@@ -1406,7 +1406,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (loaded && !trafficIndexActive()) for (const id of loaded.keys()) if (id !== state.selectedRequestId) loaded.delete(id);
         if (!loaded?.size) {
           state.requests = state.nativeRequests;
-          markTrafficEndLostRows();
+          applyTrafficIndexAnswer();
           return;
         }
         // Rows read on selection stay selectable and replace a window copy with fewer records.
@@ -1417,7 +1417,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const windowIds = new Set(state.nativeRequests.map(request => request.id));
         for (const [id, request] of loaded) if (!windowIds.has(id)) merged.push(request);
         state.requests = merged;
-        markTrafficEndLostRows();
+        applyTrafficIndexAnswer();
       }
 
       // A service_worker_end_lost gap names its row by initiator fields, not
@@ -1430,21 +1430,61 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (request.rank < 5 && !request.failed && !request.interrupted) request.status = 'incomplete';
       }
 
-      function markTrafficEndLostRows() {
+      // Every retained row takes the index-only facts of its row in the last
+      // index answer. Polls and index answers arrive in either order, so both
+      // run this: a poll for its fresh rows, an answer for the rows it names.
+      function applyTrafficIndexAnswer() {
         const rows = state.trafficIndex?.answer?.()?.rows ?? [];
-        const lost = new Set(rows.filter(row => row.endLost).map(row => row.id));
-        if (lost.size) for (const request of state.requests) if (lost.has(request.id)) markTrafficEndLost(request);
-        // Every row's body answer: a window row can lack its response_started.
         const indexed = new Map(rows.map(row => [row.id, row]));
-        if (indexed.size) for (const request of state.requests) if (indexed.has(request.id)) copyTrafficBodyFacts(request, indexed.get(request.id));
+        if (indexed.size) for (const request of state.requests) if (indexed.has(request.id)) copyTrafficIndexFacts(request, indexed.get(request.id));
       }
 
-      // The index alone knows the row a reuse names and that row's body
-      // (protocol/request-index-v1.md); copied like End lost, in place.
-      function copyTrafficBodyFacts(request, indexed) {
+      // The index alone knows End lost, every row's body answer (a window row
+      // can lack its response_started), the row a reuse names with its body,
+      // and a store copy's tabs (protocol/request-index-v1.md). Copied in
+      // place; the row is then checked against the index.
+      function copyTrafficIndexFacts(request, indexed) {
         if (!indexed) return;
+        if (indexed.endLost) markTrafficEndLost(request);
         if (indexed.memoryCacheSourceRow) request.memoryCacheSourceRow = indexed.memoryCacheSourceRow;
         if (indexed.responseBodyIndex) request.responseBodyIndex = indexed.responseBodyIndex;
+        // Tab sets and links have no request ID, so a store read lacks them;
+        // window rows link their own from the window's tab records.
+        if (request.tabsFromIndex) {
+          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
+            extensionId: indexed.extensionId, tabReason: indexed.tabReason});
+        }
+        request.indexChecked = true;
+      }
+
+      // The newest window keeps no gap records (event_window.rs), so until an
+      // index answer has held a row, its Pending cannot rule out End lost.
+      function trafficIndexUnchecked(request) {
+        return Boolean(request && state.trafficIndex && state.sessionMode !== 'preview' && request.origin !== 'sample' &&
+          !request.indexRow && request.indexChecked !== true);
+      }
+
+      // What the selected row shows from the index: an answer that changes it
+      // redraws the strip and the inspector, as the table already follows it.
+      function trafficIndexFactsKey(request) {
+        return request ? JSON.stringify([request.endLost, request.status, request.indexChecked, request.tabIds, request.tabLink,
+          request.extensionId, request.tabReason, request.responseBodyIndex, request.memoryCacheSourceRow]) : null;
+      }
+
+      // Each index answer, first or later, reaches the rows retained for
+      // selection, so the inspector never keeps a Pending the table has
+      // replaced with End lost.
+      function trafficIndexChanged() {
+        const selected = state.selectedRequestId === null ? null : state.requests.find(request => request.id === state.selectedRequestId);
+        const before = trafficIndexFactsKey(selected);
+        applyTrafficIndexAnswer();
+        renderRequests();
+        renderNetworkNotice();
+        const current = state.selectedRequestId === null ? null : state.requests.find(request => request.id === state.selectedRequestId);
+        if (current && (current !== selected || trafficIndexFactsKey(current) !== before)) {
+          updateSelectionSummary(current);
+          renderInspector();
+        }
       }
 
       function renderShellStatus() {
@@ -3596,6 +3636,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.selectedMethod.textContent = '-';
           if (elements.selectedMethod.dataset) elements.selectedMethod.dataset.method = 'safe';
           elements.selectedStatus.textContent = '-';
+          elements.selectedStatus.title = '';
           elements.selectedStatus.classList.remove('status-error', 'status-redirect', 'status-client', 'status-server');
           elements.selectedStatus.classList.add('status-neutral');
           elements.selectedUrl.textContent = state.trafficSelectionNotice || (state.requests.length ? 'Select a request to inspect its evidence.' : 'No request selected');
@@ -3606,6 +3647,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.selectedMethod.textContent = request.method;
         if (elements.selectedMethod.dataset) elements.selectedMethod.dataset.method = typeof trafficMethodClass === 'function' ? trafficMethodClass(request.method) : 'safe';
         elements.selectedStatus.textContent = request.endLost ? 'end lost' : request.status;
+        // Until an index answer holds the row, its Pending is the window's alone.
+        elements.selectedStatus.title = request.status === 'pending' && !request.endLost &&
+          typeof trafficIndexUnchecked === 'function' && trafficIndexUnchecked(request)
+          ? 'Pending in the newest window. The request index, which alone records an end the renderer could not join (End lost), has not answered for this request yet.'
+          : '';
         const numericStatus = Number(request.status);
         const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
         elements.selectedStatus.classList.toggle('status-error', failed);
@@ -3725,8 +3771,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const indexed = state.trafficIndex?.row(id) ?? null;
         const retained = state.requests.find(request => request.id === id);
         if (retained && (!indexed || trafficRecordCount(retained) >= indexed.indexRow.records)) {
-          if (indexed?.endLost) markTrafficEndLost(retained);
-          copyTrafficBodyFacts(retained, indexed);
+          copyTrafficIndexFacts(retained, indexed);
           selectRequest(id);
           focusRequestRow(id);
         } else if (indexed) loadTrafficRequest(indexed, true);
@@ -3747,11 +3792,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
-          // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
-          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
-            extensionId: indexed.extensionId, tabReason: indexed.tabReason, recordsPartial: partial});
-          if (indexed.endLost) markTrafficEndLost(request);
-          copyTrafficBodyFacts(request, indexed);
+          // Tab sets and links have no request ID, so the store read lacks them;
+          // the index row has them, now and in each later answer.
+          Object.assign(request, {tabsFromIndex: true, recordsPartial: partial});
+          copyTrafficIndexFacts(request, indexed);
           retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {
@@ -4305,7 +4349,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         if (showingGeneral) {
           state.requestBodyViewKey = requestContentViewKey(request);
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, requestTargetView(request));
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, requestTargetView(request),
+            typeof trafficIndexUnchecked === 'function' && trafficIndexUnchecked(request));
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -10363,7 +10408,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       state.trafficIndex = location.protocol === 'file:' || typeof createTrafficIndex !== 'function' ? null
-        : createTrafficIndex({onChange: () => { renderRequests(); renderNetworkNotice(); }});
+        : createTrafficIndex({onChange: trafficIndexChanged});
       if (typeof mountTrafficColumns === 'function') mountTrafficColumns(document.querySelector('#screen-traffic .request-table'));
       state.trafficOverview = typeof mountTrafficOverview === 'function'
         ? mountTrafficOverview(document.querySelector('#request-overview'), {onRange: range => {

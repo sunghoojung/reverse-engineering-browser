@@ -114,7 +114,8 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000, extra =
     const scopes = renderRequestScopes;
     renderRequestScopes = (...args) => { stats.scopes++; return scopes(...args); };
   `;
-  const added = ['selectTrafficRow', 'loadTrafficRequest', 'rebuildTrafficRequests', 'renderIndexedRequests', 'trafficIndexActive', 'createTrafficIndex'];
+  const added = ['selectTrafficRow', 'loadTrafficRequest', 'rebuildTrafficRequests', 'renderIndexedRequests', 'trafficIndexActive', 'createTrafficIndex',
+    'trafficIndexChanged', 'trafficIndexUnchecked'];
   const rebuild = appSource.includes('      function rebuildTrafficRequests(') ? part(appSource, '      function rebuildTrafficRequests(', '      function renderShellStatus(') : '';
   const api = runInNewContext(trafficSource + '\n' +
     part(appSource, '      function requestDomain(', '      function requestTraceRoot(') + rebuild + instrument +
@@ -208,8 +209,8 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000, extra =
 
 // The request index path: a real createTrafficIndex over scripted answers, the
 // production selection and load functions, and the shared row renderer.
-function indexFixture({windowCount = 6} = {}) {
-  const t = fixture(app, traffic, windowCount);
+function indexFixture({windowCount = 6, holdIndex = false} = {}) {
+  const t = fixture(app, traffic, windowCount, {renderNetworkNotice() {}});
   const {state, api} = t;
   state.sessionMode = 'live'; state.requests.forEach(row => { row.origin = 'live'; }); state.nativeRequests = state.requests;
   state.trafficDetailOpen = false; state.trafficAppliedAnswer = null; state.trafficSeenThrough = null;
@@ -228,14 +229,26 @@ function indexFixture({windowCount = 6} = {}) {
   const held = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; };
   const answer = body => new Response(JSON.stringify(body), {headers: {ETag: '"a"'}});
   let indexRows = [];
-  state.trafficIndex = api.createTrafficIndex({onChange: () => api.renderRequests(), fetcher: async (url, init) => {
+  // A held index read answers only when released, on a later macrotask, as a
+  // backend busy with other reads would answer after the event poll.
+  const indexGates = [];
+  const indexAnswer = () => new Promise(resolve => setImmediate(() => resolve(answer(document_(indexRows)))));
+  // The production handler when app.js has one (it is wired to the index below).
+  const onChange = () => typeof api.trafficIndexChanged === 'function' ? api.trafficIndexChanged() : api.renderRequests();
+  state.trafficIndex = api.createTrafficIndex({onChange, fetcher: async (url, init) => {
     reads.push(url);
-    if (url.startsWith('/api/requests?')) return answer(document_(indexRows));
+    if (url.startsWith('/api/requests?')) {
+      if (!holdIndex) return answer(document_(indexRows));
+      const gate = held();
+      indexGates.push(gate);
+      return gate.promise.then(indexAnswer);
+    }
     const gate = held();
     pending.push({url, signal: init.signal, gate});
     return gate.promise;
   }});
-  return {...t, row, setIndexRows: rows => { indexRows = rows; }, pending, reads, answer};
+  const releaseIndex = () => { for (const gate of indexGates.splice(0)) gate.resolve(); };
+  return {...t, row, setIndexRows: rows => { indexRows = rows; }, pending, reads, answer, releaseIndex, indexGates};
 }
 const quiet = async () => { for (let turn = 0; turn < 8; turn++) await new Promise(resolve => setImmediate(resolve)); };
 const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) => ({session_id: '1', process_id: 7, sequence_number: String(sequence + 1), monotonic_time_ns: String(sequence + 1), request_id: id}));
@@ -342,6 +355,97 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   t.api.rebuildTrafficRequests();
   assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'A later poll keeps End lost');
   assert.equal(t.state.requests.find(request => request.id !== whole.id).endLost, false, 'Only the named row is marked');
+}
+// The index's own answer reaches the selected row: the app wires its handler.
+assert.match(app, /createTrafficIndex\(\{onChange: trafficIndexChanged\}\)/, 'The request index reports its answers to trafficIndexChanged');
+const pendingWindow = t => {
+  t.state.requests = t.state.nativeRequests = t.state.nativeRequests.map(request =>
+    ({...request, events: [{}, {}], details: [], origin: 'live', rank: 2, status: 'pending', endLost: false}));
+  return t.state.requests[1];
+};
+{
+  // The newest window keeps no gap records (event_window.rs), so it cannot see
+  // a service_worker_end_lost gap. A row chosen before the index first answers
+  // reads Pending, not yet checked against the index; when the index answers,
+  // the selected copy, the strip and the inspector read End lost with the
+  // table, with no poll and no second click (rendered test29).
+  const t = indexFixture({windowCount: 2, holdIndex: true});
+  const lost = pendingWindow(t);
+  t.setIndexRows([{...t.row(1, 2), end_lost: true, response_body: {case: 'end_lost'}}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  assert(t.state.trafficIndex.answer() === null && t.indexGates.length === 1, 'The first index read is still outstanding');
+  t.rows().find(row => row.dataset.requestId === lost.id).click();
+  const shown = () => t.state.requests.find(request => request.id === lost.id);
+  assert.equal(t.state.selectedRequestId, lost.id, 'A window row selects while the index has not answered');
+  assert.equal(t.elements.selectedStatus.textContent, 'pending', 'Before the index answers, the window says Pending');
+  assert.equal(t.api.trafficIndexUnchecked?.(shown()), true, 'and that Pending is not yet checked against the index');
+  const drawn = t.stats.inspector;
+  t.releaseIndex(); await quiet();
+  assert(t.state.trafficIndex.answer() !== null, 'The index answered');
+  assert.equal(t.rows().find(row => row.dataset.requestId === lost.id)?.getAttribute('aria-label')?.includes('End lost'), true,
+    'The table reads End lost from the index row');
+  assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'The selected copy reads End lost once the index answers');
+  assert.equal(shown().responseBodyIndex?.case, 'end_lost', 'and takes its body answer');
+  assert.equal(t.elements.selectedStatus.textContent, 'end lost', 'The strip follows the index answer');
+  assert(t.stats.inspector > drawn, 'The inspector is drawn again from the index answer');
+  assert.equal(t.api.trafficIndexUnchecked(shown()), false, 'The row is checked against the index');
+  assert.equal(t.state.requests.find(request => request.id !== lost.id).endLost, false, 'Only the named row is marked');
+  // A later answer that changes nothing for the selection draws nothing again.
+  const settled = t.stats.inspector;
+  t.state.trafficIndex.invalidate(); await quiet();
+  assert.equal(t.stats.inspector, settled, 'An unchanged answer does not redraw the inspector');
+}
+{
+  // Rows are reused by request ID, so a row first drawn from the newest window
+  // keeps its element when the index answers. A click on it afterwards selects
+  // through the index, as a row first drawn from the index does: a row the
+  // window does not hold whole is read from the store before it opens.
+  const t = indexFixture({windowCount: 2, holdIndex: true});
+  const partial = pendingWindow(t);
+  t.setIndexRows([{...t.row(1, 9), end_lost: true}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  const element = t.rows().find(row => row.dataset.requestId === partial.id);
+  t.releaseIndex(); await quiet();
+  assert.equal(t.rows().find(row => row.dataset.requestId === partial.id), element, 'The index answer reuses the window row\'s element');
+  element.click();
+  assert.equal(t.state.trafficLoadingId, partial.id, 'The reused row selects through the index: its records are read from the store');
+  assert.equal(t.state.selectedRequestId, null, 'and it opens only once they are read');
+}
+{
+  // A poll rebuilds its rows from the index answer it has, which can predate
+  // the gap; the next answer, read because of that poll, names it. The
+  // selected row follows that answer without waiting for another poll.
+  const t = indexFixture({windowCount: 2});
+  const lost = pendingWindow(t);
+  t.setIndexRows([t.row(1, 2), t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow(lost.id);
+  const shown = () => t.state.requests.find(request => request.id === lost.id);
+  assert.deepEqual([shown().endLost, t.elements.selectedStatus.textContent], [false, 'pending'], 'The first answer has no gap');
+  assert.equal(t.api.trafficIndexUnchecked?.(shown()), false, 'A row the index answered for is checked');
+  t.setIndexRows([{...t.row(1, 2), end_lost: true}, t.row(0, 2)]);
+  t.state.trafficIndex.invalidate(); await quiet();
+  assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'The later answer marks the selected row');
+  assert.equal(t.elements.selectedStatus.textContent, 'end lost', 'The strip follows the later answer');
+}
+{
+  // A store copy takes its tabs from the index row; a later answer that links
+  // the row to more tabs reaches the copy, as it reaches the table.
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([t.row(5, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  const copy = () => t.state.requests.find(request => request.id === 'request-5');
+  assert.deepEqual([...copy().tabIds], ['1'], 'The store copy has the index row\'s tabs');
+  const drawn = t.stats.inspector;
+  t.setIndexRows([{...t.row(5, 2), tab_ids: ['1', '2'], tab_link: {kind: 2, count: 2, complete: true}}]);
+  t.state.trafficIndex.invalidate(); await quiet();
+  assert.deepEqual([...copy().tabIds], ['1', '2'], 'The store copy follows the later answer\'s tabs');
+  assert.deepEqual({...copy().tabLink}, {kind: 2, count: 2, complete: true}, 'and its tab link');
+  assert(t.stats.inspector > drawn, 'The inspector is drawn again for the new tabs');
 }
 {
   // A store read finishing after the researcher moved to the filter box leaves focus there.

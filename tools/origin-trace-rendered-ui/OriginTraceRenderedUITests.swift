@@ -1828,9 +1828,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // The lost-end gap names its row without a request ID, so the row's
       // store read lacks it; the inspector keeps what the index row says.
+      // The newest window keeps no gap records, so a row chosen before the
+      // request index answers reads Pending, not yet checked against the
+      // index, until that answer reaches it.
       try await ui.click("#screen-traffic .request-row", containing: expected.serviceWorkerLostHost)
-      try await ui.waitUntil("document.querySelector('#exchange-inspector').innerText.includes('\(expected.serviceWorkerLostHost)')",
-        "the lost-end row did not open")
+      try await ui.waitUntil("""
+        (() => { const text = document.querySelector('#exchange-inspector').innerText;
+          return text.includes('\(expected.serviceWorkerLostHost)') && !text.includes('not yet checked against the request index'); })()
+        """, "\(size.name): the lost-end row did not open, or the request index never answered for it")
       let lost = try await ui.json(selected)
       let lostLabel = lost["label"] as? String ?? ""
       XCTAssertTrue(lostLabel.contains("End lost") && !lostLabel.contains("Pending") && !lostLabel.contains("No loader"),

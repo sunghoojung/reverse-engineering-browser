@@ -402,6 +402,12 @@ it.
   `--allow-content`) sends captured content to that client's model provider in
   the same way, and `--allow-sensitive-capture` is the same separate consent
   for sensitive options in the sessions it starts.
+- Researcher names for Wasm functions (Analyst evidence names) are joined
+  into the Wasm reads as `analyst_name` at every level, like identifiers, so
+  they go to the provider with the structural results. They are the
+  researcher's own text, at most 80 characters; do not put a captured secret
+  in a name. Request, source and VM handler names are not joined into any
+  read. See [Wasm function names](protocol/wasm-function-names-v1.md).
 - The agent can instead use the researcher's own subscription. A ChatGPT
   subscription signs in through OpenAI token sharing in the researcher's
   browser; its tokens and client registration stay in the macOS Keychain and

@@ -105,6 +105,7 @@ Every option is off unless the start names it, and none is inherited.
 | Find in source, Go to line | `search_artifact_text` (`artifact_id`), `get_artifact_text` (`offset`) | F | Added |
 | Inspect (Wasm disassembly) | `inspect_wasm` with `row_offset`, `row_limit`, `sections` | R (structure), F (instruction text) | Added row windows; below Full access row text is omitted |
 | Graph (basic-block graph) | `get_wasm_functions`, `get_wasm_function_graph` | R | Covered |
+| Wasm function names (Inspect, Graph, Flow) | Read: `analyst_name` and `analyst_names` in `inspect_wasm`, `get_wasm_functions`, `get_wasm_function_graph`, `get_xrefs`, `get_flow_graph`, `get_request_stack`. Write: `analyst_action` `set_wasm_function_name` | R to read, A to write | Added; names are joined at every level and the write needs no other Analyst file |
 | Map (entropy and kind map) | `get_artifact_map` | R | Covered |
 | Facts | `get_source_facts` | A | Covered |
 | Track calls (saved invocation sites) | `get_js_invocation_sites`, `resolve_js_invocation_site`, `js_invocation_site_action` | R to read, A to change | Covered |

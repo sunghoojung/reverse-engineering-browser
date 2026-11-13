@@ -9,12 +9,15 @@ setting. See [SAFETY.md](../../SAFETY.md).
 
 ## Scope
 
-Three kinds of retained item can be named:
+Four kinds of retained item can be named:
 
 - a retained Traffic request;
 - a captured source artifact shown in Sources;
 - a VM handler row of one finding's opcode workspace (handler listing, Symbol
-  Tree and Selected handler).
+  Tree and Selected handler);
+- a WebAssembly function, keyed by its module's SHA-256 and function index, so
+  the name follows identical module bytes across sessions (contract:
+  [Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
 
 ## Persistence
 
@@ -38,11 +41,16 @@ but not shown.
 A names document contains exactly:
 
 - `document_kind: "reb-evidence-names"`
-- `contract_version: 1`
+- `contract_version: 1` or `2`
 - `scope: "local-analyst-library"`
 - `requests`: request entries
 - `artifacts`: artifact entries
 - `vm_programs`: at most 64 program groups
+- `wasm_modules` (version 2 only): at most 64 module groups
+
+Version 1 has exactly the first six members and stays readable. Writers keep
+writing version 1 while no Wasm function name exists and write version 2, with
+`wasm_modules`, once one does.
 
 Every entry carries exactly its identity fields (below) and a `name`. Unknown
 members, duplicate object members (including escaped duplicates), duplicate
@@ -74,6 +82,10 @@ string.
   shared dispatch row) and `start`/`end`, the handler's half-open source byte
   range. The source artifact must be the workspace's interpreter artifact, with
   the workspace's SHA-256, and its artifact ID must be unique in the catalog.
+- **Wasm function**: a module group holds `sha256` (64 lowercase hex
+  characters); each function entry holds `function`, the index in the module's
+  full index space, imports included. Every artifact with those bytes shares
+  the name by design, so no uniqueness rule applies.
 
 A name is shown, and an item can be renamed, only when exactly one retained
 record has its identity. Requests also need a unique Traffic row ID and artifacts
@@ -127,7 +139,10 @@ The document stores identity fields and researcher-authored names only. It never
 stores a URL, method, header, body, source text, byte range content, event
 payload, console output, cookie, credential, profile, capture setting or
 permission. Names themselves may contain private interpretation; they stay local
-and are never uploaded or sent to a model automatically.
+and are never uploaded. Wasm function names are the one kind that reaches an
+agent: the Wasm reads join them as `analyst_name` at every `reb-api mcp`
+permission level, so an agent the researcher connects sends them to its model
+provider. Request, source and handler names are not joined into any read.
 
 ## Interface
 
@@ -140,6 +155,15 @@ italic text in the researcher-name color: first in the Traffic row's name cell
 and request header, in the Sources tree and file tab, and in the VM listing,
 Symbol Tree and Selected handler. Traffic search and the handler filter match
 names too. Names are always inserted as text.
+
+Wasm functions are renamed from Sources Inspect (the pencil on a function,
+import, declaration or start row), the Graph (**Rename** in its toolbar, and F2
+on the graph or a highlighted row of the **Functions** list) and a Flow graph
+Wasm card (**Rename** in Details, or F2 on the graph with the card selected).
+F2 on a call row renames its callee. The name follows the decoded listing, the
+Graph title, the function list (whose filter matches it), Flow cards and
+Details, Initiator frames and cross-reference rows. `wasm_function_names.js`
+owns these surfaces; Wasm names are not listed in the palette.
 
 When the command palette is present, the module registers a `Names` provider
 (`id: "evidence-names"`) through `globalThis.RebCommandPalette.addProvider`,

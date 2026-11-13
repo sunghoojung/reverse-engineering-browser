@@ -1409,16 +1409,30 @@ pub(crate) fn value_flow_with(
                 node
             })
             .collect();
-        let kept_edges: Vec<Value> = edges
-            .iter()
-            .filter_map(|(from, to, object)| {
-                let (from, to) = (renumber[*from]?, renumber[*to]?);
-                let mut object = object.clone();
-                object.insert("from".into(), json!(from));
-                object.insert("to".into(), json!(to));
-                Some(Value::Object(object))
-            })
-            .collect();
+        // Edges are listed four per kept node, nearest the seed first, so a
+        // larger node cap can never fill the budget with edges and list fewer
+        // nodes than a smaller one.
+        let edge_cap = keep * EDGES_PER_NODE;
+        let mut edges_cut = false;
+        let mut kept_edges: Vec<Value> = Vec::new();
+        for (from, to, object) in &edges {
+            let (Some(from), Some(to)) = (renumber[*from], renumber[*to]) else {
+                continue;
+            };
+            if kept_edges.len() >= edge_cap {
+                edges_cut = true;
+                break;
+            }
+            let mut object = object.clone();
+            object.insert("from".into(), json!(from));
+            object.insert("to".into(), json!(to));
+            kept_edges.push(Value::Object(object));
+        }
+        if edges_cut && !truncated.edges {
+            notes.push(format!(
+                "At most {EDGES_PER_NODE} edges per listed node are listed; some edges between listed nodes are not."
+            ));
+        }
         let kept_joins: Vec<Value> = joins
             .iter()
             .filter_map(|join| {
@@ -1462,7 +1476,7 @@ pub(crate) fn value_flow_with(
         let partial = !notes.is_empty() || sim.stopped_at.is_some();
         let truncated_value = json!({
             "nodes": truncated.nodes,
-            "edges": truncated.edges,
+            "edges": truncated.edges || edges_cut,
             "depth": truncated.depth,
             "deadline": truncated.deadline,
             "joins": truncated.joins,
@@ -3285,6 +3299,46 @@ mod tests {
             document["nodes"]
         );
         assert_eq!(document["seed"]["nodes"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_larger_node_cap_never_lists_fewer_nodes() {
+        // Each clause catches a 1,000-value tag to the function label: one
+        // exception node and one return node with 1,000 edges between them,
+        // so edges could fill the response budget while few nodes are listed.
+        let values = 1000;
+        let mut text = format!(
+            "(module (tag $e (param{})) (import \"env\" \"f\" (func $f)) (func (result{}) try_table",
+            " i32".repeat(values),
+            " i32".repeat(values)
+        );
+        text.push_str(&" (catch $e 0)".repeat(50));
+        text.push_str(" call $f end unreachable))");
+        let bytes = wat::parse_str(text).unwrap();
+        let try_table = offset_of(&bytes, 1, "try_table", 0);
+        let count = |max_nodes: usize| {
+            let document = flow(
+                &bytes,
+                &format!("function=1&offset={try_table}&direction=forward&max_nodes={max_nodes}"),
+            )
+            .unwrap();
+            assert_fits(&document);
+            let (nodes, edges) = (
+                document["node_count"].as_u64().unwrap(),
+                document["edge_count"].as_u64().unwrap(),
+            );
+            assert!(
+                edges <= nodes * EDGES_PER_NODE as u64,
+                "{edges} edges for {nodes} nodes"
+            );
+            nodes
+        };
+        let (small, large) = (count(256), count(4096));
+        assert!(
+            large >= small,
+            "max_nodes 4096 lists {large} nodes, 256 lists {small}"
+        );
+        assert!(large >= 50, "{large} nodes");
     }
 
     #[test]

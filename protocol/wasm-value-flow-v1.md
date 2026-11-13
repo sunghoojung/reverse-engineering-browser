@@ -27,7 +27,7 @@ to an original byte offset of the module whose `sha256` the document names.
 | `operand` | With `offset`: one operand, counted in text order (the first operand pushed is 0). For `br_if` and `br_table` the values the branch carries come first and the selector last; a block's `end` has the block's results as its operands. Without it the seed is the instruction itself. |
 | `local` | Instead of `offset`: every definition of one local (its parameter or zero value, each `local.set` and `local.tee`, and each join of it). |
 | `direction` | `backward`, `forward` or `both` (default). |
-| `max_nodes` | 1 to 4096, default 256. Edges and join entries are capped at four per node. |
+| `max_nodes` | 1 to 4096, default 256. The slice records at most four edges and four join entries per node of this cap, and the response lists at most four edges per listed node (see Bounds). |
 | `max_depth` | 1 to 256, default 32 edges from the seed. |
 | `interprocedural` | `true` adds one bounded step across direct calls; default `false`. |
 
@@ -192,15 +192,19 @@ indices and edges stay readable at every level.
   each write many locals imply nesting depth times locals joins; the budget
   and the deadline are checked inside those loops, and past either the prefix
   is returned as `partial`.
-- Slice: `max_nodes`, four edges and four join entries per node, 64 entries per
-  join, `max_depth`, and a four-second deadline shared with the simulation. At
-  most 32 omissions are listed; the last says how many more there were.
+- Slice: `max_nodes`, four edges and four join entries per node of the cap
+  (`4 * max_nodes` in all), 64 entries per join, `max_depth`, and a
+  four-second deadline shared with the simulation. At most 32 omissions are
+  listed; the last says how many more there were.
 - Response: 120,000 bytes pretty-printed, both as returned and with `text`,
   `expression` and long strings replaced by omission objects, as `reb-api mcp`
   does below Full access, so the result is inlined at every level (the inline
   limit is 131,072). Past it, the seed, sources, sinks and joins are kept first,
   then the steps nearest the seed; kept nodes are renumbered in walk order,
-  `truncated.bytes` is set and an omission gives the counts.
+  `truncated.bytes` is set and an omission gives the counts. Every document
+  lists at most four edges per listed node, nearest the seed first, with
+  `truncated.edges` set past it, so a larger `max_nodes` never lists fewer
+  nodes.
 - `expression`: three levels deep and 160 bytes. `text`: 160 bytes; a
   `try_table` lists its first 8 catch clauses and then their count. A float
   constant whose decimal form is longer than 24 characters is written in its

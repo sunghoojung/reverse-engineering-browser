@@ -4922,7 +4922,7 @@
             "name": "max_nodes",
             "in": "query",
             "required": false,
-            "description": "Node cap, default 256. Edges and join entries are capped at four per node.",
+            "description": "Node cap, default 256. The slice records at most four edges and four join entries per node of this cap, and the response lists at most four edges per listed node.",
             "schema": {
               "type": "integer",
               "minimum": 1,

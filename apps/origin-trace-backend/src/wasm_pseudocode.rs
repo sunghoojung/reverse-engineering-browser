@@ -228,18 +228,35 @@ fn bounded(name: &str) -> String {
 struct Effects {
     /// Calls, memory, globals, tables, traps: anything whose order matters.
     impure: bool,
+    /// Calls of every kind and throws: control can leave here for a handler.
+    throws: bool,
     reads: u64,
     writes: u64,
 }
+/// The effects of a call or a throw.
+const THROWING: Effects = Effects {
+    impure: true,
+    throws: true,
+    reads: 0,
+    writes: 0,
+};
 impl Effects {
-    fn conflicts(self, other: Effects) -> bool {
+    /// Whether two effects must keep their order. While a catching frame of
+    /// this function is open (`catching`), a local write also keeps its order
+    /// with anything that can throw: a handler in this function reads the
+    /// local as it was when control left. Outside one, a throw leaves the
+    /// function and its locals are never read again, so the write may move.
+    fn conflicts(self, other: Effects, catching: bool) -> bool {
         (self.impure && other.impure)
             || self.writes & (other.reads | other.writes) != 0
             || self.reads & other.writes != 0
+            || (catching
+                && ((self.writes != 0 && other.throws) || (self.throws && other.writes != 0)))
     }
     fn union(self, other: Effects) -> Effects {
         Effects {
             impure: self.impure || other.impure,
+            throws: self.throws || other.throws,
             reads: self.reads | other.reads,
             writes: self.writes | other.writes,
         }
@@ -356,6 +373,9 @@ struct Frame {
     result_slots: Vec<String>,
     results: u32,
     unreachable: bool,
+    /// A frame whose body can catch: a legacy `try` before its first catch
+    /// arm, or a `try_table` with catch clauses.
+    catching: bool,
     /// Structured instructions opened inside unreachable code.
     dead: u32,
     open_line: usize,
@@ -401,6 +421,8 @@ struct Lifter<'m> {
     /// stack makes each statement cost its height, so the deadline is
     /// checked by this work as well as by instruction count.
     work: u64,
+    /// Catching frames open in this function; see `Effects::conflicts`.
+    catching: u32,
     budget: Budget,
     /// A line or text budget ran out inside one instruction (a br_table's
     /// cases); the lift stops after it.
@@ -588,6 +610,7 @@ impl<'m> Lifter<'m> {
                 result_slots: Vec::new(),
                 results,
                 unreachable: false,
+                catching: false,
                 dead: 0,
                 open_line: 0,
                 open_offset: 0,
@@ -608,6 +631,7 @@ impl<'m> Lifter<'m> {
             run: None,
             ended: false,
             work: 0,
+            catching: 0,
             budget: BUDGET,
             halted: false,
         }
@@ -682,7 +706,9 @@ impl<'m> Lifter<'m> {
         let mut pending = effects;
         for position in (base..self.stack.len()).rev() {
             let entry = &self.stack[position];
-            if !entry.stable && (forced(position, entry) || entry.effects.conflicts(pending)) {
+            if !entry.stable
+                && (forced(position, entry) || entry.effects.conflicts(pending, self.catching > 0))
+            {
                 must[position - base] = true;
                 pending = pending.union(entry.effects);
             }
@@ -1035,6 +1061,7 @@ impl<'m> Lifter<'m> {
             result_slots: Vec::new(),
             results,
             unreachable: false,
+            catching: kind == Kind::Try,
             dead: 0,
             open_line: line,
             open_offset: self.starts[index as usize],
@@ -1043,6 +1070,9 @@ impl<'m> Lifter<'m> {
             kind: frame_kind(kind),
             block_type,
         });
+        if kind == Kind::Try {
+            self.catching += 1;
+        }
         self.max_depth = self.max_depth.max(self.frames.len() as u32 - 1);
         self.stack.extend(inner);
         Ok(())
@@ -1071,6 +1101,12 @@ impl<'m> Lifter<'m> {
         top.kind = kind;
         top.unreachable = false;
         top.dead = 0;
+        // A catch arm runs after the throw it handles; a throw inside it
+        // goes to an outer handler.
+        let was_catching = std::mem::take(&mut top.catching);
+        if was_catching {
+            self.catching -= 1;
+        }
         // The arm's opener reads at the frame's own depth.
         let line = self.push_line(LineKind::Middle, text, vec![index], &[]);
         self.lines[line].depth -= 1;
@@ -1137,6 +1173,9 @@ impl<'m> Lifter<'m> {
             Vec::new()
         };
         let closing = self.frames.pop().expect("an open frame");
+        if closing.catching {
+            self.catching -= 1;
+        }
         self.labels.pop();
         self.stack.truncate(closing.height);
         let line = self.push_line(LineKind::Close, text, vec![index], &[]);
@@ -1235,6 +1274,7 @@ impl<'m> Lifter<'m> {
                         result_slots: Vec::new(),
                         results: 0,
                         unreachable: false,
+                        catching: false,
                         dead: 0,
                         open_line: line,
                         open_offset: self.starts[index as usize],
@@ -1299,6 +1339,8 @@ impl<'m> Lifter<'m> {
                 };
                 self.open(Kind::TryTable, try_table.ty, index, None, extra)?;
                 if !try_table.catches.is_empty() {
+                    self.top().catching = true;
+                    self.catching += 1;
                     self.fallbacks[EXCEPTION_HANDLER] += 1;
                     let line = self.frames.last().map_or(0, |frame| frame.open_line);
                     self.lines[line].kind = LineKind::Fallback;
@@ -1554,10 +1596,7 @@ impl<'m> Lifter<'m> {
                 };
                 let args = self.pop_n(pops);
                 let (name, _) = display_name(self.names, *function_index);
-                let impure = Effects {
-                    impure: true,
-                    ..Default::default()
-                };
+                let impure = THROWING;
                 let mut call = self.combine(args, index, impure, false, |values| {
                     format!("{name}({})", joined(values))
                 });
@@ -1584,10 +1623,7 @@ impl<'m> Lifter<'m> {
                 let callee = self.pop();
                 let mut args = self.pop_n(params);
                 args.push(callee);
-                let impure = Effects {
-                    impure: true,
-                    ..Default::default()
-                };
+                let impure = THROWING;
                 let (type_index, table_index) = (*type_index, *table_index);
                 let call = self.combine(args, index, impure, false, |values| {
                     let (callee, args) = values.split_last().expect("a callee");
@@ -1619,10 +1655,7 @@ impl<'m> Lifter<'m> {
                 let callee = self.pop();
                 let mut args = self.pop_n(params);
                 args.push(callee);
-                let impure = Effects {
-                    impure: true,
-                    ..Default::default()
-                };
+                let impure = THROWING;
                 let type_index = *type_index;
                 let call = self.combine(args, index, impure, false, |values| {
                     let (callee, args) = values.split_last().expect("a callee");
@@ -1645,10 +1678,7 @@ impl<'m> Lifter<'m> {
                 let args = self.pop_n(pops);
                 self.flush();
                 let text = format!("throw tag {tag_index}({})", joined(&args));
-                let impure = Effects {
-                    impure: true,
-                    ..Default::default()
-                };
+                let impure = THROWING;
                 self.statement(LineKind::Statement, text, args, index, impure);
                 self.unreachable_after();
             }
@@ -1656,13 +1686,7 @@ impl<'m> Lifter<'m> {
                 let value = self.pop();
                 self.flush();
                 let text = format!("throw_ref({})", value.text);
-                self.statement(
-                    LineKind::Statement,
-                    text,
-                    vec![value],
-                    index,
-                    Effects::default(),
-                );
+                self.statement(LineKind::Statement, text, vec![value], index, THROWING);
                 self.unreachable_after();
             }
             Operator::Rethrow { relative_depth } => {
@@ -1671,13 +1695,7 @@ impl<'m> Lifter<'m> {
                     Some(frame) => format!("rethrow {}", self.label_name(frame)),
                     None => format!("rethrow label {relative_depth} (out of range)"),
                 };
-                self.statement(
-                    LineKind::Statement,
-                    text,
-                    Vec::new(),
-                    index,
-                    Effects::default(),
-                );
+                self.statement(LineKind::Statement, text, Vec::new(), index, THROWING);
                 self.unreachable_after();
             }
             Operator::BrOnNull { relative_depth }
@@ -2884,6 +2902,111 @@ mod tests {
         );
     }
 
+    /// Imports that can throw, and a function whose handler reads p0.
+    fn throwing(body: &str) -> String {
+        format!(
+            r#"(module (import "env" "thr" (func $thr (param i32)))
+                 (import "env" "f" (func $f (param i32) (result i32)))
+                 (func (param i32 i32) (result i32 i32) {body}))"#
+        )
+    }
+
+    #[test]
+    fn a_local_write_keeps_its_order_with_a_call_that_can_throw_to_a_handler() {
+        // The tee runs before the call; if the call throws, the handler
+        // after the try_table reads 5 in p0.
+        assert_eq!(
+            exact(
+                &throwing(
+                    "block try_table (catch_all 0)
+                       i32.const 5 local.tee 0 i32.const 1 call $thr drop
+                     end end
+                     local.get 0 local.get 1"
+                ),
+                2
+            ),
+            [
+                "func f2(p0: i32, p1: i32) -> (i32, i32) {",
+                "block L1 {",
+                "try_table catch_all -> L1 {",
+                "t0 = p0 = 5",
+                "thr(1)",
+                "drop(t0)",
+                "}",
+                "}",
+                "return p0, p1",
+                "}"
+            ]
+        );
+        // The call runs before the set; if it throws, p0 is unchanged.
+        assert_eq!(
+            exact(
+                &throwing(
+                    "block try_table (catch_all 0)
+                       i32.const 13 call $f i32.const 5 local.set 0 drop
+                     end end
+                     local.get 0 local.get 1"
+                ),
+                2
+            ),
+            [
+                "func f2(p0: i32, p1: i32) -> (i32, i32) {",
+                "block L1 {",
+                "try_table catch_all -> L1 {",
+                "t0 = f(13)",
+                "p0 = 5",
+                "drop(t0)",
+                "}",
+                "}",
+                "return p0, p1",
+                "}"
+            ]
+        );
+        // A legacy try body orders them the same way; its catch arm reads p0.
+        assert_eq!(
+            exact(
+                &throwing(
+                    "try (result i32)
+                       i32.const 5 local.tee 0 i32.const 1 call $thr
+                     catch_all
+                       local.get 0
+                     end
+                     local.get 1"
+                ),
+                2
+            ),
+            [
+                "func f2(p0: i32, p1: i32) -> (i32, i32) {",
+                "try {",
+                "t0 = p0 = 5",
+                "thr(1)",
+                "t1 = t0",
+                "} catch_all {",
+                "t1 = p0",
+                "}",
+                "return t1, p1",
+                "}"
+            ]
+        );
+        // With no handler in the function a throw leaves it, so the write
+        // may still fold past the call.
+        assert_eq!(
+            exact(
+                &throwing(
+                    "i32.const 5 local.tee 0 i32.const 1 call $thr drop local.get 0 local.get 1"
+                ),
+                2
+            ),
+            [
+                "func f2(p0: i32, p1: i32) -> (i32, i32) {",
+                "thr(1)",
+                "drop(p0 = 5)",
+                "return p0, p1",
+                "}"
+            ]
+        );
+    }
+
     #[test]
     fn a_try_table_result_is_assigned_inside_the_protected_region() {
         assert_eq!(
@@ -3277,11 +3400,45 @@ mod tests {
         let scanned = scan(bytes, function).unwrap();
         let body = scanned.body.clone().unwrap();
         let mut reader = body.get_operators_reader().unwrap();
-        // Per instruction: an effect, or a local access (index, is a write).
+        // Per instruction: an effect, or a local access (index, is a write),
+        // whether it can throw, and whether a handler of this function would
+        // catch that throw (a try body, or a try_table with catch clauses).
         let mut effect = Vec::new();
         let mut local = Vec::new();
+        let mut throwing = Vec::new();
+        let mut catching = Vec::new();
+        let mut frames = vec![false];
         while !reader.eof() {
             let op = reader.read().unwrap();
+            catching.push(frames.iter().any(|open| *open));
+            throwing.push(matches!(
+                op,
+                Operator::Call { .. }
+                    | Operator::CallIndirect { .. }
+                    | Operator::CallRef { .. }
+                    | Operator::ReturnCall { .. }
+                    | Operator::ReturnCallIndirect { .. }
+                    | Operator::ReturnCallRef { .. }
+                    | Operator::Throw { .. }
+                    | Operator::ThrowRef
+                    | Operator::Rethrow { .. }
+            ));
+            match &op {
+                Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. } => {
+                    frames.push(false)
+                }
+                Operator::Try { .. } => frames.push(true),
+                Operator::TryTable { try_table } => frames.push(!try_table.catches.is_empty()),
+                Operator::Catch { .. } | Operator::CatchAll => {
+                    if let Some(open) = frames.last_mut() {
+                        *open = false;
+                    }
+                }
+                Operator::End | Operator::Delegate { .. } => {
+                    frames.pop();
+                }
+                _ => {}
+            }
             let mut fields = Vec::new();
             let memarg = immediates(&op, &mut fields).is_some();
             let mnemonic = wasm::mnemonic(&op);
@@ -3318,6 +3475,7 @@ mod tests {
                                     | Operator::F64Const { .. }
                                     | Operator::Drop
                                     | Operator::Select
+                                    | Operator::TypedSelect { .. }
                                     | Operator::Nop
                                     | Operator::End
                                     | Operator::Else
@@ -3364,6 +3522,27 @@ mod tests {
                     assert!(
                         !(first_write || second_write) || first < second,
                         "local {index}: instruction {second} reads as before {first}"
+                    );
+                }
+            }
+        }
+        // Where a handler of this function would catch, a local write and
+        // anything that can throw keep their byte order: the handler reads
+        // the local as it was when control left.
+        let guarded: Vec<u32> = order
+            .iter()
+            .copied()
+            .filter(|i| {
+                catching[*i as usize]
+                    && (throwing[*i as usize] || local[*i as usize].is_some_and(|(_, write)| write))
+            })
+            .collect();
+        for (a, &first) in guarded.iter().enumerate() {
+            for &second in &guarded[a + 1..] {
+                if throwing[first as usize] != throwing[second as usize] {
+                    assert!(
+                        first < second,
+                        "instruction {second} reads as before {first} across a catching throw"
                     );
                 }
             }
@@ -3532,7 +3711,7 @@ mod tests {
         for _ in 0..20 + next(60) {
             let depth = frames.len();
             let available = height - frames[depth - 1].base;
-            match next(30) {
+            match next(33) {
                 0 | 1 => {
                     emit(&format!("i32.const {}", next(9)), &mut body);
                     height += 1;
@@ -3652,6 +3831,38 @@ mod tests {
                     frames.last_mut().unwrap().dead = true;
                 }
                 28 | 29 if depth > 1 => close(&mut frames, &mut height, &mut body, &mut emit),
+                // A handler in this function that reads a local the try body
+                // writes around calls and throws that can reach it.
+                30..=32 if depth < 6 => {
+                    let written = next(3);
+                    emit("block try_table (catch_all 0)", &mut body);
+                    let steps = 1 + next(4);
+                    for _ in 0..steps {
+                        let piece = match next(6) {
+                            0 => format!("i32.const {} local.set {written}", next(9)),
+                            1 => format!("i32.const {} local.tee {written} call $f drop", next(9)),
+                            2 => format!(
+                                "call $g local.get {written} i32.const 1 i32.add local.set {written} drop"
+                            ),
+                            3 => format!(
+                                "i32.const {} call $f i32.const {} local.set {written} drop",
+                                next(9),
+                                next(9)
+                            ),
+                            4 => format!(
+                                "local.get {written} i32.const 1 local.tee {written} call $f i32.add drop"
+                            ),
+                            _ => "i32.const 1 throw $e".to_owned(),
+                        };
+                        let throws = piece.ends_with("throw $e");
+                        emit(&piece, &mut body);
+                        if throws {
+                            break;
+                        }
+                    }
+                    emit(&format!("end end local.get {written}"), &mut body);
+                    height += 1;
+                }
                 _ => {}
             }
             if frames.last().unwrap().dead {

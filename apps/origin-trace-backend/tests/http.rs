@@ -731,7 +731,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 60, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 62, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
@@ -824,7 +824,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 60);
+    assert_eq!(operation_count, 62);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -4565,6 +4565,164 @@ async fn wasm_function_names_join_every_wasm_read_and_never_replace_captured_nam
         409,
     )
     .await;
+}
+
+#[tokio::test]
+async fn wasm_runs_need_confirmation_run_offline_and_store_derived_records() {
+    let server = Server::start().await;
+    let spec = specification();
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/wasm-runs/imports.wat"),
+    )
+    .unwrap();
+    let bytes = wat::parse_str(&source).unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    let manifest = std::fs::read(server.root.path().join("artifacts/manifest.jsonl")).unwrap();
+    let run = json!({"artifact_id":"1","sha256":hash,"export":"mix",
+        "args":[{"type":"i32","value":"3"}],
+        "imports":[{"module":"env","field":"now","results":[{"type":"f64","value":"10"}]},
+            {"module":"env","field":"random","results":[{"type":"i32","value":"4"}]}],
+        "expect":{"results":[{"type":"i32","value":"17"}]}});
+    // No confirmation, a false one, or a changed hash: refused, nothing stored.
+    let mut unconfirmed = run.clone();
+    let body = assert_contract_response(
+        server.action("/api/wasm/runs", unconfirmed.clone()).await,
+        "post",
+        "/api/wasm/runs",
+        400,
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&body).contains("confirm_offline_execution"));
+    unconfirmed["confirm_offline_execution"] = json!(false);
+    assert_eq!(
+        server.action("/api/wasm/runs", unconfirmed).await.status(),
+        400
+    );
+    let mut confirmed = run.clone();
+    confirmed["confirm_offline_execution"] = json!(true);
+    let mut stale = confirmed.clone();
+    stale["sha256"] = json!("0".repeat(64));
+    assert_contract_response(
+        server.action("/api/wasm/runs", stale).await,
+        "post",
+        "/api/wasm/runs",
+        409,
+    )
+    .await;
+    let mut missing = confirmed.clone();
+    missing["artifact_id"] = json!("9");
+    assert_contract_response(
+        server.action("/api/wasm/runs", missing).await,
+        "post",
+        "/api/wasm/runs",
+        404,
+    )
+    .await;
+    let empty: Value = server.get("/api/wasm/runs").await.json().await.unwrap();
+    assert_eq!(empty["total"], 0);
+    let record: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.action("/api/wasm/runs", confirmed.clone()).await,
+            "post",
+            "/api/wasm/runs",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(record["outcome"]["status"], "returned");
+    assert_eq!(record["results"][0]["value"], "17");
+    assert_eq!(record["expectation"]["all_match"], true);
+    assert_eq!(record["record_class"], "derived_experiment");
+    assert_eq!(record["provenance"]["module_sha256"], hash);
+    assert_eq!(record["provenance"]["interpreter"]["name"], "wasmi");
+    assert_eq!(record["provenance"]["interpreter"]["jit"], false);
+    assert_eq!(record["import_calls_total"], 3);
+    assert_eq!(record["stored"], true);
+    assert!(record["request"].get("confirm_offline_execution").is_none());
+    // The same inputs give the same digest; the captured evidence is untouched.
+    let mut unstubbed = confirmed.clone();
+    unstubbed["imports"] = json!([]);
+    let trapped: Value = server
+        .action("/api/wasm/runs", unstubbed)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(trapped["outcome"]["status"], "import_trap");
+    assert_eq!(trapped["outcome"]["import"]["field"], "now");
+    assert_ne!(
+        trapped["provenance"]["inputs_digest"],
+        record["provenance"]["inputs_digest"]
+    );
+    assert_eq!(
+        std::fs::read(server.root.path().join("artifacts/manifest.jsonl")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        std::fs::read(
+            server
+                .root
+                .path()
+                .join(format!("artifacts/blobs/{hash}.bin"))
+        )
+        .unwrap(),
+        bytes
+    );
+    let listed: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get("/api/wasm/runs?artifact_id=1&limit=1").await,
+            "get",
+            "/api/wasm/runs",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(listed["total"], 2);
+    assert_eq!(listed["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["runs"][0]["run_id"], trapped["run_id"]);
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["WasmRuns"],
+        &listed,
+        "wasm runs",
+    );
+    for route in [
+        "/api/wasm/runs?limit=0",
+        "/api/wasm/runs?limit=65",
+        "/api/wasm/runs?artifact_id=01",
+        "/api/wasm/runs?extra=1",
+    ] {
+        assert_contract_response(server.get(route).await, "get", "/api/wasm/runs", 400).await;
+    }
+    // A malformed module is a named 422, never a run.
+    let bad = b"\0asm\x01\0\0\0\x01\x09".to_vec();
+    let bad_hash = hex::encode(Sha256::digest(&bad));
+    let artifact = json!({"protocol_version":1,"artifact_id":"2","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/bad.wasm","mime_type":"application/wasm","byte_size":bad.len(),"sha256":bad_hash,"sensitive":false,"content_path":format!("blobs/{bad_hash}.bin")});
+    let mut manifest = manifest.clone();
+    manifest.extend_from_slice(format!("{artifact}\n").as_bytes());
+    server.file("artifacts/manifest.jsonl", &manifest);
+    server.file(&format!("artifacts/blobs/{bad_hash}.bin"), &bad);
+    let mut malformed = confirmed.clone();
+    malformed["artifact_id"] = json!("2");
+    malformed["sha256"] = json!(bad_hash);
+    let body = assert_contract_response(
+        server.action("/api/wasm/runs", malformed).await,
+        "post",
+        "/api/wasm/runs",
+        422,
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&body).contains("malformed"));
+    let after: Value = server.get("/api/wasm/runs").await.json().await.unwrap();
+    assert_eq!(after["total"], 2);
 }
 
 #[tokio::test]

@@ -4824,6 +4824,246 @@
         }
       }
     },
+    "/api/wasm/runs": {
+      "get": {
+        "operationId": "get_wasm_runs",
+        "summary": "Read stored offline runs of captured Wasm functions",
+        "description": "Lists derived run records written by run_wasm_function, newest first, optionally for one artifact. Reads the local run store only: nothing executes. Records are derived experiments, never captured evidence. Memory bytes (hex) and values (value) are content and are omitted below Full access; outcomes, trap kinds, import call counts, digests and expectation matches remain.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": false,
+            "description": "Only runs of this artifact.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Runs to return, 1 to 64. Default 16.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64,
+              "default": 16
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored runs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmRuns"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown parameter, invalid identifier or limit, or a malformed run store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/wasm_run.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads artifacts/analysis/wasm-runs-v1.json. Never executes a module.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_run.rs",
+              "symbol": "list"
+            }
+          ]
+        }
+      },
+      "post": {
+        "operationId": "run_wasm_function",
+        "summary": "Run one function of a captured Wasm module offline",
+        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256). expect compares results and reads exactly and reports matches without needing the values. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Results, import arguments and memory bytes are content: below Full access value and hex fields are omitted. Requires confirm_offline_execution true; nothing runs without it.",
+        "tags": [
+          "artifacts"
+        ],
+        "x-source": "apps/origin-trace-backend/src/wasm_run.rs",
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "x-max-body-bytes": 1048576,
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WasmRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The run's derived record, including traps and limit outcomes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmRun"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed or unbounded request, missing confirmation, an argument or stub that does not match the declared types, an imported target, or an oversized artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Local origin rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact, export or function index not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "The bounded request-body read deadline expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The artifact's SHA-256 differs from the request, or another run is in progress.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The module is empty, malformed, a component, or rejected by the interpreter's validation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Artifact integrity failure or an internal run failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "code-execution",
+            "filesystem-write"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [
+            "wasmi semantics can differ from a browser engine in NaN bit patterns (this build canonicalizes them) and in resource exhaustion behavior."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "bounded-json-object",
+              "condition": "POST requires one valid Content-Length, no Transfer-Encoding, and a JSON object within x-max-body-bytes and the body deadline."
+            },
+            {
+              "id": "confirmed-offline-execution",
+              "condition": "confirm_offline_execution is true. A request without it is refused before the artifact is read, and nothing runs."
+            },
+            {
+              "id": "verified-module",
+              "condition": "artifact_id names a retained wasm artifact whose bytes match its manifest and the request sha256."
+            }
+          ],
+          "confirmations": [
+            {
+              "field": "confirm_offline_execution",
+              "value": true,
+              "when": {}
+            }
+          ],
+          "notes": "Runs captured code only on this explicit request, offline, in a pure interpreter with every import stubbed and fuel, memory, table, call depth and deadline limits. Never automatic and never started by analysis. One run at a time per backend. Writes one derived record to artifacts/analysis/wasm-runs-v1.json, evicting the oldest past 64. No automatic retry.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_run.rs",
+              "symbol": "Runs::run"
+            }
+          ]
+        }
+      }
+    },
     "/api/wasm": {
       "get": {
         "operationId": "inspect_wasm",
@@ -21937,6 +22177,615 @@
           },
           "analyst_names": {
             "$ref": "#/components/schemas/WasmAnalystNames"
+          }
+        }
+      },
+      "WasmTypedValue": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "value"
+        ],
+        "description": "One Wasm value. i32 and i64 take signed or unsigned decimal of their width and return signed decimal. f32 and f64 take decimal text, inf or -inf, or nan:0x followed by the exact bit pattern. v128 is one hexadecimal integer with lane 0 in the low bits. funcref and externref take null and return null or non-null.",
+        "properties": {
+          "type": {
+            "enum": [
+              "i32",
+              "i64",
+              "f32",
+              "f64",
+              "v128",
+              "funcref",
+              "externref"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "WasmRunRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifact_id",
+          "sha256",
+          "confirm_offline_execution"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "export"
+            ]
+          },
+          {
+            "required": [
+              "function_index"
+            ]
+          }
+        ],
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$",
+            "description": "Canonical nonzero unsigned 64-bit artifact ID"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "The artifact's SHA-256; a different value is refused with 409."
+          },
+          "export": {
+            "type": "string",
+            "description": "An exported function name."
+          },
+          "function_index": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "A defined function index, counting imported functions first. An imported index is refused."
+          },
+          "args": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/WasmTypedValue"
+            }
+          },
+          "imports": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "module",
+                "field"
+              ],
+              "description": "A stub for one function import. Exactly one of results (returned on every call) or a nonempty sequence (one entry per call, then a trap). An import without a stub traps when called.",
+              "properties": {
+                "module": {
+                  "type": "string"
+                },
+                "field": {
+                  "type": "string"
+                },
+                "results": {
+                  "type": "array",
+                  "maxItems": 1000,
+                  "items": {
+                    "$ref": "#/components/schemas/WasmTypedValue"
+                  }
+                },
+                "sequence": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 256,
+                  "items": {
+                    "type": "array",
+                    "maxItems": 1000,
+                    "items": {
+                      "$ref": "#/components/schemas/WasmTypedValue"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "memory_writes": {
+            "type": "array",
+            "maxItems": 16,
+            "description": "Bytes written to memory 0 before the call, 256 KiB in total.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "offset",
+                "hex"
+              ],
+              "properties": {
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "hex": {
+                  "type": "string",
+                  "pattern": "^([0-9a-fA-F]{2})*$"
+                }
+              }
+            }
+          },
+          "memory_reads": {
+            "type": "array",
+            "maxItems": 16,
+            "description": "Regions of memory 0 read after the call, 256 KiB in total.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "offset",
+                "length"
+              ],
+              "properties": {
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 262144
+                }
+              }
+            }
+          },
+          "run_start": {
+            "type": "boolean",
+            "default": false,
+            "description": "Run the module's start function first, under the same limits."
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "fuel": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000000000,
+                "default": 100000000
+              },
+              "memory_pages": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1024,
+                "default": 256
+              },
+              "table_elements": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000000,
+                "default": 10000
+              },
+              "call_depth": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000,
+                "default": 1000
+              },
+              "deadline_ms": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000,
+                "default": 2000
+              }
+            }
+          },
+          "expect": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Test vectors. The result reports matches, so a caller without content access can still compare.",
+            "properties": {
+              "results": {
+                "type": "array",
+                "maxItems": 1000,
+                "items": {
+                  "$ref": "#/components/schemas/WasmTypedValue"
+                }
+              },
+              "memory": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "read",
+                    "hex"
+                  ],
+                  "properties": {
+                    "read": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Index into memory_reads."
+                    },
+                    "hex": {
+                      "type": "string",
+                      "pattern": "^([0-9a-fA-F]{2})*$"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "confirm_offline_execution": {
+            "const": true,
+            "description": "Required. Confirms that captured code runs offline in the local sandbox."
+          }
+        }
+      },
+      "WasmRun": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "run_id",
+          "record_class",
+          "created_at_ms",
+          "elapsed_ms",
+          "outcome",
+          "function",
+          "start_function",
+          "results",
+          "fuel_consumed",
+          "imports",
+          "other_imports",
+          "import_calls",
+          "import_calls_total",
+          "import_calls_truncated",
+          "memory_grow_denied",
+          "table_grow_denied",
+          "memory_pages_after",
+          "memory_reads",
+          "expectation",
+          "executed_module_sha256",
+          "provenance",
+          "request",
+          "notice"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-run-v1"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "record_class": {
+            "const": "derived_experiment"
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "outcome": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "phase",
+              "trap_kind",
+              "import",
+              "byte_offset",
+              "byte_offset_note",
+              "message"
+            ],
+            "properties": {
+              "status": {
+                "enum": [
+                  "returned",
+                  "trap",
+                  "import_trap",
+                  "fuel_exhausted",
+                  "deadline_exceeded",
+                  "call_depth_exceeded",
+                  "memory_limit",
+                  "table_limit",
+                  "instantiation_failed",
+                  "memory_write_out_of_bounds"
+                ]
+              },
+              "phase": {
+                "enum": [
+                  "instantiate",
+                  "start",
+                  "prepare",
+                  "call"
+                ]
+              },
+              "trap_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "import": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "byte_offset": {
+                "type": "null"
+              },
+              "byte_offset_note": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          },
+          "function": {
+            "type": "object",
+            "required": [
+              "index",
+              "export",
+              "byte_offset",
+              "byte_end",
+              "type"
+            ],
+            "properties": {
+              "index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "export": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "byte_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "byte_end": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "type": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            },
+            "description": "The target, with its body range in the original module bytes."
+          },
+          "start_function": {
+            "type": "object",
+            "required": [
+              "index",
+              "ran"
+            ],
+            "properties": {
+              "index": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "ran": {
+                "type": "boolean"
+              }
+            }
+          },
+          "results": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/WasmTypedValue"
+            }
+          },
+          "fuel_consumed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "imports": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "function_index",
+                "module",
+                "field",
+                "stub",
+                "calls"
+              ],
+              "properties": {
+                "stub": {
+                  "enum": [
+                    "trap",
+                    "results",
+                    "sequence"
+                  ]
+                }
+              }
+            }
+          },
+          "other_imports": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "kind",
+                "module",
+                "field",
+                "provided"
+              ]
+            }
+          },
+          "import_calls": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "required": [
+                "sequence",
+                "function_index",
+                "module",
+                "field",
+                "args",
+                "args_truncated",
+                "outcome",
+                "results"
+              ]
+            }
+          },
+          "import_calls_total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "import_calls_truncated": {
+            "type": "boolean"
+          },
+          "memory_grow_denied": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "table_grow_denied": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "memory_pages_after": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "memory_reads": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "offset",
+                "length",
+                "status",
+                "sha256",
+                "hex"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "read",
+                    "out_of_bounds",
+                    "no_memory"
+                  ]
+                },
+                "sha256": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "hex": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "expectation": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "executed_module_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "SHA-256 of the rewritten execution copy; module_sha256 names the captured bytes."
+          },
+          "provenance": {
+            "type": "object",
+            "required": [
+              "artifact_id",
+              "module_sha256",
+              "module_byte_size",
+              "inputs_digest",
+              "interpreter",
+              "limits",
+              "host_access",
+              "rewrite"
+            ]
+          },
+          "request": {
+            "type": "object",
+            "description": "The request as run, without its confirmation."
+          },
+          "notice": {
+            "type": "string"
+          },
+          "stored": {
+            "type": "boolean",
+            "description": "Present on the POST result: whether the record reached the run store."
+          },
+          "store_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "WasmRuns": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "artifact_id",
+          "total",
+          "evicted_runs",
+          "max_runs",
+          "runs"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-runs-v1"
+          },
+          "artifact_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evicted_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_runs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "runs": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "$ref": "#/components/schemas/WasmRun"
+            }
           }
         }
       },

@@ -2464,6 +2464,36 @@ mod tests {
     }
 
     #[test]
+    fn omit_content_drops_wasm_run_values_and_bytes_but_keeps_the_outcome() {
+        // A wasm-run-v1 record: results, import arguments and memory bytes
+        // are content; outcome, counts, digests and expectation matches are not.
+        let record = json!({
+            "outcome": {"status": "returned", "phase": "call", "trap_kind": null},
+            "results": [{"type": "i32", "value": "SECRET_RESULT"}],
+            "import_calls": [{"sequence": 0, "module": "env", "field": "now",
+                "args": [{"type": "i32", "value": "SECRET_ARG"}], "outcome": "returned",
+                "results": [{"type": "f64", "value": "SECRET_STUB"}]}],
+            "memory_reads": [{"offset": 0, "length": 4, "status": "read",
+                "sha256": "ab".repeat(32), "hex": "5ec7e700"}],
+            "expectation": {"results_match": true, "all_match": true},
+            "provenance": {"module_sha256": "cd".repeat(32), "inputs_digest": "ef".repeat(32)}
+        });
+        let result = super::omit_content_fields(&record, None, 160, &[], true);
+        assert_eq!(result["outcome"]["status"], "returned");
+        assert_eq!(result["results"][0]["type"], "i32");
+        assert_eq!(result["results"][0]["value"]["omitted"], "string");
+        assert_eq!(
+            result["import_calls"][0]["args"][0]["value"]["omitted"],
+            "string"
+        );
+        assert_eq!(result["memory_reads"][0]["hex"]["omitted"], "string");
+        assert_eq!(result["memory_reads"][0]["sha256"], "ab".repeat(32));
+        assert_eq!(result["expectation"]["all_match"], true);
+        assert_eq!(result["provenance"]["module_sha256"], "cd".repeat(32));
+        assert!(!result.to_string().contains("SECRET") && !result.to_string().contains("5ec7e700"));
+    }
+
+    #[test]
     fn omit_content_keeps_rows_and_identifiers_and_drops_captured_content() {
         let document = json!({
             "events": [

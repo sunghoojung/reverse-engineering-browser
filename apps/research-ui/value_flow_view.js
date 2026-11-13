@@ -42,11 +42,32 @@
   const currentSource = () => typeof selectedSource === 'function' ? selectedSource() : null;
   const inspectRows = () => (typeof state !== 'undefined' && state.sourceWasm) ? state.sourceEditorView?.view?.wasmRows ?? null : null;
   const keyOf = source => source ? `${source.artifact_id}:${source.sha256 ?? ''}` : null;
+  const editor = split.closest('.sources-editor');
+  const graphOpen = () => Boolean(editor?.hasAttribute?.('data-graph'));
 
   // Only an artifact module shown as Inspect rows can be traced.
   function available() {
     const source = currentSource();
     return Boolean(source && source.kind === 'wasm' && source.source_type === 'artifact' && inspectRows());
+  }
+
+  // Operands of an instruction with a fixed stack effect, from its mnemonic,
+  // so one operand can be chosen before the first trace. Calls, branches and
+  // returns depend on types; their count arrives with the first trace.
+  function operandCount(text) {
+    const mnemonic = String(text ?? '').split(/[\s{]/, 1)[0];
+    if (/^(i32|i64|f32|f64|v128)\.const$|^(local|global)\.get$|^(memory|table)\.size$|^ref\.(null|func)$|^nop$/.test(mnemonic)) return 0;
+    if (/^(local\.(set|tee)|global\.set|drop|if|memory\.grow|table\.get|ref\.is_null)$/.test(mnemonic)) return 1;
+    if (/^(select|memory\.(fill|copy|init)|table\.(fill|copy|init))$/.test(mnemonic)) return 3;
+    if (/^(table\.(set|grow))$/.test(mnemonic)) return 2;
+    if (/\.atomic\.rmw.*cmpxchg|\.atomic\.wait/.test(mnemonic)) return 3;
+    if (/\.extract_lane/.test(mnemonic)) return 1;
+    if (/\.atomic\.(rmw|notify)|\.store|_lane$/.test(mnemonic) && !/^v128\.load\d+_lane$/.test(mnemonic)) return 2;
+    if (/^v128\.load\d+_lane$/.test(mnemonic)) return 2;
+    if (/\.load/.test(mnemonic)) return 1;
+    if (/^(i32|i64|f32|f64)\.(eqz|clz|ctz|popcnt|abs|neg|sqrt|ceil|floor|trunc|nearest|wrap_|extend|convert|demote|promote|reinterpret|trunc_sat)/.test(mnemonic)) return 1;
+    if (/^(i32|i64|f32|f64)\.(eq|ne|lt|gt|le|ge|add|sub|mul|div|rem|and|or|xor|shl|shr|rotl|rotr|min|max|copysign)/.test(mnemonic)) return 2;
+    return null;
   }
 
   function setStatus(text, kind = '') {
@@ -86,11 +107,13 @@
     elements.operand.value = [...elements.operand.options].some(option => option.value === keep) ? keep : '';
   }
 
-  // Follows the page: hides off Inspect, and a different module drops the trace.
+  // Follows the page: hides off Inspect and while the block graph is open
+  // (the graph owns that pane), and a different module drops the trace.
   function sync() {
-    const show = available();
+    const traceable = available();
+    const show = traceable && !graphOpen();
     if (panel.hidden === show) panel.hidden = !show;
-    const key = show ? keyOf(currentSource()) : null;
+    const key = traceable ? keyOf(currentSource()) : null;
     if (key !== sourceKey) {
       sourceKey = key;
       selected = null;
@@ -109,7 +132,7 @@
     if (!row || row.kind !== 'instruction' || !Number.isSafeInteger(row.byte_offset) || !Number.isSafeInteger(row.function_index)) return;
     if (selected?.offset === row.byte_offset && selected.functionIndex === row.function_index) return;
     selected = {functionIndex: row.function_index, offset: row.byte_offset, text: row.text};
-    setOperands(0);
+    setOperands(operandCount(row.text) ?? 0);
     renderTarget();
   }
 
@@ -152,15 +175,19 @@
   }
 
   // Row text: kind, the index it names and the instruction text as inert text.
+  // The identifying part leads (import name, index, join kind) so a narrow
+  // row keeps it when the kind label is cut.
   function describe(item) {
-    const parts = [KIND_LABELS[item.kind] ?? item.kind];
+    const parts = [];
+    if (item.import) parts.push(`${item.import.module}.${item.import.name}`);
+    if (item.kind === 'phi') parts.push(`${item.join ?? ''} join`.trim());
     if (item.local !== undefined) parts.push(`local ${item.local}`);
     if (item.global !== undefined) parts.push(`global ${item.global}`);
-    if (item.function !== undefined) parts.push(`func ${item.function}`);
-    if (item.import) parts.push(`${item.import.module}.${item.import.name}`);
-    if (item.join) parts.push(item.join);
+    if (item.function !== undefined && !item.import) parts.push(`func ${item.function}`);
+    if (item.kind !== 'phi') parts.push(KIND_LABELS[item.kind] ?? item.kind);
     return parts.join(' · ');
   }
+
 
   function rowLine(offset) {
     const rows = inspectRows();
@@ -194,15 +221,21 @@
       button.type = 'button';
       const line = rowLine(item.byte_offset);
       button.disabled = line < 0;
-      button.title = line < 0 ? `Byte ${item.byte_offset} has no retained Inspect row` : `Show the Inspect row at ${hex(item.byte_offset)}`;
-      button.append(node('span', 'value-flow-offset', hex(item.byte_offset)), node('span', 'value-flow-role', ROLE_LABELS[item.role] ?? item.role),
-        node('span', 'value-flow-kind', describe(item)), node('span', 'value-flow-text', clip(item.expression || item.text)));
+      const kind = describe(item), text = clip(item.expression || item.text);
+      button.title = `${kind} · ${text}\n${line < 0 ? `Byte ${item.byte_offset} has no retained Inspect row` : `Show the Inspect row at ${hex(item.byte_offset)}`}`;
+      // Kind and text share one column so the index, import or join kind
+      // stays visible at the minimum window, ahead of the instruction text.
+      const detail = node('span', 'value-flow-detail');
+      detail.append(node('span', 'value-flow-kind', kind), node('span', 'value-flow-text', text));
+      button.append(node('span', 'value-flow-offset', hex(item.byte_offset)), node('span', 'value-flow-role', ROLE_LABELS[item.role] ?? item.role), detail);
       button.addEventListener('click', () => reveal(item.byte_offset));
       entry.append(button);
       const join = joins.get(item.id);
       if (join) {
-        const incoming = join.incoming.map(edge => `${edge.via ?? 'in'} ${hex(edge.from_offset)}`).join(', ');
-        entry.append(node('span', 'value-flow-join', `${join.incoming.length} incoming: ${clip(incoming)}`));
+        const listed = join.incoming.map(edge => `${edge.via ?? 'in'} ${hex(edge.from_offset)}`).join(', ');
+        const total = Number.isSafeInteger(join.incoming_count) ? join.incoming_count : join.incoming.length;
+        const incoming = total > join.incoming.length ? `${listed}, and ${total - join.incoming.length} more` : listed;
+        entry.append(node('span', 'value-flow-join', `${total} incoming: ${clip(incoming)}`));
       }
       return entry;
     });
@@ -244,7 +277,10 @@
   code.addEventListener('focusin', noteRow);
   let pending = 0;
   const schedule = () => { if (!pending) pending = requestAnimationFrame(() => { pending = 0; sync(); }); };
-  if (typeof MutationObserver === 'function') new MutationObserver(schedule).observe(code, {childList: true});
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(schedule).observe(code, {childList: true});
+    if (editor) new MutationObserver(schedule).observe(editor, {attributes: true, attributeFilter: ['data-graph']});
+  }
   document.querySelector('#source-wasm')?.addEventListener('click', () => setTimeout(schedule, 0));
   sync();
 })();

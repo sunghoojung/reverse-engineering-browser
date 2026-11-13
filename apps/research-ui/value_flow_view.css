@@ -2,7 +2,10 @@
    the last row of the Sources view split, an auto track, so its cap must be
    definite (a percentage of an auto track is none); the listing keeps the
    rest of the editor at the minimum window. */
-#screen-sources .source-view-split:has(> .value-flow:not([hidden])):not([style*="grid-template-rows"]) { grid-template-rows: minmax(0, 1fr) auto; }
+/* Only outside Graph mode: there the split's rows belong to the graph and the
+   listing, and the panel is hidden (value_flow_view.js). */
+#screen-sources .sources-editor:not([data-graph]) .source-view-split:has(> .value-flow:not([hidden])):not([style*="grid-template-rows"]) { grid-template-rows: minmax(0, 1fr) auto; }
+#screen-sources .sources-editor[data-graph] .source-view-split > .value-flow { display: none; }
 #screen-sources .source-view-split > .value-flow { min-height: 0; }
 .value-flow {
   max-height: min(280px, 36vh);
@@ -30,7 +33,7 @@
 .value-flow-list { flex: 1 1 auto; min-height: 0; margin: 0; padding: 0 0 6px; overflow: auto; list-style: none; }
 .value-flow-list[hidden] { display: none; }
 .value-flow-row { display: grid; grid-template-columns: minmax(0, 1fr); padding: 0 6px; }
-.value-flow-link { min-width: 0; display: grid; grid-template-columns: 8ch 9ch 26ch minmax(0, 1fr); align-items: center; gap: 8px; height: 24px; padding: 0 6px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text); font: 12px var(--mono); text-align: left; }
+.value-flow-link { min-width: 0; width: 100%; display: grid; grid-template-columns: 8ch 9ch minmax(0, 1fr); align-items: center; gap: 8px; height: 24px; padding: 0 6px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text); font: 12px var(--mono); text-align: left; }
 .value-flow-link:not(:disabled):hover { background: var(--accent-soft); }
 .value-flow-link:disabled { color: var(--muted); }
 .value-flow-link > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -40,13 +43,14 @@
 .value-flow-row:is(.is-source, .is-sink) .value-flow-role { color: var(--text); }
 /* A depth-capped row is a limit, gold in the shared state colors. */
 .value-flow-row.is-frontier .value-flow-role { color: var(--amber); }
-.value-flow-kind { color: var(--muted); font: 11px var(--sans); }
-.value-flow-text { font: 400 12px var(--mono); color: var(--code-text); }
+.value-flow-detail { min-width: 0; display: flex; align-items: baseline; gap: 8px; overflow: hidden; }
+.value-flow-detail > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.value-flow-kind { flex: 0 1 26ch; color: var(--muted); font: 11px var(--sans); }
+.value-flow-text { flex: 1 1 0; font: 400 12px var(--mono); color: var(--code-text); }
 .value-flow-join { padding: 0 6px 4px calc(17ch + 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 12px var(--mono); }
 @media (max-width: 900px) {
   .value-flow-head { flex-wrap: wrap; }
-  .value-flow-link { grid-template-columns: 8ch 9ch minmax(0, 1fr); }
-  .value-flow-link > .value-flow-kind { display: none; }
+  .value-flow-kind { flex-basis: 24ch; }
 }
 /* Slice rows in the Inspect listing: a tint and a left rule by role, drawn
    over the gutter; the row text is never changed. Role is not a state, so

@@ -2469,7 +2469,10 @@ A byte budget cuts row text before structure and labels what it cut.
 
 In **Inspect**, select an instruction row (click it or Tab to its offset) and
 use the **Trace value** panel under the listing: pick **Whole instruction** or
-one operand, a direction, then **Trace value**. The panel reads one
+one operand, a direction, then **Trace value**. Instructions with a fixed
+stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
+operands as soon as the row is chosen; calls and branches list theirs after
+the first trace, from its `operand_count`. The panel reads one
 [`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
 `/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and a
 ten-second timeout, aborts a superseded read, and keeps the last slice when a
@@ -2479,7 +2482,11 @@ incoming edges. Arrow keys, Home and End move through the rows; Enter or a click
 reveals that offset in Inspect and focuses its gutter. Offsets with no retained
 Inspect row stay disabled. The slice's mounted rows carry `data-value-flow`
 (seed, source, sink or step), reapplied as the listing remounts. **×** clears
-the trace; Hex or another module hides the panel and drops it.
+the trace; Hex or another module hides the panel and drops it. While the block
+graph is open the panel and its marks are hidden, since the graph owns that
+pane, and closing the graph brings the same trace back. Graph blocks are not a
+seed. Each row keeps the identifying part of its kind first (the import name,
+the local or the join kind), so it stays readable at the minimum window.
 
 ## Flow workspace
 

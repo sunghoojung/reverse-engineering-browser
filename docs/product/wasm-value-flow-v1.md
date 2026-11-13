@@ -13,7 +13,8 @@ byte offset, role (seed, source, sink, step, or depth cap), kind and
 instruction. A join shows every incoming edge with the branch that carried it.
 Selecting a row, or Enter on it, shows that instruction in Inspect; the slice's
 rows are marked in the listing by role. **×** clears the trace, and Hex hides
-the panel.
+the panel. While the block graph is open the panel is hidden; seeding from a
+graph block is not supported in v1.
 
 Backward, the slice reaches the params, locals, globals, constants, memory
 loads (with the instructions that compute their address) and call and import

@@ -386,6 +386,19 @@ read-only and bounded by a 3.5-second deadline and listed caps; a partial
 status names what was cut. Only `hex` on a data match is captured content. See
 [WASM identification](wasm-identification-v1.md).
 
+## WASM module diff
+
+`get_wasm_module_diff` projects `GET /api/wasm/diff` with `artifact_id` (A) and
+`compare_artifact_id` (B), optional `status`, `row_offset` and `row_limit`. It
+is read-only and structure only: rows give each side's function index, body
+range, name, signature and fingerprints, with the match method and score, and
+never instruction text or constant values. Each member of a tie is its own
+`ambiguous` row, and one four-second deadline, counted from the request's
+arrival, bounds the work. Only complete reports are cached, and only they
+page reliably: a partial report says its pages can repeat or skip rows. Page with
+`row_window.next_offset`.
+See [WASM module diff v1](wasm-module-diff-v1.md).
+
 ## Compact session context
 
 `GET /api/session/context` (`get_session_context`) is the compact first read for

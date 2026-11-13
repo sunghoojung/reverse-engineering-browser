@@ -87,6 +87,12 @@ dispatch-shape-fixtures:
 wasm-identification-fixtures:
 	$(call ignored-rust-test,--lib,wasm_identification::tests::write_identification_fixtures,)
 
+# Rebuild the module diff builds after editing their .wat sources. make check
+# fails while a checked-in build differs from its source.
+.PHONY: wasm-diff-fixtures
+wasm-diff-fixtures:
+	$(call ignored-rust-test,--lib,wasm_diff::tests::write_wasm_diff_fixtures,)
+
 # The actual C++ native Wasm encoders feed the Rust workspace builder, the
 # shipped viewer and the Python validator. The Rust tests also export the exact
 # evidence stores they built; make rendered-ui-check renders those stores
@@ -157,6 +163,7 @@ $(UI_STARTUP_DEPS): tools/ui-startup-deps/package-lock.json
 native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-native-only-ui.mjs
 	node tools/check-debugger-sidebar.mjs
+	node tools/check-wasm-diff-ui.mjs
 	node tools/check-traffic-payload-ui.mjs
 	node tools/check-traffic-response-ui.mjs
 	node tools/check-wasm-readable-ui.mjs

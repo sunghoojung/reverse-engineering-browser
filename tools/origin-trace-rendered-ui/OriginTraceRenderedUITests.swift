@@ -2970,6 +2970,96 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Compare with: two synthetic builds (artifacts 430 and 431) match in a
+  // table with each status, the tied stubs stay ambiguous, and a function on
+  // either side opens Graph on its own module.
+  @MainActor
+  func test40WasmModuleDiff() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"430\"]")
+      try await ui.waitUntil("!document.querySelector('#source-wasm-diff').hidden", "Compare with is offered for a captured WASM artifact")
+      try await ui.click("#source-more summary")
+      try await ui.click("#source-wasm-diff", containing: "Compare with")
+      try await ui.waitUntil("!document.querySelector('#source-diff-view').hidden && document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", timeout: 30, "the module comparison did not load")
+      let table = try await ui.json("""
+        (() => { const view = document.querySelector('#source-diff-view');
+          return {picker: view.querySelector('.wasm-diff-picker').selectedOptions[0]?.textContent ?? '',
+            summary: view.querySelector('.wasm-diff-summary').textContent,
+            statuses: [...view.querySelectorAll('.wasm-diff-row')].map(row => row.dataset.status),
+            ambiguous: [...view.querySelectorAll('.wasm-diff-row[data-status="ambiguous"] .wasm-diff-tie')].map(cell => cell.textContent),
+            methods: [...view.querySelectorAll('.wasm-diff-method')].map(cell => cell.textContent),
+            split: document.querySelector('#source-view-split').hidden}; })()
+        """)
+      XCTAssertTrue((table["picker"] as? String ?? "").hasPrefix("#431 "), "\(size.name): B is chosen for its similar URL: \(table)")
+      XCTAssertEqual(table["statuses"] as? [String] ?? [],
+        ["changed", "changed", "added", "added", "removed", "ambiguous", "ambiguous", "ambiguous", "ambiguous", "renumbered", "renumbered", "identical", "identical"], "\(size.name): \(table)")
+      XCTAssertEqual(table["ambiguous"] as? [String] ?? [], ["tie 1 · 2 in B", "tie 1 · 2 in B", "tie 1 · 2 in A", "tie 1 · 2 in A"], "\(size.name): each tied stub is a row of the one tie: \(table)")
+      XCTAssertTrue((table["methods"] as? [String] ?? []).contains("structure"), "\(size.name): \(table)")
+      XCTAssertTrue((table["summary"] as? String ?? "").contains("2 changed"), "\(size.name): \(table)")
+      XCTAssertEqual(table["split"] as? Bool, true, "\(size.name): the table replaces the code view")
+      try await assertLayout(ui, "#source-diff-view", "\(size.name) module diff")
+      try await assertInert(ui, "\(size.name) module diff")
+      try await ui.screenshot("wasm-module-diff-\(size.name)")
+      try await diffLightScreenshot(ui, "wasm-module-diff", size.name, layout: "#source-diff-view")
+
+      try await ui.click("#source-diff-view .wasm-diff-filter", containing: "Changed")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 2", "the Changed filter did not narrow the rows")
+      try await ui.click("#source-diff-view .wasm-diff-filter", containing: "All")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", "All did not restore the rows")
+
+      // A's run export opens in Graph on A; B's digest opens in Graph on B.
+      // Each target must be the element a click at its center reaches: the
+      // sticky header once covered a row scrolled to the top edge.
+      try await assertHitTestable(ui, "#source-diff-view .wasm-diff-fn", "run · func 4", "\(size.name) A jump")
+      try await ui.click("#source-diff-view .wasm-diff-fn", containing: "run · func 4")
+      try await ui.waitUntil("document.querySelector('#source-diff-view').hidden && (document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('run')", timeout: 30, "A's function did not open in Graph")
+      let first = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
+      XCTAssertTrue(first.contains("diff-build-a"), "\(size.name): A's function opens on A: \(first)")
+      try await ui.click("#source-more summary")
+      try await ui.click("#source-wasm-diff", containing: "Compare with")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", timeout: 30, "the comparison did not reopen")
+      let top = try await ui.value("document.querySelector('#source-diff-view .wasm-diff-body').scrollTop") as? Double
+      XCTAssertEqual(top, 0, "\(size.name): the reopened table starts at the top")
+      try await assertHitTestable(ui, "#source-diff-view .wasm-diff-fn", "digest · func 8", "\(size.name) B jump")
+      try await ui.click("#source-diff-view .wasm-diff-fn", containing: "digest · func 8")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('digest')", timeout: 30, "B's function did not open in Graph")
+      let second = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
+      XCTAssertTrue(second.contains("diff-build-b"), "\(size.name): B's function opens on B: \(second)")
+      try await ui.screenshot("wasm-module-diff-jump-\(size.name)")
+      try await diffLightScreenshot(ui, "wasm-module-diff-jump", size.name, layout: nil)
+      try await ui.click("#source-graph")
+    }
+  }
+
+  /// Reveals the first `selector` element containing `text` the way a click
+  /// does, then checks that the point at its center hits it, not something
+  /// drawn over it.
+  @MainActor
+  private func assertHitTestable(_ ui: Harness, _ selector: String, _ text: String, _ context: String,
+                                 file: StaticString = #filePath, line: UInt = #line) async throws {
+    _ = try await ui.reveal(selector, containing: text)
+    let probe = try await ui.json("""
+      (() => { const target = [...document.querySelectorAll(\(String(reflecting: selector)))].find(node => node.textContent.includes(\(String(reflecting: text))));
+        const box = target.getBoundingClientRect();
+        const hit = document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
+        return {hit: !!hit && (hit === target || target.contains(hit)), at: hit ? (hit.className || hit.tagName) : null}; })()
+      """)
+    XCTAssertEqual(probe["hit"] as? Bool, true, "\(context): the click target is covered: \(probe)", file: file, line: line)
+  }
+
+  /// The same state in the light theme, set the way the theme toggle sets it.
+  @MainActor
+  private func diffLightScreenshot(_ ui: Harness, _ name: String, _ size: String, layout: String?) async throws {
+    _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+    try await Task.sleep(nanoseconds: 600_000_000)
+    if let layout { try await assertLayout(ui, layout, "\(size) \(name) light") }
+    try await ui.screenshot("\(name)-light-\(size)")
+    _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+    try await Task.sleep(nanoseconds: 300_000_000)
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor

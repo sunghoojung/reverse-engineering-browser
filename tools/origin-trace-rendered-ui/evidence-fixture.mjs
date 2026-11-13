@@ -984,6 +984,15 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const readable = await artifact(artifacts, {artifact_id: '400', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://readable-loop.wasm'},
   readableWasm());
+  // Two builds of one synthetic program for Compare with (test40); the bytes
+  // are the checked-in tools/fixtures/wasm-module-diff builds.
+  const diffFixtures = new URL('../fixtures/wasm-module-diff/', import.meta.url);
+  const diffBuilds = [];
+  for (const [id, name] of [['430', 'build-a'], ['431', 'build-b']]) {
+    diffBuilds.push(await artifact(artifacts, {artifact_id: id, session_id: '1', navigation_id: '100', frame_id: '200',
+      capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: `fixture://diff-${name}.wasm`},
+    await readFile(new URL(`${name}.wasm`, diffFixtures))));
+  }
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -993,7 +1002,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...diffBuilds, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

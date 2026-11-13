@@ -16,6 +16,9 @@ read.
 function of a captured module in a stubbed interpreter, its limits and named
 outcomes, and the derived run records it stores.
 
+[WASM module diff v1](wasm-module-diff-v1.md) defines function fingerprints and
+the static function matching between two captured modules.
+
 [Artifact map v1](artifact-map-v1.md) defines the fixed-size whole-artifact
 entropy and kind summary behind the Sources Map view.
 

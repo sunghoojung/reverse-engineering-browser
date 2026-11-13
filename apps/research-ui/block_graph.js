@@ -680,6 +680,8 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
   const runner = createBlockGraphRunner();
   host.hidden = true;
   let source = null, isOpen = false, functions = null, names = new Map(), functionIndex = null, generation = 0, abort = null, indexStatus = 'idle', screenVisible = true;
+  /* A function another view asked for, drawn once the index lists it. */
+  let requested = null;
   const key = () => `${source?.artifact_id}:${source?.sha256}`;
   const cache = new Map(); let cacheBytes = 0;
   const entryBytes = result => {
@@ -835,7 +837,9 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       indexStatus = 'ready'; renderTools();
       if (!functions.index.length) { view.setState('empty', index.omissions[0] || 'This module declares no function bodies.'); return; }
       const largest = functions.index.reduce((best, candidate) => (index.size.get(candidate) > index.size.get(best) ? candidate : best), functions.index[0]);
-      loadFunction(largest);
+      const wanted = requested !== null && functions.index.includes(requested) ? requested : largest;
+      requested = null;
+      loadFunction(wanted);
     } catch (error) {
       if (current() && error.name !== 'AbortError') {
         indexStatus = 'error';
@@ -878,6 +882,14 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
       if (isOpen && (!valid || changed)) close();
     },
     setScreenVisible(visible) { if (screenVisible === visible) return; screenVisible = visible; if (!visible && isOpen) close(); },
+    /** Opens the graph on one function of the selected module. */
+    openFunction(index) {
+      if (!isWasmSource(source) || !Number.isSafeInteger(index)) return false;
+      if (isOpen && functions) { loadFunction(index); return true; }
+      requested = index;
+      if (!isOpen) open();
+      return true;
+    },
     isOpen: () => isOpen,
     /** The function the graph last showed, for a view that follows it. */
     functionIndex: () => functionIndex

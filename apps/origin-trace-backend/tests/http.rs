@@ -731,7 +731,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 64, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 65, "Review route coverage when the API changes");
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
@@ -825,7 +825,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 64);
+    assert_eq!(operation_count, 65);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -4114,6 +4114,159 @@ async fn artifact_map_route_is_read_only_versioned_and_covers_the_whole_artifact
         .await
         .unwrap();
     assert_eq!(map["facts"]["source"], "javascript_lexer");
+}
+
+#[tokio::test]
+async fn wasm_module_diff_matches_two_builds_pages_and_refuses_bad_input() {
+    let server = Server::start().await;
+    // B renumbers every call by adding an import, moves its static data, and
+    // changes one constant; A's twin stubs stay ambiguous.
+    let a = wat::parse_str(
+        r#"(module (memory 1) (data (i32.const 2048) "abcd")
+            (func (param i32) (result i32) local.get 0 i32.const 3 i32.mul)
+            (func (result i32) i32.const 2048 i32.load)
+            (func (export "run") (param i32) (result i32) local.get 0 call 0 call 1 i32.add)
+            (func (result i32) i32.const 42) (func (result i32) i32.const 42))"#,
+    )
+    .unwrap();
+    let b = wat::parse_str(
+        r#"(module (import "env" "log" (func (param i32))) (memory 1) (data (i32.const 8192) "abcd")
+            (func (param i32) (result i32) local.get 0 i32.const 5 i32.mul)
+            (func (result i32) i32.const 8192 i32.load)
+            (func (export "run") (param i32) (result i32) local.get 0 call 1 call 2 i32.add)
+            (func (result i32) i32.const 42) (func (result i32) i32.const 42))"#,
+    )
+    .unwrap();
+    let mut manifest = String::new();
+    for (id, session, bytes) in [("1", "1", &a), ("2", "2", &b)] {
+        let hash = hex::encode(Sha256::digest(bytes));
+        let artifact = json!({"protocol_version":1,"artifact_id":id,"session_id":session,"navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":format!("https://example.test/{id}.wasm"),"mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        manifest.push_str(&format!("{artifact}\n"));
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    }
+    let script = json!({"protocol_version":1,"artifact_id":"3","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"javascript","url":"https://example.test/a.js","mime_type":"text/javascript","byte_size":1,"sha256":hex::encode(Sha256::digest(b";")),"sensitive":false,"content_path":format!("blobs/{}.bin", hex::encode(Sha256::digest(b";")))});
+    manifest.push_str(&format!("{script}\n"));
+    server.file(
+        &format!("artifacts/blobs/{}.bin", hex::encode(Sha256::digest(b";"))),
+        b";",
+    );
+    server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+    let route = "/api/wasm/diff?artifact_id=1&compare_artifact_id=2";
+    let diff: Value = serde_json::from_slice(
+        &assert_contract_response(server.get(route).await, "get", "/api/wasm/diff", 200).await,
+    )
+    .unwrap();
+    assert_eq!(diff["schema"], "wasm-module-diff-v1");
+    assert_eq!(diff["status"], "complete");
+    assert_eq!(diff["a"]["session_id"], "1");
+    assert_eq!(diff["b"]["session_id"], "2");
+    let find = |a: u64, b: u64| {
+        diff["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["a"]["function"] == a && row["b"]["function"] == b)
+            .cloned()
+            .unwrap_or_else(|| panic!("no row {a} -> {b}: {diff}"))
+    };
+    let run = find(2, 3);
+    assert_eq!(
+        (run["status"].as_str(), run["method"].as_str()),
+        (Some("renumbered"), Some("normalized"))
+    );
+    let load = find(1, 2);
+    assert_eq!(
+        load["status"], "renumbered",
+        "a data address move only renumbers"
+    );
+    let leaf = find(0, 1);
+    assert_eq!(
+        (leaf["status"].as_str(), leaf["method"].as_str()),
+        (Some("changed"), Some("call_graph"))
+    );
+    assert!(leaf["a"]["byte_end"].as_u64().unwrap() > leaf["a"]["byte_offset"].as_u64().unwrap());
+    // Each member of the stubs' tie is its own row, with the tie's size.
+    let twins = diff["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["status"] == "ambiguous")
+        .collect::<Vec<_>>();
+    assert_eq!(twins.len(), 4);
+    assert!(
+        twins
+            .iter()
+            .all(|row| row["group"] == json!({"id": 0, "a": 2, "b": 2}))
+    );
+    assert_eq!(diff["summary"]["ambiguous_groups"], 1);
+    assert_eq!(diff["summary"]["statuses"]["added"], 1, "the new import");
+    // No instruction text or constant value is part of the document.
+    let text = diff.to_string();
+    assert!(!text.contains("i32.mul") && !text.contains("2048") && !text.contains("8192"));
+    let page: Value = server
+        .get(&format!("{route}&status=changed,added&row_limit=1"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(page["rows"][0]["status"], "changed");
+    assert_eq!(page["row_window"]["total_rows"], 2);
+    assert_eq!(page["row_window"]["next_offset"], 1);
+    assert_eq!(page["summary"], diff["summary"]);
+    for (path, expected) in [
+        ("/api/wasm/diff?artifact_id=1", 400),
+        ("/api/wasm/diff?artifact_id=1&compare_artifact_id=1", 400),
+        (
+            "/api/wasm/diff?artifact_id=1&compare_artifact_id=2&extra=1",
+            400,
+        ),
+        (
+            "/api/wasm/diff?artifact_id=1&compare_artifact_id=2&status=bogus",
+            400,
+        ),
+        (
+            "/api/wasm/diff?artifact_id=1&compare_artifact_id=2&row_limit=1001",
+            400,
+        ),
+        (
+            "/api/wasm/diff?artifact_id=1&compare_artifact_id=2&row_offset=99",
+            400,
+        ),
+        ("/api/wasm/diff?artifact_id=1&compare_artifact_id=3", 400),
+        ("/api/wasm/diff?artifact_id=1&compare_artifact_id=9", 404),
+    ] {
+        let response = server.get(path).await;
+        let body: Value = serde_json::from_slice(
+            &assert_contract_response(response, "get", "/api/wasm/diff", expected).await,
+        )
+        .unwrap();
+        assert!(body["error"].is_string(), "{path}: {body}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .args(["--artifact-id", "1", "--diff-with", "2"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let mut cli: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mut http = diff.clone();
+    cli["summary"]["elapsed_ms"] = json!(0);
+    http["summary"]["elapsed_ms"] = json!(0);
+    assert_eq!(cli, http);
+    // A truncated module is a named decoding error, not a partial table.
+    let mut bad = b.clone();
+    bad.truncate(bad.len() - 3);
+    let hash = hex::encode(Sha256::digest(&bad));
+    let artifact = json!({"protocol_version":1,"artifact_id":"4","session_id":"2","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/bad.wasm","mime_type":"application/wasm","byte_size":bad.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    manifest.push_str(&format!("{artifact}\n"));
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bad);
+    server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+    let response = server
+        .get("/api/wasm/diff?artifact_id=1&compare_artifact_id=4")
+        .await;
+    assert_contract_response(response, "get", "/api/wasm/diff", 422).await;
 }
 
 #[tokio::test]

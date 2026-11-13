@@ -56,6 +56,7 @@ privacy, and implementation limits are documented in
 - [Researcher function names](./wasm-function-names-v1.md) keyed by module SHA-256 and function index are implemented: renamed from Inspect, Graph and Flow, shown in every Wasm view and joined into every agent-facing Wasm read.
 - [Offline function runs](./wasm-offline-runner-v1.md) are implemented: one function of a captured module runs on an explicit confirmed request in a local interpreter with every import stubbed, under fuel, memory, table, call-depth and deadline limits, and the result is a derived experiment record.
 - [Library identification](./wasm-identification-v1.md) is implemented: toolchain and runtime conclusions with their evidence offsets, well-known function label suggestions, and complete or partial crypto and encoding constant matches. Cross-module signature matching remains planned.
+- [Function matching between two captured modules](./wasm-module-diff-v1.md) is implemented as **Compare with** in Sources: renumbering-tolerant fingerprints, matches with method and score, and changed, added, removed and ambiguous functions. Carrying analyst names across a match remains planned.
 - Record compilation, instantiation, exported calls, imported calls, traps, and memory growth.
 - Connect JavaScript-to-WASM and WASM-to-JavaScript crossings.
 - Search for values moving between WASM, JavaScript, browser APIs, and network requests.

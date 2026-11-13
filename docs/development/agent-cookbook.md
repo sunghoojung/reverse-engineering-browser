@@ -715,6 +715,50 @@ researcher's name is `analyst_name`, and `analyst_names.functions` resolves
 callee indexes (recipe 26). A line reading `return_call f(args)` is a tail
 call: what `f` throws is not caught by a handler of this function.
 
+## 30. Compare two builds of a Wasm module
+
+Works at every level: the result is structure only. Find both modules first,
+then read what changed before what stayed.
+
+```text
+get_artifacts {"kind": "wasm", "limit": 20}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous,unclassified"}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous,unclassified", "row_offset": <row_window.next_offset>}
+```
+
+The filter keeps `unclassified`: those are the rows a `partial` report
+leaves when a limit stopped a step. Good: `status: "complete"`,
+`summary.statuses` with every count, and rows
+whose `a` and `b` sides name a `function` index. Page with the previous
+page's `row_window.next_offset`, never a fixed step: a page stops early when
+its rows are long.
+
+- **Identity**: `a.sha256` and a side's `function` identify a function in A;
+  carry what you know about it to the B side of its row.
+- **`identical`**: the body bytes and normalized hashes are equal, so the
+  signature and the types of every global and type the body names agree;
+  each static address sits at the same segment and offset; and every call
+  and `ref.func` reaches the matched function. Its limits: it cannot tell
+  apart two globals of the same type, and it compares where an address
+  points, not the bytes stored there, so changed data under an unchanged
+  layout stays `identical`.
+- **`renumbered`**: the bytes differ only in ways the contract can explain as
+  renumbering or relocation, and every call and `ref.func` reaches the
+  matched function. It has the same two limits, so treat it as strong
+  evidence, not proof.
+- **Data inserted inside a segment** moves every later offset in it, so the
+  functions reading past the insertion point are `changed` even when they
+  read the same bytes. Expect a run of `changed` readers after such an edit.
+- **`call_graph`, `structural`, `export_name`, `name`**: hypotheses with a
+  `score`. Check them with `get_wasm_function_graph` on both sides.
+- **`ambiguous`**: one row per member of a tie, with `group` saying how many
+  functions of each module tie. No pair was chosen.
+- **`unclassified`, or a `partial` status**: a limit or the deadline stopped a
+  step; `omissions` says which, and those functions may not really be added or
+  removed. Do not page a partial report: each page is compared again and can
+  stop elsewhere, so pages can repeat or skip rows. Ask again, and page only
+  once `status` is `complete`.
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -725,6 +769,7 @@ call: what `f` throws is not caught by a handler of this function.
 | `wait_for_events` | `wait.timed_out`, `events`, `query.next_after`; `debugger_observation` on types 40 to 45 |
 | `inspect_wasm` | `coverage`, then the requested section rows; `analyst_names` for researcher names |
 | `get_wasm_identification` | `summary`, `toolchain.conclusions`, `functions.suggestions`, `constants.matches`, `omissions` |
+| `get_wasm_module_diff` | `status`, `summary.statuses`, `rows` (`status`, `method`, `score`, `a.function`, `b.function`), `row_window` |
 | `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
 | `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |
 | `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |

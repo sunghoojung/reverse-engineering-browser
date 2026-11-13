@@ -18,7 +18,7 @@ use crate::{
     owned_vm_debugger::OwnedVmDebugger,
     request_cookies, request_headers,
     request_index::{self, RequestIndex},
-    session_context, session_summary, source_facts, source_format, validation, vm, wasm,
+    session_context, session_summary, source_facts, source_format, validation, vm, wasm, wasm_diff,
     wasm_graph, wasm_identification, wasm_pseudocode,
     workspace::{Kind, Store},
 };
@@ -39,13 +39,15 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 78] = [
+const UI_ASSETS: [&str; 80] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
     "wasm_readable.js",
     "wasm_readable.css",
     "block_graph_layout.js",
+    "wasm_diff_view.css",
+    "wasm_diff_view.js",
     "graph_layout_client.js",
     "flow_graph.css",
     "flow_graph.js",
@@ -529,6 +531,38 @@ impl App {
             .await?;
         Ok(([("content-type", "application/json")], document).into_response())
     }
+    /// Two artifact IDs and an optional page. A misspelled parameter fails
+    /// instead of returning an unfiltered table the caller reads as filtered.
+    async fn wasm_diff_route(&self, raw_query: &str) -> Result<Response> {
+        // The deadline counts from arrival, including the wait for a reader.
+        let started = std::time::Instant::now();
+        let q = Query::new(raw_query);
+        if q.0.keys().any(|key| {
+            ![
+                "artifact_id",
+                "compare_artifact_id",
+                "status",
+                "row_offset",
+                "row_limit",
+            ]
+            .contains(&key.as_str())
+        }) {
+            return Err(Error::bad(
+                "The WASM module diff takes artifact_id and compare_artifact_id with optional status, row_offset and row_limit",
+            ));
+        }
+        let a = q.required("artifact_id")?.to_owned();
+        let b = q.required("compare_artifact_id")?.to_owned();
+        let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
+        let default = wasm_diff::PAGE_DEFAULT_ROWS.to_string();
+        let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+        let page = wasm_diff::Page::new(offset, limit, q.one("status")?)?;
+        let root = self.options.artifacts.clone();
+        let document = self
+            .blocking(move || wasm_diff::diff(&root, &a, &b, &page, started))
+            .await?;
+        Ok(axum::Json(document).into_response())
+    }
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
     }
@@ -565,6 +599,9 @@ impl App {
         }
         if path == "/api/wasm/pseudocode" {
             return self.wasm_pseudocode_route(raw_query).await;
+        }
+        if path == "/api/wasm/diff" {
+            return self.wasm_diff_route(raw_query).await;
         }
         let q = Query::new(raw_query);
         let mut etag = None;
@@ -2789,6 +2826,58 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(result, "streamed");
+    }
+
+    #[tokio::test]
+    async fn wasm_diff_deadline_counts_from_arrival_not_from_the_reader_permit() {
+        // A request that waits for a reader past the deadline gets a partial
+        // answer as soon as it runs: the deadline counts from arrival.
+        let root = tempfile::tempdir().unwrap();
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/fixtures/wasm-module-diff");
+        let mut manifest = String::new();
+        for (id, name) in [("1", "build-a"), ("2", "build-b")] {
+            let bytes = std::fs::read(fixtures.join(format!("{name}.wasm"))).unwrap();
+            let hash = hex::encode(sha2::Sha256::digest(&bytes));
+            std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+            manifest.push_str(&format!(
+                "{}\n",
+                json!({"protocol_version":1,"artifact_id":id,"session_id":"1","navigation_id":"1",
+                    "frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm",
+                    "url":format!("fixture://{name}.wasm"),"mime_type":"application/wasm",
+                    "byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+                    "content_path":format!("blobs/{hash}.bin")})
+            ));
+        }
+        std::fs::write(artifacts.join("manifest.jsonl"), manifest).unwrap();
+        let mut options = Options::parse_from(["origin-trace-backend"]);
+        options.store = root.path().join("events.jsonl");
+        options.trace_store = root.path().join("trace.jsonl");
+        options.signal_store = root.path().join("signals.jsonl");
+        options.artifacts = artifacts;
+        options.api_collection = root.path().join("collection.json");
+        options.local_analyst = root.path().join("analyst.json");
+        let app = App::new(options, 0).await;
+        let held = app.io.clone().acquire_many_owned(4).await.unwrap();
+        let request = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.wasm_diff_route("artifact_id=1&compare_artifact_id=2")
+                    .await
+            })
+        };
+        tokio::time::sleep(wasm_diff::DEADLINE + Duration::from_millis(200)).await;
+        drop(held);
+        let response = request.await.unwrap().unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "partial", "{}", body["omissions"]);
+        assert!(body["omissions"].to_string().contains("deadline"));
+        app.stop().await;
     }
 
     #[tokio::test]

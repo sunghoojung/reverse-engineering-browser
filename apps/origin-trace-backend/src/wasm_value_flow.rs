@@ -2986,4 +2986,28 @@ mod tests {
         );
         assert_consistent(&document);
     }
+
+    #[test]
+    fn a_fence_ends_store_to_load_forwarding() {
+        let bytes = wat::parse_str(
+            "(module (memory 1 1 shared)
+              (func (param i32) (result i32) (i32.store (i32.const 64) (local.get 0)) atomic.fence (i32.load (i32.const 64)))
+              (func (param i32) (result i32) (i32.store (i32.const 64) (local.get 0)) (i32.load (i32.const 64))))",
+        )
+        .unwrap();
+        for (function, forwarded) in [(0, false), (1, true)] {
+            let load = offset_of(&bytes, function, "i32.load", 0);
+            let document = flow(
+                &bytes,
+                &format!("function={function}&offset={load}&direction=backward"),
+            )
+            .unwrap();
+            assert_eq!(
+                edge_kinds(&document).contains("forwarded_store"),
+                forwarded,
+                "function {function}: {}",
+                document["edges"]
+            );
+        }
+    }
 }

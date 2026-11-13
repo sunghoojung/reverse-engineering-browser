@@ -666,8 +666,6 @@ fn classify(op: &Operator<'_>) -> NodeKind {
             NodeKind::Load
         } else if mnemonic.contains(".store") && !mnemonic.contains("rmw") {
             NodeKind::Store
-        } else if mnemonic.starts_with("atomic.fence") {
-            NodeKind::Memory
         } else {
             NodeKind::Atomic
         }
@@ -2194,6 +2192,10 @@ impl Sim<'_, '_> {
                     self.stack.push(derived);
                 }
             }
+            // The fence's mnemonic is `atomic_fence`, with no `.atomic`, so it
+            // is matched here: it orders memory with other agents, and a store
+            // before it no longer stands for a load after it.
+            Operator::AtomicFence => self.clear_store(),
             Operator::Resume { .. }
             | Operator::ResumeThrow { .. }
             | Operator::Suspend { .. }

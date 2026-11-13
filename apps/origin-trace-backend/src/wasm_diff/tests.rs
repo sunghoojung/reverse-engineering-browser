@@ -1111,3 +1111,57 @@ fn a_comparison_with_a_module_of_no_functions_is_complete() {
     let page = render(&report, &Page::new(0, 10, None).unwrap()).unwrap();
     assert_eq!(page["status"], "complete");
 }
+
+/// A private artifact store holding the two fixture builds as 1 and 2.
+fn fixture_store() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("blobs")).unwrap();
+    let mut manifest = String::new();
+    for (id, bytes) in ["1", "2"].iter().zip(fixture_builds()) {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        std::fs::write(dir.path().join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+        manifest.push_str(&format!(
+            "{}\n",
+            json!({"protocol_version":1,"artifact_id":id,"session_id":"1","navigation_id":"1","frame_id":"1",
+                "parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":format!("fixture://{id}.wasm"),
+                "mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+                "content_path":format!("blobs/{hash}.bin")})
+        ));
+    }
+    std::fs::write(dir.path().join("manifest.jsonl"), manifest).unwrap();
+    dir
+}
+
+#[test]
+fn a_partial_report_is_not_cached_for_the_retry() {
+    let store = fixture_store();
+    let page = Page::new(0, 200, None).unwrap();
+    let stopped = diff_with(
+        store.path(),
+        "1",
+        "2",
+        &page,
+        stop_in(FINGERPRINTING),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(stopped["status"], "partial");
+    let retried = diff(store.path(), "1", "2", &page, Instant::now()).unwrap();
+    assert_eq!(retried["status"], "complete", "{:?}", retried["omissions"]);
+}
+
+#[test]
+fn the_deadline_counts_from_when_the_request_arrived() {
+    // A request that already waited past the deadline for a reader gets a
+    // partial answer at once, not four more seconds of work.
+    let store = fixture_store();
+    let page = Page::new(0, 200, None).unwrap();
+    let arrived = Instant::now() - DEADLINE - Duration::from_millis(1);
+    let late = diff(store.path(), "1", "2", &page, arrived).unwrap();
+    assert_eq!(late["status"], "partial");
+    assert!(
+        late["omissions"].to_string().contains("deadline"),
+        "{}",
+        late["omissions"]
+    );
+}

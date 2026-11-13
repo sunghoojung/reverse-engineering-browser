@@ -49,6 +49,7 @@ struct Options {
     status: Option<String>,
 }
 fn main() {
+    let started = std::time::Instant::now();
     let options = Options::parse();
     if options.artifact_map {
         let result =
@@ -64,7 +65,15 @@ fn main() {
             options.row_limit.unwrap_or(wasm_diff::PAGE_DEFAULT_ROWS),
             options.status.as_deref(),
         )
-        .and_then(|page| wasm_diff::diff(&options.artifacts, &options.artifact_id, other, &page))
+        .and_then(|page| {
+            wasm_diff::diff(
+                &options.artifacts,
+                &options.artifact_id,
+                other,
+                &page,
+                started,
+            )
+        })
         .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}));
         println!("{result}");
         return;

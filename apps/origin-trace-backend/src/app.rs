@@ -534,6 +534,8 @@ impl App {
     /// Two artifact IDs and an optional page. A misspelled parameter fails
     /// instead of returning an unfiltered table the caller reads as filtered.
     async fn wasm_diff_route(&self, raw_query: &str) -> Result<Response> {
+        // The deadline counts from arrival, including the wait for a reader.
+        let started = std::time::Instant::now();
         let q = Query::new(raw_query);
         if q.0.keys().any(|key| {
             ![
@@ -557,7 +559,7 @@ impl App {
         let page = wasm_diff::Page::new(offset, limit, q.one("status")?)?;
         let root = self.options.artifacts.clone();
         let document = self
-            .blocking(move || wasm_diff::diff(&root, &a, &b, &page))
+            .blocking(move || wasm_diff::diff(&root, &a, &b, &page, started))
             .await?;
         Ok(axum::Json(document).into_response())
     }

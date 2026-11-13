@@ -2380,18 +2380,37 @@ fn record(artifacts: &[Value], id: &str) -> Result<Value> {
 
 /// Compares two captured modules and returns one page of the match table.
 ///
-/// A report is cached in this process by both artifact IDs and SHA-256
-/// digests, so paging the same pair does not repeat the comparison. The
-/// native helper is a new process per page, so it has no such cache.
-pub fn diff(root: &Path, a_id: &str, b_id: &str, page: &Page) -> Result<Value> {
-    let started = Instant::now();
+/// `started` is when the request arrived, before it waited for a reader, so
+/// the deadline bounds the whole request. A complete report is cached in this
+/// process by both artifact IDs and SHA-256 digests, so paging the same pair
+/// does not repeat the comparison; a partial one is not, so a retry gets a
+/// fresh attempt. The native helper is a new process per page, so it has no
+/// such cache.
+pub fn diff(root: &Path, a_id: &str, b_id: &str, page: &Page, started: Instant) -> Result<Value> {
+    diff_with(root, a_id, b_id, page, Limits::DEFAULT, started)
+}
+
+fn diff_with(
+    root: &Path,
+    a_id: &str,
+    b_id: &str,
+    page: &Page,
+    limits: Limits,
+    started: Instant,
+) -> Result<Value> {
     if a_id == b_id {
         return Err(Error::bad("Compare two different artifacts"));
     }
     let artifacts = evidence::artifacts(root, 10000)?;
     let a = record(&artifacts, a_id)?;
     let b = record(&artifacts, b_id)?;
-    let key = format!("{a_id}:{}:{b_id}:{}", a["sha256"], b["sha256"]);
+    // The store is part of the key: two stores can hold the same IDs.
+    let key = format!(
+        "{}:{a_id}:{}:{b_id}:{}",
+        root.display(),
+        a["sha256"],
+        b["sha256"]
+    );
     let cached = REPORTS.lock().ok().and_then(|reports| {
         reports
             .iter()
@@ -2412,10 +2431,12 @@ pub fn diff(root: &Path, a_id: &str, b_id: &str, page: &Page) -> Result<Value> {
                 &b_bytes,
                 meta(&a, &a_bytes),
                 meta(&b, &b_bytes),
-                Limits::DEFAULT,
+                limits,
                 started,
             )?);
-            if let Ok(mut reports) = REPORTS.lock() {
+            if report.complete
+                && let Ok(mut reports) = REPORTS.lock()
+            {
                 reports.retain(|(k, _)| *k != key);
                 reports.push((key, report.clone()));
                 while reports.len() > CACHED_REPORTS {

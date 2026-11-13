@@ -86,8 +86,8 @@ void NativeScriptCookieSink::Configure(const bool capture_content,
   const bool active = capture_content && provider && (generation & 1U) == 0 &&
                       sink.emitter_.load(std::memory_order_acquire);
   if (active) {
-    // Allocated here, on the transport sequence, so a read never allocates
-    // and a session without content capture holds no table.
+    // Allocated here, on the transport sequence, so the sink never allocates
+    // on a read and a session without content capture holds no table.
     auto table = std::make_unique<ReadTable>();
     base::AutoLock lock(reads_lock_);
     reads_ = std::move(table);

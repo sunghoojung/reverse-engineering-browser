@@ -8,7 +8,7 @@ use crate::{
     error::Result,
     event_query::{self, Cursor, EVENT_RECORD_BYTES, SCAN_BYTES, Tally},
     event_window, request_cookies,
-    request_headers::{self, Lifecycle},
+    request_headers::{self, DROP_REPORT_SLACK_NS, Lifecycle},
     request_tabs::RequestTabs,
     session_context,
 };
@@ -253,6 +253,8 @@ struct RequestHeaderFacts {
     provisional: u64,
     network: u64,
     lifecycle: Lifecycle,
+    /// The first and last times of its records in the window.
+    span: Option<(u64, u64)>,
 }
 
 /// Header blocks and cookie lists no row shows, and the requests of content
@@ -266,15 +268,26 @@ struct HeaderCoverage {
     unattributed_lists: BTreeMap<(u64, u64), u64>,
     requests: HashMap<(u64, u64, u64), RequestHeaderFacts>,
     untracked: u64,
+    /// Gap times and drop counts of every category: a dropped block makes an
+    /// absent one unsure. Past the bound every request counts as overlapped.
+    drops: Vec<(u64, u64, u64)>,
+    drops_overflowed: bool,
 }
 impl HeaderCoverage {
     fn record(&mut self, event: &Value) {
-        if event["category"] != "network" {
-            return;
-        }
         let number = |key: &str| event_window::unsigned(&event[key]).unwrap_or(0);
+        let dropped = event_window::dropped_records(event);
+        if dropped > 0 {
+            if self.drops.len() < HEADER_REQUESTS {
+                self.drops
+                    .push((number("session_id"), number("monotonic_time_ns"), dropped));
+            } else {
+                self.drops_overflowed = true;
+            }
+        }
         let producer = (number("session_id"), number("process_id"));
         let key = (producer.0, producer.1, number("request_id"));
+        let time = number("monotonic_time_ns");
         match event["type"].as_str() {
             Some("request_headers" | "response_headers") => {
                 let Some(facts) = request_headers::block_facts(event) else {
@@ -286,6 +299,7 @@ impl HeaderCoverage {
                     return;
                 }
                 if let Some(request) = self.request(key, true) {
+                    request.widen(time);
                     if facts.source == 1 {
                         request.provisional |= 1 << facts.hop;
                     } else {
@@ -293,6 +307,7 @@ impl HeaderCoverage {
                     }
                 }
             }
+            _ if event["category"] != "network" => {}
             Some("cookie_list") => {
                 if let Some((_, unattributed)) = request_cookies::list_facts(event) {
                     let newest = self.unattributed_lists.entry(producer).or_default();
@@ -307,6 +322,7 @@ impl HeaderCoverage {
                 || event["browser_context_id_low"].as_str().unwrap_or("0") != "0" =>
             {
                 if let Some(request) = self.request(key, false) {
+                    request.widen(time);
                     request.lifecycle.record(event);
                 }
             }
@@ -330,7 +346,7 @@ impl HeaderCoverage {
     /// Requests that ended without a `network` block on their final hop.
     fn missing(&self) -> BTreeMap<&'static str, u64> {
         let mut missing = BTreeMap::new();
-        for request in self.requests.values() {
+        for (key, request) in &self.requests {
             if request.provisional == 0 {
                 continue;
             }
@@ -338,7 +354,18 @@ impl HeaderCoverage {
             if request.network & (1 << last) != 0 {
                 continue;
             }
-            let reason = request.lifecycle.missing_reason(true, false);
+            let dropped = self.drops_overflowed
+                || request.span.is_some_and(|(first, last)| {
+                    let to = request
+                        .lifecycle
+                        .ended
+                        .then(|| last.saturating_add(DROP_REPORT_SLACK_NS));
+                    self.drops.iter().any(|(session, time, _)| {
+                        *session == key.0 && *time >= first && to.is_none_or(|to| *time <= to)
+                    })
+                });
+            let reason =
+                request_headers::qualified(request.lifecycle.missing_reason(true, false), dropped);
             if reason != "in_progress" {
                 *missing.entry(reason).or_default() += 1;
             }
@@ -347,10 +374,18 @@ impl HeaderCoverage {
     }
 }
 
+impl RequestHeaderFacts {
+    fn widen(&mut self, time: u64) {
+        self.span = Some(self.span.map_or((time, time), |(first, last)| {
+            (first.min(time), last.max(time))
+        }));
+    }
+}
+
 fn missing_check(reason: &str, count: u64) -> Value {
     // A request that failed, or that the cache, a service worker or a
     // download answered, has no final headers by design; the rest are gaps.
-    let severity = if reason == "not_reported" {
+    let severity = if matches!(reason, "not_reported" | "record_dropped") {
         "warning"
     } else {
         "info"
@@ -1221,6 +1256,53 @@ mod tests {
         }
         event["payload_truncated"] = json!(false);
         event
+    }
+
+    #[test]
+    fn a_drop_while_a_request_ran_makes_its_missing_block_unsure() {
+        let summarize = |with_gap: bool| {
+            let root = tempfile::tempdir().unwrap();
+            let store = root.path().join("events.jsonl");
+            let artifacts = root.path().join("artifacts");
+            std::fs::create_dir_all(&artifacts).unwrap();
+            let mut events = vec![
+                lifecycle(1, "request_started", 1),
+                header(2, 1, 1, false, 1, 3, 0, 0),
+                lifecycle(4, "response_started", 1),
+                lifecycle(5, "request_completed", 1),
+            ];
+            if with_gap {
+                // A renderer's drop gap takes the category of its last record.
+                let mut gap = event(3, "canvas", "gap", 3, "2");
+                gap["process_id"] = json!(9);
+                events.push(gap);
+            }
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+            let state = CaptureState {
+                instance_id: "1:2",
+                capture_mode: "live",
+                broker_connected: true,
+                capture_stopped: false,
+                artifact_receiver_configured: false,
+                artifact_receiver_connected: false,
+            };
+            build(&store, &artifacts, &state).unwrap()["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|check| check["code"] == "final_headers_missing")
+                .map(|check| (check["reason"].clone(), check["severity"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            summarize(false),
+            vec![(json!("not_reported"), json!("warning"))]
+        );
+        assert_eq!(
+            summarize(true),
+            vec![(json!("record_dropped"), json!("warning"))]
+        );
     }
 
     #[test]

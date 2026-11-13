@@ -1865,9 +1865,17 @@ name without naming it: `whole_jar_reads` (version 1 and 2 reads, recorded
 before names were), `reads_with_unrecorded_names` with their
 `unrecorded_names`, and `unnamed_store_reads` (`cookieStore.get` or `getAll`
 with no name, which read every cookie they can); and `records_dropped`, the
-drop counts of network gap records in the window, since a lost record may
-have named it. `complete` is true only when all are zero, so an absent read is
-proof only then.
+records full queues dropped, since a lost record may have named it. A drop is
+a gap record of the session of any category or process, read at or after the
+oldest record provenance read, whose payload is not a named reason (an
+identifier category of at most 32 bytes and reason of at most 128, payload
+not truncated): it weighs its decimal count, or 1. Any category, because a
+renderer's drop gap takes the category, time and process of the last record
+the host drained before it (`MakeNativeProbeGapEvent`), so a flood of canvas
+records that hides a `script_cookie` record writes a `canvas` gap. `complete`
+is true only when all are zero, so an absent read is proof only then.
+`reads_with_unrecorded_names` counts exactly the reads that had unrecorded
+names, since each such read is its own record of count 1.
 
 Origin Trace's **Cookies** tab shows Request cookies, with "Show filtered out
 request cookies" listing excluded ones and each reason, and Response cookies
@@ -1928,13 +1936,16 @@ browser context), decided in this order:
 | `failed` | The final hop ended with `request_failed` and no response | It failed before the network service reported what it sent |
 | `redirect_not_sent` | An earlier hop, while a later hop of the request has a `network` block | The factory observes and tracks the request, so nothing was sent for this hop: an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered |
 | `not_reported` | Anything else | No observer on its factory, or the block arrived for a request the sink no longer tracked (the unattributed count) |
+| `record_dropped` | In place of `redirect_not_sent`, `not_reported` or `no_raw_response`, when a drop (as for `read_coverage` above) of the session falls between the request's first record and one second after its last, or after its first while it is open | A full queue dropped records while it ran, so the block may have been sent and lost. The second covers the browser writer, which reports drops on its next wake, at most 250 ms later, and then sends its batch. A reason drawn from a record that is there (cache, service worker, download, failure, still open) stands |
 
 `get_request_headers` gives each hop `network_block_missing` and
 `get_request_cookies` gives each hop `sent_missing` (the same reasons, a later
 hop's sent list standing for its network block) and, for a hop with a sent
 list but no received one, `received_missing`: `in_progress`, `failed` (before
-a response) or `no_raw_response`, since the received list comes with the
-response headers and what was sent was reported.
+a response), `no_raw_response`, since the received list comes with the
+response headers and what was sent was reported, or `record_dropped` in its
+place under the rule above. The backend reads the session's gap records of
+every category beside the request's own.
 Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
 and the Cookies tab lists each such hop with it.
 
@@ -1947,7 +1958,8 @@ and the Cookies tab lists each such hop with it.
   as `network_headers_unattributed`;
 - the requests whose final hop ended without a `network` block, one
   `final_headers_missing` check per reason: `info` for `download`,
-  `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`.
+  `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`
+  and `record_dropped` (a drop of any category while the request ran).
   It follows at most 131,072 browser requests; header records of later ones
   are counted as `final_headers_untracked`. A request with no header record
   (any request of a metadata-only session) has no final block to miss and is

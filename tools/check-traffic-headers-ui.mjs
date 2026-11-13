@@ -144,6 +144,30 @@ assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-C
     assert.match(section.textContent, /Provisional headers are shown/);
     assert.match(section.textContent, expected);
   }
+  // A drop gap of the session while the request ran, of any category, makes
+  // a reason drawn from an absence unsure; a cached answer stands. Past the
+  // report slack after an ended request a drop does not count.
+  {
+    const timed = (events, extra = []) => Object.assign(row(events.map(event => ({...event, session_id: '7'})), extra),
+      {firstTimestamp: 10n, lastTimestamp: 20n});
+    const gapAt = time => ({type: 'gap', category: 'canvas', session_id: '7', monotonic_time_ns: String(time),
+      payload: Buffer.from('2').toString('hex')});
+    const reasonOf = async (request, gaps) => {
+      context.state.events = gaps;
+      const view = document.createElement('div');
+      api.renderTrafficHeaders(view, request, () => {});
+      await settle();
+      context.state.events = [];
+      return [...view.querySelectorAll('details')].find(node => node.dataset.section === 'request-0').textContent;
+    };
+    const unexplained = timed([browser('request_started'), browser('response_started'), browser('request_completed')]);
+    assert.match(await reasonOf(unexplained, [gapAt(15)]), /A full queue dropped records while this request ran/);
+    assert.match(await reasonOf(unexplained, [gapAt(20 + 2000000000)]), /its factory had no DevTools observer/);
+    const cachedRow = timed([browser('request_started'), browser('response_started', {flags: 2}), browser('request_completed')]);
+    assert.match(await reasonOf(cachedRow, [gapAt(15)]), /The HTTP cache answered it/);
+    const coverage = api.trafficHeaderCoverage([unexplained], [gapAt(15)]);
+    assert.deepEqual(Object.fromEntries(coverage.missing), {record_dropped: 1});
+  }
   // An earlier hop without its block is never blamed on the final response.
   const redirected = row([browser('request_started'), browser('request_redirected'), browser('response_started', {flags: 2}),
     browser('request_completed')], [block('request', 'browser', 'Accept: */*\r\n', {hop: 1})]);

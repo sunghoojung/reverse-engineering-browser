@@ -788,16 +788,56 @@ const TRAFFIC_MISSING_REASONS = Object.freeze({
   from_cache: 'The HTTP cache answered it without sending a request, so there are no sent headers or cookies.',
   failed: 'It failed before the network stack reported the headers it sent.',
   redirect_not_sent: 'Nothing was sent for this redirect hop: it was an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered, while a later hop reported what it sent.',
+  record_dropped: 'A full queue dropped records while this request ran, so the headers it sent may have been reported and lost.',
   not_reported: 'The network stack reported no sent headers for this hop: its factory had no DevTools observer, or the block arrived after the capture stopped tracking the request.'
 });
 // A hop with sent cookies and no response list: the response headers bring it.
 const TRAFFIC_MISSING_RECEIVED_REASONS = Object.freeze({
   in_progress: TRAFFIC_MISSING_REASONS.in_progress,
   failed: 'It failed before a response arrived.',
+  record_dropped: 'A full queue dropped records while this request ran, so its response cookie list may have been reported and lost.',
   no_raw_response: 'The network stack reported what was sent for this hop but no response headers: no response arrived, or it arrived after the capture stopped tracking the request.'
 });
 const TRAFFIC_MISSING_LABELS = Object.freeze({download: 'download', service_worker: 'service worker',
-  from_cache: 'HTTP cache', failed: 'failed', not_reported: 'not reported'});
+  from_cache: 'HTTP cache', failed: 'failed', not_reported: 'not reported', record_dropped: 'possibly dropped'});
+
+// The records a gap says a full queue dropped, as the backend weighs them
+// (event_window.rs): a named reason (an identifier category of at most 32
+// bytes and reason of at most 128, payload not truncated) is no loss; any
+// other gap counts its decimal payload, or 1. Any category: a renderer's drop
+// gap takes the category of the last record drained before it.
+function trafficDroppedRecords(event) {
+  if (event?.type !== 'gap') return 0;
+  const hex = typeof event.payload === 'string' && /^(?:[0-9a-f]{2})*$/i.test(event.payload) ? event.payload : null;
+  const text = hex === null ? null : (hex.match(/../g) ?? []).map(byte => String.fromCharCode(Number.parseInt(byte, 16))).join('');
+  const identifier = (value, maximum) => typeof value === 'string' && value.length >= 1 && value.length <= maximum &&
+    /^[a-z][a-z0-9_]*$/.test(value);
+  if (event.payload_truncated !== true && identifier(event.category, 32) && identifier(text, 128)) return 0;
+  return text !== null && /^(?:0|[1-9][0-9]*)$/.test(text) && Number(text) > 0 ? Number(text) : 1;
+}
+
+// How long after a request's last record a drop of one of its records can
+// still be reported: the browser writer reports drops on its next wake.
+const TRAFFIC_DROP_REPORT_SLACK_NS = 1000000000n;
+
+// Whether a record of `request` may have been lost: a drop gap of its session
+// while it ran or reported just after, or any later one while it is open.
+function trafficDroppedDuring(request, events, ended) {
+  const session = request?.events?.[0]?.session_id;
+  const first = request?.firstTimestamp, last = request?.lastTimestamp;
+  if (typeof first !== 'bigint' || typeof last !== 'bigint') return false;
+  return (Array.isArray(events) ? events : []).some(event => {
+    if ((session && event?.session_id !== session) || !trafficDroppedRecords(event)) return false;
+    let time;
+    try { time = BigInt(event.monotonic_time_ns); } catch { return false; }
+    return time >= first && (!ended || time <= last + TRAFFIC_DROP_REPORT_SLACK_NS);
+  });
+}
+
+// A reason inferred from an absence is unsure once records may have dropped.
+function trafficQualifiedReason(reason, dropped) {
+  return dropped && ['redirect_not_sent', 'not_reported', 'no_raw_response'].includes(reason) ? 'record_dropped' : reason;
+}
 
 function trafficRequestLifecycle(request) {
   const life = {ended: false, failed: false, responded: false, fromCache: false, fromServiceWorker: false, download: false};
@@ -838,7 +878,7 @@ function trafficMissingReceivedReason(life, last) {
 
 // Each hop of a row with a provisional block and whether the network
 // reported it; the last such hop is the one its response belongs to.
-function trafficFinalBlocks(request) {
+function trafficFinalBlocks(request, events = typeof state === 'object' ? state.events : []) {
   const hops = new Map();
   for (const block of request?.headerBlocks ?? []) {
     if (block.malformed || block.kind !== 'request') continue;
@@ -850,13 +890,14 @@ function trafficFinalBlocks(request) {
   const provisional = [...hops].filter(([, hop]) => hop.provisional).map(([hop]) => hop);
   const last = provisional.length ? Math.max(...provisional) : null;
   const laterReported = hop => [...hops].some(([other, blocks]) => other > hop && blocks.network);
-  return {hops, last, laterReported, life: trafficRequestLifecycle(request)};
+  const life = trafficRequestLifecycle(request);
+  return {hops, last, laterReported, life, dropped: trafficDroppedDuring(request, events, life.ended)};
 }
 
 // What the loaded rows did not retain or could not join: header blocks and
 // cookie lists in states 4 to 8, late network blocks, and requests that ended
 // without a final block, each by reason. Counts only; it reads no block.
-function trafficHeaderCoverage(requests) {
+function trafficHeaderCoverage(requests, events = typeof state === 'object' ? state.events : []) {
   const notRetained = new Map(), missing = new Map();
   let unattributedBlocks = 0, unattributedLists = 0;
   const count = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
@@ -871,9 +912,9 @@ function trafficHeaderCoverage(requests) {
       if (/^not_captured_/.test(list.state ?? '')) count(notRetained, `cookies:${list.state}`);
       unattributedLists = Math.max(unattributedLists, list.unattributedLists ?? 0);
     }
-    const {hops, last, life} = trafficFinalBlocks(request);
+    const {hops, last, life, dropped} = trafficFinalBlocks(request, events);
     if (last === null || hops.get(last).network) continue;
-    const reason = trafficMissingReason(life, true);
+    const reason = trafficQualifiedReason(trafficMissingReason(life, true), dropped);
     if (reason !== 'in_progress') count(missing, reason);
   }
   return {notRetained, missing, unattributedBlocks, unattributedLists};

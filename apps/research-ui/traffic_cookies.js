@@ -434,7 +434,10 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
       (['cookieStore.get', 'cookieStore.getAll'].includes(record.api) && record.nameLength === 0 ? record.count : 0),
     records_dropped: total.records_dropped}),
   {whole_jar_reads: 0, reads_with_unrecorded_names: 0, unrecorded_names: 0, unnamed_store_reads: 0,
-    records_dropped: events.reduce((sum, event) => sum + trafficCookieDropWeight(event), 0)});
+    // A drop gap of any category of this session; a renderer's takes the
+    // category of the last record it drained before the drop.
+    records_dropped: events.reduce((sum, event) => sum + (sessionId && event?.session_id !== sessionId
+      ? 0 : trafficDroppedRecords(event)), 0)});
   const coverage = answered && read.readCoverage ? read.readCoverage : loadedCoverage;
   const unnamedReads = coverage.whole_jar_reads + coverage.reads_with_unrecorded_names + (coverage.unnamed_store_reads ?? 0);
   const unnamedNote = [unnamedReads ? `${plural(unnamedReads, 'read')} did not name every cookie ` +
@@ -442,7 +445,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
       coverage.reads_with_unrecorded_names ? `${plural(coverage.unrecorded_names, 'name')} past the 360-name bound or a full table` : '',
       coverage.unnamed_store_reads ? `${plural(coverage.unnamed_store_reads, 'Cookie Store read')} with no name` : '']
       .filter(Boolean).join('; ')}), so a read of ${name} may have no record.` : '',
-  coverage.records_dropped ? `${plural(coverage.records_dropped, 'network record')} ${coverage.records_dropped === 1 ? 'was' : 'were'} lost to a full queue, so a call that named it may be missing.` : '']
+  coverage.records_dropped ? `${plural(coverage.records_dropped, 'record')} ${coverage.records_dropped === 1 ? 'was' : 'were'} lost to a full queue, so a call that named it may be missing.` : '']
     .filter(Boolean).join(' ');
   group('Script access', scripts.map(record => {
     const resolved = record.frame ? frames?.get(`${record.processId}:${record.sequenceNumber}`) : null;
@@ -488,16 +491,6 @@ function trafficCookieCallPlace(thread, frameId) {
   return Object.hasOwn(TRAFFIC_COOKIE_WORKERS, thread ?? '') ? `in ${TRAFFIC_COOKIE_WORKERS[thread]} ${frameId}` : `in frame ${frameId}`;
 }
 
-// A network gap record's drop count, as the backend weighs it: a named gap
-// (an identifier) is a reason, not a loss; any other gap counts at least one.
-function trafficCookieDropWeight(event) {
-  if (event?.type !== 'gap' || event.category !== 'network') return 0;
-  const hex = typeof event.payload === 'string' && /^(?:[0-9a-f]{2})*$/i.test(event.payload) ? event.payload : '';
-  const text = (hex.match(/../g) ?? []).map(byte => String.fromCharCode(Number.parseInt(byte, 16))).join('');
-  if (/^[a-z][a-z0-9_]{0,63}$/.test(text)) return 0;
-  return /^[0-9]+$/.test(text) && Number(text) > 0 ? Number(text) : 1;
-}
-
 // Script calls the store read beyond the event window the view already decoded.
 function beyondScripts(read, scripts) {
   if (read.status !== 'ready') return [];
@@ -530,7 +523,7 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
   const hops = trafficCookieHops(request);
   // A hop the content session saw (it has a provisional header block) but
   // the network never reported has no list, and says why.
-  const finals = typeof trafficFinalBlocks === 'function' ? trafficFinalBlocks(request) : null;
+  const finals = typeof trafficFinalBlocks === 'function' ? trafficFinalBlocks(request, context.events) : null;
   for (const [hop, blocks] of finals?.hops ?? []) {
     if (blocks.provisional && !hops.some(known => known.hop === hop)) hops.push({hop, sent: [], received: []});
   }
@@ -561,14 +554,16 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
     hop.received.forEach((list, index) => parts.push(trafficCookieSection(`received-${hop.hop}-${index}`,
       `Response cookies${suffix}`, list, rerender, {received: true, onProvenance})));
     if (counted && hop.sent.length && !hop.received.length) {
-      parts.push(missingNote(hop.hop, 'Response cookies', trafficMissingReceivedReason(finals.life, last), true));
+      parts.push(missingNote(hop.hop, 'Response cookies',
+        trafficQualifiedReason(trafficMissingReceivedReason(finals.life, last), finals.dropped), true));
     }
     hop.sent.forEach((list, index) => parts.push(trafficCookieSection(`sent-${hop.hop}-${index}`,
       `Request cookies${suffix}`, list, rerender, {received: false, onProvenance})));
     // A later hop's sent list shows the factory observes the request.
     const laterSent = hops.some(other => other.hop > hop.hop && other.sent.length);
     if (counted && !hop.sent.length) {
-      parts.push(missingNote(hop.hop, 'Request cookies', trafficMissingReason(finals.life, last, laterSent), false));
+      parts.push(missingNote(hop.hop, 'Request cookies',
+        trafficQualifiedReason(trafficMissingReason(finals.life, last, laterSent), finals.dropped), false));
     }
   }
   if (trafficCookieOptions.provenance !== null) {

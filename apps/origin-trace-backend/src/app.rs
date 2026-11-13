@@ -1134,8 +1134,10 @@ impl App {
                         event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let gaps = session_gaps(&options.store, &session)?;
                     let mut document = request_headers::build(
                         &detail.records,
+                        &gaps,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1176,8 +1178,10 @@ impl App {
                         event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let gaps = session_gaps(&options.store, &session)?;
                     let mut document = request_cookies::build(
                         &detail.records,
+                        &gaps,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1240,8 +1244,10 @@ impl App {
                                 )
                             })
                     };
+                    let gaps = session_gaps(&options.store, &session)?;
                     let mut document = request_cookies::provenance(
                         &detail.records,
+                        &gaps,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -2338,6 +2344,14 @@ fn analysis_input_signature(path: &Path) -> String {
     let identity = String::new();
     evidence::resource_etag(path, &identity)
 }
+/// The session's gap records in the newest 64 MiB of events, of every
+/// category: a renderer's drop gap takes the category of the last record it
+/// drained, so a lost network record can hide behind a canvas gap.
+fn session_gaps(store: &Path, session: &str) -> Result<Vec<Value>> {
+    let filter = event_query::event_filter(&Query::new(&format!("session_id={session}&type=gap")))?;
+    Ok(event_query::read_request_records(store, None, 5000, &filter)?.records)
+}
+
 fn matches_etag(headers: &HeaderMap, etag: Option<&str>) -> bool {
     etag.is_some_and(|tag| headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(tag))
 }

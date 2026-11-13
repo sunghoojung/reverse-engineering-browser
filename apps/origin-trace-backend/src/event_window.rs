@@ -298,6 +298,16 @@ pub(crate) fn drop_weight(event: &Value) -> u64 {
         .filter(|count| *count > 0)
         .unwrap_or(1)
 }
+/// The records a gap says a full queue dropped: its drop weight, or 0 when it
+/// is a named reason rather than a loss. Any category: a renderer drop takes
+/// the category of the last record drained before it.
+pub(crate) fn dropped_records(event: &Value) -> u64 {
+    if event["type"] != "gap" || named_gap(event).is_some() {
+        0
+    } else {
+        drop_weight(event)
+    }
+}
 // A lowercase letter, then lowercase letters, digits or underscores. A decimal
 // drop count never matches, nor does page-shaped or truncated text.
 fn identifier(bytes: &[u8], maximum: usize) -> bool {

@@ -988,6 +988,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const card = document.createElement('button');
           card.type = 'button';
           card.className = 'signal-surface-card';
+          card.dataset.category = category;
           card.dataset.present = String(familyEvents.length > 0);
           card.title = `${operations.size} unique operations${top ? ` · ${top[0]} × ${top[1]}` : ' · Not observed'}`;
           card.setAttribute('aria-label', `${label}, ${familyEvents.length} events. Open activity.`);
@@ -1355,6 +1356,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'signal-event-row';
+          row.dataset.category = event.category;
           row.dataset.signalEventKey = signalEventKey(event);
           row.dataset.new = String(state.signalNewKeys.has(row.dataset.signalEventKey));
           row.setAttribute('role', 'option');
@@ -1480,9 +1482,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
         elements.capture.classList.toggle('preview', preview);
+        // No session is a neutral state; the ok color belongs to a live broker.
+        elements.capture.classList.toggle('idle', idle && !offline && !artifactOffline);
         elements.capture.querySelector('span:last-child').textContent = captureLabel;
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
         elements.broker.classList.toggle('offline', offline);
+        elements.broker.classList.toggle('idle', !offline && (connecting || idle || preview));
         elements.broker.textContent = connecting ? 'connecting to evidence'
           : offline ? state.connection === 'unresponsive' ? 'broker not responding' : 'broker unavailable'
             : live ? 'broker connected' : idle ? 'no capture session'
@@ -1503,6 +1508,28 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         document.title = live ? 'Origin Trace - Live Session'
           : idle ? 'Origin Trace' : preview ? 'Origin Trace - Preview' : 'Origin Trace - Demo Evidence';
+      }
+
+      // Splits the status bar's gap label into one span per clause, so each
+      // carries its own state: recorded loss reads as a failure, a sampling
+      // limit as a caution and a zero count as meta. The text is unchanged;
+      // a clause count that disagrees with the label leaves it plain.
+      function markGapClauses(gapCount, reportedDrops, namedGaps = []) {
+        const node = elements.gaps;
+        if (typeof node.replaceChildren !== 'function' || typeof namedGapTotal !== 'function') return;
+        const named = (matching, kind) => namedGapTotal(matching) > 0n ? [kind] : [];
+        const kinds = [gapCount > 0n ? 'loss' : '', ...(reportedDrops > 0n ? ['loss'] : []),
+          ...named(namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'limit'),
+          ...named(namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'limit'),
+          ...named(namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'loss')];
+        const clauses = node.textContent.split(' · ');
+        if (clauses.length !== kinds.length) return;
+        node.replaceChildren(...clauses.map((clause, index) => {
+          const span = document.createElement('span');
+          span.textContent = index ? ` · ${clause}` : clause;
+          if (kinds[index]) span.dataset.kind = kinds[index];
+          return span;
+        }));
       }
 
       function resetRequestSelection() {
@@ -3424,8 +3451,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         if (!request) {
           elements.selectedMethod.textContent = '-';
+          if (elements.selectedMethod.dataset) elements.selectedMethod.dataset.method = 'safe';
           elements.selectedStatus.textContent = '-';
-          elements.selectedStatus.classList.remove('status-error');
+          elements.selectedStatus.classList.remove('status-error', 'status-redirect', 'status-client', 'status-server');
           elements.selectedStatus.classList.add('status-neutral');
           elements.selectedUrl.textContent = state.trafficSelectionNotice || (state.requests.length ? 'Select a request to inspect its evidence.' : 'No request selected');
           elements.selectedUrl.title = '';
@@ -3433,10 +3461,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return;
         }
         elements.selectedMethod.textContent = request.method;
+        if (elements.selectedMethod.dataset) elements.selectedMethod.dataset.method = typeof trafficMethodClass === 'function' ? trafficMethodClass(request.method) : 'safe';
         elements.selectedStatus.textContent = request.endLost ? 'end lost' : request.status;
         const numericStatus = Number(request.status);
         const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
         elements.selectedStatus.classList.toggle('status-error', failed);
+        // The strip shares the ledger's status classes, so a 404 reads the same in both.
+        elements.selectedStatus.classList.toggle('status-redirect', !failed && numericStatus >= 300 && numericStatus < 400);
+        elements.selectedStatus.classList.toggle('status-client', !request.failed && numericStatus >= 400 && numericStatus < 500);
+        elements.selectedStatus.classList.toggle('status-server', Boolean(request.failed) || numericStatus >= 500);
         elements.selectedStatus.classList.toggle('status-neutral', !failed && (!Number.isFinite(numericStatus) || request.status === 'pending'));
         const fullUrl = request.urlTruncated ? requestFullUrl(request) : null;
         elements.selectedUrl.textContent = request.origin === 'sample'
@@ -5994,7 +6027,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const runnerBusy = state.localAnalystRunner?.active_run_id !== null && state.localAnalystRunner?.active_run_id !== undefined &&
           state.localAnalystRunner?.active_run_id !== state.analystActiveRunId;
         analystElements.runnerBadge.textContent = runnerAvailable ? runnerBusy ? 'Runner busy' : 'Runner ready' : 'Runner unavailable';
-        analystElements.runnerBadge.style.color = runnerAvailable ? '' : 'var(--red)';
+        if (analystElements.runnerBadge.dataset) analystElements.runnerBadge.dataset.kind = runnerAvailable ? runnerBusy ? 'busy' : '' : 'offline';
         analystElements.includeSelected.disabled = !selected || state.analystRunPending;
         if (!selected) analystElements.includeSelected.checked = false;
         analystElements.sensitiveRow.hidden = !(selected?.sensitive && analystElements.includeSelected.checked);
@@ -6388,7 +6421,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function renderDecoder() {
         toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
-        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? '' : 'offline';
+        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? state.decoderEngine.busy ? 'busy' : '' : 'offline';
         let parsedInput = null;
         let inputError = null;
         try { parsedInput = state.decoderInputSnapshot ? decoderBase64ToBytes(state.decoderInputSnapshot.base64) : decoderParseInput(); }
@@ -7051,6 +7084,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const icon = document.createElement('span');
           icon.className = 'source-file-icon';
           icon.dataset.icon = sourceTreeFileIcon(source);
+          icon.dataset.origin = source.capture_origin ?? '';
           icon.textContent = sourceIcon(source);
           icon.title = sourceKindLabel(source.kind)?.[1] ?? source.kind;
           const name = document.createElement('span');
@@ -8916,6 +8950,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
           elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
+          if (typeof markGapClauses === 'function') markGapClauses(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
           renderNetworkNotice();
           renderRequests();
           renderInspector();

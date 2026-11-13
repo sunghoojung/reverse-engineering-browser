@@ -26,6 +26,7 @@ class Ret { constructor(values) { this.values = values; } }
 // A tail call leaves the function, and so every handler in it, before the
 // callee runs; the call is made at the top, outside every try.
 class TailCall { constructor(fn, args) { this.fn = fn; this.args = args; } }
+const catchable = e => (e && e.wasmExc !== undefined) || e instanceof Fuel;
 
 function makeEnv(tag, state) {
   const log = state.log;
@@ -357,8 +358,11 @@ function interpret(listing, a, b, tagless) {
           try { exec(it.body); }
           catch (e) {
             if (e instanceof Br && e.label === it.label) break;
-            if (e instanceof Br || e instanceof Ret || e instanceof Trap || e instanceof TailCall) throw e;
-            if (it.catches.length) throw new Br(it.catches[0]);
+            // A handler catches a thrown exception, or the Fuel error a JS
+            // import throws (catch_all catches JS exceptions too). Anything
+            // else, an interpreter error included, passes through and fails
+            // the check instead of reading as a caught throw.
+            if (it.catches.length && catchable(e)) throw new Br(it.catches[0]);
             throw e;
           }
           break;
@@ -429,6 +433,14 @@ console.log(JSON.stringify({rows: Math.min(limit, rows.length), compared: real.c
 for (const m of real.firstMismatches) console.log(JSON.stringify(m, null, 1));
 const mutated = check(true);
 const failures = [];
+// An interpreter error inside a handler is a failure of the check, never a
+// caught exception.
+let masked = false;
+try {
+  interpret(parseListing('func run(p0: i32, p1: i32) -> (i32, i32) {\n  block L1 {\n    try_table catch_all -> L1 {\n      no_such_import(1)\n    }\n  }\n  return p0, p1\n}\n'), 0, 0);
+  masked = true;
+} catch {}
+if (masked) failures.push('an interpreter error inside a handler was taken for a caught exception');
 if (real.mismatched) failures.push(`${real.mismatched} listings read a different value than V8 ran`);
 if (real.parseErrors) failures.push(`${real.parseErrors} listings could not be read`);
 if (real.compared < 0.8 * INPUTS.length * Math.min(limit, rows.length)) failures.push(`only ${real.compared} runs were compared`);

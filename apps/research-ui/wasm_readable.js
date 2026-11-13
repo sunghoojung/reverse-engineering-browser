@@ -85,7 +85,7 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
     stats.textContent = wasmReadableSummary(doc);
     for (const line of lines) {
       const row = document.createElement('div');
-      row.className = `wasm-readable-line wasm-readable-${line.kind}`;
+      row.className = `wasm-readable-line wasm-readable-kind-${line.kind}`;
       row.id = `wasm-readable-line-${line.number}`;
       row.setAttribute('role', 'option'); row.setAttribute('aria-selected', 'false');
       const at = document.createElement('span'); at.className = 'wasm-readable-offset';

@@ -49,6 +49,9 @@ const MAX_STORED_NAME_BYTES: usize = 1024;
 const MAX_IMMEDIATE_TEXT: usize = 96;
 const MAX_CASE_TEXT: usize = 240;
 const MAX_FRAMES_LISTED: usize = 256;
+/// Byte ranges listed per line before the rest merge into one span, so a
+/// single line cannot push a page past the inline limit.
+const MAX_LINE_RANGES: usize = 64;
 pub const DEFAULT_LINE_LIMIT: usize = 400;
 pub const MAX_LINE_LIMIT: usize = 2000;
 /// The MCP server inlines a result of at most 131,072 bytes in both its
@@ -2228,7 +2231,7 @@ fn lift(
 
 /// Byte ranges a line covers: its own instructions and those it names,
 /// merged where they touch, and its header span.
-fn ranges(lift: &Lift, line: &Line) -> Vec<[u32; 2]> {
+fn ranges(lift: &Lift, line: &Line) -> (Vec<[u32; 2]>, bool) {
     let mut indexes: Vec<u32> = line.owned.iter().chain(&line.refs).copied().collect();
     indexes.sort_unstable();
     indexes.dedup();
@@ -2243,7 +2246,17 @@ fn ranges(lift: &Lift, line: &Line) -> Vec<[u32; 2]> {
             _ => out.push([start, end]),
         }
     }
-    out
+    if out.len() > MAX_LINE_RANGES {
+        // One line can own tens of thousands of scattered instructions (a
+        // return of many values). The rest become one covering span, which
+        // also covers bytes other lines own; `truncation.merged_ranges`
+        // counts the lines cut this way.
+        let end = out[out.len() - 1][1];
+        out.truncate(MAX_LINE_RANGES);
+        out[MAX_LINE_RANGES - 1][1] = end;
+        return (out, true);
+    }
+    (out, false)
 }
 
 fn rendered(lift: &Lift, line: &Line) -> String {
@@ -2371,6 +2384,7 @@ pub fn pseudocode(
         "max_line_limit": MAX_LINE_LIMIT,
         "window_bytes": WINDOW_BYTES,
         "max_frames_listed": MAX_FRAMES_LISTED,
+        "max_line_ranges": MAX_LINE_RANGES,
         "deadline_ms": DEADLINE.as_millis() as u64,
     });
     let available = line_limit.min(lift.lines.len() - line_offset);
@@ -2410,8 +2424,15 @@ pub fn pseudocode(
             "limits": limits,
             "notice": "Static lift of declared stack effects; the module was not executed. A complete lift owns every instruction on exactly one line, and folding keeps the order of calls, memory, globals, tables, traps and local writes. Fallback lines keep the raw instruction text. Names come from the module's name section, exports and imports.",
         });
-        let frames_truncated =
-            window_document(&mut document, &lift, &scan.names, line_offset, count);
+        let mut merged = 0usize;
+        let frames_truncated = window_document(
+            &mut merged,
+            &mut document,
+            &lift,
+            &scan.names,
+            line_offset,
+            count,
+        );
         let stop = line_offset + count;
         document["window"] = json!({
             "line_offset": line_offset,
@@ -2426,6 +2447,7 @@ pub fn pseudocode(
             "clipped_lines": lift.clipped_lines,
             "window_bytes": count < available,
             "frames": frames_truncated,
+            "merged_ranges": merged,
         });
         // The MCP server inlines a result only when both its compact and its
         // pretty form fit, so the window is measured in both.
@@ -2442,6 +2464,7 @@ pub fn pseudocode(
 /// Fills the window's lines, text, callees and frames into `document`, and
 /// says whether frames around the window were left out.
 fn window_document(
+    merged: &mut usize,
     document: &mut Value,
     lift: &Lift,
     names: &Names,
@@ -2453,11 +2476,15 @@ fn window_document(
     for line in lift.lines.iter().skip(line_offset).take(count) {
         text.push_str(&rendered(lift, line));
         text.push('\n');
+        let (covered, cut) = ranges(lift, line);
+        if cut {
+            *merged += 1;
+        }
         lines.push(json!([
             line.depth,
             line.kind as u8,
             line.owned.len(),
-            ranges(lift, line)
+            covered
         ]));
     }
     let stop = line_offset + count;
@@ -3039,6 +3066,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn one_line_with_scattered_bytes_still_fits_a_page() {
+        // A return of 1,000 values, each a sum with nops between its terms:
+        // the return line owns thousands of instructions that never touch.
+        let mut wat = String::from("(module (func (result");
+        for _ in 0..1_000 {
+            wat.push_str(" i32");
+        }
+        wat.push(')');
+        for _ in 0..1_000 {
+            wat.push_str(" i32.const 1");
+            for term in 0..12 {
+                let _ = write!(wat, " nop i32.const {term} nop i32.add");
+            }
+        }
+        wat.push_str(" return))");
+        let bytes = wat::parse_str(&wat).unwrap();
+        let directory = store(&bytes);
+        let first: Value =
+            serde_json::from_str(&pseudocode(directory.path(), "7", 0, 0, 1).unwrap()).unwrap();
+        // The return line is the last but one; read the window that ends there.
+        let last = first["line_count"].as_u64().unwrap() as usize - 2;
+        let text = pseudocode(directory.path(), "7", 0, last, 2).unwrap();
+        let document: Value = serde_json::from_str(&text).unwrap();
+        let pretty = serde_json::to_string_pretty(&document).unwrap();
+        assert!(
+            text.len() <= 131_072 && pretty.len() <= 131_072,
+            "{} compact, {} pretty",
+            text.len(),
+            pretty.len()
+        );
+        assert!(
+            document["text"]
+                .as_str()
+                .unwrap()
+                .trim_start()
+                .starts_with("return "),
+            "{}",
+            document["text"]
+        );
+        assert_eq!(document["truncation"]["merged_ranges"], 1);
+        let ranges = document["lines"][0][3].as_array().unwrap();
+        assert_eq!(ranges.len(), MAX_LINE_RANGES);
+        // The covering span ends where the line's last instruction does.
+        let end = ranges[MAX_LINE_RANGES - 1][1].as_u64().unwrap();
+        assert!(end <= document["byte_end"].as_u64().unwrap());
     }
 
     #[test]

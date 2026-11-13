@@ -23407,7 +23407,8 @@
               "deadline",
               "clipped_lines",
               "window_bytes",
-              "frames"
+              "frames",
+              "merged_ranges"
             ],
             "properties": {
               "instructions": {
@@ -23428,6 +23429,11 @@
               },
               "frames": {
                 "type": "boolean"
+              },
+              "merged_ranges": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Lines in the window whose byte ranges passed 64; their 64th range is a span covering every later one, which also covers bytes other lines own."
               }
             }
           },

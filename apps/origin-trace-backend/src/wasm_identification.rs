@@ -26,9 +26,10 @@ use wasmparser::{
 
 /// The block graph's input budget: real modules are tens of MiB.
 pub const MAX_BYTES: usize = wasm_graph::MAX_BYTES;
-/// Inside the native helper's five-second process deadline, so a partial
+/// Counted from the start of `load`, before the artifact is read and hashed,
+/// and well inside the native helper's five-second process kill, so a partial
 /// report still reaches the app.
-const DEADLINE: Duration = Duration::from_secs(4);
+const DEADLINE: Duration = Duration::from_millis(3500);
 const MAX_CONCLUSIONS: usize = 32;
 const MAX_EVIDENCE: usize = 8;
 const MAX_PRODUCERS: usize = 16;
@@ -642,24 +643,101 @@ fn rust_crate(name: &str) -> (Option<&str>, bool) {
     if name.starts_with("_Z") {
         return (None, false);
     }
-    let trimmed = name
-        .trim_start_matches(['<', '&'])
-        .trim_start_matches("mut ");
-    let crate_name = trimmed.split("::").next().unwrap_or("");
     let certain = name.rsplit("::").next().is_some_and(rust_hash) && name.contains("::");
-    if !certain && (name.contains('(') || name.ends_with(" const") || name.contains('~')) {
+    let Some(outside) = outside_angles(name) else {
+        // Unbalanced brackets, as C++ `operator<` leaves them, are no Rust path.
+        return (None, certain);
+    };
+    if !certain && (outside.contains('(') || outside.ends_with(" const") || outside.contains('~')) {
         return (None, false);
     }
-    let known = trimmed
-        .contains("::")
-        .then(|| {
+    let known = demangled_paths(name)
+        .into_iter()
+        .filter(|path| path.contains("::"))
+        .find_map(|path| {
+            let crate_name = path.split("::").next().unwrap_or("");
             RUST_CRATES
                 .iter()
                 .find(|known| **known == crate_name)
                 .copied()
-        })
-        .flatten();
+        });
     (known, certain)
+}
+
+/// The text of `name` outside every `<...>`, or `None` when the brackets do
+/// not balance. Rust generic arguments hold parentheses that are no parameter
+/// list (`drop_in_place<(String, u32)>`, `<() as Debug>`, `Fn(u8) -> u8`), so
+/// the C++ parameter-list rule reads only what is outside them.
+fn outside_angles(name: &str) -> Option<String> {
+    let mut depth = 0usize;
+    let mut out = String::new();
+    let mut characters = name.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '-' if characters.peek() == Some(&'>') => {
+                characters.next();
+                if depth == 0 {
+                    out.push_str("->");
+                }
+            }
+            '<' => depth += 1,
+            '>' => depth = depth.checked_sub(1)?,
+            _ if depth == 0 => out.push(character),
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(out)
+}
+
+fn trim_path(path: &str) -> &str {
+    let mut path = path.trim();
+    loop {
+        let next = path
+            .trim_start_matches('&')
+            .trim_start_matches("mut ")
+            .trim_start_matches("dyn ");
+        if next == path {
+            return path;
+        }
+        path = next;
+    }
+}
+
+/// The paths a demangled Rust name names a crate by: for `<X as Trait>::f`
+/// the trait's path, then the self type's; otherwise the name itself. A
+/// leading `&`, `mut ` or `dyn ` is not part of a path.
+fn demangled_paths(name: &str) -> Vec<&str> {
+    let Some(inner) = name.strip_prefix('<') else {
+        return vec![trim_path(name)];
+    };
+    // The first `<...>` group, balanced, ending before its `>`.
+    let mut depth = 1usize;
+    let mut close = None;
+    let bytes = inner.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'-' if bytes.get(at + 1) == Some(&b'>') => at += 1,
+            b'<' => depth += 1,
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(at);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    let Some(close) = close else {
+        return Vec::new();
+    };
+    let group = &inner[..close];
+    match group.find(" as ") {
+        Some(split) => vec![trim_path(&group[split + 4..]), trim_path(&group[..split])],
+        None => vec![trim_path(group)],
+    }
 }
 
 /// The crate of a Rust v0 symbol: the identifier after the first crate root
@@ -682,7 +760,8 @@ fn v0_crate(name: &str) -> Option<&str> {
     if rest[at..].starts_with('_') {
         at += 1;
     }
-    rest.get(at..at + length)
+    // A crafted length near usize::MAX must not overflow the end.
+    rest.get(at..at.checked_add(length)?)
         .filter(|crate_name| !crate_name.is_empty())
 }
 
@@ -946,6 +1025,8 @@ struct Labeler<'a> {
     per_function: HashMap<u32, Vec<u64>>,
     /// Suggestions found past `MAX_SUGGESTIONS`, counted and not stored.
     dropped: usize,
+    /// Labels a function had past `MAX_SUGGESTIONS_PER_FUNCTION`.
+    beyond_per_function: usize,
     /// The producers section declares C or C++.
     cpp_declared: bool,
     conclusions: &'a mut Conclusions,
@@ -965,7 +1046,11 @@ impl Labeler<'_> {
         };
         let hash = label_hash(&label);
         let labels = self.per_function.entry(function).or_default();
-        if labels.len() >= MAX_SUGGESTIONS_PER_FUNCTION || labels.contains(&hash) {
+        if labels.contains(&hash) {
+            return;
+        }
+        if labels.len() >= MAX_SUGGESTIONS_PER_FUNCTION {
+            self.beyond_per_function += 1;
             return;
         }
         labels.push(hash);
@@ -1464,6 +1549,20 @@ fn producers(
     true
 }
 
+/// One run of a data match: its module bytes and, when the segment's offset
+/// is a constant, its memory address. A clustered match can bridge
+/// unrelated bytes between its runs, so containment and load references are
+/// read from the runs, never from the span.
+#[derive(Clone, Copy)]
+struct Part {
+    start: usize,
+    end: usize,
+    address: Option<u64>,
+}
+
+/// Runs kept per match; a 256-element table of 4-element runs has 64.
+const MAX_PARTS: usize = 64;
+
 /// One reported constant match.
 struct Match {
     set: usize,
@@ -1482,6 +1581,9 @@ struct Match {
     segments: Vec<u32>,
     encoding: Option<Encoding>,
     runs: usize,
+    /// The runs, up to `MAX_PARTS`; `parts_cut` when more were joined.
+    parts: Vec<Part>,
+    parts_cut: bool,
     /// The memory address of `byte_offset` and of the match's end, when the
     /// segments' offsets are constants.
     address: Option<u64>,
@@ -1498,6 +1600,13 @@ struct Match {
 }
 
 impl Match {
+    fn add_part(&mut self, part: Part) {
+        if self.parts.len() < MAX_PARTS {
+            self.parts.push(part);
+        } else {
+            self.parts_cut = true;
+        }
+    }
     fn matched(&self) -> usize {
         self.covered
             .iter()
@@ -1561,6 +1670,14 @@ fn data_match(run: &Run, segment: &Segment<'_>) -> Match {
         segments: vec![segment.index],
         encoding: Some(run.encoding),
         runs: 1,
+        parts: vec![Part {
+            start: segment.data_offset + run.start,
+            end: segment.data_offset + run.end,
+            address: segment
+                .address
+                .map(|base| base.wrapping_add(run.start as u64)),
+        }],
+        parts_cut: false,
         address: segment
             .address
             .map(|base| base.wrapping_add(run.start as u64)),
@@ -1625,6 +1742,13 @@ fn cluster(mut runs: Vec<Run>, segment: &Segment<'_>, deadline: Instant, out: &m
                 .map(|base| base.wrapping_add(run.end as u64));
             open.end_index = run.end_index;
             open.cover(run.first, run.end_index);
+            open.add_part(Part {
+                start: segment.data_offset + run.start,
+                end: segment.data_offset + run.end,
+                address: segment
+                    .address
+                    .map(|base| base.wrapping_add(run.start as u64)),
+            });
             continue;
         }
         if let Some(done) = current.replace(data_match(run, segment)) {
@@ -1675,6 +1799,10 @@ fn merge_segments(mut matches: Vec<Match>) -> (Vec<Match>, usize) {
                 previous.address_end = entry.address_end;
                 previous.runs += entry.runs;
                 previous.segments.extend(entry.segments);
+                previous.parts_cut |= entry.parts_cut;
+                for part in entry.parts {
+                    previous.add_part(part);
+                }
                 continue;
             }
         }
@@ -1691,48 +1819,102 @@ fn explains(entry_size: usize, entry: &Match, container_size: usize, container: 
 }
 
 /// Drops a data match another match fully explains: MD5's four words inside
-/// a SHA-1 state, the Base62 alphabet inside a Base64 one. One pass over the
-/// matches sorted by start, widest first: the widest range seen so far is
-/// the only container a later match needs to be compared with.
-fn suppress_data(mut matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> Vec<Match> {
-    matches.sort_unstable_by_key(|entry| {
+/// a SHA-1 state, the Base62 alphabet inside a Base64 one. A container is one
+/// run of another match, never the span a clustered or merged match bridges,
+/// so a partial table whose runs sit on both sides of a complete one never
+/// hides it. One pass over matches and runs sorted by start: among the runs
+/// that start at or before a match, the one reaching furthest (from a
+/// different match) is the only container it needs to be compared with. A
+/// match with more runs than it kept is no container.
+fn suppress_data(matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> Vec<Match> {
+    let mut order = (0..matches.len()).collect::<Vec<_>>();
+    order.sort_unstable_by_key(|index| {
+        let entry = &matches[*index];
         (
             entry.byte_offset,
             std::cmp::Reverse(entry.byte_end),
             !entry.complete(),
         )
     });
-    let mut kept: Vec<Match> = Vec::with_capacity(matches.len());
-    let mut widest: Option<usize> = None;
-    for (position, entry) in matches.into_iter().enumerate() {
+    let mut runs = matches
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.parts_cut)
+        .flat_map(|(owner, entry)| {
+            entry
+                .parts
+                .iter()
+                .map(move |part| (part.start, part.end, owner))
+        })
+        .collect::<Vec<_>>();
+    runs.sort_unstable();
+    // The furthest-reaching run, and the furthest-reaching run of any other
+    // match, as (end, size, owner).
+    let mut first: Option<(usize, usize, usize)> = None;
+    let mut second: Option<(usize, usize, usize)> = None;
+    let mut next = 0usize;
+    let mut drop = vec![false; matches.len()];
+    for (position, index) in order.iter().enumerate() {
         if position.is_multiple_of(1024) && Instant::now() > deadline {
             *expired = true;
+            for later in &order[position..] {
+                drop[*later] = true;
+            }
             break;
         }
-        let size = entry.byte_end.saturating_sub(entry.byte_offset);
-        if let Some(index) = widest {
-            let container = &kept[index];
-            if container.byte_end >= entry.byte_end
-                && explains(
-                    size,
-                    &entry,
-                    container.byte_end.saturating_sub(container.byte_offset),
-                    container,
-                )
-            {
-                continue;
+        let entry = &matches[*index];
+        while next < runs.len() && runs[next].0 <= entry.byte_offset {
+            let (start, end, owner) = runs[next];
+            let offer = (end, end - start, owner);
+            match first {
+                None => first = Some(offer),
+                Some((reach, _, holder)) if holder == owner => {
+                    if end > reach {
+                        first = Some(offer);
+                    }
+                }
+                Some(best) if end > best.0 => {
+                    second = Some(best);
+                    first = Some(offer);
+                }
+                _ => {
+                    if second.is_none_or(|(reach, ..)| end > reach) {
+                        second = Some(offer);
+                    }
+                }
             }
+            next += 1;
         }
-        // A match merged across segments spans their headers too, so it is
-        // never the container that explains another match.
-        if entry.segments.len() == 1
-            && widest.is_none_or(|index| entry.byte_end > kept[index].byte_end)
+        let container = match first {
+            Some(best) if best.2 != *index => Some(best),
+            _ => second,
+        };
+        if let Some((reach, size, owner)) = container
+            && owner != *index
+            && reach >= entry.byte_end
+            && explains(
+                entry.byte_end.saturating_sub(entry.byte_offset),
+                entry,
+                size,
+                &matches[owner],
+            )
         {
-            widest = Some(kept.len());
+            drop[*index] = true;
         }
-        kept.push(entry);
     }
-    kept
+    let mut keep = matches
+        .into_iter()
+        .zip(drop)
+        .enumerate()
+        .filter_map(|(index, (entry, dropped))| (!dropped).then_some((index, entry)))
+        .collect::<Vec<_>>();
+    let rank = order
+        .iter()
+        .enumerate()
+        .map(|(rank, index)| (*index, rank))
+        .collect::<HashMap<_, _>>();
+    keep.sort_unstable_by_key(|(index, _)| rank[index]);
+    keep.into_iter().map(|(_, entry)| entry).collect()
 }
 
 /// The same rule for one function's immediate matches, by value sets. A
@@ -1811,9 +1993,19 @@ impl Targets {
         let mut starts: HashMap<u64, Vec<usize>> = HashMap::new();
         let mut ranges = Vec::new();
         for (index, entry) in matches.iter().enumerate() {
-            if let (Some(start), Some(end)) = (entry.address, entry.address_end) {
+            if let Some(start) = entry.address {
                 starts.entry(start).or_default().push(index);
-                ranges.push((start, end, index));
+            }
+            // Loads are matched against the runs, so a load into a table
+            // that sits between two runs of another match is not theirs.
+            for part in &entry.parts {
+                if let Some(address) = part.address {
+                    ranges.push((
+                        address,
+                        address.saturating_add((part.end - part.start) as u64),
+                        index,
+                    ));
+                }
             }
         }
         ranges.sort_unstable();
@@ -2034,6 +2226,8 @@ fn scan_functions(
                 segments: Vec::new(),
                 encoding: None,
                 runs: 0,
+                parts: Vec::new(),
+                parts_cut: false,
                 address: None,
                 address_end: None,
                 references: Vec::new(),
@@ -2057,8 +2251,20 @@ fn scan_functions(
 
 /// The identification report for one stored artifact.
 pub fn load(root: &Path, id: &str, offset: usize, limit: usize) -> Result<Value> {
+    load_started(root, id, offset, limit, Instant::now())
+}
+
+/// `load` with the instant its deadline counts from: reading and hashing up
+/// to 64 MiB is part of the budget.
+fn load_started(
+    root: &Path,
+    id: &str,
+    offset: usize,
+    limit: usize,
+    started: Instant,
+) -> Result<Value> {
     let artifact = wasm_graph::artifact(root, id)?;
-    let mut document = identify(&artifact.bytes, offset, limit)?;
+    let mut document = identify_until(&artifact.bytes, offset, limit, started + DEADLINE)?;
     document["artifact_id"] = artifact.artifact_id;
     document["sha256"] = artifact.sha256;
     Ok(document)
@@ -2074,18 +2280,22 @@ fn serialized(value: &Value) -> usize {
 /// Builds the report. `offset` and `limit` page the suggestion rows only;
 /// every other part is whole on every page, held to `FIXED_BYTES`.
 pub fn identify(bytes: &[u8], offset: usize, limit: usize) -> Result<Value> {
-    identify_within(bytes, offset, limit, DEADLINE)
+    identify_until(bytes, offset, limit, Instant::now() + DEADLINE)
 }
 
 /// `identify` with its time budget named, so the deadline paths are tested
 /// without a module large enough to reach the real one.
+#[cfg(test)]
 fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) -> Result<Value> {
+    identify_until(bytes, offset, limit, Instant::now() + budget)
+}
+
+/// One deadline for the whole report: reading, labeling, both scans and the
+/// merge all poll it, and each says where it stopped.
+fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) -> Result<Value> {
     if bytes.len() > MAX_BYTES {
         return Err(Error::bad("WASM identification input exceeds 64 MiB"));
     }
-    // One deadline for the whole report: reading, labeling, both scans and
-    // the merge all poll it, and each says where it stopped.
-    let deadline = Instant::now() + budget;
     let module = read_module(bytes, deadline)?;
     let mut omissions = module.omissions.clone();
     let mut conclusions = Conclusions::default();
@@ -2162,6 +2372,7 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
         suggestions: Vec::new(),
         per_function: HashMap::new(),
         dropped: 0,
+        beyond_per_function: 0,
         cpp_declared,
         conclusions: &mut conclusions,
     };
@@ -2191,6 +2402,12 @@ fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) 
         ));
     }
     let dropped_suggestions = labeler.dropped;
+    if labeler.beyond_per_function > 0 {
+        omissions.push(format!(
+            "Per-function label limit of {MAX_SUGGESTIONS_PER_FUNCTION} reached; {} further labels are counted, not listed.",
+            labeler.beyond_per_function
+        ));
+    }
     let labeled_functions = labeler.per_function.len();
     let mut suggestions = labeler.suggestions;
     suggestions.sort_by_key(|entry| entry.function);
@@ -3267,57 +3484,269 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_match_merged_across_segments_is_never_a_container() {
+    fn synthetic(
+        set: &str,
+        parts: &[(usize, usize)],
+        segments: Vec<u32>,
+        elements: usize,
+    ) -> Match {
         let catalog = wasm_constants::catalog();
-        let set = |id: &str| catalog.iter().position(|set| set.id == id).unwrap();
-        let entry = |set: usize, start: usize, end: usize, segments: Vec<u32>, elements: usize| {
-            let mut entry = Match {
-                set,
-                location: "data",
-                covered: [0; 4],
-                first: 0,
-                end_index: elements,
-                byte_offset: start,
-                byte_end: end,
-                preview_end: end,
-                segments,
-                encoding: Some(Encoding::U32Le),
-                runs: 1,
-                address: None,
-                address_end: None,
-                references: Vec::new(),
-                reference_count: 0,
-                function: None,
-                sites: Vec::new(),
-                site_count: 0,
-                values: BTreeSet::new(),
-            };
-            entry.cover(0, elements);
-            entry
+        let set = catalog.iter().position(|known| known.id == set).unwrap();
+        let mut entry = Match {
+            set,
+            location: "data",
+            covered: [0; 4],
+            first: 0,
+            end_index: elements,
+            byte_offset: parts[0].0,
+            byte_end: parts[parts.len() - 1].1,
+            preview_end: parts[0].1,
+            segments,
+            encoding: Some(Encoding::U32Le),
+            runs: parts.len(),
+            parts: parts
+                .iter()
+                .map(|(start, end)| Part {
+                    start: *start,
+                    end: *end,
+                    address: None,
+                })
+                .collect(),
+            parts_cut: false,
+            address: None,
+            address_end: None,
+            references: Vec::new(),
+            reference_count: 0,
+            function: None,
+            sites: Vec::new(),
+            site_count: 0,
+            values: BTreeSet::new(),
         };
-        let merged = entry(set("crc32_table"), 0, 2000, vec![0, 1], 256);
-        let inside = entry(set("md5_h"), 600, 616, vec![1], 4);
+        entry.cover(0, elements);
+        entry
+    }
+
+    #[test]
+    fn a_match_is_contained_only_by_a_run_of_another() {
         let mut expired = false;
-        let kept = suppress_data(
-            vec![merged, inside],
-            Instant::now() + DEADLINE,
-            &mut expired,
-        );
+        let late = Instant::now() + DEADLINE;
+        // A span bridging two runs, merged or clustered, holds nothing in its gap.
+        let merged = synthetic("crc32_table", &[(0, 512), (1500, 2000)], vec![0, 1], 256);
+        let inside = synthetic("md5_h", &[(600, 616)], vec![1], 4);
+        let kept = suppress_data(vec![merged, inside], late, &mut expired);
         assert_eq!(
             kept.len(),
             2,
-            "the merged span suppressed a match it does not explain"
+            "a bridged gap suppressed a match it does not explain"
         );
-        // A single-segment container still explains what it holds.
-        let container = entry(set("sha1_h"), 600, 620, vec![1], 5);
-        let inside = entry(set("md5_h"), 600, 616, vec![1], 4);
-        let kept = suppress_data(
-            vec![container, inside],
-            Instant::now() + DEADLINE,
-            &mut expired,
+        // One run of a larger match explains what it holds.
+        let container = synthetic("sha1_h", &[(600, 620)], vec![1], 5);
+        let inside = synthetic("md5_h", &[(600, 616)], vec![1], 4);
+        assert_eq!(
+            suppress_data(vec![container, inside], late, &mut expired).len(),
+            1
         );
-        assert_eq!(kept.len(), 1);
+        // A second run of a larger match explains too.
+        let container = synthetic("base64_standard", &[(0, 40), (100, 164)], vec![0], 64);
+        let inside = synthetic("base62_alphanumeric", &[(100, 162)], vec![0], 62);
+        assert_eq!(
+            suppress_data(vec![container, inside], late, &mut expired).len(),
+            1
+        );
+    }
+
+    /// CRC-32 elements 0 to 16, a complete SHA-256 K table, then CRC-32
+    /// elements 40 to 56, in one segment at 1024.
+    fn sandwich() -> Vec<u8> {
+        let crc = wasm_constants::crc_table(0xedb8_8320, true);
+        [
+            raw::words(&crc[..16]),
+            raw::words(&wasm_constants::SHA256_K),
+            raw::words(&crc[40..56]),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn a_partial_table_on_both_sides_never_hides_a_complete_one() {
+        // A load at 1096 reads the SHA-256 table (1088 to 1344), not the CRC
+        // runs on either side of it.
+        let mut body = vec![0x41, 0];
+        body.extend([0x28, 2]);
+        body.extend(raw::leb(1096));
+        body.push(0x1a);
+        let mut sections = raw::functions(1, &body);
+        sections.insert(2, raw::memory(1));
+        sections.push(raw::data(&[(1024, sandwich())]));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let sha = constant(&report, "sha256_k");
+        assert_eq!(sha.len(), 1, "{report:#}");
+        assert_eq!(sha[0]["match"], "complete");
+        assert_eq!(
+            sha[0]["referenced_by"][0]["via"], "load_offset",
+            "{report:#}"
+        );
+        let crc = constant(&report, "crc32_table");
+        assert_eq!(crc[0]["match"], "partial");
+        assert_eq!(crc[0]["reference_count"], 0, "{report:#}");
+    }
+
+    /// A small xorshift generator, so the property cases are reproducible.
+    struct Seeded(u64);
+    impl Seeded {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+    }
+
+    /// The review's merge fuzzer, bounded: whole tables, tables split in
+    /// order across consecutive segments, and tables sandwiched between two
+    /// runs of the other table are always reported complete, and no match
+    /// runs backward.
+    #[test]
+    fn planted_tables_are_found_complete_in_random_layouts() {
+        let crc = raw::words(&wasm_constants::crc_table(0xedb8_8320, true));
+        let k = raw::words(&wasm_constants::SHA256_K);
+        let tables = [("crc32_table", &crc), ("sha256_k", &k)];
+        let mut random = Seeded(0x9e37_79b9_7f4a_7c15);
+        for case in 0..150 {
+            let mut segments = Vec::new();
+            let mut planted = Vec::new();
+            let mut address = 1024u32;
+            for _ in 0..1 + random.below(3) {
+                let which = random.below(2);
+                let (id, table) = tables[which];
+                let other = tables[1 - which].1;
+                match random.below(3) {
+                    0 => {
+                        segments.push((address, table.to_vec()));
+                        address += table.len() as u32 + [0, 4, 64][random.below(3)];
+                    }
+                    1 => {
+                        let words = table.len() / 4;
+                        let cut = 8 + random.below(words - 16);
+                        segments.push((address, table[..cut * 4].to_vec()));
+                        segments.push((address + cut as u32 * 4, table[cut * 4..].to_vec()));
+                        address += table.len() as u32 + 64;
+                    }
+                    _ => {
+                        let start = random.below(other.len() / 4 - 40);
+                        let bytes = [
+                            &other[start * 4..(start + 12) * 4],
+                            table.as_slice(),
+                            &other[(start + 20) * 4..(start + 32) * 4],
+                        ]
+                        .concat();
+                        address += bytes.len() as u32 + 64;
+                        segments.push((address - bytes.len() as u32 - 64, bytes));
+                    }
+                }
+                planted.push(id);
+            }
+            let report =
+                identify(&raw::module(&[raw::memory(4), raw::data(&segments)]), 0, 16).unwrap();
+            for entry in report["constants"]["matches"].as_array().unwrap() {
+                assert!(
+                    entry["byte_offset"].as_u64() <= entry["byte_end"].as_u64(),
+                    "case {case}: {entry}"
+                );
+            }
+            for id in planted {
+                assert!(
+                    constant(&report, id)
+                        .iter()
+                        .any(|entry| entry["match"] == "complete"),
+                    "case {case}: {id} not complete\n{report:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strong_evidence_displaces_weak_evidence_in_a_full_list() {
+        let mut names = (0..8u32)
+            .map(|index| (index, format!("core::fmt::f{index}")))
+            .collect::<Vec<_>>();
+        names.push((8, "core::fmt::write::h0123456789abcdef".into()));
+        let mut sections = raw::functions(9, &[]);
+        sections.push(raw::names(&names));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        let rust = conclusion(&report, "rust").unwrap();
+        assert_eq!(rust["confidence"], "high");
+        assert_eq!(rust["evidence_count"], 9);
+        assert_eq!(rust["evidence"][0]["confidence"], "high", "{rust:#}");
+    }
+
+    #[test]
+    fn rust_name_forms_and_crafted_names() {
+        assert_eq!(rust_crate("_RC18446744073709551615abc"), (None, false));
+        for name in [
+            "core::ptr::drop_in_place<(alloc::string::String, u32)>",
+            "<() as core::fmt::Debug>::fmt",
+            "<T as core::any::Any>::type_id",
+            "<&mut W as core::fmt::Write>::write_str",
+        ] {
+            assert_eq!(rust_crate(name), (Some("core"), false), "{name}");
+        }
+        for name in [
+            "std::terminate()",
+            "std::exception::~exception()",
+            "log::Logger::write(char const*)",
+            "core::Engine::step()",
+            "std::bad_alloc::what() const",
+            "std::operator<<(std::ostream&, char const*)",
+        ] {
+            assert_eq!(rust_crate(name).0, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_deadline_counts_from_the_start_of_load() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = std::fs::read(fixtures().join("rust-wasm-bindgen.wasm")).unwrap();
+        let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        std::fs::create_dir_all(root.path().join("blobs")).unwrap();
+        std::fs::write(root.path().join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+        let row = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1",
+            "parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/m.wasm",
+            "mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+            "content_path":format!("blobs/{hash}.bin")});
+        std::fs::write(root.path().join("manifest.jsonl"), format!("{row}\n")).unwrap();
+        assert_eq!(load(root.path(), "1", 0, 16).unwrap()["status"], "complete");
+        // A read that already spent the budget leaves a partial report.
+        let report = load_started(root.path(), "1", 0, 16, Instant::now() - DEADLINE).unwrap();
+        assert_eq!(report["status"], "partial");
+        assert!(
+            report["omissions"].to_string().contains("deadline"),
+            "{report:#}"
+        );
+        assert!(DEADLINE <= Duration::from_millis(3500));
+    }
+
+    #[test]
+    fn labels_past_the_per_function_limit_are_counted() {
+        let exports = raw::vector(
+            &["malloc", "free", "calloc", "realloc", "memcpy", "memset"]
+                .iter()
+                .map(|name| [raw::name(name), vec![0, 0]].concat())
+                .collect::<Vec<_>>(),
+        );
+        let mut sections = raw::functions(1, &[]);
+        sections.insert(2, raw::section(7, &exports));
+        let report = identify(&raw::module(&sections), 0, 16).unwrap();
+        assert_eq!(labels(&report, 0).len(), MAX_SUGGESTIONS_PER_FUNCTION);
+        let expected =
+            "Per-function label limit of 4 reached; 2 further labels are counted, not listed.";
+        assert!(
+            omission_lines(&report).contains(&expected.to_owned()),
+            "{report:#}"
+        );
     }
 
     #[test]

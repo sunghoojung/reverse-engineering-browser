@@ -2027,6 +2027,15 @@ impl<'m> Lifter<'m> {
     }
 }
 
+/// A validator message can quote captured text, such as a duplicate export
+/// name of any length, so it is cut on a character boundary and marked.
+const MAX_VALIDATOR_MESSAGE: usize = 512;
+fn validator_message(error: &wasmparser::BinaryReaderError) -> String {
+    let mut text = error.to_string();
+    clip(&mut text, MAX_VALIDATOR_MESSAGE);
+    text
+}
+
 /// What one module pass collects for one function.
 struct Scan<'a> {
     module: ModuleTypes,
@@ -2051,17 +2060,20 @@ fn scan(bytes: &[u8], function: u32) -> Result<Scan<'_>> {
     let mut validator = Validator::new_with_features(WasmFeatures::all());
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(bad)?;
-        match validator
-            .payload(&payload)
-            .map_err(|error| Error::protocol(format!("WASM module does not validate: {error}")))?
-        {
+        match validator.payload(&payload).map_err(|error| {
+            Error::protocol(format!(
+                "WASM module does not validate: {}",
+                validator_message(&error)
+            ))
+        })? {
             ValidPayload::Func(body_validator, body) if body_validator.index == function => {
                 body_validator
                     .into_validator(FuncValidatorAllocations::default())
                     .validate(&body)
                     .map_err(|error| {
                         Error::protocol(format!(
-                            "WASM function {function} does not validate: {error}"
+                            "WASM function {function} does not validate: {}",
+                            validator_message(&error)
                         ))
                     })?;
             }
@@ -3235,6 +3247,26 @@ mod tests {
             first.ends_with("#11") && second.ends_with("#12"),
             "{first} {second}"
         );
+    }
+
+    #[test]
+    fn a_validator_message_quoting_captured_text_is_bounded() {
+        // A duplicate export name is quoted in the validator's message; a
+        // 99,000-byte one (in two-byte characters) must not come back whole.
+        let name = "\u{e9}".repeat(49_500);
+        let wat =
+            format!(r#"(module (func) (export "{name}" (func 0)) (export "{name}" (func 0)))"#);
+        let bytes = wat::parse_str(&wat).unwrap();
+        let directory = store(&bytes);
+        let error = pseudocode(directory.path(), "7", 0, 0, 10).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert!(
+            error.message.starts_with("WASM module does not validate: "),
+            "{}",
+            &error.message[..80]
+        );
+        assert!(error.message.len() <= 600, "{} bytes", error.message.len());
+        assert!(error.message.ends_with(" [text limited]"));
     }
 
     #[test]

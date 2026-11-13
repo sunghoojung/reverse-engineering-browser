@@ -800,7 +800,8 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       if (thread?.kind === 'observed' && !(thread.session_id === record.session_id &&
           String(thread.process_id) === String(record.process_id) && thread.frame_id === record.frame_id)) view.thread = null;
       view.kind = record.type;
-      view.reveal = {key: debuggerRecordKey(record), record, after: readsStarted};
+      // Where focus was when asked: the record takes focus only if it is still there.
+      view.reveal = {key: debuggerRecordKey(record), record, after: readsStarted, focus: document.activeElement};
       hooks.refreshTree?.();
       if (open) read(); else setOpen(true);
       return true;
@@ -1414,7 +1415,10 @@ function debuggerObservationsSection() {
         list.scrollTo(revealing.key);
         choose(view, revealing, 'reveal');
         if (typeof list.element.scrollIntoView === 'function') list.element.scrollIntoView({block: 'start'});
-        list.focus();
+        // A control the researcher picked meanwhile (a file, Find, the Watch
+        // form) keeps focus; the record is still chosen and in view.
+        const active = document.activeElement;
+        if (!active || active === document.body || active === wanted.focus) list.focus();
       }
       const end = loaded ? loaded.bottom : observations.query?.next_before ?? null;
       controls.more.hidden = !current || end === null || items.length >= DEBUGGER_SIDEBAR.rows;

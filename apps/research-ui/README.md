@@ -322,7 +322,9 @@ Each section is a collapsible pane:
   **Show older records** reads older pages, and the record is chosen when its
   page arrives. Like a Traffic lookup, the ask ends when the researcher moves
   on: another row, a kind or thread, **Show newest**, closing the sidebar,
-  leaving Sources or a replaced store.
+  leaving Sources or a replaced store. Focus moves to the list only if it is
+  still where it was when asked; a file, Find or the Watch form picked
+  meanwhile keeps it, and the record is still chosen.
 - **Pausing**: one statement of the availability `get_native_debugger` reports.
   Today it is unsupported, so the sidebar offers no control to stop, step or
   inspect a paused frame. When sections registered with `native: 'pausing'`

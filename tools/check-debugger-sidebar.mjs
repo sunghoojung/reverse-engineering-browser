@@ -1010,7 +1010,7 @@ await check('watch rules state what they cannot observe', async () => {
 // Traffic lookup: another row, closing, leaving Sources or a thread pick made
 // before the read answers leaves that choice, and focus, where it is.
 await check('moving on cancels a pending showObservation', async () => {
-  for (const how of ['another row', 'closing', 'leaving Sources', 'a thread']) {
+  for (const how of ['another row', 'closing', 'leaving Sources', 'a thread', 'Show newest', 'a replaced store']) {
     const store = createStore(6);
     store.add(1, {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}});
     store.add(4);
@@ -1028,7 +1028,10 @@ await check('moving on cancels a pending showObservation', async () => {
     if (how === 'another row') click(ui, ui.rows('#debugger-observations').find(row => row.dataset.key === '1:42:8'));
     else if (how === 'closing') ui.close();
     else if (how === 'leaving Sources') { screen.hidden = true; await settle(); }
-    else click(ui, ui.rows('#debugger-threads').find(row => row.dataset.key === 'F:1:42:200'));
+    else if (how === 'a thread') click(ui, ui.rows('#debugger-threads').find(row => row.dataset.key === 'F:1:42:200'));
+    else if (how === 'Show newest') click(ui, ui.sidebar.querySelector('.debugger-show-newest'));
+    // A shorter store: cleared or replaced, though it still holds the record.
+    else store.records = store.records.slice(0, 8);
     await settle();
     const before = focused.length;
     holding = false;
@@ -1043,6 +1046,35 @@ await check('moving on cancels a pending showObservation', async () => {
     assert(!focused.slice(before).includes('debugger-observations'), `${how}: focus does not jump to the list`);
     if (how === 'another row') assert.match(ui.text('.debugger-detail'), /sequence 8/, 'the row chosen instead stays chosen');
     assert.doesNotMatch(ui.text('.debugger-observation-notes'), /Observation #7/, `${how}: nothing names the abandoned record`);
+    ui.close();
+  }
+});
+
+// A control the researcher picks before the read answers keeps focus: the
+// record is still chosen, and focus moves only when it is where it was.
+await check('showObservation leaves focus on a control picked meanwhile', async () => {
+  for (const picked of ['a file in the tree', 'the Watch form', 'nothing']) {
+    const store = createStore(6);
+    store.add(1, {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}});
+    let holding = true;
+    const ui = mount({store, hold: url => holding && url.includes('type=request_watch_match'),
+      globals: {RebNativeConsole: {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}), watch: async () => ({status: 'ok'})}}});
+    let active = ui.document.body;
+    Object.defineProperty(ui.document, 'activeElement', {configurable: true, get: () => active});
+    const focused = [];
+    ui.window.Element.prototype.focus = function focus() { focused.push(this.id); active = this; };
+    ui.open();
+    await until(() => ui.sidebar.querySelector('.debugger-watch-form'), `${picked}: the sidebar`);
+    ui.context.RebDebuggerSidebar.showObservation({...store.records[6]});
+    await until(() => ui.reads().some(entry => entry.url.includes('type=request_watch_match') && entry.release), `${picked}: the read, held`);
+    if (picked === 'a file in the tree') active = ui.document.querySelector('#source-tree');
+    else if (picked === 'the Watch form') active = ui.sidebar.querySelector('.debugger-watch-form textarea');
+    const before = focused.length;
+    holding = false;
+    for (const entry of ui.reads().filter(entry => entry.release)) entry.release();
+    await until(() => ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key === '1:42:7', `${picked}: still chosen`);
+    const moved = focused.slice(before).includes('debugger-observations');
+    assert.equal(moved, picked === 'nothing', `${picked}: focus ${moved ? 'moved' : 'stayed'}`);
     ui.close();
   }
 });

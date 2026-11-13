@@ -168,6 +168,9 @@ function createWasmRunDialog({button, getSource}) {
     fact('Elapsed', `${record.elapsed_ms} ms`);
     if (record.memory_grow_denied) fact('Growth denied', `${record.memory_grow_denied} memory.grow call(s) past the limit returned -1`);
     fact('Record', `${record.run_id}${record.stored === false ? ` · not stored: ${record.store_error}` : ' · stored as a derived run'}`);
+    // What the backend trimmed so the record fits what an agent receives.
+    const trimmed = Array.isArray(record.size_trimmed) ? record.size_trimmed.filter(step => typeof step === 'string') : [];
+    if (trimmed.length) fact('Trimmed for size', trimmed.join('; '));
     rows.push(facts);
     const calls = Array.isArray(record.import_calls) ? record.import_calls : [];
     const callTitle = el('h3', '', `Import calls · ${Number(record.import_calls_total ?? 0).toLocaleString()} attempted${record.import_calls_truncated ? `, first ${calls.length} recorded` : ''}`);
@@ -184,6 +187,8 @@ function createWasmRunDialog({button, getSource}) {
         table.append(row);
       }
       rows.push(table);
+    } else if (record.import_calls_truncated && Number(record.import_calls_total) > 0) {
+      rows.push(el('p', 'wasm-run-hint', 'The import calls were omitted to fit the record; their count is above.'));
     } else rows.push(el('p', 'wasm-run-hint', 'No import was called.'));
     const reads = Array.isArray(record.memory_reads) ? record.memory_reads : [];
     if (reads.length) {

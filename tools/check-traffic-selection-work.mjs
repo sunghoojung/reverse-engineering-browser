@@ -115,7 +115,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000, extra =
     renderRequestScopes = (...args) => { stats.scopes++; return scopes(...args); };
   `;
   const added = ['selectTrafficRow', 'loadTrafficRequest', 'rebuildTrafficRequests', 'renderIndexedRequests', 'trafficIndexActive', 'createTrafficIndex',
-    'trafficIndexChanged', 'trafficIndexUnchecked'];
+    'trafficIndexChanged', 'trafficIndexUnchecked', 'trafficIndexRequest'];
   const rebuild = appSource.includes('      function rebuildTrafficRequests(') ? part(appSource, '      function rebuildTrafficRequests(', '      function renderShellStatus(') : '';
   const api = runInNewContext(trafficSource + '\n' +
     part(appSource, '      function requestDomain(', '      function requestTraceRoot(') + rebuild + instrument +
@@ -475,6 +475,19 @@ const pendingWindow = t => {
   t.api.rebuildTrafficRequests();
   assert.equal(shown().watch?.rule, 2, 'A later poll keeps the watch mark');
   assert.equal(t.state.requests.find(request => request.id === other.id).watch, null, 'Only the watched row is marked');
+  // A row the index answer does not hold (the debugger sidebar locates one
+  // outside Traffic's block): no rebuild can restore the mark, so the store
+  // read itself must carry it.
+  const located = indexFixture({windowCount: 1});
+  located.setIndexRows([]);
+  located.api.renderRequests(); await quiet();
+  located.api.loadTrafficRequest(located.api.trafficIndexRequest({...located.row(9, 2), watch}, 'live'), true);
+  await quiet();
+  located.pending[0].gate.resolve(located.answer({events: eventsOf('9', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(located.state.trafficIndex.row('request-9'), null, 'the index answer does not hold the row');
+  assert.equal(JSON.stringify(located.state.requests.find(request => request.id === 'request-9')?.watch), JSON.stringify(shownWatch),
+    'a located row read from the store is marked watched');
   // A rule the record's own decode names is never replaced.
   const decoded = {...shownWatch, rule: 4};
   t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, watch: request.id === whole.id ? decoded : null}));

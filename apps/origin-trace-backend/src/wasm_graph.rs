@@ -8,7 +8,7 @@
 //! whole-module structure.
 use crate::{
     error::{Error, Result},
-    evidence, validation, wasm,
+    evidence, validation, wasm, wasm_names,
 };
 use serde_json::Value;
 use std::{
@@ -93,6 +93,16 @@ struct Row {
 
 /// Lists a module's functions without decoding any instruction.
 pub fn function_index(root: &Path, id: &str) -> Result<String> {
+    function_index_named(root, id, None)
+}
+
+/// The function list with the researcher names of this module's functions as
+/// an `analyst_names` member beside the name-section `names`.
+pub(crate) fn function_index_named(
+    root: &Path,
+    id: &str,
+    analyst: Option<&wasm_names::Names>,
+) -> Result<String> {
     let artifact = artifact(root, id)?;
     let mut imported = 0u32;
     let mut types = Vec::new();
@@ -237,7 +247,16 @@ pub fn function_index(root: &Path, id: &str) -> Result<String> {
         "],\"omissions\":{},\"limits\":{{\"max_input_bytes\":{MAX_BYTES},\"max_index_bytes\":{MAX_INDEX_BYTES},\"max_name_bytes\":{MAX_NAME_BYTES}}},\"notice\":\"Static function list. Graphs are computed one function at a time.\"}}",
         serde_json::to_string(&omissions).expect("JSON strings"),
     );
-    Ok(out)
+    Ok(match (analyst, artifact.sha256.as_str()) {
+        (Some(names), Some(sha)) => wasm_names::append_members(
+            out,
+            &[(
+                "analyst_names",
+                names.module_member(sha, u64::from(imported) + types.len() as u64),
+            )],
+        ),
+        _ => out,
+    })
 }
 
 /// A name stays one inert line of bounded text, whatever the module supplied.
@@ -983,6 +1002,17 @@ fn json_string(out: &mut String, value: &str) {
 
 /// Basic blocks for one defined function, or a provider error a caller shows.
 pub fn function_graph(root: &Path, id: &str, function: u32) -> Result<String> {
+    function_graph_named(root, id, function, None)
+}
+
+/// The block graph with the function's researcher name as `analyst_name` and
+/// every name of its module as `analyst_names`, so a `call N` row resolves.
+pub(crate) fn function_graph_named(
+    root: &Path,
+    id: &str,
+    function: u32,
+    analyst: Option<&wasm_names::Names>,
+) -> Result<String> {
     let artifact = artifact(root, id)?;
     let started = Instant::now();
     let deadline = started + DEADLINE;
@@ -1018,7 +1048,19 @@ pub fn function_graph(root: &Path, id: &str, function: u32) -> Result<String> {
                     )));
                 }
                 let ty = types.get(position as usize - 1).copied();
-                return graph_document(&artifact, function, ty, &body, deadline);
+                let out = graph_document(&artifact, function, ty, &body, deadline)?;
+                let (Some(names), Some(sha)) = (analyst, artifact.sha256.as_str()) else {
+                    return Ok(out);
+                };
+                let mut members = Vec::new();
+                if let Some(name) = names.function(sha, function) {
+                    members.push(("analyst_name", serde_json::json!(name)));
+                }
+                members.push((
+                    "analyst_names",
+                    names.module_member(sha, u64::from(imported) + types.len() as u64),
+                ));
+                return Ok(wasm_names::append_members(out, &members));
             }
             Payload::End(_) => break,
             _ => {}

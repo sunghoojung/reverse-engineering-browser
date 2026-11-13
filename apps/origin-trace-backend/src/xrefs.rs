@@ -430,6 +430,8 @@ struct Row<'a> {
     operation: String,
     state: &'static str,
     target: Target<'a>,
+    /// The Wasm function this row names, in the module's full index space.
+    function: Option<u32>,
 }
 
 enum Target<'a> {
@@ -488,7 +490,7 @@ impl Row<'_> {
                 (evidence, ids, time.cloned().unwrap_or(Value::Null))
             }
         };
-        json!({
+        let mut row = json!({
             "direction": direction.key(),
             "kind": self.kind,
             "name": self.name,
@@ -499,7 +501,11 @@ impl Row<'_> {
             "evidence": evidence,
             "ids": ids,
             "time_ns": time,
-        })
+        });
+        if let Some(function) = self.function {
+            row["function_index"] = json!(function);
+        }
+        row
     }
 }
 
@@ -535,6 +541,7 @@ fn event_row<'a>(kind: &'static str, name: String, detail: String, event: &'a Va
         operation: event["type"].as_str().unwrap_or("event").to_owned(),
         state: "observed",
         target: Target::Event(event),
+        function: None,
     }
 }
 
@@ -977,8 +984,16 @@ fn artifact_plan(
         patterns.push(r#""parent_event_id":"?[1-9]"#.to_owned());
         patterns.push(r#""type":"gap""#.to_owned());
     }
+    let mut selection = resolved("artifact", label);
+    // The module digest and selected function are the researcher-name key.
+    if wasm.is_some() {
+        selection["wasm_sha256"] = json!(info.sha256);
+        if let Some(target) = wasm.as_ref().and_then(|module| module.target) {
+            selection["function_index"] = json!(target);
+        }
+    }
     Ok(Plan::Artifact {
-        selection: resolved("artifact", label),
+        selection,
         prefilter: compile(&patterns)?,
         session,
         session_text: session.to_string(),
@@ -1458,16 +1473,17 @@ fn classify_wasm(
         if function == u64::from(target) {
             facts.link_parents.insert((process, sequence));
             if let Some(caller) = direct {
-                let row = event_row(
+                let mut row = event_row(
                     "direct_caller",
                     function_name(caller),
                     format!("called this function · sample {sequence} · byte {offset}"),
                     event,
                 );
+                row.function = u32::try_from(caller).ok();
                 sinks[0].push(&row, Direction::In, needle);
             }
             if let Some(callee) = callee {
-                let row = event_row(
+                let mut row = event_row(
                     "indirect_call",
                     function_name(callee),
                     format!(
@@ -1476,22 +1492,24 @@ fn classify_wasm(
                     ),
                     event,
                 );
+                row.function = u32::try_from(callee).ok();
                 sinks[1].push(&row, Direction::Out, needle);
             }
             return;
         }
         if direct == Some(u64::from(target)) {
-            let row = event_row(
+            let mut row = event_row(
                 "direct_caller",
                 function_name(function),
                 format!("called by this function · sample {sequence}"),
                 event,
             );
+            row.function = u32::try_from(function).ok();
             sinks[1].push(&row, Direction::Out, needle);
             return;
         }
         if callee == Some(u64::from(target)) {
-            let row = event_row(
+            let mut row = event_row(
                 "indirect_call",
                 function_name(function),
                 format!(
@@ -1500,6 +1518,7 @@ fn classify_wasm(
                 ),
                 event,
             );
+            row.function = u32::try_from(function).ok();
             sinks[0].push(&row, Direction::In, needle);
         }
         return;
@@ -1557,6 +1576,7 @@ fn static_rows(plan: &Plan, stores: &Stores, sinks: &mut [Sink; 2], needle: &str
                     operation: "dispatch_sample".to_owned(),
                     state: "observed",
                     target: Target::Sample(reference, sample.get("monotonic_time_ns")),
+                    function: None,
                 };
                 sinks[0].push(&row, Direction::In, needle);
             }
@@ -1652,6 +1672,7 @@ fn artifact_row<'a>(
             info,
             byte_offset,
         },
+        function: None,
     }
 }
 
@@ -1676,7 +1697,7 @@ fn emit_wasm_static(
                     let (offset, import) = entry;
                     if matches!(import.ty, TypeRef::Func(_)) {
                         let name = format!("{}.{}", import.module, import.name);
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_import",
                             name,
                             format!("import · func {index}"),
@@ -1685,6 +1706,7 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(index);
                         sinks[1].push(&row, Direction::Out, needle);
                         index += 1;
                     }
@@ -1696,7 +1718,7 @@ fn emit_wasm_static(
                     if export.kind == ExternalKind::Func
                         && target.is_none_or(|target| export.index == target)
                     {
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_export",
                             export.name.to_owned(),
                             format!("export · func {}", export.index),
@@ -1705,6 +1727,7 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(export.index);
                         sinks[0].push(&row, Direction::In, needle);
                     }
                 }
@@ -1729,7 +1752,7 @@ fn emit_wasm_static(
                         _ => continue,
                     };
                     if callee == target {
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_call",
                             module.function_name(caller),
                             format!("calls this function · byte {offset}"),
@@ -1738,10 +1761,11 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(caller);
                         sinks[0].push(&row, Direction::In, needle);
                     }
                     if caller == target {
-                        let row = artifact_row(
+                        let mut row = artifact_row(
                             "wasm_call",
                             module.function_name(callee),
                             format!("call · byte {offset}"),
@@ -1750,6 +1774,7 @@ fn emit_wasm_static(
                             info,
                             Some(offset as u32),
                         );
+                        row.function = Some(callee);
                         sinks[1].push(&row, Direction::Out, needle);
                     }
                 }

@@ -3942,9 +3942,14 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
         .output()
         .unwrap();
     assert!(output.status.success());
+    // The native helper has no Analyst library; only the loopback route joins
+    // researcher names, so its status member is the one difference.
+    let mut joined = report.clone();
+    assert_eq!(joined["analyst_names"]["status"], "none");
+    joined.as_object_mut().unwrap().remove("analyst_names");
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        report
+        joined
     );
     // Names may contain newlines. They must not create additional display rows
     // and silently shift instruction links to unrelated original bytes.
@@ -4164,9 +4169,11 @@ async fn wasm_graph_routes_are_bounded_read_only_and_refuse_bad_input() {
         .output()
         .unwrap();
     assert!(output.status.success());
+    let mut joined = graph.clone();
+    joined.as_object_mut().unwrap().remove("analyst_names");
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        graph
+        joined
     );
     // A body whose final end became a nop is malformed, and the route says so.
     let mut bad = bytes.clone();
@@ -4184,6 +4191,304 @@ async fn wasm_graph_routes_are_bounded_read_only_and_refuse_bad_input() {
     server.file(&format!("artifacts/blobs/{hash}.bin"), &bad);
     let response = server.get("/api/wasm/graph?artifact_id=3&function=1").await;
     assert_eq!(response.status().as_u16(), 422);
+}
+
+#[tokio::test]
+async fn wasm_function_names_join_every_wasm_read_and_never_replace_captured_names() {
+    let server = Server::start().await;
+    let bytes = wat::parse_str(
+        r#"(module (import "env" "log" (func (param i32)))
+            (func $helper (result i32) i32.const 7)
+            (func (export "run") (result i32) call $helper))"#,
+    )
+    .unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    server.file("events.jsonl", b"");
+    // Unnamed: every read says there is no names document and joins nothing.
+    let body = assert_contract_response(
+        server.get("/api/wasm?artifact_id=1").await,
+        "get",
+        "/api/wasm",
+        200,
+    )
+    .await;
+    let report: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(report["analyst_names"]["status"], "none");
+    assert!(
+        report["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("analyst_name").is_none())
+    );
+    let call = report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["text"].as_str().is_some_and(|t| t.starts_with("call ")))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        call["target_function_index"], 1,
+        "A direct callee is structure"
+    );
+    // An unrelated Analyst file must survive the narrow write.
+    let notes = json!({"action":"replace_local_analyst_workspace","expected_generation":0,
+        "folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
+        "files":[{"id":4,"folder_id":1,"name":"notes.md","kind":"scratchpad","language":"markdown","content":"keep"}]});
+    assert_eq!(
+        server
+            .action("/api/local-analyst/actions", notes)
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+    let set = |function: u32, name: &str, expected: Value| json!({"action":"set_wasm_function_name","sha256":hash,"function":function,"name":name,"expected_name":expected});
+    let body = assert_contract_response(
+        server
+            .action(
+                "/api/local-analyst/actions",
+                set(1, "encode_payload", Value::Null),
+            )
+            .await,
+        "post",
+        "/api/local-analyst/actions",
+        200,
+    )
+    .await;
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["key"], format!("wasm-function:{hash}:1"));
+    assert_eq!(result["changed"], true);
+    assert_contract_response(
+        server
+            .action(
+                "/api/local-analyst/actions",
+                set(0, "host_log", Value::Null),
+            )
+            .await,
+        "post",
+        "/api/local-analyst/actions",
+        200,
+    )
+    .await;
+    // A stale expectation writes nothing.
+    assert_contract_response(
+        server
+            .action("/api/local-analyst/actions", set(1, "other", Value::Null))
+            .await,
+        "post",
+        "/api/local-analyst/actions",
+        409,
+    )
+    .await;
+    for bad in [
+        json!({"action":"set_wasm_function_name","sha256":"ABC","function":1,"name":"x"}),
+        json!({"action":"set_wasm_function_name","sha256":hash,"function":-1,"name":"x"}),
+        json!({"action":"set_wasm_function_name","sha256":hash,"function":1,"name":"a\u{202e}b"}),
+        json!({"action":"set_wasm_function_name","sha256":hash,"function":1,"name":"x","extra":1}),
+    ] {
+        assert_contract_response(
+            server.action("/api/local-analyst/actions", bad).await,
+            "post",
+            "/api/local-analyst/actions",
+            400,
+        )
+        .await;
+    }
+    let library: Value = server.get("/api/local-analyst").await.json().await.unwrap();
+    assert!(
+        library["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["content"] == "keep")
+    );
+    // Inspect: headers by function_index, call rows by their target.
+    let body = assert_contract_response(
+        server.get("/api/wasm?artifact_id=1").await,
+        "get",
+        "/api/wasm",
+        200,
+    )
+    .await;
+    let report: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(report["analyst_names"]["status"], "ready");
+    assert_eq!(
+        report["analyst_names"]["functions"],
+        json!([[0, "host_log"], [1, "encode_payload"]])
+    );
+    let rows = report["rows"].as_array().unwrap();
+    let header = rows
+        .iter()
+        .find(|row| row["kind"] == "function" && row["function_index"] == 1)
+        .unwrap();
+    assert_eq!(header["analyst_name"], "encode_payload");
+    assert_eq!(
+        header["text"], "func 1 (type 1)",
+        "Captured text is unchanged"
+    );
+    let import = rows.iter().find(|row| row["kind"] == "import").unwrap();
+    assert_eq!(import["analyst_name"], "host_log");
+    let call = rows
+        .iter()
+        .find(|row| row["target_function_index"] == 1)
+        .unwrap();
+    assert_eq!(call["target_analyst_name"], "encode_payload");
+    assert!(
+        call.get("analyst_name").is_none(),
+        "A body row is not its function's header"
+    );
+    let windowed: Value = server
+        .get("/api/wasm?artifact_id=1&row_offset=0&row_limit=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        windowed["analyst_names"]["functions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "A row window keeps the module's names"
+    );
+    // The function list keeps captured names separate.
+    let body = assert_contract_response(
+        server.get("/api/wasm/functions?artifact_id=1").await,
+        "get",
+        "/api/wasm/functions",
+        200,
+    )
+    .await;
+    let index: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        index["names"],
+        json!([[1, "helper"], [2, "run"]]),
+        "The name section stays as decoded"
+    );
+    assert_eq!(
+        index["analyst_names"]["functions"],
+        json!([[0, "host_log"], [1, "encode_payload"]])
+    );
+    let body = assert_contract_response(
+        server.get("/api/wasm/graph?artifact_id=1&function=1").await,
+        "get",
+        "/api/wasm/graph",
+        200,
+    )
+    .await;
+    let graph: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(graph["analyst_name"], "encode_payload");
+    let body = assert_contract_response(
+        server.get("/api/wasm/graph?artifact_id=1&function=2").await,
+        "get",
+        "/api/wasm/graph",
+        200,
+    )
+    .await;
+    let graph: Value = serde_json::from_slice(&body).unwrap();
+    assert!(graph.get("analyst_name").is_none());
+    assert_eq!(
+        graph["analyst_names"]["functions"][1],
+        json!([1, "encode_payload"])
+    );
+    // Cross-references: the selected function and the rows that name one.
+    let helper_offset = index["functions"][0][1].as_u64().unwrap();
+    let route =
+        format!("/api/xrefs?kind=artifact&session_id=1&artifact_id=1&byte_offset={helper_offset}");
+    let body = assert_contract_response(server.get(&route).await, "get", "/api/xrefs", 200).await;
+    let xrefs: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(xrefs["selection"]["wasm_sha256"], hash);
+    assert_eq!(xrefs["selection"]["function_index"], 1);
+    assert_eq!(xrefs["selection"]["analyst_name"], "encode_payload");
+    let caller = xrefs["pages"]["in"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "wasm_call")
+        .unwrap();
+    assert_eq!(caller["function_index"], 2);
+    assert_eq!(
+        caller["name"], "run",
+        "The captured export name stays the row name"
+    );
+    assert!(caller.get("analyst_name").is_none());
+    // Other bytes are another module: no name follows a different digest.
+    let other = wat::parse_str(r#"(module (func) (func (export "x")))"#).unwrap();
+    let other_hash = hex::encode(Sha256::digest(&other));
+    let second = json!({"protocol_version":1,"artifact_id":"2","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":other.len(),"sha256":other_hash,"sensitive":false,"content_path":format!("blobs/{other_hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n{second}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{other_hash}.bin"), &other);
+    let report: Value = server
+        .get("/api/wasm?artifact_id=2")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(report["analyst_names"]["functions"], json!([]));
+    // Clearing the last name returns the document to version 1.
+    for (function, name) in [(1, "encode_payload"), (0, "host_log")] {
+        assert_contract_response(
+            server
+                .action("/api/local-analyst/actions", set(function, "", json!(name)))
+                .await,
+            "post",
+            "/api/local-analyst/actions",
+            200,
+        )
+        .await;
+    }
+    let report: Value = server
+        .get("/api/wasm?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(report["analyst_names"]["functions"], json!([]));
+    // A malformed names document joins nothing and is never overwritten.
+    let library: Value = server.get("/api/local-analyst").await.json().await.unwrap();
+    let mut files: Vec<Value> = library["files"].as_array().unwrap().iter().map(|file| json!({"id":file["id"],"folder_id":file["folder_id"],"name":file["name"],"kind":file["kind"],"language":file["language"],"content":file["content"]})).collect();
+    for file in &mut files {
+        if file["name"] == "Evidence names.reb-names.json" {
+            file["content"] =
+                json!("{\"document_kind\":\"reb-evidence-names\",\"contract_version\":9}");
+        }
+    }
+    let replace = json!({"action":"replace_local_analyst_workspace","expected_generation":library["generation"],"folders":library["folders"],"files":files});
+    assert_eq!(
+        server
+            .action("/api/local-analyst/actions", replace)
+            .await
+            .status()
+            .as_u16(),
+        200
+    );
+    let report: Value = server
+        .get("/api/wasm?artifact_id=1")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(report["analyst_names"]["status"], "malformed");
+    assert_contract_response(
+        server
+            .action("/api/local-analyst/actions", set(1, "x", Value::Null))
+            .await,
+        "post",
+        "/api/local-analyst/actions",
+        409,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -4382,7 +4687,10 @@ async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out(
         assert!(output.status.success());
         serde_json::from_slice(&output.stdout).unwrap()
     };
-    assert_eq!(cli(&["--sections", "data,custom"]), late);
+    // Only the loopback route joins researcher names.
+    let mut joined = late.clone();
+    joined.as_object_mut().unwrap().remove("analyst_names");
+    assert_eq!(cli(&["--sections", "data,custom"]), joined);
     assert_eq!(
         cli(&["--sections", "exports"])["status"],
         400,

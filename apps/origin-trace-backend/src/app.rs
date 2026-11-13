@@ -39,7 +39,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 71] = [
+const UI_ASSETS: [&str; 72] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -75,6 +75,7 @@ const UI_ASSETS: [&str; 71] = [
     "investigation_navigation.js",
     "investigation_notebook.js",
     "evidence_names.js",
+    "wasm_function_names.js",
     "invocation_sites.js",
     "request_stack.js",
     "debugger_pause.js",
@@ -182,6 +183,8 @@ pub struct App {
     gaps: Arc<crate::gap_tally::GapTally>,
     /// The last flow graph and the store snapshot it describes.
     flow_graph: Arc<crate::flow_graph::Cache>,
+    /// Researcher Wasm function names, reread only when the library changes.
+    wasm_names: Arc<crate::wasm_names::Cache>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
@@ -293,6 +296,7 @@ impl App {
             xrefs: Arc::default(),
             gaps: Arc::default(),
             flow_graph: Arc::default(),
+            wasm_names: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
@@ -452,21 +456,30 @@ impl App {
         }
         let id = q.required("artifact_id")?.to_owned();
         let root = self.options.artifacts.clone();
+        let names = self.names_reader();
         let document = if path == "/api/wasm/functions" {
             if q.one("function")?.is_some() {
                 return Err(Error::bad("The WASM function list takes only artifact_id"));
             }
-            self.blocking(move || wasm_graph::function_index(&root, &id))
+            self.blocking(move || wasm_graph::function_index_named(&root, &id, Some(&names())))
                 .await?
         } else {
             let function = q
                 .required("function")?
                 .parse::<u32>()
                 .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
-            self.blocking(move || wasm_graph::function_graph(&root, &id, function))
-                .await?
+            self.blocking(move || {
+                wasm_graph::function_graph_named(&root, &id, function, Some(&names()))
+            })
+            .await?
         };
         Ok(([("content-type", "application/json")], document).into_response())
+    }
+    /// Reads the researcher Wasm names on a blocking thread: one `stat` while
+    /// the library is unchanged, a bounded reread when it changed.
+    fn names_reader(&self) -> impl Fn() -> Arc<crate::wasm_names::Names> + Send + 'static {
+        let (cache, store) = (self.wasm_names.clone(), self.workspace.clone());
+        move || cache.get(&store)
     }
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
@@ -599,11 +612,13 @@ impl App {
                     None
                 };
                 let root = self.options.artifacts.clone();
+                let names = self.names_reader();
                 self.blocking(move || {
                     let mut document = wasm::load(&root, &id, sections.as_ref())?;
                     if let Some((offset, limit)) = window {
                         wasm::window(&mut document, offset, limit)?;
                     }
+                    crate::wasm_names::annotate_inspection(&mut document, &names());
                     Ok(document)
                 })
                 .await?
@@ -806,16 +821,21 @@ impl App {
                     self.options.artifacts.clone(),
                     self.requests.clone(),
                 );
-                self.blocking(move || match name {
-                    "navigation_sequence" => crate::request_stack::navigation_document(
-                        &store, &artifacts, &requests, session, process, value,
-                    ),
-                    "observation_sequence" => crate::request_stack::observation_document(
-                        &store, &artifacts, &requests, session, process, value,
-                    ),
-                    _ => crate::request_stack::document(
-                        &store, &artifacts, &requests, session, process, value,
-                    ),
+                let names = self.names_reader();
+                self.blocking(move || {
+                    let mut document = match name {
+                        "navigation_sequence" => crate::request_stack::navigation_document(
+                            &store, &artifacts, &requests, session, process, value,
+                        ),
+                        "observation_sequence" => crate::request_stack::observation_document(
+                            &store, &artifacts, &requests, session, process, value,
+                        ),
+                        _ => crate::request_stack::document(
+                            &store, &artifacts, &requests, session, process, value,
+                        ),
+                    }?;
+                    crate::wasm_names::annotate_request_stack(&mut document, &names());
+                    Ok(document)
                 })
                 .await?
             }
@@ -1367,8 +1387,12 @@ impl App {
                 // A client that moved on leaves no scan running.
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                let names = self.names_reader();
                 let graph = self
-                    .blocking(move || crate::flow_graph::run(&stores, session, &cache, &cancel))
+                    .blocking(move || {
+                        let graph = crate::flow_graph::run(&stores, session, &cache, &cancel)?;
+                        crate::wasm_names::annotate_flow_graph_bytes(graph, &names())
+                    })
                     .await?;
                 return Ok(bytes_response(graph, "application/json"));
             }
@@ -1401,8 +1425,12 @@ impl App {
                 // leaves no read running.
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                let names = self.names_reader();
                 self.blocking(move || {
-                    crate::xrefs::run(&query, &stores, &cursors, handler, &cancel)
+                    let mut document =
+                        crate::xrefs::run(&query, &stores, &cursors, handler, &cancel)?;
+                    crate::wasm_names::annotate_xrefs(&mut document, &names());
+                    Ok(document)
                 })
                 .await?
             }
@@ -1961,6 +1989,12 @@ impl App {
                     let store = self.workspace.clone();
                     let workspace = self.blocking(move || store.load()).await?;
                     self.analyst.run(value, &workspace).await
+                }
+                "set_wasm_function_name" => {
+                    let store = self.workspace.clone();
+                    let value = value.clone();
+                    self.blocking(move || crate::wasm_names::set_function_name(&store, &value))
+                        .await
                 }
                 "cancel_local_analyst_script" => {
                     validation::fields(value, &["action", "run_id"], "Analyst cancellation")?;

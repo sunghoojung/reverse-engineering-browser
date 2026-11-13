@@ -1657,11 +1657,9 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
         .unwrap_or_default();
     let inputs_digest = request.digest();
     record["schema"] = json!(SCHEMA);
-    record["run_id"] = json!(format!(
-        "wr-{}-{}",
-        created.as_millis(),
-        &inputs_digest[..12]
-    ));
+    // A random nonce: an identifier derived from the inputs would let anyone
+    // who sees it test guesses at those inputs.
+    record["run_id"] = json!(format!("wr-{}-{}", created.as_millis(), nonce()));
     record["record_class"] = json!("derived_experiment");
     record["created_at_ms"] = json!(created.as_millis() as u64);
     record["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
@@ -1731,6 +1729,96 @@ fn unreadable() -> Error {
 
 /// Keeps the newest runs. A run is derived, not evidence, so the oldest is
 /// evicted at capacity, and `evicted_runs` counts every eviction.
+/// 96 random bits from the operating system, as hex. If that source is
+/// unreadable, a randomly keyed hash of the time and a counter stands in: it is
+/// still unrelated to the run's inputs.
+fn nonce() -> String {
+    use std::io::Read as _;
+    let mut bytes = [0u8; 12];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .is_ok()
+    {
+        return hex::encode(bytes);
+    }
+    use std::hash::{BuildHasher, Hasher};
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    );
+    hasher.write_u64(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    format!("{:016x}", hasher.finish())
+}
+
+/// Renames `from` to `to` only if `to` does not exist, atomically where the
+/// system offers it.
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(from.as_os_str().as_bytes())?;
+        let target = std::ffi::CString::new(to.as_os_str().as_bytes())?;
+        #[cfg(target_os = "macos")]
+        let status = unsafe {
+            libc::renameatx_np(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        #[cfg(target_os = "linux")]
+        let status = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // A hard link fails when the target exists, so nothing is replaced.
+        std::fs::hard_link(from, to)?;
+        std::fs::remove_file(from)
+    }
+}
+
+/// Moves an unreadable store aside under a name that does not exist yet, and
+/// returns that name. An existing file is never replaced: a name in use gets a
+/// counter suffix.
+fn move_aside(path: &Path, millis: u128) -> Result<String> {
+    for attempt in 0..1000u32 {
+        let name = if attempt == 0 {
+            format!("wasm-runs-v1.json.unreadable-{millis}")
+        } else {
+            format!("wasm-runs-v1.json.unreadable-{millis}-{attempt}")
+        };
+        match rename_no_replace(path, &path.with_file_name(&name)) {
+            Ok(()) => return Ok(name),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(Error::new(
+        500,
+        "Could not find a free name to move the unreadable run store aside",
+    )
+    .with_code(Code::ArtifactIntegrity))
+}
+
 /// Returns a notice when an unreadable store was moved aside. Its bytes are
 /// kept under a new name, never overwritten, and the run that moved it says so.
 fn persist(root: &Path, record: &Value) -> Result<Option<String>> {
@@ -1743,8 +1831,7 @@ fn persist(root: &Path, record: &Value) -> Result<Option<String>> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis();
-            let name = format!("wasm-runs-v1.json.unreadable-{millis}");
-            std::fs::rename(&path, path.with_file_name(&name))?;
+            let name = move_aside(&path, millis)?;
             (
                 decode(None)?,
                 Some(format!(
@@ -2505,6 +2592,74 @@ mod tests {
                 "{ty} {text}"
             );
         }
+    }
+
+    #[test]
+    fn moving_an_unreadable_store_aside_never_replaces_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path().join("wasm-runs-v1.json");
+        let taken = directory.path().join("wasm-runs-v1.json.unreadable-7");
+        std::fs::write(&taken, b"an earlier unreadable store").unwrap();
+        std::fs::write(&store, b"{not json").unwrap();
+        let name = move_aside(&store, 7).unwrap();
+        assert_eq!(name, "wasm-runs-v1.json.unreadable-7-1");
+        assert_eq!(
+            std::fs::read(&taken).unwrap(),
+            b"an earlier unreadable store"
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(&name)).unwrap(),
+            b"{not json"
+        );
+        assert!(!store.exists());
+    }
+
+    #[test]
+    fn a_run_id_is_random_not_derived_from_the_inputs() {
+        // run_id carried 48 bits of inputs_digest, which a reader could test
+        // guesses at the inputs against.
+        let (request, limits) = request(json!({}));
+        let first = run_blocking_record(&request, limits);
+        let second = run_blocking_record(&request, limits);
+        assert_eq!(
+            first["provenance"]["inputs_digest"],
+            second["provenance"]["inputs_digest"]
+        );
+        let digest = first["provenance"]["inputs_digest"].as_str().unwrap();
+        for record in [&first, &second] {
+            let id = record["run_id"].as_str().unwrap();
+            assert!(!id.contains(&digest[..12]), "{id}");
+            assert_eq!(id.rsplit('-').next().unwrap().len(), 24, "{id}");
+        }
+        assert_ne!(first["run_id"], second["run_id"]);
+    }
+
+    /// The record run_blocking builds for one artifact in a fresh store.
+    fn run_blocking_record(request: &Request, limits: Limits) -> Value {
+        let directory = tempfile::tempdir().unwrap();
+        let bytes = module(&fixture("arith.wat"));
+        let hash = hex::encode(Sha256::digest(&bytes));
+        std::fs::create_dir_all(directory.path().join("blobs")).unwrap();
+        std::fs::write(directory.path().join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+        let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/a.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+        std::fs::write(
+            directory.path().join("manifest.jsonl"),
+            format!("{artifact}\n"),
+        )
+        .unwrap();
+        let mut request = request.clone();
+        request.sha256 = hash;
+        request.args = vec![
+            Typed {
+                ty: "i32".into(),
+                value: "1".into(),
+            },
+            Typed {
+                ty: "i32".into(),
+                value: "2".into(),
+            },
+        ];
+        run_blocking(directory.path(), &request, limits).unwrap()
     }
 
     #[test]

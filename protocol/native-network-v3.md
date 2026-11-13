@@ -1024,13 +1024,17 @@ all of these hold:
    copy fits what is left of the budget. Snapshots are charged to the budget;
    a receiver refusal refunds them.
 
-A snapshot the spacing holds back is not left waiting for the next chunk: the
-first chunk that arrives too soon posts one delayed task on the capture's
-sequence for the time the spacing allows, which takes the snapshot then if the
-body is still open and the byte bounds allow it. The task finds the body by
-key and capture ID, as the completion wait does, so a body that ended or a new
-configuration leaves it nothing to do. A burst followed by silence is therefore
-published within the spacing.
+A snapshot the spacing holds back, or one only the body's paced allowance
+holds back, is not left waiting for the next chunk: the first chunk that
+arrives too soon posts one delayed task on the capture's sequence for the time
+the spacing, or the pace, allows. The task takes the snapshot then if the body
+is still open and the byte bounds allow it, or posts again for the next such
+time; a body has at most one pending. It finds the body by key and capture ID,
+as the completion wait does, so a body that ended or a new configuration
+leaves it nothing to do. A burst followed by silence is therefore published
+within the spacing, or once the session has run long enough for the body's
+pace to allow it. A snapshot the session quarter or the budget withholds waits
+for the next chunk, because time alone frees neither.
 
 A snapshot the spacing allows but a byte bound withholds (the body's
 allowance, the session's quarter, or the budget) is not taken, and the
@@ -1056,7 +1060,7 @@ few bytes every 15 to 30 s. In a one-hour session with the default budget:
 | Stream | Snapshots | Copied | Newest snapshot at most |
 | --- | ---: | ---: | --- |
 | 60 KB/s | 33 | 58 MiB | 82 s old, then sealed after 279 s |
-| 3.6 KB/s | 93 | 57 MiB | 810 s old |
+| 3.6 KB/s | 93 | 57 MiB | 807 s old |
 | 10 KB/s for 60 s | 50 | 12 MiB | 1 s old |
 | a heartbeat every 15 s | 84 | 0 MiB | 105 s old |
 

@@ -1540,7 +1540,13 @@ if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
   labels+=(--js-invocation-session-sites "$REB_NATIVE_JS_INVOCATION_SITES" --js-invocation-session-state armed)
   [[ "$REB_NATIVE_JS_INVOCATION_DIGESTS" == 1 ]] && labels+=(--js-invocation-session-digests)
 fi
-[[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]] && labels+=(--session-request-content)
+# The real launcher's labels: a content session's limits, with its defaults.
+if [[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]]; then
+  labels+=(--session-request-content
+    --session-request-content-budget-mib "${{REB_REQUEST_CONTENT_BUDGET_MIB:-256}}"
+    --session-response-body-budget-mib "${{REB_RESPONSE_BODY_BUDGET_MIB:-512}}"
+    --session-response-media "${{REB_CAPTURE_RESPONSE_MEDIA:-0}}")
+fi
 [[ "$REB_CONSOLE_DOCUMENT_START" == 1 ]] && labels+=(--session-document-start)
 [[ "${{REB_NATIVE_REQUEST_STACKS-0}}" == 1 ]] && labels+=(--session-request-stacks)
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
@@ -1757,7 +1763,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     assert_eq!(context["live_admission"], "ready");
     assert_eq!(
         context["capture_options"],
-        json!({"source":"launcher","request_content":false,"canvas_images":false,
+        json!({"source":"launcher","request_content":false,"content_limits":null,"canvas_images":false,
             "request_stacks":false,"document_start":"not_permitted",
             "js_invocation":{"state":"not_armed","count":0,"digests":false}})
     );
@@ -1923,7 +1929,8 @@ fn agent_session_options_are_named_never_inherited() {
     let started = call(
         &mut mcp,
         json!({"document_start": true, "request_content": true,
-            "request_content_budget_mib": 64, "request_stacks": true,
+            "request_content_budget_mib": 64, "response_body_budget_mib": 1024,
+            "response_media": true, "request_stacks": true,
             "confirm_sensitive_capture": true, "js_invocation_sites": agent_file,
             "timeout_seconds": 30}),
     );
@@ -1940,6 +1947,8 @@ fn agent_session_options_are_named_never_inherited() {
         ("document_start", json!(true)),
         ("request_content", json!(true)),
         ("request_content_budget_mib", json!(64)),
+        ("response_body_budget_mib", json!(1024)),
+        ("response_media", json!(true)),
         ("request_stacks", json!(true)),
         ("js_invocation_saved_sites", json!(false)),
         ("js_invocation_digests", json!(false)),
@@ -1982,8 +1991,10 @@ fn agent_session_options_are_named_never_inherited() {
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
     assert_eq!(
         context["capture_options"],
-        json!({"source":"launcher","request_content":true,"canvas_images":false,
-            "request_stacks":true,"document_start":"permitted",
+        json!({"source":"launcher","request_content":true,
+            "content_limits":{"version":1,"request_content_budget_mib":64,
+                "response_body_budget_mib":1024,"response_media":true},
+            "canvas_images":false,"request_stacks":true,"document_start":"permitted",
             "js_invocation":{"state":"armed","count":1,"digests":false}})
     );
 
@@ -2034,6 +2045,7 @@ fn agent_session_options_are_named_never_inherited() {
         "not_permitted"
     );
     assert_eq!(context["capture_options"]["request_content"], false);
+    assert_eq!(context["capture_options"]["content_limits"], Value::Null);
     assert_eq!(context["capture_options"]["request_stacks"], false);
 
     let ended = mcp.request(

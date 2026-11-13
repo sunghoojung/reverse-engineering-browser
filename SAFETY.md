@@ -142,14 +142,17 @@ it.
   paths, queries and body bytes are sensitive capture: they are retained only
   with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
   mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
-  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` sets another
-  budget. Those bytes include uploaded files, blobs and stream bodies, which the
+  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` or the start panel's
+  **Request content budget** sets another, from 1 MiB to 4 GiB. Those bytes
+  include uploaded files, blobs and stream bodies, which the
   browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
   sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
   bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget, including
   partial copies of bodies still arriving, which use at most a quarter of it; images,
   audio, video and fonts that page elements load need
-  `REB_CAPTURE_RESPONSE_MEDIA=1`. See [Native network v3](protocol/native-network-v3.md).
+  `REB_CAPTURE_RESPONSE_MEDIA=1` or the start panel's **Capture media and
+  fonts**, and the panel's **Response body budget** sets that budget, from
+  1 MiB to 16 GiB. See [Native network v3](protocol/native-network-v3.md).
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
   ([request index v1](protocol/request-index-v1.md)).

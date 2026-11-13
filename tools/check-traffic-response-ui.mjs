@@ -141,9 +141,11 @@ assert.equal(api.responseBodyCase({...leftWindow, responseStarted: {sequenceNumb
   bodyLength: '0', capturedLength: '0'})}), 'empty', 'loaded records that hold the body record decide');
 const states = {captured_truncated: /16 MiB capture limit/, partial: /had arrived, at snapshot 2\. All of them are retained/,
   aborted: /network failed mid-body/, cancelled: /stopped reading/, empty: /Empty body/, not_modified: /304/,
-  redirected: /discards redirect bodies/, not_captured_type: /REB_CAPTURE_RESPONSE_MEDIA=1/,
+  redirected: /discards redirect bodies/,
+  // The remedy is the start panel control for the next session, never an environment variable.
+  not_captured_type: /^Not retained: images, audio, video and fonts that page elements load are kept only when Capture media and fonts is on in New Live Session…, for the next session\.$/,
   not_captured_artifact_unavailable: /artifact channel/, not_captured_transfer_refused: /in-flight memory/,
-  not_captured_session_budget: /REB_RESPONSE_BODY_BUDGET_MIB/};
+  not_captured_session_budget: /^Not retained: this session had used its response body budget\. Raise Response body budget in New Live Session… for the next session\.$/};
 for (const [name, pattern] of Object.entries(states)) {
   assert.match(capture({responseBody: record(null, {state: name, partialIndex: 2, bodyLength: '9', capturedLength: '9'})}, true), pattern, name);
 }

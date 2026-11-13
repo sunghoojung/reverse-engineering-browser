@@ -214,7 +214,7 @@
       "get": {
         "operationId": "get_session_context",
         "summary": "Get compact session context and capture options",
-        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and up to 16 retained Wasm artifacts from a 256 KiB manifest tail, without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
+        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, content_limits with the content session's budgets and media choice, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and up to 16 retained Wasm artifacts from a 256 KiB manifest tail, without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
         "tags": [
           "health"
         ],
@@ -26951,6 +26951,50 @@
                 "type": "boolean",
                 "description": "Request paths, queries, headers and bodies, and response bodies, are retained (request_target, request_headers, response_headers and response_body events, request_body, header and response_body artifacts)."
               },
+              "content_limits": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "required": [
+                  "version",
+                  "request_content_budget_mib",
+                  "response_body_budget_mib",
+                  "response_media"
+                ],
+                "description": "Version 1 of the limits a content session runs with, named as the LiveSessionStart options: set by the app's start panel, the start options or the launcher's REB_REQUEST_CONTENT_BUDGET_MIB, REB_RESPONSE_BODY_BUDGET_MIB and REB_CAPTURE_RESPONSE_MEDIA. Null when request_content is false or the backend is not live. Not required: a backend from before this object omits it, which a reader treats as not reported; every backend that knows it reports it.",
+                "properties": {
+                  "version": {
+                    "const": 1
+                  },
+                  "request_content_budget_mib": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1,
+                    "maximum": 4096,
+                    "description": "MiB of unique request bodies and full targets this session keeps. Null when the launcher did not name it."
+                  },
+                  "response_body_budget_mib": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1,
+                    "maximum": 16384,
+                    "description": "MiB of unique response bodies this session keeps. Null when the launcher did not name it."
+                  },
+                  "response_media": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ],
+                    "description": "Element images, audio, video and fonts are kept too, against the response body budget. Null when the launcher did not name the choice."
+                  }
+                }
+              },
               "canvas_images": {
                 "type": "boolean"
               },
@@ -35768,6 +35812,22 @@
                 "lists": {
                   "$ref": "#/components/schemas/Uint64String",
                   "description": "network_headers_unattributed: cookie lists that arrived for a request no longer tracked."
+                },
+                "budget_mib": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1,
+                  "description": "On a request_content_not_retained check for a session budget: the budget in force in MiB, as get_session_context capture_options.content_limits reports it, or null when this backend does not know it."
+                },
+                "retained_bytes": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "On a session budget check: the unique bytes of that budget's artifacts (request_body and request_target, or response_body) in the scanned manifest, identical content counted once as the browser charges it."
+                },
+                "retained_complete": {
+                  "type": "boolean",
+                  "description": "False when the manifest scan stopped at its bound, so retained_bytes is a lower bound."
                 }
               }
             }

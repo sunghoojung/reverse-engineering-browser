@@ -44,6 +44,7 @@
 
 .session-panel-modes { min-width: 0; margin: 0; padding: 0; border: 0; display: grid; gap: 6px; }
 .session-panel-modes > legend { margin-bottom: 6px; }
+.session-panel-mode-note { margin: -2px 0 2px; color: var(--muted); font-size: 12px; }
 .session-panel-mode { min-width: 0; display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px;
   border: 1px solid var(--line-soft); border-radius: 10px; cursor: pointer; }
 .session-panel-mode:hover { border-color: var(--line); }
@@ -54,6 +55,27 @@
 .session-panel-mode-text { min-width: 0; display: grid; gap: 2px; }
 .session-panel-mode-name { color: var(--text); font: 500 12.5px/1.4 var(--sans); }
 .session-panel-mode-detail { color: var(--muted); font: 12px/1.45 var(--sans); overflow-wrap: anywhere; }
+
+/* A Content session's limits: a label and a short MiB field on one line, the
+ * meaning below, so nothing widens the panel at the minimum window. */
+.session-panel-limits { min-width: 0; margin: 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line-soft); display: grid; gap: 8px; }
+.session-panel-limits > legend { float: left; width: 100%; margin-bottom: 0; }
+.session-panel-limits > legend + * { clear: both; }
+.session-panel-limit { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; row-gap: 2px; }
+.session-panel-limit-name { min-width: 0; color: var(--text); font: 500 12.5px/1.4 var(--sans); }
+.session-panel-limit-field { display: inline-flex; align-items: center; gap: 6px; }
+.session-panel-limit-input { box-sizing: border-box; width: 76px; height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--session-raised); color: var(--text); font: 12.5px/1 var(--mono); text-align: right; }
+.session-panel-limit-input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.session-panel-limit-input[aria-invalid="true"] { border-color: var(--red); }
+.session-panel-limit-input:disabled { color: var(--faint); }
+.session-panel-limit-unit { color: var(--muted); font: 12px/1 var(--sans); }
+.session-panel-limit-detail, .session-panel-limit-error { grid-column: 1 / -1; min-width: 0; font: 12px/1.45 var(--sans); overflow-wrap: anywhere; }
+.session-panel-limit-detail { color: var(--muted); }
+.session-panel-limit-error { color: var(--red); }
+.session-panel-media { min-width: 0; display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
+.session-panel-media input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--accent); }
+.session-panel-media input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 
 .session-panel-sites { min-width: 0; display: grid; justify-items: start; gap: 6px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
 .session-panel-sites > :not(button) { justify-self: stretch; }

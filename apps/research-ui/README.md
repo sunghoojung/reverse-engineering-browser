@@ -939,9 +939,44 @@ shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
 opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
-each request body's length, type and SHA-256. In Content mode,
-`REB_CAPTURE_REQUEST_CONTENT=0` or `REB_CAPTURE_CANVAS_IMAGES=0` turns either
-off.
+each request body's length, type and SHA-256. An inherited
+`REB_CAPTURE_REQUEST_CONTENT=0` selects Metadata only for the automatic launch
+and preselects it in the start panel, which says so beside the mode, so
+pressing Start keeps no request content; choosing Content there captures it.
+`REB_CAPTURE_CANVAS_IMAGES=0` turns Canvas images off. Once the start panel has
+chosen a mode, that mode decides request content for the rest of the run, over
+an inherited `REB_CAPTURE_REQUEST_CONTENT`.
+
+With Content chosen, the panel also shows the session's **Content limits**:
+
+| Control | Range and default | What it means |
+| --- | --- | --- |
+| **Request content budget** | 1 to 4,096 MiB, default 256 | How much of the request bodies and full URLs the session keeps, counting identical content once |
+| **Response body budget** | 1 to 16,384 MiB, default 512 | How much of the response bodies the session keeps, counting identical bodies once |
+| **Capture media and fonts** | Off by default | Also keep the images, audio, video and fonts that pages load; they count against the response body budget |
+
+Past a budget the browser still lists each later body or URL and names it as
+not kept, never silently. The budgets stay on this Mac with the session, and
+the launcher grows the session's artifact store by both, so a raised budget can
+use that much more disk. A value outside its range, or not a whole number, is
+named at its field with the rule, and nothing starts. The native side checks a
+Content start again ([`ContentLimits`](macos/LiveSessionCoordinator.swift)) with
+the rules the agent path applies to `request_content_budget_mib`,
+`response_body_budget_mib` and `response_media`, and passes the values to the
+launcher as `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB`
+and `REB_CAPTURE_RESPONSE_MEDIA`, replacing any inherited value. The panel
+first shows those variables when the launcher would accept them, else the
+defaults; the limits it starts with hold for later Content sessions in the same
+app run, including Retry and a Dock reopen, as the mode does. Until the panel
+starts a Content session, the automatic launch takes the variables as they are.
+**Metadata only** keeps no content, so the panel shows none of the limits, and
+a session that keeps no request content, whatever started it, is given none of
+the three variables, inherited ones included, as the agent path removes them.
+The starting and failed panels name the limits the session runs with, and
+only for a session that keeps request content; the launch log's `Request content capture` and
+`Response body capture` lines record them, and `get_session_context` reports
+them as `capture_options.content_limits`, so a researcher or an agent can tell
+which budgets the session ran with.
 
 The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
@@ -1510,6 +1545,35 @@ across it to filter to that time range; with it focused, Right or Left Arrow
 selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
+
+When a content session's budget runs out, the browser lists each later body or
+URL and names it as not kept. The footer then adds a line naming each used
+budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
+response bodies not kept · Raise it in New Live Session… for the next session.`
+
+- The counts are the whole session's, from `get_session_summary`'s budget
+  checks, like the `N / M requests` beside them. Traffic reads the summary once
+  in every session, a stored one included, so a budget met outside the loaded
+  rows still shows, and again at most every 30 s while it shows in a content
+  session or while a budget shows as used.
+- A count is exact only while nothing has arrived since the summary was read:
+  it records the event poll's tag then, and in a live session a later change
+  of that tag makes it `at least N` until the next read. So do a failed re-read
+  (which keeps the last figure), a summary whose scan stopped at its 64 MiB
+  bound, and the loaded rows before the first read answers.
+- The size is the session context's `capture_options.content_limits`
+  (`get_session_context`), read once after the first valid poll; a session that
+  is not live, or keeps no content, names the budget without a size. The bytes
+  kept are the unique bytes of that budget's artifacts, from the summary.
+- The Payload tab and the Request URL row name the request content budget the
+  same way, and the Response tab names **Response body budget** and **Capture
+  media and fonts**; each remedy applies to the next session.
+- In the short stacked layout (at most 1,100 by 650 px) with a request open, the
+  line becomes a one-line **Budgets used** button (or the one budget's name)
+  beside the footer's own, so the ledger keeps its rows. Return or Space opens
+  the whole sentence above the footer; Escape, focus leaving it, a press
+  anywhere else or closing the request closes it, so it never stays over the
+  rows unasked.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with

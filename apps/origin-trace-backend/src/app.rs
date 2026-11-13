@@ -1039,6 +1039,7 @@ impl App {
                 let store = self.options.store.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
+                let content_limits = session_context::content_limits(&self.options);
                 let mut summary = self
                     .blocking(move || {
                         let mut summary = session_summary::build(
@@ -1051,6 +1052,7 @@ impl App {
                                 capture_stopped: state.2,
                                 artifact_receiver_configured: state.3,
                                 artifact_receiver_connected: state.4,
+                                content_limits,
                             },
                         )?;
                         session_summary::add_response_bodies(&mut summary, counts);

@@ -163,10 +163,10 @@ function trafficResponseCapture(request, contentSession) {
     empty: 'Empty body (0 bytes).',
     not_modified: 'Not modified (304): the server sent no body.',
     redirected: 'Redirect: Chromium discards redirect bodies.',
-    not_captured_type: 'Not retained: images, audio, video and fonts that page elements load are kept only with REB_CAPTURE_RESPONSE_MEDIA=1.',
+    not_captured_type: 'Not retained: images, audio, video and fonts that page elements load are kept only when Capture media and fonts is on in New Live Session…, for the next session.',
     not_captured_artifact_unavailable: 'Not retained: the artifact channel was unavailable.',
     not_captured_transfer_refused: 'Not retained: the bounded in-flight memory or artifact transfer queue refused it.',
-    not_captured_session_budget: 'Not retained: this session had used its response body budget. Raise REB_RESPONSE_BODY_BUDGET_MIB for a new session.'
+    not_captured_session_budget: 'Not retained: this session had used its response body budget. Raise Response body budget in New Live Session… for the next session.'
   }[record.state] ?? 'Unknown capture state.';
 }
 

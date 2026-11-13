@@ -303,7 +303,8 @@ for (const [body, pattern] of [
   [record({kind: 'file', state: 'not_captured_body_kind', lengthPartial: true, sha256: null, capturedLength: '0', artifactId: '0'}), /file upload parts were described, not read/],
   [record({kind: 'chunked_data_pipe', state: 'not_captured_read_incomplete', lengthPartial: true, read: true, sha256: null, capturedLength: '0', artifactId: '0'}), /a file, blob or stream part was not read whole/],
   [record({state: 'not_captured_artifact_unavailable', capturedLength: '0', artifactId: '0'}), /artifact channel was unavailable/],
-  [record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'}), /request body budget/],
+  [record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'}),
+    /Not captured: this session had used its request content budget\. Raise Request content budget in New Live Session… for the next session\./],
   [record({state: 'not_captured_credential_form', sha256: null, capturedLength: '0', artifactId: '0'}), /password form submission\. Bytes and digest are withheld/],
 ]) {
   render(body === undefined ? {...request(null), origin: 'sample'} : request(body), null);
@@ -311,6 +312,14 @@ for (const [body, pattern] of [
   assert.equal(panel.querySelector('.traffic-payload-view'), null, 'no payload view without retained bytes');
   assert.equal(panel.querySelector('.traffic-payload-tools'), null, 'no find or copy without content');
 }
+// The session context names a content session's budget (state.sessionContentLimits,
+// app.js), so the refusal says which.
+context.state = {sessionContentLimits: {request_content_budget_mib: 1024, response_body_budget_mib: 512, response_media: false}};
+render(request(record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'})), null);
+assert.match(text('[data-section="payload"]'),
+  /Not captured: this session had used its 1,024 MiB request content budget\. Raise Request content budget in New Live Session… for the next session\./);
+assert.doesNotMatch(text('[data-section="payload"]'), /REB_/);
+delete context.state;
 render(jsonRequest, ready(json));
 const details = panel.querySelector('details.traffic-payload-details');
 assert.equal(details.hasAttribute('open'), false, 'Capture details starts collapsed');

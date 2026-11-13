@@ -78,6 +78,10 @@
         canvasRenderCaptures: [],
         canvasImageCaptureEnabled,
         requestContentCaptureEnabled,
+        // capture_options.content_limits from the session context (app.js);
+        // null until that read answers, and for a session without content.
+        sessionContentLimits: null,
+        sessionContentLimitsRead: null,
         nativeRequests: [],
         requests: standalonePreview ? [...sampleRequests] : [],
         artifacts: standalonePreview ? [...sampleArtifacts] : [],

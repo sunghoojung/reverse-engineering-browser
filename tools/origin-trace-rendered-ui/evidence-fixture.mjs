@@ -29,6 +29,12 @@ export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">
 export const METADATA_BODY_HOST = 'api.metadata.test';
 // A content-session response body (native-network-v3.md) whose JSON carries markup.
 export const RESPONSE_BODY_HOST = 'api.response.test';
+// A content-session POST, recorded as real capture records it: its target's
+// first 116 bytes, the rest refused by the request content budget, and its
+// body and response refused by their budgets (native-network-v2.md target
+// retention 4 and body state 10, v3 response state 12).
+export const BUDGET_HOST = 'api.budget.test';
+export const BUDGET_TARGET = `/collect/batch?session=fixture&events=${'e'.repeat(160)}`;
 // Rows only the renderer finishes (protocol/native-network-v3.md).
 export const MEMORY_CACHE_HOST = 'cdn.memory.test';
 export const MEMORY_CACHE_TARGET = '/sprite.png?v=3';
@@ -308,6 +314,32 @@ function responseBodyPayload(bytes, contentType = 'application/json') {
   return payload.toString('hex');
 }
 
+// A response_body record refused by the session's response body budget:
+// no artifact, no captured bytes and no digest.
+function budgetResponsePayload(length, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 12;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+// A version 2 request_target whose bytes past the prefix were not retained.
+function requestTargetPayloadV2(target, retention) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(2, 0);
+  payload.writeUInt16LE(128, 2);
+  payload.writeUInt32LE(Buffer.byteLength(target), 4);
+  payload[8] = 2;
+  payload[9] = retention;
+  payload.write(target.slice(0, 116), 12, 'utf8');
+  return payload.toString('hex');
+}
+
 function requestTargetPayload(target) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
@@ -399,6 +431,14 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
     {parent_event_id: cachedStart.sequence_number});
   row(cached, 'response_started', hex('text/css'), {status_code: 200, flags: 2});
   row(cached, 'request_completed', hex('completed'), {status_code: 200});
+  const refused = {request_id: '3004'};
+  const refusedStart = row(refused, 'request_started', hex(`POST ${BUDGET_HOST}`), {resource_type: 13});
+  row(refused, 'request_target', requestTargetPayloadV2(BUDGET_TARGET, 4), {parent_event_id: refusedStart.sequence_number});
+  row(refused, 'request_body', requestBodyPayload({state: 10, content: true, bytes: Buffer.from('{"events":[1,2,3]}')}),
+    {parent_event_id: refusedStart.sequence_number});
+  const refusedResponse = row(refused, 'response_started', hex('application/json'), {status_code: 200});
+  row(refused, 'response_body', budgetResponsePayload(2048), {parent_event_id: refusedResponse.sequence_number});
+  row(refused, 'request_completed', hex('completed'), {status_code: 200});
   const responseArtifact = await artifact(artifactsRoot, {artifact_id: '325', session_id: template.session_id, navigation_id: '0',
     frame_id: template.frame_id, creator_event_id: responded.sequence_number, execution_context_id: '0',
     capture_origin: 'network_response', kind: 'response_body', mime_type: 'application/json', sensitive: true,

@@ -157,6 +157,134 @@ buttonNamed('Continue Offline').click();
 await settle();
 assert.deepEqual(posted.at(-1), {op: 'offline'});
 
+// A Content session's limits: shown only for Content, drawn from native's
+// values and bounds, checked here as native checks them, and sent with Start.
+const limits = (request = 256, response = 512, media = false) => ({
+  request_content_budget_mib: {value: request, min: 1, max: 4096, default: 256},
+  response_body_budget_mib: {value: response, min: 1, max: 16384, default: 512},
+  response_media: {value: media, default: false}});
+const field = id => panel.querySelector(`#session-panel-${id}`);
+const type = (id, value) => { field(id).value = value; field(id).dispatchEvent(new window.Event('input')); };
+push({panel: 'hidden'});
+answer = () => ({ok: true});
+push(choose({state: 'empty', generation: 5, limit: 8, items: []}, {limits: limits()}));
+for (const phrase of ['Content limits', 'Request content budget', 'Response body budget', 'Capture media and fonts',
+  'How much of the request bodies and full URLs this session keeps, counting identical content once.',
+  'Past it, later ones are listed but not kept. 1 to 4,096 MiB; default 256 MiB.',
+  'Past it, later bodies are listed but not kept. 1 to 16,384 MiB; default 512 MiB.',
+  'Also keep the images, audio, video and fonts that pages load. They count against the response body budget.',
+  'Both budgets stay on this Mac with the session and can use that much disk.']) {
+  assert(text().includes(phrase), `the Content limits say: ${phrase}`);
+}
+assert.equal(field('request-budget').value, '256', 'native’s default request content budget');
+assert.equal(field('response-budget').value, '512', 'native’s default response body budget');
+assert.equal(field('media').checked, false, 'media and fonts are skipped by default');
+assert.equal(panel.querySelector('label[for="session-panel-request-budget"]').textContent, 'Request content budget');
+assert.equal(field('request-budget').getAttribute('aria-describedby'), 'session-panel-request-budget-detail');
+assert.deepEqual([...panel.querySelectorAll('input[type="checkbox"]')].map(box => box.id), ['session-panel-media'],
+  'the media choice is the only checkbox');
+assert(!/keychain/i.test(text()), 'the limits name no Keychain choice');
+// Metadata keeps no content, so it shows and sends none of the limits.
+radio('metadata').checked = true;
+radio('metadata').dispatchEvent(new window.Event('change'));
+assert.equal(field('request-budget'), null, 'Metadata shows no request content budget');
+assert.equal(field('media'), null, 'Metadata shows no media choice');
+assert(!text().includes('Content limits'));
+buttonNamed('Start Session').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'metadata'}, 'a Metadata start names no limit');
+radio('content').checked = true;
+radio('content').dispatchEvent(new window.Event('change'));
+assert.equal(field('request-budget').value, '256', 'the limits come back with Content');
+buttonNamed('Start Session').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'content', request_content_budget_mib: 256,
+  response_body_budget_mib: 512, response_media: false}, 'a Content start sends the default limits as numbers');
+// A raised budget and media capture, typed and kept across a native redraw.
+type('request-budget', ' 1024 ');
+type('response-budget', '16384');
+field('media').checked = true;
+field('media').dispatchEvent(new window.Event('change'));
+push(choose({state: 'empty', generation: 6, limit: 8, items: []}, {limits: limits()}));
+assert.equal(field('request-budget').value, ' 1024 ', 'a redraw keeps the typed budget');
+assert.equal(field('media').checked, true, 'a redraw keeps the media choice');
+buttonNamed('Start Session').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'content', request_content_budget_mib: 1024,
+  response_body_budget_mib: 16384, response_media: true}, 'a raised budget and media capture are sent');
+// Out of bounds: named at the field, and nothing is sent.
+for (const [id, value, rule] of [
+  ['request-budget', '4097', 'Request content budget must be a whole number from 1 to 4096 MiB.'],
+  ['request-budget', '0', 'Request content budget must be a whole number from 1 to 4096 MiB.'],
+  ['request-budget', '12.5', 'Request content budget must be a whole number from 1 to 4096 MiB.'],
+  ['request-budget', '', 'Request content budget must be a whole number from 1 to 4096 MiB.'],
+  ['request-budget', '-5', 'Request content budget must be a whole number from 1 to 4096 MiB.'],
+  ['response-budget', '16385', 'Response body budget must be a whole number from 1 to 16384 MiB.'],
+  ['response-budget', '1e3', 'Response body budget must be a whole number from 1 to 16384 MiB.'],
+]) {
+  type('request-budget', '256');
+  type('response-budget', '512');
+  type(id, value);
+  const sent = posted.length;
+  buttonNamed('Start Session').click();
+  await settle();
+  assert.equal(posted.length, sent, `${id} ${JSON.stringify(value)} starts nothing`);
+  const error = panel.querySelector(`#session-panel-${id}-error`);
+  assert.equal(error?.textContent, rule, `${id} ${JSON.stringify(value)} names the rule`);
+  assert.equal(error.getAttribute('role'), 'alert');
+  assert.equal(field(id).getAttribute('aria-invalid'), 'true');
+  assert.equal(field(id).getAttribute('aria-describedby'), `session-panel-${id}-error session-panel-${id}-detail`);
+  assert.equal(panel.dataset.state, 'choose', 'the decision stays open');
+}
+// Fixing the value removes the error at once; Return in the field starts.
+type('response-budget', '2048');
+assert.equal(panel.querySelector('#session-panel-response-budget-error'), null, 'a fixed value clears its error');
+assert.equal(field('response-budget').getAttribute('aria-invalid'), null);
+const enter = new window.Event('keydown');
+enter.key = 'Enter';
+field('response-budget').dispatchEvent(enter);
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'content', request_content_budget_mib: 256,
+  response_body_budget_mib: 2048, response_media: true}, 'Return in a budget starts with the shown limits');
+// Native's own refusal of a value stays on screen with its reason.
+answer = () => new Error('Request content budget must be a whole number from 1 to 4096 MiB.');
+buttonNamed('Start Session').click();
+await settle();
+assert(panel.querySelector('[role="alert"]')?.textContent.includes('Request content budget must be a whole number'), text());
+assert.equal(panel.dataset.state, 'choose');
+answer = () => ({ok: true});
+// A new decision starts again from native's values.
+push({panel: 'hidden'});
+push(choose({state: 'empty', generation: 7, limit: 8, items: []}, {limits: limits(64, 128, true)}));
+assert.equal(field('request-budget').value, '64');
+assert.equal(field('response-budget').value, '128');
+assert.equal(field('media').checked, true);
+assert.equal(panel.querySelector('.session-panel-limit-error'), null);
+// An inherited opt-out preselects Metadata, and the panel says why beside the mode.
+push({panel: 'hidden'});
+push(choose({state: 'empty', generation: 8, limit: 8, items: []}, {mode: 'metadata', limits: limits(),
+  modeNote: 'Metadata is preselected because REB_CAPTURE_REQUEST_CONTENT=0 is set.'}));
+assert.equal(radio('metadata').checked, true, 'the opt-out preselects Metadata');
+const modeNote = panel.querySelector('#session-panel-mode-note');
+assert.equal(modeNote?.textContent, 'Metadata is preselected because REB_CAPTURE_REQUEST_CONTENT=0 is set.');
+assert(modeNote.closest('.session-panel-modes'), 'the note sits with the mode control');
+assert.equal(panel.querySelector('.session-panel-modes').getAttribute('aria-describedby'), 'session-panel-mode-note');
+buttonNamed('Start Session').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'metadata'}, 'Start without touching the mode starts Metadata');
+push({panel: 'hidden'});
+push(choose({state: 'empty', generation: 9, limit: 8, items: []}, {limits: limits()}));
+assert.equal(panel.querySelector('#session-panel-mode-note'), null, 'no note when nothing preselected the mode');
+// Starting and failed sessions name the limits they run with.
+push({panel: 'starting', mode: 'content', modes, limits: limits(1024, 2048, true)});
+assert(text().includes('Capture mode: Content (default). Request content budget 1,024 MiB, response body budget 2,048 MiB, media and fonts kept.'), text());
+push({panel: 'failed', mode: 'content', modes, limits: limits(1024, 2048, false),
+  failure: {title: 'Live session unavailable', message: 'Brave stopped.', afterStartup: false}});
+assert(text().includes('Retry starts a new session with the same capture mode: Content (default). Same limits: request content budget 1,024 MiB, response body budget 2,048 MiB, media and fonts skipped.'), text());
+push({panel: 'failed', mode: 'content', modes,
+  failure: {title: 'Live session unavailable', message: 'Brave stopped.', afterStartup: false}});
+assert(!text().includes('Same limits'), 'a session the panel did not start names no limits');
+
 push({panel: 'hidden'});
 assert.equal(panel.hidden, true);
 assert.equal(panel.children.length, 0);
@@ -169,9 +297,33 @@ const native = readFileSync(new URL('../apps/research-ui/macos/SessionPanel.swif
 for (const op of ['state', 'start', 'retry', 'offline', 'removeSite', 'clearSites']) {
   assert(native.includes(`case "${op}"`) || native.includes(`"${op}"`), `native handles ${op}`);
 }
-assert.match(native, /isSubset\(of: \["op", "mode"\]\)/, 'native refuses a start that names anything but the mode');
+// A start is accepted only through LivePanelStart.parse, whose rules (the mode,
+// Content limits checked as the agent path checks them, none on Metadata, no
+// other key) tools/check-live-session-failure.swift runs.
 assert(!/body\["keychain"\]/.test(native), 'native reads no Keychain value from the page');
-assert.match(native, /LiveCaptureMode\(rawValue: raw\)/, 'native accepts only a known capture mode');
+assert.match(native, /if let modeNote \{ value\["modeNote"\] = modeNote \}/, 'native publishes why the mode is preselected');
+const startCase = native.slice(native.indexOf('case "start":'), native.indexOf('case "retry":'));
+assert.match(startCase, /switch LivePanelStart\.parse\(body\)/, 'native parses a start with the shared rules');
+assert.match(startCase, /accept\(\.start\(start\.mode, start\.limits\)\)/, 'native starts with the parsed choice only');
+assert.doesNotMatch(startCase, /body\[/, 'the start case reads nothing from the page but through the parser');
+const coordinator = readFileSync(new URL('../apps/research-ui/macos/LiveSessionCoordinator.swift', import.meta.url), 'utf8');
+assert.match(coordinator, /isSubset\(of: \["op", "mode"\] \+ ContentLimits\.keys\)/, 'the parser refuses any other key');
+// One set of bounds and defaults: the app, the agent path and the launcher.
+const agent = readFileSync(new URL('../apps/origin-trace-backend/src/session_launch.rs', import.meta.url), 'utf8');
+const launcher = readFileSync(new URL('../scripts/run-live-session.sh', import.meta.url), 'utf8');
+assert.match(coordinator, /requestContentBudgetRange: ClosedRange<UInt32> = 1\.\.\.4096/);
+assert.match(coordinator, /responseBodyBudgetRange: ClosedRange<UInt32> = 1\.\.\.16384/);
+assert.match(coordinator, /ContentLimits\(requestContentBudgetMiB: 256, responseBodyBudgetMiB: 512, responseMedia: false\)/);
+assert.match(coordinator, /static let keys = \["request_content_budget_mib", "response_body_budget_mib", "response_media"\]/);
+assert.match(agent, /\(1\.\.=4096\)\.contains\(&budget\)/);
+assert.match(agent, /\(1\.\.=16384\)\.contains\(&budget\)/);
+assert.match(agent, /request_content_budget_mib\.unwrap_or\(256\)/);
+assert.match(agent, /response_body_budget_mib\.unwrap_or\(512\)/);
+assert.match(launcher, /REB_REQUEST_CONTENT_BUDGET_MIB:-256\}/);
+assert.match(launcher, /REB_RESPONSE_BODY_BUDGET_MIB:-512\}/);
+assert.match(launcher, /request_content_budget_mib > 4096/);
+assert.match(launcher, /response_body_budget_mib > 16384/);
 console.log('PASS session panel: start choices with the alert’s wording, no Keychain option, saved sites as text, Remove and Clear All by generation, '
-  + 'Start with the page selection, a refused choice kept on screen, starting, unavailable and ended states with Retry and Continue Offline '
+  + 'Start with the page selection, a refused choice kept on screen, starting, unavailable and ended states with Retry and Continue Offline, '
+  + 'Content limits only for Content with defaults, raised values, out-of-bounds refusals that send nothing, and the app, agent and launcher bounds in step '
   + '(offline DOM model; rendered layout, focus and the real bridge are in the rendered harness)');

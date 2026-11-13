@@ -369,7 +369,8 @@ conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for
 every live session (agent, app or `make live`): `request_content`,
-`canvas_images`, `request_stacks`, `document_start` (`permitted` or `not_permitted`; whether
+`content_limits`, `canvas_images`, `request_stacks`, `document_start`
+(`permitted` or `not_permitted`; whether
 this Brave honors it is `document_start_supported` in `get_native_console`),
 and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
 or `unreadable`), `count` and `digests`. `run-live-session.sh` passes the
@@ -378,6 +379,18 @@ backend `--session-request-content`, `--session-canvas-images`,
 enable nothing. Idle and demo
 backends report `source: not_live` with everything off. Site labels and
 source URLs stay in `get_js_invocation_sites`.
+
+`content_limits` is a versioned addition to `capture_options`: for a session
+with `request_content` it is `{"version": 1, "request_content_budget_mib",
+"response_body_budget_mib", "response_media"}`, the limits the session runs
+with, named as the start options are, whichever of the app's start panel, the
+start options or the launcher environment set them. Otherwise it is null. The
+launcher passes them as `--session-request-content-budget-mib`,
+`--session-response-body-budget-mib` and `--session-response-media` (`0` or
+`1`), which the backend accepts only with `--session-request-content` and
+within the launcher's bounds; a value no launcher named is null, never a
+guessed default. The schema does not require `content_limits`: a backend from
+before the addition omits it, and a reader treats that as not reported.
 
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
@@ -587,7 +600,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `no_events` | The store is empty. |
 | `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
 | `artifact_capture_failed` | Some artifact bodies were not stored. |
-| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. |
+| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the scanned manifest, and `retained_complete`, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
 | `network_headers_unattributed` | Severity `warning`: `blocks` network header blocks and `lists` cookie lists arrived for requests the capture no longer tracked, so no row shows them. |
 | `final_headers_missing` | `count` requests of a content session ended with provisional headers and no cookie lists, one check per `reason`: `download`, `service_worker`, `from_cache` or `failed` (`info`, no request reached the network or it failed first), `not_reported` (`warning`, no observer or an untracked block) and `record_dropped` (`warning`, a full queue dropped records while it ran, so the block may have been lost). See [missing final blocks](native-network-v3.md#missing-final-blocks). |
 | `final_headers_untracked` | Header records of requests past the 131,072 the summary follows; their final blocks are not counted. Never raised for a metadata-only session, which records no header. |

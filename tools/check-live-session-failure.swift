@@ -140,6 +140,149 @@ enum LiveSessionFailureChecks {
     }
     print("PASS native live document-start permission: on by default for app captures, an explicit 0 survives")
 
+    // The start panel's content limits: the launcher's bounds and grammar,
+    // the agent path's rules for a start message, and the environment they
+    // reach the launcher through only in a session that retains content.
+    let defaultLimits = ContentLimits.defaults
+    precondition(defaultLimits == ContentLimits(requestContentBudgetMiB: 256, responseBodyBudgetMiB: 512, responseMedia: false), "default limits")
+    let configuredCases: [([String: String], ContentLimits)] = [
+      ([:], defaultLimits),
+      (["REB_REQUEST_CONTENT_BUDGET_MIB": "1024", "REB_RESPONSE_BODY_BUDGET_MIB": "16384", "REB_CAPTURE_RESPONSE_MEDIA": "1"],
+        ContentLimits(requestContentBudgetMiB: 1024, responseBodyBudgetMiB: 16384, responseMedia: true)),
+      (["REB_REQUEST_CONTENT_BUDGET_MIB": "1", "REB_RESPONSE_BODY_BUDGET_MIB": "1"],
+        ContentLimits(requestContentBudgetMiB: 1, responseBodyBudgetMiB: 1, responseMedia: false)),
+      (["REB_REQUEST_CONTENT_BUDGET_MIB": "4097", "REB_RESPONSE_BODY_BUDGET_MIB": "16385"], defaultLimits),
+      (["REB_REQUEST_CONTENT_BUDGET_MIB": "0", "REB_RESPONSE_BODY_BUDGET_MIB": "0512"], defaultLimits),
+      (["REB_REQUEST_CONTENT_BUDGET_MIB": "+64", "REB_RESPONSE_BODY_BUDGET_MIB": " 64"], defaultLimits),
+      (["REB_REQUEST_CONTENT_BUDGET_MIB": "\u{FF16}\u{FF14}", "REB_RESPONSE_BODY_BUDGET_MIB": "64k"], defaultLimits),
+      (["REB_CAPTURE_RESPONSE_MEDIA": "yes"], defaultLimits),
+    ]
+    for (environment, expected) in configuredCases {
+      precondition(ContentLimits.configured(environment) == expected, "configured limits \(environment)")
+    }
+    let start = { (request: Any?, response: Any?, media: Any?) -> Result<ContentLimits, ContentLimits.Refusal> in
+      var body: [String: Any] = ["op": "start", "mode": "content"]
+      if let request { body["request_content_budget_mib"] = request }
+      if let response { body["response_body_budget_mib"] = response }
+      if let media { body["response_media"] = media }
+      return ContentLimits.validated(body)
+    }
+    let yes = NSNumber(value: true), no = NSNumber(value: false)
+    precondition(start(NSNumber(value: 256), NSNumber(value: 512), no) == .success(defaultLimits), "default start")
+    precondition(start(NSNumber(value: 4096), NSNumber(value: 16384), yes)
+      == .success(ContentLimits(requestContentBudgetMiB: 4096, responseBodyBudgetMiB: 16384, responseMedia: true)), "raised start")
+    precondition(start(NSNumber(value: 1), NSNumber(value: 1.0), no)
+      == .success(ContentLimits(requestContentBudgetMiB: 1, responseBodyBudgetMiB: 1, responseMedia: false)), "smallest start")
+    let requestRule = ContentLimits.Refusal(message: ContentLimits.requestContentBudgetRule)
+    let responseRule = ContentLimits.Refusal(message: ContentLimits.responseBodyBudgetRule)
+    let mediaRule = ContentLimits.Refusal(message: "Capture media and fonts must be on or off.")
+    let refusals: [(String, Any?, Any?, Any?, ContentLimits.Refusal)] = [
+      ("request over", NSNumber(value: 4097), NSNumber(value: 512), no, requestRule),
+      ("request zero", NSNumber(value: 0), NSNumber(value: 512), no, requestRule),
+      ("request negative", NSNumber(value: -1), NSNumber(value: 512), no, requestRule),
+      ("request fraction", NSNumber(value: 12.5), NSNumber(value: 512), no, requestRule),
+      ("request text", "256", NSNumber(value: 512), no, requestRule),
+      ("request boolean", yes, NSNumber(value: 512), no, requestRule),
+      ("request infinite", NSNumber(value: Double.infinity), NSNumber(value: 512), no, requestRule),
+      ("response over", NSNumber(value: 256), NSNumber(value: 16385), no, responseRule),
+      ("response huge", NSNumber(value: 256), NSNumber(value: 1e300), no, responseRule),
+      ("response boolean", NSNumber(value: 256), no, no, responseRule),
+      ("media number", NSNumber(value: 256), NSNumber(value: 512), NSNumber(value: 1), mediaRule),
+      ("media text", NSNumber(value: 256), NSNumber(value: 512), "true", mediaRule),
+    ]
+    for (name, request, response, media, expected) in refusals {
+      precondition(start(request, response, media) == .failure(expected), "refused limits: \(name)")
+    }
+    for missing in 0..<3 {
+      let values: [Any?] = [NSNumber(value: 256), NSNumber(value: 512), no].enumerated().map { $0.offset == missing ? nil : $0.element }
+      guard case .failure(let refusal) = start(values[0], values[1], values[2]) else { preconditionFailure("missing limit \(missing)") }
+      precondition(refusal.message.contains("needs a request content budget"), "missing limit \(missing): \(refusal.message)")
+    }
+    let raised = ContentLimits(requestContentBudgetMiB: 1024, responseBodyBudgetMiB: 2048, responseMedia: true)
+    let limitNames = ["REB_REQUEST_CONTENT_BUDGET_MIB", "REB_RESPONSE_BODY_BUDGET_MIB", "REB_CAPTURE_RESPONSE_MEDIA"]
+    let inherited = ["REB_REQUEST_CONTENT_BUDGET_MIB": "999", "REB_RESPONSE_BODY_BUDGET_MIB": "99", "REB_CAPTURE_RESPONSE_MEDIA": "0"]
+    let limitCases: [(String, [String: String], Bool, ContentLimits?, [String?])] = [
+      ("content default", [:], true, defaultLimits, ["256", "512", "0"]),
+      ("content raised", [:], true, raised, ["1024", "2048", "1"]),
+      ("chosen limits replace inherited ones", inherited, true, raised, ["1024", "2048", "1"]),
+      ("no panel choice passes the environment", inherited, true, nil, ["999", "99", "0"]),
+      ("no panel choice, no environment", [:], true, nil, [nil, nil, nil]),
+      ("metadata passes nothing", [:], false, raised, [nil, nil, nil]),
+      ("a mask without content passes nothing", ["REB_CAPTURE_CATEGORY_MASK": "0x300"], true, raised, [nil, nil, nil]),
+      ("content off by the environment passes nothing", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, raised, [nil, nil, nil]),
+    ]
+    for (name, given, content, limits, expected) in limitCases {
+      let environment = LiveSessionCoordinator.captureDefaults(environment: given, captureNetworkContent: content, contentLimits: limits)
+      precondition(limitNames.map { environment[$0] } == expected, "content limits: \(name) \(limitNames.map { environment[$0] })")
+    }
+    // The start panel message SessionPanel.swift accepts only through LivePanelStart.parse.
+    let parse = { (body: [String: Any]) in LivePanelStart.parse(["op": "start"].merging(body) { _, given in given }) }
+    precondition(parse(["mode": "metadata"]) == .success(LivePanelStart(mode: .metadata, limits: nil)), "metadata start")
+    precondition(parse(["mode": "content", "request_content_budget_mib": NSNumber(value: 1024), "response_body_budget_mib": NSNumber(value: 512),
+      "response_media": yes]) == .success(LivePanelStart(mode: .content, limits: ContentLimits(requestContentBudgetMiB: 1024,
+        responseBodyBudgetMiB: 512, responseMedia: true))), "content start")
+    let startRefusals: [(String, [String: Any], String)] = [
+      ("limits on metadata", ["mode": "metadata", "response_media": yes], "Budgets and media capture apply only to a Content session."),
+      ("a budget on metadata", ["mode": "metadata", "request_content_budget_mib": NSNumber(value: 64)],
+        "Budgets and media capture apply only to a Content session."),
+      ("content without limits", ["mode": "content"], "A Content session needs a request content budget, a response body budget and the media choice."),
+      ("content out of bounds", ["mode": "content", "request_content_budget_mib": NSNumber(value: 5000), "response_body_budget_mib": NSNumber(value: 512),
+        "response_media": no], ContentLimits.requestContentBudgetRule),
+      ("a Keychain switch", ["mode": "metadata", "keychain": yes], "The start panel offers only the capture mode and a Content session's limits."),
+      ("an unknown mode", ["mode": "everything"], "Choose Content or Metadata only."),
+    ]
+    for (name, body, message) in startRefusals {
+      precondition(parse(body) == .failure(ContentLimits.Refusal(message: message)), "refused start: \(name)")
+    }
+    // A session that keeps no request content is given none of the content-only
+    // switches, inherited or chosen; the panel's mode decides request content.
+    let media = ["REB_CAPTURE_RESPONSE_MEDIA": "1", "REB_REQUEST_CONTENT_BUDGET_MIB": "999", "REB_RESPONSE_BODY_BUDGET_MIB": "99"]
+    let modeCases: [(String, [String: String], Bool, Bool, ContentLimits?, String, [String?])] = [
+      ("a metadata start drops inherited content switches", media, false, true, nil, "0", [nil, nil, nil]),
+      ("an automatic metadata launch drops them too", media, false, false, nil, "0", [nil, nil, nil]),
+      ("a chosen Content mode wins over an inherited 0", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, true, raised, "1", ["1024", "2048", "1"]),
+      ("a chosen Metadata mode wins over an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, false, true, nil, "0",
+        [nil, nil, nil]),
+      ("an automatic launch keeps an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, false, false, nil, "1",
+        ["999", "99", "1"]),
+      ("an automatic launch keeps an inherited 0 and drops the rest", ["REB_CAPTURE_REQUEST_CONTENT": "0"].merging(media) { a, _ in a }, true, false,
+        raised, "0", [nil, nil, nil]),
+    ]
+    for (name, given, content, chosen, limits, expectedContent, expected) in modeCases {
+      let environment = LiveSessionCoordinator.captureDefaults(
+        environment: given, captureNetworkContent: content, contentLimits: limits, modeChosen: chosen)
+      precondition(environment["REB_CAPTURE_REQUEST_CONTENT"] == expectedContent, "request content: \(name)")
+      precondition(limitNames.map { environment[$0] } == expected, "content switches: \(name) \(limitNames.map { environment[$0] })")
+    }
+    precondition(LiveSessionCoordinator.retainsRequestContent(environment: [:], captureNetworkContent: true, modeChosen: true), "content retains")
+    precondition(!LiveSessionCoordinator.retainsRequestContent(environment: ["REB_CAPTURE_CATEGORY_MASK": "0x300"], captureNetworkContent: true,
+      modeChosen: true), "a mask without Network and Artifact retains nothing, so the panel names no limits")
+    precondition(LiveSessionCoordinator.retainsRequestContent(environment: ["REB_CAPTURE_REQUEST_CONTENT": "0"], captureNetworkContent: true,
+      modeChosen: true), "a chosen Content mode retains content over an inherited 0")
+    // An inherited REB_CAPTURE_REQUEST_CONTENT=0 still protects someone who
+    // just presses Start: the panel preselects Metadata and says why, and only
+    // choosing Content there captures content.
+    let optedOut = ["REB_CAPTURE_REQUEST_CONTENT": "0"]
+    precondition(LiveCaptureMode.configured(optedOut) == .metadata, "an inherited 0 preselects Metadata")
+    precondition(LiveCaptureMode.configured(optedOut.merging(["REB_AUTOMATIC_CAPTURE_MODE": "content"]) { a, _ in a }) == .metadata,
+      "an inherited 0 wins over REB_AUTOMATIC_CAPTURE_MODE=content")
+    precondition(LiveCaptureMode.configured(["REB_CAPTURE_REQUEST_CONTENT": "1"]) == .content, "an inherited 1 keeps the default")
+    precondition(LiveCaptureMode.requestContentOptedOut(optedOut) && !LiveCaptureMode.requestContentOptedOut([:]), "opt-out")
+    precondition(LiveCaptureMode.optOutNote.contains("Metadata is preselected"), "the panel says why")
+    let preselected = LiveCaptureMode.configured(optedOut)
+    guard case .success(let untouched) = parse(["mode": preselected.rawValue]) else { preconditionFailure("preselected start") }
+    let pressed = LiveSessionCoordinator.captureDefaults(environment: optedOut.merging(media) { a, _ in a },
+      captureNetworkContent: untouched.mode.capturesNetworkContent, contentLimits: untouched.limits, modeChosen: true)
+    precondition(untouched.mode == .metadata && pressed["REB_CAPTURE_REQUEST_CONTENT"] == "0"
+      && limitNames.allSatisfy({ pressed[$0] == nil }), "Start pressed without touching the mode is a Metadata start")
+    guard case .success(let chosen) = parse(["mode": "content", "request_content_budget_mib": NSNumber(value: 256),
+      "response_body_budget_mib": NSNumber(value: 512), "response_media": no]) else { preconditionFailure("chosen content") }
+    let content = LiveSessionCoordinator.captureDefaults(environment: optedOut, captureNetworkContent: chosen.mode.capturesNetworkContent,
+      contentLimits: chosen.limits, modeChosen: true)
+    precondition(content["REB_CAPTURE_REQUEST_CONTENT"] == "1" && content["REB_REQUEST_CONTENT_BUDGET_MIB"] == "256",
+      "choosing Content there is a Content start")
+    print("PASS native content limits: the launcher's bounds and grammar for the panel's first values, start messages checked as the agent path checks them, launcher switches only for a session that retains content, inherited content-only switches dropped otherwise, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
+
     // Saved invocation sites arm app-started captures. Digests follow the
     // mode, the launcher drops sites a Brave cannot arm, and explicit values win.
     let saved = URL(fileURLWithPath: "/private/tmp/origin-trace-live-x-js-invocation-sites.json")

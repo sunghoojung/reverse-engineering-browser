@@ -1173,14 +1173,22 @@ launcher passes for content sessions.
 - SHA-256 grows by at most one 64 KiB tee read per task, so the record carries
   the digest when the body ends; the receiver verifies it.
 - Unique bytes per session are budgeted: 512 MiB by default, 1 MiB to 16 GiB
-  with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`).
+  with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`, the
+  app start panel's **Response body budget**, or the start option
+  `response_body_budget_mib`). Media and fonts are asked for with
+  `REB_CAPTURE_RESPONSE_MEDIA=1`, **Capture media and fonts** or
+  `response_media`.
   A body is charged when it ends, once its digest is known: identical bytes
   are stored once by SHA-256 and charge nothing (the repeat stream is aborted),
   each snapshot is charged within its [shares](#partial-bodies), and a receiver
   refusal refunds them. The launcher grows a content session's receiver store
   by both budgets.
 - Every refusal is a named state. The session summary counts states 2 and 9 to
-  12 under `request_content_not_retained`, category `response_body`.
+  12 under `request_content_not_retained`, category `response_body`; state 12
+  also carries the budget in force (`budget_mib`) and the unique
+  `response_body` bytes retained (`retained_bytes`), and
+  `get_session_context` reports the session's limits as
+  `capture_options.content_limits`.
 
 ### Bodies the proxy never sees
 

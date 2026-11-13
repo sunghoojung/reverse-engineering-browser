@@ -124,6 +124,36 @@ fn specification() -> Value {
     serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap()
 }
 
+/// content_limits is a versioned addition: the schema must not require what an
+/// older backend omits, and an unnamed media choice is null, as the budgets are.
+#[test]
+fn session_context_content_limits_schema_matches_its_prose() {
+    let spec = specification();
+    let options = &spec["components"]["schemas"]["SessionContext"]["properties"]["capture_options"];
+    let required = options["required"].as_array().unwrap();
+    assert!(!required.contains(&json!("content_limits")), "{required:?}");
+    let limits = &options["properties"]["content_limits"];
+    assert!(
+        limits["description"]
+            .as_str()
+            .unwrap()
+            .contains("a backend from before this object omits it")
+    );
+    assert_eq!(limits["required"].as_array().unwrap().len(), 4);
+    for field in [
+        "request_content_budget_mib",
+        "response_body_budget_mib",
+        "response_media",
+    ] {
+        assert!(
+            limits["properties"][field]["type"]
+                .as_array()
+                .is_some_and(|types| types.contains(&json!("null"))),
+            "{field} may be unknown"
+        );
+    }
+}
+
 #[tokio::test]
 async fn origin_trace_gap_markers_preserve_addressable_events_over_http() {
     let fixture: Value =
@@ -2167,12 +2197,18 @@ async fn session_summary_counts_every_capture_refusal_by_reason() {
         .unwrap();
     assert_eq!(response["reason"], "not_captured_session_budget");
     assert_eq!(response["count"], "2");
+    // The remedy is the start panel control for the next session, never an
+    // environment variable; this backend is not live, so the budget is unknown.
+    let message = response["message"].as_str().unwrap();
     assert!(
-        response["message"]
-            .as_str()
-            .unwrap()
-            .contains("REB_RESPONSE_BODY_BUDGET_MIB")
+        message.contains(
+            "Raise Response body budget in the start panel (New Live Session…) for the next session"
+        ),
+        "{message}"
     );
+    assert!(!message.contains("REB_"), "{message}");
+    assert!(response["budget_mib"].is_null());
+    assert_eq!(response["retained_bytes"], "0");
     assert_eq!(
         summary["checks"]
             .as_array()

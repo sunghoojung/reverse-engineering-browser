@@ -154,12 +154,13 @@ It photographs them in both themes.
 decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
 not exist, so Start fails at once and no browser launches on any machine. The
 panel must sit inside the workspace with nothing clipped, open with Start
-Session focused and this run's last choice, reach every control with Shift+Tab
-and visible focus, change the mode with an arrow key and the Keychain with
-Space, and start on Return. The failure must name the cause, say Retry uses
-the mode and Keychain choice made by keyboard (so native received them), and
-focus Retry; Return on Retry must fail afresh, and Continue Offline must close
-the panel and return focus to the workspace.
+Session focused and this run's last choice, with no Keychain choice, reach
+every control with Shift+Tab and visible focus (in Content, the media choice
+and both budgets sit between the mode and the actions), change the mode with an
+arrow key, and start on Return. The failure must name the cause, say Retry uses
+the mode chosen by keyboard (so native received it), and focus Retry; Return
+on Retry must fail afresh, and Continue Offline must close the panel and return
+focus to the workspace.
 
 `test30WorkerInitiatorStack` opens the synthetic request a dedicated worker
 started (two synthetic renderer processes, version 3 stack records,
@@ -181,6 +182,31 @@ and Escape must close it and return focus. The Headers tab must say the HTTP
 cache answered without sending a request and that the block was not retained;
 and the Cookies tab must list the hop with the same reason in place of a bare
 "No cookie list was retained", with nothing clipped and captured text inert.
+
+`test36StartPanelContentLimits` takes the start panel's **Content limits**
+through both window sizes ([#428](https://github.com/sunghoojung/reverse-engineering-browser/issues/428),
+[#436](https://github.com/sunghoojung/reverse-engineering-browser/issues/436)).
+Normal opens with the defaults (256 and 512 MiB, media skipped), in both
+themes, with every limit a Shift+Tab stop with a visible ring. A typed 5000
+sent with Return is named at its field and starts nothing; native refuses an
+out-of-bounds, fractional, missing or Metadata-only limit sent past the page
+with the agent path's reasons. A raised 1,024 MiB budget and media capture
+typed and checked from the keyboard reach the start, whose failure (the
+missing Brave) names them. Narrow opens with those limits, held for the run;
+Metadata hides them and its start names none. In Traffic, the fixture's
+`api.budget.test` row is a content-session POST whose target past its first
+116 bytes, body and response met their budgets. The footer must take its
+counts from the session summary (two request records, one response) and, as
+this harness backend is not live, name no size; once the page reads a live
+session context (64 and 128 MiB), the footer, the Request URL row and the
+Payload tab name those sizes, and the Response tab names the control, all
+without an environment variable. At the narrow size with the request open the
+footer must show a one-line button instead of the line, fully visible, which
+Return or Space opens to the whole sentence and Escape closes with focus kept;
+focus leaving it, a press elsewhere and closing the request close it too, and a
+request opened again starts with it closed. Beside `test35`'s **header gaps**
+item, the two must not overlap when both are open, and each Escape must close
+only its own and not the request. Both themes, nothing clipped.
 
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,

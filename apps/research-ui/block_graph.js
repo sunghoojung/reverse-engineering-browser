@@ -664,7 +664,14 @@ function createBlockGraphRunner({script = 'block_graph_layout.js', local = null}
 /* Sources view mode for one captured WASM artifact. */
 function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
   const view = createBlockGraphView(host, {
-    onReveal: (offset) => revealOffset?.(offset),
+    // Showing a block's offset in the linear listing focuses that row; a
+    // reveal started from the Graph (a click or Enter on a block) keeps focus
+    // on the Graph, so F2 and the arrow keys still act on the function drawn.
+    onReveal: (offset) => {
+      const fromGraph = host.contains(document.activeElement);
+      revealOffset?.(offset);
+      if (fromGraph && host.isConnected && !host.hidden) view.focus();
+    },
     onSelect: () => {},
     retry: () => loadFunction(functionIndex, true),
     titleOf: graph => names.get(graph.functionIndex) ?? `func ${graph.functionIndex}`,
@@ -732,12 +739,19 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     const target = list[Math.max(0, Math.min(list.length - 1, (position < 0 ? 0 : position) + direction))];
     if (target !== undefined) loadFunction(target);
   }
-  let menu = null;
-  function closeMenu(opener) { menu?.remove(); menu = null; repaintMenu = null; opener?.setAttribute('aria-expanded', 'false'); }
+  let menu = null, menuOpener = null;
+  // Focus inside the closing popover returns to its trigger rather than
+  // staying on a removed entry or falling to the body.
+  function closeMenu(opener = menuOpener) {
+    const inside = Boolean(menu?.contains(document.activeElement));
+    menu?.remove(); menu = null; repaintMenu = null; opener?.setAttribute('aria-expanded', 'false');
+    if (inside && opener?.isConnected) opener.focus({preventScroll: true});
+    menuOpener = null;
+  }
   function toggleMenu(opener, wrap) {
     if (menu) { closeMenu(opener); opener.focus(); return; }
     if (!functions) return;
-    opener.setAttribute('aria-expanded', 'true');
+    opener.setAttribute('aria-expanded', 'true'); menuOpener = opener;
     menu = document.createElement('div'); menu.className = 'block-graph-fn-menu'; menu.setAttribute('role', 'dialog'); menu.setAttribute('aria-label', 'Choose a function');
     const input = document.createElement('input'); input.type = 'search'; input.placeholder = 'Filter by index, name or size'; input.setAttribute('aria-label', 'Filter functions');
     const list = document.createElement('div'); list.className = 'block-graph-fn-list'; list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Functions'); list.tabIndex = 0;

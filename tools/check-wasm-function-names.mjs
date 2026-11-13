@@ -247,6 +247,22 @@ async function checkSurfaces() {
   controller.close(false);
   document.querySelector('#editor').removeAttribute('data-graph-linear-hidden');
   caret = null;
+  // An entry left focused after it was hidden (a closed popover row) is not
+  // the function under the cursor: F2 on it names the Graph's function.
+  const shelf = document.createElement('div'); shelf.hidden = true;
+  const stale = document.createElement('button'); stale.className = 'block-graph-fn-row';
+  wasm.mark(stale, SHA, 1, 'func 1'); shelf.append(stale); document.querySelector('#screen-sources').append(shelf);
+  pointer(host);
+  assert(press(stale), 'F2 on a hidden entry falls through');
+  assert.equal(label(), 'Researcher name for func 4', 'A hidden func 1 entry does not name func 1');
+  controller.close(false); shelf.remove();
+  // A Graph reveal can leave focus on a listing row (in CI, the call into
+  // func 1 that starts func 2's first block). After a Graph press, F2 on that
+  // row names the Graph's function.
+  pointer(host.querySelector('.block-graph-canvas') ?? host);
+  assert(press(call), 'F2 on a revealed row beside the Graph');
+  assert.equal(label(), 'Researcher name for func 4', 'A focused listing row does not outrank a later Graph press');
+  controller.close(false);
   console.log('PASS Wasm names surfaces: Inspect headers and call targets, in-place refresh, F2 routing, hostile names as text, Graph title and function list with filter (LinkeDOM; not rendered QA)');
 }
 
@@ -335,6 +351,68 @@ async function checkPoll() {
   console.log('PASS Wasm names poll: one conditional read per tick, 304 adopts nothing, an agent-set name appears on the next tick');
 }
 
+// The Graph keeps keyboard focus through its own reveal and popover: the
+// three ways focus left it in WebKit before F2.
+async function checkGraphFocus() {
+  const dom = parseHTML('<!doctype html><html><body><section id="screen-sources"><div id="source-name-host"></div><div id="editor"><div id="source-graph-host" hidden></div><div id="source-code-wrap" tabindex="0"><div id="source-code"><span class="source-line" data-local-line="0"><span class="source-text">call</span></span></div></div></div><button id="graph-toggle">Graph</button></section></body></html>');
+  const {document, window, Event} = dom;
+  window.HTMLElement.prototype.select ??= function select() {};
+  window.HTMLElement.prototype.scrollIntoView ??= function scrollIntoView() {};
+  document.hasFocus ??= () => true;
+  let focused = null;
+  window.HTMLElement.prototype.focus = function focus() { focused = this; };
+  const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, requestAnimationFrame: fn => setTimeout(fn, 0),
+    cancelAnimationFrame: clearTimeout, getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, dispatchEvent: () => true, devicePixelRatio: 1};
+  const extra = ['wasm_function_names.js', 'block_graph_layout.js', 'block_graph.js'];
+  const {api, validateLibrary, global, panel: createPanel, layout} = await namesModels(root, context,
+    (await Promise.all(extra.map(name => read(`apps/research-ui/${name}`)))).join('\n'), ', panel: createSourceGraphPanel, layout: blockGraphLayout');
+  const store = server(library());
+  const controller = api.mount({fetcher: store.fetcher, validateLibrary});
+  assert(await controller.load());
+  // Two laid-out blocks, so Enter can select and reveal a real block.
+  const rows = '0 call 1\n2 end\n';
+  const graph = {count: 2, offsets: Float64Array.from([48, 50]), ends: Float64Array.from([50, 52]), firstRow: Uint32Array.from([0, 1]),
+    rowCount: Uint32Array.from([1, 1]), instructionCount: Uint32Array.from([1, 1]), flags: Uint32Array.from([3, 6]),
+    from: Int32Array.from([0]), to: Int32Array.from([1]), kind: Uint8Array.from([0]), labels: [null], rows, roots: [0],
+    title: 'run', status: 'decoded', instructions: 2, omissions: [], evidence: 'declared', notice: ''};
+  const starts = layout.rowStarts(rows), sizes = layout.nodeSizes(graph, starts, layout.METRICS);
+  global.loadWasmFunctionGraph = async ({functionIndex}) => ({graph: {...graph, functionIndex}, starts, layout: layout.layoutGraph(graph, sizes, layout.METRICS)});
+  global.readWasmFunctionIndex = async () => ({index: [1, 2], size: new Map([[1, 2], [2, 4]]), names: new Map([[2, 'run']]), status: 'decoded', omissions: []});
+  const host = document.querySelector('#source-graph-host'), button = document.querySelector('#graph-toggle');
+  const row = document.querySelector('#source-code .source-line');
+  // As in Sources: the reveal moves the listing to the offset and focuses it.
+  const panel = createPanel({host, editor: document.querySelector('#editor'), button, closeOn: null, revealOffset: () => row.focus()});
+  panel.sync({kind: 'wasm', source_type: 'artifact', artifact_id: '9', sha256: SHA});
+  button.click();
+  for (let i = 0; i < 20 && !(host.querySelector('.block-graph-stats')?.textContent ?? '').includes('block'); i++) await settle();
+  const canvas = host.querySelector('.block-graph-canvas');
+  const key = (target, name) => target.dispatchEvent(Object.defineProperty(new Event('keydown', {bubbles: true, cancelable: true}), 'key', {value: name}));
+  // A canvas press focuses the canvas.
+  focused = null;
+  canvas.dispatchEvent(new Event('pointerdown', {bubbles: true, cancelable: true}));
+  // Identity is compared as a boolean: printing LinkeDOM nodes in a failure
+  // message never finishes.
+  const where = () => focused?.className || focused?.tagName || 'nothing';
+  assert(focused === canvas, `A press on the canvas focuses it, not ${where()}`);
+  // Enter on a block reveals its offset, which focuses the listing row; the
+  // Graph takes focus back, as for a click on a block.
+  // LinkeDOM keeps no activeElement; the reveal reads it to see where focus is.
+  Object.defineProperty(document, 'activeElement', {configurable: true, get: () => focused});
+  key(canvas, 'ArrowDown'); key(canvas, 'Enter');
+  assert(host.querySelector('.block-graph-selection')?.textContent.startsWith('loc_'), 'Enter selected and revealed a block');
+  assert(focused === canvas, `A reveal started from the Graph leaves focus on the Graph, not ${where()}`);
+  // Closing the Functions popover returns focus to its trigger.
+  const opener = host.querySelector('.block-graph-fn-wrap button[aria-haspopup]');
+  opener.click();
+  const filter = host.querySelector('.block-graph-fn-menu input');
+  assert(filter, 'The popover opened');
+  filter.focus();
+  document.body.dispatchEvent(new Event('pointerdown', {bubbles: true}));
+  assert.equal(host.querySelector('.block-graph-fn-menu'), null, 'A press outside closes it');
+  assert(focused === opener, `Focus inside the closed popover returns to its trigger, not ${where()}`);
+  console.log('PASS Wasm names Graph focus: a canvas press focuses the canvas, a reveal from the Graph keeps focus on it, a closing popover returns focus to its trigger (LinkeDOM; not rendered QA)');
+}
+
 async function checkWiring() {
   const html = await read('apps/research-ui/index.html'), app = await read('apps/research-ui/app.js');
   const order = ['evidence_names.js', 'wasm_function_names.js', 'app.js'].map(name => html.indexOf(`src="${name}"`));
@@ -367,4 +445,5 @@ await checkDocument();
 await checkSurfaces();
 await checkFlow();
 await checkPoll();
+await checkGraphFocus();
 await checkWiring();

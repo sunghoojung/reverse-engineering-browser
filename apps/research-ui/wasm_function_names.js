@@ -161,7 +161,7 @@
   // focus inside the editor.
   function openGraph() {
     const host = document.querySelector('#source-graph-host');
-    return host && !host.hidden ? isMarked(host) : null;
+    return host && !host.hidden && rendered(host) ? isMarked(host) : null;
   }
   // With the Graph open, the most recent pointer interaction decides: a press
   // on a marked row of the linear listing shown beside it names that row; a
@@ -174,18 +174,28 @@
     const linear = code && !code.closest('[data-graph-linear-hidden]') && row && code.contains(row) ? isMarked(row) : null;
     return linear && pointedAt > latestGraph ? linear : graph;
   }
+  // A marked element that is not on screen (inside [hidden], removed, or laid
+  // out with no box) cannot stand for the function under the cursor, even if
+  // the engine left focus on it.
+  const rendered = node => node.isConnected && !node.closest('[hidden]') &&
+    (typeof node.getClientRects !== 'function' || node.getClientRects().length > 0);
   // Which function F2 names, or null to leave the key to the Sources handler
   // (a tree row, a tab or the toolbar renames the file).
   function f2Target(target) {
-    const own = target?.closest?.('[data-wasm-function]');
+    const found = target?.closest?.('[data-wasm-function]'), own = found && rendered(found) ? found : null;
+    // A listing row can hold focus because a Graph reveal focused it; beside
+    // the open Graph it follows the latest pointer interaction like the code
+    // view does, instead of naming the row.
+    const graph = openGraph();
+    if (own && graph && own !== graph && own.closest('#source-code')) return besideGraph(graph);
     if (own) return own;
+    if (found) target = found.closest('#source-code-wrap') ?? document.body;
     if (target?.closest?.('.source-tree-row, .source-editor-tab')) return null;
     const onBody = !target || target === document.body || target === document.documentElement;
     if (onBody) {
       const sources = document.querySelector('#screen-sources');
       if (!sources || sources.hidden) return null;
     } else if (!target?.closest?.('#source-code-wrap')) return null;
-    const graph = openGraph();
     return graph ? besideGraph(graph) : inspectRow();
   }
   // F2 renames the function under the cursor, as in a disassembler. Text

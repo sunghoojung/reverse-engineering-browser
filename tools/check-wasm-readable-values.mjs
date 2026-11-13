@@ -23,6 +23,9 @@ class Trap extends Error {}
 class Fuel extends Error {}
 class Br { constructor(label, values) { this.label = label; } }
 class Ret { constructor(values) { this.values = values; } }
+// A tail call leaves the function, and so every handler in it, before the
+// callee runs; the call is made at the top, outside every try.
+class TailCall { constructor(fn, args) { this.fn = fn; this.args = args; } }
 
 function makeEnv(tag, state) {
   const log = state.log;
@@ -33,7 +36,9 @@ function makeEnv(tag, state) {
     two: () => { log.push('two'); return [state.counter + 10, state.counter + 20]; },
     tick: () => { log.push('tick'); state.ticks += 1; if (state.ticks > FUEL) throw new Fuel('fuel'); },
     thr: x => { log.push(`thr(${x})`); if (x & 1) throw state.makeExc(x); },
-    mv: x => { log.push(`mv(${x})`); return [x ^ 5, (x + 100) | 0]; },
+    // mv throws on 13 so a tail call to it from inside a handler shows
+    // whether the listing lets the exception escape, as V8 does.
+    mv: x => { log.push(`mv(${x})`); if (x === 13) throw state.makeExc(x); return [x ^ 5, (x + 100) | 0]; },
   };
 }
 
@@ -286,6 +291,21 @@ function interpret(listing, a, b, tagless) {
       if (ev(c) !== 0) throw new Ret(vals.map(ev));
       return;
     }
+    if (line.startsWith('return_call ')) {
+      const call = new P(line.slice('return_call '.length)).expr();
+      if (call.k === 'call') {
+        const args = call.args.map(ev);
+        const fn = names[call.name]; if (!fn) throw Error(`call ${call.name}`);
+        throw new TailCall(fn, args);
+      }
+      if (call.k === 'ci') {
+        const args = call.args.map(ev); const i = ev(call.idx); const fn = table[u(i)];
+        if (!fn) throw new Trap('table');
+        if (fn !== (call.type === 1 ? table[0] : table[1])) throw new Trap('sig');
+        throw new TailCall(fn, args);
+      }
+      throw Error(`tail call ${line}`);
+    }
     if (line.startsWith('return ')) {
       const p = new P(line.slice(7)); const vals = [p.expr()]; while (p.is(',')) { p.i++; vals.push(p.expr()); }
       const out = vals.map(ev);
@@ -337,7 +357,7 @@ function interpret(listing, a, b, tagless) {
           try { exec(it.body); }
           catch (e) {
             if (e instanceof Br && e.label === it.label) break;
-            if (e instanceof Br || e instanceof Ret || e instanceof Trap) throw e;
+            if (e instanceof Br || e instanceof Ret || e instanceof Trap || e instanceof TailCall) throw e;
             if (it.catches.length) throw new Br(it.catches[0]);
             throw e;
           }
@@ -354,7 +374,14 @@ function interpret(listing, a, b, tagless) {
     }
   }
   let outcome;
-  try { exec(listing); throw Error('fell off function'); }
+  try {
+    try { exec(listing); throw Error('fell off function'); }
+    catch (e) {
+      if (!(e instanceof TailCall)) throw e;
+      const r = e.fn(...e.args);
+      throw new Ret(r);
+    }
+  }
   catch (e) {
     if (e instanceof Ret) outcome = `ret ${e.values[0]},${e.values[1]}`;
     else if (e instanceof Trap) outcome = 'trap';

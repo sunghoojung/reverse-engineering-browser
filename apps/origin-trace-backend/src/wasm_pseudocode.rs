@@ -1734,8 +1734,12 @@ impl<'m> Lifter<'m> {
     /// results, or the return of a tail call.
     fn push_call(&mut self, call: Expr, pushes: u32, tail: bool) {
         if tail {
+            // A tail call replaces this function's frame before the callee
+            // runs, so no handler of this function catches what it throws,
+            // even inside a try body or a try_table. It reads as
+            // `return_call`, never as a `return` of a call the braces guard.
             self.flush();
-            let text = format!("return {}", call.text);
+            let text = format!("return_call {}", call.text);
             let calls = call.calls.clone();
             self.spill_before(call.effects);
             self.push_line(LineKind::Statement, text, call.instrs, &calls);
@@ -3008,6 +3012,39 @@ mod tests {
                 "func f2(p0: i32, p1: i32) -> (i32, i32) {",
                 "thr(1)",
                 "drop(p0 = 5)",
+                "return p0, p1",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tail_call_reads_as_leaving_every_handler() {
+        // Inside a try_table, a tail call still leaves this function first:
+        // V8 lets an exception from mv escape, so it must not read as a
+        // return the braces protect.
+        assert_eq!(
+            exact(
+                r#"(module (import "env" "mv" (func $mv (param i32) (result i32 i32)))
+                  (type $t (func (param i32) (result i32 i32))) (table 1 funcref)
+                  (func (param i32 i32) (result i32 i32)
+                    block try_table (catch_all 0) local.get 0 return_call $mv end end
+                    block try_table (catch_all 0) local.get 1 i32.const 0 return_call_indirect (type $t) end end
+                    local.get 0 local.get 1))"#,
+                1
+            ),
+            [
+                "func f1(p0: i32, p1: i32) -> (i32, i32) {",
+                "block L1 {",
+                "try_table catch_all -> L1 {",
+                "return_call mv(p0)",
+                "}",
+                "}",
+                "block L3 {",
+                "try_table catch_all -> L3 {",
+                "return_call call_indirect(p1; index 0, type 0, table 0)",
+                "}",
+                "}",
                 "return p0, p1",
                 "}"
             ]
@@ -4288,6 +4325,9 @@ mod tests {
             "block try_table (catch_all 0) i32.const 5 local.tee 0 i32.const 1 call $thr drop end end local.get 0 local.get 1",
             "block try_table (catch_all 0) i32.const 13 call $f i32.const 5 local.set 0 drop end end local.get 0 local.get 1",
             "block try_table (catch_all 0) local.get 0 call $f local.set 1 local.get 1 call $thr end end local.get 0 local.get 1",
+            // A tail callee that throws: the exception escapes the handler.
+            "block try_table (catch_all 0) i32.const 13 return_call $mv end end local.get 0 local.get 1",
+            "block try_table (catch_all 0) local.get 0 return_call $mv end end local.get 0 local.get 1",
         ];
         let mut programs: Vec<(String, String)> = hand
             .iter()
@@ -4710,7 +4750,10 @@ mod tests {
             "{lines:?}"
         );
         assert!(lines.contains(&"throw tag 0(p0)".to_owned()), "{lines:?}");
-        assert!(lines.contains(&"return f2(p0)".to_owned()), "{lines:?}");
+        assert!(
+            lines.contains(&"return_call f2(p0)".to_owned()),
+            "{lines:?}"
+        );
         assert_eq!(document["fallbacks"]["exception_handler"], 1);
         assert_eq!(document["fallbacks"]["gc_branch"], 1);
         assert!(

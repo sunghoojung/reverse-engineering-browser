@@ -1,0 +1,39 @@
+/* Readable view: one Wasm function's lifted lines above the linear view,
+ * sharing the split the Graph uses. */
+#screen-sources .sources-editor[data-readable="true"] .source-view-split { grid-template-rows: minmax(0, 2fr) minmax(72px, 1fr); }
+#screen-sources .sources-editor[data-readable="true"] #source-readable-host { grid-row: 1; }
+#screen-sources .sources-editor[data-readable="true"] #source-code-wrap { grid-row: 2; border-top: 1px solid var(--line); }
+#screen-sources .sources-editor[data-readable="true"] :is(#source-window, #source-search-status) { display: none !important; }
+#screen-sources .source-view-split:has(> #source-code-wrap[hidden]):has(> #source-graph-host[hidden]):has(> #source-readable-host[hidden]) { display: none; }
+.wasm-readable[hidden], .wasm-readable [hidden] { display: none !important; }
+.wasm-readable { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--panel); }
+.wasm-readable-header { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 2px; min-height: 30px; padding: 3px 10px; border-bottom: 1px solid var(--line); }
+.wasm-readable-function { display: flex; align-items: center; gap: 4px; color: var(--muted); font: 11px var(--sans); }
+.wasm-readable-function input { width: 76px; height: 24px; padding: 0 6px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); font: 11px var(--mono); }
+.wasm-readable-title { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; color: var(--text); font: 600 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.wasm-readable-stats { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.wasm-readable-status { margin: 0; padding: 4px 10px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font: 11px var(--sans); overflow-wrap: anywhere; }
+.wasm-readable-status[data-kind="warning"] { color: var(--amber); }
+.wasm-readable-status[data-kind="error"] { color: var(--red); }
+.wasm-readable-lines { min-width: 0; min-height: 0; overflow: auto; padding: 2px 0; background: var(--code-bg, var(--panel)); font: 12px/20px var(--code-font, var(--mono)); }
+/* The list is the keyboard target after a pointer choice too, so its ring
+ * follows :focus; WebKit does not match :focus-visible after a click. */
+.wasm-readable-lines:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wasm-readable-line { display: flex; align-items: baseline; gap: 10px; min-width: max-content; padding: 0 10px 0 0; cursor: pointer; white-space: pre; }
+.wasm-readable-line:hover { background: var(--panel-3); }
+.wasm-readable-line[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.wasm-readable-offset { position: sticky; left: 0; flex: 0 0 auto; width: 7ch; padding: 0 6px 0 10px; background: inherit; color: var(--faint); text-align: right; }
+.wasm-readable-line:not(:hover):not([aria-selected="true"]) .wasm-readable-offset { background: var(--code-bg, var(--panel)); }
+.wasm-readable-text { color: var(--code-text, var(--text)); }
+.wasm-readable-kind-header .wasm-readable-text, .wasm-readable-kind-open .wasm-readable-text, .wasm-readable-kind-middle .wasm-readable-text,
+.wasm-readable-kind-close .wasm-readable-text, .wasm-readable-kind-case .wasm-readable-text { color: var(--syntax-keyword, var(--accent)); }
+.wasm-readable-kind-fallback .wasm-readable-text { color: var(--amber); }
+.wasm-readable-raw { flex: 0 0 auto; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--amber) 55%, var(--line)); border-radius: 3px; color: var(--amber); font: 10px/16px var(--sans); }
+.wasm-readable-pager { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 3px 10px; border-top: 1px solid var(--line); }
+.wasm-readable-notice { flex: 1 1 12rem; min-width: 0; color: var(--faint); font: 11px var(--sans); }
+.wasm-readable-header button:focus-visible, .wasm-readable-pager button:focus-visible, .wasm-readable-function input:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Rows are pinned: a hidden status or pager must not move the lines into an auto row. */
+.wasm-readable-header { grid-row: 1; }
+.wasm-readable-status { grid-row: 2; }
+.wasm-readable-lines { grid-row: 3; }
+.wasm-readable-pager { grid-row: 4; }

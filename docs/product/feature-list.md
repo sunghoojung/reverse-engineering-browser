@@ -51,7 +51,8 @@ privacy, and implementation limits are documented in
 - Detect network-loaded modules and modules compiled from runtime bytes.
 - Preserve module bytes, hashes, origin, creator artifact, and lifecycle events.
 - Display imports, exports, types, functions, tables, memories, globals, strings, data segments, and custom sections.
-- [Captured module inspection and byte-offset disassembly](./wasm-inspection-v1.md) are implemented in Sources. Higher-level readable reconstruction remains planned.
+- [Captured module inspection and byte-offset disassembly](./wasm-inspection-v1.md) are implemented in Sources.
+- A [readable view of one function](./wasm-readable-view-v1.md) is implemented in Sources and for agents: folded expressions with every line mapped to its bytes, names only from the module, and counted raw lines for what it does not fold. Type recovery and value provenance remain planned.
 - [Researcher function names](./wasm-function-names-v1.md) keyed by module SHA-256 and function index are implemented: renamed from Inspect, Graph and Flow, shown in every Wasm view and joined into every agent-facing Wasm read.
 - [Offline function runs](./wasm-offline-runner-v1.md) are implemented: one function of a captured module runs on an explicit confirmed request in a local interpreter with every import stubbed, under fuel, memory, table, call-depth and deadline limits, and the result is a derived experiment record.
 - [Library identification](./wasm-identification-v1.md) is implemented: toolchain and runtime conclusions with their evidence offsets, well-known function label suggestions, and complete or partial crypto and encoding constant matches. Cross-module signature matching remains planned.

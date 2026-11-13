@@ -816,8 +816,8 @@ assert.equal(mapViewKind(), 'Derived', 'the new selection keeps the evidence sta
 assert.equal(mapRoot.hidden, true, 'the retired map is hidden');
 assert.equal(mapRoot.querySelector('.map-facts').children.length, 0, 'the retired summary is released');
 
-// Sources Graph: Inspect, Graph and Map sit together, and Graph and Map exclude each other.
-assert.match(html, /id="source-wasm"[^>]*>Inspect<\/button>\s*<button id="source-graph"[^>]*>Graph<\/button>\s*<button id="source-map"/, 'Inspect, Graph and Map are adjacent in that order');
+// Sources Graph: Inspect, Graph, Readable and Map sit together, and the three views exclude each other.
+assert.match(html, /id="source-wasm"[^>]*>Inspect<\/button>\s*<button id="source-graph"[^>]*>Graph<\/button>\s*<button id="source-readable"[^>]*>Readable<\/button>\s*<button id="source-map"/, 'Inspect, Graph, Readable and Map are adjacent in that order');
 for (const [path, assets] of [['scripts/build-research-app.sh', ['block_graph.js', 'block_graph_layout.js', 'block_graph.css']], ['apps/origin-trace-backend/src/app.rs', ['"block_graph.js"', '"block_graph_layout.js"', '"block_graph.css"']],
   ['apps/research-ui/macos/OriginTraceApp.swift', ['/block_graph.js', '/block_graph_layout.js', '/block_graph.css']]]) {
   const text = await readFile(join(root, path), 'utf8');

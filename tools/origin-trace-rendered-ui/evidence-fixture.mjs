@@ -165,6 +165,33 @@ function namedFunctionsWasm() {
     ...section(7, [1, ...text('run'), 0, 2]), ...section(10, [2, 2, 0, 0x0b, 4, 0, 0x10, 1, 0x0b])]);
 }
 
+// One function for the Readable view: a loop that loads, adds and calls an
+// import, then code after a return that the lift keeps raw. The import's name
+// is markup so the view can be checked to insert captured names as text.
+function readableWasm() {
+  const leb = n => { const out = []; do { let b = n & 127; n >>>= 7; out.push(n ? b | 128 : b); } while (n); return out; };
+  const text = value => [...leb(Buffer.byteLength(value)), ...Buffer.from(value)];
+  const section = (id, data) => [id, ...leb(data.length), ...data];
+  const body = [1, 1, 0x7f,
+    0x03, 0x40,
+    0x20, 0, 0x28, 2, 8, 0x41, 1, 0x6a, 0x21, 1,
+    0x20, 1, 0x10, 0,
+    0x20, 1, 0x20, 0, 0x48, 0x0d, 0,
+    0x0b,
+    0x20, 1, 0x0f,
+    0x41, 7,
+    0x0b];
+  const names = [1, ...leb(1 + text('<img src=x onerror=alert(1)>').length + 1), 1, 0, ...text('<img src=x onerror=alert(1)>')];
+  return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+    ...section(1, [2, 0x60, 1, 0x7f, 0, 0x60, 1, 0x7f, 1, 0x7f]),
+    ...section(2, [1, ...text('env'), ...text('log'), 0, 0]),
+    ...section(3, [1, 1]),
+    ...section(5, [1, 0, 1]),
+    ...section(7, [1, ...text('readable_run'), 0, 1]),
+    ...section(10, [1, ...leb(body.length), ...body]),
+    ...section(0, [...text('name'), ...names])]);
+}
+
 function jsonLines(text) {
   return text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 }
@@ -954,6 +981,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const identified = await artifact(artifacts, {artifact_id: '410', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'network_response', kind: 'wasm', mime_type: 'application/wasm', url: 'https://fixture.invalid/identified-module.wasm'},
   await readFile(new URL('../fixtures/wasm-identification/rust-wasm-bindgen.wasm', import.meta.url)));
+  const readable = await artifact(artifacts, {artifact_id: '400', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://readable-loop.wasm'},
+  readableWasm());
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -963,7 +993,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

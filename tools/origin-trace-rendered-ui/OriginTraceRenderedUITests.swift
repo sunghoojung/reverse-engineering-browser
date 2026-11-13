@@ -445,6 +445,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
   }
 
+  // A Sources toolbar command that did not fit the row sits in More; open
+  // More first, as a researcher would, then choose it.
+  @MainActor
+  private func clickSourceTool(_ ui: Harness, _ selector: String) async throws {
+    let moved = try await ui.value("document.querySelector('.source-more-menu').contains(document.querySelector(\(String(reflecting: selector))))") as? Bool
+    if moved == true { try await ui.click("#source-more > summary") }
+    try await ui.click(selector)
+  }
+
   @MainActor
   private func assertFullyVisible(_ ui: Harness, _ selector: String, _ context: String,
                                   file: StaticString = #filePath, line: UInt = #line) async throws {
@@ -2906,6 +2915,61 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // The Readable view of a captured Wasm function: folded lines with their
+  // byte offsets, a counted raw line, a markup-shaped module name inserted as
+  // text, and line selection by pointer and keyboard revealing the bytes.
+  @MainActor
+  func test37WasmReadableView() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"400\"]")
+      try await ui.waitUntil("!document.querySelector('#source-readable').hidden", "Readable is offered for a captured WASM artifact")
+      try await clickSourceTool(ui, "#source-readable")
+      try await ui.waitUntil("(document.querySelector('#source-readable-host .wasm-readable-lines')?.textContent ?? '').includes('loop L1 {')", timeout: 30, "the readable lines did not load")
+      let view = try await ui.json("""
+        (() => { const host = document.querySelector('#source-readable-host'), rows = [...host.querySelectorAll('.wasm-readable-line')];
+          const text = rows.map(row => row.querySelector('.wasm-readable-text').textContent.trim());
+          return {title: host.querySelector('.wasm-readable-title').textContent, stats: host.querySelector('.wasm-readable-stats').textContent,
+            text, raw: host.querySelectorAll('.wasm-readable-raw').length, offsets: rows.map(row => row.querySelector('.wasm-readable-offset').textContent),
+            height: host.getBoundingClientRect().height, pressed: document.querySelector('#source-readable').getAttribute('aria-pressed')}; })()
+        """)
+      let text = view["text"] as? [String] ?? []
+      XCTAssertTrue((view["title"] as? String ?? "").contains("readable_run"), "\(size.name): the export names the function: \(view)")
+      XCTAssertTrue(text.contains("l1 = i32.load(p0, offset 8) + 1"), "\(size.name): the load folds into one line: \(text)")
+      XCTAssertTrue(text.contains("br_if L1 (l1 < p0)"), "\(size.name): the loop branch reads with its condition: \(text)")
+      XCTAssertTrue(text.contains("\"<img src=x onerror=alert(1)>\"(l1)"), "\(size.name): the module's name is quoted text: \(text)")
+      XCTAssertEqual(view["raw"] as? Int, 1, "\(size.name): the code after return is one raw line: \(view)")
+      XCTAssertTrue((view["stats"] as? String ?? "").contains("1 raw"), "\(size.name): the header counts the raw line: \(view)")
+      XCTAssertFalse((view["offsets"] as? [String] ?? []).isEmpty, "\(size.name): lines show their byte offsets")
+      XCTAssertEqual(view["pressed"] as? String, "true", "\(size.name): the Readable control shows it is on")
+      XCTAssertGreaterThanOrEqual(view["height"] as? Double ?? 0, 160, "\(size.name): the readable view gets most of the height: \(view)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) readable view")
+      try await assertInert(ui, "\(size.name) readable view")
+      try await ui.screenshot("wasm-readable-\(size.name)")
+      // Choosing a line reveals its first byte in the linear view.
+      try await ui.click("#source-readable-host .wasm-readable-line", containing: "br_if L1")
+      try await ui.waitUntil("document.querySelector('#source-code [data-graph-reveal]') !== null", "choosing a line reveals its bytes")
+      let chosen = try await ui.value("document.querySelector('#source-readable-host [aria-selected=true] .wasm-readable-text').textContent.trim()") as? String
+      XCTAssertEqual(chosen, "br_if L1 (l1 < p0)", "\(size.name): the chosen line is selected")
+      _ = try await ui.value("(document.querySelectorAll('#source-code [data-graph-reveal]').forEach(row => row.removeAttribute('data-graph-reveal')), document.querySelector('#source-readable-host .wasm-readable-lines').focus(), 1)")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("(document.querySelector('#source-readable-host [aria-selected=true]')?.textContent ?? '').includes('}')", "the down arrow moves the selection")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("document.querySelector('#source-code [data-graph-reveal]') !== null", "Enter reveals the selected line's bytes")
+      let focus = try await ui.value("getComputedStyle(document.activeElement).outlineStyle") as? String
+      XCTAssertNotEqual(focus, "none", "\(size.name): the focused list shows its focus")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+      try await Task.sleep(nanoseconds: 600_000_000)
+      try await ui.screenshot("wasm-readable-light-\(size.name)")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+      // Graph replaces Readable in the same split.
+      try await clickSourceTool(ui, "#source-graph")
+      try await ui.waitUntil("document.querySelector('#source-readable-host').hidden", "opening Graph closes Readable")
+      try await clickSourceTool(ui, "#source-graph")
+    }
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor
@@ -3312,7 +3376,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-tree [role=treeitem]", containing: "map-module")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "the fixture module did not open as hex")
       let idleRSS = webContentResidentKilobytes(ui)
-      try await ui.click("#source-map")
+      try await clickSourceTool(ui, "#source-map")
       try await ui.waitUntil("!document.querySelector('.map-body').hidden && document.querySelector('.map-canvas').width > 0", timeout: 90, "the map did not load")
       let side = try await ui.value("document.querySelector('.map-canvas').width") as? Int ?? 0
       let openRSS = webContentResidentKilobytes(ui)

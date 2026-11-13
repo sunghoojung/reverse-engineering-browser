@@ -109,6 +109,7 @@ Every option is off unless the start names it, and none is inherited.
 | Run offline… (one function in the stubbed local interpreter) | `run_wasm_function` | F | Added; Full access only, because a run's outcome, fuel, import calls, timing and expectations all disclose computed values |
 | Stored offline runs | `get_wasm_runs` | F | Added; Full access only, for the same reason |
 | Inspect identification summary, Details and Functions menu badges | `get_wasm_identification` with `row_offset`, `row_limit` | R (structure), F (matched bytes `hex`) | Added |
+| Readable (lifted function) | `get_wasm_pseudocode` with `line_offset`, `line_limit` | R (structure, ranges, callees), F (lifted text) | Added; below Full access the lifted text is omitted |
 | Map (entropy and kind map) | `get_artifact_map` | R | Covered |
 | Facts | `get_source_facts` | A | Covered |
 | Track calls (saved invocation sites) | `get_js_invocation_sites`, `resolve_js_invocation_site`, `js_invocation_site_action` | R to read, A to change | Covered |
@@ -191,7 +192,7 @@ Every option is off unless the start names it, and none is inherited.
 
 ## Totals
 
-The tables have 109 rows.
+The tables have 110 rows.
 
 - **Before the change that added this page**, 76 rows were covered for a
   client started with `--allow-effects --allow-session-start`. The in-app agent had nine fixed
@@ -200,14 +201,14 @@ The tables have 109 rows.
   `get_analysis_catalog`, `get_js_invocation_sites`, `inspect_wasm`) plus,
   with actions on, every effectful operation. It could not read content or
   start sessions, and every action needed Allow once.
-- **Now** 94 rows are covered: 79 marked Covered (the 76, plus three rows
-  later changes added as covered) and 15 marked Added (request and response
+- **Now** 95 rows are covered: 79 marked Covered (the 76, plus three rows
+  later changes added as covered) and 16 marked Added (request and response
   bodies, source text, search across files and within one, Wasm row windows,
   guest bytecode, the two response options, the session flow graph, graph
   layout, Wasm function names, offline Wasm function runs and their stored
-  records, and Wasm library identification), and the in-app agent can use
-  all of them at the level each row names, including session control at Full
-  access.
+  records, Wasm library identification and the readable Wasm function), and
+  the in-app agent can use all of them at the level each row names, including
+  session control at Full access.
 - **3 rows are partial**: Decode value and Decode range need the value read
   first (Full access, or a pin), and the Static bytecode, Contextual and
   Opcode ledger views decode researcher-imported definitions in the page.

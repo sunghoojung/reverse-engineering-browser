@@ -691,6 +691,25 @@ read them with `get_wasm_function_graph` or recipe 23. A suggestion is not a
 name and a constant match is not proof the algorithm runs; cite the offsets.
 Below Full access the matched bytes (`hex`) are omitted.
 
+## 29. Read one Wasm function as folded expressions
+
+`get_wasm_functions` names the function; `get_wasm_pseudocode` lifts it.
+
+```text
+get_wasm_functions {"artifact_id": "9"}
+get_wasm_pseudocode {"artifact_id": "9", "function": 41, "line_limit": 400}
+get_wasm_pseudocode {"artifact_id": "9", "function": 41, "line_offset": 400, "line_limit": 400}
+```
+
+Good: `status: complete` and `lifted_instructions` equal to
+`instruction_count`; continue with `window.next_line_offset` until it is null.
+Cite a line by its `ranges` (module byte offsets) and the module `sha256`, not
+by its text: `inspect_wasm` rows at those offsets are the evidence. A line of
+kind `fallback` is the raw instruction, and `fallbacks` says why it was not
+folded. Below Full access `text` is omitted, but `lines`, `frames`, `nesting`
+and `callees` still show the shape: where the loops and switches are and what
+the function calls. Names in the text come only from the module.
+
 ## Response shapes at a glance
 
 | Tool | Look at |

@@ -125,7 +125,7 @@
         "run_wasm_function",
         "get_wasm_runs"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. Running captured code is a content read too: run_wasm_function, and get_wasm_runs which returns its records, are listed only with --allow-content, and running still needs --allow-effects, because a run's outcome, fuel, import calls, timing and repeated expectations can each disclose values the code computed. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, and inspect_wasm with row_offset and row_limit. Binary responses are still refused."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -5224,6 +5224,161 @@
             {
               "path": "apps/origin-trace-backend/src/wasm_constants.rs",
               "symbol": "catalog"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/wasm/pseudocode": {
+      "get": {
+        "operationId": "get_wasm_pseudocode",
+        "summary": "Readable lifted listing of one WebAssembly function",
+        "description": "A readable lift of one defined function of a hash-verified core WASM artifact: the operand stack is simulated with declared effects and instructions fold into nested expressions (l3 = i32.load(l1, offset 8) + 1), calls by name, if/else, loops, br_table as a switch and call_indirect with its type and table. Every instruction is owned by exactly one line, checked on each lift, and every line carries the original module byte ranges it covers. Folding keeps calls, memory, globals, traps and branches in byte order, and local writes in order with calls and throws a handler in the same function can catch. What the lift does not model stays the raw instruction text on a fallback line, counted by reason in fallbacks. Names come only from the name section, exports and imports. text is captured content and is omitted below --allow-content; line structure, ranges, counts, the nesting summary and callee names are returned at every level. Lines are paged with line_offset and line_limit; window.next_line_offset continues. A module or function that does not validate gets a named 422 error instead of a listing. Never executes the module.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "function",
+            "in": "query",
+            "required": true,
+            "description": "Function index, including imported function numbering. An imported or undefined index returns 404.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "line_offset",
+            "in": "query",
+            "required": false,
+            "description": "First line of the window. A value past line_count is refused. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "line_limit",
+            "in": "query",
+            "required": false,
+            "description": "Lines in the window, 1 to 2000. The window is cut further until the whole document is at most 120 KiB both compact and pretty-printed, so one page is inlined by reb-api mcp; truncation.window_bytes says it was cut and window.next_line_offset continues. Default 400.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2000,
+              "default": 400
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned readable lift.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmPseudocode"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+            },
+            {
+              "id": "defined-function",
+              "condition": "function must name a function with a body in this module."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Decodes and lifts one function body on request, one window at a time, with no retained whole-module structure. Declared stack effects only; the module is never executed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_pseudocode.rs",
+              "symbol": "pseudocode"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/wasm_stack.rs",
+              "symbol": "arity"
             }
           ]
         },
@@ -22856,6 +23011,445 @@
             "$ref": "#/components/schemas/SafeInteger"
           },
           "file": {
+            "type": "string"
+          }
+        }
+      },
+      "WasmPseudocode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "byte_size",
+          "function_index",
+          "name",
+          "name_source",
+          "byte_offset",
+          "byte_end",
+          "type_index",
+          "params",
+          "results",
+          "locals",
+          "evidence",
+          "status",
+          "instruction_count",
+          "lifted_instructions",
+          "unowned_instructions",
+          "repeated_instructions",
+          "line_count",
+          "fallback_count",
+          "fallbacks",
+          "spill_count",
+          "unknown_operands",
+          "nesting",
+          "frame_fields",
+          "frames",
+          "line_kinds",
+          "line_fields",
+          "lines",
+          "text",
+          "callee_fields",
+          "callees",
+          "window",
+          "truncation",
+          "omissions",
+          "limits",
+          "notice"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-pseudocode-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byte_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "function_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 160,
+            "description": "Display name: the name section, an export, an import's module.field, then f<index>. A name that is not a plain identifier, or that looks like a lift variable, is quoted. A name longer than 96 bytes keeps its start and end around ... and is followed by #<function index>."
+          },
+          "name_source": {
+            "enum": [
+              "name_section",
+              "export",
+              "import",
+              "index"
+            ]
+          },
+          "byte_offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "byte_end": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "type_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "params": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "results": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "locals": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence": {
+            "const": "static_lift"
+          },
+          "status": {
+            "enum": [
+              "complete",
+              "partial"
+            ],
+            "description": "complete when no limit stopped the lift and every decoded instruction of the body is owned by exactly one line, as checked on each lift (unowned_instructions and repeated_instructions are zero); otherwise partial. Fallback lines do not make a lift partial."
+          },
+          "instruction_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lifted_instructions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Instructions owned by lines. Equal to instruction_count when status is complete."
+          },
+          "unowned_instructions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Decoded instructions owned by no line. Nonzero only when a limit stopped the lift or the lift is wrong, and status is then partial."
+          },
+          "repeated_instructions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Decoded instructions owned by more than one line. Always zero for a correct lift; nonzero makes status partial."
+          },
+          "line_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fallback_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "fallbacks": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "unreachable_code",
+              "unknown_effect",
+              "exception_handler",
+              "gc_branch",
+              "stack_switching",
+              "label_out_of_range"
+            ],
+            "properties": {
+              "unreachable_code": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unknown_effect": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "exception_handler": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "gc_branch": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "stack_switching": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "label_out_of_range": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "spill_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Values assigned to a temporary tN so effects keep their order or a line stays readable."
+          },
+          "unknown_operands": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Operands read as ? because an earlier effect in the frame was unknown."
+          },
+          "nesting": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "required": [
+              "max_depth",
+              "block",
+              "loop",
+              "if",
+              "else",
+              "try",
+              "try_table",
+              "br_table"
+            ]
+          },
+          "frame_fields": {
+            "const": [
+              "open_line",
+              "close_line",
+              "depth",
+              "kind",
+              "label",
+              "byte_offset"
+            ]
+          },
+          "frames": {
+            "type": "array",
+            "maxItems": 256,
+            "description": "Control frames open in or around the window.",
+            "items": {
+              "type": "array",
+              "minItems": 6,
+              "maxItems": 6,
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "enum": [
+                    "function",
+                    "block",
+                    "loop",
+                    "if",
+                    "else",
+                    "try",
+                    "catch",
+                    "try_table"
+                  ]
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              ]
+            }
+          },
+          "line_kinds": {
+            "const": [
+              "header",
+              "statement",
+              "open",
+              "middle",
+              "close",
+              "case",
+              "fallback"
+            ]
+          },
+          "line_fields": {
+            "const": [
+              "depth",
+              "kind",
+              "instructions",
+              "ranges"
+            ]
+          },
+          "lines": {
+            "type": "array",
+            "maxItems": 2000,
+            "items": {
+              "type": "array",
+              "minItems": 4,
+              "maxItems": 4,
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 6
+                },
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "minItems": 2,
+                    "maxItems": 2
+                  },
+                  "description": "Module byte ranges, exclusive end."
+                }
+              ]
+            }
+          },
+          "text": {
+            "type": "string",
+            "description": "The window's lines, one per newline-terminated row, indented by depth. Captured content: omitted below --allow-content."
+          },
+          "callee_fields": {
+            "const": [
+              "function_index",
+              "name",
+              "name_source"
+            ]
+          },
+          "callees": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "prefixItems": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "maxLength": 160
+                },
+                {
+                  "enum": [
+                    "name_section",
+                    "export",
+                    "import",
+                    "index"
+                  ]
+                }
+              ]
+            }
+          },
+          "window": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "line_offset",
+              "line_limit",
+              "lines",
+              "next_line_offset"
+            ],
+            "properties": {
+              "line_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "line_limit": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "lines": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "next_line_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          },
+          "truncation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "instructions",
+              "lines",
+              "deadline",
+              "clipped_lines",
+              "window_bytes",
+              "frames",
+              "merged_ranges"
+            ],
+            "properties": {
+              "instructions": {
+                "type": "boolean"
+              },
+              "lines": {
+                "type": "boolean"
+              },
+              "deadline": {
+                "type": "boolean"
+              },
+              "clipped_lines": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "window_bytes": {
+                "type": "boolean"
+              },
+              "frames": {
+                "type": "boolean"
+              },
+              "merged_ranges": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Lines in the window whose byte ranges passed 64; their 64th range is a span covering every later one, which also covers bytes other lines own."
+              }
+            }
+          },
+          "omissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "notice": {
             "type": "string"
           }
         }

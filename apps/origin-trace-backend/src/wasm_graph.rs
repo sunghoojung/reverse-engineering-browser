@@ -22,7 +22,7 @@ use wasmparser::{ExternalKind, KnownCustom, Name, Operator, Parser, Payload};
 /// limit can be raised; 64 MiB covers both without an unbounded read.
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Web engines reject a body above this size, so a longer one cannot have run.
-const MAX_BODY_BYTES: usize = 7_654_321;
+pub(crate) const MAX_BODY_BYTES: usize = 7_654_321;
 /// Instruction rows are the bulk of a large function's response.
 const MAX_ROW_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STRUCTURE_BYTES: usize = 32 * 1024 * 1024;

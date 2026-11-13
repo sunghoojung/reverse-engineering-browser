@@ -172,6 +172,14 @@ process named, and the stated end of a task scheduled with no script, then list
 the async callers still not shown, with nothing clipped and captured names
 inert.
 
+`test37WasmReadableView` opens fixture artifact 400 in Sources and turns on
+**Readable** (from More when it has moved there). At both sizes the folded
+load, the loop's `br_if` and the quoted, markup-shaped import name must show as
+text with one counted raw line, nothing clipped or overlapping and no captured
+markup in the DOM. Clicking a line and then the down arrow and Enter must each
+reveal the line's bytes in the linear view with visible focus, and opening
+Graph must close Readable.
+
 `test38WasmLibraryIdentification` opens the synthetic Rust and wasm-bindgen
 module (artifact 410, built from
 [`rust-wasm-bindgen.wat`](../fixtures/wasm-identification/rust-wasm-bindgen.wat))

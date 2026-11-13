@@ -204,7 +204,9 @@ without an environment variable. At the narrow size with the request open the
 footer must show a one-line button instead of the line, fully visible, which
 Return or Space opens to the whole sentence and Escape closes with focus kept;
 focus leaving it, a press elsewhere and closing the request close it too, and a
-request opened again starts with it closed. Both themes, nothing clipped.
+request opened again starts with it closed. Beside `test35`'s **header gaps**
+item, the two must not overlap when both are open, and each Escape must close
+only its own and not the request. Both themes, nothing clipped.
 
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,

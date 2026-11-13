@@ -363,6 +363,26 @@ assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session c
   assert.equal(notice.dataset.expanded, 'false', 'closing the request closes the sentence');
   runInContext(`state.trafficDetailOpen = true; renderInspector();`, context);
   assert.equal(notice.dataset.expanded, 'false', 'a request opened again starts with it closed');
+  // Beside the footer's header gaps breakdown, each Escape closes only its own.
+  const gaps = document.getElementById('request-header-gaps');
+  const gapsDetail = document.getElementById('request-header-gaps-detail');
+  const escape = target => { const key = new window.Event('keydown', {bubbles: true}); key.key = 'Escape'; target.dispatchEvent(key); };
+  const gapsOpen = () => gaps.getAttribute('aria-expanded') === 'true';
+  runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
+  open();
+  escape(toggle);
+  assert.equal(notice.dataset.expanded, 'false', 'Escape on the budget button closes the sentence');
+  assert.equal(gapsOpen(), true, 'and leaves the header gaps breakdown open');
+  open();
+  escape(gaps);
+  assert.equal(gapsOpen(), false, 'Escape on the header gaps button closes its breakdown');
+  assert.equal(notice.dataset.expanded, 'true', 'and leaves the budget sentence open');
+  runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
+  escape(gapsDetail);
+  assert.equal(gapsOpen(), false, 'Escape inside the breakdown closes it');
+  assert.equal(notice.dataset.expanded, 'true', 'and not the budget sentence');
+  gaps.dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  assert.equal(notice.dataset.expanded, 'false', 'pressing the header gaps button closes the budget sentence');
 }
 // The session context is the only source of a budget's size; the workspace
 // address carries none, and nothing says it does.

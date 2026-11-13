@@ -3689,6 +3689,37 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let reopened = try await traffic.json("({expanded: \(expanded), text: getComputedStyle(\(line)).display})")
         XCTAssertEqual(reopened["expanded"] as? String, "false", "\(size.name): the sentence does not reappear unasked: \(reopened)")
         XCTAssertEqual(reopened["text"] as? String, "none", "\(size.name): \(reopened)")
+        // Beside the footer's header gaps item: its breakdown opens in the
+        // footer and the budget sentence above it, never over each other, and
+        // each Escape closes only its own.
+        let gapsOpen = "document.querySelector('#request-header-gaps').getAttribute('aria-expanded')"
+        try await traffic.waitUntil("!document.querySelector('#request-header-gaps').hidden", "\(size.name): the header gaps item did not show")
+        try await assertFullyVisible(traffic, "#request-header-gaps", "\(size.name) header gaps beside the budget button")
+        try await traffic.click("#request-header-gaps")
+        try await traffic.waitUntil("\(gapsOpen) === 'true'", "\(size.name): the header gaps breakdown did not open")
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): the sentence did not open beside the breakdown")
+        let both = try await traffic.json("""
+          (() => { const a = document.querySelector('#request-budget-text').getBoundingClientRect(),
+            b = document.querySelector('#request-header-gaps-detail').getBoundingClientRect();
+            return {overlap: a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom, gaps: \(gapsOpen)}; })()
+          """)
+        XCTAssertEqual(both["overlap"] as? Bool, false, "\(size.name): the sentence and the breakdown overlap: \(both)")
+        XCTAssertEqual(both["gaps"] as? String, "true", "\(size.name): \(both)")
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence beside the breakdown")
+        try await traffic.screenshot("traffic-budget-sentence-gaps-\(size.name)")
+        try await traffic.key(53, "\u{1B}")
+        try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): Escape did not close the sentence beside the breakdown")
+        let gapsAfterBudgetEscape = try await traffic.value(gapsOpen) as? String
+        XCTAssertEqual(gapsAfterBudgetEscape, "true", "\(size.name): the budget's Escape leaves the breakdown open")
+        _ = try await traffic.value("(document.querySelector('#request-header-gaps').focus(), true)")
+        try await traffic.key(53, "\u{1B}")
+        try await traffic.waitUntil("\(gapsOpen) === 'false'", "\(size.name): Escape did not close the breakdown")
+        let budgetAfterGapsEscape = try await traffic.value(expanded) as? String
+        XCTAssertEqual(budgetAfterGapsEscape, "false", "\(size.name): \(budgetAfterGapsEscape ?? "")")
+        let request = try await traffic.value("!document.querySelector('#screen-traffic .detail-pane').hidden") as? Bool
+        XCTAssertEqual(request, true, "\(size.name): neither Escape closed the request")
       }
       _ = try await traffic.value("""
         (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';

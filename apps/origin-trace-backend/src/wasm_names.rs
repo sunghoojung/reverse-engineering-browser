@@ -585,17 +585,28 @@ pub fn annotate_flow_graph(document: &mut Value, names: &Names) {
     document["analyst_names"] = names.summary(joined);
 }
 
-/// The flow graph is cached as bytes. Without Wasm names only the status
-/// member is appended, as text; with names the graph is parsed, joined and
-/// encoded again, which its own node and edge budgets bound.
+/// Whether a JSON document names any module these names cover, read from its
+/// `"sha256":"<hex>"` members in one pass without parsing it.
+fn names_any_module(text: &str, names: &Names) -> bool {
+    const KEY: &str = "\"sha256\":\"";
+    text.match_indices(KEY).any(|(at, _)| {
+        text.get(at + KEY.len()..at + KEY.len() + 64)
+            .is_some_and(|sha| names.modules.contains_key(sha))
+    })
+}
+
+/// The flow graph is cached as bytes. Unless it names a module that has a
+/// researcher name, only the status member is appended, as text; otherwise
+/// the graph is parsed, joined and encoded again, which its own node and
+/// edge budgets bound. A name for an unrelated module costs one scan.
 pub fn annotate_flow_graph_bytes(
     graph: axum::body::Bytes,
     names: &Names,
 ) -> Result<axum::body::Bytes> {
-    if names.is_empty() {
-        let text = String::from_utf8(graph.to_vec())
-            .map_err(|_| Error::new(500, "Flow graph encoding failed"))?;
-        return Ok(append_members(text, &[("analyst_names", names.summary(0))]).into());
+    let text =
+        std::str::from_utf8(&graph).map_err(|_| Error::new(500, "Flow graph encoding failed"))?;
+    if !names_any_module(text, names) {
+        return Ok(append_members(text.to_owned(), &[("analyst_names", names.summary(0))]).into());
     }
     let mut document: Value = serde_json::from_slice(&graph)
         .map_err(|_| Error::new(500, "Flow graph encoding failed"))?;
@@ -986,6 +997,28 @@ mod tests {
                 .is_none()
         );
         assert_eq!(stack["analyst_names"]["joined"], 1);
+    }
+
+    #[test]
+    fn an_unrelated_name_leaves_the_flow_graph_unparsed() {
+        let other = "b".repeat(64);
+        let names = names_of(&library(
+            &doc(json!([{"sha256":SHA,"functions":[{"function":1,"name":"encode_payload"}]}]))
+                .to_string(),
+        ));
+        // Member order a reparse would sort: the bytes must come back as they were.
+        let graph = format!(
+            r#"{{"schema":"flow-graph-v1","nodes":[{{"kind":"wasm","sha256":"{other}","function_index":1,"id":0}}]}}"#
+        );
+        let out = annotate_flow_graph_bytes(graph.clone().into(), &names).unwrap();
+        let out = std::str::from_utf8(&out).unwrap();
+        assert!(out.starts_with(&graph[..graph.len() - 1]), "{out}");
+        assert!(!out.contains("analyst_name\":\"encode_payload"));
+        let named = graph.replace(&other, SHA);
+        let out = annotate_flow_graph_bytes(named.into(), &names).unwrap();
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["nodes"][0]["analyst_name"], "encode_payload");
+        assert_eq!(value["analyst_names"]["joined"], 1);
     }
 
     #[test]

@@ -18,7 +18,7 @@ const documentFor = (offset, count, total, extra = {}) => ({
   name: 'readable_run', name_source: 'export', status: 'complete', instruction_count: total * 2, lifted_instructions: total * 2,
   line_count: total, fallback_count: 1, spill_count: 0, omissions: [],
   lines: Array.from({length: count}, (_, index) => line(1, index === 1 ? 6 : 1, 2, 100 + (offset + index) * 2)),
-  text: Array.from({length: count}, (_, index) => index === 0 ? '  <img src=x onerror=alert(1)>(l1)' : `  line ${offset + index}`).join('\n') + '\n',
+  text: Array.from({length: count}, (_, index) => offset + index === 0 ? '  <img src=x onerror=alert(1)>(l1)' : `  line ${offset + index}`).join('\n') + '\n',
   window: {line_offset: offset, line_limit: 400, lines: count, next_line_offset: offset + count < total ? offset + count : null},
   ...extra
 });
@@ -44,12 +44,15 @@ assert.match(wasmReadableSummary({...documentFor(0, 3, 3), status: 'partial', sp
 const {window, document} = parseHTML(`<!doctype html><section class="sources-editor"><button id="readable" hidden></button><button id="graph"></button>
   <section id="host" hidden></section></section>`);
 const reads = [];
-const total = 450;
+let total = 450;
+// The service cuts a window by its serialized size; `cut` stands in for that.
+let cut = 400;
 const fetch = async url => {
   reads.push(url);
-  if (url.startsWith('/api/wasm/functions')) return new Response(JSON.stringify({schema: 'wasm-function-index-v1', artifact_id: '400', functions: [[1, 10, 90, 1]], names: [[1, 'readable_run']], status: 'decoded', omissions: []}));
+  const artifact = /artifact_id=(\d+)/.exec(url)[1];
+  if (url.startsWith('/api/wasm/functions')) return new Response(JSON.stringify({schema: 'wasm-function-index-v1', artifact_id: artifact, functions: [[1, 10, 90, 1]], names: [[1, 'readable_run']], status: 'decoded', omissions: []}));
   const offset = Number(/line_offset=(\d+)/.exec(url)[1]);
-  return new Response(JSON.stringify(documentFor(offset, Math.min(400, total - offset), total)));
+  return new Response(JSON.stringify(documentFor(offset, Math.min(cut, total - offset), total, {artifact_id: artifact})));
 };
 const context = createContext({window, document, console, fetch, Response, AbortController, Error, TypeError, Map, JSON, Number, String, Math, setTimeout});
 runInContext(`${await ui('block_graph.js')}\n${await ui('wasm_readable.js')}\nglobalThis.create = createWasmReadablePanel;`, context);
@@ -106,4 +109,24 @@ assert.equal(panel.isOpen(), false);
 assert.equal(host.hidden, true);
 panel.sync({kind: 'wasm', source_type: 'artifact', artifact_id: '401', sha256: 'c'.repeat(64)});
 assert.equal(rows().length, 0, 'another module drops the old lines');
+// Windows cut short by size: moving up from a window's first line selects
+// the line directly above, never one a short earlier window left out.
+total = 900; cut = 250;
+const lineNumber = () => Number(/line (\d+)/.exec(host.querySelector('[aria-selected=true] .wasm-readable-text')?.textContent ?? '')?.[1]);
+button.dispatchEvent(new window.Event('click'));
+await settle();
+host.querySelector('.wasm-readable-lines').focus = () => {};
+const later = [...host.querySelectorAll('.wasm-readable-pager button')].find(node => node.textContent === 'Later lines');
+const earlier = [...host.querySelectorAll('.wasm-readable-pager button')].find(node => node.textContent === 'Earlier lines');
+later.dispatchEvent(new window.Event('click')); await settle();
+later.dispatchEvent(new window.Event('click')); await settle();
+assert.equal(lineNumber(), 500, 'two later windows of 250 lines start at line 500');
+press('ArrowUp'); await settle();
+assert.equal(lineNumber(), 499, 'ArrowUp past a window top selects the line just above');
+assert.ok(reads.some(url => url.includes('artifact_id=401') && url.includes('line_offset=100')), 'a short window from 100 was read first');
+assert.ok(reads.some(url => url.includes('artifact_id=401') && url.includes('line_offset=250')), 'then the window that ends on line 499');
+later.dispatchEvent(new window.Event('click')); await settle();
+assert.equal(lineNumber(), 500);
+earlier.dispatchEvent(new window.Event('click')); await settle();
+assert.equal(lineNumber(), 499, 'Earlier lines also lands on the line just above');
 console.log('Wasm readable view checks passed');

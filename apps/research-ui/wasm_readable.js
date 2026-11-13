@@ -127,19 +127,35 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
     list.focus?.({preventScroll: true});
   }
 
-  async function load(index, start = 0, focusLast = false) {
-    if (!source || !isOpen || !Number.isSafeInteger(index) || index < 0) return;
-    functionIndex = index; offset = start; input.value = String(index);
-    const owned = claim(), cacheKey = key(index, start);
+  /** One window, from the cache when it was read recently. */
+  async function read(index, start) {
+    const cacheKey = key(index, start);
     const hit = cache.get(cacheKey);
+    if (!hit) { list.replaceChildren(); setStatus('Lifting the function from immutable module bytes…'); }
+    const result = hit ?? await readWasmReadable(source.artifact_id, index, start, abort.signal);
+    cache.delete(cacheKey); cache.set(cacheKey, result);
+    while (cache.size > WASM_READABLE_CACHE) cache.delete(cache.keys().next().value);
+    return result;
+  }
+  /** Shows the window at `start`, selecting line `wanted` (a line number)
+   * or the window's first line. A window the service cut by bytes can end
+   * before `wanted`; then it is read again from where a window of that size
+   * would end on `wanted`, so moving up never skips a line. */
+  async function load(index, start = 0, wanted = null) {
+    if (!source || !isOpen || !Number.isSafeInteger(index) || index < 0) return;
+    functionIndex = index; input.value = String(index);
+    const owned = claim();
     try {
-      if (!hit) { list.replaceChildren(); setStatus('Lifting the function from immutable module bytes…'); }
-      const result = hit ?? await readWasmReadable(source.artifact_id, index, start, abort.signal);
+      let result = await read(index, start);
+      for (let attempt = 0; wanted !== null && start + result.lines.length <= wanted && attempt < 4; attempt += 1) {
+        if (!owned()) return;
+        const shortfall = wanted - (start + result.lines.length - 1);
+        start = attempt === 3 ? wanted : Math.min(wanted, start + shortfall);
+        result = await read(index, start);
+      }
       if (!owned()) return;
-      cache.delete(cacheKey); cache.set(cacheKey, result);
-      while (cache.size > WASM_READABLE_CACHE) cache.delete(cache.keys().next().value);
-      current = result; selected = -1; renderLines();
-      if (result.lines.length) select(focusLast ? result.lines.length - 1 : 0);
+      offset = start; current = result; selected = -1; renderLines();
+      if (result.lines.length) select(wanted === null ? 0 : Math.min(result.lines.length - 1, Math.max(0, wanted - start)));
     } catch (error) {
       if (!owned() || error.name === 'AbortError') return;
       current = null; list.replaceChildren(); title.textContent = `func ${index}`; stats.textContent = '';
@@ -171,7 +187,7 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
   previous.addEventListener('click', () => step(-1));
   next.addEventListener('click', () => step(1));
   input.addEventListener('change', () => { const value = Number(input.value); if (Number.isSafeInteger(value)) load(value); });
-  earlier.addEventListener('click', () => { if (current) load(functionIndex, Math.max(0, offset - WASM_READABLE_PAGE)); });
+  earlier.addEventListener('click', () => { if (current && offset > 0) load(functionIndex, Math.max(0, offset - WASM_READABLE_PAGE), offset - 1); });
   later.addEventListener('click', () => { const after = current?.doc.window.next_line_offset; if (after !== null && after !== undefined) load(functionIndex, after); });
   list.addEventListener('keydown', event => {
     if (!current?.lines.length) return;
@@ -182,7 +198,7 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
       const target = selected + moves[event.key];
       // Moving past a window's edge reads the neighbouring window.
       if (target >= current.lines.length && current.doc.window.next_line_offset !== null) load(functionIndex, current.doc.window.next_line_offset);
-      else if (target < 0 && offset > 0) load(functionIndex, Math.max(0, offset - WASM_READABLE_PAGE), true);
+      else if (target < 0 && offset > 0) load(functionIndex, Math.max(0, offset - WASM_READABLE_PAGE), Math.max(0, offset + target));
       else select(target);
     } else if (event.key === 'Home') { event.preventDefault(); select(0); }
     else if (event.key === 'End') { event.preventDefault(); select(current.lines.length - 1); }

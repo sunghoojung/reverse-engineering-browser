@@ -42,6 +42,11 @@ golden.rows.forEach((row, index) => {
   // A newest record without bytes names the snapshot of the same response still retained.
   assert.equal(row.response_body.earlier_snapshot?.artifact_id ?? null, expected.responseBodyEarlier?.artifactId ?? null,
     `${expected.id} earlier snapshot`);
+  // Traffic tries every snapshot newest first; the index names the first.
+  const snapshots = expected.responseBodySnapshots ?? [];
+  assert.equal(snapshots[0] ?? null, expected.responseBodyEarlier ?? null, `${expected.id} newest snapshot first`);
+  snapshots.slice(1).forEach((item, at) => assert(BigInt(item.sequenceNumber) < BigInt(snapshots[at].sequenceNumber),
+    `${expected.id} snapshots newest first`));
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {
     assert.deepEqual(shown[field], expected[field] ?? (field === 'urlTruncated' ? false : null), `${expected.id} ${field}`);
   }
@@ -53,6 +58,9 @@ golden.rows.forEach((row, index) => {
   assert.deepEqual(row.root && [row.root.session_id, row.root.process_id, row.root.sequence_number],
     root && [root.session_id, root.process_id, root.sequence_number], `${expected.id} root event`);
 });
+const refusedRow = model.find(item => item.id === 'S1:R62:6');
+assert.deepEqual(refusedRow.responseBodySnapshots.map(item => item.artifactId).join(), '89,85',
+  'a refused end lists both snapshots of its response, newest first');
 // A service worker's end that lost its start reads as such, never Pending; a
 // race network row shows what the page received.
 const shownRows = golden.rows.map(row => view.trafficIndexRequest(row, 'live'));
@@ -85,7 +93,7 @@ for (const [id, kind] of [['S1:R62:9', 'failed_before_response'], ['S1:R62:10', 
   ['S1:R62:11', 'pending'], ['S1:R62:8', 'not_modified'], ['S1:R61:25', 'redirected']]) {
   assert.equal(byId.get(id), kind, `${id} after a redirect`);
 }
-assert(golden.rows.some(row => row.response_body.earlier_snapshot?.artifact_id === '85'), 'a refused end keeps its snapshot');
+assert(golden.rows.some(row => row.response_body.earlier_snapshot?.artifact_id === '89'), 'a refused end keeps its newest snapshot');
 assert(golden.rows.some(row => row.response_body.snapshots_withheld), 'the fixture has a body whose snapshots were withheld');
 for (const [sort, orders] of Object.entries(golden.orders)) {
   for (const [direction, sign] of [['asc', 1], ['desc', -1]]) {

@@ -3469,8 +3469,16 @@ mod tests {
         let mut withheld = body(3, 30, 30, 1);
         (withheld[0], withheld[5]) = (2, 0x80);
         answered(12, withheld, "88", 200);
-        // A refused end keeps the snapshot the receiver holds beside it.
+        // A refused end keeps the newest snapshot beside it; Traffic tries
+        // the older one when the receiver refused the newest.
         let refused = answered(6, body(3, 30, 30, 1), "85", 200);
+        store.push(
+            7,
+            976,
+            "response_body",
+            &body(3, 45, 45, 2),
+            child(&refused, "89", 6),
+        );
         store.push(
             7,
             976,
@@ -4677,9 +4685,9 @@ mod tests {
         let refused = &row("S1:R62:6")["response_body"];
         assert_eq!(refused["case"], "not_captured_session_budget");
         assert!(refused["artifact_id"].is_null());
-        assert_eq!(refused["earlier_snapshot"]["artifact_id"], "85");
-        assert_eq!(refused["earlier_snapshot"]["captured_length"], "30");
-        assert_eq!(refused["earlier_snapshot"]["partial_index"], 1);
+        assert_eq!(refused["earlier_snapshot"]["artifact_id"], "89");
+        assert_eq!(refused["earlier_snapshot"]["captured_length"], "45");
+        assert_eq!(refused["earlier_snapshot"]["partial_index"], 2);
         assert!(row("S1:R62:1")["response_body"]["earlier_snapshot"].is_null());
         assert_eq!(
             row("S1:R62:12")["response_body"]["snapshots_withheld"],

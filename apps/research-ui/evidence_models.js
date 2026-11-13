@@ -920,15 +920,17 @@
             event.parent_event_id === response.sequence_number && event.session_id === response.session_id &&
             event.process_id === response.process_id).reduce(newest, null) : null;
           request.responseBody = responseBody ? decodeResponseBodyRecord(responseBody) ?? {malformed: true} : null;
-          // A refusal, or any newest record without bytes, does not hide a
-          // snapshot of the same response the receiver still holds.
-          const snapshot = response && request.responseBody && (request.responseBody.malformed || request.responseBody.artifactId === '0')
+          // A refusal, or any newest record without bytes, does not hide the
+          // snapshots of the same response, newest first: Traffic shows the
+          // newest one the receiver did not refuse.
+          const snapshots = response && request.responseBody && (request.responseBody.malformed || request.responseBody.artifactId === '0')
             ? request.details.filter(event => event.type === 'response_body' && event.parent_event_id === response.sequence_number &&
               event.session_id === response.session_id && event.process_id === response.process_id)
               .map(event => decodeResponseBodyRecord(event)).filter(item => item?.state === 'partial' && item.capturedLength !== '0')
-              .reduce((latest, item) => !latest || BigInt(item.sequenceNumber) > BigInt(latest.sequenceNumber) ? item : latest, null)
-            : null;
-          request.responseBodyEarlier = snapshot;
+              .sort((left, right) => BigInt(right.sequenceNumber) > BigInt(left.sequenceNumber) ? 1 : BigInt(right.sequenceNumber) < BigInt(left.sequenceNumber) ? -1 : 0)
+            : [];
+          request.responseBodyEarlier = snapshots[0] ?? null;
+          request.responseBodySnapshots = snapshots;
           request.redirectedBody = request.events.some(event => event.type === 'request_redirected' &&
             requestChildOf(request.details, event, 'response_body'));
           // Header blocks join an exact lifecycle parent of this request.

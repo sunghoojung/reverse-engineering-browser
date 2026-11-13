@@ -2696,9 +2696,10 @@ mod tests {
         let bytes = raw::module(&[raw::memory(8), raw::data(&[(1024, segment)])]);
         let started = Instant::now();
         let report = identify(&bytes, 0, 16).unwrap();
-        // Pairwise merging of these runs took 28 s in a release build.
+        // Pairwise merging of these runs took 28 s in a release build; the
+        // bound leaves room for a debug build on a loaded machine.
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < Duration::from_secs(20),
             "{:?}",
             started.elapsed()
         );

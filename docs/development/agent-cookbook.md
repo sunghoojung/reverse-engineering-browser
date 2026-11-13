@@ -715,6 +715,26 @@ researcher's name is `analyst_name`, and `analyst_names.functions` resolves
 callee indexes (recipe 26). A line reading `return_call f(args)` is a tail
 call: what `f` throws is not caught by a handler of this function.
 
+## 30. Compare two builds of a Wasm module
+
+Works at every level: the result is structure only. Find both modules first,
+then read what changed before what stayed.
+
+```text
+get_artifacts {"kind": "wasm", "limit": 20}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous"}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous", "row_offset": 200}
+```
+
+Good: `status: "complete"`, `summary.statuses` with every count, and rows
+whose `a` and `b` sides name a `function` index. `a.sha256` and that index
+identify a function in A; carry what you know about it to the B side of its
+row. Trust `identical` and `renumbered` (`normalized` method) most; a
+`call_graph` or `structural` match is a hypothesis with a `score`, so check it
+with `get_wasm_function_graph` on both sides. An `ambiguous` row lists tied
+`candidates` and was deliberately not paired. `unclassified` rows and a
+`partial` status mean a limit stopped matching; `omissions` says which.
+
 ## Response shapes at a glance
 
 | Tool | Look at |
@@ -725,6 +745,7 @@ call: what `f` throws is not caught by a handler of this function.
 | `wait_for_events` | `wait.timed_out`, `events`, `query.next_after`; `debugger_observation` on types 40 to 45 |
 | `inspect_wasm` | `coverage`, then the requested section rows; `analyst_names` for researcher names |
 | `get_wasm_identification` | `summary`, `toolchain.conclusions`, `functions.suggestions`, `constants.matches`, `omissions` |
+| `get_wasm_module_diff` | `status`, `summary.statuses`, `rows` (`status`, `method`, `score`, `a.function`, `b.function`), `row_window` |
 | `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
 | `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |
 | `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |

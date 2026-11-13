@@ -110,6 +110,7 @@ Every option is off unless the start names it, and none is inherited.
 | Stored offline runs | `get_wasm_runs` | F | Added; Full access only, for the same reason |
 | Inspect identification summary, Details and Functions menu badges | `get_wasm_identification` with `row_offset`, `row_limit` | R (structure), F (matched bytes `hex`) | Added |
 | Readable (lifted function) | `get_wasm_pseudocode` with `line_offset`, `line_limit` | R (structure, ranges, callees), F (lifted text) | Added; below Full access the lifted text is omitted |
+| Compare with (Wasm module diff) | `get_wasm_module_diff` with `status`, `row_offset`, `row_limit` | R | Added; structure only, so nothing is omitted below Full access |
 | Map (entropy and kind map) | `get_artifact_map` | R | Covered |
 | Facts | `get_source_facts` | A | Covered |
 | Track calls (saved invocation sites) | `get_js_invocation_sites`, `resolve_js_invocation_site`, `js_invocation_site_action` | R to read, A to change | Covered |

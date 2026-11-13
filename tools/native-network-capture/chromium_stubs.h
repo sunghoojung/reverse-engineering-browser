@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -22,6 +23,27 @@
 #define BUILDFLAG(flag) (flag)
 #define IS_POSIX 1
 namespace base {
+// Chromium 157 counts URLLoaderCompletionStatus lengths as unsigned
+// base::ByteSize; the sink converts them with base::saturated_cast.
+class ByteSize {
+ public:
+  constexpr ByteSize() = default;
+  constexpr explicit ByteSize(std::uint64_t bytes) : bytes_(bytes) {}
+  constexpr std::uint64_t InBytes() const { return bytes_; }
+
+ private:
+  std::uint64_t bytes_ = 0;
+};
+template <class Dst, class Src>
+constexpr Dst saturated_cast(Src value) {
+  if (std::cmp_greater(value, std::numeric_limits<Dst>::max())) {
+    return std::numeric_limits<Dst>::max();
+  }
+  if (std::cmp_less(value, std::numeric_limits<Dst>::min())) {
+    return std::numeric_limits<Dst>::min();
+  }
+  return static_cast<Dst>(value);
+}
 template <class T>
 class NoDestructor {
  public:
@@ -166,8 +188,8 @@ struct ResourceRequest {
 };
 struct URLLoaderCompletionStatus {
   int error_code = 0;
-  std::int64_t encoded_data_length = 0;
-  std::int64_t decoded_body_length = 0;
+  base::ByteSize encoded_data_length;
+  base::ByteSize decoded_body_length;
 };
 namespace mojom {
 class URLResponseHead {

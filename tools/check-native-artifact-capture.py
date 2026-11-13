@@ -35,6 +35,7 @@ HEADERS = (
     "base/process/process_handle.h",
     "base/threading/platform_thread.h",
     "base/time/time.h",
+    "base/numerics/safe_conversions.h",
     "content/public/browser/browser_context.h",
     "net/http/http_response_headers.h",
     "net/url_request/redirect_info.h",

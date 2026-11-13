@@ -1,8 +1,8 @@
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index 8bbea4f..5307e36 100644
+index 388f94a..3196160 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -325,6 +325,16 @@ using ApiImplementationCallback = void (*)(const FunctionCallbackInfo<Value>&);
+@@ -339,6 +339,16 @@ using ApiImplementationCallback = void (*)(const FunctionCallbackInfo<Value>&);
  // --- Callback for WebAssembly.compileStreaming ---
  using WasmStreamingCallback = void (*)(const FunctionCallbackInfo<Value>&);
  
@@ -20,10 +20,10 @@ index 8bbea4f..5307e36 100644
    kArrayBuffer,
    kUint8Array,
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index 615396e..1c88059 100644
+index c829546..51de511 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1760,6 +1760,10 @@ class V8_EXPORT Isolate {
+@@ -1790,6 +1790,10 @@ class V8_EXPORT Isolate {
  
    void SetRuntimeBufferCallback(RuntimeBufferCallback callback);
  
@@ -35,10 +35,10 @@ index 615396e..1c88059 100644
        WasmAsyncResolvePromiseCallback callback);
  
 diff --git a/src/api/api.cc b/src/api/api.cc
-index eaa9562..2202299 100644
+index 17f2019..36abeb9 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -11010,6 +11010,63 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
+@@ -11072,6 +11072,62 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
  CALLBACK_SETTER(RuntimeBufferCallback, RuntimeBufferCallback,
                  runtime_buffer_callback)
  
@@ -64,8 +64,7 @@ index eaa9562..2202299 100644
 +      return false;
 +    result->context = Utils::ToLocal(summary.AsJavaScript().native_context());
 +    result->script_id = script->id();
-+    result->is_eval =
-+        script->compilation_type() == i::Script::CompilationType::kEval;
++    result->is_eval = script->has_eval_origin();
 +    result->source = Utils::ToLocal(
 +        i::direct_handle(i::Cast<i::String>(script->source()), isolate));
 +    const auto name = script->GetNameOrSourceURL();

@@ -1,8 +1,8 @@
 diff --git a/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py b/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
-index 75c3e9bf5..e8cba3a64 100644
+index 4ccff805e..1d3d0bb75 100644
 --- a/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
 +++ b/chromium_src/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
-@@ -82,6 +82,174 @@ _PAGE_GRAPH_TRACKED_ITEMS = {
+@@ -83,6 +83,174 @@ _PAGE_GRAPH_TRACKED_ITEMS = {
      "XMLHttpRequestUpload": {"*"},
  }
  
@@ -177,7 +177,7 @@ index 75c3e9bf5..e8cba3a64 100644
  ### Helpers begin.
  
  
-@@ -100,6 +254,61 @@ def _should_track_in_page_graph(cg_context):
+@@ -102,6 +270,61 @@ def _should_track_in_page_graph(cg_context):
      return cg_context.property_.identifier in tracked_class_items
  
  
@@ -239,7 +239,7 @@ index 75c3e9bf5..e8cba3a64 100644
  def _to_page_graph_object(arg):
      return "ToPageGraphObject({})".format(arg)
  
-@@ -283,6 +478,13 @@ def _make_empty_callback_def(original_function, cg_context, function_name):
+@@ -312,6 +535,13 @@ def _make_empty_callback_def(original_function, cg_context, function_name):
      return func_def
  
  
@@ -250,6 +250,6 @@ index 75c3e9bf5..e8cba3a64 100644
 +    return func_def
 +
 +
- @override_utils.override_function(globals(),
-                                   condition=_IS_PG_WEBAPI_PROBES_ENABLED)
- def _make_blink_api_call(original_function,
+ @override_utils.override_function(
+     globals(), condition=_IS_PG_WEBAPI_PROBES_ENABLED
+ )

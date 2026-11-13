@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 56496ac..43e408a 100644
+index 557986a..309454b 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -43,6 +43,7 @@
@@ -7,10 +7,10 @@ index 56496ac..43e408a 100644
  #include "base/memory/scoped_refptr.h"
  #include "base/metrics/histogram_functions.h"
 +#include "base/no_destructor.h"
+ #include "base/numerics/safe_conversions.h"
  #include "base/system/sys_info.h"
  #include "base/task/single_thread_task_runner.h"
- #include "base/task/thread_pool.h"
-@@ -50,6 +51,7 @@
+@@ -51,6 +52,7 @@
  #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
@@ -18,7 +18,7 @@ index 56496ac..43e408a 100644
  #include "build/build_config.h"
  #include "components/crash/core/common/crash_key.h"
  #include "services/metrics/public/cpp/ukm_builders.h"
-@@ -122,6 +124,7 @@
+@@ -126,6 +128,7 @@
  #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
  #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
  #include "tools/v8_context_snapshot/buildflags.h"
@@ -26,7 +26,7 @@ index 56496ac..43e408a 100644
  #include "v8/include/v8-profiler.h"
  #include "v8/include/v8.h"
  
-@@ -782,6 +785,146 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+@@ -787,6 +790,146 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
    return result;
  }
  
@@ -173,7 +173,7 @@ index 56496ac..43e408a 100644
  std::uint8_t PollNativeWasmExecution() {
    // No V8 handles and no document walk. The stack check calls this.
    return static_cast<std::uint8_t>(
-@@ -2027,6 +2170,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1989,6 +2132,12 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      isolate->SetJsInvocationCallbacks(js_invocation);
      reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
          CurrentJsInvocation);
@@ -187,7 +187,7 @@ index 56496ac..43e408a 100644
    // Every isolate, including workers. The worker br_table gap is recorded
    // from the dispatch callback; this one names jitless and left-Liftoff.
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
-index b3efcb6..08de5bd 100644
+index 2238e5f..4a433ce 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
 @@ -27,7 +27,9 @@
@@ -200,7 +200,7 @@ index b3efcb6..08de5bd 100644
  #include "build/build_config.h"
  #include "net/base/load_flags.h"
  #include "net/base/net_errors.h"
-@@ -283,6 +285,17 @@ int ResourceRequestSender::SendAsync(
+@@ -282,6 +284,17 @@ int ResourceRequestSender::SendAsync(
    // The JavaScript invocation that started this request, when one is
    // current; see protocol/native-js-invocation-v1.md.
    reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);

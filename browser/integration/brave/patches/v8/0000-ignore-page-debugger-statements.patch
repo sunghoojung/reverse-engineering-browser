@@ -1,8 +1,8 @@
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -3204,6 +3204,9 @@ DEFINE_INT(cpu_profiler_sampling_interval, 1000,
-            "CPU profiler sampling interval in microseconds")
+@@ -3224,6 +3224,9 @@ DEFINE_UINT(cpu_profiler_sampling_interval, 1000,
+             "CPU profiler sampling interval in microseconds")
  
  // debugger
 +DEFINE_BOOL(reb_ignore_debugger_statements, false,
@@ -38,7 +38,7 @@ diff --git a/test/inspector/debugger/reb-ignore-debugger-statements.js b/test/in
 new file mode 100644
 --- /dev/null
 +++ b/test/inspector/debugger/reb-ignore-debugger-statements.js
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,48 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.

@@ -148,7 +148,7 @@ configure_node() {
     fi
   done
 
-  echo "Brave requires Node.js >=24.16.0 and <25. Set REB_NODE_DIRECTORY or install node@24." >&2
+  echo "Brave needs Node.js >=24.16.0; this checkout pins it to the 24 line. Set REB_NODE_DIRECTORY or install node@24." >&2
   exit 1
 }
 
@@ -202,7 +202,7 @@ touch_brave_overrides() {
       (
         cd "${brave_directory}"
         node --input-type=module -e \
-          "import util from './build/commands/lib/util.js'; util.touchOverriddenFiles()"
+          "import util from './build/commands/lib/util.ts'; util.touchOverriddenFiles()"
       )
       return
     fi
@@ -217,7 +217,7 @@ force_touch_brave_overrides() {
   (
     cd "${brave_directory}"
     node --input-type=module -e \
-      "import util from './build/commands/lib/util.js'; util.touchOverriddenFiles()"
+      "import util from './build/commands/lib/util.ts'; util.touchOverriddenFiles()"
 
     # Brave's helper only touches Chromium sources when the override mtime is
     # newer. A newly enabled Siso redirect can otherwise leave an older object

@@ -65,7 +65,7 @@ initializations of the same Brave pin can use different tooling. Before
 
 Bootstrap also applies `browser/integration/brave/patches/init/` to brave-core
 before Brave's own initialization reads `DEPS`. That stack holds backports that
-initialization itself needs; see the
+initialization itself needs and is empty at the current pin; see the
 [integration guide](integration/brave/README.md#pre-initialization-patches).
 
 The initialized checkout requires at least 150 GiB free. Keep 200 to 250 GiB

@@ -13,7 +13,8 @@ ln -s "$root/browser/integration/brave/overlay" "$build/include/brave"
 headers=(
   build/build_config.h base/containers/span.h base/no_destructor.h
   base/files/file_path.h base/process/process_handle.h base/threading/platform_thread.h
-  base/time/time.h content/public/browser/browser_context.h net/http/http_response_headers.h
+  base/time/time.h base/numerics/safe_conversions.h content/public/browser/browser_context.h
+  net/http/http_response_headers.h
   net/url_request/redirect_info.h services/network/public/cpp/resource_request.h
   services/network/public/cpp/url_loader_completion_status.h
   services/network/public/mojom/url_response_head.mojom.h

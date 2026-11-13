@@ -1,8 +1,8 @@
 diff --git a/BUILD.gn b/BUILD.gn
-index 353f6a6..05d0ff5 100644
+index 2b2c51f..0d913c0 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -3551,6 +3551,7 @@ v8_header_set("v8_headers") {
+@@ -3902,6 +3902,7 @@ v8_header_set("v8_headers") {
      "include/v8-microtask-queue.h",
      "include/v8-microtask.h",
      "include/v8-native-console.h",
@@ -113,10 +113,10 @@ index 0000000..0665eec
 +
 +#endif  // INCLUDE_V8_NATIVE_STACK_H_
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index d5b352a..9ac20f3 100644
+index a712c80..e2c43eb 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
-@@ -21,6 +21,7 @@
+@@ -22,6 +22,7 @@
  #include <utility>
  
  #include "include/v8-callbacks.h"
@@ -124,7 +124,7 @@ index d5b352a..9ac20f3 100644
  #include "include/v8-function.h"
  #include "include/v8-template.h"
  #include "src/api/api-arguments-inl.h"
-@@ -1267,8 +1268,10 @@ class CallSiteBuilder {
+@@ -1287,8 +1288,10 @@ class CallSiteBuilder {
    Handle<FixedArray> elements_;
  };
  
@@ -136,7 +136,7 @@ index d5b352a..9ac20f3 100644
    while (!builder->Full()) {
      // Check that the {promise} is not settled.
      if (promise->status() != Promise::kPending) return;
-@@ -1692,6 +1695,213 @@ DirectHandle<StackTraceInfo> GetDetailedStackTraceFromCallSiteInfos(
+@@ -1742,6 +1745,212 @@ DirectHandle<StackTraceInfo> GetDetailedStackTraceFromCallSiteInfos(
    return isolate->factory()->NewStackTraceInfo(frames);
  }
  
@@ -244,17 +244,16 @@ index d5b352a..9ac20f3 100644
 +      Handle<Script> script = scripts_[i];
 +      v8::NativeStackScript out{};
 +      out.script_id = script->id();
-+      out.is_eval = script->compilation_type() == Script::CompilationType::kEval;
++      out.is_eval = script->has_eval_origin();
 +      out.line_offset = script->line_offset();
 +      out.column_offset = script->column_offset();
 +      out.context = Utils::ToLocal(contexts_[i]);
 +      out.name = Utils::ToLocal(direct_handle(script->name(), isolate_));
 +#if V8_ENABLE_WEBASSEMBLY
-+      // Keeps the wire bytes alive for the callback.
-+      Managed<wasm::NativeModule>::Ptr module;
 +      if (script->type() == Script::Type::kWasm) {
 +        out.is_wasm = true;
-+        module = script->wasm_native_module();
++        // Keeps the wire bytes alive for the callback.
++        auto module = script->wasm_native_module();
 +        base::Vector<const uint8_t> bytes = module->wire_bytes();
 +        out.wire_bytes = bytes.begin();
 +        out.wire_bytes_size = bytes.size();
@@ -350,7 +349,7 @@ index d5b352a..9ac20f3 100644
  }  // namespace
  
  MaybeDirectHandle<JSObject> Isolate::CaptureAndSetErrorStack(
-@@ -8582,4 +8792,16 @@ void Isolate::PrintNumberStringCacheStats(const char* comment,
+@@ -8739,4 +8948,16 @@ void Isolate::PrintNumberStringCacheStats(const char* comment,
  }
  
  }  // namespace internal
@@ -368,10 +367,10 @@ index d5b352a..9ac20f3 100644
 +
  }  // namespace v8
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index 40c8ea5..3c5816f 100644
+index acc399a..5921bc2 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -3443,6 +3443,8 @@ DEFINE_BOOL(sim_abort_on_bad_auth, true,
+@@ -3448,6 +3448,8 @@ DEFINE_BOOL(sim_abort_on_bad_auth, true,
  // isolate.cc
  DEFINE_BOOL(async_stack_traces, true,
              "include async stack traces in Error.stack")

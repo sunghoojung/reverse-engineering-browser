@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-index 65246254f992589ddfb0e3886e3c7a413a199779..0067c3f92459286846ba209948fe96b6cb30cd2b 100644
+index ed5d85061265926f4827f54e101eaf36f2b4e857..9c8adb260010483b7d3ae7c99dc10d02ccb49b65 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 @@ -24,6 +24,7 @@
@@ -10,7 +10,7 @@ index 65246254f992589ddfb0e3886e3c7a413a199779..0067c3f92459286846ba209948fe96b6
  
  #include "base/feature_list.h"
  #include "base/metrics/histogram_functions.h"
-@@ -386,6 +387,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
+@@ -418,6 +419,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
        CaptureNativeDedicatedWorkerScript(
            execution_context, classic_script.SourceText(), file_name,
            reb::NativeWorkerSourceKind::kClassic);
@@ -24,7 +24,7 @@ index 65246254f992589ddfb0e3886e3c7a413a199779..0067c3f92459286846ba209948fe96b6
      }
      return script;
    }
-@@ -400,6 +408,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
+@@ -432,6 +440,13 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
      CaptureNativeDedicatedWorkerScript(
          execution_context, classic_script.SourceText(), file_name,
          reb::NativeWorkerSourceKind::kClassic);
@@ -37,8 +37,8 @@ index 65246254f992589ddfb0e3886e3c7a413a199779..0067c3f92459286846ba209948fe96b6
 +    }
    }
  
-   TRACE_EVENT_END1(
-@@ -519,6 +534,16 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule_ChromiumImpl(
+   TRACE_EVENT_END(
+@@ -550,6 +565,16 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule_ChromiumImpl(
          params.GetSourceText(), file_name, reb::NativeWorkerSourceKind::kModule);
    }
  
@@ -52,11 +52,11 @@ index 65246254f992589ddfb0e3886e3c7a413a199779..0067c3f92459286846ba209948fe96b6
 +         reb::NativeWorkerSourceKind::kModule});
 +  }
 +
-   TRACE_EVENT_END1(kTraceEventCategoryGroup, "v8.compileModule", "data",
-                    [&](perfetto::TracedValue context) {
-                      inspector_compile_script_event::Data(
+   TRACE_EVENT_END(
+       kTraceEventCategoryGroup, "data", [&](perfetto::TracedValue context) {
+         inspector_compile_script_event::Data(
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
-index 14a1829b2659bf115945cecccf66e6e1a60fb4ee..3308cff1a48f345524b31e0661955747155bfbc5 100644
+index 213af8eaaf0410053d74a52ae2346472ff9c4432..04b76dbcf900dcd59659f3f1ffcf034952516e0b 100644
 --- a/third_party/blink/renderer/core/BUILD.gn
 +++ b/third_party/blink/renderer/core/BUILD.gn
 @@ -261,6 +261,7 @@ component("core") {
@@ -67,18 +67,6 @@ index 14a1829b2659bf115945cecccf66e6e1a60fb4ee..3308cff1a48f345524b31e0661955747
      "core_initializer.cc",
      "core_initializer.h",
    ]
-@@ -479,7 +480,10 @@ component("core") {
-       "Carbon.framework",
-     ]
-   }
--  visibility += brave_blink_renderer_core_visibility public_deps += brave_blink_renderer_core_public_deps sources += brave_blink_renderer_core_sources deps += brave_blink_renderer_core_deps
-+  visibility += brave_blink_renderer_core_visibility
-+  public_deps += brave_blink_renderer_core_public_deps
-+  sources += brave_blink_renderer_core_sources
-+  deps += brave_blink_renderer_core_deps
- }
- 
- # Certain sources should be compiled with heavy optimization enabled.
 diff --git a/third_party/blink/renderer/core/messaging/blink_transferable_message.h b/third_party/blink/renderer/core/messaging/blink_transferable_message.h
 index 497daf11d275fe0c8a637cb6f944aa04d1b5860b..21ddc9f8dbe0cdbb4b15fb65e788282f2c6c009f 100644
 --- a/third_party/blink/renderer/core/messaging/blink_transferable_message.h
@@ -107,7 +95,7 @@ index 497daf11d275fe0c8a637cb6f944aa04d1b5860b..21ddc9f8dbe0cdbb4b15fb65e788282f
  
    mojom::blink::UserActivationSnapshotPtr user_activation;
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker.cc b/third_party/blink/renderer/core/workers/dedicated_worker.cc
-index bc8726d68af801c093bc4baf266c7d3271638df8..16efe7c472fc865bbb0091c9fd1d8ca771885825 100644
+index 64be4c4900fb44971d3e6b6b18e0eb98e9ae958a..980636b9fab3b47b1d174b08b0f3e01f566560ac 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker.cc
 @@ -3,6 +3,7 @@
@@ -118,7 +106,7 @@ index bc8726d68af801c093bc4baf266c7d3271638df8..16efe7c472fc865bbb0091c9fd1d8ca7
  
  #include <optional>
  #include <utility>
-@@ -100,6 +101,10 @@ DedicatedWorker* DedicatedWorker::Create(
+@@ -111,6 +112,10 @@ DedicatedWorker* DedicatedWorker::Create(
  
    DedicatedWorker* worker = MakeGarbageCollected<DedicatedWorker>(
        context, script_request_url, options);
@@ -129,7 +117,7 @@ index bc8726d68af801c093bc4baf266c7d3271638df8..16efe7c472fc865bbb0091c9fd1d8ca7
    worker->UpdateStateIfNeeded();
    worker->Start();
    return worker;
-@@ -199,6 +204,11 @@ void DedicatedWorker::postMessage(ScriptState* script_state,
+@@ -210,6 +215,11 @@ void DedicatedWorker::postMessage(ScriptState* script_state,
            ->StoreCurrentStackTrace("Worker.postMessage");
    uint64_t trace_id = base::trace_event::GetNextGlobalTraceId();
    transferable_message.trace_id = trace_id;
@@ -141,7 +129,7 @@ index bc8726d68af801c093bc4baf266c7d3271638df8..16efe7c472fc865bbb0091c9fd1d8ca7
    context_proxy_->PostMessageToWorkerGlobalScope(
        std::move(transferable_message));
    TRACE_EVENT_INSTANT(
-@@ -319,6 +329,10 @@ void DedicatedWorker::Start() {
+@@ -345,6 +355,10 @@ void DedicatedWorker::EmulateStartForTesting() {
  
  void DedicatedWorker::terminate() {
    DCHECK(!GetExecutionContext() || GetExecutionContext()->IsContextThread());
@@ -153,7 +141,7 @@ index bc8726d68af801c093bc4baf266c7d3271638df8..16efe7c472fc865bbb0091c9fd1d8ca7
  }
  
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
-index d69f66ae6a7b5ecf0027db51ca2c2933c3d1a711..5bd70107a31e6d6ef92441ba5c6adf491eac1cab 100644
+index 33c5e9bd1c763628d6bc8ec0f824bfb917b1e6d6..cbb22a8f986b897f418538a6bedc3ad3f5b0c12b 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
 @@ -29,6 +29,7 @@
@@ -164,7 +152,7 @@ index d69f66ae6a7b5ecf0027db51ca2c2933c3d1a711..5bd70107a31e6d6ef92441ba5c6adf49
  
  #include <memory>
  
-@@ -447,6 +448,11 @@ void DedicatedWorkerGlobalScope::postMessage(ScriptState* script_state,
+@@ -421,6 +422,11 @@ void DedicatedWorkerGlobalScope::postMessage(ScriptState* script_state,
    }
    uint64_t trace_id = base::trace_event::GetNextGlobalTraceId();
    transferable_message.trace_id = trace_id;
@@ -177,7 +165,7 @@ index d69f66ae6a7b5ecf0027db51ca2c2933c3d1a711..5bd70107a31e6d6ef92441ba5c6adf49
        WorkerThreadDebugger::From(script_state->GetIsolate());
    transferable_message.sender_stack_trace_id =
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
-index 4255301e2a33753fd09a06c7f9c1ceafd31601ab..0dbb3e782c8e70e86306791b8da38b336224a253 100644
+index 4b30b69f7c87b38eed0c9d1924946d78dc8a4aea..9aaa3aeb8e03ef47369d87e1597a3a118e0aeb05 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
 @@ -3,6 +3,7 @@
@@ -188,7 +176,7 @@ index 4255301e2a33753fd09a06c7f9c1ceafd31601ab..0dbb3e782c8e70e86306791b8da38b33
  
  #include <memory>
  
-@@ -315,8 +316,20 @@ void DedicatedWorkerMessagingProxy::PostMessageToWorkerObject(
+@@ -330,8 +331,20 @@ void DedicatedWorkerMessagingProxy::PostMessageToWorkerObject(
                std::move(context), GetExecutionContext(), *event);
          },
          perfetto::Flow::Global(event->GetTraceId()));
@@ -210,7 +198,7 @@ index 4255301e2a33753fd09a06c7f9c1ceafd31601ab..0dbb3e782c8e70e86306791b8da38b33
    }
    debugger->ExternalAsyncTaskFinished(message.sender_stack_trace_id);
 diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.cc b/third_party/blink/renderer/core/workers/worker_global_scope.cc
-index a501bfda49a9f52fbf525a0166c7cc24cb237653..39f0459ebfe806d0049c39ef220a95586c290a0a 100644
+index f7ce2b1f80fe4fe3030064bc7eb2c00772650b10..3e5cfd66fdf9382241fbacaa87acfbabcc768359 100644
 --- a/third_party/blink/renderer/core/workers/worker_global_scope.cc
 +++ b/third_party/blink/renderer/core/workers/worker_global_scope.cc
 @@ -26,6 +26,7 @@
@@ -221,7 +209,7 @@ index a501bfda49a9f52fbf525a0166c7cc24cb237653..39f0459ebfe806d0049c39ef220a9558
  
  #include "base/memory/scoped_refptr.h"
  #include "base/metrics/histogram_functions.h"
-@@ -215,6 +216,9 @@ scheduler::WorkerScheduler* WorkerGlobalScope::GetScheduler() {
+@@ -219,6 +220,9 @@ scheduler::WorkerScheduler* WorkerGlobalScope::GetScheduler() {
  }
  
  void WorkerGlobalScope::Dispose() {
@@ -231,7 +219,7 @@ index a501bfda49a9f52fbf525a0166c7cc24cb237653..39f0459ebfe806d0049c39ef220a9558
    if (reb::IsNativeWorkerSourceCaptureEnabled() && IsDedicatedWorkerGlobalScope()) {
      reb::RetireNativeWorkerSource(GetExecutionContextToken().Visit([](const auto& token) {
        return reb::NativeWorkerToken{token.value().GetHighForSerialization(),
-@@ -645,8 +649,20 @@ void WorkerGlobalScope::ReceiveMessage(BlinkTransferableMessage message) {
+@@ -858,8 +862,20 @@ void WorkerGlobalScope::ReceiveMessage(BlinkTransferableMessage message) {
                std::move(context), GetExecutionContext(), *message_event);
          },
          perfetto::Flow::Global(message_event->GetTraceId()));
@@ -253,7 +241,7 @@ index a501bfda49a9f52fbf525a0166c7cc24cb237653..39f0459ebfe806d0049c39ef220a9558
    }
  
 diff --git a/third_party/blink/renderer/core/workers/worker_thread.cc b/third_party/blink/renderer/core/workers/worker_thread.cc
-index ef25707a97c4d7619da664fe5908681c8f659ad8..b6981ea161acbc95dfccbc2afa592932d42e70e1 100644
+index ecfc8a2a4deb5514c38c50f807aeb586984df39e..15412a6fccc44ab891e715565c33603a466ccc62 100644
 --- a/third_party/blink/renderer/core/workers/worker_thread.cc
 +++ b/third_party/blink/renderer/core/workers/worker_thread.cc
 @@ -25,6 +25,7 @@
@@ -264,10 +252,10 @@ index ef25707a97c4d7619da664fe5908681c8f659ad8..b6981ea161acbc95dfccbc2afa592932
  
  #include <atomic>
  #include <limits>
-@@ -676,6 +677,10 @@ void WorkerThread::InitializeOnWorkerThread(
+@@ -666,6 +667,10 @@ void WorkerThread::InitializeOnWorkerThread(
          CreateWorkerGlobalScope(std::move(global_scope_creation_params));
      worker_scheduler_->InitializeOnWorkerThread(global_scope_);
-     worker_reporting_proxy_.DidCreateWorkerGlobalScope(GlobalScope());
+     worker_reporting_proxy_->DidCreateWorkerGlobalScope(GlobalScope());
 +    // Scope allocated; this does not claim successful V8
 +    // initialization/evaluation.
 +    reb::worker_observation::ObserveScope(

@@ -9,7 +9,7 @@
 namespace reb {
 
 // Ordinals of content::ContentBrowserClient::URLLoaderFactoryType at pinned
-// Chromium 151.0.7922.108. The Brave proxy patch static_asserts each value.
+// Chromium 157.0.8103.79. The Brave proxy patch static_asserts each value.
 // Renderer-issued subresource factories are the only ones whose
 // CreateLoaderAndStart request id is the renderer's GenerateRequestId().
 enum class NativeUrlLoaderFactoryKind : int {

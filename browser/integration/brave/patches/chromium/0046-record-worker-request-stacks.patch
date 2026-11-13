@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index fa4a188..8263a8e 100644
+index 2fa9f75..395ece7 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -43,7 +43,6 @@
@@ -7,10 +7,10 @@ index fa4a188..8263a8e 100644
  #include "base/memory/scoped_refptr.h"
  #include "base/metrics/histogram_functions.h"
 -#include "base/no_destructor.h"
+ #include "base/numerics/safe_conversions.h"
  #include "base/system/sys_info.h"
  #include "base/task/single_thread_task_runner.h"
- #include "base/task/thread_pool.h"
-@@ -833,16 +832,9 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+@@ -838,16 +837,9 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
    return result;
  }
  
@@ -30,7 +30,7 @@ index fa4a188..8263a8e 100644
  struct NativeRequestStackCall {
    reb::NativeRequestStackWalk& walk;
    v8::Isolate* isolate;
-@@ -858,7 +850,8 @@ void NativeStackFramesReady(void* data, const v8::NativeStackCapture& capture) {
+@@ -863,7 +855,8 @@ void NativeStackFramesReady(void* data, const v8::NativeStackCapture& capture) {
    reb::NativeRequestStackWalk& walk =
        static_cast<NativeRequestStackCall*>(data)->walk;
    const base::span<reb::NativeStackFrame> out = walk.frames();
@@ -40,7 +40,7 @@ index fa4a188..8263a8e 100644
    const auto copy = [&](const std::size_t from, const std::size_t count) {
      for (std::size_t i = from; i < from + count && i < out.size(); ++i) {
        out[i].kind = static_cast<std::uint8_t>(in[i].kind);
-@@ -947,7 +940,11 @@ void NativeStackScriptDescribed(void* data, const v8::NativeStackScript& script)
+@@ -952,7 +945,11 @@ void NativeStackScriptDescribed(void* data, const v8::NativeStackScript& script)
  
  reb::NativeRequestStackWalkResult WalkNativeRequestStack(
      reb::NativeRequestStackWalk& walk) {
@@ -53,7 +53,7 @@ index fa4a188..8263a8e 100644
      return reb::NativeRequestStackWalkResult::kUnsupportedThread;
    }
    v8::Isolate* const isolate = v8::Isolate::TryGetCurrent();
-@@ -962,10 +959,10 @@ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
+@@ -967,10 +964,10 @@ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
    reb::request_stack_blink::SetAsyncContext(walk, isolate);
    NativeRequestStackCall call{walk, isolate};
    v8::NativeStackCapture capture;
@@ -66,7 +66,7 @@ index fa4a188..8263a8e 100644
                                 : reb::kNativeRequestStackSyncLimit;
    capture.async_capacity = task ? 0 : reb::kNativeRequestStackAsyncLimit;
    capture.innermost_only = task;
-@@ -2228,11 +2225,18 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -2190,11 +2187,18 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      isolate->SetJsInvocationCallbacks(js_invocation);
      reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
          CurrentJsInvocation);
@@ -89,7 +89,7 @@ index fa4a188..8263a8e 100644
    }
    // Every isolate, including workers. The worker br_table gap is recorded
 diff --git a/third_party/blink/renderer/core/workers/worker_thread.cc b/third_party/blink/renderer/core/workers/worker_thread.cc
-index b6981ea..459bdd7 100644
+index 15412a6..4535b8a 100644
 --- a/third_party/blink/renderer/core/workers/worker_thread.cc
 +++ b/third_party/blink/renderer/core/workers/worker_thread.cc
 @@ -25,6 +25,7 @@
@@ -100,7 +100,7 @@ index b6981ea..459bdd7 100644
  #include "brave/components/reverse_engineering_browser/renderer/native_worker_observation_blink.h"
  
  #include <atomic>
-@@ -681,6 +682,10 @@ void WorkerThread::InitializeOnWorkerThread(
+@@ -671,6 +672,10 @@ void WorkerThread::InitializeOnWorkerThread(
      // initialization/evaluation.
      reb::worker_observation::ObserveScope(
          GlobalScope(), {reb::NativeWorkerOperation::kGlobalScopeStarted});
@@ -111,7 +111,7 @@ index b6981ea..459bdd7 100644
  
      worker_inspector_controller_ = WorkerInspectorController::Create(
          this, url_for_debugger, inspector_task_runner_,
-@@ -851,6 +856,7 @@ void WorkerThread::PerformShutdownOnWorkerThread() {
+@@ -836,6 +841,7 @@ void WorkerThread::PerformShutdownOnWorkerThread() {
  
    GlobalScope()->Dispose();
    global_scope_ = nullptr;

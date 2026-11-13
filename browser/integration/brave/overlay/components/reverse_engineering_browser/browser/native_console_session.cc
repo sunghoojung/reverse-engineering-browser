@@ -51,6 +51,7 @@
 #include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
 #include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
+#include "url/gurl.h"
 #include "url/origin.h"
 
 namespace reb {
@@ -91,8 +92,11 @@ class ConsoleActivity final : public content::WebContentsObserver {
                                                const blink::mojom::ResourceLoadInfo&)>;
   ConsoleActivity(content::WebContents* contents, Capture capture)
       : content::WebContentsObserver(contents), capture_(std::move(capture)) {}
+  // Only info.final_url's origin is kept, so the full original URL that
+  // Chromium 157 passes beside the possibly sanitized info is not read.
   void ResourceLoadComplete(content::RenderFrameHost* frame,
                             const content::GlobalRequestID&,
+                            const GURL&,
                             const blink::mojom::ResourceLoadInfo& info) override {
     capture_.Run(frame, info);
   }

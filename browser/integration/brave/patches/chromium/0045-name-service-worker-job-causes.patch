@@ -1,5 +1,5 @@
 diff --git a/content/browser/devtools/service_worker_devtools_agent_host.cc b/content/browser/devtools/service_worker_devtools_agent_host.cc
-index bf5a56f..a77b295 100644
+index e1dbcee..2ee74c9 100644
 --- a/content/browser/devtools/service_worker_devtools_agent_host.cc
 +++ b/content/browser/devtools/service_worker_devtools_agent_host.cc
 @@ -4,10 +4,13 @@
@@ -38,7 +38,7 @@ index bf5a56f..a77b295 100644
        rph, worker_route_id_, version->key(), client_security_state_.Clone(),
        std::move(coep_reporter_for_script_loader),
 diff --git a/content/browser/payments/payment_app_installer.cc b/content/browser/payments/payment_app_installer.cc
-index c13d42c..3dda838 100644
+index fab4ae1..1e2cb4d 100644
 --- a/content/browser/payments/payment_app_installer.cc
 +++ b/content/browser/payments/payment_app_installer.cc
 @@ -10,6 +10,7 @@
@@ -49,16 +49,16 @@ index c13d42c..3dda838 100644
  #include "content/browser/payments/payment_app_context_impl.h"
  #include "content/browser/service_worker/service_worker_context_wrapper.h"
  #include "content/browser/storage_partition_impl.h"
-@@ -17,6 +18,8 @@
- #include "content/public/browser/browser_task_traits.h"
+@@ -18,6 +19,8 @@
  #include "content/public/browser/browser_thread.h"
  #include "content/public/browser/console_message.h"
+ #include "content/public/browser/global_routing_id.h"
 +#include "content/public/browser/render_frame_host.h"
 +#include "content/public/browser/render_process_host.h"
  #include "content/public/browser/service_worker_context_observer.h"
  #include "content/public/browser/storage_partition.h"
  #include "content/public/browser/web_contents.h"
-@@ -104,6 +107,12 @@ class SelfDeleteInstaller
+@@ -108,6 +111,12 @@ class SelfDeleteInstaller
      // TODO(crbug.com/40177656): Because this function can be called in a 3p
      // context we will need to generate a full StorageKey (origin + top-level
      // site) once StorageKey is expanded with the top-level site.
@@ -72,18 +72,18 @@ index c13d42c..3dda838 100644
          sw_url_,
          blink::StorageKey::CreateFirstParty(url::Origin::Create(option.scope)),
 diff --git a/content/browser/service_worker/embedded_worker_instance.cc b/content/browser/service_worker/embedded_worker_instance.cc
-index f4ca463..9d6b8b3 100644
+index 721bf7f..7b493eb 100644
 --- a/content/browser/service_worker/embedded_worker_instance.cc
 +++ b/content/browser/service_worker/embedded_worker_instance.cc
-@@ -15,6 +15,7 @@
- #include "base/observer_list.h"
+@@ -16,6 +16,7 @@
+ #include "base/task/sequenced_task_runner.h"
  #include "base/time/time.h"
  #include "base/trace_event/trace_event.h"
 +#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
  #include "content/browser/bad_message.h"
  #include "content/browser/data_url_loader_factory.h"
  #include "content/browser/devtools/devtools_instrumentation.h"
-@@ -367,6 +368,14 @@ void EmbeddedWorkerInstance::Start(
+@@ -370,6 +371,14 @@ void EmbeddedWorkerInstance::Start(
  
      // Create factory bundles for this worker to do loading. These bundles don't
      // support reconnection to the network service, see below comments.
@@ -99,7 +99,7 @@ index f4ca463..9d6b8b3 100644
      // The bundle for new scripts is passed to ServiceWorkerScriptLoaderFactory
      // and used to request non-installed service worker scripts. It's only
 diff --git a/content/browser/service_worker/service_worker_container_host.cc b/content/browser/service_worker/service_worker_container_host.cc
-index cb73937..6700a55 100644
+index a042f4b..5b68306 100644
 --- a/content/browser/service_worker/service_worker_container_host.cc
 +++ b/content/browser/service_worker/service_worker_container_host.cc
 @@ -4,6 +4,7 @@
@@ -115,13 +115,13 @@ index cb73937..6700a55 100644
  #include "base/strings/stringprintf.h"
  #include "base/task/single_thread_task_runner.h"
 +#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
  #include "content/browser/service_worker/service_worker_client.h"
  #include "content/browser/service_worker/service_worker_consts.h"
- #include "content/browser/service_worker/service_worker_context_core.h"
-@@ -1380,6 +1382,15 @@ void ServiceWorkerContainerHostForClient::Update(
-         outside_fetch_client_settings_object,
-     blink::mojom::ServiceWorkerRegistrationObjectHost::UpdateCallback
-         callback) {
+@@ -1540,6 +1542,15 @@ void ServiceWorkerContainerHostForClient::Update(
+                             std::string());
+     return;
+   }
 +  // A page's update() is the update job's cause; the job is created inside
 +  // ExecuteUpdate (protocol/native-network-v3.md).
 +  std::optional<reb::ScopedNativeFactoryOwner> native_owner;
@@ -135,7 +135,7 @@ index cb73937..6700a55 100644
    registration->ExecuteUpdate(std::move(outside_fetch_client_settings_object),
                                std::move(callback));
 diff --git a/content/browser/service_worker/service_worker_register_job.cc b/content/browser/service_worker/service_worker_register_job.cc
-index 394de6a..58bc813 100644
+index 2d9161e..817a367 100644
 --- a/content/browser/service_worker/service_worker_register_job.cc
 +++ b/content/browser/service_worker/service_worker_register_job.cc
 @@ -55,14 +55,46 @@ typedef ServiceWorkerRegisterJobBase::RegistrationJobType RegistrationJobType;
@@ -207,7 +207,7 @@ index 394de6a..58bc813 100644
    CHECK(context_);
    CHECK(outside_fetch_client_settings_object_);
    CHECK(outside_fetch_client_settings_object_->policy_container_policies);
-@@ -464,6 +498,8 @@ void ServiceWorkerRegisterJob::OnUpdateCheckFinished(
+@@ -466,6 +500,8 @@ void ServiceWorkerRegisterJob::OnUpdateCheckFinished(
                  "ServiceWorker.UpdateResourceSha256ChecksumsResult", status);
            }));
      }
@@ -216,16 +216,16 @@ index 394de6a..58bc813 100644
      ResolvePromise(blink::ServiceWorkerStatusCode::kOk, std::string(),
                     registration());
      // This terminates the current job (|this|).
-@@ -535,6 +571,8 @@ void ServiceWorkerRegisterJob::
-   // either case.
-   DCHECK(!existing_registration->installing_version());
+@@ -538,6 +574,8 @@ void ServiceWorkerRegisterJob::
+   CHECK(!existing_registration->installing_version(),
+         base::NotFatalUntil::M159);
    if (existing_registration->active_version()) {
 +    NoteNativeJobCauseForVersions(context_->wrapper()->browser_context(),
 +                                  native_cause_, existing_registration.get());
      // "5.2.1. Invoke Resolve Job Promise with job and registration."
      ResolvePromise(status, std::string(), existing_registration.get());
      // "5.2.2. Invoke Finish Job with job and abort these steps."
-@@ -574,7 +612,7 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
+@@ -577,7 +615,7 @@ void ServiceWorkerRegisterJob::StartScriptFetchForNewWorker(
    // The network restrictions of the creator (e.g., frame) must be
    // enforced for service worker script fetches.
    std::optional<reb::ScopedNativeFactoryOwner> native_owner(
@@ -234,7 +234,7 @@ index 394de6a..58bc813 100644
    scoped_refptr<network::SharedURLLoaderFactory> loader_factory =
        context_->wrapper()->GetLoaderFactoryForMainScriptFetch(
            version->scope(), version->version_id(),
-@@ -661,6 +699,10 @@ void ServiceWorkerRegisterJob::StartWorkerForUpdate(
+@@ -664,6 +702,10 @@ void ServiceWorkerRegisterJob::StartWorkerForUpdate(
    // "Let worker be a new ServiceWorker object..." and start the worker.
    set_new_version(std::move(version));
    new_version()->set_force_bypass_cache_for_scripts(force_bypass_cache_);
@@ -245,7 +245,7 @@ index 394de6a..58bc813 100644
  
    if (GetContentClient()
            ->browser()
-@@ -695,7 +737,7 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
+@@ -698,7 +740,7 @@ void ServiceWorkerRegisterJob::UpdateAndContinue() {
    // The network restrictions of the creator (e.g., frame) must be
    // enforced for service worker script fetches.
    std::optional<reb::ScopedNativeFactoryOwner> native_owner(

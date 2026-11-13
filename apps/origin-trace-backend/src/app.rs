@@ -514,8 +514,18 @@ impl App {
         let default = wasm_pseudocode::DEFAULT_LINE_LIMIT.to_string();
         let limit = q.number("line_limit", Some(&default), 32, true)? as usize;
         let root = self.options.artifacts.clone();
+        let names = self.names_reader();
         let document = self
-            .blocking(move || wasm_pseudocode::pseudocode(&root, &id, function, offset, limit))
+            .blocking(move || {
+                wasm_pseudocode::pseudocode_named(
+                    &root,
+                    &id,
+                    function,
+                    offset,
+                    limit,
+                    Some(&names()),
+                )
+            })
             .await?;
         Ok(([("content-type", "application/json")], document).into_response())
     }

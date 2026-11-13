@@ -4476,6 +4476,42 @@ async fn wasm_function_names_join_every_wasm_read_and_never_replace_captured_nam
         graph["analyst_names"]["functions"][1],
         json!([1, "encode_payload"])
     );
+    // The readable view: the named function carries its name beside the
+    // module's, and a caller's text keeps the module's name for the call.
+    let body = assert_contract_response(
+        server
+            .get("/api/wasm/pseudocode?artifact_id=1&function=1")
+            .await,
+        "get",
+        "/api/wasm/pseudocode",
+        200,
+    )
+    .await;
+    let lift: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(lift["analyst_name"], "encode_payload");
+    assert_eq!(lift["name"], "helper");
+    assert_eq!(lift["analyst_names"]["status"], "ready");
+    let body = assert_contract_response(
+        server
+            .get("/api/wasm/pseudocode?artifact_id=1&function=2")
+            .await,
+        "get",
+        "/api/wasm/pseudocode",
+        200,
+    )
+    .await;
+    let lift: Value = serde_json::from_slice(&body).unwrap();
+    assert!(lift.get("analyst_name").is_none());
+    assert_eq!(
+        lift["analyst_names"]["functions"][1],
+        json!([1, "encode_payload"])
+    );
+    assert!(
+        lift["text"].as_str().unwrap().contains("return helper()"),
+        "{}",
+        lift["text"]
+    );
+    assert_eq!(lift["callees"], json!([[1, "helper", "name_section"]]));
     // Cross-references: the selected function and the rows that name one.
     let helper_offset = index["functions"][0][1].as_u64().unwrap();
     let route =
@@ -5005,9 +5041,14 @@ async fn wasm_pseudocode_route_lifts_one_function_in_windows_and_refuses_bad_inp
         .output()
         .unwrap();
     assert!(output.status.success());
+    // Only the loopback route joins researcher names; the CLI is otherwise
+    // the same document.
+    let mut joined = lift.clone();
+    assert_eq!(joined["analyst_names"]["status"], "none");
+    joined.as_object_mut().unwrap().remove("analyst_names");
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        lift
+        joined
     );
     // A body whose final end became a nop is malformed, and the route says so.
     let mut bad = bytes.clone();

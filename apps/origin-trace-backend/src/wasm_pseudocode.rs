@@ -2352,6 +2352,22 @@ pub fn pseudocode(
     line_offset: usize,
     line_limit: usize,
 ) -> Result<String> {
+    pseudocode_named(root, id, function, line_offset, line_limit, None)
+}
+
+/// [`pseudocode`] with researcher names joined, as the loopback route does
+/// (protocol/wasm-function-names-v1.md): the function's own `analyst_name`
+/// and the module's names in `analyst_names`, beside the module-supplied
+/// names, never in place of them. They join inside the window loop, so the
+/// measured page still fits the inline limit with them.
+pub fn pseudocode_named(
+    root: &Path,
+    id: &str,
+    function: u32,
+    line_offset: usize,
+    line_limit: usize,
+    analyst: Option<&crate::wasm_names::Names>,
+) -> Result<String> {
     if line_limit == 0 || line_limit > MAX_LINE_LIMIT {
         return Err(Error::bad(format!(
             "line_limit must be between 1 and {MAX_LINE_LIMIT}"
@@ -2483,6 +2499,12 @@ pub fn pseudocode(
             "limits": limits,
             "notice": "Static lift of declared stack effects; the module was not executed. A complete lift owns every instruction on exactly one line, and folding keeps the order of calls, memory, globals, tables, traps and branches, and of local writes with whatever can throw to a handler in this function. Fallback lines keep the raw instruction text. Names come from the module's name section, exports and imports.",
         });
+        if let (Some(names), Some(sha)) = (analyst, artifact.sha256.as_str()) {
+            if let Some(name) = names.function(sha, function) {
+                document["analyst_name"] = json!(name);
+            }
+            document["analyst_names"] = names.module_member(sha, scan.module.function_count());
+        }
         let mut merged = 0usize;
         let frames_truncated = window_document(
             &mut merged,

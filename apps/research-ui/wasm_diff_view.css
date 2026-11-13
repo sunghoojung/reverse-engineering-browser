@@ -45,6 +45,7 @@
 .wasm-diff-fn:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
 .wasm-diff-fn:disabled { color: var(--muted); }
 .wasm-diff-absent { color: var(--faint); font: 11px var(--sans); line-height: 22px; }
+.wasm-diff-tie { color: var(--accent); white-space: nowrap; }
 .wasm-diff-method { color: var(--muted); font-size: 11px; line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wasm-diff-score { color: var(--muted); font: 11px/22px var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
 .wasm-diff-status { line-height: 22px; }

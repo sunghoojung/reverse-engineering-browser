@@ -115,7 +115,8 @@ const header = ui => [...ui.root.querySelectorAll('th')].map(cell => cell.textCo
   assert(ui.root.textContent.includes(HOSTILE), 'a captured name is shown as text');
   const ties = rows(ui).filter(row => row.dataset.status === 'ambiguous');
   assert.equal(ties.length, 4, 'every tie member is a row');
-  assert(ties.every(row => row.querySelector('.wasm-diff-method').textContent === 'same bytes · tie 1 (2 × 2)'));
+  assert(ties.every(row => row.querySelector('.wasm-diff-method').textContent === 'same bytes'));
+  assert.deepEqual(ties.map(row => row.querySelector('.wasm-diff-tie').textContent), ['tie 1 · 2 in B', 'tie 1 · 2 in B', 'tie 1 · 2 in A', 'tie 1 · 2 in A']);
   assert(ui.root.querySelector('.wasm-diff-summary').textContent.includes('4 ambiguous in 1 tie'));
   const [aChanged, bChanged] = rows(ui)[0].querySelectorAll('.wasm-diff-fn');
   click(ui, aChanged); click(ui, bChanged);

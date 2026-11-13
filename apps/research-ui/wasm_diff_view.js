@@ -56,9 +56,9 @@ function wasmDiffCandidates(modules, source) {
     .map(entry => entry.module);
 }
 
-/** A tie group's short label: its number and member counts. */
-function wasmDiffGroupLabel(group) {
-  return `tie ${Number(group.id) + 1} (${group.a} × ${group.b})`;
+/** What a tie member's empty side says: the tie and its size on that side. */
+function wasmDiffGroupLabel(group, side) {
+  return `tie ${Number(group.id) + 1} · ${Number(group[side.toLowerCase()]).toLocaleString()} in ${side}`;
 }
 
 /** The summary sentence for a page's whole report. */
@@ -147,9 +147,14 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     picker.disabled = !chosen;
     return modules;
   }
-  function sideButton(side, artifactId) {
+  function sideButton(side, artifactId, tie = null) {
     const cell = el('td', 'wasm-diff-side');
-    if (!side) { cell.append(el('span', 'wasm-diff-absent', '—')); return cell; }
+    if (!side) {
+      // A tie member's other side names the tie it shares instead of a dash.
+      const absent = el('span', tie ? 'wasm-diff-absent wasm-diff-tie' : 'wasm-diff-absent', tie ?? '—');
+      cell.append(absent);
+      return cell;
+    }
     cell.append(functionButton(side, artifactId));
     return cell;
   }
@@ -168,13 +173,13 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
       const status = el('td', 'wasm-diff-status');
       status.append(el('span', `wasm-diff-pill wasm-diff-pill-${row.status}`, WASM_DIFF_STATUS_LABEL[row.status] ?? row.status));
       tr.append(status);
-      tr.append(sideButton(row.a, pair.a), sideButton(row.b, pair.b));
+      // Each member of a tie is its own row; its empty side names the tie.
+      const tieA = row.group && !row.a ? wasmDiffGroupLabel(row.group, 'A') : null;
+      const tieB = row.group && !row.b ? wasmDiffGroupLabel(row.group, 'B') : null;
+      tr.append(sideButton(row.a, pair.a, tieA), sideButton(row.b, pair.b, tieB));
       const method = el('td', 'wasm-diff-method', row.method ? WASM_DIFF_METHOD_LABEL[row.method] ?? row.method : '');
-      // Each member of a tie is its own row; the group says what it tied with.
       if (row.group) {
-        const label = wasmDiffGroupLabel(row.group);
-        method.textContent = `${method.textContent} · ${label}`;
-        method.title = `Tied by ${method.textContent.split(' · ')[0]}: ${row.group.a} in A and ${row.group.b} in B; no pair was chosen`;
+        method.title = `Tied by ${method.textContent}: ${row.group.a} in A and ${row.group.b} in B; no pair was chosen`;
         if (tr.dataset) tr.dataset.group = String(row.group.id);
       }
       tr.append(method);

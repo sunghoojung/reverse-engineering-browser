@@ -2380,9 +2380,9 @@ every status; the filter chips (All, Changed, Added, Removed, Ambiguous,
 Unchanged, and Unclassified when a limit stopped matching) narrow the rows,
 and **Show more rows** reads the next page of 200. Each row shows its status,
 each side's function as `name · func N` (the index alone when unnamed), the
-method and the score. Each member of a tie is its own ambiguous row, and the
-method column names the tie and how many functions of each module are in it
-(`same bytes · tie 1 (2 × 2)`); no pair is chosen. Selecting a function opens **Graph** on that function in its own module
+method and the score. Each member of a tie is its own ambiguous row, and its
+empty side names the tie and how many functions of the other module are in it
+(`tie 1 · 2 in B`); no pair is chosen. Selecting a function opens **Graph** on that function in its own module
 and records the step, so Back returns. Imports have no body and are not
 links. Omissions from a partial comparison are listed above the table, and
 an error keeps **Retry comparison**; omissions of an earlier pair are cleared

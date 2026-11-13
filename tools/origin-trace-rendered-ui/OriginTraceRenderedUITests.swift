@@ -2988,14 +2988,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return {picker: view.querySelector('.wasm-diff-picker').selectedOptions[0]?.textContent ?? '',
             summary: view.querySelector('.wasm-diff-summary').textContent,
             statuses: [...view.querySelectorAll('.wasm-diff-row')].map(row => row.dataset.status),
-            ambiguous: [...view.querySelectorAll('.wasm-diff-row[data-status="ambiguous"] .wasm-diff-method')].map(cell => cell.textContent),
+            ambiguous: [...view.querySelectorAll('.wasm-diff-row[data-status="ambiguous"] .wasm-diff-tie')].map(cell => cell.textContent),
             methods: [...view.querySelectorAll('.wasm-diff-method')].map(cell => cell.textContent),
             split: document.querySelector('#source-view-split').hidden}; })()
         """)
       XCTAssertTrue((table["picker"] as? String ?? "").hasPrefix("#431 "), "\(size.name): B is chosen for its similar URL: \(table)")
       XCTAssertEqual(table["statuses"] as? [String] ?? [],
         ["changed", "changed", "added", "added", "removed", "ambiguous", "ambiguous", "ambiguous", "ambiguous", "renumbered", "renumbered", "identical", "identical"], "\(size.name): \(table)")
-      XCTAssertEqual(table["ambiguous"] as? [String] ?? [], Array(repeating: "same bytes · tie 1 (2 × 2)", count: 4), "\(size.name): each tied stub is a row of the one tie: \(table)")
+      XCTAssertEqual(table["ambiguous"] as? [String] ?? [], ["tie 1 · 2 in B", "tie 1 · 2 in B", "tie 1 · 2 in A", "tie 1 · 2 in A"], "\(size.name): each tied stub is a row of the one tie: \(table)")
       XCTAssertTrue((table["methods"] as? [String] ?? []).contains("structure"), "\(size.name): \(table)")
       XCTAssertTrue((table["summary"] as? String ?? "").contains("2 changed"), "\(size.name): \(table)")
       XCTAssertEqual(table["split"] as? Bool, true, "\(size.name): the table replaces the code view")

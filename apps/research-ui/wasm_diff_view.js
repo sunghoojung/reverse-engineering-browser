@@ -192,6 +192,8 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
       cell.colSpan = 5; tr.append(cell); tbody.append(tr);
     }
     more.hidden = doc?.row_window?.next_offset === null || doc?.row_window?.next_offset === undefined;
+    // Each page of a partial report is compared again and can stop elsewhere.
+    more.title = doc?.status === 'partial' ? 'This report is partial: each page is compared again, so pages can repeat or skip rows. Retry for a complete report.' : '';
   }
   /** `fresh` is a new pair or filter: its table starts at the top. Show
    * more appends below the rows already read and keeps the place. */
@@ -250,7 +252,10 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
       setState('error', error instanceof TypeError ? 'The evidence service is unreachable. Check that the session is still running.' : error.message, true);
     }
   }
+  /** Keeps a complete table for reopening. A partial one is never kept:
+   * the backend does not keep it either, so reopening asks again. */
   function remember(key) {
+    if (doc?.status !== 'complete') { cache.delete(key); return; }
     cache.delete(key); cache.set(key, {doc, rows});
     while (cache.size > WASM_DIFF_CACHE) cache.delete(cache.keys().next().value);
   }

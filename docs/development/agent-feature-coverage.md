@@ -174,6 +174,7 @@ Every option is off unless the start names it, and none is inherited.
 | Console snippets, filter, command history | none | none | Not exposed: editor state of the panel; the agent evaluates any source directly |
 | Live Wasm memory and calls | `get_live_wasm`, `live_wasm_action` | A | Covered; a current Brave has no peer, so it reports unsupported |
 | Native debugger (breakpoints, stepping, scopes, watch) | `get_native_debugger`, `native_debugger_action` | A | Covered; a current Brave has no peer, so it reports the pausing debugger unsupported and refuses every action |
+| Debugger sidebar Observations: watch rules, waiting on a request, listener, timer, CSP violation, exception or DOM mutation | `native_console_action` `runtime` `watch` to arm; `wait_for_events` and `get_events` with `type` to wait and read (`debugger_observation`: site and `stack_read`); `get_request_stack` `observation_sequence` | A to arm, R to wait and read | Covered ([recipe 25](agent-cookbook.md#25-break-on-a-request-a-click-handler-or-a-csp-violation-without-pausing)); records come from fixtures until a Brave build serves them |
 | Agent dock (provider, model, transcript, permission) | none | none | Not exposed: the agent's own controls stay with the researcher |
 
 ## Workspace chrome

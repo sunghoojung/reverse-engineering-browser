@@ -13,7 +13,7 @@ const {requestsFromEvents} = load(['apps/research-ui/evidence_models.js'], 'requ
 const view = load(['apps/research-ui/request_stack.js', 'apps/research-ui/traffic_view.js', 'apps/research-ui/traffic_filter.js',
   'apps/research-ui/traffic_response.js'], `trafficSortedRequests, trafficSearchRequests,
   trafficRequestDomain, trafficIndexRequest, trafficParseFilter, trafficApplyFilter, trafficBrowserInternal, trafficSizeCell, trafficWaterfall,
-  trafficInitiatorFrame, trafficStatusCell, responseBodyCase`);
+  trafficInitiatorFrame, trafficStatusCell, responseBodyCase, trafficWatchText`);
 
 const model = requestsFromEvents(golden.events, 'live');
 // Tabs and the unresolved reason come from tab sets and links, as Traffic attaches them.
@@ -26,7 +26,7 @@ golden.rows.forEach((row, index) => {
   for (const field of ['id', 'path', 'method', 'status', 'time', 'type', 'targetKind', 'hostOnly', 'failed', 'interrupted',
     'tabId', 'operation', 'targetMalformed', 'transferSize', 'resourceSize', 'fromCache', 'fromServiceWorker', 'memoryCache',
     'staticData', 'raceNetwork', 'endLost', 'mimeType', 'protocol', 'responseTimestamp', 'errorCode', 'loaderObserved', 'initiator', 'mainFrame',
-    'tabReason', 'memoryCacheSource']) {
+    'tabReason', 'memoryCacheSource', 'watch']) {
     assert.deepEqual(shown[field], expected[field], `${expected.id} ${field}`);
   }
   // Why the body is or is not retained, decided from the row's own records.
@@ -50,6 +50,8 @@ golden.rows.forEach((row, index) => {
   for (const field of ['target', 'host', 'urlTruncated', 'targetLength']) {
     assert.deepEqual(shown[field], expected[field] ?? (field === 'urlTruncated' ? false : null), `${expected.id} ${field}`);
   }
+  // Traffic selects a window row without a store read only when it holds every record the index counts.
+  assert.equal(expected.events.length + expected.details.length, row.records, `${expected.id} records`);
   assert.equal(row.domain, view.trafficRequestDomain(expected), `${expected.id} domain`);
   assert.equal(row.browser_internal, view.trafficBrowserInternal(expected), `${expected.id} browser-internal`);
   const root = expected.events.find(event => event.type === 'request_started' && event.request_id !== '0') ??
@@ -69,6 +71,20 @@ assert(lost && lost.status === 'incomplete' && view.trafficStatusCell(lost).text
 const raced = shownRows.find(row => row.raceNetwork);
 assert(raced && raced.status === 'failed' && raced.fromServiceWorker && view.trafficStatusCell(raced).text === 'Failed');
 assert.equal(shownRows.filter(row => row.endLost || row.raceNetwork).length, 2);
+// A watched request names its rule and its first match record, from the backend's decode.
+const watched = shownRows.filter(row => row.watch);
+const matches = golden.events.filter(event => event.type === 'request_watch_match');
+assert(matches.length === 2 && matches[0].debugger_observation.detail.rule === 3 && matches[1].debugger_observation.detail.rule === 5,
+  'the golden holds two matches of one request');
+assert(watched.length === 1 && watched[0].watch.rule === 3 && watched[0].watch.methodMatched === true &&
+  watched[0].watch.sequenceNumber === matches[0].sequence_number, 'one watched row, with its first match');
+// Without the decode (the polling window carries none) the same match is
+// named, with no rule; Traffic then takes the rule from the index row.
+const bare = requestsFromEvents(golden.events.map(({debugger_observation, ...event}) => event), 'live')
+  .find(row => row.id === watched[0].id);
+assert.deepEqual({...bare.watch}, {...watched[0].watch, rule: null, methodMatched: null, ruleRead: false}, 'an undecoded match names the same record');
+assert.match(view.trafficWatchText(bare.watch), /not read here/, 'an undecoded rule reads as not read here');
+assert.match(view.trafficWatchText({...bare.watch, ruleRead: true}), /names no rule it could decode/, 'a refused record names no rule');
 // An MHTML archive reuse has no HTTP status, yet it finished: never No loader.
 const archive = shownRows.find(row => row.memoryCache && row.status === 'finished');
 const archiveCell = archive && view.trafficStatusCell(archive);

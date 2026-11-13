@@ -450,6 +450,25 @@ function trafficBlockStart(container, total, start) {
   return Math.max(0, Math.min(maximum, first - 2 * TRAFFIC_ROW_MARGIN));
 }
 
+// What a request watch match says, in the debugger sidebar's own words.
+function trafficWatchText(watch) {
+  if (!watch) return '';
+  if (watch.rule !== null) return `Request watch rule ${watch.rule + 1} matched${watch.methodMatched ? ', method too' : ''}`;
+  // Without a decode (the polling window carries none, and the index row did
+  // not answer) the rule is unknown here, which is not the record lacking one.
+  return watch.ruleRead === false ? 'A request watch rule matched (which one is not read here: the request index has not answered for this row)'
+    : 'A request watch rule matched (the record names no rule it could decode)';
+}
+
+// The request watch rule that matched a row (protocol/request-index-v1.md), in
+// the shape requestsFromEvents gives it.
+function trafficIndexWatch(watch) {
+  if (!watch || typeof watch !== 'object') return null;
+  return {sessionId: watch.session_id, processId: watch.process_id, sequenceNumber: watch.sequence_number, frameId: watch.frame_id,
+    rule: Number.isInteger(watch.rule) ? watch.rule : null, methodMatched: typeof watch.method_matched === 'boolean' ? watch.method_matched : null,
+    ruleRead: true};
+}
+
 // A request index row (protocol/request-index-v1.md) in the Traffic row shape.
 function trafficIndexRequest(row, origin) {
   return {id: row.id, path: row.path, method: row.method, status: row.status, time: row.time, type: row.type, origin,
@@ -460,7 +479,7 @@ function trafficIndexRequest(row, origin) {
     firstTimestamp: BigInt(row.first_time_ns), lastTimestamp: BigInt(row.last_time_ns),
     transferSize: row.transfer_size, resourceSize: row.resource_size, fromCache: row.from_cache,
     fromServiceWorker: row.from_service_worker, memoryCache: row.memory_cache === true, staticData: row.static_data === true,
-    raceNetwork: row.race_network === true, endLost: row.end_lost === true,
+    raceNetwork: row.race_network === true, endLost: row.end_lost === true, watch: trafficIndexWatch(row.watch),
     // Index-only facts: every row's body case, and the row a reuse names with its body.
     responseBodyIndex: row.response_body ?? null, memoryCacheSource: row.memory_cache_source?.id ?? null,
     memoryCacheSourceRow: row.memory_cache_source ?? null,
@@ -557,7 +576,7 @@ function renderTrafficRows(container, requests, options) {
     const key = JSON.stringify([request.path, request.method, request.status, request.time,
       request.type, request.origin, request.hostOnly, request.failed, request.targetKind, request.operation, researcherName,
       request.tabLinkLabel, request.transferSize, request.resourceSize, request.fromCache, request.fromServiceWorker,
-      request.memoryCache, request.staticData, request.raceNetwork, request.endLost, request.mimeType, request.protocol,
+      request.memoryCache, request.staticData, request.raceNetwork, request.endLost, request.mimeType, request.protocol, trafficWatchText(request.watch),
       request.initiator, trafficInitiatorFrame(request)?.title, request.errorCode, request.loaderObserved, time(request.firstTimestamp), time(request.lastTimestamp),
       time(request.responseTimestamp), scaleKey]);
     // Reuse the row itself on lifecycle changes, preserving focus and its single
@@ -581,6 +600,11 @@ function renderTrafficRows(container, requests, options) {
       const name = cell('name', 'request-name', undefined, `${url}\n${trafficOriginLabel(request)} · ${request.method} · network · ${request.operation ?? 'network'} · request ${request.id}${request.tabLinkLabel ? ` · ${request.tabLinkLabel}` : ''}${request.tabReason ? ` · no tab: ${request.tabReason}` : ''}${request.hostOnly ? ' · URL path and query not captured' : request.urlTruncated ? ` · path and query truncated from ${request.targetLength} bytes` : ''}`);
       // A researcher name leads the cell; the captured path and host stay visible.
       if (researcherName) name.append(trafficNode('span', 'researcher-name', researcherName));
+      if (request.watch) {
+        const watched = trafficNode('span', 'request-watched', 'Watched');
+        watched.title = `${trafficWatchText(request.watch)}. The General tab links to its observation in the Sources debugger.`;
+        name.append(watched);
+      }
       const host = trafficNode('span', 'request-host', target.host);
       if (request.tabLinkLabel) host.append(trafficNode('span', 'request-tab-link', `${target.host ? ' · ' : ''}${request.tabLinkLabel}`));
       name.append(trafficNode('span', 'request-resource', target.name), host);
@@ -618,7 +642,7 @@ function renderTrafficRows(container, requests, options) {
       }
       row.replaceChildren(name, status, type, cell('method', 'request-method', request.method, request.method),
         protocol, initiator, size, timeCell, waterfall);
-      row.setAttribute('aria-label', `${researcherName ? `${researcherName} (researcher name). ` : ''}${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${sizeCell.transfer}, ${timeLabel}, ${request.operation ?? 'network'}, request ${request.id}`);
+      row.setAttribute('aria-label', `${researcherName ? `${researcherName} (researcher name). ` : ''}${trafficOriginLabel(request)} ${request.hostOnly ? 'host-only metadata' : 'request'}: ${request.method} ${request.path}, ${status.textContent}, ${sizeCell.transfer}, ${timeLabel}, ${request.operation ?? 'network'}, request ${request.id}${request.watch ? `, ${trafficWatchText(request.watch)}` : ''}`);
     }
     row.setAttribute('aria-selected', String(request.id === selectedId));
     // Positions in the whole list, not the mounted rows.
@@ -745,6 +769,47 @@ function renderTrafficDetails(container, request, notice = '', targetView = null
     node.dataset.kind = kinds[index];
     if (kinds[index] === 'provenance') node.dataset.origin = request.origin ?? 'local';
   });
+  renderTrafficWatch(container, request.watch ?? null);
+}
+
+// A request a watch rule matched: the rule, and its request_watch_match record
+// in the Sources debugger sidebar's Observations. A poll can add the mark to a
+// selection already shown, so this section follows each render.
+function renderTrafficWatch(container, watch) {
+  let section = container.querySelector('.traffic-watch');
+  if (!watch) { section?.remove(); return; }
+  const key = JSON.stringify(watch);
+  if (section?.dataset.watch === key) return;
+  section?.remove();
+  section = trafficNode('section', 'traffic-general traffic-watch');
+  section.dataset.watch = key;
+  section.setAttribute('aria-label', 'Debugger watch');
+  section.append(trafficNode('h2', '', 'Debugger watch'));
+  const row = (label, value) => {
+    const node = trafficNode('div', 'traffic-general-row');
+    node.append(trafficNode('span', '', label), value);
+    section.append(node);
+  };
+  const rule = trafficNode('span', 'traffic-general-value', `${trafficWatchText(watch)}. The record names the rule's place in the set armed then; the debugger's Watch rules show the set armed now.`);
+  rule.dataset.kind = 'prose';
+  row('Rule', rule);
+  const where = trafficNode('span', 'traffic-general-value traffic-watch-record', `request_watch_match #${watch.sequenceNumber} · renderer ${watch.processId} · frame ${watch.frameId}`);
+  row('Observation', where);
+  const status = trafficNode('p', 'traffic-watch-status');
+  status.setAttribute('role', 'status');
+  const open = trafficNode('button', 'secondary-button traffic-watch-open', 'Show in debugger');
+  open.type = 'button';
+  open.title = 'Opens Sources with the debugger sidebar on this observation and its stack.';
+  open.addEventListener('click', () => {
+    const record = {type: 'request_watch_match', session_id: watch.sessionId, process_id: watch.processId,
+      sequence_number: watch.sequenceNumber, frame_id: watch.frameId};
+    if (typeof showScreen === 'function') showScreen('sources');
+    status.textContent = globalThis.RebDebuggerSidebar?.showObservation?.(record) ? '' : 'The Sources debugger is not available in this window.';
+  });
+  const actions = trafficNode('div', 'traffic-watch-actions');
+  actions.append(open, status);
+  section.append(actions);
+  container.querySelector('.traffic-general')?.after(section);
 }
 
 function trafficTabs(request) {

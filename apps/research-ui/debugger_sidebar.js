@@ -67,6 +67,10 @@ globalThis.RebDebuggerSidebar = Object.freeze({
   open: () => debuggerSidebarController?.setOpen(true),
   close: () => debuggerSidebarController?.setOpen(false),
   isOpen: () => Boolean(debuggerSidebarController?.isOpen()),
+  // Opens on one observation record (session_id, process_id, sequence_number,
+  // type and frame_id): its kind is listed and its row selected once a read
+  // holds it. Traffic's watched requests link here.
+  showObservation: record => Boolean(debuggerSidebarController?.reveal(record)),
   // The Sources tree scope, while the sidebar is open and a thread allows one.
   sourceScope: () => debuggerSidebarController?.sourceScope() ?? null
 });
@@ -285,6 +289,9 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
       paint();
     },
     focus() { element.focus({preventScroll: true}); },
+    scrollTo(key) { reveal(key); paint(); },
+    // The painted row of `key`, or null while it is outside the window.
+    row(key) { return [...space.children].find(row => row.dataset.key === key) ?? null; },
     release() { if (frame > 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame); frame = 0; space.replaceChildren(); items = []; options = []; tops = [0]; signature = ''; active = null; }
   };
 }
@@ -405,7 +412,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   const view = {
     // `readSerial` numbers the read whose answer `document` is; readsStarted()
     // counts reads begun, so an action can tell which reads followed it.
-    status: 'loading', document: null, error: null, updatedAt: null, readSerial: 0, thread: null, kind: null,
+    status: 'loading', document: null, error: null, updatedAt: null, readSerial: 0, thread: null, kind: null, reveal: null,
     readsStarted: () => readsStarted,
     observations: blankObservations(),
     // Asks for a read soon. From a render, or the promises it queued, it does
@@ -423,16 +430,18 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     // Paints the sections again from what was last read, without a read.
     repaint: () => render(),
     selectThread(thread) {
+      view.reveal = null;
       view.thread = thread && view.thread?.key === thread.key ? null : thread;
       hooks.refreshTree?.();
       read();
     },
     setKind(kind) {
+      view.reveal = null;
       view.kind = Object.hasOwn(DEBUGGER_OBSERVATION_KINDS, kind) ? kind : null;
       read();
     },
     older: () => readOlder(),
-    showNewest() { dropList(); render(); read(); },
+    showNewest() { view.reveal = null; dropList(); render(); read(); },
     // Once the researcher has a place (a selected row, or the list scrolled
     // from its top), the newest page becomes a kept list that later reads add
     // to; back at the top with nothing selected, the list follows the newest
@@ -518,6 +527,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     // A shorter store was cleared or replaced: its older pages, and any read
     // of them still running, belong to the evidence before it.
     const replaced = observations.query && BigInt(page.store_end) < BigInt(observations.query.store_end);
+    if (replaced) view.reveal = null;
     if (observations.key !== key || replaced) { dropList(); Object.assign(observations, {key, head: [], refused: 0, query: null}); }
     const head = valid(answer), list = observations.list;
     let bridged = null;
@@ -726,6 +736,8 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   function stop() {
     generation += 1;
     stops += 1;
+    // Closing or leaving Sources is moving on: a pending showObservation ends.
+    view.reveal = null;
     clearTimeout(timer);
     timer = 0;
     refreshQueued = false;
@@ -782,6 +794,20 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     isOpen: () => open,
     // Counts closes and departures from Sources, so work begun before one can tell.
     stops: () => stops,
+    // An observed-frame scope that excludes the record is cleared; any other
+    // thread scope does not filter Observations, so it stays.
+    reveal(record) {
+      if (!record || !Object.hasOwn(DEBUGGER_OBSERVATION_KINDS, record.type)) return false;
+      const thread = view.thread;
+      if (thread?.kind === 'observed' && !(thread.session_id === record.session_id &&
+          String(thread.process_id) === String(record.process_id) && thread.frame_id === record.frame_id)) view.thread = null;
+      view.kind = record.type;
+      // Where focus was when asked: the record takes focus only if it is still there.
+      view.reveal = {key: debuggerRecordKey(record), record, after: readsStarted, focus: document.activeElement};
+      hooks.refreshTree?.();
+      if (open) read(); else setOpen(true);
+      return true;
+    },
     sectionsChanged: () => render(),
     sourceScope() {
       const thread = view.thread;
@@ -955,6 +981,10 @@ function debuggerWatchSection() {
     const switches = debuggerNode('div', 'debugger-watch-switches');
     switches.append(timers.label, csp.label, field('Exceptions', exceptions));
     const dom = debuggerNode('p', 'debugger-note');
+    // What a rule cannot see, said where it is armed: a wait for it would time
+    // out with nothing missing (protocol/native-debugger-observation-v1.md).
+    const limits = debuggerNode('p', 'debugger-note debugger-watch-limits',
+      'Observes only this document\'s main thread: not its workers, other frames or same-process iframes. Its navigation clears the rules, and they cannot be armed ahead of a page load, so what a page does while it loads is not observed.');
     const arm = debuggerNode('button', 'secondary-button debugger-arm');
     arm.type = 'submit';
     const actions = debuggerNode('div', 'debugger-watch-actions');
@@ -965,7 +995,7 @@ function debuggerWatchSection() {
     own.clear = debuggerButton('Clear rules', 'secondary-button', () => send(view, own, null));
     actions.append(arm, own.clear);
     element.append(field('Requests', requests, 'One per line: an optional method, then text the URL contains.'),
-      field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, actions, output);
+      field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, limits, actions, output);
     element.addEventListener('submit', event => { event.preventDefault(); send(view, own, 'arm'); });
     return own;
   }
@@ -1043,7 +1073,7 @@ function debuggerWatchSection() {
       if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
       else if (!armed) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));
       else {
-        nodes.push(debuggerNote(`Armed on Console document ${armed.target_id} (Console session ${armed.session_id}). Navigation, a new capture, Clear rules or a Console Stop disarms them.`));
+        nodes.push(debuggerNote(`Armed on Console document ${armed.target_id} (Console session ${armed.session_id}). Only its main thread is observed. Navigation, a new capture, Clear rules or a Console Stop disarms them.`));
         const thread = view.thread;
         if (thread?.kind === 'document' && thread.target_id !== armed.target_id) nodes.push(debuggerNote(`The selected document ${thread.target_id} has no rules; they are armed on document ${armed.target_id}.`, 'warning'));
         const list = debuggerNode('dl', 'debugger-rules');
@@ -1136,10 +1166,16 @@ function debuggerObservationsSection() {
   // A row the researcher chose is marked at once and brings its details into view.
   function choose(view, item, how) {
     if (!item) return;
+    // Any other choice is the researcher moving on from a pending showObservation.
+    if (how !== 'reveal') view.reveal = null;
+    // A key that leaves the chosen row active (an arrow past the last row,
+    // Home on the first) chooses nothing new and leaves the pane where it is.
+    if (how === 'active' && selected?.key === item.key) return;
     if (selected?.key !== item.key) notice = null;
     if (opening && opening.key !== item.key) cancelOpening();
     selected = item;
-    revealKey = item.key;
+    // A revealed row keeps its list, which takes focus, in view instead.
+    revealKey = how === 'reveal' ? null : item.key;
     list?.set(shown, {selectedKey: item.key});
     holdPlace(view);
     paintDetail(view);
@@ -1338,6 +1374,12 @@ function debuggerObservationsSection() {
       const current = Boolean(observations.query) && observations.key === `${view.kind ?? 'all'}|${view.thread?.kind === 'observed' ? view.thread.key : 'all'}`;
       // Until the new filter is read, the rows read before stay, named as what they are.
       const items = observations.query ? rows(view) : [];
+      // A record asked for by showObservation is chosen once a read made after
+      // the ask holds it, older pages included; until then the list says so.
+      const wanted = view.reveal;
+      const asked = Boolean(wanted) && current && view.status === 'ready' && view.readSerial > wanted.after;
+      const revealing = asked ? items.find(item => item.key === wanted.key) ?? null : null;
+      if (revealing) view.reveal = null;
       const notes = [];
       const scope = view.thread?.kind === 'observed' ? ` in frame ${view.thread.frame_id}` : '';
       const kind = view.kind ? DEBUGGER_OBSERVATION_KINDS[view.kind].filter.toLowerCase() : 'records';
@@ -1347,6 +1389,9 @@ function debuggerObservationsSection() {
         const before = observations.query.type ? DEBUGGER_OBSERVATION_KINDS[observations.query.type].filter.toLowerCase() : 'records';
         const where = observations.query.thread ? ` in frame ${observations.query.thread.frame_id}` : '';
         notes.push(debuggerNote(`The ${kind}${scope} were not read. The rows below are the ${before}${where} read before.`, 'warning'));
+      }
+      if (asked && !revealing) {
+        notes.push(debuggerNote(`Observation #${wanted.record.sequence_number} of renderer ${wanted.record.process_id} is not among these ${kind}. Show older records reads older ones, and it is chosen once read.`, 'warning'));
       }
       const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
       if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
@@ -1369,6 +1414,20 @@ function debuggerObservationsSection() {
       list.element.hidden = !items.length;
       shown = items;
       list.set(items, {selectedKey: selected?.key ?? null});
+      if (revealing) {
+        // The chosen row in its list, then the list, which takes focus, at the
+        // top of the pane; its details follow below it. Once they render, the
+        // row itself is brought whole into view where the pane is short.
+        list.scrollTo(revealing.key);
+        choose(view, revealing, 'reveal');
+        if (typeof list.element.scrollIntoView === 'function') list.element.scrollIntoView({block: 'start'});
+        const row = list.row(revealing.key);
+        if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({block: 'nearest'});
+        // A control the researcher picked meanwhile (a file, Find, the Watch
+        // form) keeps focus; the record is still chosen and in view.
+        const active = document.activeElement;
+        if (!active || active === document.body || active === wanted.focus) list.focus();
+      }
       const end = loaded ? loaded.bottom : observations.query?.next_before ?? null;
       controls.more.hidden = !current || end === null || items.length >= DEBUGGER_SIDEBAR.rows;
       controls.more.disabled = observations.loadingOlder;

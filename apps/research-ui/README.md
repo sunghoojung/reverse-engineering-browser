@@ -280,7 +280,12 @@ Each section is a collapsible pane:
   document. Arming replaces the set and keeps the DOM rules the Console armed
   on the same document. A refused set leaves nothing armed, and nothing is
   retried. Without a live connection the section says how to get one and
-  shows no form.
+  shows no form. The form and the armed set say what a rule cannot observe,
+  because a wait for it would then find nothing with nothing missing: only
+  the armed document's main thread records, never its workers, other frames
+  or same-process iframes; its navigation clears the rules; and they cannot
+  be armed ahead of a page load, so what a page does while it loads is not
+  observed.
 - **Observations**: the newest records, 128 at a time and up to 4,096 with
   **Show older records**, filtered by kind. A note says how much of the store
   the rows were read from: the whole store, or its newest bytes and why the
@@ -308,6 +313,18 @@ Each section is a collapsible pane:
   nor their note. Malformed
   records, a renderer's `debugger_observation_budget` gap and store sequence
   gaps are stated above the list, which is as tall as its rows up to a cap.
+  Traffic's **Show in debugger** on a watched request calls
+  `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
+  kind, clears an observed-frame scope that would hide the record, and once a
+  read made after the ask holds it, chooses that row, scrolls the list to the
+  top of the pane with its details below and moves focus to the list. A record
+  that read does not hold is named above the list and stays asked for:
+  **Show older records** reads older pages, and the record is chosen when its
+  page arrives. Like a Traffic lookup, the ask ends when the researcher moves
+  on: another row, a kind or thread, **Show newest**, closing the sidebar,
+  leaving Sources or a replaced store. Focus moves to the list only if it is
+  still where it was when asked; a file, Find or the Watch form picked
+  meanwhile keeps it, and the record is still chosen.
 - **Pausing**: one statement of the availability `get_native_debugger` reports.
   Today it is unsupported, so the sidebar offers no control to stop, step or
   inspect a paused frame. When sections registered with `native: 'pausing'`
@@ -866,6 +883,11 @@ value as `window.tempN`, or release it. `$_` reads the previous result. `copy(va
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
 argument once. Event monitoring is explicit and lasts at most 60 seconds.
+`getEventListeners` also takes `window` and `document`, and an element, `window`
+or `document` result offers **Event listeners** among its value actions. The
+runtime describes `window` and `document` as a plain `Object`, so a plain
+`Object` result offers it too, and the page refuses any other object with its
+own reason. **Monitor events** stays for elements only.
 
 Top-level await and promise controls show resolved/rejected values. Stopping a
 wait releases its handle; it does not cancel previously scheduled page work.
@@ -1502,7 +1524,20 @@ The columns are Name, Status, Type, Method, Initiator, Size, Time and Waterfall;
 Protocol is available from the header menu.
 
 - **Name** is the last path segment and the query, with the host as a muted
-  sublabel only when the path was captured. The full URL is the tooltip.
+  sublabel only when the path was captured. The full URL is the tooltip. A
+  request a debugger watch rule matched carries a **Watched** chip in the
+  network kind's color (the match is a network record), whose tooltip names
+  the rule, or says the rule is not read here when no decode came with the
+  record and the request index has not answered for the row. General then has a **Debugger watch** section: the
+  rule (its place in the set armed when it matched; Watch rules shows the set
+  armed now), the `request_watch_match` record's sequence, renderer and frame,
+  and **Show in debugger**, which opens Sources with the debugger sidebar on
+  that observation (`RebDebuggerSidebar.showObservation`). The request index
+  row's `watch` names the match, so the mark survives every path that builds
+  a row: the newest window, a row selected whole from it, a row read from the
+  store and each later poll. The rule comes from the backend's decode beside
+  the record in a row's store read, and from the index row otherwise: the
+  polling window carries no decode.
 - **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
   Pending has no response yet, and No loader means only the renderer recorded
   the request. End lost means the request's service worker ended it but the
@@ -1763,7 +1798,7 @@ Every color keeps one meaning on every screen. The tokens sit at the top of
 
 | Meaning | Colors | Where |
 | --- | --- | --- |
-| Resource and evidence kind | scripts foam, WebAssembly and VM iris, dynamic code gold, requests and network records rose, documents pine, sockets gold; styles, images, fonts and media neutral | Traffic row markers, Type and waterfall bars; Sources file icons; Evidence categories; the Flow graph cards |
+| Resource and evidence kind | scripts foam, WebAssembly and VM iris, dynamic code gold, requests and network records rose, documents pine, sockets gold; styles, images, fonts and media neutral | Traffic row markers, Type and waterfall bars, the Watched chip (a `request_watch_match` network record); Sources file icons; Evidence categories; the Flow graph cards |
 | HTTP verb | POST, PUT and PATCH gold, DELETE love, GET, HEAD and OPTIONS neutral | Traffic Method and the selected request |
 | Status | 2xx plain text, 3xx iris, 4xx gold, 5xx and failures love | Traffic Status and the selected request |
 | State | ready foam, busy or limited gold, failed or unavailable love | session and availability tags, notices (as a faint wash), the status bar's loss and sampling counts |

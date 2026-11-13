@@ -3961,4 +3961,185 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#inspector-tab-general")
     }
   }
+
+  // #434 phase 1: a request a watch rule matched is marked on its Traffic row
+  // and in General with its rule, and Show in debugger opens its observation
+  // in the Sources debugger sidebar, chosen and focused. Where rules are armed
+  // the sidebar says what they cannot observe.
+  @MainActor
+  func test33WatchedRequestInTrafficAndDebugger() async throws {
+    let expected = try Expectations.load()
+    let host = "watch.debugger.test"
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      _ = try await ui.value("""
+        (() => { const filter = document.querySelector('#request-filter'); filter.value = '\(host)';
+          filter.dispatchEvent(new Event('input', {bubbles: true})); return true; })()
+        """)
+      try await ui.waitUntil("""
+        [...document.querySelectorAll('#screen-traffic .request-row')].some(row => row.innerText.includes('\(host)') && row.querySelector('.request-watched'))
+        """, "\(size.name): the watched request is not marked on its row")
+      let row = try await ui.json("""
+        (() => { const row = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'));
+          const chip = row.querySelector('.request-watched'), name = row.querySelector('.request-name');
+          const a = chip.getBoundingClientRect(), b = name.getBoundingClientRect();
+          return {chip: chip.innerText, title: chip.title, label: row.getAttribute('aria-label'),
+            inside: a.left >= b.left - 0.5 && a.right <= b.right + 0.5 && a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5 && a.width > 0,
+            // The name the chip leads stays on the row's one line, not wrapped out of it.
+            named: (() => { const resource = name.querySelector('.request-resource').getBoundingClientRect();
+              return resource.width > 0 && resource.top < b.bottom && resource.bottom > b.top && Math.abs(resource.top - a.top) < 4; })(),
+            clipped: chip.scrollWidth > chip.clientWidth + 1,
+            others: [...document.querySelectorAll('#screen-traffic .request-row')].filter(node => node !== row && node.querySelector('.request-watched')).length}; })()
+        """)
+      print("RENDERED_UI_WATCHED_ROW \(size.name) \(row)")
+      XCTAssertEqual(row["chip"] as? String, "Watched", "\(size.name): \(row)")
+      XCTAssertEqual(row["inside"] as? Bool, true, "\(size.name): the chip sits inside the Name cell: \(row)")
+      XCTAssertEqual(row["clipped"] as? Bool, false, "\(size.name): the chip is not clipped: \(row)")
+      XCTAssertEqual(row["named"] as? Bool, true, "\(size.name): the request's name stays visible beside the chip: \(row)")
+      XCTAssertEqual(row["others"] as? Int, 0, "\(size.name): only the watched row is marked: \(row)")
+      XCTAssertTrue((row["label"] as? String ?? "").contains("Request watch rule 1 matched, method too"), "\(size.name): \(row)")
+      XCTAssertTrue((row["title"] as? String ?? "").contains("Request watch rule 1 matched"), "\(size.name): \(row)")
+      // The color system: the chip is a network record, so the network kind's
+      // color in both themes, never foam, the script kind and ready state.
+      for theme in ["dark", "light"] {
+        let colors = try await ui.json("""
+          (async () => {
+            const root = document.documentElement, before = root.dataset.theme ?? null;
+            root.dataset.theme = '\(theme)';
+            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const color = token => { const probe = document.createElement('span'); probe.style.color = `var(${token})`;
+              document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; };
+            const chip = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'))
+              .querySelector('.request-watched');
+            const result = {chip: getComputedStyle(chip).color, request: color('--kind-request'), script: color('--kind-script')};
+            if (before === null) delete root.dataset.theme; else root.dataset.theme = before;
+            return result; })()
+          """)
+        XCTAssertEqual(colors["chip"] as? String, colors["request"] as? String, "\(size.name) \(theme): the chip takes --kind-request: \(colors)")
+        XCTAssertNotEqual(colors["chip"] as? String, colors["script"] as? String, "\(size.name) \(theme): never the script kind: \(colors)")
+      }
+      _ = try await ui.value("""
+        (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
+          document.documentElement.dataset.theme = 'light';
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        """)
+      try await assertLayout(ui, "#screen-traffic", "\(size.name) watched row light")
+      try await ui.screenshot("traffic-watched-row-light-\(size.name)")
+      _ = try await ui.value("""
+        (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+        """)
+
+      try await ui.click("#screen-traffic .request-row", containing: host)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden && Boolean(document.querySelector('#exchange-inspector .traffic-watch'))",
+        "\(size.name): General did not show the debugger watch")
+      let general = try await ui.json("""
+        (() => { const section = document.querySelector('#exchange-inspector .traffic-watch');
+          return {text: section.innerText.replace(/\\s+/g, ' '), record: section.querySelector('.traffic-watch-record').innerText,
+            selected: state.selectedRequestId}; })()
+        """)
+      print("RENDERED_UI_WATCHED_GENERAL \(size.name) \(general)")
+      let text = general["text"] as? String ?? ""
+      XCTAssertTrue(text.contains("Debugger watch") && text.contains("Request watch rule 1 matched, method too"), "\(size.name): \(general)")
+      let record = general["record"] as? String ?? ""
+      XCTAssertTrue(record.contains("renderer \(expected.debuggerProcess) · frame \(expected.debuggerFrame)"), "\(size.name): \(general)")
+      XCTAssertTrue((general["selected"] as? String ?? "").hasSuffix(":R\(expected.debuggerProcess):5100"), "\(size.name): \(general)")
+      let sequence = record.split(separator: "#").last?.split(separator: " ").first.map(String.init) ?? ""
+      XCTAssertFalse(sequence.isEmpty, "\(size.name): the record names its sequence: \(record)")
+      try await assertInert(ui, "\(size.name) watched request")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) watched request general")
+      try await ui.screenshot("traffic-watched-request-\(size.name)")
+
+      // Pressed from the keyboard, so the list it moves focus to must show it.
+      _ = try await ui.value("(() => { const open = document.querySelector('.traffic-watch-open'); open.scrollIntoView({block: 'nearest'}); open.focus(); return true; })()")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("""
+        (() => { const chosen = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]');
+          return !document.querySelector('#screen-sources').hidden && !document.querySelector('#debugger-sidebar').hidden &&
+            chosen?.dataset.key.endsWith(':\(expected.debuggerProcess):\(sequence)') && document.activeElement?.id === 'debugger-observations'; })()
+        """, "\(size.name): Show in debugger did not choose the observation with focus on its list")
+      // Before any key, as the reveal left it: the chosen row is whole inside
+      // its list and the pane in both themes, the narrow window included.
+      for theme in ["dark", "light"] {
+        let revealed = try await ui.json("""
+          (async () => {
+            const root = document.documentElement;
+            window.__rebRevealTheme = root.dataset.theme ?? null;
+            root.dataset.theme = '\(theme)';
+            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+            const list = document.querySelector('#debugger-observations').getBoundingClientRect();
+            const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
+            return {rowTop: row?.top ?? null, rowBottom: row?.bottom ?? null, paneTop: pane.top, paneBottom: pane.bottom,
+              listTop: list.top, listBottom: list.bottom,
+              rowInPane: Boolean(row) && row.top >= pane.top - 0.5 && row.bottom <= pane.bottom + 0.5,
+              rowInList: Boolean(row) && row.top >= list.top - 0.5 && row.bottom <= list.bottom + 0.5}; })()
+          """)
+        print("RENDERED_UI_WATCHED_REVEALED \(size.name) \(theme) \(revealed)")
+        XCTAssertEqual(revealed["rowInPane"] as? Bool, true, "\(size.name) \(theme): the revealed row's top and bottom are inside the pane: \(revealed)")
+        XCTAssertEqual(revealed["rowInList"] as? Bool, true, "\(size.name) \(theme): the revealed row is not clipped by its list: \(revealed)")
+        try await ui.screenshot("debugger-revealed-row-\(theme)-\(size.name)")
+        _ = try await ui.value("""
+          (() => { if (window.__rebRevealTheme === null) delete document.documentElement.dataset.theme;
+            else document.documentElement.dataset.theme = window.__rebRevealTheme; delete window.__rebRevealTheme; return true; })()
+          """)
+      }
+      // WebKit draws focus a script moved only after the next key press; the
+      // arrow keeps the one Requests row active and must show the list's focus.
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      // Measured once its actions appeared: the arrow leaves the one row
+      // active, so nothing scrolls the row out from under the pane's edge.
+      try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar .debugger-detail .debugger-detail-actions'))",
+        "\(size.name): the chosen record's actions did not appear")
+      _ = try await ui.value("new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))")
+      let shown = try await ui.json("""
+        (() => { const detail = document.querySelector('#debugger-sidebar .debugger-detail'), box = detail.getBoundingClientRect();
+          const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+          const list = document.querySelector('#debugger-observations').getBoundingClientRect();
+          const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
+          return {kind: document.querySelector('.debugger-kind[aria-pressed="true"]')?.dataset.kind ?? '',
+            detail: detail.innerText.replace(/\\s+/g, ' '), inView: !detail.hidden && box.top < pane.bottom - 24 && box.bottom > pane.top,
+            // The focused list and its chosen row are on screen, inside the pane.
+            listInPane: list.top >= pane.top - 0.5 && list.top < pane.bottom - 20,
+            rowInPane: Boolean(row) && row.top >= pane.top - 0.5 && row.bottom <= pane.bottom + 0.5,
+            focus: __rebUiProbe.focusState()}; })()
+        """)
+      print("RENDERED_UI_WATCHED_SHOWN \(size.name) \(shown)")
+      XCTAssertEqual(shown["kind"] as? String, "request_watch_match", "\(size.name): the Requests kind is listed: \(shown)")
+      XCTAssertEqual(shown["inView"] as? Bool, true, "\(size.name): its details are in view: \(shown)")
+      XCTAssertTrue((shown["detail"] as? String ?? "").contains("request 5100"), "\(size.name): \(shown)")
+      let focus = shown["focus"] as? [String: Any] ?? [:]
+      XCTAssertEqual(focus["id"] as? String, "debugger-observations", "\(size.name): focus stays on the list: \(shown)")
+      XCTAssertEqual(focus["inViewport"] as? Bool, true, "\(size.name): the focused list is in the viewport: \(shown)")
+      XCTAssertEqual(shown["listInPane"] as? Bool, true, "\(size.name): the focused list is inside the sidebar pane: \(shown)")
+      XCTAssertEqual(shown["rowInPane"] as? Bool, true, "\(size.name): the chosen row is inside the sidebar pane: \(shown)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): the list shows its focus once a key is pressed: \(shown)")
+      let active = try await ui.value("document.querySelector('#debugger-observations .debugger-list-row[data-active=\"true\"]')?.dataset.key ?? ''") as? String ?? ""
+      XCTAssertTrue(active.hasSuffix(":\(expected.debuggerProcess):\(sequence)"), "\(size.name): the chosen record is the active row: \(active)")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) shown observation")
+      try await ui.screenshot("debugger-shown-observation-\(size.name)")
+      try await lightScreenshot(ui, "debugger-shown-observation", size.name)
+
+      // Arming: a live Console document draws the form, which states what a rule cannot observe.
+      _ = try await ui.value("""
+        (() => { window.__rebConsole = window.RebNativeConsole;
+          window.RebNativeConsole = {liveDocument: () => ({session_id: '5', target_id: '21', label: 'top #21'}), watch: async () => ({status: 'ok'})};
+          return true; })()
+        """)
+      try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar .debugger-watch-limits'))", timeout: 8,
+        "\(size.name): the arming form did not render")
+      let limits = try await ui.value("""
+        (() => { const note = document.querySelector('#debugger-sidebar .debugger-watch-limits');
+          note.scrollIntoView({block: 'center'}); return note.innerText; })()
+        """) as? String ?? ""
+      for said in ["only this document's main thread", "workers, other frames or same-process iframes", "navigation clears the rules",
+                   "cannot be armed ahead of a page load"] {
+        XCTAssertTrue(limits.contains(said), "\(size.name): the form says \(said): \(limits)")
+      }
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) watch limits")
+      try await ui.screenshot("debugger-watch-limits-\(size.name)")
+      _ = try await ui.value("(() => { window.RebNativeConsole = window.__rebConsole; delete window.__rebConsole; return true; })()")
+    }
+  }
 }

@@ -958,5 +958,152 @@ await check('a busy read leaves the arm outcome', async () => {
   ui.close();
 });
 
+// Traffic's watched request opens its observation: the kind is listed and the
+// record chosen once a read holds it, or the list says that read lacks it.
+await check('showObservation chooses the record Traffic names', async () => {
+  const store = createStore(6);
+  const matched = {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}};
+  store.add(1, matched);
+  store.add(4);
+  const ui = mount({store});
+  // linkedom keeps no focus, so the focus calls are what is checked; WebKit focus is test33's.
+  const focused = [];
+  ui.window.Element.prototype.focus = function focus() { focused.push(this.id); };
+  const target = {...store.records[6]};
+  assert.equal(ui.context.RebDebuggerSidebar.showObservation(target), true);
+  assert.equal(ui.sidebar.hidden, false, 'it opens the sidebar');
+  const list = () => ui.sidebar.querySelector('#debugger-observations');
+  await until(() => list()?.querySelector('[aria-selected="true"]'), 'the record is chosen');
+  assert(ui.reads().every(entry => new URL(entry.url, 'http://local').searchParams.get('type') === 'request_watch_match'), 'its kind is read');
+  assert.equal(list().querySelector('[aria-selected="true"]').dataset.key, '1:42:7');
+  assert.match(ui.text('.debugger-detail'), /sequence 7/);
+  assert(focused.includes('debugger-observations'), 'focus moves to the list it chose in');
+  const listAt = ui.reveals.lastIndexOf('debugger-list');
+  assert(listAt >= 0 && ui.reveals.indexOf('debugger-list-row', listAt) > listAt, `the chosen row is brought into view after its list: ${ui.reveals}`);
+  // An arrow that leaves the one row active chooses nothing new: the pane
+  // stays as the reveal left it, the row whole above its details.
+  const revealed = ui.reveals.length;
+  key(ui, list(), 'ArrowDown');
+  await sleep(250);
+  await settle();
+  assert.equal(ui.reveals.length, revealed, `an arrow on the chosen row scrolls nothing: ${ui.reveals.slice(revealed)}`);
+  assert.equal(list().querySelector('[aria-selected="true"]').dataset.key, '1:42:7');
+  assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, sequence_number: '999'}), true);
+  await until(() => /Observation #999 of renderer 42 is not among these requests\. Show older records reads older ones, and it is chosen once read\./.test(ui.text('.debugger-observation-notes')), 'an absent record is named');
+  assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, type: 'gap'}), false, 'only an observation kind');
+  // A kind the researcher picks before the read answers drops the request.
+  store.delay = 200;
+  ui.context.RebDebuggerSidebar.showObservation(target);
+  click(ui, ui.sidebar.querySelector('.debugger-kind[data-kind="timer_observation"]'));
+  await until(() => /^\d+ timers, newest first/.test(ui.text('.debugger-observation-notes')), 'the picked kind is read');
+  await settle();
+  assert.doesNotMatch(ui.text('.debugger-observation-notes'), /Observation #7/, 'an abandoned request names nothing');
+  assert.equal(list().querySelector('[aria-selected="true"]'), null, 'and chooses nothing');
+  store.delay = 0;
+  ui.close();
+});
+
+// What a watch rule cannot see is said where rules are armed and where they stand armed.
+await check('watch rules state what they cannot observe', async () => {
+  const store = createStore(1);
+  store.watch = {state: 'armed', armed: {session_id: '5', target_id: '22', rules: {requests: [{url_contains: '/api/x'}]}}};
+  const ui = mount({store, globals: {RebNativeConsole: {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}), watch: async () => ({status: 'ok'})}}});
+  ui.open();
+  await until(() => ui.sidebar.querySelector('.debugger-watch-limits'), 'the arming form');
+  const limits = ui.text('.debugger-watch-limits');
+  for (const said of [/only this document's main thread/, /workers, other frames or same-process iframes/, /navigation clears the rules/i, /cannot be armed ahead of a page load/]) assert.match(limits, said);
+  assert.match(ui.text('.debugger-watch-state'), /Only its main thread is observed/);
+  ui.close();
+});
+
+// Review round 1: moving on cancels a pending showObservation, as it cancels a
+// Traffic lookup: another row, closing, leaving Sources or a thread pick made
+// before the read answers leaves that choice, and focus, where it is.
+await check('moving on cancels a pending showObservation', async () => {
+  for (const how of ['another row', 'closing', 'leaving Sources', 'a thread', 'Show newest', 'a replaced store']) {
+    const store = createStore(6);
+    store.add(1, {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}});
+    store.add(4);
+    let holding = false;
+    const ui = mount({store, hold: url => holding && url.includes('type=request_watch_match')});
+    const focused = [];
+    ui.window.Element.prototype.focus = function focus() { focused.push(this.id); };
+    ui.open();
+    await until(() => ui.rows('#debugger-observations')[0]?.getAttribute('aria-setsize') === '11', `${how}: rows`);
+    holding = true;
+    ui.context.RebDebuggerSidebar.showObservation({...store.records[6]});
+    const held = () => ui.reads().find(entry => entry.url.includes('type=request_watch_match') && entry.release);
+    await until(() => held(), `${how}: the read, held`);
+    const screen = ui.document.querySelector('#screen-sources');
+    if (how === 'another row') click(ui, ui.rows('#debugger-observations').find(row => row.dataset.key === '1:42:8'));
+    else if (how === 'closing') ui.close();
+    else if (how === 'leaving Sources') { screen.hidden = true; await settle(); }
+    else if (how === 'a thread') click(ui, ui.rows('#debugger-threads').find(row => row.dataset.key === 'F:1:42:200'));
+    else if (how === 'Show newest') click(ui, ui.sidebar.querySelector('.debugger-show-newest'));
+    // A shorter store: cleared or replaced, though it still holds the record.
+    else store.records = store.records.slice(0, 8);
+    await settle();
+    const before = focused.length;
+    holding = false;
+    // Every read held so far, including one the choice itself started.
+    for (const entry of ui.reads().filter(entry => entry.release)) entry.release();
+    if (how === 'closing') ui.open();
+    if (how === 'leaving Sources') screen.hidden = false;
+    await until(() => ui.rows('#debugger-observations').length > 0, `${how}: rows again`);
+    await sleep(POLL + 500);
+    const chosen = ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key ?? null;
+    assert.notEqual(chosen, '1:42:7', `${how}: the abandoned record is not chosen`);
+    assert(!focused.slice(before).includes('debugger-observations'), `${how}: focus does not jump to the list`);
+    if (how === 'another row') assert.match(ui.text('.debugger-detail'), /sequence 8/, 'the row chosen instead stays chosen');
+    assert.doesNotMatch(ui.text('.debugger-observation-notes'), /Observation #7/, `${how}: nothing names the abandoned record`);
+    ui.close();
+  }
+});
+
+// A control the researcher picks before the read answers keeps focus: the
+// record is still chosen, and focus moves only when it is where it was.
+await check('showObservation leaves focus on a control picked meanwhile', async () => {
+  for (const picked of ['a file in the tree', 'the Watch form', 'nothing']) {
+    const store = createStore(6);
+    store.add(1, {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}});
+    let holding = true;
+    const ui = mount({store, hold: url => holding && url.includes('type=request_watch_match'),
+      globals: {RebNativeConsole: {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}), watch: async () => ({status: 'ok'})}}});
+    let active = ui.document.body;
+    Object.defineProperty(ui.document, 'activeElement', {configurable: true, get: () => active});
+    const focused = [];
+    ui.window.Element.prototype.focus = function focus() { focused.push(this.id); active = this; };
+    ui.open();
+    await until(() => ui.sidebar.querySelector('.debugger-watch-form'), `${picked}: the sidebar`);
+    ui.context.RebDebuggerSidebar.showObservation({...store.records[6]});
+    await until(() => ui.reads().some(entry => entry.url.includes('type=request_watch_match') && entry.release), `${picked}: the read, held`);
+    if (picked === 'a file in the tree') active = ui.document.querySelector('#source-tree');
+    else if (picked === 'the Watch form') active = ui.sidebar.querySelector('.debugger-watch-form textarea');
+    const before = focused.length;
+    holding = false;
+    for (const entry of ui.reads().filter(entry => entry.release)) entry.release();
+    await until(() => ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key === '1:42:7', `${picked}: still chosen`);
+    const moved = focused.slice(before).includes('debugger-observations');
+    assert.equal(moved, picked === 'nothing', `${picked}: focus ${moved ? 'moved' : 'stayed'}`);
+    ui.close();
+  }
+});
+
+// A record older than the newest page stays asked for: Show older records
+// reads its page, and it is chosen then, with the note gone.
+await check('showObservation waits for Show older to reach its record', async () => {
+  const store = createStore(0);
+  store.add(201, {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}});
+  const ui = mount({store});
+  const target = {...store.records[0]};
+  ui.context.RebDebuggerSidebar.showObservation(target);
+  await until(() => /Observation #1 of renderer 42 is not among these requests/.test(ui.text('.debugger-observation-notes')), 'the absent record is named');
+  assert.equal(ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]'), null);
+  click(ui, ui.sidebar.querySelector('.debugger-older'));
+  await until(() => ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key === '1:42:1', 'chosen once its page is read');
+  assert.doesNotMatch(ui.text('.debugger-observation-notes'), /is not among these/, 'the note goes once the rows hold it');
+  ui.close();
+});
+
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);
 for (const name of results) console.log(`  ${name}`);

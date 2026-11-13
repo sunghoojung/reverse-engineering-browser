@@ -22,6 +22,16 @@ nothing. `get_native_debugger` reports the rules the renderer confirmed, the
 Console documents, recorded workers and observed frames (`threads`), and the
 newest 32 records decoded.
 
+Three limits follow from arming through a live document, and each one makes a
+wait time out with nothing missing from the store, so every place that arms a
+rule or waits on one states them:
+
+- Only the armed document's main thread matches. Workers, other frames and
+  same-process iframes never record, and one document is armed at a time.
+- Navigation of that document clears the rules.
+- Rules cannot be armed ahead of a page load. What a new page does before its
+  rules are armed is not observed.
+
 | Rule | Bound |
 | --- | --- |
 | `requests`: `url_contains` (1-256 bytes) and optional `method` | 8 |
@@ -45,6 +55,72 @@ observation records among the newest 2,048 records that are observations or
 gaps of any kind, within the newest 64 MiB of the store, at most 64.
 `observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
 (above) in that scan, at most 16.
+
+A filtered or cursor `get_events` read and every `wait_for_events` put
+`debugger_observation` beside the hex payload of each record of types 40 to
+45, so an agent "breaks" by waiting on a cursor filtered by `type`. The
+unfiltered polling window carries none: the UI reads observations through
+`get_native_debugger`, and the decode would grow that window by a third. It is
+the object `get_native_debugger` lists, from the same decoder, with
+`status: decoded`, plus `site`, `stack_read` and `stack_read_operation`, or
+`{status: invalid}` with no field for a record the core refuses.
+
+`site` is the record's own frame resolved as `get_request_stack` resolves a
+frame below: script URL, one-based line, UTF-16 column and function name when
+the source is retained, else a reason with the raw `script_id` and
+`position`. A page's sites are grouped by script, and each script's source is
+read and walked once for all of them. Every outcome is kept, at most 4,096:
+a resolution that can no longer change for good, and one still waiting
+(`source_artifact_missing`, `script_identity_missing`,
+`script_identity_outside_scan`) with the artifact manifest bytes its lookups
+covered and the request index position it was read at, read again only once
+either moved.
+The manifest is append-only and is read from where the last read stopped, so
+a later read parses only the lines appended since. Identities come from the
+request index alone, never from a scan of the store. A page reads at most 4
+scripts, newest records first on a backward page and oldest first on a
+forward one. Before any kept answer is used, the event store and the
+artifact manifest are each checked to be the same file they were read from,
+grown or not: the same device and inode, a length no shorter, the same first
+4 KiB and the same 4 KiB before the length last read. Any other store or
+manifest, and clearing the capture, drops everything kept. A read during
+which another read found either one replaced shows and keeps nothing it read.
+
+A resolved site names the artifact it was resolved from. If the same bytes
+land again under another artifact ID or URL, the kept site still names the
+first, while `get_request_stack` names the newest such artifact; both are
+the same source, so the line, column and function name agree.
+
+A page's tag covers the store, the manifest's identity and length, the
+request index position and the kept sites, as they were before the read. A
+read that resolved sites therefore answers the next read with the same tag
+in full once more; whatever lands during a read changes the next tag.
+
+A site that does not resolve keeps its raw frame and a reason. These need a
+second look:
+
+| Reason | Why | Recourse |
+| --- | --- | --- |
+| `source_limit` (deferred) | The page's sites name more than 4 scripts not yet resolved | Read the same cursor again: kept sites cost nothing, so the next 4 scripts are read, and the page's tag never matches a later read while it holds one. A smaller `limit` names fewer scripts. |
+| `site_read_failed` (deferred) | The script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read | Read again |
+| `source_artifact_missing` | The script's source is retained but its artifact has not landed, or never will (a lost artifact channel, a rejected frame) | Read again after the artifact lands; nothing is re-read until the manifest grows |
+| `script_identity_outside_scan` | The request index has not folded the script's identity yet, or holds its 16,384 identities and keeps no more | Read again once the index moves (it folds 64 MiB a step, and the backend's own schedule refreshes it every 30 seconds); `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
+
+`stack_read` is exactly the arguments of the `get_request_stack` read named by
+`stack_read_operation`, passed as it is. That read covers the newest 64 MiB of
+the store, so for an older record it answers `outside_scan`; the site on the
+event page does not depend on it.
+
+These fields are returned at every MCP permission level, `read-only`
+included, where the hex payload is withheld: none is captured content. A
+request match carries its rule's slot and method flag, never the URL
+substring; a listener's event type equals a name a rule armed; a CSP
+violation names a host only, never a path or query; an exception says only
+its kind, never a message or value; a DOM mutation names an attribute's local
+name, never its value or text; the site carries the script URL, position and
+function name that `get_request_stack` returns at the same levels. At
+`read-only`, `ask` and `auto` a string longer than 160 characters, such as a
+long script URL, is withheld like any other.
 
 `get_request_stack` with `process_id` and `observation_sequence` reads one
 record of types 40 to 45 and resolves its stack like a request's. It adds

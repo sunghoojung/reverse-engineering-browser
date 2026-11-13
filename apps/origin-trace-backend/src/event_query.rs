@@ -395,6 +395,26 @@ impl EventFilter {
                 .until_ns
                 .is_none_or(|until| time.is_some_and(|time| time < until))
     }
+    /// Whether a page can hold a debugger observation that names its own
+    /// frame (listener, timer callback or throw site), whose resolution
+    /// depends on the artifact manifest and the request index as well.
+    /// Those three are runtime records with no request ID, so a network or
+    /// request read, as Traffic's store reads are, holds none.
+    pub fn may_hold_sites(&self) -> bool {
+        let typed = self.types.is_empty()
+            || self.types.iter().any(|kind| {
+                matches!(
+                    kind.as_str(),
+                    "listener_dispatch" | "timer_observation" | "exception_observation"
+                )
+            });
+        let runtime = self.categories.is_empty() || self.categories.iter().any(|c| c == "runtime");
+        let requestless = self
+            .ids
+            .iter()
+            .all(|(field, value)| *field != "request_id" || *value == 0);
+        typed && runtime && requestless
+    }
     pub fn echo(&self) -> Value {
         let mut object = Map::new();
         if !self.types.is_empty() {
@@ -799,6 +819,9 @@ pub fn events_document(
 
 /// Puts the decoded Wasm observation or JavaScript invocation object beside
 /// each payload of an event page, as every page that returns events shows it.
+/// Debugger observations are decoded by the filtered and waiting reads only
+/// (`request_stack::ObservationSites`): the UI's polling window does not use
+/// them, and they would grow its body by a third.
 pub(crate) fn annotate_events(events: &mut [Value]) {
     crate::vm_opcode::annotate_wasm_observations(events);
     crate::js_invocation::annotate(events);
@@ -1223,6 +1246,32 @@ mod tests {
             document["unterminated_tail_bytes"],
             (bytes.len() as u64 - ends[2]).to_string()
         );
+    }
+
+    /// Review round 2, C: only a read that can hold a site depends on the
+    /// manifest and the request index; Traffic's network and request reads
+    /// never wait on the index for their tag.
+    #[test]
+    fn only_reads_that_can_hold_a_site_depend_on_the_manifest_and_index() {
+        let filter = |raw: &str| event_filter(&Query::new(raw)).unwrap();
+        for raw in [
+            "type=listener_dispatch",
+            "type=timer_observation,csp_violation",
+            "category=runtime",
+            "session_id=1",
+            "request_id=0",
+        ] {
+            assert!(filter(raw).may_hold_sites(), "{raw}");
+        }
+        for raw in [
+            "request_id=5",
+            "category=network&request_id=5&session_id=1&process_id=7",
+            "category=network",
+            "type=csp_violation,request_watch_match",
+            "type=listener_dispatch&category=network",
+        ] {
+            assert!(!filter(raw).may_hold_sites(), "{raw}");
+        }
     }
 
     #[test]

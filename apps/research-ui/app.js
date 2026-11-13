@@ -1446,6 +1446,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function copyTrafficIndexFacts(request, indexed) {
         if (!indexed) return;
         if (indexed.endLost) markTrafficEndLost(request);
+        // A watch match's rule, where no decode came with the record (the
+        // stored-evidence window's own event window carries none).
+        if (indexed.watch && (!request.watch || request.watch.ruleRead === false)) request.watch = indexed.watch;
         if (indexed.memoryCacheSourceRow) request.memoryCacheSourceRow = indexed.memoryCacheSourceRow;
         if (indexed.responseBodyIndex) request.responseBodyIndex = indexed.responseBodyIndex;
         // Tab sets and links have no request ID, so a store read lacks them;
@@ -1468,7 +1471,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // redraws the strip and the inspector, as the table already follows it.
       function trafficIndexFactsKey(request) {
         return request ? JSON.stringify([request.endLost, request.status, request.indexChecked, request.tabIds, request.tabLink,
-          request.extensionId, request.tabReason, request.responseBodyIndex, request.memoryCacheSourceRow]) : null;
+          request.extensionId, request.tabReason, request.responseBodyIndex, request.memoryCacheSourceRow, request.watch]) : null;
       }
 
       // Each index answer, first or later, reaches the rows retained for

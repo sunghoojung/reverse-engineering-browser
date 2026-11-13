@@ -30,7 +30,12 @@ export function createConsoleFixture() {
       if (command.source === 'fixture.stale') return {status:200,body:{...state(),status:'stale_target',text:'Synthetic document replaced',request_id:requestId}};
       runtime={status:'ok',value:command.source==='fixture.object'?value('object','Object {alpha, guarded, nested}', '1'):command.source==='fixture.malformed'?{type:'invented',text:'bad',truncated:false}:command.source==='fixture.throw'?null:value('number','42')};
       if(command.source==='fixture.throw') runtime={status:'exception',text:'Synthetic exception: inert <script>text</script>'};
+      // window and document describe themselves as a plain Object, as the native runtime does.
+      const described={'fixture.window':['Object','7'],'fixture.element':['<button#go>','8'],'fixture.array':['Array(2)','9'],'fixture.plain':['Object','12']}[command.source];
+      if(described) runtime={status:'ok',value:value('object',...described)};
     }
+    if (command.operation === 'listeners') runtime=command.handle==='12'?{status:'error',text:'Select an Element, document or window to inspect its listeners'}
+      :{status:'ok',properties:[{name:'click',value:value('function','ƒ onTap(…)','11')}],more:false,offset:0,truncated:false};
     if (command.operation === 'inspect') {
       if(fixture.inspectMode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
       const end=Math.min(fixture.propertyCount,command.offset+16);
@@ -347,6 +352,16 @@ export async function checkConsoleDOM(root) {
   await get('refresh').click();await settle();get('target').value=fixture.target;await get('target').emit('change');await settle();
   await submit('fixture.malformed');assert.match(get('notice').textContent,/Malformed runtime value/);assert.equal(api.state().submitting,false);
   await submit('fixture.throw');assert.match(get('output').textContent,/inert <script>text<\/script>/);assert.equal(get('output').querySelector('script'),null);
+  // Event listeners for an element, window or document result; monitoring for an element only.
+  const actionsOf=async source=>{await submit(source);await settle();const object=get('output').querySelectorAll('.native-console-object').at(-1);return {object,names:object.querySelector('.native-console-value-actions').querySelectorAll('button').map(node=>node.textContent)};};
+  for(const [source,listeners,monitor] of [['fixture.window',true,false],['fixture.element',true,true],['fixture.array',false,false]]){
+    const {names}=await actionsOf(source);
+    assert.equal(names.includes('Event listeners'),listeners,`${source} Event listeners`);assert.equal(names.includes('Monitor events'),monitor,`${source} Monitor events`);
+  }
+  {const {object}=await actionsOf('fixture.window');const listed=object.querySelector('.native-console-value-actions').querySelectorAll('button').find(node=>node.textContent==='Event listeners');
+    await listed.click();await settle();assert.equal(fixture.calls.at(-1).command.operation,'listeners');assert.equal(fixture.calls.at(-1).command.handle,'7');assert.match(object.textContent,/Registered event listeners/);assert.match(object.textContent,/click: ƒ onTap/);}
+  {const {object}=await actionsOf('fixture.plain');await object.querySelector('.native-console-value-actions').querySelectorAll('button').find(node=>node.textContent==='Event listeners').click();await settle();
+    assert.match(object.textContent,/Select an Element, document or window to inspect its listeners/,'Another object is refused by the runtime, in its words');}
   for(let i=0;i<140;i++)api.logs({messages:[{level:'info',text:`fixture message ${i}`,time:0}],dropped:0});
   assert(get('output').children.length<=128);assert(api.state().outputBytes<=262144);assert(api.state().outputNodes<=8192);assert.match(get('output-count').textContent,/older removed/);
   get('filter').value='no-such-value';await get('filter').emit('input');assert.equal(get('no-matches').hidden,false);await get('filter-close').click();assert.equal(get('no-matches').hidden,true);

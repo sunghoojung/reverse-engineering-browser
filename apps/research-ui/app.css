@@ -2330,8 +2330,8 @@ var(--panel);
       .request-resource { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 11px; }
       /* The name takes the space it needs and the host only what is left. A host
          with under 7ch left wraps onto a second line the one-line cell hides. */
-      .request-name:not(:has(> .researcher-name)) { flex-wrap: wrap; align-content: flex-start; height: 14px; line-height: 14px; }
-      .request-name:not(:has(> .researcher-name)) > .request-host { min-width: 7ch; }
+      .request-name:not(:has(> .researcher-name)):not(:has(> .request-watched)) { flex-wrap: wrap; align-content: flex-start; height: 14px; line-height: 14px; }
+      .request-name:not(:has(> .researcher-name)):not(:has(> .request-watched)) > .request-host { min-width: 7ch; }
       .request-host { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 10px var(--sans); }
       .request-type, .request-method, .request-time { color: var(--muted); }
       .request-type { font-family: var(--sans); }
@@ -4307,6 +4307,17 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-traffic .traffic-general-value[data-kind="provenance"]::before { content: ""; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
 #screen-traffic .traffic-general-value[data-origin="live"]::before { background: var(--green); }
 #screen-traffic .traffic-general-value[data-origin="demo"]::before { background: var(--amber); }
+/* A request a debugger watch rule matched: a chip on its row and a section in General.
+   Like a researcher name, the chip keeps the cell on one line, so the name it
+   leads shrinks with an ellipsis instead of wrapping out of the row. */
+/* The chip is a request_watch_match, a network record: the network kind's color
+   (rose), as Evidence colors that record, never foam, the script kind and ready state. */
+.request-name > .request-watched { flex: 0 0 auto; padding: 0 4px; border-radius: 3px; background: color-mix(in srgb, var(--kind-request-fill) 16%, transparent); color: var(--kind-request); font: 600 9px/14px var(--sans); }
+#screen-traffic .traffic-watch { padding-top: 0; }
+#screen-traffic .traffic-watch-record { color: var(--muted); }
+#screen-traffic .traffic-watch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 8px; }
+#screen-traffic .traffic-watch-status { margin: 0; color: var(--state-danger); font: 12px/16px var(--sans); }
+#screen-traffic .traffic-watch-status:empty { display: none; }
 
 /* Rows share the tree's columns, so values and types align whatever each
    type label's width. Detail values wrap instead of hiding evidence. */
@@ -5251,7 +5262,7 @@ details.decoder-card > header p { margin-top: 0; }
 }
 .researcher-name[hidden] { display: none; }
 .request-name > .researcher-name { flex: 0 1 auto; max-width: 50%; font-size: 11px; }
-.request-name:has(> .researcher-name) > .request-host { flex-shrink: 3; }
+.request-name:has(> .researcher-name) > .request-host, .request-name:has(> .request-watched) > .request-host { flex-shrink: 3; }
 /* Traffic's strip stacks the name over the raw URL, so both share the width
    the URL had; the rename control is an icon to keep the actions on one line. */
 #screen-traffic .selection-target { display: flex; flex: 1 1 160px; flex-direction: column; justify-content: center; min-width: 80px; }

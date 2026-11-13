@@ -431,7 +431,13 @@ function check(mutate) {
     const row = {...source};
     const otherFallbacks = row.fallbacks - (row.exception_handlers ?? 0);
     if (row.status !== 'complete' || otherFallbacks > 0 || row.next !== null) { skipped++; continue; }
-    if (mutate) { const t = row.text.replace(' + ', ' - '); if (t === row.text) { skipped++; continue; } row.text = t; }
+    // The sanity mutation reads every addition as a subtraction, and the
+    // epilogue's first store as storing p1 instead of p0.
+    if (mutate) {
+      const t = row.text.replaceAll(' + ', ' - ').replace('i32.store(0, offset 16) = p0', 'i32.store(0, offset 16) = p1');
+      if (t === row.text) { skipped++; continue; }
+      row.text = t;
+    }
     let listing;
     try { listing = parseListing(row.text); }
     catch (e) { parseErrors++; if (!mutate && parseErrors <= 3) console.log(`PARSE seed ${row.seed}: ${e.message}\n${row.text}`); continue; }
@@ -473,6 +479,10 @@ if (masked) failures.push('an interpreter error inside a handler was taken for a
 if (real.mismatched) failures.push(`${real.mismatched} listings read a different value than V8 ran`);
 if (real.parseErrors) failures.push(`${real.parseErrors} listings could not be read`);
 if (real.compared < 0.8 * INPUTS.length * Math.min(limit, rows.length)) failures.push(`only ${real.compared} runs were compared`);
-if (mutated.mismatched === 0) failures.push('a mutated listing was never caught');
+// The mutated listings must differ from V8 in a minimum share: about a third
+// do (their epilogue or results show it); a much lower share means the check
+// stopped seeing what listings compute.
+const MIN_CAUGHT_SHARE = 0.25;
+if (mutated.mismatched < MIN_CAUGHT_SHARE * mutated.executed) failures.push(`only ${mutated.mismatched} of ${mutated.executed} mutated listings were caught (at least ${MIN_CAUGHT_SHARE * 100}% must be)`);
 if (failures.length) { console.error(`FAIL readable lift values: ${failures.join('; ')}`); process.exit(1); }
-console.log(`PASS readable lift values: ${real.compared} runs of ${Math.min(limit, rows.length)} modules match V8; ${mutated.mismatched} of ${mutated.compared} mutated runs caught (${Date.now() - started} ms)`);
+console.log(`PASS readable lift values: ${real.compared} runs of ${Math.min(limit, rows.length)} modules match V8; ${mutated.mismatched} of ${mutated.executed} mutated listings caught (${Date.now() - started} ms)`);

@@ -4376,6 +4376,14 @@ mod tests {
             let open = frames.pop().unwrap();
             height = open.base + open.results;
         }
+        // Every local reaches memory at the end, so a listing that reads a
+        // wrong value into one differs from V8 even when the results do not.
+        for local in 0..4 {
+            emit!(
+                "i32.const 0 local.get {local} i32.store offset={}",
+                16 + 4 * local
+            );
+        }
         value_module(&body)
     }
     fn value_module(body: &str) -> String {

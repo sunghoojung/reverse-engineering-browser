@@ -2369,14 +2369,9 @@ pub fn pseudocode(
             format!("WASM function {function} is not defined by this module"),
         ));
     };
+    // Module validation already refused any body past the 7,654,321-byte
+    // limit web engines enforce, in this function or another one.
     let range = body.range();
-    if range.len() > wasm_graph::MAX_BODY_BYTES {
-        return Err(Error::bad(format!(
-            "WASM function {function} is {} bytes, past the {}-byte body limit web engines enforce",
-            range.len(),
-            wasm_graph::MAX_BODY_BYTES
-        )));
-    }
     let (lift, locals) = lift(&scan, &body, type_index, function, deadline, BUDGET)?;
     if line_offset > lift.lines.len() {
         return Err(Error::bad("line_offset exceeds the line count"));
@@ -3267,6 +3262,48 @@ mod tests {
         );
         assert!(error.message.len() <= 600, "{} bytes", error.message.len());
         assert!(error.message.ends_with(" [text limited]"));
+    }
+
+    #[test]
+    fn one_oversized_body_makes_every_function_of_its_module_refused() {
+        // Two functions, the second past the body limit web engines enforce.
+        // Validation reads every body's size, so both requests get a 422.
+        fn leb(out: &mut Vec<u8>, mut value: usize) {
+            loop {
+                let byte = (value & 127) as u8;
+                value >>= 7;
+                out.push(byte | if value > 0 { 128 } else { 0 });
+                if value == 0 {
+                    break;
+                }
+            }
+        }
+        fn section(module: &mut Vec<u8>, id: u8, data: &[u8]) {
+            module.push(id);
+            leb(module, data.len());
+            module.extend_from_slice(data);
+        }
+        let mut large = vec![0u8];
+        large.resize(wasm_graph::MAX_BODY_BYTES + 2, 0x01);
+        large.push(0x0b);
+        let mut code = vec![2u8, 2, 0, 0x0b];
+        leb(&mut code, large.len());
+        code.extend_from_slice(&large);
+        let mut module = b"\0asm\x01\0\0\0".to_vec();
+        section(&mut module, 1, &[1, 0x60, 0, 0]);
+        section(&mut module, 3, &[2, 0, 0]);
+        section(&mut module, 10, &code);
+        let directory = store(&module);
+        for function in [0, 1] {
+            let error = pseudocode(directory.path(), "7", function, 0, 10).unwrap_err();
+            assert_eq!(error.status, 422, "function {function}: {}", error.message);
+            assert!(
+                error.message.starts_with("WASM module does not validate"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains("size"), "{}", error.message);
+        }
     }
 
     #[test]
@@ -4349,6 +4386,10 @@ mod tests {
             "(func (param i32) (result i32) local.get 0 i32.const 1 local.tee 0 local.get 0 call_indirect (type $t) i32.add)",
             "(func (param i32) (result i32) call $g global.get 0 local.get 0 i32.load select)",
             "(func (param i32) (result i32) local.get 0 i32.const 2 local.tee 0 local.get 0 select)",
+            // A typed select is pure: it may read after a later global write,
+            // and the checker must not count it as an effect.
+            "(func (param i32) (result i32)
+               local.get 0 i32.const 1 local.get 0 select (result i32) global.get 0 global.set 0)",
             // if entry: the condition writes a local read below it.
             "(func (param i32) (result i32) local.get 0 i32.const 5 local.tee 0 if (result i32) i32.const 1 else i32.const 2 end i32.add)",
             // try_table entry and end.

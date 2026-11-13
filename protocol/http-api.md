@@ -399,6 +399,15 @@ page reliably: a partial report says its pages can repeat or skip rows. Page wit
 `row_window.next_offset`.
 See [WASM module diff v1](wasm-module-diff-v1.md).
 
+## WASM value flow
+
+`get_wasm_value_flow` projects `GET /api/wasm/value-flow`: a bounded static
+slice of where one instruction operand or one local of a defined function comes
+from and where it goes, with joins at structured merges and one optional step
+to direct call sites. It is read-only and refuses unknown or repeated
+parameters. `text` and `expression` are content and are omitted below Full
+access. See [WASM value flow](wasm-value-flow-v1.md).
+
 ## Compact session context
 
 `GET /api/session/context` (`get_session_context`) is the compact first read for

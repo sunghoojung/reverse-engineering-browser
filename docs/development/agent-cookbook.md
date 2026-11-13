@@ -542,7 +542,7 @@ asking, while the researcher watches every call. A complete loop:
    session this connection was opened on.
 2. `start_live_session {"url": "<the authorized page>", "request_stacks":
    true}` when a fresh capture is needed. Wait with `wait_for_events`.
-3. Read with recipes 2, 10 and 21 to 23, and act with the Console (recipe 18)
+3. Read with recipes 2, 10, 21 to 23 and 31, and act with the Console (recipe 18)
    or input (recipe 17) inside the authorized target only.
 4. `session_action {"body": {"action": "end", "confirm": true}}`. The
    connection returns to the session it was opened on.
@@ -758,6 +758,30 @@ its rows are long.
   removed. Do not page a partial report: each page is compared again and can
   stop elsewhere, so pages can repeat or skip rows. Ask again, and page only
   once `status` is `complete`.
+
+## 31. Trace a value inside a Wasm function
+
+Find where an import call's argument comes from, then where a parameter goes.
+Structure works at every level; `text` and `expression` need Full access.
+
+```text
+get_wasm_functions {"artifact_id": "9"}
+get_wasm_function_graph {"artifact_id": "9", "function": 12}
+get_wasm_value_flow {"artifact_id": "9", "function": 12, "offset": 4410, "operand": 0, "direction": "backward"}
+get_wasm_value_flow {"artifact_id": "9", "function": 12, "local": 0, "direction": "forward", "interprocedural": true}
+```
+
+Take `offset` from a graph row or an `inspect_wasm` row (both are original
+module byte offsets). Good: `status` `computed`; `sources` are the params,
+constants, globals, loads and call results that feed the operand, and a load
+node's `address` edges are its address slice. Forward, `sinks` with kind
+`import_call` are where the value crosses into JavaScript, and `store` sinks say
+by edge kind whether it is the address or the stored value. Each `joins` entry
+lists every incoming edge with `via` and `via_offset`. `interprocedural.steps`
+gives the direct call sites of a parameter (`caller_argument`) and returns
+(`caller_result`); `also_reachable_indirectly` true means those are not every
+caller. `partial` with `truncated` set: narrow `direction`, raise `max_nodes`
+(up to 4096) or `max_depth`, or seed a nearer instruction.
 
 ## Response shapes at a glance
 

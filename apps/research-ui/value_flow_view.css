@@ -37,9 +37,9 @@
 .value-flow-offset { color: var(--code-line-number-active); font-variant-numeric: tabular-nums; }
 .value-flow-role { color: var(--muted); font: 11px var(--sans); }
 .value-flow-row.is-seed .value-flow-role { color: var(--accent); }
-.value-flow-row.is-source .value-flow-role { color: var(--green); }
-.value-flow-row.is-sink .value-flow-role { color: var(--amber); }
-.value-flow-row.is-frontier .value-flow-role { color: var(--red); }
+.value-flow-row:is(.is-source, .is-sink) .value-flow-role { color: var(--text); }
+/* A depth-capped row is a limit, gold in the shared state colors. */
+.value-flow-row.is-frontier .value-flow-role { color: var(--amber); }
 .value-flow-kind { color: var(--muted); font: 11px var(--sans); }
 .value-flow-text { font: 400 12px var(--mono); color: var(--code-text); }
 .value-flow-join { padding: 0 6px 4px calc(17ch + 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 12px var(--mono); }
@@ -49,10 +49,11 @@
   .value-flow-link > .value-flow-kind { display: none; }
 }
 /* Slice rows in the Inspect listing: a tint and a left rule by role, drawn
-   over the gutter; the row text is never changed. */
+   over the gutter; the row text is never changed. Role is not a state, so
+   only the seed takes the accent and the ends of the slice are bright
+   neutral (see the color system in the README). */
 .source-line[data-value-flow] { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.source-line[data-value-flow]::after { content: ""; position: absolute; z-index: 1; left: 0; top: 0; bottom: 0; width: 3px; background: var(--muted); pointer-events: none; }
+.source-line[data-value-flow]::after { content: ""; position: absolute; z-index: 1; left: 0; top: 0; bottom: 0; width: 3px; background: var(--faint); pointer-events: none; }
 .source-line[data-value-flow="seed"] { background: color-mix(in srgb, var(--accent) 18%, transparent); }
 .source-line[data-value-flow="seed"]::after { background: var(--accent); }
-.source-line[data-value-flow="source"]::after { background: var(--green); }
-.source-line[data-value-flow="sink"]::after { background: var(--amber); }
+.source-line:is([data-value-flow="source"], [data-value-flow="sink"])::after { background: var(--text); }

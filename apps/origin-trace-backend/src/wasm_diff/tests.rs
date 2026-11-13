@@ -1357,3 +1357,28 @@ fn union_find_reports_joined_members_whichever_is_the_root() {
     let root = sets.find(0);
     assert_eq!(sets.size[root as usize], 3);
 }
+
+#[test]
+fn equal_bytes_that_mean_something_else_are_changed_not_identical() {
+    // B swapped its two helpers, so the thunk's `call 1` now reaches what
+    // was A's function 0: same bytes, a different callee.
+    let a = r#"(module (func i32.const 1 drop) (func i32.const 2 drop nop)
+        (func (export "t") call 1))"#;
+    let b = r#"(module (func i32.const 2 drop nop) (func i32.const 1 drop)
+        (func (export "t") call 1))"#;
+    let found = rows(&report_with(a, b, untimed()));
+    assert!(
+        found.contains(&row("changed", Some("normalized"), Some(2), Some(2))),
+        "{found:?}"
+    );
+    // The segment moved under an unchanged constant: same bytes, but they
+    // read offset 16 in A and offset 0 in B.
+    let a = r#"(module (memory 1) (data (i32.const 4096) "abcdefghijklmnopqrstuvwxyz0123456789")
+        (func i32.const 4112 i32.load drop))"#;
+    let b = r#"(module (memory 1) (data (i32.const 4112) "abcdefghijklmnopqrstuvwxyz0123456789")
+        (func i32.const 4112 i32.load drop))"#;
+    assert_eq!(
+        rows(&report_with(a, b, untimed())),
+        vec![row("changed", Some("normalized"), Some(0), Some(0))]
+    );
+}

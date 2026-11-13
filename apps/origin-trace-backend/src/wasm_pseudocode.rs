@@ -635,13 +635,21 @@ impl<'m> Lifter<'m> {
     /// to a temporary, deepest first. A value must go first when it conflicts
     /// with `effects` or with a value above it that must go first.
     fn spill_before(&mut self, effects: Effects) {
+        self.spill_forced(effects, |_, _| false);
+    }
+    /// `spill_before`, also assigning every value `forced` selects. Marking
+    /// runs from the top down and adds each marked value's effects, so a
+    /// value below a forced one that conflicts with it (a read of a local the
+    /// forced value writes) is assigned first too. Assigning a forced value
+    /// alone would move it ahead of such a value and change what it reads.
+    fn spill_forced(&mut self, effects: Effects, forced: impl Fn(usize, &Expr) -> bool) {
         let base = self.base();
         self.work += (self.stack.len() - base) as u64;
         let mut must = vec![false; self.stack.len() - base];
         let mut pending = effects;
         for position in (base..self.stack.len()).rev() {
             let entry = &self.stack[position];
-            if !entry.stable && entry.effects.conflicts(pending) {
+            if !entry.stable && (forced(position, entry) || entry.effects.conflicts(pending)) {
                 must[position - base] = true;
                 pending = pending.union(entry.effects);
             }
@@ -1342,19 +1350,12 @@ impl<'m> Lifter<'m> {
                 // taken, so they are read twice and become temporaries too.
                 // A pure pending value can wait: on the taken path it is
                 // discarded unobserved.
+                // The condition was evaluated last, so what conflicts with it
+                // is assigned too.
                 let carried_from = self.stack.len().saturating_sub(count).max(self.base());
-                self.work += (self.stack.len() - self.base()) as u64;
-                for position in self.base()..self.stack.len() {
-                    let entry = &self.stack[position];
-                    if !entry.stable
-                        && (position >= carried_from
-                            || entry.effects.impure
-                            || entry.effects.writes != 0)
-                    {
-                        let taken = std::mem::take(&mut self.stack[position]);
-                        self.stack[position] = self.spill_line(taken);
-                    }
-                }
+                self.spill_forced(cond.effects, |position, entry| {
+                    position >= carried_from || entry.effects.impure || entry.effects.writes != 0
+                });
                 let mut values = self.pop_n(count as u32);
                 let text = self.branch_text("br_if", frame, &values, Some(&cond.text));
                 let constants: Vec<Expr> = values
@@ -2754,6 +2755,56 @@ mod tests {
     }
 
     #[test]
+    fn a_br_if_never_moves_a_local_read_past_a_write_of_it() {
+        // The call's argument writes p0 and must run before the branch; the
+        // pending read of the original p0 below it is assigned first.
+        assert_eq!(
+            exact(
+                "(module (func $f (param i32) (result i32) local.get 0)
+                  (func (param i32) (result i32) (local i32)
+                    block local.get 0 i32.const 3 local.tee 0 call $f i32.const 0 br_if 0
+                      i32.add local.set 1 end
+                    local.get 1))",
+                1
+            ),
+            [
+                "func f1(p0: i32) -> i32 {",
+                "var l1: i32",
+                "block L1 {",
+                "t0 = p0",
+                "t1 = f(p0 = 3)",
+                "br_if L1 (0)",
+                "l1 = t0 + t1",
+                "}",
+                "return l1",
+                "}"
+            ]
+        );
+        // The same for a carried value: the sum reads the parameter, not 9.
+        assert_eq!(
+            exact(
+                "(module (func (param i32) (result i32)
+                    block (result i32)
+                      local.get 0 i32.const 1 i32.add i32.const 9 local.tee 0 local.get 0 br_if 0
+                      i32.add
+                    end))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i32 {",
+                "block L1 {",
+                "t0 = p0 + 1",
+                "t1 = p0 = 9",
+                "br_if L1 (p0) with t2 = t1",
+                "t2 = t0 + t1",
+                "}",
+                "return t2",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
     fn a_try_table_result_is_assigned_inside_the_protected_region() {
         assert_eq!(
             exact(
@@ -3174,7 +3225,9 @@ mod tests {
                   call 0 i32.const 5 global.set $g local.get 0 i32.const 9 local.set 0 i32.add global.get $g i32.add))"
                 .to_owned(),
         ];
-        fixtures.extend((0..300).map(generated));
+        // Seeds 445, 1408, 1678, 4160 and 4959 found a br_if that moved a
+        // local read past a write, so every seed below 5,000 runs.
+        fixtures.extend((0..5_000).map(generated));
         for wat in &fixtures {
             let bytes = wat::parse_str(wat).unwrap_or_else(|error| panic!("{error}: {wat}"));
             let function = scan(&bytes, u32::MAX).unwrap().module.imported_functions() + {

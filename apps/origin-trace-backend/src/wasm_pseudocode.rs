@@ -44,15 +44,37 @@ const MAX_LINE_TEXT: usize = 2048;
 const MAX_EXPR_DEPTH: u16 = 12;
 const MAX_EXPR_TEXT: usize = 200;
 const MAX_INDENT: u32 = 24;
-const MAX_NAME_BYTES: usize = 64;
+const MAX_NAME_BYTES: usize = 96;
+const MAX_STORED_NAME_BYTES: usize = 1024;
 const MAX_IMMEDIATE_TEXT: usize = 96;
 const MAX_CASE_TEXT: usize = 240;
 const MAX_FRAMES_LISTED: usize = 256;
 pub const DEFAULT_LINE_LIMIT: usize = 400;
 pub const MAX_LINE_LIMIT: usize = 2000;
-/// One page stays well inside the 128 KiB MCP inline limit.
-const WINDOW_BYTES: usize = 96 * 1024;
+/// The MCP server inlines a result of at most 131,072 bytes in both its
+/// compact and its pretty-printed JSON; a window is cut until the whole
+/// document fits 120 KiB in both, leaving room for the tool envelope.
+const WINDOW_BYTES: usize = 120 * 1024;
 const DEADLINE: Duration = Duration::from_secs(3);
+/// The lift's size budgets; `BUDGET` in production, smaller in tests.
+#[derive(Clone, Copy)]
+struct Budget {
+    instructions: usize,
+    lines: usize,
+    text_bytes: usize,
+    /// Treat the deadline as passed once this much ordering work is done.
+    /// Tests use it to check where the deadline is looked at without
+    /// depending on the machine's speed; production leaves it unset.
+    work: Option<u64>,
+}
+const BUDGET: Budget = Budget {
+    instructions: MAX_INSTRUCTIONS,
+    lines: MAX_LINES,
+    text_bytes: MAX_TEXT_BYTES,
+    work: None,
+};
+/// Stack entries visited between deadline checks.
+const WORK_CHECK: u64 = 1 << 16;
 
 const LINE_KINDS: [&str; 7] = [
     "header",
@@ -138,27 +160,33 @@ fn identifier(name: &str) -> String {
     if plain && !reserved {
         return name.to_owned();
     }
-    let mut text = String::from("\"");
-    for character in name.chars().flat_map(char::escape_debug) {
-        if text.len() + character.len_utf8() > MAX_NAME_BYTES {
-            text.push_str("...");
-            break;
-        }
-        text.push(character);
-    }
-    text.push('"');
-    text
+    let escaped: String = name.chars().flat_map(char::escape_debug).collect();
+    format!("\"{}\"", head_and_tail(&escaped, MAX_NAME_BYTES))
 }
 
-fn bounded(name: &str) -> String {
-    let mut text = String::new();
-    for character in name.chars() {
-        if text.len() + character.len_utf8() > 2 * MAX_NAME_BYTES {
-            break;
-        }
-        text.push(character);
+/// Text cut to at most `limit` bytes around a `...`, keeping its start and
+/// its end: overloads and numbered clones of one demangled name differ at
+/// the end, so a head-only cut would print them all the same.
+fn head_and_tail(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
     }
-    text
+    let keep = limit - 3;
+    let mut head = keep * 3 / 5;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - (keep - head);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}...{}", &text[..head], &text[tail..])
+}
+
+/// A module name kept for display. Its start and end survive, so names
+/// that differ only in a long middle are the only ones that can collide.
+fn bounded(name: &str) -> String {
+    head_and_tail(name, MAX_STORED_NAME_BYTES)
 }
 
 /// Reads of and writes to locals, as a 64-bit bloom of local indexes. A
@@ -289,6 +317,10 @@ struct Frame {
     /// other frame's results. Allocated on first use.
     slots: Vec<String>,
     branch_values: u32,
+    /// Temporaries a loop's results reach its end in. A branch to a loop
+    /// goes back to its start, so its results are not its branch values.
+    /// Every other frame's results are its branch values, `slots`.
+    result_slots: Vec<String>,
     results: u32,
     unreachable: bool,
     /// Structured instructions opened inside unreachable code.
@@ -332,10 +364,22 @@ struct Lifter<'m> {
     /// The line and instruction of the last collapsed `block` opener.
     run: Option<(usize, u32)>,
     ended: bool,
+    /// Pending-stack entries visited while ordering effects. A deep operand
+    /// stack makes each statement cost its height, so the deadline is
+    /// checked by this work as well as by instruction count.
+    work: u64,
+    budget: Budget,
+    /// A line or text budget ran out inside one instruction (a br_table's
+    /// cases); the lift stops after it.
+    halted: bool,
 }
 
 /// What the lift of one function produced, before windowing.
 struct Lift {
+    /// Pending-stack entries visited while ordering effects; the deadline
+    /// tests read it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    work: u64,
     lines: Vec<Line>,
     starts: Vec<u32>,
     ends: Vec<u32>,
@@ -508,6 +552,7 @@ impl<'m> Lifter<'m> {
                 label: 0,
                 slots: Vec::new(),
                 branch_values: results,
+                result_slots: Vec::new(),
                 results,
                 unreachable: false,
                 dead: 0,
@@ -529,6 +574,9 @@ impl<'m> Lifter<'m> {
             omissions: Vec::new(),
             run: None,
             ended: false,
+            work: 0,
+            budget: BUDGET,
+            halted: false,
         }
     }
 
@@ -588,6 +636,7 @@ impl<'m> Lifter<'m> {
     /// with `effects` or with a value above it that must go first.
     fn spill_before(&mut self, effects: Effects) {
         let base = self.base();
+        self.work += (self.stack.len() - base) as u64;
         let mut must = vec![false; self.stack.len() - base];
         let mut pending = effects;
         for position in (base..self.stack.len()).rev() {
@@ -606,6 +655,7 @@ impl<'m> Lifter<'m> {
     }
     /// Assigns every non-constant pending value of this frame to a temporary.
     fn spill_all(&mut self) {
+        self.work += (self.stack.len() - self.base()) as u64;
         for position in self.base()..self.stack.len() {
             if !self.stack[position].stable {
                 let entry = std::mem::take(&mut self.stack[position]);
@@ -635,6 +685,7 @@ impl<'m> Lifter<'m> {
     /// the frame with instructions becomes its own line.
     fn flush(&mut self) {
         let base = self.base();
+        self.work += (self.stack.len() - base) as u64;
         let pending = self.stack.split_off(base);
         for entry in pending {
             if !entry.instrs.is_empty() || !entry.stable {
@@ -735,6 +786,19 @@ impl<'m> Lifter<'m> {
         }
         self.frames[frame].slots.clone()
     }
+    /// The temporaries a frame's results reach its end in: a loop's own
+    /// result slots, any other frame's branch slots.
+    fn result_slots(&mut self, frame: usize) -> Vec<String> {
+        if self.frames[frame].kind != Kind::Loop {
+            return self.slots(frame);
+        }
+        let wanted = self.frames[frame].results as usize;
+        while self.frames[frame].result_slots.len() < wanted {
+            let name = self.temp();
+            self.frames[frame].result_slots.push(name);
+        }
+        self.frames[frame].result_slots.clone()
+    }
     /// The text of a branch to `frame` carrying `values`, taken when `cond`
     /// holds if there is one. A branch to the function's frame is a return.
     fn branch_text(
@@ -776,9 +840,18 @@ impl<'m> Lifter<'m> {
         self.frames.len().checked_sub(depth as usize + 1)
     }
     /// Values reaching a frame's end by falling through are assigned to its
-    /// slots, as a branch to it would.
+    /// result slots, as a branch out of it would.
     fn assign_slots(&mut self, frame: usize, values: Vec<Expr>) {
-        let slots = self.slots(frame);
+        let slots = self.result_slots(frame);
+        let extra = values.len().saturating_sub(slots.len());
+        let mut values = values.into_iter();
+        // More values than slots means an unknown effect upset the stack
+        // shape; the extras are still evaluated, never dropped.
+        for value in values.by_ref().take(extra) {
+            if !value.instrs.is_empty() || !value.stable {
+                self.spill_value(value);
+            }
+        }
         for (slot, value) in slots.into_iter().zip(values) {
             if value.text == slot && value.instrs.is_empty() {
                 continue;
@@ -918,6 +991,7 @@ impl<'m> Lifter<'m> {
             label,
             slots,
             branch_values,
+            result_slots: Vec::new(),
             results,
             unreachable: false,
             dead: 0,
@@ -991,11 +1065,11 @@ impl<'m> Lifter<'m> {
                     self.spill_before(effects);
                     self.push_line(LineKind::Statement, text, owned, &calls);
                 }
-            } else if matches!(kind, Kind::Block | Kind::TryTable)
-                && !self.targeted[self.frames[frame].label as usize]
-            {
+            } else if kind == Kind::Block && !self.targeted[self.frames[frame].label as usize] {
                 // The only way out is falling through, so the result stays a
-                // pending value instead of a temporary.
+                // pending value instead of a temporary. A try_table's result
+                // is assigned inside it instead: carried past its end, the
+                // value would read as computed outside the protected region.
                 self.flush();
                 carried = Some(values);
             } else {
@@ -1017,7 +1091,7 @@ impl<'m> Lifter<'m> {
         }
         text.push_str(&suffix);
         let slots = if carried.is_none() && kind != Kind::Function {
-            self.slots(frame)
+            self.result_slots(frame)
         } else {
             Vec::new()
         };
@@ -1117,6 +1191,7 @@ impl<'m> Lifter<'m> {
                         label,
                         slots: Vec::new(),
                         branch_values: 0,
+                        result_slots: Vec::new(),
                         results: 0,
                         unreachable: false,
                         dead: 0,
@@ -1259,14 +1334,28 @@ impl<'m> Lifter<'m> {
                     return Ok(());
                 };
                 let cond = self.pop();
-                let count = self.frames[frame].branch_values;
-                // The values stay on the stack when the branch is not taken,
-                // so they are read twice and become temporaries.
-                let mut values = self.pop_n(count);
-                for value in values.iter_mut() {
-                    let taken = std::mem::take(value);
-                    *value = self.spill_value(taken);
+                let count = self.frames[frame].branch_values as usize;
+                // Everything pending ran before the branch whether or not it
+                // is taken, so a value with an effect (a call, a load, a
+                // global, a local write) is assigned first, deepest first.
+                // The carried values stay on the stack when the branch is not
+                // taken, so they are read twice and become temporaries too.
+                // A pure pending value can wait: on the taken path it is
+                // discarded unobserved.
+                let carried_from = self.stack.len().saturating_sub(count).max(self.base());
+                self.work += (self.stack.len() - self.base()) as u64;
+                for position in self.base()..self.stack.len() {
+                    let entry = &self.stack[position];
+                    if !entry.stable
+                        && (position >= carried_from
+                            || entry.effects.impure
+                            || entry.effects.writes != 0)
+                    {
+                        let taken = std::mem::take(&mut self.stack[position]);
+                        self.stack[position] = self.spill_line(taken);
+                    }
                 }
+                let mut values = self.pop_n(count as u32);
                 let text = self.branch_text("br_if", frame, &values, Some(&cond.text));
                 let constants: Vec<Expr> = values
                     .iter_mut()
@@ -1681,6 +1770,12 @@ impl<'m> Lifter<'m> {
         self.spill_before(selector.effects);
         self.push_line(LineKind::Open, text, owned, &selector.calls);
         for depth in order {
+            // One br_table can name tens of thousands of targets, so the line
+            // and text budgets are checked per case line, not per instruction.
+            if self.over_budget() {
+                self.halted = true;
+                return Ok(());
+            }
             let runs = &cases[&depth];
             let mut label = String::new();
             for (shown, (start, stop)) in runs.iter().enumerate() {
@@ -1699,30 +1794,44 @@ impl<'m> Lifter<'m> {
                 }
                 label.push_str(&piece);
             }
-            let text = match self.target(depth) {
-                Some(frame) => format!(
-                    "case {label}: {}",
-                    self.branch_text("br", frame, &values, None)
+            let (text, kind) = match self.target(depth) {
+                Some(frame) => (
+                    format!(
+                        "case {label}: {}",
+                        self.branch_text("br", frame, &values, None)
+                    ),
+                    LineKind::Case,
                 ),
                 None => {
+                    // Counted as a fallback, so it is a fallback line.
                     self.fallbacks[LABEL_OUT_OF_RANGE] += 1;
-                    format!("case {label}: label {depth} (out of range)")
+                    (
+                        format!("case {label}: label {depth} (out of range)"),
+                        LineKind::Fallback,
+                    )
                 }
             };
-            self.case_line(text, index);
+            self.case_line(text, index, kind);
+        }
+        if self.over_budget() {
+            self.halted = true;
+            return Ok(());
         }
         let text = format!(
             "default: {}",
             self.branch_text("br", default_frame, &values, None)
         );
-        self.case_line(text, index);
+        self.case_line(text, index, LineKind::Case);
         let close = self.push_line(LineKind::Close, "}".into(), Vec::new(), &[]);
         self.lines[close].refs.push(index);
         self.unreachable_after();
         Ok(())
     }
-    fn case_line(&mut self, text: String, index: u32) {
-        let line = self.push_line(LineKind::Case, text, Vec::new(), &[]);
+    fn over_budget(&self) -> bool {
+        self.lines.len() >= self.budget.lines || self.text_bytes >= self.budget.text_bytes
+    }
+    fn case_line(&mut self, text: String, index: u32, kind: LineKind) {
+        let line = self.push_line(kind, text, Vec::new(), &[]);
         self.lines[line].depth += 1;
         self.lines[line].refs.push(index);
     }
@@ -1860,6 +1969,7 @@ impl<'m> Lifter<'m> {
             truncated_instructions: stopped == Some("instructions"),
             truncated_lines: stopped == Some("lines"),
             truncated_deadline: stopped == Some("deadline"),
+            work: self.work,
             omissions: self.omissions,
         }
     }
@@ -1967,10 +2077,12 @@ fn lift(
     type_index: u32,
     function: u32,
     deadline: Instant,
+    budget: Budget,
 ) -> Result<(Lift, u32)> {
     let signature = scan.module.func_type(type_index);
     let params = signature.map_or(0, |ty| ty.params().len() as u32);
     let mut lifter = Lifter::new(&scan.module, &scan.names, type_index, params);
+    lifter.budget = budget;
     let range = body.range();
     // The header and local declarations are bytes, not instructions.
     let (name, _) = display_name(&scan.names, function);
@@ -2028,16 +2140,18 @@ fn lift(
     let mut reader = body.get_operators_reader().map_err(bad)?;
     let mut stopped = None;
     let mut message = None;
+    let mut next_check = WORK_CHECK;
     while !reader.eof() {
-        if lifter.starts.len() >= MAX_INSTRUCTIONS {
+        if lifter.starts.len() >= budget.instructions {
             stopped = Some("instructions");
             message = Some(format!(
-                "Instruction limit of {MAX_INSTRUCTIONS} reached at byte {}; later instructions are not lifted.",
+                "Instruction limit of {} reached at byte {}; later instructions are not lifted.",
+                budget.instructions,
                 reader.original_position()
             ));
             break;
         }
-        if lifter.lines.len() >= MAX_LINES || lifter.text_bytes >= MAX_TEXT_BYTES {
+        if lifter.over_budget() {
             stopped = Some("lines");
             message = Some(format!(
                 "Line budget reached at byte {}; later instructions are not lifted.",
@@ -2045,7 +2159,13 @@ fn lift(
             ));
             break;
         }
-        if lifter.starts.len() & 1023 == 0 && Instant::now() > deadline {
+        let checkpoint = lifter.starts.len() & 1023 == 0 || lifter.work >= next_check;
+        if checkpoint {
+            next_check = lifter.work + WORK_CHECK;
+        }
+        if checkpoint
+            && (Instant::now() > deadline || budget.work.is_some_and(|work| lifter.work > work))
+        {
             stopped = Some("deadline");
             message = Some(format!(
                 "Lift deadline reached at byte {}; later instructions are not lifted.",
@@ -2058,6 +2178,13 @@ fn lift(
         lifter.starts.push(offset as u32);
         lifter.ends.push(reader.original_position() as u32);
         lifter.step(&op, index)?;
+        if lifter.halted {
+            stopped = Some("lines");
+            message = Some(format!(
+                "Line budget reached inside the instruction at byte {offset}; it and later instructions are not completely lifted."
+            ));
+            break;
+        }
     }
     if stopped.is_none() {
         reader.finish().map_err(bad)?;
@@ -2153,79 +2280,30 @@ pub fn pseudocode(
             wasm_graph::MAX_BODY_BYTES
         )));
     }
-    let (lift, locals) = lift(&scan, &body, type_index, function, deadline)?;
+    let (lift, locals) = lift(&scan, &body, type_index, function, deadline, BUDGET)?;
     if line_offset > lift.lines.len() {
         return Err(Error::bad("line_offset exceeds the line count"));
     }
-    let mut text = String::new();
-    let mut lines = Vec::new();
-    let mut bytes = 0usize;
-    let mut stop = line_offset;
-    for line in lift.lines.iter().skip(line_offset).take(line_limit) {
-        let shown = rendered(&lift, line);
-        let covered = ranges(&lift, line);
-        let size = shown.len() + 24 + covered.len() * 24;
-        if !lines.is_empty() && bytes + size > WINDOW_BYTES {
-            break;
+    // Ownership is checked, not assumed: a lift is complete only when every
+    // decoded instruction is owned by exactly one line.
+    let mut owners = vec![0u8; lift.instruction_count];
+    for line in &lift.lines {
+        for &instruction in &line.owned {
+            if let Some(count) = owners.get_mut(instruction as usize) {
+                *count = count.saturating_add(1);
+            }
         }
-        bytes += size;
-        text.push_str(&shown);
-        text.push('\n');
-        lines.push(json!([
-            line.depth,
-            line.kind as u8,
-            line.owned.len(),
-            covered
-        ]));
-        stop += 1;
     }
-    let window_bytes_reached = stop < (line_offset + line_limit).min(lift.lines.len());
-    let window = line_offset..stop;
-    let mut callees: Vec<u32> = lift
-        .calls
-        .iter()
-        .filter(|(line, _)| window.contains(&(*line as usize)))
-        .map(|(_, function)| *function)
-        .collect();
-    callees.sort_unstable();
-    callees.dedup();
-    let callees: Vec<Value> = callees
-        .into_iter()
-        .map(|index| {
-            let (name, source) = display_name(&scan.names, index);
-            json!([index, name, source])
-        })
-        .collect();
-    let relevant: Vec<&Closed> = lift
-        .closed
-        .iter()
-        .filter(|frame| {
-            frame.open_line < stop && frame.close_line.is_none_or(|close| close >= line_offset)
-        })
-        .collect();
-    let frames_truncated = relevant.len() > MAX_FRAMES_LISTED;
-    let frames: Vec<Value> = relevant
-        .iter()
-        .take(MAX_FRAMES_LISTED)
-        .map(|frame| {
-            json!([
-                frame.open_line,
-                frame.close_line,
-                frame.depth,
-                KIND_NAMES[frame.kind as usize],
-                frame.label,
-                frame.byte_offset
-            ])
-        })
-        .collect();
-    let lifted: usize = lift.lines.iter().map(|line| line.owned.len()).sum();
+    let unowned = owners.iter().filter(|count| **count == 0).count();
+    let repeated = owners.iter().filter(|count| **count > 1).count();
+    let stopped = lift.truncated_instructions || lift.truncated_lines || lift.truncated_deadline;
+    let complete = !stopped && unowned == 0 && repeated == 0;
+    let lifted: usize = owners.iter().filter(|count| **count > 0).count();
     let fallback_count: u32 = lift.fallbacks.iter().sum();
     let mut fallbacks = serde_json::Map::new();
     for (name, count) in FALLBACK_REASONS.iter().zip(lift.fallbacks) {
         fallbacks.insert((*name).to_owned(), json!(count));
     }
-    let complete =
-        !(lift.truncated_instructions || lift.truncated_lines || lift.truncated_deadline);
     let (name, name_source) = display_name(&scan.names, function);
     let signature = scan.module.func_type(type_index);
     let mut nesting = serde_json::Map::new();
@@ -2245,25 +2323,19 @@ pub fn pseudocode(
         );
     }
     let mut omissions = lift.omissions.clone();
+    if !stopped && (unowned > 0 || repeated > 0) {
+        omissions.insert(
+            0,
+            format!(
+                "{unowned} instructions are owned by no line and {repeated} by more than one; this lift is not a complete reading."
+            ),
+        );
+    }
     if fallback_count > 0 {
         omissions.push(format!(
             "{fallback_count} instructions are raw fallback lines; fallbacks names why."
         ));
     }
-    let window_value = json!({
-        "line_offset": line_offset,
-        "line_limit": line_limit,
-        "lines": stop - line_offset,
-        "next_line_offset": if stop < lift.lines.len() { json!(stop) } else { Value::Null },
-    });
-    let truncation = json!({
-        "instructions": lift.truncated_instructions,
-        "lines": lift.truncated_lines,
-        "deadline": lift.truncated_deadline,
-        "clipped_lines": lift.clipped_lines,
-        "window_bytes": window_bytes_reached,
-        "frames": frames_truncated,
-    });
     let limits = json!({
         "max_input_bytes": wasm_graph::MAX_BYTES,
         "max_body_bytes": wasm_graph::MAX_BODY_BYTES,
@@ -2277,45 +2349,136 @@ pub fn pseudocode(
         "max_frames_listed": MAX_FRAMES_LISTED,
         "deadline_ms": DEADLINE.as_millis() as u64,
     });
-    let document = json!({
-        "schema": "wasm-pseudocode-v1",
-        "artifact_id": artifact.artifact_id,
-        "sha256": artifact.sha256,
-        "byte_size": artifact.bytes.len(),
-        "function_index": function,
-        "name": name,
-        "name_source": name_source,
-        "byte_offset": range.start,
-        "byte_end": range.end,
-        "type_index": type_index,
-        "params": signature.map_or(0, |ty| ty.params().len()),
-        "results": signature.map_or(0, |ty| ty.results().len()),
-        "locals": locals,
-        "evidence": "static_lift",
-        "status": if complete { "complete" } else { "partial" },
-        "instruction_count": lift.instruction_count,
-        "lifted_instructions": lifted,
-        "line_count": lift.lines.len(),
-        "fallback_count": fallback_count,
-        "fallbacks": fallbacks,
-        "spill_count": lift.spills,
-        "unknown_operands": lift.unknown_operands,
-        "nesting": nesting,
-        "frame_fields": ["open_line", "close_line", "depth", "kind", "label", "byte_offset"],
-        "frames": frames,
-        "line_kinds": LINE_KINDS,
-        "line_fields": ["depth", "kind", "instructions", "ranges"],
-        "lines": lines,
-        "text": text,
-        "callee_fields": ["function_index", "name", "name_source"],
-        "callees": callees,
-        "window": window_value,
-        "truncation": truncation,
-        "omissions": omissions,
-        "limits": limits,
-        "notice": "Static lift of declared stack effects; the module was not executed. Every instruction is owned by one line, and fallback lines keep the raw instruction text. Names come from the module's name section, exports and imports.",
-    });
-    Ok(document.to_string())
+    let available = line_limit.min(lift.lines.len() - line_offset);
+    let mut count = available;
+    loop {
+        let mut document = json!({
+            "schema": "wasm-pseudocode-v1",
+            "artifact_id": artifact.artifact_id,
+            "sha256": artifact.sha256,
+            "byte_size": artifact.bytes.len(),
+            "function_index": function,
+            "name": name,
+            "name_source": name_source,
+            "byte_offset": range.start,
+            "byte_end": range.end,
+            "type_index": type_index,
+            "params": signature.map_or(0, |ty| ty.params().len()),
+            "results": signature.map_or(0, |ty| ty.results().len()),
+            "locals": locals,
+            "evidence": "static_lift",
+            "status": if complete { "complete" } else { "partial" },
+            "instruction_count": lift.instruction_count,
+            "lifted_instructions": lifted,
+            "unowned_instructions": unowned,
+            "repeated_instructions": repeated,
+            "line_count": lift.lines.len(),
+            "fallback_count": fallback_count,
+            "fallbacks": fallbacks,
+            "spill_count": lift.spills,
+            "unknown_operands": lift.unknown_operands,
+            "nesting": nesting,
+            "frame_fields": ["open_line", "close_line", "depth", "kind", "label", "byte_offset"],
+            "line_kinds": LINE_KINDS,
+            "line_fields": ["depth", "kind", "instructions", "ranges"],
+            "callee_fields": ["function_index", "name", "name_source"],
+            "omissions": omissions,
+            "limits": limits,
+            "notice": "Static lift of declared stack effects; the module was not executed. A complete lift owns every instruction on exactly one line, and folding keeps the order of calls, memory, globals, tables, traps and local writes. Fallback lines keep the raw instruction text. Names come from the module's name section, exports and imports.",
+        });
+        let frames_truncated =
+            window_document(&mut document, &lift, &scan.names, line_offset, count);
+        let stop = line_offset + count;
+        document["window"] = json!({
+            "line_offset": line_offset,
+            "line_limit": line_limit,
+            "lines": count,
+            "next_line_offset": if stop < lift.lines.len() { json!(stop) } else { Value::Null },
+        });
+        document["truncation"] = json!({
+            "instructions": lift.truncated_instructions,
+            "lines": lift.truncated_lines,
+            "deadline": lift.truncated_deadline,
+            "clipped_lines": lift.clipped_lines,
+            "window_bytes": count < available,
+            "frames": frames_truncated,
+        });
+        // The MCP server inlines a result only when both its compact and its
+        // pretty form fit, so the window is measured in both.
+        let compact = document.to_string();
+        let pretty = serde_json::to_string_pretty(&document).map_or(usize::MAX, |text| text.len());
+        if count <= 1 || (compact.len() <= WINDOW_BYTES && pretty <= WINDOW_BYTES) {
+            return Ok(compact);
+        }
+        let largest = compact.len().max(pretty);
+        count = (count * WINDOW_BYTES / largest).clamp(1, count - 1);
+    }
+}
+
+/// Fills the window's lines, text, callees and frames into `document`, and
+/// says whether frames around the window were left out.
+fn window_document(
+    document: &mut Value,
+    lift: &Lift,
+    names: &Names,
+    line_offset: usize,
+    count: usize,
+) -> bool {
+    let mut text = String::new();
+    let mut lines = Vec::with_capacity(count);
+    for line in lift.lines.iter().skip(line_offset).take(count) {
+        text.push_str(&rendered(lift, line));
+        text.push('\n');
+        lines.push(json!([
+            line.depth,
+            line.kind as u8,
+            line.owned.len(),
+            ranges(lift, line)
+        ]));
+    }
+    let stop = line_offset + count;
+    let window = line_offset..stop;
+    let mut callees: Vec<u32> = lift
+        .calls
+        .iter()
+        .filter(|(line, _)| window.contains(&(*line as usize)))
+        .map(|(_, function)| *function)
+        .collect();
+    callees.sort_unstable();
+    callees.dedup();
+    let callees: Vec<Value> = callees
+        .into_iter()
+        .map(|index| {
+            let (name, source) = display_name(names, index);
+            json!([index, name, source])
+        })
+        .collect();
+    let relevant: Vec<&Closed> = lift
+        .closed
+        .iter()
+        .filter(|frame| {
+            frame.open_line < stop && frame.close_line.is_none_or(|close| close >= line_offset)
+        })
+        .collect();
+    let frames: Vec<Value> = relevant
+        .iter()
+        .take(MAX_FRAMES_LISTED)
+        .map(|frame| {
+            json!([
+                frame.open_line,
+                frame.close_line,
+                frame.depth,
+                KIND_NAMES[frame.kind as usize],
+                frame.label,
+                frame.byte_offset
+            ])
+        })
+        .collect();
+    document["lines"] = Value::Array(lines);
+    document["text"] = Value::String(text);
+    document["callees"] = Value::Array(callees);
+    document["frames"] = Value::Array(frames);
+    relevant.len() > MAX_FRAMES_LISTED
 }
 
 #[cfg(test)]
@@ -2384,6 +2547,648 @@ mod tests {
             .lines()
             .map(|line| line.trim().to_owned())
             .collect()
+    }
+
+    /// Lifts `function` and checks the reading is whole: status complete,
+    /// every instruction owned, and every code byte owned by exactly one line.
+    /// Returns the trimmed lines.
+    fn exact(wat: &str, function: u32) -> Vec<String> {
+        let bytes = wat::parse_str(wat).expect("fixture");
+        let document = lift_of(wat, function);
+        assert_eq!(document["status"], "complete", "{}", document["text"]);
+        assert_eq!(document["unowned_instructions"], 0);
+        assert_eq!(document["repeated_instructions"], 0);
+        assert_bytes_owned_once(&bytes, function);
+        text(&document)
+    }
+    fn internal(
+        bytes: &[u8],
+        function: u32,
+        deadline: Instant,
+        budget: Budget,
+    ) -> (Lift, usize, usize) {
+        let scanned = scan(bytes, function).unwrap();
+        let body = scanned.body.clone().unwrap();
+        let (lift, _) = lift(
+            &scanned,
+            &body,
+            scanned.type_index.unwrap(),
+            function,
+            deadline,
+            budget,
+        )
+        .unwrap();
+        let mut locals = body.get_locals_reader().unwrap();
+        for _ in 0..locals.get_count() {
+            locals.read().unwrap();
+        }
+        (lift, locals.original_position(), body.range().end)
+    }
+    fn assert_bytes_owned_once(bytes: &[u8], function: u32) {
+        let (lift, start, end) = internal(bytes, function, Instant::now() + DEADLINE, BUDGET);
+        let mut owners = vec![0u32; end - start];
+        for line in &lift.lines {
+            for &instruction in &line.owned {
+                for byte in lift.starts[instruction as usize]..lift.ends[instruction as usize] {
+                    owners[byte as usize - start] += 1;
+                }
+            }
+        }
+        let wrong: Vec<usize> = owners
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count != 1)
+            .map(|(byte, _)| byte + start)
+            .collect();
+        assert!(wrong.is_empty(), "bytes not owned exactly once: {wrong:?}");
+    }
+
+    #[test]
+    fn a_loop_result_reaches_its_end_in_its_own_temporary() {
+        assert_eq!(
+            exact(
+                "(module (func (result i32) loop (result i32) i32.const 7 end))",
+                0
+            ),
+            [
+                "func f0() -> i32 {",
+                "loop {",
+                "t0 = 7",
+                "}",
+                "return t0",
+                "}"
+            ]
+        );
+        // Inside an if arm, the loop's result flows on to the if's result.
+        assert_eq!(
+            exact(
+                "(module (func (param i32) (result i32)
+                    local.get 0
+                    if (result i32) loop (result i32) i32.const 1 end else i32.const 2 end))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i32 {",
+                "if (p0) {",
+                "loop {",
+                "t0 = 1",
+                "}",
+                "t1 = t0",
+                "} else {",
+                "t1 = 2",
+                "}",
+                "return t1",
+                "}"
+            ]
+        );
+        // A br_if out of a loop and the loop's own fallthrough both arrive.
+        assert_eq!(
+            exact(
+                "(module (func (param i32) (result i32)
+                    block (result i32)
+                      loop (result i32) i32.const 5 local.get 0 br_if 1 drop i32.const 6 end
+                    end))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i32 {",
+                "block L1 {",
+                "loop {",
+                "br_if L1 (p0) with t0 = 5",
+                "drop(5)",
+                "t1 = 6",
+                "}",
+                "t0 = t1",
+                "}",
+                "return t0",
+                "}"
+            ]
+        );
+        // A loop's i64 result never lands in its i32 parameter's temporary.
+        assert_eq!(
+            exact(
+                "(module (func (param i32) (result i64)
+                    local.get 0 loop (param i32) (result i64) drop i64.const 9 end))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i64 {",
+                "t0 = p0",
+                "loop with t1 = t0 {",
+                "drop(t1)",
+                "t2 = 9L",
+                "}",
+                "return t2",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn effects_pending_at_a_br_if_run_before_it() {
+        // f runs whether or not the branch is taken, so it reads first.
+        assert_eq!(
+            exact(
+                "(module (func $f (result i32) i32.const 1) (func $h (param i32))
+                  (func (param i32) block call $f local.get 0 br_if 0 call $h end))",
+                2
+            ),
+            [
+                "func f2(p0: i32) {",
+                "block L1 {",
+                "t0 = f()",
+                "br_if L1 (p0)",
+                "h(t0)",
+                "}",
+                "}"
+            ]
+        );
+        // A global read and a trapping load stay before the branch, and the
+        // lines' first bytes keep the order of the code.
+        let wat = "(module (global (mut i32) (i32.const 0)) (memory 1)
+            (func (param i32)
+              block global.get 0 local.get 0 i32.load local.get 0 br_if 0 i32.add drop end))";
+        assert_eq!(
+            exact(wat, 0),
+            [
+                "func f0(p0: i32) {",
+                "block L1 {",
+                "t0 = g0",
+                "t1 = i32.load(p0)",
+                "br_if L1 (p0)",
+                "drop(t0 + t1)",
+                "}",
+                "}"
+            ]
+        );
+        let document = lift_of(wat, 0);
+        let firsts: Vec<u64> = document["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|line| line[2].as_u64().unwrap() > 0)
+            .map(|line| line[3][0][0].as_u64().unwrap())
+            .collect();
+        assert!(
+            firsts.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{firsts:?}"
+        );
+        // A pure pending value may wait: if the branch is taken it is unseen.
+        assert_eq!(
+            exact(
+                "(module (func (param i32) (result i32)
+                    block (result i32) local.get 0 i32.const 1 i32.add local.get 0 br_if 0 end))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i32 {",
+                "block L1 {",
+                "t0 = p0 + 1",
+                "br_if L1 (p0) with t1 = t0",
+                "t1 = t0",
+                "}",
+                "return t1",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_try_table_result_is_assigned_inside_the_protected_region() {
+        assert_eq!(
+            exact(
+                "(module (func $f (result i32) i32.const 1)
+                  (func (result i32)
+                    block $h
+                      try_table (result i32) (catch_all $h) call $f end
+                      return
+                    end
+                    i32.const 0))",
+                1
+            ),
+            [
+                "func f1() -> i32 {",
+                "block L1 {",
+                "try_table catch_all -> L1 {",
+                "t0 = f()",
+                "}",
+                "return t0",
+                "}",
+                "return 0",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_load_reads_before_a_later_store() {
+        assert_eq!(
+            exact(
+                "(module (memory 1) (func (param i32) (result i32)
+                    local.get 0 i32.load local.get 0 i32.const 5 i32.store))",
+                0
+            ),
+            [
+                "func f0(p0: i32) -> i32 {",
+                "t0 = i32.load(p0)",
+                "i32.store(p0) = 5",
+                "return t0",
+                "}"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_br_table_stops_at_the_line_budget_inside_its_cases() {
+        let mut wat = String::from("(module (func (param i32)");
+        for _ in 0..60 {
+            wat.push_str(" block");
+        }
+        wat.push_str(" local.get 0 br_table");
+        for depth in 0..60 {
+            let _ = write!(wat, " {depth}");
+        }
+        wat.push_str(" 0");
+        for _ in 0..60 {
+            wat.push_str(" end");
+        }
+        wat.push_str("))");
+        let bytes = wat::parse_str(&wat).unwrap();
+        let budget = Budget {
+            lines: 20,
+            ..BUDGET
+        };
+        let (lift, _, _) = internal(&bytes, 0, Instant::now() + DEADLINE, budget);
+        assert!(lift.lines.len() <= 20, "{} lines", lift.lines.len());
+        assert!(lift.truncated_lines);
+        assert!(
+            lift.omissions[0].contains("inside the instruction"),
+            "{:?}",
+            lift.omissions
+        );
+    }
+
+    #[test]
+    fn the_deadline_holds_on_a_deep_operand_stack() {
+        // Each statement orders itself against every pending value, so on a
+        // 100,000-deep stack one statement visits 100,000 of them. Looked at
+        // only every 1,024 instructions, a passed deadline would let 512
+        // statements, 51 million visits, run past it; it is also looked at
+        // every WORK_CHECK visits. The deadline here is work, not time, so
+        // the bound holds on a loaded machine.
+        let mut wat = String::from("(module (func (param i32) (local i32)");
+        for _ in 0..100_000 {
+            wat.push_str(" i32.const 1");
+        }
+        for _ in 0..4_000 {
+            wat.push_str(" local.get 0 local.set 1");
+        }
+        wat.push_str("))");
+        let bytes = wat::parse_str(&wat).unwrap();
+        let budget = Budget {
+            work: Some(1_000_000),
+            ..BUDGET
+        };
+        let (lift, _, _) = internal(
+            &bytes,
+            0,
+            Instant::now() + Duration::from_secs(3600),
+            budget,
+        );
+        assert!(
+            lift.truncated_deadline,
+            "the lift finished before its deadline"
+        );
+        assert!(
+            lift.work <= 1_000_000 + 65_536 + 2 * 100_001,
+            "{} visits past a 1,000,000-visit deadline",
+            lift.work - 1_000_000
+        );
+    }
+
+    #[test]
+    fn long_names_keep_their_start_and_end() {
+        let stem = "std::__2::basic_string<char, std::__2::char_traits<char>, std::__2::allocator<char>>::__grow_by_and_replace_and_append";
+        let wat = format!(
+            r#"(module (func (export "{stem}_1")) (func (export "{stem}_2"))
+                (func call 0 call 1))"#
+        );
+        let lines = exact(&wat, 2);
+        let calls: Vec<&String> = lines.iter().filter(|line| line.ends_with("()")).collect();
+        assert_eq!(calls.len(), 2, "{lines:?}");
+        assert_ne!(calls[0], calls[1]);
+        assert!(
+            calls[0].starts_with("\"std::__2::basic_string") && calls[0].contains("..."),
+            "{calls:?}"
+        );
+        assert!(
+            calls[0].ends_with("append_1\"()") && calls[1].ends_with("append_2\"()"),
+            "{calls:?}"
+        );
+        assert!(calls[0].len() <= MAX_NAME_BYTES + 4, "{}", calls[0].len());
+    }
+
+    #[test]
+    fn an_out_of_range_case_is_a_fallback_line() {
+        let document = lift_of(
+            "(module (func (param i32) block local.get 0 br_table 0 7 0 end))",
+            0,
+        );
+        assert_eq!(document["fallbacks"]["label_out_of_range"], 1);
+        let lines = text(&document);
+        let position = lines
+            .iter()
+            .position(|line| line.contains("(out of range)"))
+            .unwrap();
+        assert_eq!(document["lines"][position][1], 6, "{lines:?}");
+    }
+
+    /// The MCP server inlines a result only when its compact and its pretty
+    /// JSON are both at most 131,072 bytes.
+    fn assert_pages_fit(bytes: &[u8], function: u32, line_limit: usize) -> usize {
+        let directory = store(bytes);
+        let mut offset = 0;
+        let mut pages = 0;
+        let mut seen = 0;
+        loop {
+            let text = pseudocode(directory.path(), "7", function, offset, line_limit).unwrap();
+            let document: Value = serde_json::from_str(&text).unwrap();
+            let pretty = serde_json::to_string_pretty(&document).unwrap();
+            assert!(
+                text.len() <= 131_072 && pretty.len() <= 131_072,
+                "page at {offset}: {} compact, {} pretty",
+                text.len(),
+                pretty.len()
+            );
+            let lines = document["window"]["lines"].as_u64().unwrap() as usize;
+            assert!(lines >= 1);
+            seen += lines;
+            pages += 1;
+            match document["window"]["next_line_offset"].as_u64() {
+                Some(next) => {
+                    assert_eq!(next as usize, offset + lines, "windows are contiguous");
+                    offset = next as usize;
+                }
+                None => {
+                    assert_eq!(seen, document["line_count"].as_u64().unwrap() as usize);
+                    return pages;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_page_fits_the_inline_limit_compact_and_pretty() {
+        // Demangled C++ names, quote-heavy export names, and many calls.
+        let mut wat = String::from("(module");
+        for index in 0..300 {
+            let _ = write!(
+                wat,
+                r#" (func (export "std::__2::basic_string<char, \"traits\"<char>>::__grow_by_and_replace_{index}") (param i32) (result i32) local.get 0)"#
+            );
+        }
+        wat.push_str(" (func (param i32) (result i32)");
+        for index in 0..1_200 {
+            let _ = write!(wat, " local.get 0 call {} local.set 0", index % 300);
+        }
+        wat.push_str(" local.get 0))");
+        let bytes = wat::parse_str(&wat).unwrap();
+        assert!(assert_pages_fit(&bytes, 300, 400) > 1);
+        assert!(assert_pages_fit(&bytes, 300, MAX_LINE_LIMIT) > 1);
+        // Plain straight-line code at the largest window: structure alone
+        // pretty-prints to several times its compact size.
+        let mut wat = String::from("(module (func (param i32)");
+        for index in 0..4_000 {
+            let _ = write!(wat, " local.get 0 i32.const {index} i32.add local.set 0");
+        }
+        wat.push_str("))");
+        let bytes = wat::parse_str(&wat).unwrap();
+        assert!(assert_pages_fit(&bytes, 0, MAX_LINE_LIMIT) > 2);
+    }
+
+    /// The folding guarantee, checked on a lift: read in line order, with an
+    /// expression's operands before the expression, the instructions with an
+    /// effect (calls, memory, globals, tables, traps, throws) and the
+    /// branches (if, br, br_if, br_table, return) keep their byte order, and
+    /// no access to a local moves across a write to that local.
+    fn assert_effect_order(bytes: &[u8], function: u32) {
+        let (lift, _, _) = internal(bytes, function, Instant::now() + DEADLINE, BUDGET);
+        let scanned = scan(bytes, function).unwrap();
+        let body = scanned.body.clone().unwrap();
+        let mut reader = body.get_operators_reader().unwrap();
+        // Per instruction: an effect, or a local access (index, is a write).
+        let mut effect = Vec::new();
+        let mut local = Vec::new();
+        while !reader.eof() {
+            let op = reader.read().unwrap();
+            let mut fields = Vec::new();
+            let memarg = immediates(&op, &mut fields).is_some();
+            let mnemonic = wasm::mnemonic(&op);
+            let (is_effect, access) = match op {
+                Operator::LocalGet { local_index } => (false, Some((local_index, false))),
+                Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
+                    (false, Some((local_index, true)))
+                }
+                Operator::GlobalGet { .. } | Operator::GlobalSet { .. } => (true, None),
+                Operator::Call { .. }
+                | Operator::CallIndirect { .. }
+                | Operator::CallRef { .. }
+                | Operator::ReturnCall { .. }
+                | Operator::ReturnCallIndirect { .. }
+                | Operator::Throw { .. }
+                | Operator::Unreachable
+                // A branch decides whether what follows runs, so nothing
+                // with an effect may cross it either way.
+                | Operator::If { .. }
+                | Operator::Br { .. }
+                | Operator::BrIf { .. }
+                | Operator::BrTable { .. }
+                | Operator::Return => (true, None),
+                _ => (
+                    memarg
+                        || (wasm_stack::arity(&op, &scanned.module, &[])
+                            .is_some_and(|(_, pushes)| pushes <= 1)
+                            && !pure(&mnemonic)
+                            && !matches!(
+                                op,
+                                Operator::I32Const { .. }
+                                    | Operator::I64Const { .. }
+                                    | Operator::F32Const { .. }
+                                    | Operator::F64Const { .. }
+                                    | Operator::Drop
+                                    | Operator::Select
+                                    | Operator::Nop
+                                    | Operator::End
+                                    | Operator::Else
+                                    | Operator::Block { .. }
+                                    | Operator::Loop { .. }
+                                    | Operator::If { .. }
+                                    | Operator::Br { .. }
+                                    | Operator::BrIf { .. }
+                                    | Operator::BrTable { .. }
+                                    | Operator::Return
+                            )),
+                    None,
+                ),
+            };
+            effect.push(is_effect);
+            local.push(access);
+        }
+        let order: Vec<u32> = lift
+            .lines
+            .iter()
+            .flat_map(|line| line.owned.iter().copied())
+            .collect();
+        let effects: Vec<u32> = order
+            .iter()
+            .copied()
+            .filter(|i| effect[*i as usize])
+            .collect();
+        assert!(
+            effects.windows(2).all(|pair| pair[0] < pair[1]),
+            "effects out of byte order: {effects:?}"
+        );
+        let mut by_local: HashMap<u32, Vec<(u32, bool)>> = HashMap::new();
+        for &instruction in &order {
+            if let Some((index, write)) = local[instruction as usize] {
+                by_local
+                    .entry(index)
+                    .or_default()
+                    .push((instruction, write));
+            }
+        }
+        for (index, accesses) in by_local {
+            for (a, &(first, first_write)) in accesses.iter().enumerate() {
+                for &(second, second_write) in &accesses[a + 1..] {
+                    assert!(
+                        !(first_write || second_write) || first < second,
+                        "local {index}: instruction {second} reads as before {first}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Small valid i32 stack programs mixing calls, loads, stores, globals,
+    /// locals, trapping division and conditional branches.
+    fn generated(seed: u64) -> String {
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+        let mut body = String::new();
+        let mut height = 0u32;
+        let mut open = 0u32;
+        for _ in 0..80 {
+            let choice = next(13);
+            let op = match choice {
+                0 => {
+                    height += 1;
+                    format!("i32.const {}", next(9))
+                }
+                1 => {
+                    height += 1;
+                    format!("local.get {}", next(3))
+                }
+                2 if height >= 1 => {
+                    height -= 1;
+                    format!("local.set {}", next(3))
+                }
+                3 if height >= 1 => format!("local.tee {}", next(3)),
+                4 => {
+                    height += 1;
+                    "global.get 0".into()
+                }
+                5 if height >= 1 => {
+                    height -= 1;
+                    "global.set 0".into()
+                }
+                6 if height >= 1 => "call $f".into(),
+                7 => {
+                    height += 1;
+                    "call $g".into()
+                }
+                8 if height >= 1 => "i32.load offset=4".into(),
+                9 if height >= 2 => {
+                    height -= 2;
+                    "i32.store".into()
+                }
+                10 if height >= 2 => {
+                    height -= 1;
+                    if next(2) == 0 {
+                        "i32.add".into()
+                    } else {
+                        "i32.div_s".into()
+                    }
+                }
+                11 if open < 3 && height == 0 => {
+                    open += 1;
+                    "block".into()
+                }
+                12 if open > 0 && height >= 1 => {
+                    height -= 1;
+                    "br_if 0".into()
+                }
+                _ if open > 0 && height == 0 => {
+                    open -= 1;
+                    "end".into()
+                }
+                _ => {
+                    height += 1;
+                    "i32.const 3".into()
+                }
+            };
+            body.push(' ');
+            body.push_str(&op);
+        }
+        // Close blocks only at an empty stack, as a block without a result needs.
+        for _ in 0..height {
+            body.push_str(" drop");
+        }
+        for _ in 0..open {
+            body.push_str(" end");
+        }
+        format!(
+            "(module (memory 1) (global (mut i32) (i32.const 0))
+               (func $f (param i32) (result i32) local.get 0) (func $g (result i32) i32.const 1)
+               (func (param i32) (local i32 i32) {body}))"
+        )
+    }
+
+    #[test]
+    fn folding_keeps_effect_order_and_owns_every_byte_once() {
+        let mut fixtures = vec![
+            "(module (func $f (result i32) i32.const 1) (func $h (param i32))
+              (func (param i32) block call $f local.get 0 br_if 0 call $h end))"
+                .to_owned(),
+            "(module (memory 1) (func (param i32) (result i32)
+                local.get 0 i32.load local.get 0 i32.const 5 i32.store))"
+                .to_owned(),
+            "(module (import \"env\" \"f\" (func (result i32))) (global $g (mut i32) (i32.const 0))
+                (func (param i32) (result i32)
+                  call 0 i32.const 5 global.set $g local.get 0 i32.const 9 local.set 0 i32.add global.get $g i32.add))"
+                .to_owned(),
+        ];
+        fixtures.extend((0..300).map(generated));
+        for wat in &fixtures {
+            let bytes = wat::parse_str(wat).unwrap_or_else(|error| panic!("{error}: {wat}"));
+            let function = scan(&bytes, u32::MAX).unwrap().module.imported_functions() + {
+                let mut count = 0u32;
+                for payload in Parser::new(0).parse_all(&bytes) {
+                    if let Ok(Payload::CodeSectionEntry(_)) = payload {
+                        count += 1;
+                    }
+                }
+                count - 1
+            };
+            assert_effect_order(&bytes, function);
+            assert_bytes_owned_once(&bytes, function);
+        }
     }
 
     #[test]

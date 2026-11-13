@@ -260,6 +260,21 @@ assert.equal(field('request-budget').value, '64');
 assert.equal(field('response-budget').value, '128');
 assert.equal(field('media').checked, true);
 assert.equal(panel.querySelector('.session-panel-limit-error'), null);
+// An inherited opt-out preselects Metadata, and the panel says why beside the mode.
+push({panel: 'hidden'});
+push(choose({state: 'empty', generation: 8, limit: 8, items: []}, {mode: 'metadata', limits: limits(),
+  modeNote: 'Metadata is preselected because REB_CAPTURE_REQUEST_CONTENT=0 is set.'}));
+assert.equal(radio('metadata').checked, true, 'the opt-out preselects Metadata');
+const modeNote = panel.querySelector('#session-panel-mode-note');
+assert.equal(modeNote?.textContent, 'Metadata is preselected because REB_CAPTURE_REQUEST_CONTENT=0 is set.');
+assert(modeNote.closest('.session-panel-modes'), 'the note sits with the mode control');
+assert.equal(panel.querySelector('.session-panel-modes').getAttribute('aria-describedby'), 'session-panel-mode-note');
+buttonNamed('Start Session').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'metadata'}, 'Start without touching the mode starts Metadata');
+push({panel: 'hidden'});
+push(choose({state: 'empty', generation: 9, limit: 8, items: []}, {limits: limits()}));
+assert.equal(panel.querySelector('#session-panel-mode-note'), null, 'no note when nothing preselected the mode');
 // Starting and failed sessions name the limits they run with.
 push({panel: 'starting', mode: 'content', modes, limits: limits(1024, 2048, true)});
 assert(text().includes('Capture mode: Content (default). Request content budget 1,024 MiB, response body budget 2,048 MiB, media and fonts kept.'), text());
@@ -286,6 +301,7 @@ for (const op of ['state', 'start', 'retry', 'offline', 'removeSite', 'clearSite
 // Content limits checked as the agent path checks them, none on Metadata, no
 // other key) tools/check-live-session-failure.swift runs.
 assert(!/body\["keychain"\]/.test(native), 'native reads no Keychain value from the page');
+assert.match(native, /if let modeNote \{ value\["modeNote"\] = modeNote \}/, 'native publishes why the mode is preselected');
 const startCase = native.slice(native.indexOf('case "start":'), native.indexOf('case "retry":'));
 assert.match(startCase, /switch LivePanelStart\.parse\(body\)/, 'native parses a start with the shared rules');
 assert.match(startCase, /accept\(\.start\(start\.mode, start\.limits\)\)/, 'native starts with the parsed choice only');

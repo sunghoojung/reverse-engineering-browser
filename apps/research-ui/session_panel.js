@@ -145,6 +145,13 @@
   function modeGroup() {
     const group = element('fieldset', 'session-panel-modes');
     group.append(element('legend', 'session-panel-label', 'Capture mode'));
+    // Native says why the mode is preselected when the environment decided it.
+    if (typeof view.state?.modeNote === 'string' && view.state.modeNote) {
+      const note = element('p', 'session-panel-text session-panel-mode-note', view.state.modeNote);
+      note.id = 'session-panel-mode-note';
+      group.setAttribute('aria-describedby', note.id);
+      group.append(note);
+    }
     for (const id of ['content', 'metadata']) {
       const option = element('label', 'session-panel-mode');
       option.dataset.mode = id;

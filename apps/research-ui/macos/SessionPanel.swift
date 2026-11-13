@@ -44,6 +44,12 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
     }
   }
 
+  // One short line beside the mode control saying why it is preselected, or
+  // nil. Drawn as text.
+  var modeNote: String? {
+    didSet { if modeNote != oldValue, isChoosing(content) { publish() } }
+  }
+
   var decisionOpen: Bool {
     switch content {
     case .choose, .failed: return true
@@ -213,7 +219,9 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       if let limits { value["limits"] = limits.panelState }
       return value
     case .choose(let mode, let limits):
-      return ["panel": "choose", "mode": mode.rawValue, "modes": modes, "sites": siteState(), "limits": limits.panelState]
+      var value: [String: Any] = ["panel": "choose", "mode": mode.rawValue, "modes": modes, "sites": siteState(), "limits": limits.panelState]
+      if let modeNote { value["modeNote"] = modeNote }
+      return value
     case .failed(let failure, let mode, let limits):
       var value: [String: Any] = [
         "panel": "failed", "mode": mode.rawValue, "modes": modes,

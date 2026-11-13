@@ -939,10 +939,13 @@ shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
 opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
-each request body's length, type and SHA-256. For the automatic launch,
-`REB_CAPTURE_REQUEST_CONTENT=0` or `REB_CAPTURE_CANVAS_IMAGES=0` turns either
-off. Once the start panel has chosen a mode, that mode decides request content
-for the rest of the run, over an inherited `REB_CAPTURE_REQUEST_CONTENT`.
+each request body's length, type and SHA-256. An inherited
+`REB_CAPTURE_REQUEST_CONTENT=0` selects Metadata only for the automatic launch
+and preselects it in the start panel, which says so beside the mode, so
+pressing Start keeps no request content; choosing Content there captures it.
+`REB_CAPTURE_CANVAS_IMAGES=0` turns Canvas images off. Once the start panel has
+chosen a mode, that mode decides request content for the rest of the run, over
+an inherited `REB_CAPTURE_REQUEST_CONTENT`.
 
 With Content chosen, the panel also shows the session's **Content limits**:
 

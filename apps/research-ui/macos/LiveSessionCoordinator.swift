@@ -20,12 +20,24 @@ enum LiveCaptureMode: String {
   // The app saves no choice between launches, so REB_AUTOMATIC_CAPTURE_MODE is
   // the only durable one. Unset or empty means the default. Any other value but
   // "content" selects Metadata, so a misspelled opt-out never turns on content.
+  // An inherited REB_CAPTURE_REQUEST_CONTENT=0 also selects Metadata: it opted
+  // out of request content, and a start panel that preselected Content would
+  // capture it on a single Return.
   static func configured(_ environment: [String: String]) -> LiveCaptureMode {
+    if requestContentOptedOut(environment) { return .metadata }
     guard let value = environment["REB_AUTOMATIC_CAPTURE_MODE"], !value.isEmpty else {
       return .content
     }
     return LiveCaptureMode(rawValue: value) ?? .metadata
   }
+
+  static func requestContentOptedOut(_ environment: [String: String]) -> Bool {
+    environment["REB_CAPTURE_REQUEST_CONTENT"] == "0"
+  }
+
+  // The start panel's line beside the mode while that opt-out decides it.
+  static let optOutNote = "Metadata is preselected because REB_CAPTURE_REQUEST_CONTENT=0 is set."
+
 }
 
 // How much a Content session keeps, set in the start panel. The bounds and

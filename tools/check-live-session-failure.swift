@@ -259,7 +259,29 @@ enum LiveSessionFailureChecks {
       modeChosen: true), "a mask without Network and Artifact retains nothing, so the panel names no limits")
     precondition(LiveSessionCoordinator.retainsRequestContent(environment: ["REB_CAPTURE_REQUEST_CONTENT": "0"], captureNetworkContent: true,
       modeChosen: true), "a chosen Content mode retains content over an inherited 0")
-    print("PASS native content limits: the launcher's bounds and grammar for the panel's first values, start messages checked as the agent path checks them, launcher switches only for a session that retains content, inherited content-only switches dropped otherwise, and the panel's mode deciding request content")
+    // An inherited REB_CAPTURE_REQUEST_CONTENT=0 still protects someone who
+    // just presses Start: the panel preselects Metadata and says why, and only
+    // choosing Content there captures content.
+    let optedOut = ["REB_CAPTURE_REQUEST_CONTENT": "0"]
+    precondition(LiveCaptureMode.configured(optedOut) == .metadata, "an inherited 0 preselects Metadata")
+    precondition(LiveCaptureMode.configured(optedOut.merging(["REB_AUTOMATIC_CAPTURE_MODE": "content"]) { a, _ in a }) == .metadata,
+      "an inherited 0 wins over REB_AUTOMATIC_CAPTURE_MODE=content")
+    precondition(LiveCaptureMode.configured(["REB_CAPTURE_REQUEST_CONTENT": "1"]) == .content, "an inherited 1 keeps the default")
+    precondition(LiveCaptureMode.requestContentOptedOut(optedOut) && !LiveCaptureMode.requestContentOptedOut([:]), "opt-out")
+    precondition(LiveCaptureMode.optOutNote.contains("Metadata is preselected"), "the panel says why")
+    let preselected = LiveCaptureMode.configured(optedOut)
+    guard case .success(let untouched) = parse(["mode": preselected.rawValue]) else { preconditionFailure("preselected start") }
+    let pressed = LiveSessionCoordinator.captureDefaults(environment: optedOut.merging(media) { a, _ in a },
+      captureNetworkContent: untouched.mode.capturesNetworkContent, contentLimits: untouched.limits, modeChosen: true)
+    precondition(untouched.mode == .metadata && pressed["REB_CAPTURE_REQUEST_CONTENT"] == "0"
+      && limitNames.allSatisfy({ pressed[$0] == nil }), "Start pressed without touching the mode is a Metadata start")
+    guard case .success(let chosen) = parse(["mode": "content", "request_content_budget_mib": NSNumber(value: 256),
+      "response_body_budget_mib": NSNumber(value: 512), "response_media": no]) else { preconditionFailure("chosen content") }
+    let content = LiveSessionCoordinator.captureDefaults(environment: optedOut, captureNetworkContent: chosen.mode.capturesNetworkContent,
+      contentLimits: chosen.limits, modeChosen: true)
+    precondition(content["REB_CAPTURE_REQUEST_CONTENT"] == "1" && content["REB_REQUEST_CONTENT_BUDGET_MIB"] == "256",
+      "choosing Content there is a Content start")
+    print("PASS native content limits: the launcher's bounds and grammar for the panel's first values, start messages checked as the agent path checks them, launcher switches only for a session that retains content, inherited content-only switches dropped otherwise, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
 
     // Saved invocation sites arm app-started captures. Digests follow the
     // mode, the launcher drops sites a Brave cannot arm, and explicit values win.

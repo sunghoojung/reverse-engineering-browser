@@ -2859,9 +2859,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func presentLiveSessionSetup() {
     guard !liveSessionCoordinator.isRunning, let sessionPanel else { return }
     presentOriginTraceWindow()
+    // Until the panel chooses, an inherited REB_CAPTURE_REQUEST_CONTENT=0
+    // preselects Metadata (LiveCaptureMode.configured), and the panel says so.
+    let environment = ProcessInfo.processInfo.environment
+    sessionPanel.modeNote = !panelChoseMode && LiveCaptureMode.requestContentOptedOut(environment) ? LiveCaptureMode.optOutNote : nil
     sessionPanel.content = .choose(
       mode: selectedCaptureMode,
-      limits: selectedContentLimits ?? ContentLimits.configured(ProcessInfo.processInfo.environment))
+      limits: selectedContentLimits ?? ContentLimits.configured(environment))
   }
 
   // The panel already accepted this choice for the decision on screen; it is

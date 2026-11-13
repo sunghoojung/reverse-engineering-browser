@@ -396,6 +396,22 @@ const pendingWindow = t => {
   assert.equal(t.stats.inspector, settled, 'An unchanged answer does not redraw the inspector');
 }
 {
+  // Rows are reused by request ID, so a row first drawn from the newest window
+  // keeps its element when the index answers. A click on it afterwards selects
+  // through the index, as a row first drawn from the index does: a row the
+  // window does not hold whole is read from the store before it opens.
+  const t = indexFixture({windowCount: 2, holdIndex: true});
+  const partial = pendingWindow(t);
+  t.setIndexRows([{...t.row(1, 9), end_lost: true}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  const element = t.rows().find(row => row.dataset.requestId === partial.id);
+  t.releaseIndex(); await quiet();
+  assert.equal(t.rows().find(row => row.dataset.requestId === partial.id), element, 'The index answer reuses the window row\'s element');
+  element.click();
+  assert.equal(t.state.trafficLoadingId, partial.id, 'The reused row selects through the index: its records are read from the store');
+  assert.equal(t.state.selectedRequestId, null, 'and it opens only once they are read');
+}
+{
   // A poll rebuilds its rows from the index answer it has, which can predate
   // the gap; the next answer, read because of that poll, names it. The
   // selected row follows that answer without waiting for another poll.

@@ -979,7 +979,7 @@ await check('showObservation chooses the record Traffic names', async () => {
   assert.match(ui.text('.debugger-detail'), /sequence 7/);
   assert(focused.includes('debugger-observations'), 'focus moves to the list it chose in');
   assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, sequence_number: '999'}), true);
-  await until(() => /Observation #999 of renderer 42 is not among these requests/.test(ui.text('.debugger-observation-notes')), 'an absent record is named');
+  await until(() => /Observation #999 of renderer 42 is not among these requests\. Show older records reads older ones, and it is chosen once read\./.test(ui.text('.debugger-observation-notes')), 'an absent record is named');
   assert.equal(ui.context.RebDebuggerSidebar.showObservation({...target, type: 'gap'}), false, 'only an observation kind');
   // A kind the researcher picks before the read answers drops the request.
   store.delay = 200;
@@ -1003,6 +1003,63 @@ await check('watch rules state what they cannot observe', async () => {
   const limits = ui.text('.debugger-watch-limits');
   for (const said of [/only this document's main thread/, /workers, other frames or same-process iframes/, /navigation clears the rules/i, /cannot be armed ahead of a page load/]) assert.match(limits, said);
   assert.match(ui.text('.debugger-watch-state'), /Only its main thread is observed/);
+  ui.close();
+});
+
+// Review round 1: moving on cancels a pending showObservation, as it cancels a
+// Traffic lookup: another row, closing, leaving Sources or a thread pick made
+// before the read answers leaves that choice, and focus, where it is.
+await check('moving on cancels a pending showObservation', async () => {
+  for (const how of ['another row', 'closing', 'leaving Sources', 'a thread']) {
+    const store = createStore(6);
+    store.add(1, {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}});
+    store.add(4);
+    let holding = false;
+    const ui = mount({store, hold: url => holding && url.includes('type=request_watch_match')});
+    const focused = [];
+    ui.window.Element.prototype.focus = function focus() { focused.push(this.id); };
+    ui.open();
+    await until(() => ui.rows('#debugger-observations')[0]?.getAttribute('aria-setsize') === '11', `${how}: rows`);
+    holding = true;
+    ui.context.RebDebuggerSidebar.showObservation({...store.records[6]});
+    const held = () => ui.reads().find(entry => entry.url.includes('type=request_watch_match') && entry.release);
+    await until(() => held(), `${how}: the read, held`);
+    const screen = ui.document.querySelector('#screen-sources');
+    if (how === 'another row') click(ui, ui.rows('#debugger-observations').find(row => row.dataset.key === '1:42:8'));
+    else if (how === 'closing') ui.close();
+    else if (how === 'leaving Sources') { screen.hidden = true; await settle(); }
+    else click(ui, ui.rows('#debugger-threads').find(row => row.dataset.key === 'F:1:42:200'));
+    await settle();
+    const before = focused.length;
+    holding = false;
+    // Every read held so far, including one the choice itself started.
+    for (const entry of ui.reads().filter(entry => entry.release)) entry.release();
+    if (how === 'closing') ui.open();
+    if (how === 'leaving Sources') screen.hidden = false;
+    await until(() => ui.rows('#debugger-observations').length > 0, `${how}: rows again`);
+    await sleep(POLL + 500);
+    const chosen = ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key ?? null;
+    assert.notEqual(chosen, '1:42:7', `${how}: the abandoned record is not chosen`);
+    assert(!focused.slice(before).includes('debugger-observations'), `${how}: focus does not jump to the list`);
+    if (how === 'another row') assert.match(ui.text('.debugger-detail'), /sequence 8/, 'the row chosen instead stays chosen');
+    assert.doesNotMatch(ui.text('.debugger-observation-notes'), /Observation #7/, `${how}: nothing names the abandoned record`);
+    ui.close();
+  }
+});
+
+// A record older than the newest page stays asked for: Show older records
+// reads its page, and it is chosen then, with the note gone.
+await check('showObservation waits for Show older to reach its record', async () => {
+  const store = createStore(0);
+  store.add(201, {type: 'request_watch_match', request_id: '5100', detail: {rule: 0, method_matched: true}});
+  const ui = mount({store});
+  const target = {...store.records[0]};
+  ui.context.RebDebuggerSidebar.showObservation(target);
+  await until(() => /Observation #1 of renderer 42 is not among these requests/.test(ui.text('.debugger-observation-notes')), 'the absent record is named');
+  assert.equal(ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]'), null);
+  click(ui, ui.sidebar.querySelector('.debugger-older'));
+  await until(() => ui.sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key === '1:42:1', 'chosen once its page is read');
+  assert.doesNotMatch(ui.text('.debugger-observation-notes'), /is not among these/, 'the note goes once the rows hold it');
   ui.close();
 });
 

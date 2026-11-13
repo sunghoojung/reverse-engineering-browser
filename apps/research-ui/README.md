@@ -316,9 +316,13 @@ Each section is a collapsible pane:
   Traffic's **Show in debugger** on a watched request calls
   `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
   kind, clears an observed-frame scope that would hide the record, and once a
-  read made after the ask lists it, chooses that row, brings it and its
-  details into view and moves focus to the list. A record that read does not
-  hold is named above the list; **Show older records** reads older ones.
+  read made after the ask holds it, chooses that row, scrolls the list to the
+  top of the pane with its details below and moves focus to the list. A record
+  that read does not hold is named above the list and stays asked for:
+  **Show older records** reads older pages, and the record is chosen when its
+  page arrives. Like a Traffic lookup, the ask ends when the researcher moves
+  on: another row, a kind or thread, **Show newest**, closing the sidebar,
+  leaving Sources or a replaced store.
 - **Pausing**: one statement of the availability `get_native_debugger` reports.
   Today it is unsupported, so the sidebar offers no control to stop, step or
   inspect a paused frame. When sections registered with `native: 'pausing'`

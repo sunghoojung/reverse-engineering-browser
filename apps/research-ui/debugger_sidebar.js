@@ -439,7 +439,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
       read();
     },
     older: () => readOlder(),
-    showNewest() { dropList(); render(); read(); },
+    showNewest() { view.reveal = null; dropList(); render(); read(); },
     // Once the researcher has a place (a selected row, or the list scrolled
     // from its top), the newest page becomes a kept list that later reads add
     // to; back at the top with nothing selected, the list follows the newest
@@ -525,6 +525,7 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
     // A shorter store was cleared or replaced: its older pages, and any read
     // of them still running, belong to the evidence before it.
     const replaced = observations.query && BigInt(page.store_end) < BigInt(observations.query.store_end);
+    if (replaced) view.reveal = null;
     if (observations.key !== key || replaced) { dropList(); Object.assign(observations, {key, head: [], refused: 0, query: null}); }
     const head = valid(answer), list = observations.list;
     let bridged = null;
@@ -733,6 +734,8 @@ function createDebuggerSidebar({root, toggle, screen, hooks}) {
   function stop() {
     generation += 1;
     stops += 1;
+    // Closing or leaving Sources is moving on: a pending showObservation ends.
+    view.reveal = null;
     clearTimeout(timer);
     timer = 0;
     refreshQueued = false;
@@ -1119,8 +1122,6 @@ function debuggerObservationsSection() {
   // one Traffic lookup in flight.
   let list = null, controls = null, detail = null, selected = null, detailTimer = 0, notice = null, revealKey = null, shown = [], opening = null;
   const stacks = new Map();
-  // A record another workspace asked for that the rows read for it lack.
-  let unlisted = null;
   // Read once per record; a failed read is tried again only after a pause.
   function resolution(view, record) {
     const key = debuggerRecordKey(record);
@@ -1162,11 +1163,13 @@ function debuggerObservationsSection() {
   // A row the researcher chose is marked at once and brings its details into view.
   function choose(view, item, how) {
     if (!item) return;
-    unlisted = null;
+    // Any other choice is the researcher moving on from a pending showObservation.
+    if (how !== 'reveal') view.reveal = null;
     if (selected?.key !== item.key) notice = null;
     if (opening && opening.key !== item.key) cancelOpening();
     selected = item;
-    revealKey = item.key;
+    // A revealed row keeps its list, which takes focus, in view instead.
+    revealKey = how === 'reveal' ? null : item.key;
     list?.set(shown, {selectedKey: item.key});
     holdPlace(view);
     paintDetail(view);
@@ -1366,14 +1369,11 @@ function debuggerObservationsSection() {
       // Until the new filter is read, the rows read before stay, named as what they are.
       const items = observations.query ? rows(view) : [];
       // A record asked for by showObservation is chosen once a read made after
-      // the ask lists its kind; one that read does not hold is named instead.
+      // the ask holds it, older pages included; until then the list says so.
       const wanted = view.reveal;
-      let revealing = null;
-      if (wanted && current && view.status === 'ready' && view.readSerial > wanted.after) {
-        view.reveal = null;
-        revealing = items.find(item => item.key === wanted.key) ?? null;
-        if (!revealing) unlisted = {at: observations.key, record: wanted.record};
-      }
+      const asked = Boolean(wanted) && current && view.status === 'ready' && view.readSerial > wanted.after;
+      const revealing = asked ? items.find(item => item.key === wanted.key) ?? null : null;
+      if (revealing) view.reveal = null;
       const notes = [];
       const scope = view.thread?.kind === 'observed' ? ` in frame ${view.thread.frame_id}` : '';
       const kind = view.kind ? DEBUGGER_OBSERVATION_KINDS[view.kind].filter.toLowerCase() : 'records';
@@ -1384,8 +1384,8 @@ function debuggerObservationsSection() {
         const where = observations.query.thread ? ` in frame ${observations.query.thread.frame_id}` : '';
         notes.push(debuggerNote(`The ${kind}${scope} were not read. The rows below are the ${before}${where} read before.`, 'warning'));
       }
-      if (current && unlisted?.at === observations.key) {
-        notes.push(debuggerNote(`Observation #${unlisted.record.sequence_number} of renderer ${unlisted.record.process_id} is not among these ${kind}. Show older records reads older ones.`, 'warning'));
+      if (asked && !revealing) {
+        notes.push(debuggerNote(`Observation #${wanted.record.sequence_number} of renderer ${wanted.record.process_id} is not among these ${kind}. Show older records reads older ones, and it is chosen once read.`, 'warning'));
       }
       const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
       if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
@@ -1409,10 +1409,11 @@ function debuggerObservationsSection() {
       shown = items;
       list.set(items, {selectedKey: selected?.key ?? null});
       if (revealing) {
-        // The list into view first, then the chosen row in it; choose brings its details into view.
-        if (typeof list.element.scrollIntoView === 'function') list.element.scrollIntoView({block: 'nearest'});
+        // The chosen row in its list, then the list, which takes focus, at the
+        // top of the pane; its details follow below it.
         list.scrollTo(revealing.key);
         choose(view, revealing, 'reveal');
+        if (typeof list.element.scrollIntoView === 'function') list.element.scrollIntoView({block: 'start'});
         list.focus();
       }
       const end = loaded ? loaded.bottom : observations.query?.next_before ?? null;

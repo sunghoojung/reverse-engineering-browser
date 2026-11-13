@@ -4035,8 +4035,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let shown = try await ui.json("""
         (() => { const detail = document.querySelector('#debugger-sidebar .debugger-detail'), box = detail.getBoundingClientRect();
           const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+          const list = document.querySelector('#debugger-observations').getBoundingClientRect();
+          const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
           return {kind: document.querySelector('.debugger-kind[aria-pressed="true"]')?.dataset.kind ?? '',
             detail: detail.innerText.replace(/\\s+/g, ' '), inView: !detail.hidden && box.top < pane.bottom - 24 && box.bottom > pane.top,
+            // The focused list and its chosen row are on screen, inside the pane.
+            listInPane: list.top >= pane.top - 0.5 && list.top < pane.bottom - 20,
+            rowInPane: Boolean(row) && row.top >= pane.top - 0.5 && row.bottom <= pane.bottom + 0.5,
             focus: __rebUiProbe.focusState()}; })()
         """)
       print("RENDERED_UI_WATCHED_SHOWN \(size.name) \(shown)")
@@ -4045,6 +4050,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertTrue((shown["detail"] as? String ?? "").contains("request 5100"), "\(size.name): \(shown)")
       let focus = shown["focus"] as? [String: Any] ?? [:]
       XCTAssertEqual(focus["id"] as? String, "debugger-observations", "\(size.name): focus stays on the list: \(shown)")
+      XCTAssertEqual(focus["inViewport"] as? Bool, true, "\(size.name): the focused list is in the viewport: \(shown)")
+      XCTAssertEqual(shown["listInPane"] as? Bool, true, "\(size.name): the focused list is inside the sidebar pane: \(shown)")
+      XCTAssertEqual(shown["rowInPane"] as? Bool, true, "\(size.name): the chosen row is inside the sidebar pane: \(shown)")
       XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): the list shows its focus once a key is pressed: \(shown)")
       let active = try await ui.value("document.querySelector('#debugger-observations .debugger-list-row[data-active=\"true\"]')?.dataset.key ?? ''") as? String ?? ""
       XCTAssertTrue(active.hasSuffix(":\(expected.debuggerProcess):\(sequence)"), "\(size.name): the chosen record is the active row: \(active)")

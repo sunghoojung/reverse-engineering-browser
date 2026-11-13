@@ -24,7 +24,7 @@ to an original byte offset of the module whose `sha256` the document names.
 | `artifact_id` | Canonical nonzero artifact ID of a captured `wasm` artifact. Required. |
 | `function` | Function index, imported functions counted first. An imported or undefined index is 404. |
 | `offset` | Original module byte offset where one instruction of that function starts. A position inside an instruction is 404. |
-| `operand` | With `offset`: one operand, counted in text order (the first operand pushed is 0). Without it the seed is the instruction itself. |
+| `operand` | With `offset`: one operand, counted in text order (the first operand pushed is 0). For `br_if` and `br_table` the values the branch carries come first and the selector last; a block's `end` has the block's results as its operands. Without it the seed is the instruction itself. |
 | `local` | Instead of `offset`: every definition of one local (its parameter or zero value, each `local.set` and `local.tee`, and each join of it). |
 | `direction` | `backward`, `forward` or `both` (default). |
 | `max_nodes` | 1 to 4096, default 256. Edges and join entries are capped at four per node. |
@@ -33,8 +33,10 @@ to an original byte offset of the module whose `sha256` the document names.
 
 Give exactly one of `offset` and `local`. Unknown, repeated, non-canonical or
 out-of-range parameters fail with 400 rather than widening the slice. An
-instruction that neither consumes nor produces a value (`block`, `nop`) and an
-`operand` past the instruction's operands are 400.
+instruction that neither consumes nor produces a value (`block`, `nop`), an
+instruction no declared path reaches, and an `operand` past the instruction's
+operands are 400. A seed at or after the point where the simulation stopped is
+400 with code `resource_limit`.
 
 ## Simulation
 
@@ -42,8 +44,12 @@ The body is walked once with an abstract operand stack and abstract locals.
 Every instruction that consumes or produces a value becomes a node at its byte
 offset. Synthetic nodes stand for parameters and the zero value of declared
 locals (at the body or local declaration offset), exception values a handler
-receives, and a value popped from an empty stack in unreachable code
-(`unknown`).
+receives, and an operand a reachable instruction found missing (`unknown`).
+
+Code that no declared path reaches (after `br`, `br_table`, `return`,
+`unreachable`, a throw or a tail call, until the enclosing `else`, `catch` or
+`end`) creates no node: its reads, calls and stores cannot feed a slice or be
+reported as sinks, and a loop it contains gets no header joins.
 
 Merges follow structured control flow only, so no target is guessed:
 
@@ -63,17 +69,28 @@ false path of an `if` without `else`) and `catch`. `via_offset` is the byte
 offset of the transfer.
 
 Memory is conservative. A load is a source; its address operands are followed
-backward as the load's address slice. A load is linked to an earlier store
+backward as the load's address slice. An atomic read-modify-write returns the
+old memory value, so backward follows only its address; `table.get` follows its
+index, and other table results follow nothing. A load is linked to an earlier store
 (`forwarded_store`) only when both are full width of the same type
 (`i32`, `i64`, `f32`, `f64`, `v128`), use the same memory and static offset,
 and take the address from equal constants, and the store is the latest one in
 the same basic block with no other store, call, atomic or memory operation in
-between. Every other load stays a source.
+between. Every other load stays a source. Globals are not forwarded the same
+way: a `global.get` is always a source, even right after a `global.set` of the
+same global.
 
 Operators whose stack effect v1 does not model (stack switching) stop the
 simulation with a named omission. The prefix before them is still valid and
-the document is `partial`. A malformed stack shape becomes an `unknown` value
-and an omission; malformed binary or control structure fails with 422.
+the document is `partial`.
+
+Captured bytes need not validate. A reachable instruction that finds fewer
+operands than it needs gets `unknown` values; a path that carries fewer or more
+values into a merge than the block declares (an `if` without `else` whose arm
+leaves a value, a catch whose tag does not match its target) is padded with
+`unknown` values or cut to the declared count; values left on the stack at an
+`end` flow nowhere. Each is a named omission and the document is `partial`.
+Malformed binary or control structure fails with 422.
 
 ## Slice
 
@@ -113,9 +130,10 @@ The [OpenAPI schema](openapi.json) defines `WasmValueFlow`.
   `operand`, `local`, `local_set`, `global_set`, `address`, `stored_value`,
   `forwarded_store`, `argument`, `callee_index`, `callee_ref`, `selector`,
   `return`, `drop` and `merge`.
-- `joins` list every join in the slice with all of its incoming edges, each
-  with `from` (a node ID, or null when that producer is outside the slice),
-  `from_kind`, `from_offset`, `via` and `via_offset`.
+- `joins` list every join in the slice with `incoming_count` and up to 64
+  incoming edges, each with `from` (a node ID, or null when that producer is
+  outside the listed nodes), `from_kind`, `from_offset`, `via` and
+  `via_offset`. When a join has more, `truncated.joins` is set.
 - `sources` and `sinks` are node IDs.
 - `interprocedural` is `{requested, steps, direct_callers}`. A step is
   `caller_argument` (a parameter in the slice and the argument slot of a direct
@@ -140,13 +158,26 @@ indices and edges stay readable at every level.
 
 - Input: 64 MiB, the block graph's limit. One body: 7,654,321 bytes, the size
   engines accept. Locals: 50,000, the count engines accept. Larger is 400.
-- Simulation: 2,000,000 instructions and 32,000,000 work units (instructions,
-  snapshot and join entries); past either the prefix is returned as `partial`,
-  and a seed past the stop point is 400 with code `resource_limit`.
-- Slice: `max_nodes`, four edges and four join entries per node, `max_depth`,
-  and a four-second deadline shared with the simulation.
+- Simulation: 2,000,000 instructions and 4,000,000 work units (instructions,
+  loop-write, snapshot and join entries). The loop-write pass records a write
+  in the innermost loop only and passes each loop's set to its enclosing loop
+  at `end`, so it is linear in the bytes plus the joins it implies. Loops that
+  each write many locals imply nesting depth times locals joins; the budget
+  and the deadline are checked inside those loops, and past either the prefix
+  is returned as `partial`.
+- Slice: `max_nodes`, four edges and four join entries per node, 64 entries per
+  join, `max_depth`, and a four-second deadline shared with the simulation. At
+  most 32 omissions are listed; the last says how many more there were.
+- Response: 120,000 bytes pretty-printed, both as returned and with `text`,
+  `expression` and long strings replaced by omission objects, as `reb-api mcp`
+  does below Full access, so the result is inlined at every level (the inline
+  limit is 131,072). Past it, the seed, sources, sinks and joins are kept first,
+  then the steps nearest the seed; kept nodes are renumbered in walk order,
+  `truncated.bytes` is set and an omission gives the counts.
 - `expression`: three levels deep and 160 bytes.
 - Interprocedural: 64 steps and 256 direct call sites, within the same deadline.
 
 The backend runs on the bounded blocking reader pool. The UI fetches one slice
-at a time and aborts a superseded request.
+at a time and aborts a superseded request. The Sources panel seeds from Inspect
+rows only; it is hidden while the block graph is open, and graph blocks are not
+a seed.

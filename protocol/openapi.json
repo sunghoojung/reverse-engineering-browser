@@ -24950,6 +24950,7 @@
                 "node",
                 "join",
                 "byte_offset",
+                "incoming_count",
                 "incoming"
               ],
               "properties": {
@@ -24976,6 +24977,11 @@
                 "slot": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "incoming_count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Every incoming edge of the join; incoming lists at most max_join_entries of them."
                 },
                 "incoming": {
                   "type": "array",
@@ -25165,7 +25171,8 @@
               "depth",
               "deadline",
               "joins",
-              "simulation"
+              "simulation",
+              "bytes"
             ],
             "properties": {
               "nodes": {
@@ -25184,6 +25191,9 @@
                 "type": "boolean"
               },
               "simulation": {
+                "type": "boolean"
+              },
+              "bytes": {
                 "type": "boolean"
               }
             }

@@ -39,6 +39,15 @@ const MAX_CALL_SITES: usize = 256;
 /// Web engines reject a body above this size, so a longer one cannot have run.
 const MAX_BODY_BYTES: usize = 7_654_321;
 const DEADLINE: Duration = Duration::from_secs(4);
+/// Incoming edges listed per join; `incoming_count` keeps the total. A
+/// dispatcher's exit join can have thousands.
+const MAX_JOIN_ENTRIES: usize = 64;
+const MAX_OMISSIONS: usize = 32;
+/// `reb-api mcp` inlines a result only when its compact and pretty-printed
+/// forms both fit `x-reb-mcp.inline_json_limit_bytes` (131,072), and content
+/// omission can make it larger. The document is cut to fit this budget in
+/// every form, leaving room for the tool envelope.
+pub const MAX_RESPONSE_BYTES: usize = 120_000;
 const QUERY_KEYS: [&str; 9] = [
     "artifact_id",
     "function",
@@ -295,6 +304,19 @@ fn addressed_source(kind: NodeKind) -> bool {
     matches!(kind, NodeKind::Load | NodeKind::Atomic | NodeKind::Table)
 }
 
+/// Which inputs of a memory or table source its value depends on. A load's
+/// result depends on its address (and a lane load's vector); an atomic
+/// read-modify-write returns the old memory value, so only its address feeds
+/// it; `table.get` depends on its index, and other table results (sizes) on
+/// nothing followed here.
+fn follows_backward(node: &wasm_def_use::Node, edge: EdgeKind, inputs: usize) -> bool {
+    match node.kind {
+        NodeKind::Atomic => edge == EdgeKind::Address,
+        NodeKind::Table => inputs == 1 && node.results == 1,
+        _ => true,
+    }
+}
+
 /// Whether a value reaching `kind` over `edge` keeps flowing on.
 fn forward_continues(kind: NodeKind, edge: EdgeKind) -> bool {
     match kind {
@@ -429,6 +451,15 @@ impl Slicer<'_> {
                 continue;
             }
             for edge in self.adjacency.inputs(node).to_vec() {
+                if !seed
+                    && !follows_backward(
+                        &self.sim.nodes[node as usize],
+                        self.sim.edges[edge as usize].kind,
+                        self.adjacency.inputs(node).len(),
+                    )
+                {
+                    continue;
+                }
                 pending.push((edge, depth));
             }
         }
@@ -521,17 +552,38 @@ fn instruction_text(
     while !reader.eof() && index <= last {
         let op = reader.read().map_err(wasm_def_use::bad)?;
         if wanted.contains(&index) {
-            let operands = wasm_graph::operands(&op);
-            let mut text = wasm::mnemonic(&op);
-            if !operands.is_empty() {
-                text.push(' ');
-                text.push_str(&operands);
-            }
-            texts.insert(index, text);
+            texts.insert(index, operator_text(&op));
         }
         index += 1;
     }
     Ok(texts)
+}
+
+/// One instruction as `mnemonic operands`, the same spelling as graph rows.
+/// Exception handlers name their clauses instead of a parser dump.
+fn operator_text(op: &Operator<'_>) -> String {
+    let mut text = wasm::mnemonic(op);
+    let operands = match op {
+        Operator::TryTable { try_table } => try_table
+            .catches
+            .iter()
+            .map(|catch| match catch {
+                wasmparser::Catch::One { tag, label } => format!("(catch {tag} {label})"),
+                wasmparser::Catch::OneRef { tag, label } => format!("(catch_ref {tag} {label})"),
+                wasmparser::Catch::All { label } => format!("(catch_all {label})"),
+                wasmparser::Catch::AllRef { label } => format!("(catch_all_ref {label})"),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Operator::Try { .. } => String::new(),
+        Operator::Catch { tag_index } => tag_index.to_string(),
+        _ => wasm_graph::operands(op),
+    };
+    if !operands.is_empty() {
+        text.push(' ');
+        text.push_str(&operands);
+    }
+    text
 }
 
 struct Texts<'s> {
@@ -549,7 +601,7 @@ impl Texts<'_> {
             NodeKind::Phi if n.index != NONE => format!("join of local {}", n.index),
             NodeKind::Phi => format!("join of result {}", n.aux),
             NodeKind::ExceptionValue => "exception values".to_owned(),
-            NodeKind::Unknown => "unknown (empty stack in unreachable code)".to_owned(),
+            NodeKind::Unknown => "unknown (no operand was on the stack)".to_owned(),
             NodeKind::Return => "return".to_owned(),
             _ => String::new(),
         }
@@ -570,6 +622,17 @@ impl Texts<'_> {
             | NodeKind::Phi
             | NodeKind::Unknown
             | NodeKind::Return => self.synthetic(node),
+            NodeKind::ExceptionValue => {
+                let tag = if n.index == NONE {
+                    "any tag".to_owned()
+                } else {
+                    format!("tag {}", n.index)
+                };
+                match self.instructions.get(&n.instruction) {
+                    Some(handler) => format!("exception values of {tag} at {handler}"),
+                    None => format!("exception values of {tag}"),
+                }
+            }
             _ => self
                 .instructions
                 .get(&n.instruction)
@@ -793,6 +856,23 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                     format!("No instruction of WASM function {function} starts at byte {offset}"),
                 ));
             };
+            if let Some(stopped) = sim.stopped_at
+                && offset >= stopped
+            {
+                return Err(Error::new(
+                    400,
+                    format!(
+                        "Value flow stopped at byte {stopped}, at or before the seed at byte {offset}: {}",
+                        sim.omissions.join(" ")
+                    ),
+                )
+                .with_code(Code::ResourceLimit));
+            }
+            if !sim.instruction_live[instruction as usize] {
+                return Err(Error::bad(format!(
+                    "The instruction at byte {offset} is unreachable in declared control flow, so no value flows through it"
+                )));
+            }
             let inputs = sim.inputs(instruction).to_vec();
             let node = sim.instruction_nodes[instruction as usize];
             match operand {
@@ -955,9 +1035,10 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
         adjacency: &slicer.adjacency,
         instructions: instruction_text(body, &wanted)?,
     };
+    // Nodes, edges, joins and steps are built once. The response keeps the
+    // longest prefix of nodes in walk order (nearest the seed first) that fits
+    // the byte budget, with every edge, join and step among them.
     let mut nodes = Vec::with_capacity(slicer.included.len());
-    let mut sources = Vec::new();
-    let mut sinks = Vec::new();
     for (id, entry) in slicer.included.iter().enumerate() {
         let n = &sim.nodes[entry.node as usize];
         let mut object = Map::new();
@@ -1025,58 +1106,55 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
                 json!(texts.bounded_expression(entry.node)),
             );
         }
-        match entry.role {
-            Role::Source => sources.push(id),
-            Role::Sink => sinks.push(id),
-            _ => {}
-        }
         nodes.push(Value::Object(object));
     }
-    let edge_object = |edge: &wasm_def_use::Edge, from: Value, to: Value| {
-        let mut object = Map::new();
-        object.insert("from".into(), from);
-        object.insert("to".into(), to);
-        object.insert("kind".into(), json!(edge.kind.name()));
-        object.insert("operand".into(), json!(edge.operand));
-        object.insert("result".into(), json!(edge.result));
-        if let Some(via) = edge.via.name() {
-            object.insert("via".into(), json!(via));
-            object.insert("via_offset".into(), json!(edge.via_offset));
-        }
-        Value::Object(object)
-    };
-    let mut edges = Vec::with_capacity(slicer.edges.len());
+    let mut edges: Vec<(usize, usize, Map<String, Value>)> = Vec::with_capacity(slicer.edges.len());
     for edge in &slicer.edges {
         let e = &sim.edges[*edge as usize];
         let (Some(from), Some(to)) = (slicer.id_of.get(&e.from), slicer.id_of.get(&e.to)) else {
             continue;
         };
-        edges.push(edge_object(e, json!(from), json!(to)));
+        let mut object = Map::new();
+        object.insert("kind".into(), json!(e.kind.name()));
+        object.insert("operand".into(), json!(e.operand));
+        object.insert("result".into(), json!(e.result));
+        if let Some(via) = e.via.name() {
+            object.insert("via".into(), json!(via));
+            object.insert("via_offset".into(), json!(e.via_offset));
+        }
+        edges.push((*from as usize, *to as usize, object));
     }
-    // Every join in the slice lists every incoming edge, in the slice or not.
-    let mut joins = Vec::new();
+    // Every join lists its incoming edges, in the slice or not, up to a cap.
+    struct JoinRow {
+        node: usize,
+        object: Map<String, Value>,
+        incoming: Vec<(Option<usize>, Map<String, Value>)>,
+    }
+    let mut joins: Vec<JoinRow> = Vec::new();
     let mut join_entries = 0usize;
     for (id, entry) in slicer.included.iter().enumerate() {
         let n = &sim.nodes[entry.node as usize];
         if n.kind != NodeKind::Phi {
             continue;
         }
+        let inputs = slicer.adjacency.inputs(entry.node);
         let mut incoming = Vec::new();
-        for edge in slicer.adjacency.inputs(entry.node) {
+        for edge in inputs.iter().take(MAX_JOIN_ENTRIES) {
             if join_entries >= slicer.max_edges {
-                slicer.truncated.joins = true;
                 break;
             }
             join_entries += 1;
             let e = &sim.edges[*edge as usize];
             let from = &sim.nodes[e.from as usize];
-            incoming.push(json!({
-                "from": slicer.id_of.get(&e.from),
-                "from_kind": from.kind.name(),
-                "from_offset": from.offset,
-                "via": e.via.name(),
-                "via_offset": e.via_offset,
-            }));
+            let mut item = Map::new();
+            item.insert("from_kind".into(), json!(from.kind.name()));
+            item.insert("from_offset".into(), json!(from.offset));
+            item.insert("via".into(), json!(e.via.name()));
+            item.insert("via_offset".into(), json!(e.via_offset));
+            incoming.push((slicer.id_of.get(&e.from).map(|id| *id as usize), item));
+        }
+        if incoming.len() < inputs.len() {
+            slicer.truncated.joins = true;
         }
         let mut object = Map::new();
         object.insert("node".into(), json!(id));
@@ -1087,8 +1165,12 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
         } else {
             object.insert("slot".into(), json!(n.aux));
         }
-        object.insert("incoming".into(), Value::Array(incoming));
-        joins.push(Value::Object(object));
+        object.insert("incoming_count".into(), json!(inputs.len()));
+        joins.push(JoinRow {
+            node: id,
+            object,
+            incoming,
+        });
     }
     let interprocedural = interprocedural_steps(
         request,
@@ -1121,75 +1203,229 @@ pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
         omissions.push("Slice deadline reached; the slice is the part walked before it.".into());
     }
     if truncated.joins {
-        omissions.push(
-            "Join entry cap reached; later joins list only part of their incoming edges.".into(),
-        );
+        omissions.push(format!(
+            "A join lists at most {MAX_JOIN_ENTRIES} incoming edges ({} in all); incoming_count gives each join's total.",
+            slicer.max_edges
+        ));
     }
-    let partial = !omissions.is_empty() || sim.stopped_at.is_some();
-    Ok(json!({
-        "schema": "wasm-value-flow-v1",
-        "artifact_id": artifact.artifact_id,
-        "sha256": artifact.sha256,
-        "byte_size": artifact.bytes.len(),
-        "function_index": function,
-        "type_index": sim.type_index,
-        "byte_offset": range.start,
-        "byte_end": range.end,
-        "params": sim.params,
-        "locals": sim.locals,
-        "results": sim.results,
-        "evidence": "declared_static",
-        "complete": false,
-        "status": if partial { "partial" } else { "computed" },
-        "request": {
-            "direction": request.direction.name(),
-            "max_nodes": max_nodes,
-            "max_depth": request.max_depth,
-            "interprocedural": request.interprocedural,
-        },
-        "seed": {
-            "kind": if seed_local.is_some() { "local" } else { "instruction" },
-            "byte_offset": seed_offset,
-            "operand": seed_operand,
-            "operand_count": operand_count,
-            "local": seed_local,
-            "nodes": seed_nodes.iter().filter_map(|node| slicer.id_of.get(node)).collect::<Vec<_>>(),
-        },
-        "instructions_simulated": sim.instructions.len(),
-        "simulation_stopped_at": sim.stopped_at,
-        "node_count": nodes.len(),
-        "edge_count": edges.len(),
-        "nodes": nodes,
-        "edges": edges,
-        "joins": joins,
-        "sources": sources,
-        "sinks": sinks,
-        "interprocedural": interprocedural,
-        "truncated": {
+    if omissions.len() > MAX_OMISSIONS {
+        let more = omissions.len() - (MAX_OMISSIONS - 1);
+        omissions.truncate(MAX_OMISSIONS - 1);
+        omissions.push(format!("{more} more omissions are not listed."));
+    }
+    let limits = json!({
+        "max_input_bytes": wasm_graph::MAX_BYTES,
+        "max_body_bytes": MAX_BODY_BYTES,
+        "max_locals": wasm_def_use::MAX_LOCALS,
+        "max_instructions": wasm_def_use::MAX_INSTRUCTIONS,
+        "max_work": wasm_def_use::MAX_WORK,
+        "max_nodes": max_nodes,
+        "max_edges": max_nodes * EDGES_PER_NODE,
+        "max_join_entries": MAX_JOIN_ENTRIES,
+        "max_depth": request.max_depth,
+        "max_expression_bytes": MAX_EXPRESSION_BYTES,
+        "max_interprocedural_steps": MAX_STEPS,
+        "max_call_sites": MAX_CALL_SITES,
+        "max_response_bytes": MAX_RESPONSE_BYTES,
+        "deadline_ms": DEADLINE.as_millis() as u64,
+    });
+    let total = nodes.len();
+    // When the budget cuts nodes, the seed goes first, then the slice's
+    // sources and sinks, then joins, then the steps between them nearest the
+    // seed. Kept nodes are renumbered in walk order.
+    let rank = |id: usize| -> u8 {
+        match slicer.included[id].role {
+            Role::Seed => 0,
+            Role::Source | Role::Sink => 1,
+            _ if sim.nodes[slicer.included[id].node as usize].kind == NodeKind::Phi => 2,
+            _ => 3,
+        }
+    };
+    let mut ranked: Vec<usize> = (0..total).collect();
+    ranked.sort_by_key(|id| (rank(*id), *id));
+    let assemble = |keep: usize| -> Value {
+        let cut = keep < total;
+        let mut chosen = vec![false; total];
+        for id in &ranked[..keep] {
+            chosen[*id] = true;
+        }
+        let mut renumber = vec![None; total];
+        let mut next = 0usize;
+        for id in 0..total {
+            if chosen[id] {
+                renumber[id] = Some(next);
+                next += 1;
+            }
+        }
+        let mut notes = omissions.clone();
+        if cut {
+            notes.push(format!(
+                "Response budget of {MAX_RESPONSE_BYTES} bytes reached; {keep} of {total} nodes are listed: the seed, sources, sinks and joins first, then the nearest steps."
+            ));
+        }
+        let kept_nodes: Vec<Value> = (0..total)
+            .filter(|id| chosen[*id])
+            .map(|id| {
+                let mut node = nodes[id].clone();
+                node["id"] = json!(renumber[id]);
+                node
+            })
+            .collect();
+        let kept_edges: Vec<Value> = edges
+            .iter()
+            .filter_map(|(from, to, object)| {
+                let (from, to) = (renumber[*from]?, renumber[*to]?);
+                let mut object = object.clone();
+                object.insert("from".into(), json!(from));
+                object.insert("to".into(), json!(to));
+                Some(Value::Object(object))
+            })
+            .collect();
+        let kept_joins: Vec<Value> = joins
+            .iter()
+            .filter_map(|join| {
+                let node = renumber[join.node]?;
+                let mut object = join.object.clone();
+                object.insert("node".into(), json!(node));
+                let incoming = join
+                    .incoming
+                    .iter()
+                    .map(|(from, item)| {
+                        let mut item = item.clone();
+                        item.insert("from".into(), json!(from.and_then(|id| renumber[id])));
+                        Value::Object(item)
+                    })
+                    .collect();
+                object.insert("incoming".into(), Value::Array(incoming));
+                Some(Value::Object(object))
+            })
+            .collect();
+        let roles = |role: Role| -> Vec<usize> {
+            (0..total)
+                .filter(|id| slicer.included[*id].role == role)
+                .filter_map(|id| renumber[id])
+                .collect()
+        };
+        let mut steps_value = interprocedural.clone();
+        if let Some(steps) = steps_value["steps"].as_array_mut() {
+            steps.retain_mut(|step| {
+                match step["node"]
+                    .as_u64()
+                    .and_then(|node| renumber.get(node as usize).copied().flatten())
+                {
+                    Some(node) => {
+                        step["node"] = json!(node);
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+        let partial = !notes.is_empty() || sim.stopped_at.is_some();
+        let truncated_value = json!({
             "nodes": truncated.nodes,
             "edges": truncated.edges,
             "depth": truncated.depth,
             "deadline": truncated.deadline,
             "joins": truncated.joins,
             "simulation": sim.stopped_at.is_some(),
-        },
-        "omissions": omissions,
-        "limits": {
-            "max_input_bytes": wasm_graph::MAX_BYTES,
-            "max_body_bytes": MAX_BODY_BYTES,
-            "max_locals": wasm_def_use::MAX_LOCALS,
-            "max_instructions": wasm_def_use::MAX_INSTRUCTIONS,
-            "max_work": wasm_def_use::MAX_WORK,
-            "max_nodes": max_nodes,
-            "max_edges": max_nodes * EDGES_PER_NODE,
-            "max_depth": request.max_depth,
-            "max_expression_bytes": MAX_EXPRESSION_BYTES,
-            "max_interprocedural_steps": MAX_STEPS,
-            "max_call_sites": MAX_CALL_SITES,
-            "deadline_ms": DEADLINE.as_millis() as u64,
-        },
-        "notice": "Declared static value flow inside one function, from the module bytes. Memory is a source unless a same-block store to the same constant address is proven; nothing was executed.",
-    }))
+            "bytes": cut,
+        });
+        json!({
+            "schema": "wasm-value-flow-v1",
+            "artifact_id": artifact.artifact_id,
+            "sha256": artifact.sha256,
+            "byte_size": artifact.bytes.len(),
+            "function_index": function,
+            "type_index": sim.type_index,
+            "byte_offset": range.start,
+            "byte_end": range.end,
+            "params": sim.params,
+            "locals": sim.locals,
+            "results": sim.results,
+            "evidence": "declared_static",
+            "complete": false,
+            "status": if partial { "partial" } else { "computed" },
+            "request": {
+                "direction": request.direction.name(),
+                "max_nodes": max_nodes,
+                "max_depth": request.max_depth,
+                "interprocedural": request.interprocedural,
+            },
+            "seed": {
+                "kind": if seed_local.is_some() { "local" } else { "instruction" },
+                "byte_offset": seed_offset,
+                "operand": seed_operand,
+                "operand_count": operand_count,
+                "local": seed_local,
+                "nodes": seed_nodes.iter().filter_map(|node| slicer.id_of.get(node)).filter_map(|id| renumber[*id as usize]).collect::<Vec<_>>(),
+            },
+            "instructions_simulated": sim.instructions.len(),
+            "simulation_stopped_at": sim.stopped_at,
+            "node_count": kept_nodes.len(),
+            "edge_count": kept_edges.len(),
+            "nodes": kept_nodes,
+            "edges": kept_edges,
+            "joins": kept_joins,
+            "sources": roles(Role::Source),
+            "sinks": roles(Role::Sink),
+            "interprocedural": steps_value,
+            "truncated": truncated_value,
+            "omissions": notes,
+            "limits": limits,
+            "notice": "Declared static value flow inside one function, from the module bytes. Memory is a source unless a same-block store to the same constant address is proven; nothing was executed.",
+        })
+    };
+    let whole = assemble(total);
+    if fits_response(&whole) {
+        return Ok(whole);
+    }
+    // The longest prefix that fits; fewer nodes never make the document larger.
+    let (mut low, mut high) = (0usize, total - 1);
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if fits_response(&assemble(middle)) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    Ok(assemble(low))
+}
+
+/// Whether a document fits the response budget pretty-printed both as it is
+/// and as `reb-api mcp` projects it below Full access, where a content string
+/// becomes a larger omission object.
+pub fn fits_response(document: &Value) -> bool {
+    let pretty =
+        |value: &Value| serde_json::to_string_pretty(value).map_or(usize::MAX, |text| text.len());
+    pretty(document) <= MAX_RESPONSE_BYTES
+        && pretty(&content_omitted(document, None)) <= MAX_RESPONSE_BYTES
+}
+
+/// The `--omit-content` projection of this document's fields: `text`,
+/// `expression` and any string over 160 characters become an omission object.
+pub fn content_omitted(value: &Value, key: Option<&str>) -> Value {
+    match value {
+        Value::String(text)
+            if matches!(key, Some("text" | "expression")) || text.chars().count() > 160 =>
+        {
+            json!({"omitted": "string", "chars": text.chars().count(), "bytes": text.len()})
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| content_omitted(item, key))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(name, child)| (name.clone(), content_omitted(child, Some(name))))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn interprocedural_steps(
@@ -1746,11 +1982,502 @@ mod tests {
         );
     }
 
+    /// Every instruction of every function, seeded whole and by each operand
+    /// it reports, in both directions: a module that does not validate gets a
+    /// document or a named error, never a panic or a 500.
+    fn sweep(bytes: &[u8]) {
+        let module = Module::read(bytes).unwrap();
+        for position in 0..module.bodies.len() {
+            let function = module.imported_functions + position as u32;
+            let mut reader = module.bodies[position].get_operators_reader().unwrap();
+            while !reader.eof() {
+                let (_, offset) = reader.read_with_offset().unwrap();
+                for direction in ["backward", "forward"] {
+                    let query = format!(
+                        "function={function}&offset={offset}&direction={direction}&interprocedural=true"
+                    );
+                    match flow(bytes, &query) {
+                        Ok(document) => {
+                            let count = document["seed"]["operand_count"].as_u64().unwrap_or(0);
+                            for operand in 0..count {
+                                if let Err(error) =
+                                    flow(bytes, &format!("{query}&operand={operand}"))
+                                {
+                                    assert_ne!(
+                                        error.status, 500,
+                                        "{query}&operand={operand}: {}",
+                                        error.message
+                                    );
+                                }
+                            }
+                        }
+                        Err(error) => assert_ne!(error.status, 500, "{query}: {}", error.message),
+                    }
+                }
+            }
+            if let Err(error) = flow(bytes, &format!("function={function}&local=0")) {
+                assert_ne!(error.status, 500, "{}", error.message);
+            }
+        }
+    }
+
+    fn joins_of<'a>(document: &'a Value, join: &str) -> Vec<&'a Value> {
+        document["joins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|j| j["join"] == join)
+            .collect()
+    }
+
+    fn vias(join: &Value) -> Vec<&str> {
+        join["incoming"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["via"].as_str().unwrap())
+            .collect()
+    }
+
     #[test]
-    fn unreachable_operands_are_unknown_values() {
-        let bytes = wat::parse_str("(module (func (result i32) unreachable i32.add))").unwrap();
-        let add = offset_of(&bytes, 0, "i32.add", 0);
-        let document = flow(&bytes, &format!("function=0&offset={add}")).unwrap();
+    fn paths_carrying_the_wrong_value_count_are_padded_and_named() {
+        // An if without else whose arm leaves a value, and a catch whose tag
+        // carries one value into a block that declares two: both do not
+        // validate, and both used to index past the incoming values.
+        let short_if = wat::parse_str(
+            "(module (func (result i32) i32.const 1 if (result i32) i32.const 2 end))",
+        )
+        .unwrap();
+        let end = offset_of(&short_if, 0, "end", 0);
+        let document = flow(&short_if, &format!("function=0&offset={end}")).unwrap();
+        assert_eq!(document["status"], "partial");
+        assert!(
+            document["omissions"].as_array().unwrap().iter().any(|o| o
+                .as_str()
+                .unwrap()
+                .contains("carries 0 values where the block declares 1")),
+            "{}",
+            document["omissions"]
+        );
         assert!(kinds_of(&document, "sources").contains(&"unknown"));
+        let short_catch = wat::parse_str(
+            r#"(module (tag $e (param i32))
+              (func (result i32 i32)
+                block $h (result i32 i32)
+                  try_table (catch $e $h) nop end
+                  i32.const 1 i32.const 2
+                end))"#,
+        )
+        .unwrap();
+        let end = offset_of(&short_catch, 0, "end", 1);
+        let document = flow(&short_catch, &format!("function=0&offset={end}")).unwrap();
+        assert!(
+            document["omissions"].as_array().unwrap().iter().any(|o| o
+                .as_str()
+                .unwrap()
+                .contains("carries 1 values where the block declares 2")),
+            "{}",
+            document["omissions"]
+        );
+        let past = wat::parse_str(
+            "(module (func (param i32) (result i32) block (result i32) local.get 0 br 0 end))",
+        )
+        .unwrap();
+        for bytes in [short_if, short_catch, past] {
+            sweep(&bytes);
+        }
+        sweep(&fixture());
+    }
+
+    #[test]
+    fn dead_code_feeds_no_slice() {
+        let bytes = wat::parse_str(
+            r#"(module (import "env" "send" (func $send (param i32)))
+              (func (param i32) (result i32)
+                local.get 0 drop
+                i32.const 0 return
+                local.get 0 call $send
+                i32.const 1)
+              (func (param i32)
+                block
+                  local.get 0 call $send
+                  br 0
+                  local.get 0 call $send
+                end))"#,
+        )
+        .unwrap();
+        let after_return = flow(&bytes, "function=1&local=0&direction=forward").unwrap();
+        assert!(
+            node(&after_return, "import_call").is_empty(),
+            "{}",
+            after_return["nodes"]
+        );
+        assert_eq!(
+            after_return["status"], "computed",
+            "{}",
+            after_return["omissions"]
+        );
+        let after_br = flow(&bytes, "function=2&local=0&direction=forward").unwrap();
+        let calls = node(&after_br, "import_call");
+        assert_eq!(calls.len(), 1, "{}", after_br["nodes"]);
+        assert_eq!(calls[0]["byte_offset"], offset_of(&bytes, 2, "call", 0));
+        let dead = offset_of(&bytes, 2, "call", 1);
+        let error = flow(&bytes, &format!("function=2&offset={dead}")).unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(error.message.contains("unreachable"), "{}", error.message);
+    }
+
+    fn nested_loops(depth: usize, locals: usize) -> Vec<u8> {
+        let mut text = format!(
+            "(module (func (param i32) (result i32) (local{})",
+            " i32".repeat(locals)
+        );
+        text.push_str(&" loop".repeat(depth));
+        for local in 1..=locals {
+            text.push_str(&format!(" local.get 0 local.set {local}"));
+        }
+        text.push_str(&" end".repeat(depth));
+        text.push_str(" local.get 1))");
+        wat::parse_str(text).unwrap()
+    }
+
+    fn simulate_first(bytes: &[u8], limits: wasm_def_use::Limits, deadline: Instant) -> Simulation {
+        let module = Module::read(bytes).unwrap();
+        wasm_def_use::simulate_with(&module, 0, &module.bodies[0], deadline, limits).unwrap()
+    }
+
+    #[test]
+    fn nested_loops_stay_inside_the_work_budget_and_the_deadline() {
+        let later = Instant::now() + Duration::from_secs(60);
+        // One write under 20,000 loops: the prescan is linear in the bytes.
+        let deep = nested_loops(20_000, 1);
+        let sim = simulate_first(&deep, wasm_def_use::Limits::default(), later);
+        assert_eq!(sim.stopped_at, None, "{:?}", sim.omissions);
+        assert!(sim.work < 6 * 20_000, "work {}", sim.work);
+        // Every loop really writes every local: a quadratic number of joins,
+        // cut at the work budget, which the loops inside one instruction check.
+        let wide = nested_loops(400, 400);
+        let limits = wasm_def_use::Limits {
+            max_instructions: wasm_def_use::MAX_INSTRUCTIONS,
+            max_work: 50_000,
+        };
+        let sim = simulate_first(&wide, limits, later);
+        assert!(sim.stopped_at.is_some());
+        assert!(sim.work <= 50_000 + 400, "work {}", sim.work);
+        assert!(
+            sim.omissions.iter().any(|o| o.contains("work budget")),
+            "{:?}",
+            sim.omissions
+        );
+        let prescan = wasm_def_use::Limits {
+            max_instructions: wasm_def_use::MAX_INSTRUCTIONS,
+            max_work: 1_000,
+        };
+        let sim = simulate_first(&wide, prescan, later);
+        assert!(
+            sim.omissions
+                .iter()
+                .any(|o| o.contains("while recording loop writes")),
+            "{:?}",
+            sim.omissions
+        );
+        let sim = simulate_first(&wide, wasm_def_use::Limits::default(), Instant::now());
+        assert!(sim.stopped_at.is_some());
+        assert!(
+            sim.omissions.iter().any(|o| o.contains("deadline")),
+            "{:?}",
+            sim.omissions
+        );
+        // The default budget stops the 2,000 by 2,000 shape quickly, with a name.
+        let started = Instant::now();
+        let document = flow(&nested_loops(2_000, 2_000), "function=0&local=1").unwrap();
+        assert_eq!(document["truncated"]["simulation"], true);
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    fn assert_fits(document: &Value) {
+        let pretty = serde_json::to_string_pretty(document).unwrap().len();
+        let omitted = serde_json::to_string_pretty(&content_omitted(document, None))
+            .unwrap()
+            .len();
+        assert!(
+            pretty <= 131_072 && omitted <= 131_072,
+            "pretty {pretty}, omitted {omitted}"
+        );
+        assert!(fits_response(document));
+    }
+
+    #[test]
+    fn responses_fit_the_inline_limit_in_every_form() {
+        let mut text = String::from("(module (func (param i32) (result i32) (block (result i32)");
+        for k in 0..1100 {
+            text.push_str(&format!(" (drop (br_if 0 (i32.const {k}) (local.get 0)))"));
+        }
+        text.push_str(" (i32.const -1))))");
+        let wide = wat::parse_str(text).unwrap();
+        let end = offset_of(&wide, 0, "end", 0);
+        let document = flow(&wide, &format!("function=0&offset={end}")).unwrap();
+        assert_fits(&document);
+        let join = &document["joins"][0];
+        assert_eq!(join["incoming_count"], 1101);
+        assert_eq!(join["incoming"].as_array().unwrap().len(), MAX_JOIN_ENTRIES);
+        assert_eq!(document["truncated"]["joins"], true);
+        // A long chain through a parameter with 64 interprocedural steps.
+        let mut text = String::from("(module (func $chain (param i32) (result i32) local.get 0");
+        text.push_str(&" i32.const 3 i32.add".repeat(120));
+        text.push_str(") (func (param i32)");
+        text.push_str(&" local.get 0 call $chain drop".repeat(80));
+        text.push_str("))");
+        let chain = wat::parse_str(text).unwrap();
+        let ret = offset_of(&chain, 0, "end", 0);
+        let document = flow(
+            &chain,
+            &format!(
+                "function=0&offset={ret}&direction=backward&max_depth=256&interprocedural=true"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            document["truncated"]["nodes"], false,
+            "{}",
+            document["omissions"]
+        );
+        assert_eq!(
+            document["interprocedural"]["steps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            64
+        );
+        assert_fits(&document);
+        let document = flow(&chain, &format!("function=0&offset={ret}&direction=backward&max_nodes=4096&max_depth=256&interprocedural=true")).unwrap();
+        assert_fits(&document);
+        assert_eq!(document["truncated"]["bytes"], true);
+        assert!(
+            document["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o.as_str().unwrap().contains("Response budget"))
+        );
+        let count = document["node_count"].as_u64().unwrap() as usize;
+        for edge in document["edges"].as_array().unwrap() {
+            assert!(
+                edge["from"].as_u64().unwrap() < count as u64
+                    && edge["to"].as_u64().unwrap() < count as u64
+            );
+        }
+    }
+
+    #[test]
+    fn joins_list_every_definition_and_memory_needs_the_same_constant_address() {
+        let bytes = wat::parse_str(
+            r#"(module (memory 1)
+              (func (param i32) (result i32) (local i32)
+                local.get 0
+                if i32.const 1 local.set 1 else i32.const 2 local.set 1 end
+                local.get 1)
+              (func (param i32 i32) (result i32)
+                (i32.store (i32.const 64) (local.get 0))
+                (i32.store (i32.const 128) (local.get 1))
+                (i32.load (i32.const 64)))
+              (func (param i32 i32) (result i32)
+                (i32.store (i32.const 64) (local.get 0))
+                (i32.store (local.get 1) (local.get 1))
+                (i32.load (i32.const 64)))
+              (func (param i32) (result i32)
+                (i32.store (i32.const 64) (local.get 0))
+                (i32.load (i32.const 68)))
+              (func (param i32) (result i32)
+                (i32.store (i32.const 64) (local.get 0))
+                (i32.load (i32.const 64))))"#,
+        )
+        .unwrap();
+        let get = offset_of(&bytes, 0, "local.get", 1);
+        let document = flow(
+            &bytes,
+            &format!("function=0&offset={get}&direction=backward"),
+        )
+        .unwrap();
+        let join = joins_of(&document, "if")[0];
+        assert_eq!(join["local"], 1);
+        assert_eq!(vias(join), ["then_end", "fallthrough"]);
+        let offsets: HashSet<u64> = join["incoming"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["from_offset"].as_u64().unwrap())
+            .collect();
+        assert_eq!(offsets.len(), 2, "{join}");
+        assert!(
+            join["incoming"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["from_kind"] == "local_set")
+        );
+        for function in [1, 2, 3] {
+            let load = offset_of(&bytes, function, "i32.load", 0);
+            let document = flow(
+                &bytes,
+                &format!("function={function}&offset={load}&direction=backward"),
+            )
+            .unwrap();
+            assert!(
+                !edge_kinds(&document).contains("forwarded_store"),
+                "function {function}: {}",
+                document["edges"]
+            );
+        }
+        let load = offset_of(&bytes, 4, "i32.load", 0);
+        let document = flow(
+            &bytes,
+            &format!("function=4&offset={load}&direction=backward"),
+        )
+        .unwrap();
+        assert!(edge_kinds(&document).contains("forwarded_store"));
+    }
+
+    #[test]
+    fn branch_operands_are_the_carried_values_then_the_selector() {
+        let bytes = wat::parse_str(
+            "(module (func (param i32) (result i32) (block (result i32) (drop (br_if 0 (i32.const 7) (local.get 0))) (i32.const 8))))",
+        )
+        .unwrap();
+        let br_if = offset_of(&bytes, 0, "br_if", 0);
+        let whole = flow(
+            &bytes,
+            &format!("function=0&offset={br_if}&direction=backward"),
+        )
+        .unwrap();
+        assert_eq!(whole["seed"]["operand_count"], 2);
+        let carried = flow(&bytes, &format!("function=0&offset={br_if}&operand=0")).unwrap();
+        assert!(
+            node(&carried, "const")
+                .iter()
+                .any(|n| n["role"] == "seed" && n["text"] == "i32.const 7"),
+            "{}",
+            carried["nodes"]
+        );
+        assert!(
+            !joins_of(&carried, "block").is_empty(),
+            "the carried value reaches the block join"
+        );
+        let condition = flow(
+            &bytes,
+            &format!("function=0&offset={br_if}&operand=1&direction=backward"),
+        )
+        .unwrap();
+        assert!(node(&condition, "param").iter().any(|n| n["local"] == 0));
+        assert!(edge_kinds(&condition).contains("selector"));
+    }
+
+    #[test]
+    fn short_stacks_and_leftover_values_are_named() {
+        let bytes = wat::parse_str("(module (func (result i32) block (result i32) br 0 end) (func i32.const 1 i32.const 2 drop))").unwrap();
+        let end = offset_of(&bytes, 0, "end", 1);
+        let document = flow(
+            &bytes,
+            &format!("function=0&offset={end}&direction=backward"),
+        )
+        .unwrap();
+        assert!(
+            document["omissions"].as_array().unwrap().iter().any(|o| o
+                .as_str()
+                .unwrap()
+                .contains("carries 1 values but the operand stack holds 0")),
+            "{}",
+            document["omissions"]
+        );
+        let unknown = node(&document, "unknown");
+        assert_eq!(unknown[0]["text"], "unknown (no operand was on the stack)");
+        let document = flow(
+            &bytes,
+            "function=1&offset="
+                .to_owned()
+                .as_str()
+                .to_owned()
+                .replace(
+                    "offset=",
+                    &format!("offset={}", offset_of(&bytes, 1, "drop", 0)),
+                )
+                .as_str(),
+        )
+        .unwrap();
+        assert!(
+            document["omissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o.as_str().unwrap().contains("left on the operand stack")),
+            "{}",
+            document["omissions"]
+        );
+    }
+
+    #[test]
+    fn atomic_results_follow_only_their_address() {
+        let bytes = wat::parse_str(
+            "(module (memory 1 1 shared) (func (param i32 i32) (result i32) (i32.atomic.rmw.add (local.get 0) (local.get 1))))",
+        )
+        .unwrap();
+        let end = offset_of(&bytes, 0, "end", 0);
+        let document = flow(
+            &bytes,
+            &format!("function=0&offset={end}&direction=backward"),
+        )
+        .unwrap();
+        let params: Vec<u64> = node(&document, "param")
+            .iter()
+            .map(|n| n["local"].as_u64().unwrap())
+            .collect();
+        assert_eq!(params, [0], "{}", document["nodes"]);
+        let rmw = offset_of(&bytes, 0, "i32.atomic.rmw.add", 0);
+        let seeded = flow(
+            &bytes,
+            &format!("function=0&offset={rmw}&direction=backward"),
+        )
+        .unwrap();
+        assert_eq!(
+            node(&seeded, "param").len(),
+            2,
+            "the seed's own operands are all listed"
+        );
+    }
+
+    #[test]
+    fn handlers_read_as_instructions_and_stops_are_resource_limits() {
+        let bytes = wat::parse_str(
+            r#"(module (tag $e (param i32))
+              (func (result i32)
+                (block $h (result i32)
+                  (try_table (catch $e $h) nop)
+                  (i32.const 0))))"#,
+        )
+        .unwrap();
+        let end = offset_of(&bytes, 0, "end", 1);
+        let document = flow(
+            &bytes,
+            &format!("function=0&offset={end}&direction=backward"),
+        )
+        .unwrap();
+        let exception = node(&document, "exception_value")[0];
+        assert_eq!(
+            exception["text"],
+            "exception values of tag 0 at try_table (catch 0 0)"
+        );
+        let switching = wat::parse_str(
+            "(module (type $f (func)) (type $c (cont $f)) (func $g) (elem declare func $g)
+              (func (param i32) (result i32) local.get 0 drop ref.func $g cont.new $c drop local.get 0))",
+        )
+        .unwrap();
+        let stop = offset_of(&switching, 1, "cont_new", 0);
+        let error = flow(&switching, &format!("function=1&offset={stop}")).unwrap_err();
+        assert_eq!(error.status, 400);
+        assert!(
+            error.message.contains("stopped at byte"),
+            "{}",
+            error.message
+        );
     }
 }

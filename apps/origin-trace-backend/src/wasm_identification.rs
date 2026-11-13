@@ -733,7 +733,26 @@ fn demangled_paths(name: &str) -> Vec<&str> {
         return Vec::new();
     };
     let group = &inner[..close];
-    match group.find(" as ") {
+    // Only the ` as ` outside any nested `<...>` separates self type from
+    // trait: `<<Vec<u8> as Deref>::Target as alloc::Foo>` names alloc.
+    let mut depth = 0usize;
+    let mut split = None;
+    let bytes = group.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'-' if bytes.get(at + 1) == Some(&b'>') => at += 1,
+            b'<' => depth += 1,
+            b'>' => depth = depth.saturating_sub(1),
+            b' ' if depth == 0 && group[at..].starts_with(" as ") => {
+                split = Some(at);
+                break;
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    match split {
         Some(split) => vec![trim_path(&group[split + 4..]), trim_path(&group[..split])],
         None => vec![trim_path(group)],
     }
@@ -3732,6 +3751,12 @@ mod tests {
         // A v0 name whose crate cannot be read is still certainly Rust.
         assert_eq!(rust_crate("_RNvNtB2_3fmt5write"), (None, true));
         assert_eq!(rust_crate("_ReadFile"), (None, false));
+    }
+
+    #[test]
+    fn a_nested_qualified_path_takes_its_top_level_trait() {
+        let name = "<<alloc::vec::Vec<u8> as core::ops::Deref>::Target as alloc::Foo>::bar";
+        assert_eq!(rust_crate(name), (Some("alloc"), false));
     }
 
     #[test]

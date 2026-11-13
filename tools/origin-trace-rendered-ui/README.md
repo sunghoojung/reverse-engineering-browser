@@ -212,10 +212,14 @@ only its own and not the request. Both themes, nothing clipped.
 a helper and an exported caller) in Sources Inspect, renames the helper with
 the pencil on its header row and Enter, and requires at both sizes that the
 italic name follows the unchanged captured header and the call row that
-targets it. The Graph's **Functions** list must show the name beside `func 1`,
-choosing that row must put it beside the Graph title, and F2 on the graph must
-open the same editor, which Escape closes. Layout and inertness are checked at
-each step ([Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
+targets it, and that F2 after a click on the call row opens the callee's
+editor. The Graph's **Functions** list must show the name beside `func 1`; the
+open popover covers the graph by design, so its layout is checked on its own
+and the Graph's once it closes. Choosing that row must put the name beside the
+Graph title, and F2 after a click on the graph must open the editor for
+`func 1`, which Escape closes. Layout and inertness are checked at each step,
+and the Graph is photographed in both themes
+([Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
 
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,

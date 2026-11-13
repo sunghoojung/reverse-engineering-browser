@@ -163,7 +163,11 @@ Wasm card (**Rename** in Details, or F2 on the graph with the card selected).
 F2 on a call row renames its callee. The name follows the decoded listing, the
 Graph title, the function list (whose filter matches it), Flow cards and
 Details, Initiator frames and cross-reference rows. `wasm_function_names.js`
-owns these surfaces; Wasm names are not listed in the palette.
+owns these surfaces; Wasm names are not listed in the palette. The open UI
+polls the library on its 2 s tick with the last ETag, which the backend
+answers with 304 from one `stat` while nothing changed, so names an agent saves
+appear without a reload. A save from Flow Details returns focus to the redrawn
+Rename button or the canvas.
 
 When the command palette is present, the module registers a `Names` provider
 (`id: "evidence-names"`) through `globalThis.RebCommandPalette.addProvider`,

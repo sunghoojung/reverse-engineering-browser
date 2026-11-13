@@ -43,6 +43,9 @@ Version 2 of that closed document adds one member:
   duplicate indexes in one group and duplicate groups are refused.
 - Wasm names share the document's 500-name count, 80-character name rule and
   32 KiB byte bound with every other kind.
+- Every number is an integer written as one. A hand-edited `1.0` or `2e0` is
+  refused, by the backend's strict parser and by the UI, even where it equals
+  an integer, so both sides accept exactly the same documents.
 - Version 1 documents stay readable. Writers keep writing version 1 while no
   Wasm name exists and switch to version 2 for the first one, so a build that
   predates Wasm names keeps reading a library that has none.
@@ -84,7 +87,7 @@ and one `analyst_names` status member. No captured field changes.
 | `inspect_wasm` | `analyst_name` on `function`, `import`, `declaration` and `start` rows (by `function_index`); `target_analyst_name` on `call`, `return_call` and `ref.func` rows beside their new structural `target_function_index`; the module's names in `analyst_names.functions` |
 | `get_wasm_functions` | `analyst_names.functions` as `[index, name]` pairs, beside the name-section `names` |
 | `get_wasm_function_graph` | `analyst_name` for the function; the module's names in `analyst_names.functions`, so a `call N` row resolves |
-| `get_xrefs` | `selection.wasm_sha256` and `selection.function_index` identify the selection; rows that name a Wasm function carry `function_index` and `analyst_name` |
+| `get_xrefs` | `selection.wasm_sha256` and `selection.function_index` identify the selection; rows that name a Wasm function carry `function_index` and `analyst_name`. A `call_indirect` row names a callee only when its table entry resolved in this instance; a null, out-of-bounds, foreign or unresolved entry is labeled by its resolution and carries no `function_index` |
 | `get_flow_graph` | Wasm nodes carry `sha256` and `analyst_name` |
 | `get_request_stack` | Wasm frames carry `module_sha256` and `analyst_name`, in the stack and every task segment |
 
@@ -107,8 +110,13 @@ the packaged UI reads names from its own store and renders them itself.
   an unchanged library costs one `stat` per read. Every library write renames a
   new file into place, so a new generation always has a new inode.
 - A library without Wasm names leaves documents unchanged apart from the small
-  status member. The flow graph, cached as bytes, is then extended as text and
-  parsed only when names exist; its node and edge budgets bound that parse.
+  status member. The flow graph, cached as bytes, is parsed only when one scan
+  of its `sha256` members finds a module that has a name; otherwise it is
+  extended as text. Its node and edge budgets bound that parse.
+- The UI asks every 2 s whether the library changed, with its last ETag.
+  `GET /api/local-analyst` answers an unchanged file with 304 from the same
+  `stat` (device, inode, size, modification time) and never reads it, so a name
+  an agent saves appears in an open window within one tick.
 - A one-module `functions` list holds at most 500 pairs.
 
 ## Permission levels
@@ -133,8 +141,16 @@ module diff carrying names forward) use these instead of reading the document:
 - JavaScript, in the UI: `RebEvidenceNames.wasmFunctionKey(sha256, index)`,
   `RebEvidenceNames.wasmFunctionName(sha256, index)` (a name or `null`), and
   `RebWasmFunctionNames` (`nameOf`, `nameNode` for an inert, bidi-isolated
-  name span, `mark` so F2 inside an element renames its function, `beginFrom`,
-  `subscribe` to repaint on a rename).
+  name span, `mark` so F2 inside an element renames its function, with an
+  optional editor host and focus fallback, `beginFrom`, `subscribe` to repaint
+  on a rename).
+
+F2 resolves the function under the cursor from where focus really is:
+Inspect rows take no focus, so with focus on the code view it uses the row
+under the caret selection, else the row last pointed at, else the current
+line; with the Graph open, and with focus on the code view or the body, it
+uses the Graph's function. Tree rows, tabs and the toolbar keep the file
+rename.
 
 A view that carries a name to another module (a diff match) must write it under
 the other module's own key; a name never follows a match implicitly.

@@ -445,6 +445,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
   }
 
+  // A Sources toolbar command that did not fit the row sits in More; open
+  // More first, as a researcher would, then choose it.
+  @MainActor
+  private func clickSourceTool(_ ui: Harness, _ selector: String) async throws {
+    let moved = try await ui.value("document.querySelector('.source-more-menu').contains(document.querySelector(\(String(reflecting: selector))))") as? Bool
+    if moved == true { try await ui.click("#source-more > summary") }
+    try await ui.click(selector)
+  }
+
   @MainActor
   private func assertFullyVisible(_ ui: Harness, _ selector: String, _ context: String,
                                   file: StaticString = #filePath, line: UInt = #line) async throws {
@@ -2911,14 +2920,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // text, and line selection by pointer and keyboard revealing the bytes.
   @MainActor
   func test37WasmReadableView() async throws {
-    let inMore = "document.querySelector('.source-more-menu').contains(document.querySelector('#source-readable'))"
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "sources")
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"400\"]")
       try await ui.waitUntil("!document.querySelector('#source-readable').hidden", "Readable is offered for a captured WASM artifact")
-      if try await ui.value(inMore) as? Bool == true { try await ui.click("#source-more > summary") }
-      try await ui.click("#source-readable")
+      try await clickSourceTool(ui, "#source-readable")
       try await ui.waitUntil("(document.querySelector('#source-readable-host .wasm-readable-lines')?.textContent ?? '').includes('loop L1 {')", timeout: 30, "the readable lines did not load")
       let view = try await ui.json("""
         (() => { const host = document.querySelector('#source-readable-host'), rows = [...host.querySelectorAll('.wasm-readable-line')];
@@ -2957,10 +2964,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("wasm-readable-light-\(size.name)")
       _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
       // Graph replaces Readable in the same split.
-      if try await ui.value("document.querySelector('.source-more-menu').contains(document.querySelector('#source-graph'))") as? Bool == true { try await ui.click("#source-more > summary") }
-      try await ui.click("#source-graph")
+      try await clickSourceTool(ui, "#source-graph")
       try await ui.waitUntil("document.querySelector('#source-readable-host').hidden", "opening Graph closes Readable")
-      try await ui.click("#source-graph")
+      try await clickSourceTool(ui, "#source-graph")
     }
   }
 
@@ -3370,7 +3376,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-tree [role=treeitem]", containing: "map-module")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "the fixture module did not open as hex")
       let idleRSS = webContentResidentKilobytes(ui)
-      try await ui.click("#source-map")
+      try await clickSourceTool(ui, "#source-map")
       try await ui.waitUntil("!document.querySelector('.map-body').hidden && document.querySelector('.map-canvas').width > 0", timeout: 90, "the map did not load")
       let side = try await ui.value("document.querySelector('.map-canvas').width") as? Int ?? 0
       let openRSS = webContentResidentKilobytes(ui)

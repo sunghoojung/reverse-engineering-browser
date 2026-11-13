@@ -23636,7 +23636,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What was trimmed, in order, so the pretty-printed record fits 120 KiB: the import call list, the request echo, import lists past 32, results past 64, the function type lists. Empty when nothing was."
+            "description": "Each trimming step that removed something, in order, so the record fits 120 KiB pretty-printed as a one-record get_wasm_runs listing: the request echo, import lists past 32, the function type lists, the import calls past the longest prefix that fits, results past 64, then the import lists to what fits. Empty when nothing was trimmed. The store keeps the trimmed record."
           },
           "store_notice": {
             "type": [

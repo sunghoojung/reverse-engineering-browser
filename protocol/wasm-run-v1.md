@@ -93,20 +93,35 @@ arguments and 16 results each (`args_truncated`, `results_truncated`), 16
 memories and 16 tables, 64 operators in any constant expression, 262,144
 element segment items, one expected memory entry per read (so at most 16),
 captured import and export names cut to 128 bytes and outcome messages to 1,024
-in the record, a 4 MiB record, 64 stored runs and a 16 MiB store. A limit
+in the record (measured as JSON, so control characters, quotes and backslashes
+count as their escapes), a 4 MiB record, 64 stored runs and a 16 MiB store. A limit
 outside its range is refused with 400.
 
-A record always fits the 128 KiB that `reb-api mcp` returns inline, so a Full
-client gets every byte it read rather than a structural summary. Reads are
-returned as hex, so their 32 KiB cap is 64 KiB of text. If the pretty-printed
-record would still exceed 120 KiB, it is trimmed in this order until it fits:
-the import call list is emptied (`import_calls_total` and
-`import_calls_truncated` stay), the request echo is replaced by its size
-(`provenance.inputs_digest` still names it), `imports` and `other_imports` keep
-their first 32 entries, `results` keeps its first 64 values, and
-`function.type` becomes its two counts. `size_trimmed` lists each step taken and
-is empty otherwise. Outcomes, counts, memory reads, digests and the expectation
-are never trimmed; the expectation is computed before any trimming.
+A record always fits the 128 KiB that `reb-api mcp` returns inline, alone and
+as a one-record `get_wasm_runs` listing, so a Full client gets every byte it
+read rather than a structural summary. Reads are returned as hex, so their 32
+KiB cap is 64 KiB of text. The record is measured as the listing returns it:
+nested in `{"runs": [...]}`, every line gains four spaces of indentation. If
+that pretty-printed listing would exceed 120 KiB, the record is trimmed in this
+order until it fits:
+
+1. The request echo is replaced by its size (`provenance.inputs_digest` still
+   names it).
+2. `imports` and `other_imports` keep their first 32 entries.
+3. `function.type` becomes its two counts.
+4. `import_calls` keeps the longest prefix that fits, and
+   `import_calls_truncated` is set; `import_calls_total` stays.
+5. `results` keeps its first 64 values.
+6. `imports` and `other_imports` keep only as many entries as fit.
+
+`size_trimmed` lists each step that removed something and is empty otherwise.
+Outcomes, counts, memory reads, digests and the expectation are never trimmed;
+the expectation is computed before any trimming. The trimmed record is what the
+HTTP response returns and what the store keeps: trimming happens once, before
+storage, so a later `get_wasm_runs` shows the same record.
+
+A name cut to 128 bytes ends in ` [cut]`. Two names that share their first 128
+bytes then look the same; `function_index` is what tells them apart.
 
 The memory and table limits are totals: every memory and every table the run
 creates, imported or defined, and every growth, counts against one budget each.

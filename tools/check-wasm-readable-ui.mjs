@@ -55,6 +55,11 @@ const fetch = async url => {
   return new Response(JSON.stringify(documentFor(offset, Math.min(cut, total - offset), total, {artifact_id: artifact})));
 };
 const context = createContext({window, document, console, fetch, Response, AbortController, Error, TypeError, Map, JSON, Number, String, Math, setTimeout});
+// The researcher-names helper (wasm_function_names.js) loads after the panel
+// is built; a markup-shaped name must stay text and a rename must repaint.
+let researcherName = '<b>encode_payload</b>';
+const nameListeners = [];
+const namedSha = 'a'.repeat(64);
 runInContext(`${await ui('block_graph.js')}\n${await ui('wasm_readable.js')}\nglobalThis.create = createWasmReadablePanel;`, context);
 const host = document.getElementById('host'), button = document.getElementById('readable');
 const revealed = [];
@@ -62,6 +67,10 @@ let focusedList = 0;
 const panel = context.create({host, editor: host.closest('.sources-editor'), button, closeOn: [document.getElementById('graph')],
   revealOffset: offset => revealed.push(offset), initialFunction: () => null});
 host.querySelector('.wasm-readable-lines').focus = () => { focusedList += 1; };
+context.RebWasmFunctionNames = {
+  nameOf: (sha256, index) => (sha256 === namedSha && index === 1 ? researcherName : null),
+  subscribe: listener => { nameListeners.push(listener); return () => {}; }
+};
 const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise(resolve => setTimeout(resolve, 0)); };
 panel.sync({kind: 'javascript', source_type: 'artifact', artifact_id: '9', sha256: 'b'});
 assert.equal(button.hidden, true, 'Readable is offered only for a Wasm artifact');
@@ -80,6 +89,11 @@ assert.equal(rows()[0].querySelector('.wasm-readable-text').textContent, '  <img
 assert.equal(rows()[1].querySelectorAll('.wasm-readable-raw').length, 1, 'a fallback line carries the raw chip');
 assert.equal(rows()[0].querySelector('.wasm-readable-offset').textContent, '000064');
 assert.equal(host.querySelector('.wasm-readable-title').textContent, 'readable_run (func 1)');
+assert.equal(host.querySelector('.wasm-readable-analyst').textContent, '<b>encode_payload</b>', 'the researcher name sits beside the module name');
+assert.equal(host.querySelector('.wasm-readable-analyst').hidden, false);
+assert.equal(host.querySelectorAll('.wasm-readable-header b').length, 0, 'a researcher name stays text');
+researcherName = null; nameListeners.forEach(listener => listener());
+assert.equal(host.querySelector('.wasm-readable-analyst').hidden, true, 'a cleared name repaints');
 // Choosing a line reveals its first byte; keys move the selection.
 rows()[2].dispatchEvent(new window.Event('click'));
 assert.deepEqual(revealed, [104]);

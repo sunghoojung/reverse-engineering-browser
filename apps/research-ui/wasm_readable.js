@@ -56,8 +56,16 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
   label.append(labelText, input);
   const next = document.createElement('button'); next.type = 'button'; next.className = 'source-tool'; next.textContent = '›'; next.setAttribute('aria-label', 'Next function');
   const title = document.createElement('span'); title.className = 'wasm-readable-title';
+  // The researcher's name for the function (protocol/wasm-function-names-v1.md)
+  // sits beside the module's, never in its place; the listing keeps the
+  // module's names.
+  // wasm_function_names.js loads after this panel is built, so its helper is
+  // looked up when used.
+  const researcher = () => globalThis.RebWasmFunctionNames;
+  const analyst = document.createElement('span'); analyst.className = 'researcher-name wasm-readable-analyst'; analyst.hidden = true;
+  let watchingNames = false;
   const stats = document.createElement('span'); stats.className = 'wasm-readable-stats';
-  header.append(previous, label, next, title, stats);
+  header.append(previous, label, next, title, analyst, stats);
   const status = document.createElement('p'); status.className = 'wasm-readable-status'; status.setAttribute('role', 'status');
   const list = document.createElement('div'); list.className = 'wasm-readable-lines'; list.tabIndex = 0;
   list.setAttribute('role', 'listbox'); list.setAttribute('aria-label', 'Readable lines');
@@ -82,6 +90,7 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
     if (!current) return;
     const {doc, lines} = current;
     title.textContent = `${doc.name} (func ${doc.function_index})`;
+    paintAnalyst();
     stats.textContent = wasmReadableSummary(doc);
     for (const line of lines) {
       const row = document.createElement('div');
@@ -107,6 +116,13 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
     pager.hidden = earlier.disabled && later.disabled;
     const omissions = (doc.omissions ?? []).filter(text => !text.includes('raw fallback'));
     setStatus(omissions[0] ?? '', omissions.length ? 'warning' : 'info');
+  }
+  function paintAnalyst() {
+    if (!watchingNames && researcher()?.subscribe) { watchingNames = true; researcher().subscribe(() => { if (isOpen) paintAnalyst(); }); }
+    const name = current && source ? researcher()?.nameOf(source.sha256, current.doc.function_index) ?? null : null;
+    analyst.textContent = name ?? '';
+    analyst.hidden = !name;
+    analyst.title = name ? `${name} (researcher name)` : '';
   }
   function select(position) {
     if (!current?.lines.length) return;
@@ -158,7 +174,7 @@ function createWasmReadablePanel({host, editor, button, closeOn = [], revealOffs
       if (result.lines.length) select(wanted === null ? 0 : Math.min(result.lines.length - 1, Math.max(0, wanted - start)));
     } catch (error) {
       if (!owned() || error.name === 'AbortError') return;
-      current = null; list.replaceChildren(); title.textContent = `func ${index}`; stats.textContent = '';
+      current = null; list.replaceChildren(); title.textContent = `func ${index}`; stats.textContent = ''; paintAnalyst();
       pager.hidden = true;
       setStatus(error instanceof TypeError ? 'The evidence service is unreachable. Check that the session is still running.' : error.message, 'error');
     }

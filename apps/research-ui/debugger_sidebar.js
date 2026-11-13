@@ -290,6 +290,8 @@ function createDebuggerList({id, label, onActive = null, onChoose, render}) {
     },
     focus() { element.focus({preventScroll: true}); },
     scrollTo(key) { reveal(key); paint(); },
+    // The painted row of `key`, or null while it is outside the window.
+    row(key) { return [...space.children].find(row => row.dataset.key === key) ?? null; },
     release() { if (frame > 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frame); frame = 0; space.replaceChildren(); items = []; options = []; tops = [0]; signature = ''; active = null; }
   };
 }
@@ -1411,10 +1413,13 @@ function debuggerObservationsSection() {
       list.set(items, {selectedKey: selected?.key ?? null});
       if (revealing) {
         // The chosen row in its list, then the list, which takes focus, at the
-        // top of the pane; its details follow below it.
+        // top of the pane; its details follow below it. Once they render, the
+        // row itself is brought whole into view where the pane is short.
         list.scrollTo(revealing.key);
         choose(view, revealing, 'reveal');
         if (typeof list.element.scrollIntoView === 'function') list.element.scrollIntoView({block: 'start'});
+        const row = list.row(revealing.key);
+        if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({block: 'nearest'});
         // A control the researcher picked meanwhile (a file, Find, the Watch
         // form) keeps focus; the record is still chosen and in view.
         const active = document.activeElement;

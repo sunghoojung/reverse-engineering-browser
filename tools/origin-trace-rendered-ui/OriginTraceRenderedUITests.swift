@@ -4059,6 +4059,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return !document.querySelector('#screen-sources').hidden && !document.querySelector('#debugger-sidebar').hidden &&
             chosen?.dataset.key.endsWith(':\(expected.debuggerProcess):\(sequence)') && document.activeElement?.id === 'debugger-observations'; })()
         """, "\(size.name): Show in debugger did not choose the observation with focus on its list")
+      // Before any key, as the reveal left it: the chosen row is whole inside
+      // its list and the pane in both themes, the narrow window included.
+      for theme in ["dark", "light"] {
+        let revealed = try await ui.json("""
+          (async () => {
+            const root = document.documentElement;
+            window.__rebRevealTheme = root.dataset.theme ?? null;
+            root.dataset.theme = '\(theme)';
+            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+            const list = document.querySelector('#debugger-observations').getBoundingClientRect();
+            const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
+            return {rowTop: row?.top ?? null, rowBottom: row?.bottom ?? null, paneTop: pane.top, paneBottom: pane.bottom,
+              listTop: list.top, listBottom: list.bottom,
+              rowInPane: Boolean(row) && row.top >= pane.top - 0.5 && row.bottom <= pane.bottom + 0.5,
+              rowInList: Boolean(row) && row.top >= list.top - 0.5 && row.bottom <= list.bottom + 0.5}; })()
+          """)
+        print("RENDERED_UI_WATCHED_REVEALED \(size.name) \(theme) \(revealed)")
+        XCTAssertEqual(revealed["rowInPane"] as? Bool, true, "\(size.name) \(theme): the revealed row's top and bottom are inside the pane: \(revealed)")
+        XCTAssertEqual(revealed["rowInList"] as? Bool, true, "\(size.name) \(theme): the revealed row is not clipped by its list: \(revealed)")
+        try await ui.screenshot("debugger-revealed-row-\(theme)-\(size.name)")
+        _ = try await ui.value("""
+          (() => { if (window.__rebRevealTheme === null) delete document.documentElement.dataset.theme;
+            else document.documentElement.dataset.theme = window.__rebRevealTheme; delete window.__rebRevealTheme; return true; })()
+          """)
+      }
       // WebKit draws focus a script moved only after the next key press; the
       // arrow keeps the one Requests row active and must show the list's focus.
       try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])

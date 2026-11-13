@@ -42,7 +42,10 @@ use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 pub const SCHEMA: &str = "wasm-run-v1";
 const STORE_SCHEMA: &str = "reb-wasm-runs-v1";
 /// The artifact receiver's default per-artifact limit. A larger module is
-/// refused before compilation, which no deadline can interrupt.
+/// refused before compilation, which no deadline can interrupt. Compiling
+/// takes about 25 to 30 times the module size in memory at its peak (a
+/// 6.9 MB body of nested ifs peaked near 320 MB resident), so a module at
+/// this cap can need about 480 MB for the length of the run.
 pub const MAX_MODULE_BYTES: usize = 16 * 1024 * 1024;
 /// Wasm itself allows 1,000 parameters and results per function type.
 const MAX_VALUES: usize = 1000;
@@ -68,6 +71,11 @@ const MAX_LITERAL: usize = 64;
 const MAX_CONST_OPERATORS: usize = 64;
 /// Memories and tables a run instantiates, imported and defined together.
 const MAX_MEMORIES: u32 = 16;
+/// Element segment items across the module. Instantiation materializes every
+/// item, active or passive, and cannot be interrupted, so this bounds it: about
+/// 5.6 million items took 4.5 s past a 50 ms deadline. Large real tables hold
+/// tens of thousands.
+const MAX_ELEMENT_ITEMS: u64 = 262_144;
 const MAX_TABLES: u32 = 16;
 /// Fuel is granted in slices so the wall-clock deadline is checked between
 /// them, and every import call checks it too; a slice is well under a
@@ -79,8 +87,10 @@ const PAGE: u64 = 65_536;
 const INTERPRETER: &str = "wasmi";
 const INTERPRETER_VERSION: &str = "2.0.0";
 
-/// Default and maximum for each limit. The maxima keep one run inside a
-/// bounded share of this process's memory and time.
+/// Default and maximum for each limit. The maxima bound what the module may
+/// use while it runs: linear memory and tables up to 64 MiB and 1,000,000
+/// elements in total, and 10 s. Compilation memory is bounded separately, by
+/// MAX_MODULE_BYTES.
 const FUEL: (u64, u64) = (100_000_000, 10_000_000_000);
 const MEMORY_PAGES: (u64, u64) = (256, 1024);
 const TABLE_ELEMENTS: (u64, u64) = (10_000, 1_000_000);
@@ -556,6 +566,7 @@ struct Scan {
     defined_functions: u32,
     memories: u32,
     tables: u32,
+    element_items: u64,
     exports: Vec<(String, ExternalKind, u32)>,
     start: Option<u32>,
     bodies: Vec<Range<usize>>,
@@ -632,6 +643,15 @@ fn scan(bytes: &[u8]) -> Result<Scan> {
                     let element = element.map_err(bad)?;
                     if let wasmparser::ElementKind::Active { offset_expr, .. } = &element.kind {
                         constant(offset_expr, "element offset")?;
+                    }
+                    facts.element_items += u64::from(match &element.items {
+                        wasmparser::ElementItems::Functions(items) => items.count(),
+                        wasmparser::ElementItems::Expressions(_, items) => items.count(),
+                    });
+                    if facts.element_items > MAX_ELEMENT_ITEMS {
+                        return Err(Error::protocol(format!(
+                            "WASM run module has over {MAX_ELEMENT_ITEMS} element segment items, which instantiation would materialize without a deadline; nothing ran"
+                        )));
                     }
                     if let wasmparser::ElementItems::Expressions(_, items) = element.items {
                         for item in items {
@@ -1382,6 +1402,17 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
         Some(outcome) => Err(outcome),
         None => Instance::new(&mut store, &module, &externs)
             .map_err(|error| instantiation_failure(&error, &store)),
+    };
+    // Compilation and instantiation cannot be interrupted; they are bounded by
+    // the module, element and constant-expression caps. A deadline that passed
+    // during them is reported as such, before any function is called.
+    let instance = match instance {
+        Ok(_) if Instant::now() >= deadline => Err(Outcome::new(
+            Status::DeadlineExceeded,
+            Phase::Instantiate,
+            "The deadline passed while the module was compiled and instantiated; no function was called",
+        )),
+        other => other,
     };
     let mut outcome = None;
     let mut results = None;
@@ -2338,6 +2369,47 @@ mod tests {
         state.deadline_hit = false;
         assert!(stub_call(&mut state, 0, &[], &mut results).is_ok());
         assert!(matches!(results[0], Val::I32(1)));
+    }
+
+    #[test]
+    fn element_items_are_capped_and_a_late_instantiation_is_reported() {
+        let (request, limits) = request(json!({}));
+        let many = module(&repeated(
+            "(module (func $f) (elem func ",
+            "$f ",
+            MAX_ELEMENT_ITEMS as usize + 1,
+            ") (func (export \"run\")))",
+        ));
+        let error = execute(&request, limits, &many, Instant::now()).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert!(
+            error.message.contains("element segment items"),
+            "{}",
+            error.message
+        );
+        // Within the cap, a deadline that passes while the module is compiled
+        // and instantiated ends the run there, not as a call that returned.
+        let full = module(&repeated(
+            "(module (func $f) (elem func ",
+            "$f ",
+            MAX_ELEMENT_ITEMS as usize,
+            ") (func (export \"run\") (result i32) i32.const 1))",
+        ));
+        let (late, limits) = self::request(json!({"limits":{"deadline_ms":1}}));
+        let result = execute(
+            &late,
+            limits,
+            &full,
+            Instant::now() - Duration::from_millis(5),
+        )
+        .unwrap();
+        assert_eq!(
+            result["outcome"]["status"], "deadline_exceeded",
+            "{}",
+            result["outcome"]
+        );
+        assert_eq!(result["outcome"]["phase"], "instantiate");
+        assert_eq!(result["results"], Value::Null);
     }
 
     #[test]

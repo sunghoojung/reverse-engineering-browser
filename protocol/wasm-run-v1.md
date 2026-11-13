@@ -92,7 +92,8 @@ which no deadline can interrupt), a 1 MiB request body, 1,000 arguments, 256
 stubs with up to 256 sequence entries, 16 writes and 16 reads of at most 256
 KiB each in total, 256 recorded import calls with up to 16 arguments and 16
 results each (`args_truncated`, `results_truncated`), 16 memories and 16
-tables, 64 operators in any constant expression, a 4 MiB record, 64 stored runs
+tables, 64 operators in any constant expression, 262,144 element segment items,
+one expected memory entry per read (so at most 16), a 4 MiB record, 64 stored runs
 and a 16 MiB store. A limit outside its range is refused with 400.
 
 The memory and table limits are totals: every memory and every table the run
@@ -103,14 +104,25 @@ table, element or data initializer) over 64 operators is refused with 422
 before the interpreter sees it, because wasmi builds and evaluates one
 recursively, one native stack frame per operator; real modules use one to
 three. Every function is compiled when the module is (eager compilation), so a
-large body costs no fuel and a call never stops for compilation; the 16 MiB
-module cap bounds that work.
+large body costs no fuel and a call never stops for compilation. Element
+segments hold at most 262,144 items in total, active or passive, because
+instantiation materializes every one; data segments are bounded by the module
+size.
+
+Compilation and instantiation cannot be interrupted. They are bounded only by
+those caps: the 16 MiB module, 64-operator constant expressions and 262,144
+element items. Their time counts toward the deadline, and a deadline that
+passes during them ends the run as `deadline_exceeded` in phase `instantiate`
+before any function is called. Compiling needs about 25 to 30 times the module
+size in memory at its peak (a 6.9 MB body of nested ifs peaked near 320 MB
+resident), so a module at the 16 MiB cap can hold about 480 MB of the backend's
+memory while it compiles.
 
 Fuel is granted in 100,000-unit slices. The deadline is checked before each
 call, between slices and at every import call, so a run ends within one
 100,000-unit slice or one import call of the deadline, where checking only
 between 1,000,000-unit slices let a loop of import calls run three times past
-it. Compiling the module is not interruptible and counts toward the deadline. A
+it. A
 refused `memory.grow` returns -1 to the module, as the specification
 requires, and is counted in `memory_grow_denied` (`table_grow_denied` for
 tables). One run is admitted per backend at a time; a second gets 409. Once
@@ -127,7 +139,7 @@ admitted, a dropped HTTP connection does not cancel the run or its storage.
 | `trap` | A Wasm trap; `trap_kind` is `unreachable`, `memory_out_of_bounds`, `table_out_of_bounds`, `indirect_call_to_null`, `integer_division_by_zero`, `integer_overflow`, `bad_conversion_to_integer`, `indirect_call_type_mismatch` or `out_of_system_memory`. |
 | `import_trap` | A function import without a stub (`reason: no_stub`) or with an exhausted sequence (`sequence_exhausted`) was called; `outcome.import` names it. |
 | `fuel_exhausted` | The fuel limit was reached. |
-| `deadline_exceeded` | The wall-clock deadline was reached between fuel slices. |
+| `deadline_exceeded` | The wall-clock deadline was reached: before a call, between fuel slices, at an import call, or (phase `instantiate`) while the module was compiled and instantiated. |
 | `call_depth_exceeded` | The call depth or value stack limit was reached (`trap_kind: stack_overflow`). |
 | `memory_limit`, `table_limit` | A memory or table the module declares or imports exceeds its limit at instantiation, or a growth that must succeed was refused. |
 | `instantiation_failed` | Instantiation failed for another reason, such as an out-of-bounds data segment. |

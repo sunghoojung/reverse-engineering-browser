@@ -95,23 +95,39 @@ programs mixing calls, loads, stores, globals, locals, trapping division and
 `br_if`. `typed_generated_modules_validate_and_keep_effect_order` runs 2,000
 modules that wasmparser validates, with nested `block`, `loop`, `if`/`else`
 and `try_table`, `br`, `br_if` and `br_table` at depth, `return_call`,
-`select`, `local.tee`, `memory.grow`, a multi-value call and `throw`. A third,
+`select`, `local.tee`, `memory.grow`, a multi-value call and `throw`, and
+`try_table` handlers that read a local the try body writes. A third,
 `every_partial_assignment_keeps_the_guarantees`, puts a conflicting value
-below every place that assigns only part of the pending stack.
+below every place that assigns only part of the pending stack. Beyond these
+static checks, `make wasm-readable-values-check` (part of `make check`) runs
+3,000 generated modules in V8 with imports that log their calls and throw
+into handlers, interprets each listing with the same imports, and requires
+the same results, traps, escaping exceptions, call log, global and memory for
+five inputs.
 
 1. The instructions with an effect (calls, loads, stores and every other
    memory or table operation, global reads and writes, trapping arithmetic,
    throws, `unreachable`) and the branches (`if`, `br`, `br_if`, `br_table`,
    `return`) keep their byte order.
 2. No read or write of a local moves across a write of that local.
-3. When `status` is `complete`, every decoded instruction, and so every code
+3. While a catching frame of this function is open (a legacy `try` body
+   before its first catch arm, or a `try_table` with catch clauses), a local
+   write keeps its byte order with every instruction that can throw: calls of
+   every kind, `throw`, `throw_ref` and `rethrow`. A handler in the function
+   reads the local as it was when control left.
+4. When `status` is `complete`, every decoded instruction, and so every code
    byte, is owned by exactly one line.
 
-Only pure values (constants, local reads, arithmetic that cannot trap) may
-read later than their bytes, and only where nothing above can change them.
+So two kinds of instruction may read at a different place than their bytes.
+A pure value (a constant, a local read, arithmetic that cannot trap) may read
+later, where nothing above can change what it reads. A local write may move
+across a call or a throw where no catching frame of this function is open: a
+throw there leaves the function, and its locals are never read again.
 To keep these properties, a pending value is assigned to a temporary `tN` on
-its own line, deepest first, before a line it conflicts with: two effects, or
-a local one writes and the other reads. Values are marked from the top of
+its own line, deepest first, before a line it conflicts with. Two values
+conflict when both have effects, when one writes a local the other reads or
+writes, or, inside a catching frame, when one writes a local and the other
+can throw. Values are marked from the top of
 the stack down, and each marked value's effects join what later values are
 checked against, so a value below a marked one that conflicts with it is
 assigned before it. At a `br_if`, every pending value with an effect or a
@@ -204,7 +220,7 @@ ranges, and the callee table. Callee names are module names, which
 | Bound | Value | Why |
 | --- | --- | --- |
 | Input | 64 MiB | The block graph's limit, above the artifact receiver's default 16 MiB. |
-| Function body | 7,654,321 bytes | Web engines reject a longer body, so it cannot have run. |
+| Function body | 7,654,321 bytes | Web engines reject a longer body, so it cannot have run. Module validation enforces it for every body, so one oversized function makes every function of its module return 422. |
 | Instructions lifted | 250,000 | Keeps one request's offsets and lines in tens of megabytes. |
 | Lines | 300,000, and 24 MiB of line text | The same, for line storage. Checked before each instruction and before each `br_table` case line, so one table with many targets cannot overshoot. |
 | Line text | 2,048 bytes | One line stays readable; `clipped_lines` counts cuts. |
@@ -218,7 +234,9 @@ are not lifted. The lift is recomputed for each window. An imported or
 undefined function returns 404. A module whose sections do not validate, or
 a requested function whose body does not validate with wasmparser's
 validator (every feature enabled), returns 422 with a named error rather
-than a listing. The lift reads declared stack effects and assumes a body that
+than a listing. The validator's own message can quote captured text (a
+duplicate export name, say), so it is cut at 512 bytes on a character
+boundary and marked `[text limited]`. The lift reads declared stack effects and assumes a body that
 type checks, so an invalid one would read as plausible junk. A malformed
 body or unterminated control structure also returns 422, a window past `line_count` or a `line_limit` outside 1 to 2,000
 400. The native route runs the packaged helper with the block graph's queue,

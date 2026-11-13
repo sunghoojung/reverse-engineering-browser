@@ -2477,7 +2477,7 @@ pub fn pseudocode(
             "callee_fields": ["function_index", "name", "name_source"],
             "omissions": omissions,
             "limits": limits,
-            "notice": "Static lift of declared stack effects; the module was not executed. A complete lift owns every instruction on exactly one line, and folding keeps the order of calls, memory, globals, tables, traps and local writes. Fallback lines keep the raw instruction text. Names come from the module's name section, exports and imports.",
+            "notice": "Static lift of declared stack effects; the module was not executed. A complete lift owns every instruction on exactly one line, and folding keeps the order of calls, memory, globals, tables, traps and branches, and of local writes with whatever can throw to a handler in this function. Fallback lines keep the raw instruction text. Names come from the module's name section, exports and imports.",
         });
         let mut merged = 0usize;
         let frames_truncated = window_document(

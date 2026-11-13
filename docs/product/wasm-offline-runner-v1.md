@@ -14,8 +14,8 @@ What runs, and what cannot happen:
   backend. Every import is a stub that returns only values the request supplies,
   or traps, and every call it receives is recorded. Memory, tables and globals
   the module imports are fresh and empty.
-- Fuel, memory pages, table elements, call depth and a wall-clock deadline bound
-  each run. Each limit, each trap and an import called without a stub is its
+- Fuel, memory pages and table elements (each a total across every memory or
+  table), call depth and a wall-clock deadline bound each run. Each limit, each trap and an import called without a stub is its
   own named outcome. The start function runs only when asked.
 - Memory can be written before the call and read after it, within 256 KiB each.
   Expected results and memory bytes are compared exactly, so a caller without
@@ -24,8 +24,8 @@ What runs, and what cannot happen:
   as a derived experiment record with the module hash, function, inputs digest,
   interpreter version and limits.
 
-Return values, import arguments and memory bytes are content: an agent receives
-them only at Full access. The contract, limits and outcomes are in
+Return values, import arguments, memory bytes and their digests are content:
+an agent receives them only at Full access, and below it not even their length. The contract, limits and outcomes are in
 [WASM run v1](../../protocol/wasm-run-v1.md), and the policy in
 [SAFETY](../../SAFETY.md#observation-and-experiments).
 

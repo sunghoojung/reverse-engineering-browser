@@ -662,8 +662,10 @@ statuses are answers, not failures: `trap` with `trap_kind`, `import_trap` with
 `outcome.import` (stub that import, using `import_calls` to see its arguments
 and call order, and supply every clock or random source), `fuel_exhausted`,
 `deadline_exceeded` or `call_depth_exceeded` (raise `limits` or choose another
-function), and `memory_write_out_of_bounds`. Below Full access every `value`
-and `hex` is omitted, so compare with `expect` rather than reading results. A
+function), `memory_limit` or `table_limit` (the limits are totals across every
+memory and table), and `memory_write_out_of_bounds`. Below Full access every
+`value`, `hex` and memory `sha256` is omitted with no length, so compare with
+`expect` rather than reading results. A
 match holds for these inputs only. `get_wasm_runs {"artifact_id": "9"}` lists
 earlier runs. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
 

@@ -106,7 +106,7 @@ Every option is off unless the start names it, and none is inherited.
 | Inspect (Wasm disassembly) | `inspect_wasm` with `row_offset`, `row_limit`, `sections` | R (structure), F (instruction text) | Added row windows; below Full access row text is omitted |
 | Graph (basic-block graph) | `get_wasm_functions`, `get_wasm_function_graph` | R | Covered |
 | Wasm function names (Inspect, Graph, Flow) | Read: `analyst_name` and `analyst_names` in `inspect_wasm`, `get_wasm_functions`, `get_wasm_function_graph`, `get_xrefs`, `get_flow_graph`, `get_request_stack`. Write: `analyst_action` `set_wasm_function_name` | R to read, A to write | Added; names are joined at every level and the write needs no other Analyst file |
-| Run offline… (one function in the stubbed local interpreter) | `run_wasm_function` | A (outcome, counts, digests, expectation matches), F (results, import arguments, memory bytes) | Added |
+| Run offline… (one function in the stubbed local interpreter) | `run_wasm_function` | A (outcome, counts, digests, expectation matches), F (results, import arguments, memory bytes and their digests) | Added |
 | Stored offline runs | `get_wasm_runs` | R (structure), F (values and bytes) | Added |
 | Map (entropy and kind map) | `get_artifact_map` | R | Covered |
 | Facts | `get_source_facts` | A | Covered |

@@ -57,13 +57,13 @@ match its import's result types; a mismatch is a 400 that names both type
 lists, and is checked before any module code runs. A stub that names no
 function import, or two stubs for one import, is refused.
 
-Values are `{type, value}` with string values, so they can be copied between
-`args`, stubs, `results` and `expect`:
+Values are `{type, value}` with string values of at most 64 characters, so
+they can be copied between `args`, stubs, `results` and `expect`:
 
 | Type | Accepted | Returned |
 | --- | --- | --- |
 | `i32`, `i64` | signed or unsigned decimal of that width | signed decimal |
-| `f32`, `f64` | decimal, `inf`, `-inf`, or `nan:0x` with the exact bit pattern | the same forms |
+| `f32`, `f64` | an optionally negative decimal with optional fraction and exponent (`1.5`, `-0`, `1e300`), `inf`, `-inf`, or `nan:0x` with the exact bit pattern; a finite literal that rounds to infinity is refused | the shortest form that reads back to the same bits (`1001.0`, `1e300`), `inf`, `-inf` or `nan:0x` |
 | `v128` | one hexadecimal integer (optional `0x`), lane 0 in the low bits | `0x` and 32 digits |
 | `funcref`, `externref` | `null` | `null` or `non-null` |
 
@@ -78,19 +78,36 @@ bytes, can still learn whether its vectors matched.
 | Limit | Default | Maximum |
 | --- | --- | --- |
 | `fuel` | 100,000,000 | 10,000,000,000 |
-| `memory_pages` (64 KiB pages, any memory) | 256 | 1,024 |
-| `table_elements` | 10,000 | 1,000,000 |
+| `memory_pages` (64 KiB pages, total across every memory) | 256 | 1,024 |
+| `table_elements` (total across every table) | 10,000 | 1,000,000 |
 | `call_depth` | 1,000 | 10,000 |
 | `deadline_ms` (wall clock, from when the run starts reading the module) | 2,000 | 10,000 |
 
 Fixed bounds: a 16 MiB module (larger artifacts are refused before compilation,
 which no deadline can interrupt), a 1 MiB request body, 1,000 arguments, 256
 stubs with up to 256 sequence entries, 16 writes and 16 reads of at most 256
-KiB each in total, 256 recorded import calls with up to 16 arguments each, 64
-stored runs and a 16 MiB store. A limit outside its range is refused with 400.
+KiB each in total, 256 recorded import calls with up to 16 arguments and 16
+results each (`args_truncated`, `results_truncated`), 16 memories and 16
+tables, 64 operators in any constant expression, a 4 MiB record, 64 stored runs
+and a 16 MiB store. A limit outside its range is refused with 400.
 
-Fuel is granted in 1,000,000-unit slices; the deadline is checked between
-slices. A refused `memory.grow` returns -1 to the module, as the specification
+The memory and table limits are totals: every memory and every table the run
+creates, imported or defined, and every growth, counts against one budget each.
+A module with more than 16 memories or tables ends as `memory_limit` or
+`table_limit` before anything is created. A constant expression (a global,
+table, element or data initializer) over 64 operators is refused with 422
+before the interpreter sees it, because wasmi builds and evaluates one
+recursively, one native stack frame per operator; real modules use one to
+three. Every function is compiled when the module is (eager compilation), so a
+large body costs no fuel and a call never stops for compilation; the 16 MiB
+module cap bounds that work.
+
+Fuel is granted in 100,000-unit slices. The deadline is checked before each
+call, between slices and at every import call, so a run ends within one
+100,000-unit slice or one import call of the deadline, where checking only
+between 1,000,000-unit slices let a loop of import calls run three times past
+it. Compiling the module is not interruptible and counts toward the deadline. A
+refused `memory.grow` returns -1 to the module, as the specification
 requires, and is counted in `memory_grow_denied` (`table_grow_denied` for
 tables). One run is admitted per backend at a time; a second gets 409. Once
 admitted, a dropped HTTP connection does not cancel the run or its storage.
@@ -125,14 +142,18 @@ Besides the outcome, a record carries `function` (index, export name, body
 range, type), `results`, `fuel_consumed`, `elapsed_ms`, `imports` (each function
 import, its stub kind and call count), `other_imports`, `import_calls` (each
 attempted call in order: `sequence`, `function_index`, `module`, `field`,
-`args`, `outcome`, `results`), `import_calls_total` and
+`args`, `args_truncated`, `outcome`, `results`, `results_truncated`),
+`import_calls_total` and
 `import_calls_truncated`, `memory_pages_after`, `memory_reads` (status `read`,
 `out_of_bounds` or `no_memory`, with `sha256` and `hex`), `expectation`, the
 `request` as run (without its confirmation) and `provenance`: `artifact_id`,
 `module_sha256`, `module_byte_size`, `inputs_digest` (SHA-256 of the request
 without its confirmation), the interpreter and its version, the effective
-limits, and the rewrite. The POST result adds `stored` and `store_error`; when
-storage fails the record is still returned with `stored: false`.
+limits, and the rewrite. The record is checked against the `WasmRun` contract
+before it is stored; a record that fails is neither stored nor returned, and
+the 500 says so without quoting any value. The POST result adds `stored` and
+`store_error`; when storage fails, or the record exceeds 4 MiB, the record is
+still returned with `stored: false`.
 
 The store keeps the newest 64 runs; older ones are evicted and counted in
 `evicted_runs`. `GET /api/wasm/runs` takes optional `artifact_id` and `limit`
@@ -140,12 +161,16 @@ The store keeps the newest 64 runs; older ones are evicted and counted in
 
 ## Content and agent access
 
-Return values, stub values, import arguments and memory bytes derive from the
-captured code and are content. Through `reb-api mcp`, `run_wasm_function` is
-effectful (`code-execution`, `filesystem-write`) and is listed only with
-`--allow-effects`; `get_wasm_runs` is a read. Below Full access
-(`--omit-content`), every `value` and `hex` field is omitted, while outcomes,
-trap kinds, counts, digests, import names and expectation matches remain. The
+Return values, stub values, import arguments, memory bytes and digests of
+memory bytes derive from the captured code and are content. Through `reb-api
+mcp`, `run_wasm_function` is effectful (`code-execution`, `filesystem-write`)
+and is listed only with `--allow-effects`; `get_wasm_runs` is a read.
+`x-reb-mcp.run_values` lists both operations: below `--allow-content`
+(`--permission full`), every `value`, `hex` and `sha256` field is replaced by
+`{"omitted":"content"}` with no length or digest, since the length of a short
+result or the digest of a few bytes would recover it. Outcomes, trap kinds,
+counts, module digests, import names and expectation matches remain, and no
+error message quotes a value. The
 native stored-evidence window (`reb://`) does not host the interpreter and
 answers 503.
 
@@ -156,6 +181,12 @@ synthetic fixtures in `tools/fixtures/wasm-runs/` through a return, traps,
 fuel exhaustion, a deadline, a start function that never returns, supplied and
 missing import stubs, a sequence that runs out, memory writes, bounded and
 out-of-bounds reads, denied growth, a memory over its limit, and malformed,
-empty, invalid and imported targets. `tests/http.rs` covers the confirmation
-refusal, hash mismatch, contract shapes, storage and listing, and that the
-captured bytes and manifest are unchanged after runs.
+empty, invalid and imported targets. Regression tests cover a 100,000-operator
+global initializer (it aborted the backend), memory and table totals across
+several memories and tables, a function body over 200 KB, float results such
+as `1e300`, exact float spellings, the deadline at an import call, and capped
+import results. `tests/http.rs` covers the confirmation refusal, hash mismatch,
+contract shapes, storage and listing, and that the captured bytes and manifest
+are unchanged after runs. `tests/mcp_stdio.rs` runs a module through `reb-api
+mcp --permission ask` and checks that no result, memory byte, digest or error
+message carries a value.

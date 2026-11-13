@@ -365,7 +365,8 @@ import stubbed. It is effectful (`code-execution`, `filesystem-write`), so MCP
 lists it only with `--allow-effects`, and the server refuses a body without
 `confirm_offline_execution: true` before reading the artifact. `get_wasm_runs`
 projects `GET /api/wasm/runs`, a read of the stored derived records. Below Full
-access the `value` and `hex` fields of both are omitted. See
+access (`x-reb-mcp.run_values`) the `value`, `hex` and `sha256` fields of both
+are replaced with a content marker that keeps no length. See
 [WASM run v1](wasm-run-v1.md).
 
 ## Compact session context

@@ -3002,6 +3002,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertLayout(ui, "#source-diff-view", "\(size.name) module diff")
       try await assertInert(ui, "\(size.name) module diff")
       try await ui.screenshot("wasm-module-diff-\(size.name)")
+      try await diffLightScreenshot(ui, "wasm-module-diff", size.name, layout: "#source-diff-view")
 
       try await ui.click("#source-diff-view .wasm-diff-filter", containing: "Changed")
       try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 2", "the Changed filter did not narrow the rows")
@@ -3009,6 +3010,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", "All did not restore the rows")
 
       // A's run export opens in Graph on A; B's digest opens in Graph on B.
+      // Each target must be the element a click at its center reaches: the
+      // sticky header once covered a row scrolled to the top edge.
+      try await assertHitTestable(ui, "#source-diff-view .wasm-diff-fn", "run · func 4", "\(size.name) A jump")
       try await ui.click("#source-diff-view .wasm-diff-fn", containing: "run · func 4")
       try await ui.waitUntil("document.querySelector('#source-diff-view').hidden && (document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('run')", timeout: 30, "A's function did not open in Graph")
       let first = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
@@ -3016,13 +3020,44 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-more summary")
       try await ui.click("#source-wasm-diff", containing: "Compare with")
       try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", timeout: 30, "the comparison did not reopen")
+      let top = try await ui.value("document.querySelector('#source-diff-view .wasm-diff-body').scrollTop") as? Double
+      XCTAssertEqual(top, 0, "\(size.name): the reopened table starts at the top")
+      try await assertHitTestable(ui, "#source-diff-view .wasm-diff-fn", "digest · func 8", "\(size.name) B jump")
       try await ui.click("#source-diff-view .wasm-diff-fn", containing: "digest · func 8")
       try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('digest')", timeout: 30, "B's function did not open in Graph")
       let second = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
       XCTAssertTrue(second.contains("diff-build-b"), "\(size.name): B's function opens on B: \(second)")
       try await ui.screenshot("wasm-module-diff-jump-\(size.name)")
+      try await diffLightScreenshot(ui, "wasm-module-diff-jump", size.name, layout: nil)
       try await ui.click("#source-graph")
     }
+  }
+
+  /// Reveals the first `selector` element containing `text` the way a click
+  /// does, then checks that the point at its center hits it, not something
+  /// drawn over it.
+  @MainActor
+  private func assertHitTestable(_ ui: Harness, _ selector: String, _ text: String, _ context: String,
+                                 file: StaticString = #filePath, line: UInt = #line) async throws {
+    _ = try await ui.reveal(selector, containing: text)
+    let probe = try await ui.json("""
+      (() => { const target = [...document.querySelectorAll(\(String(reflecting: selector)))].find(node => node.textContent.includes(\(String(reflecting: text))));
+        const box = target.getBoundingClientRect();
+        const hit = document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
+        return {hit: !!hit && (hit === target || target.contains(hit)), at: hit ? (hit.className || hit.tagName) : null}; })()
+      """)
+    XCTAssertEqual(probe["hit"] as? Bool, true, "\(context): the click target is covered: \(probe)", file: file, line: line)
+  }
+
+  /// The same state in the light theme, set the way the theme toggle sets it.
+  @MainActor
+  private func diffLightScreenshot(_ ui: Harness, _ name: String, _ size: String, layout: String?) async throws {
+    _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+    try await Task.sleep(nanoseconds: 600_000_000)
+    if let layout { try await assertLayout(ui, layout, "\(size) \(name) light") }
+    try await ui.screenshot("\(name)-light-\(size)")
+    _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+    try await Task.sleep(nanoseconds: 300_000_000)
   }
 
   // One resident-size sample from `ps`: the app, its web content process, the

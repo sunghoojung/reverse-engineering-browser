@@ -193,7 +193,9 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     }
     more.hidden = doc?.row_window?.next_offset === null || doc?.row_window?.next_offset === undefined;
   }
-  function renderDocument(pair) {
+  /** `fresh` is a new pair or filter: its table starts at the top. Show
+   * more appends below the rows already read and keeps the place. */
+  function renderDocument(pair, fresh = true) {
     shown = pair;
     sideHeads[0].textContent = `A · #${pair.a}`; sideHeads[0].title = `This module: artifact ${pair.a} · ${doc.a.sha256 ?? ''}`;
     sideHeads[1].textContent = `B · #${pair.b}`; sideHeads[1].title = `Compared module: artifact ${pair.b} · ${doc.b.sha256 ?? ''}`;
@@ -206,6 +208,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     notes.hidden = !doc.omissions.length;
     renderRows(pair);
     setState('ready', '');
+    if (fresh) body.scrollTop = 0;
   }
   let shown = null;
   function claim() { const owner = ++generation; abort?.abort(); abort = new AbortController(); return () => owner === generation; }
@@ -260,7 +263,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
       if (!current()) return;
       doc = next; rows = rows.concat(next.rows);
       remember(key);
-      renderDocument(pair);
+      renderDocument(pair, false);
     } catch (error) {
       if (current() && error.name !== 'AbortError') { notes.hidden = false; notes.append(el('li', '', error instanceof TypeError ? 'The evidence service is unreachable.' : error.message)); }
     } finally { more.disabled = false; }

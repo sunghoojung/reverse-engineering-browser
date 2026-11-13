@@ -7,7 +7,7 @@
 .wasm-run-form { min-height: 0; overflow: auto; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 16px 20px; font-size: 12px; }
 .wasm-run-form h2 { margin: 0; font-size: 16px; font-weight: 500; }
 .wasm-run-form h3 { margin: 6px 0 0; font-size: 12px; font-weight: 600; }
-.wasm-run-banner { margin: 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--amber) 55%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--amber) 12%, var(--panel)); line-height: 1.45; }
+.wasm-run-banner { margin: 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--state-warn) 55%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--state-warn) 12%, var(--panel)); line-height: 1.45; }
 .wasm-run-module { margin: 0; color: var(--muted); font: 11px var(--mono); overflow-wrap: anywhere; }
 .wasm-run-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .wasm-run-label { color: var(--muted); font-size: 11px; }
@@ -18,13 +18,15 @@
 .wasm-run-check { display: flex; align-items: flex-start; gap: 8px; line-height: 1.4; }
 .wasm-run-check input { flex: none; margin: 2px 0 0; }
 .wasm-run-confirm { font-weight: 600; }
-.wasm-run-error { margin: 0; color: var(--red); overflow-wrap: anywhere; }
+.wasm-run-error { margin: 0; color: var(--state-danger); overflow-wrap: anywhere; }
 .wasm-run-error[hidden], .wasm-run-output[hidden] { display: none; }
 .wasm-run-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .wasm-run-output { display: grid; gap: 6px; min-width: 0; padding-top: 10px; border-top: 1px solid var(--line-soft); }
 .wasm-run-outcome { margin: 0; font-weight: 600; }
-.wasm-run-outcome[data-status="returned"] { color: var(--green); }
-.wasm-run-outcome:not([data-status="returned"]) { color: var(--amber); }
+/* State colors: returned is ready, a limit is limited, a trap or failure is failed. */
+.wasm-run-outcome[data-status="returned"] { color: var(--state-ok); }
+.wasm-run-outcome { color: var(--state-warn); }
+.wasm-run-outcome:is([data-status="trap"], [data-status="import_trap"], [data-status="instantiation_failed"]) { color: var(--state-danger); }
 .wasm-run-message { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .wasm-run-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 0; }
 .wasm-run-facts dt { color: var(--muted); }

@@ -29,20 +29,39 @@ function isWasmIdentification(report, source) {
     Array.isArray(report.functions?.suggestions) && Array.isArray(report.constants?.matches) && Array.isArray(report.omissions);
 }
 
+/* Badges by function index, built once per report: the Functions filter
+ * asks for every function on each keystroke, so one lookup each. */
+const wasmIdentificationBadges = new WeakMap();
+
+function wasmIdentificationBadgeMap(report) {
+  let badges = wasmIdentificationBadges.get(report);
+  if (badges) return badges;
+  const rank = {high: 0, medium: 1, low: 2};
+  const rows = new Map(), constants = new Map();
+  const add = (map, key, value) => { const list = map.get(key); if (list) list.push(value); else map.set(key, [value]); };
+  for (const row of report.functions.suggestions) add(rows, row[0], row);
+  for (const match of report.constants.matches) {
+    const named = new Set([match.function_index, ...(match.referenced_by ?? []).map(reference => reference.function_index)]);
+    for (const index of named) if (Number.isSafeInteger(index)) add(constants, index, match);
+  }
+  badges = new Map();
+  for (const index of new Set([...rows.keys(), ...constants.keys()])) {
+    const own = (rows.get(index) ?? []).sort((a, b) => rank[a[4]] - rank[b[4]]);
+    const named = constants.get(index) ?? [];
+    const text = own.length ? WASM_IDENTIFICATION_CATEGORY[own[0][2]] ?? own[0][2] : 'constant';
+    const title = [...own.map(row => `${row[1]} (${row[4]}, ${row[5]} at byte ${row[6]})`),
+      ...named.map(match => `${match.label}: ${match.matched}/${match.total} ${match.match}`)].join('\n');
+    badges.set(index, {text, title, search: `${text} ${title}`});
+  }
+  wasmIdentificationBadges.set(report, badges);
+  return badges;
+}
+
 /** The badge for one function in the Functions menu, or null: the strongest
  * suggestion's category, then a constant the function names. */
 function wasmIdentificationBadge(source, functionIndex) {
   const report = source && wasmIdentificationReports.get(wasmIdentificationKey(source));
-  if (!report) return null;
-  const rank = {high: 0, medium: 1, low: 2};
-  const rows = report.functions.suggestions.filter(row => row[0] === functionIndex).sort((a, b) => rank[a[4]] - rank[b[4]]);
-  const constants = report.constants.matches.filter(match => match.function_index === functionIndex ||
-    (match.referenced_by ?? []).some(reference => reference.function_index === functionIndex));
-  if (!rows.length && !constants.length) return null;
-  const text = rows.length ? WASM_IDENTIFICATION_CATEGORY[rows[0][2]] ?? rows[0][2] : 'constant';
-  const title = [...rows.map(row => `${row[1]} (${row[4]}, ${row[5]} at byte ${row[6]})`),
-    ...constants.map(match => `${match.label}: ${match.matched}/${match.total} ${match.match}`)].join('\n');
-  return {text, title, search: `${text} ${title}`};
+  return report ? wasmIdentificationBadgeMap(report).get(functionIndex) ?? null : null;
 }
 
 const wasmIdentificationRequests = new Map();
@@ -72,7 +91,13 @@ async function wasmIdentificationLoad(source, retry = false) {
     if (!isWasmIdentification(report, source)) throw new Error('The identification report did not match these module bytes.');
     wasmIdentificationReports.delete(key);
     wasmIdentificationReports.set(key, report);
-    while (wasmIdentificationReports.size > WASM_IDENTIFICATION_CACHE) wasmIdentificationReports.delete(wasmIdentificationReports.keys().next().value);
+    // An evicted report's request goes with it, so returning to that module
+    // reads it again instead of showing a ready state with nothing to show.
+    while (wasmIdentificationReports.size > WASM_IDENTIFICATION_CACHE) {
+      const evicted = wasmIdentificationReports.keys().next().value;
+      wasmIdentificationReports.delete(evicted);
+      requests.delete(evicted);
+    }
     requests.set(key, {status: 'ready'});
   } catch (error) {
     // A failed refresh keeps the last report for these bytes on screen.
@@ -197,13 +222,14 @@ function createWasmIdentificationPanel({root, getSource, inspecting, reveal}) {
     if (key !== shownKey) { shownKey = key; detailsOpen = false; }
     const report = wasmIdentificationReports.get(key);
     const request = requests.get(key);
-    if (!report && !request) { load(source); return; }
+    // Ready with no report means it was evicted: read it again.
+    if (!report && (!request || request.status === 'ready')) { load(source); return; }
     if (!report) {
       if (request.status === 'loading') { root.replaceChildren(element('p', 'wasm-id-state', 'Identifying toolchain, functions and constants…')); return; }
       const retry = element('button', 'wasm-id-toggle', 'Retry identification');
       retry.type = 'button';
       retry.addEventListener('click', () => load(source, true));
-      const message = element('p', 'wasm-id-state', request.error);
+      const message = element('p', 'wasm-id-state', request.error || 'Identification failed. Original bytes are preserved.');
       message.setAttribute('role', 'alert');
       root.replaceChildren(message, retry);
       return;
@@ -215,5 +241,5 @@ function createWasmIdentificationPanel({root, getSource, inspecting, reveal}) {
   return {sync: render, report: source => (source ? wasmIdentificationReports.get(wasmIdentificationKey(source)) ?? null : null)};
 }
 
-// The offline checks read the badge and the identity check.
-if (typeof module === 'object' && module?.exports) module.exports = {isWasmIdentification, wasmIdentificationBadge, wasmIdentificationReports, wasmIdentificationLoad};
+// tools/check-wasm-identification-ui.mjs loads this file in a DOM model.
+if (typeof module === 'object' && module?.exports) module.exports = {isWasmIdentification, wasmIdentificationBadge, wasmIdentificationReports, wasmIdentificationRequests, wasmIdentificationLoad, createWasmIdentificationPanel};

@@ -154,6 +154,7 @@ native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-source-search.mjs
 	node tools/check-invocation-sites-ui.mjs
 	node tools/check-wasm-runner-ui.mjs
+	node tools/check-wasm-identification-ui.mjs
 	node tools/check-debugger-pause-ui.mjs
 	node tools/check-native-only-startup.cjs
 	node tools/check-native-only-launch.mjs

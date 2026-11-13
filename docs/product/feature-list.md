@@ -53,6 +53,7 @@ privacy, and implementation limits are documented in
 - Display imports, exports, types, functions, tables, memories, globals, strings, data segments, and custom sections.
 - [Captured module inspection and byte-offset disassembly](./wasm-inspection-v1.md) are implemented in Sources. Higher-level readable reconstruction remains planned.
 - [Researcher function names](./wasm-function-names-v1.md) keyed by module SHA-256 and function index are implemented: renamed from Inspect, Graph and Flow, shown in every Wasm view and joined into every agent-facing Wasm read.
+- [Offline function runs](./wasm-offline-runner-v1.md) are implemented: one function of a captured module runs on an explicit confirmed request in a local interpreter with every import stubbed, under fuel, memory, table, call-depth and deadline limits, and the result is a derived experiment record.
 - Record compilation, instantiation, exported calls, imported calls, traps, and memory growth.
 - Connect JavaScript-to-WASM and WASM-to-JavaScript crossings.
 - Search for values moving between WASM, JavaScript, browser APIs, and network requests.
@@ -133,6 +134,7 @@ privacy, and implementation limits are documented in
 ## Experiment Lab
 
 - Branch an immutable Baseline into a disposable experiment.
+- Run one function of a captured WASM module offline against chosen inputs and test vectors ([offline function runs](./wasm-offline-runner-v1.md)).
 - Patch selected values, objects, functions, browser API results, requests, or responses.
 - Replay captured actions and requests with explicit fixtures.
 - Use isolated profiles, credentials, cookies, storage, and permissions.

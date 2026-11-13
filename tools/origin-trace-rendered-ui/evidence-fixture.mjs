@@ -118,6 +118,25 @@ async function artifact(root, fields, bytes) {
     byte_size: bytes.length, sha256: hash, content_path: `blobs/${hash}.bin`};
 }
 
+// Run offline (test42): add(a, b) returns a + b, and stamp(a, b) adds a clock
+// read from the import env.now, so it traps until that import is stubbed. The
+// export names are markup, which must stay text. Built by hand like the module
+// below; tools/fixtures/wasm-runs/ holds the .wat fixtures the Rust tests use.
+export const RUN_OFFLINE_ARTIFACT_ID = '450';
+function offlineRunnerWasm() {
+  const text = value => [...Buffer.from(value, 'utf8')];
+  const name = value => [text(value).length, ...text(value)];
+  const section = (id, data) => [id, data.length, ...data];
+  const add = [0x00, 0x20, 0, 0x20, 1, 0x6a, 0x0b];
+  const stamp = [0x00, 0x20, 0, 0x10, 0, 0xaa, 0x6a, 0x0b];
+  return Buffer.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+    ...section(1, [2, 0x60, 2, 0x7f, 0x7f, 1, 0x7f, 0x60, 0, 1, 0x7c]),
+    ...section(2, [1, ...name('env'), ...name('now'), 0x00, 1]),
+    ...section(3, [2, 0, 0]),
+    ...section(7, [2, ...name('add'), 0x00, 1, ...name('stamp<b>'), 0x00, 2]),
+    ...section(10, [2, add.length, ...add, stamp.length, ...stamp])]);
+}
+
 // A flattened dispatcher: a loop around a br_table with one block per arm, each
 // arm branching back to the loop. Built here so the fixture needs no wat tool.
 function dispatcherWasm(arms) {
@@ -927,6 +946,9 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const namedWasm = await artifact(artifacts, {artifact_id: NAMED_WASM_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://named-functions.wasm'},
   namedFunctionsWasm());
+  const offlineRunner = await artifact(artifacts, {artifact_id: RUN_OFFLINE_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'wasm', mime_type: 'application/wasm', url: 'https://fixture.invalid/offline-runner.wasm'},
+  offlineRunnerWasm());
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -936,7 +958,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

@@ -222,6 +222,19 @@ editor for `func 2`, the function the Graph draws, which Escape closes. Layout a
 and the Graph is photographed in both themes
 ([Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
 
+`test42RunOfflineInSources` opens fixture artifact 450, a hand-built module
+whose second export (`stamp<b>`) reads the import `env.now`, and chooses
+**More > Run offline…**. At both sizes the dialog must name the local sandbox
+above every field, list the export names as text, and keep **Run** disabled
+until the confirmation is checked with a pointer click. A run without stubs
+must show **Import trapped** with the recorded `env.now` call; a run with
+`env.now` stubbed to 1000 must return `i32 1001`. After each run the outcome
+line must be inside the dialog's visible frame and be the topmost element at
+its position, since the result follows the fields and starts below the visible
+area until the dialog scrolls to it. Nothing may be clipped, captured names stay
+inert, and Escape closes the dialog. Screenshots: `run-offline-dialog-*` and
+`run-offline-result-*`, each also in the light theme (`*-light-*`).
+
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,
 with automatic live sessions on, `REB_EVENT_STORE` and its siblings naming

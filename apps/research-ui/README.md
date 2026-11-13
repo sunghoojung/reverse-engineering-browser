@@ -531,7 +531,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -2077,7 +2077,8 @@ original-source pivots choose their own retained location.
 
 The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**
 and **Graph** for a Wasm module, **Map**, **Debugger** and **More**, which holds Go to line,
-Rename, Decode range, Facts, Track calls, Static cleanup and Details. The row
+Rename, Decode range, Facts, Track calls, Static cleanup, **Run offline…** (for
+a Wasm module) and Details. The row
 never wraps at any width: the URL shortens first (its tooltip keeps it whole),
 then Find, and when the commands still do not fit, Debugger, Map, Graph and
 Inspect move in that order to the top of More and return once there is room. Find's coverage
@@ -2953,6 +2954,21 @@ headings and omission messages are excluded; partial coverage stays visible. Fai
 provide **Retry inspection**. Partial coverage and display limits are explicit.
 The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
 the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
+
+**More > Run offline…** on a captured Wasm module opens a dialog that runs one
+function in the backend's local sandbox: the `wasmi` interpreter, offline, with
+every import stubbed. Its banner says so above every field, and nothing runs
+until **I confirm this captured function runs offline in the local sandbox** is
+checked and **Run** is pressed. Choose the function (named and exported
+functions first), give arguments as `i32 7, i32 5`, import stubs as JSON (an
+import without a stub traps when called, so supply every clock or random
+source), memory writes and reads as `offset:hex` and `offset:length`, and
+optional fuel, deadline, memory and call-depth limits. The result shows the
+outcome and phase (a trap names its kind; every limit is its own outcome), the
+results, fuel used, every recorded import call with its arguments, and the
+memory reads. Captured names, values and bytes are text, never markup. Each run
+is stored as a derived experiment record, not evidence. The stored-evidence
+window cannot run code and says so. See [WASM run v1](../../protocol/wasm-run-v1.md).
 
 **Map** in the Sources toolbar shows one picture of the whole selected artifact:
 a captured script, a Wasm module or a VM bytecode image. **Open map** on a VM

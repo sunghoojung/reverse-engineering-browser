@@ -299,7 +299,34 @@ it.
   embeds one. No DevTools protocol or page JavaScript is involved.
 - Run mutable tools in a disposable experiment context by default. Experiments
   do not read or modify baseline tabs, production cookies, storage, or
-  credentials. Never execute extracted code automatically.
+  credentials. Never execute extracted code automatically or as a side effect
+  of analysis.
+- The offline Wasm runner (`run_wasm_function`) is the only path that executes
+  captured code. It runs one function of a captured module only on an explicit
+  researcher or agent request that sets `confirm_offline_execution`. It runs
+  offline, in the pure `wasmi` interpreter (no JIT) inside the local backend,
+  under a fuel limit, one total limit on the memory of all its memories, one
+  total limit on the elements of all its tables, a call-depth limit and a
+  wall-clock deadline. A module with more memories, tables, constant
+  expression operators or element segment items than the runner's fixed
+  bounds is refused or stopped before any of its code runs. Compiling and
+  instantiating a module cannot be interrupted; those bounds and the 16 MiB
+  module cap limit them, and compiling can hold about 30 times the module's
+  size in memory. Every import is a stub that returns only values
+  the request supplies, or traps, so the module reaches no filesystem, network,
+  clock, randomness, browser, page or other host state. Nothing runs it
+  automatically, from analysis, or on a schedule. A run is a derived experiment
+  record, never captured evidence.
+- Running captured code is a content read. Everything a run reports can
+  disclose values the code computed: its results and memory bytes, and also
+  its outcome, trap kind, fuel used, import call count and arguments, memory
+  growth, timing, and the answer to repeated expectations. No subset of a run's
+  record is safe to show below Full access. So an agent can run captured code,
+  or read stored runs (`get_wasm_runs`), only at Full access
+  (`--permission full`, which sets `--allow-content`), and running also needs
+  `--allow-effects` and `confirm_offline_execution`. At Read only, Ask for
+  actions and Auto-approve actions neither tool is listed, and a call is refused
+  before anything is sent.
 
 - The native Console defaults to a separate disposable browser profile. Explicit
   Live capture mode additionally requires a specifically selected native document

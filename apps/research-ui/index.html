@@ -8,6 +8,7 @@
     <title>Origin Trace - Reverse Engineering Browser</title>
     <link rel="stylesheet" href="app.css">
     <link rel="stylesheet" href="xrefs_view.css">
+    <link rel="stylesheet" href="wasm_runner.css">
     <link rel="stylesheet" href="entropy_map.css">
     <link rel="stylesheet" href="block_graph.css">
     <link rel="stylesheet" href="flow_graph.css">
@@ -296,6 +297,7 @@
                     <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                     <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
                     <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
+                    <button id="source-run-offline" class="source-tool" type="button" title="Run one function of this module offline in a local sandbox, with every import stubbed" hidden>Run offline…</button>
                     <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
                   </div>
                 </details>
@@ -944,6 +946,7 @@
     <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
     <script src="block_graph_layout.js"></script>
     <script src="block_graph.js"></script>
+    <script src="wasm_runner.js"></script>
     <script src="flow_graph_layout.js"></script>
     <script src="flow_graph.js"></script>
     <script src="flow_timeline.js"></script>

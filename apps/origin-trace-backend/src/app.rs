@@ -39,7 +39,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 72] = [
+const UI_ASSETS: [&str; 74] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -110,6 +110,8 @@ const UI_ASSETS: [&str; 72] = [
     "native_console_completion.js",
     "xrefs_view.js",
     "xrefs_view.css",
+    "wasm_runner.js",
+    "wasm_runner.css",
     "debugger_sidebar.js",
     "debugger_sidebar.css",
 ];
@@ -171,6 +173,8 @@ pub struct App {
     native_debugger_pause: NativeDebuggerPause,
     owned_vm_debugger: OwnedVmDebugger,
     vm_experiments: crate::vm_experiment::Experiments,
+    /// Offline runs of captured Wasm functions; derived records only.
+    wasm_runs: crate::wasm_run::Runs,
     /// The live capture lifecycle; `capture` serializes stop and clear.
     lifecycle: Capture,
     capture: Mutex<()>,
@@ -283,6 +287,7 @@ impl App {
                     "build/reb-native-vm-fixture",
                 ),
             ),
+            wasm_runs: crate::wasm_run::Runs::new(options.artifacts.clone()),
             live_browser: LiveBrowser::new(&options),
             lifecycle: Capture::new(&options),
             requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
@@ -498,6 +503,26 @@ impl App {
         }
         if path == "/api/wasm/functions" || path == "/api/wasm/graph" {
             return self.wasm_graph_route(path, raw_query).await;
+        }
+        if path == "/api/wasm/runs" {
+            let q = Query::new(raw_query);
+            q.only(&["artifact_id", "limit"], &[])?;
+            let artifact = match q.one("artifact_id")? {
+                Some(id) => {
+                    validation::canonical(&json!(id), 64, true, "Artifact ID")?;
+                    Some(id.to_owned())
+                }
+                None => None,
+            };
+            let limit = q.number("limit", Some("16"), 64, true)?;
+            if limit > 64 {
+                return Err(Error::bad("limit must be between 1 and 64"));
+            }
+            let root = self.options.artifacts.clone();
+            let value = self
+                .blocking(move || crate::wasm_run::list(&root, artifact.as_deref(), limit as usize))
+                .await?;
+            return Ok(axum::Json(value).into_response());
         }
         let q = Query::new(raw_query);
         let mut etag = None;
@@ -2286,6 +2311,14 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .float32_operation(bytes.to_vec())
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
+            }
+            // Typed parse with unknown and duplicate keys refused.
+            if path == "/api/wasm/runs" {
+                return app
+                    .wasm_runs
+                    .run(&bytes)
+                    .await
+                    .map(|value| axum::Json(value).into_response());
             }
             // Typed parse of up to 8 MiB of numbers, never a generic JSON tree.
             if path == "/api/graph-layout" {

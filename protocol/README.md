@@ -12,6 +12,10 @@ for Wasm functions, keyed by module SHA-256 and full function index, their
 version 2 evidence-names storage and their join into every agent-facing Wasm
 read.
 
+[WASM run v1](wasm-run-v1.md) defines confirmed offline execution of one
+function of a captured module in a stubbed interpreter, its limits and named
+outcomes, and the derived run records it stores.
+
 [Artifact map v1](artifact-map-v1.md) defines the fixed-size whole-artifact
 entropy and kind summary behind the Sources Map view.
 

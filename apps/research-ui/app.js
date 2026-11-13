@@ -7,6 +7,10 @@ const sourceGraphPanel = createSourceGraphPanel({
   closeOn: document.querySelector('#source-map'),
   revealOffset: offset => revealGraphByteOffset(offset)
 });
+// Run offline (wasm_runner.js): one function, only on an explicit confirmed run.
+const wasmRunDialog = typeof createWasmRunDialog === 'function'
+  ? createWasmRunDialog({button: document.querySelector('#source-run-offline'), getSource: () => selectedSource()})
+  : null;
 const sourceFactsPanel = createSourceFactsPanel({
   getSource: selectedSource, onNavigate: revealSourceFactRange,
   openSidebar() { state.sourceSidebarOpen = true; renderSourceSidebar(); }
@@ -7941,6 +7945,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function renderSources() {
         const source = selectedSource();
         if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.sync(source);
+        if (typeof wasmRunDialog !== 'undefined' && wasmRunDialog) wasmRunDialog.sync(source);
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;

@@ -2760,6 +2760,93 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Run offline: the dialog names the local sandbox above every field, sends
+  // nothing before the confirmation, and shows a stubbed import's trap, then a
+  // return, with captured export names kept as text.
+  @MainActor
+  func test42RunOfflineInSources() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "offline-runner.wasm")
+      try await ui.waitUntil("document.querySelector('#source-run-offline')?.hidden === false", "Run offline is offered for a captured WASM artifact")
+      try await ui.click("#source-more > summary")
+      try await ui.click("#source-run-offline")
+      try await ui.waitUntil("document.querySelector('.wasm-run-dialog')?.open === true && document.querySelectorAll('.wasm-run-dialog option').length === 2", "the dialog lists the module's two functions")
+      let opened = try await ui.json("""
+        (() => { const d = document.querySelector('.wasm-run-dialog'), run = [...d.querySelectorAll('button')].find(b => b.textContent === 'Run');
+          return {banner: d.querySelector('.wasm-run-banner').textContent, first: d.querySelector('.wasm-run-banner') === d.querySelector('form').children[1],
+            options: [...d.querySelectorAll('option')].map(o => o.textContent), runDisabled: run.disabled}; })()
+        """)
+      XCTAssertTrue((opened["banner"] as? String ?? "").contains("local sandbox"), "\(size.name): the sandbox is named: \(opened)")
+      XCTAssertEqual(opened["first"] as? Bool, true, "\(size.name): the banner sits above every field")
+      XCTAssertEqual(opened["options"] as? [String], ["add (func 1)", "stamp<b> (func 2)"], "\(size.name): export names stay text")
+      XCTAssertEqual(opened["runDisabled"] as? Bool, true, "\(size.name): Run waits for the confirmation")
+      try await assertLayout(ui, ".wasm-run-dialog", "\(size.name) run offline dialog")
+      try await ui.screenshot("run-offline-dialog-\(size.name)")
+      try await runOfflineLightScreenshot(ui, "run-offline-dialog-light-\(size.name)")
+      _ = try await ui.value("""
+        (() => { const d = document.querySelector('.wasm-run-dialog'); d.querySelector('select').value = '2';
+          const args = [...d.querySelectorAll('.wasm-run-field')].find(f => f.querySelector('.wasm-run-label').textContent === 'Arguments').querySelector('input');
+          args.value = 'i32 1, i32 2'; return true; })()
+        """)
+      try await ui.click(".wasm-run-confirm input")
+      try await ui.click(".wasm-run-actions button", containing: "Run")
+      try await ui.waitUntil("(document.querySelector('.wasm-run-outcome')?.textContent ?? '').includes('Import trapped')", timeout: 30, "an unstubbed import traps")
+      let trapped = try await ui.value("document.querySelector('.wasm-run-output').textContent") as? String ?? ""
+      XCTAssertTrue(trapped.contains("env.now (func 0)") && trapped.contains("trapped (no stub value)"), "\(size.name): the import call is recorded: \(trapped)")
+      try await assertRunResultVisible(ui, "\(size.name) import trap")
+      _ = try await ui.value("""
+        (() => { const d = document.querySelector('.wasm-run-dialog');
+          d.querySelector('textarea').value = '[{"module":"env","field":"now","results":[{"type":"f64","value":"1000"}]}]'; return true; })()
+        """)
+      try await ui.click(".wasm-run-actions button", containing: "Run")
+      try await ui.waitUntil("(document.querySelector('.wasm-run-outcome')?.textContent ?? '').startsWith('Returned')", timeout: 30, "the stubbed run returns")
+      let returned = try await ui.value("document.querySelector('.wasm-run-output').textContent") as? String ?? ""
+      XCTAssertTrue(returned.contains("i32 1001"), "\(size.name): the result is shown: \(returned)")
+      try await assertLayout(ui, ".wasm-run-dialog", "\(size.name) run offline result")
+      try await assertInert(ui, "\(size.name) run offline result")
+      try await assertRunResultVisible(ui, "\(size.name) stubbed return")
+      try await ui.screenshot("run-offline-result-\(size.name)")
+      try await runOfflineLightScreenshot(ui, "run-offline-result-light-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('.wasm-run-dialog')?.open === false", "Escape closes the dialog")
+    }
+  }
+
+  // The outcome line after Run is inside the dialog's visible frame and is the
+  // topmost element at its own position: the result follows the fields, so it
+  // starts below the visible area until the dialog scrolls it into view.
+  @MainActor
+  private func assertRunResultVisible(_ ui: Harness, _ context: String,
+                                      file: StaticString = #filePath, line: UInt = #line) async throws {
+    let seen = try await ui.json("""
+      (() => { const d = document.querySelector('.wasm-run-dialog'), o = d.querySelector('.wasm-run-outcome');
+        const box = o.getBoundingClientRect(), frame = d.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + Math.min(box.width / 2, 40), box.top + box.height / 2);
+        return {inside: box.height > 0 && box.top >= frame.top && box.bottom <= frame.bottom
+            && box.left >= frame.left && box.right <= frame.right,
+          hit: Boolean(hit && o.contains(hit)), top: box.top, bottom: box.bottom, frameTop: frame.top, frameBottom: frame.bottom}; })()
+      """)
+    XCTAssertEqual(seen["inside"] as? Bool, true, "\(context): the outcome is inside the dialog's visible frame: \(seen)", file: file, line: line)
+    XCTAssertEqual(seen["hit"] as? Bool, true, "\(context): the outcome is not covered: \(seen)", file: file, line: line)
+  }
+
+  // The same dialog in the light theme, set the way the theme toggle sets it.
+  @MainActor
+  private func runOfflineLightScreenshot(_ ui: Harness, _ name: String) async throws {
+    _ = try await ui.value("""
+      (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
+        document.documentElement.dataset.theme = 'light';
+        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+      """)
+    try await ui.screenshot(name)
+    _ = try await ui.value("""
+      (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+        else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+      """)
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor

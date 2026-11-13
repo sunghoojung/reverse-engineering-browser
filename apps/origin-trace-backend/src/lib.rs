@@ -62,6 +62,7 @@ mod vm_request_links;
 pub mod wasm;
 pub mod wasm_graph;
 mod wasm_names;
+mod wasm_run;
 mod worker;
 mod workspace;
 mod workspace_lease;

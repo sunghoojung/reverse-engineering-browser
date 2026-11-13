@@ -638,6 +638,38 @@ means someone renamed it first: read again and pass the current name as
 `expected_name`. An empty `name` clears it. `analyst_names.status` other than
 `ready` or `none` means the names file needs the researcher's attention.
 
+## 27. Run one Wasm function offline against test vectors
+
+Needs Full access (`--permission full`). Running captured code is a content
+read: a run's outcome, fuel, import calls, timing and repeated expectations can
+all disclose values the code computed, so `run_wasm_function` and
+`get_wasm_runs` are not listed at Read only, Ask or Auto-approve. Call it only
+when the researcher asked for that test. It runs in a local interpreter with every import stubbed, never in
+the page. Find the module and the function first:
+
+```text
+get_artifacts {"kind": "wasm", "limit": 20}
+get_wasm_functions {"artifact_id": "9"}
+run_wasm_function {"artifact_id": "9", "sha256": "<its sha256>", "export": "digest",
+  "args": [{"type": "i32", "value": "1024"}, {"type": "i32", "value": "3"}],
+  "memory_writes": [{"offset": 1024, "hex": "616263"}],
+  "memory_reads": [{"offset": 2048, "length": 32}],
+  "imports": [{"module": "env", "field": "now", "results": [{"type": "f64", "value": "0"}]}],
+  "expect": {"memory": [{"read": 0, "hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]},
+  "confirm_offline_execution": true}
+```
+
+Good: `outcome.status` `returned` and `expectation.all_match` true. Other
+statuses are answers, not failures: `trap` with `trap_kind`, `import_trap` with
+`outcome.import` (stub that import, using `import_calls` to see its arguments
+and call order, and supply every clock or random source), `fuel_exhausted`,
+`deadline_exceeded` or `call_depth_exceeded` (raise `limits` or choose another
+function), `memory_limit` or `table_limit` (the limits are totals across every
+memory and table), and `memory_write_out_of_bounds`. Each read takes at most
+one expected entry. A
+match holds for these inputs only. `get_wasm_runs {"artifact_id": "9"}` lists
+earlier runs. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
+
 ## Response shapes at a glance
 
 | Tool | Look at |

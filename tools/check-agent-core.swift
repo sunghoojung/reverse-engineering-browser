@@ -375,6 +375,12 @@ enum AgentCoreChecks {
       ("start_live_session", false, .full, ["response_media": true], false, refuse),
       ("start_live_session", false, .full, ["request_content": true, "confirm_sensitive_capture": true], true, .run),
       ("session_action", false, .auto, [:], false, refuse),
+      ("run_wasm_function", false, .ask, [:], false, refuse),
+      ("run_wasm_function", false, .auto, [:], false, refuse),
+      ("run_wasm_function", false, .full, [:], false, .run),
+      ("get_wasm_runs", true, .readOnly, [:], false, refuse),
+      ("get_wasm_runs", true, .auto, [:], false, refuse),
+      ("get_wasm_runs", true, .full, [:], false, .run),
     ]
     for (name, readOnly, level, arguments, sensitive, expected) in cases {
       let decision = AgentToolGate.decide(name, readOnly: readOnly, arguments: arguments, level: level, sensitive: sensitive)

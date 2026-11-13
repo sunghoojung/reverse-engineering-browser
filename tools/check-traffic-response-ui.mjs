@@ -510,6 +510,37 @@ await showLinked({...refusedEnd, responseBodyEarlier: null, events: [], response
   earlier_snapshot: {artifact_id: snapshotBytes.artifact_id, body_length: '40', captured_length: '12', partial_index: 4,
     sha256: snapshotBytes.sha256, record_sequence: '32', record_time_ns: '0'}}});
 assert.match(panel.querySelector('.traffic-response-code').textContent, /data: kept/, 'the index\'s earlier snapshot opens');
+// What the receiver kept is said from the lookup: a refused snapshot falls
+// back to the newest one it kept, and is never said to be retained.
+const refusedSnapshot = (id, partialIndex) => {
+  state.events.push({type: 'artifact_capture_failed', artifact_id: id, session_id: '7', parent_event_id: '30',
+    payload: Buffer.from(`refused:${id}`).toString('hex')});
+  return record({artifact_id: id, byte_size: 30, sha256: 'c'.repeat(64), mime_type: 'text/event-stream'},
+    {state: 'partial', partialIndex, bodyLength: '60', sequenceNumber: String(32 + partialIndex)});
+};
+const keptSnapshot = record(snapshotBytes, {state: 'partial', partialIndex: 4, bodyLength: '40'});
+const refusedFive = refusedSnapshot('905', 5);
+await showLinked({...refusedEnd, responseBodyEarlier: refusedFive, responseBodySnapshots: [refusedFive, keptSnapshot]});
+assert.match(panel.textContent, /Snapshot 4: 12 bytes of the 40 bytes that had arrived\. The receiver retains it, and it is shown below\. The receiver did not retain the later snapshot 5\./);
+assert.match(panel.querySelector('.traffic-response-code').textContent, /data: kept/, 'the newest kept snapshot opens');
+assert.doesNotMatch(panel.textContent, /refused:905/);
+await showLinked({...refusedEnd, responseBodyEarlier: refusedFive, responseBodySnapshots: [refusedFive]});
+assert.match(panel.textContent, /Snapshot 5: 30 bytes of the 60 bytes that had arrived\. The receiver did not retain it\./);
+assert.match(panel.textContent, /did not retain it \(refused:905\)/);
+assert.doesNotMatch(panel.textContent, /retains it/);
+assert(!panel.querySelector('.traffic-response-code'), 'a refused snapshot shows no bytes');
+const refusedThree = refusedSnapshot('906', 3);
+await showLinked({...refusedEnd, responseBodyEarlier: refusedFive, responseBodySnapshots: [refusedFive, refusedThree]});
+assert.match(panel.textContent, /Snapshot 5: .*The receiver did not retain it or any earlier snapshot of this response\./);
+const unacknowledged = record({artifact_id: '907', byte_size: 30, sha256: 'd'.repeat(64), mime_type: 'text/event-stream'},
+  {state: 'partial', partialIndex: 6, bodyLength: '60'});
+await showLinked({...refusedEnd, responseBodyEarlier: unacknowledged, responseBodySnapshots: [unacknowledged]});
+assert.match(panel.textContent, /Snapshot 6: .*Whether the receiver retains it is not known yet\./);
+assert.doesNotMatch(panel.textContent, /retains it, and it is shown below/);
+// An index-decided row keeps the withheld note the index carries.
+await showLinked({...leftWindow, id: 'left-window-withheld', responseBodyIndex: {...indexBody, case: 'partial', partial_index: 2,
+  snapshots_withheld: true}});
+assert.match(panel.textContent, /Snapshots.*A snapshot the schedule allowed was withheld/s, 'the index row keeps its withheld note');
 // A record-backed index answer for a row whose response left the window opens its bytes.
 await showLinked({...leftWindow, id: 'left-window', responseBodyIndex: {...indexBody, artifact_id: jsonArtifact.artifact_id,
   body_length: String(jsonArtifact.byte_size), captured_length: String(jsonArtifact.byte_size), sha256: jsonArtifact.sha256}});

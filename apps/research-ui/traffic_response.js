@@ -37,13 +37,14 @@ function trafficResponseIndexWins(request) {
 }
 
 // An index body answer as the record shape the model decodes. The record's
-// content type and codings are not in the index.
+// content type, codings and other flags are not in the index; its withheld
+// flag is.
 function trafficIndexRecord(body) {
   if (!body || (!TRAFFIC_RESPONSE_STATES.has(body.case) && body.case !== 'malformed')) return null;
   if (body.case === 'malformed') return {malformed: true};
   const started = body.response_started;
   return {state: body.case, shared: body.shared === true, fromCache: false, serviceWorker: false, stillEncoded: false,
-    codingsOmitted: false, completionUnobserved: false, contentType: null, codings: [], bodyLength: body.body_length ?? '0',
+    codingsOmitted: false, completionUnobserved: false, snapshotsWithheld: body.snapshots_withheld === true, contentType: null, codings: [], bodyLength: body.body_length ?? '0',
     capturedLength: body.captured_length ?? '0', partialIndex: body.partial_index ?? 0, sha256: body.sha256 ?? null,
     artifactId: body.artifact_id ?? '0', sequenceNumber: body.record_sequence, parentEventId: started?.sequence_number,
     sessionId: started?.session_id, processId: started?.process_id, monotonicTimeNs: body.record_time_ns, fromIndex: true};
@@ -65,6 +66,14 @@ function trafficResponseEarlier(request) {
     parentEventId: started.sequence_number, bodyLength: earlier.body_length, capturedLength: earlier.captured_length,
     partialIndex: earlier.partial_index, sha256: earlier.sha256, sequenceNumber: earlier.record_sequence,
     monotonicTimeNs: earlier.record_time_ns, codings: [], fromIndex: true};
+}
+
+// Every snapshot to try, newest first: the loaded records carry each one,
+// the index names only its newest.
+function trafficResponseSnapshots(request) {
+  if (!trafficResponseIndexWins(request) && request?.responseBodySnapshots?.length) return request.responseBodySnapshots;
+  const earlier = trafficResponseEarlier(request);
+  return earlier ? [earlier] : [];
 }
 
 // Why a request's response body is or is not retained (protocol/native-network-v3.md
@@ -163,17 +172,18 @@ function trafficResponseCapture(request, contentSession) {
 
 function trafficResponseRows(record) {
   if (!record || record.malformed) return [];
+  // Version 2 bit 7 (protocol/native-network-v3.md "Partial bodies"), which the index carries too.
+  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshot allowance, the session\'s snapshot share or the response body budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
   // The index answer carries lengths and the digest, not the record's type or codings.
   if (record.fromIndex) {
     return [['Body length', `${trafficResponseBytes(record.bodyLength)} decoded`, 'value'],
       ['SHA-256', record.sha256 ?? 'No retained bytes', record.sha256 ? 'value' : 'prose'],
-      ['Record', 'Read from the request index: the loaded records lack it, so its content type and codings are not shown.', 'prose']];
+      ['Record', 'Read from the request index: the loaded records lack it, so its content type and codings are not shown.', 'prose'],
+      ...withheld];
   }
   const codings = record.codings.map(coding => TRAFFIC_RESPONSE_CODINGS[coding] ?? coding).join(', ');
   const notes = [record.fromCache && 'served from the HTTP cache', record.serviceWorker && 'served by a service worker',
     record.completionUnobserved && 'the loader reported no completion, so the end is unconfirmed'].filter(Boolean);
-  // Version 2 bit 7 (protocol/native-network-v3.md "Partial bodies").
-  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshot allowance, the session\'s snapshot share or the response body budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
   return [
     ['Content type', record.contentType ?? 'Not a bounded media type; not recorded', record.contentType ? 'value' : 'prose'],
     ['Content encoding', codings ? `${codings}${record.codingsOmitted ? ', more not recorded' : ''} · ${record.stillEncoded
@@ -778,18 +788,29 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     const kind = responseBodyCase(request);
     const source = kind === 'memory_cache' && request ? trafficMemoryCacheSource(request, getRequests() ?? []) : null;
     const fetches = kind === 'service_worker' && request ? fetchesOf(request) : null;
-    // A newest record without bytes does not hide a snapshot the receiver holds.
-    const earlier = !source && record && (record.malformed || record.artifactId === '0') ? trafficResponseEarlier(request) : null;
     // A reuse shows the bytes of the request it names; nothing else stands in for a body.
     const indexed = trafficResponseIndexWins(request) ? trafficResponseStand(request.id, request.type, request.responseBodyIndex) : null;
-    const shownFrom = source?.stand ?? (earlier ? {...request, responseStarted: request.responseStarted ?? indexed?.responseStarted, responseBody: earlier}
+    // A newest record without bytes does not hide a snapshot the receiver
+    // holds: snapshots are tried newest first until one is not refused.
+    const snapshotOf = item => ({...request, responseStarted: request.responseStarted ?? indexed?.responseStarted, responseBody: item});
+    const tried = [];
+    for (const item of !source && record && (record.malformed || record.artifactId === '0') ? trafficResponseSnapshots(request) : []) {
+      const from = snapshotOf(item);
+      const lookedUp = artifactOf(from, item);
+      const refused = lookedUp.artifact ? null : refusalOf(from) ?? (lookedUp.found?.status === 'refused' ? lookedUp.found.reason || 'unknown reason' : null);
+      tried.push({item, refused});
+      if (!refused) break;
+    }
+    const chosen = tried.find(entry => !entry.refused) ?? tried[0] ?? null;
+    const earlier = chosen?.item ?? null;
+    const shownFrom = source?.stand ?? (earlier ? snapshotOf(earlier)
       : indexed ? {...request, responseStarted: indexed.responseStarted, responseBody: record} : request);
     const shownRecord = source?.stand ? source.stand.responseBody : earlier ?? record;
     const {artifact, found} = request ? artifactOf(shownFrom, shownRecord) : {artifact: null, found: null};
     const refusal = artifact ? null : refusalOf(shownFrom) ?? (found?.status === 'refused' ? found.reason || 'unknown reason' : null);
     const view = artifact ? viewOf(artifact) : null;
     const key = JSON.stringify([request?.id, request?.origin, tab, record, kind, request?.responseStarted?.sequenceNumber, artifact?.artifact_id,
-      earlier?.artifactId, source && [source.id, source.found, source.reason, source.body, source.mimeType],
+      tried.map(entry => [entry.item.artifactId, entry.refused]), source && [source.id, source.found, source.reason, source.body, source.mimeType],
       fetches && [fetches.status, fetches.capped, fetches.searched, fetches.rows.map(row => [row.id, row.responseBodyIndex?.case])],
       refusal, found?.status, view && [view.status, view.loaded, view.error, view.moreError, view.loadingMore], options, generation]);
     if (container.dataset.renderKey === key) return;
@@ -813,7 +834,16 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       ...trafficResponseRows(record)];
     if (earlier) {
       const after = trafficResponseAfter(earlier, request);
-      rows.push(['Earlier snapshot', `Snapshot ${earlier.partialIndex}: ${trafficResponseBytes(earlier.capturedLength)} of the ${trafficResponseBytes(earlier.bodyLength)} that had arrived${after ? ` ${after} after the response started` : ''}. The receiver retains it, and it is shown below.`, 'prose']);
+      // Refused snapshots other than the one shown: later ones when it was
+      // kept, earlier ones when every snapshot was refused.
+      const others = tried.filter(entry => entry.refused && entry !== chosen).map(entry => entry.item.partialIndex);
+      // Said from the artifact lookup, never assumed.
+      const kept = artifact ? 'The receiver retains it, and it is shown below.'
+        : refusal ? (others.length ? 'The receiver did not retain it or any earlier snapshot of this response.' : 'The receiver did not retain it.')
+        : found?.status === 'loading' ? 'Looking up whether the receiver retains it.' : 'Whether the receiver retains it is not known yet.';
+      const skipped = !refusal && others.length
+        ? ` The receiver did not retain the later snapshot${others.length > 1 ? 's' : ''} ${others.join(', ')}.` : '';
+      rows.push(['Earlier snapshot', `Snapshot ${earlier.partialIndex}: ${trafficResponseBytes(earlier.capturedLength)} of the ${trafficResponseBytes(earlier.bodyLength)} that had arrived${after ? ` ${after} after the response started` : ''}. ${kept}${skipped}`, 'prose']);
     }
     const reused = kind === 'memory_cache' ? sourceNote(request, source) : null;
     if (reused) rows.push(['Reused from', reused, 'prose']);

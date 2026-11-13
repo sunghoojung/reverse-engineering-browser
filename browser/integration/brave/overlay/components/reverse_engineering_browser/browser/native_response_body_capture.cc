@@ -6,6 +6,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -243,28 +244,36 @@ void NativeResponseBodyCapture::OnData(const Key key,
 void NativeResponseBodyCapture::TrySnapshot(const std::map<Key, Body>::iterator found,
                                             const std::uint64_t now) {
   Body& body = found->second;
-  switch (SnapshotDue(body, body.stream.kept(), now)) {
+  const std::uint64_t size = body.stream.kept();
+  const SnapshotGate gate = SnapshotDue(body, size, now);
+  switch (gate) {
     case SnapshotGate::kReady:
       Snapshot(found);
       return;
     case SnapshotGate::kWithheld:
+    case SnapshotGate::kPaced:
       // Every later record of the body says a byte bound withheld one.
       body.summary.flags |= kNativeResponseBodySnapshotsWithheld;
-      return;
+      if (gate == SnapshotGate::kWithheld) {
+        return;
+      }
+      break;
     case SnapshotGate::kTooSoon:
       break;
     case SnapshotGate::kUnchanged:
       return;
   }
-  // A burst followed by silence is still published once the spacing allows:
-  // one delayed task per body, which finds the body by key and capture ID as
-  // the completion wait does, so a body that ended or a new configuration
-  // leaves it nothing to do.
+  // A burst followed by silence is still published once the spacing, or the
+  // per-body pace that only time relaxes, allows: one delayed task per body,
+  // which finds the body by key and capture ID as the completion wait does,
+  // so a body that ended or a new configuration leaves it nothing to do. The
+  // session share and the budget are not retried; the next chunk tries again.
   if (body.snapshot_timer || !base::SequencedTaskRunner::HasCurrentDefault()) {
     return;
   }
   body.snapshot_timer = true;
-  const std::uint64_t due = NextSnapshotNs(body);
+  const std::uint64_t due =
+      gate == SnapshotGate::kPaced ? PaceDueNs(body, size, now) : NextSnapshotNs(body);
   base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
       base::BindOnce([](Key key, std::uint64_t id) { Get().OnSnapshotTimer(key, id); },
@@ -298,6 +307,25 @@ std::uint64_t NativeResponseBodyCapture::NextSnapshotNs(const Body& body) noexce
   return body.started_ns + std::max(last + kNativeResponseBodySnapshotFirstNs, spaced);
 }
 
+std::uint64_t NativeResponseBodyCapture::PaceDueNs(const Body& body,
+                                                   const std::uint64_t size,
+                                                   const std::uint64_t now) const noexcept {
+  // SnapshotDue's pace solved for the age: the size share cannot grow while
+  // the body is silent, so the elapsed share of the session must reach the
+  // fraction of the paced part of the allowance this snapshot needs. kPaced
+  // means it needs more than the quarter at once and at most the allowance.
+  const std::uint64_t allowance = budget_ / kNativeResponseBodySnapshotBodyDivisor;
+  const std::uint64_t at_once = allowance / 4;
+  const double fraction =
+      static_cast<double>(body.copied + size - at_once) / static_cast<double>(allowance - at_once);
+  const double span = static_cast<double>(expires_at_monotonic_ns_ - body.started_ns);
+  const std::uint64_t due =
+      body.started_ns + static_cast<std::uint64_t>(std::ceil(fraction * span));
+  // Rounding can leave the pace a few nanoseconds short at `due`; a retry
+  // then waits the shortest spacing instead of running at once.
+  return due > now ? due : now + kNativeResponseBodySnapshotFirstNs;
+}
+
 NativeResponseBodyCapture::SnapshotGate NativeResponseBodyCapture::SnapshotDue(
     const Body& body,
     const std::uint64_t size,
@@ -325,11 +353,14 @@ NativeResponseBodyCapture::SnapshotGate NativeResponseBodyCapture::SnapshotDue(
   const std::uint64_t paced =
       allowance / 4 +
       static_cast<std::uint64_t>(static_cast<double>(allowance - allowance / 4) * share);
-  return body.copied + size <= paced &&
-                 snapshot_used_ + size <= budget_ / kNativeResponseBodySnapshotSessionDivisor &&
-                 size <= budget_ - std::min(budget_, used_)
-             ? SnapshotGate::kReady
-             : SnapshotGate::kWithheld;
+  const bool shared =
+      snapshot_used_ + size <= budget_ / kNativeResponseBodySnapshotSessionDivisor &&
+      size <= budget_ - std::min(budget_, used_);
+  if (body.copied + size <= paced && shared) {
+    return SnapshotGate::kReady;
+  }
+  // Only the pace grows with time alone, and only up to the whole allowance.
+  return shared && body.copied + size <= allowance ? SnapshotGate::kPaced : SnapshotGate::kWithheld;
 }
 
 void NativeResponseBodyCapture::OnEnd(const Key key,

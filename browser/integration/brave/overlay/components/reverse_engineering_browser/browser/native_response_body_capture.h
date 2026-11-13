@@ -102,7 +102,8 @@ class NativeResponseBodyCapture final {
     std::uint64_t started_ns = 0;
     std::uint64_t snapshot_ns = 0;
     std::uint64_t snapshot_size = 0;
-    // A delayed task will retry a snapshot the spacing held back.
+    // A delayed task will retry a snapshot the spacing or the per-body pace
+    // held back.
     bool snapshot_timer = false;
     // Bytes every snapshot of this body copied, against its allowance.
     std::uint64_t copied = 0;
@@ -124,12 +125,17 @@ class NativeResponseBodyCapture final {
   // Ends the stream and records the body; an open body becomes partial.
   void Finish(std::map<Key, Body>::iterator found);
   // Whether a snapshot of `size` kept bytes may be taken now.
-  enum class SnapshotGate : std::uint8_t { kUnchanged, kTooSoon, kWithheld, kReady };
+  // kPaced: only the per-body pace withholds it, which time alone relaxes.
+  enum class SnapshotGate : std::uint8_t { kUnchanged, kTooSoon, kPaced, kWithheld, kReady };
   [[nodiscard]] SnapshotGate SnapshotDue(const Body& body,
                                          std::uint64_t size,
                                          std::uint64_t now) const noexcept;
   // The earliest time the spacing allows the next snapshot.
   [[nodiscard]] static std::uint64_t NextSnapshotNs(const Body& body) noexcept;
+  // The earliest time the per-body pace allows a snapshot of `size` bytes.
+  [[nodiscard]] std::uint64_t PaceDueNs(const Body& body,
+                                        std::uint64_t size,
+                                        std::uint64_t now) const noexcept;
   // Takes the snapshot, waits for the spacing, or marks it withheld.
   void TrySnapshot(std::map<Key, Body>::iterator found, std::uint64_t now);
   void OnSnapshotTimer(Key key, std::uint64_t capture_id);

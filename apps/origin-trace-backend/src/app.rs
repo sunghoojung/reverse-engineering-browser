@@ -1005,10 +1005,8 @@ impl App {
                     self.receiver_connected().await,
                     capture.state.as_str(),
                 );
-                // The body case counts follow the request index, which can be
-                // mid-store on an unchanged file, so its progress is in the tag.
-                let progress = self.requests.lock().await.progress_marker();
-                etag = Some(event_window::etag(
+                // The store's tag is taken before the request index reads it.
+                let before = event_window::etag(
                     &self.options.store,
                     &session_summary::etag_key(
                         &format!("{state:?}"),
@@ -1016,25 +1014,31 @@ impl App {
                             &self.options.artifacts.join("manifest.jsonl"),
                             "",
                         ),
-                        &progress,
                     ),
-                ));
+                );
+                // Per request, so they come from the request index's rows. The
+                // index is held only for its counts, and a failure leaves the
+                // rest of the summary standing.
+                let index = self.requests.clone().lock_owned().await;
+                let (counts, progress) = self
+                    .blocking(move || {
+                        let mut index = index;
+                        let counts = index.response_bodies().map_err(|error| error.message);
+                        Ok((counts, index.progress_marker()))
+                    })
+                    .await?;
+                // The counts can be mid-store on an unchanged file, so the tag
+                // names the progress they were read at. An answer without them
+                // is not tagged, so a revalidation reads the index again.
+                etag = counts
+                    .is_ok()
+                    .then(|| session_summary::etag(&before, &progress));
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
                 let store = self.options.store.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
-                // Per request, so they come from the request index's rows. The
-                // index is held only for its counts, and a failure leaves the
-                // rest of the summary standing.
-                let index = self.requests.clone().lock_owned().await;
-                let counts = self
-                    .blocking(move || {
-                        let mut index = index;
-                        Ok(index.response_bodies().map_err(|error| error.message))
-                    })
-                    .await?;
                 let mut summary = self
                     .blocking(move || {
                         let mut summary = session_summary::build(

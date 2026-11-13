@@ -964,11 +964,22 @@ fn body_case_meaning(case: &str) -> &'static str {
     }
 }
 
-/// The summary's ETag key: capture state, artifact manifest and the request
-/// index's progress, since the body case counts change as the index reads an
-/// unchanged store.
-pub fn etag_key(state: &str, manifest: &str, progress: &str) -> String {
-    format!("summary:{state}:{manifest}:index:{progress}")
+/// The summary's ETag key over the store's tag: capture state and artifact
+/// manifest.
+pub fn etag_key(state: &str, manifest: &str) -> String {
+    format!("summary:{state}:{manifest}")
+}
+
+/// The summary's ETag: the store's tag taken before the request index read
+/// it, and the index's progress after, the point its body case counts were
+/// read at. An answer counted mid-store therefore never shares a tag with the
+/// complete one, and bytes appended during the read change the next tag.
+pub fn etag(before: &str, progress: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "\"{}\"",
+        hex::encode(Sha256::digest(format!("{before}:index:{progress}")))
+    )
 }
 
 /// Every request's response body case, counted from the request index's rows,
@@ -980,7 +991,7 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
         Err(reason) => {
             summary["response_bodies"] = json!({"available": false, "reason": reason,
                 "complete": false, "requests": "0", "unindexed_records": "0",
-                "snapshots_withheld": "0", "cases": []});
+                "snapshots_withheld": "0", "earlier_snapshots": "0", "cases": []});
             return;
         }
     };
@@ -990,15 +1001,33 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
             .and_then(|count| count.parse::<u64>().ok())
             .unwrap_or(0)
     };
+    // A refused or malformed body may still name an earlier snapshot the
+    // receiver holds, which Traffic opens; each case says how many do.
+    let earlier = |case: &str| {
+        counts["earlier_snapshots"][case]
+            .as_str()
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
     let cases = counts["cases"]
         .as_object()
         .map(|cases| {
             cases
                 .iter()
-                .map(|(case, value)| json!({"case": case, "count": value, "meaning": body_case_meaning(case)}))
+                .map(|(case, value)| json!({"case": case, "count": value,
+                    "earlier_snapshots": earlier(case).to_string(), "meaning": body_case_meaning(case)}))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let earlier_total = counts["earlier_snapshots"]
+        .as_object()
+        .map(|cases| {
+            cases
+                .values()
+                .filter_map(|count| count.as_str()?.parse::<u64>().ok())
+                .sum::<u64>()
+        })
+        .unwrap_or(0);
     let (worker, reused, local) = (
         count("service_worker"),
         count("memory_cache"),
@@ -1008,7 +1037,8 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
         "available": true, "reason": null,
         "complete": counts["complete"], "requests": counts["requests"],
         "unindexed_records": counts["unindexed_records"],
-        "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"), "cases": cases,
+        "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"),
+        "earlier_snapshots": earlier_total.to_string(), "cases": cases,
     });
     let withheld = counts["snapshots_withheld"]
         .as_str()
@@ -1053,8 +1083,10 @@ mod tests {
         add_response_bodies(
             &mut summary,
             Ok(
-                json!({"complete": true, "requests": "6", "unindexed_records": "0", "snapshots_withheld": "3",
-                "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1"}}),
+                json!({"complete": true, "requests": "8", "unindexed_records": "0", "snapshots_withheld": "3",
+                "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1",
+                    "not_captured_session_budget": "2"},
+                "earlier_snapshots": {"not_captured_session_budget": "1"}}),
             ),
         );
         assert_eq!(summary["response_bodies"]["available"], true);
@@ -1067,7 +1099,15 @@ mod tests {
             .unwrap();
         assert_eq!(withheld["count"], "3");
         let cases = summary["response_bodies"]["cases"].as_array().unwrap();
-        assert_eq!(cases.len(), 4);
+        assert_eq!(cases.len(), 5);
+        // A refused body that keeps an earlier snapshot is counted as such.
+        assert_eq!(summary["response_bodies"]["earlier_snapshots"], "1");
+        let refused = cases
+            .iter()
+            .find(|case| case["case"] == "not_captured_session_budget")
+            .unwrap();
+        assert_eq!(refused["earlier_snapshots"], "1");
+        assert_eq!(cases[0]["earlier_snapshots"], "0");
         let worker = cases
             .iter()
             .find(|case| case["case"] == "service_worker")
@@ -1111,10 +1151,8 @@ mod tests {
         );
         assert_eq!(failed["response_bodies"]["cases"], json!([]));
         // The tag changes as the index reads an unchanged store.
-        assert_ne!(
-            etag_key("live", "m1", "4096"),
-            etag_key("live", "m1", "caught-up")
-        );
+        assert_ne!(etag("\"store\"", "4096"), etag("\"store\"", "caught-up"));
+        assert!(etag("\"store\"", "caught-up").starts_with('"'));
     }
 
     #[test]

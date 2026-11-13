@@ -364,6 +364,8 @@
                 }
               },
               "ETag": {
+                "required": false,
+                "description": "Absent when response_bodies.available is false, so a revalidation reads the request index again.",
                 "schema": {
                   "type": "string"
                 }
@@ -35611,7 +35613,8 @@
                 "requests",
                 "unindexed_records",
                 "cases",
-                "snapshots_withheld"
+                "snapshots_withheld",
+                "earlier_snapshots"
               ],
               "properties": {
                 "available": {
@@ -35643,6 +35646,7 @@
                     "required": [
                       "case",
                       "count",
+                      "earlier_snapshots",
                       "meaning"
                     ],
                     "properties": {
@@ -35678,6 +35682,10 @@
                       "count": {
                         "$ref": "#/components/schemas/Uint64String"
                       },
+                      "earlier_snapshots": {
+                        "$ref": "#/components/schemas/Uint64String",
+                        "description": "Rows of this case whose newest body record names no bytes (a refusal or a malformed record) and that name an earlier snapshot of the same response, which Traffic opens."
+                      },
                       "meaning": {
                         "type": "string"
                       }
@@ -35687,6 +35695,10 @@
                 "snapshots_withheld": {
                   "$ref": "#/components/schemas/Uint64String",
                   "description": "Rows whose newest body record says a byte bound withheld a snapshot (response_body flag bit 7)."
+                },
+                "earlier_snapshots": {
+                  "$ref": "#/components/schemas/Uint64String",
+                  "description": "Rows of every case that name an earlier snapshot: the sum of each case's earlier_snapshots."
                 }
               }
             },

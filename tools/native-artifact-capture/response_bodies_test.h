@@ -348,8 +348,8 @@ void RunDueTasks() {
 
 // The contract's sizing table, replayed through the capture itself: one
 // stream per profile opened at the start of a one-hour session with the
-// default budget, its chunks at a fixed rate, posted timers run as the clock
-// passes them. tools/check-native-artifact-capture.py holds the table to it.
+// default budget, its chunks at a fixed rate, each posted timer run at its due
+// time. tools/check-native-artifact-capture.py holds the table to it.
 void ResponseBodyScheduleReplay(const std::filesystem::path& output) {
   struct Profile {
     const char* name;
@@ -401,13 +401,33 @@ void ResponseBodyScheduleReplay(const std::filesystem::path& output) {
       // Snapshot copies are counted, then dropped, so the replay holds one stream.
       std::erase_if(transfers, [](const auto& entry) { return entry.second->stream_id != 0; });
     };
-    for (std::int64_t at = profile.tick; at <= profile.duration; at += profile.tick) {
-      base::test_now_ns = static_cast<std::int64_t>(start) + at;
-      RunDueTasks();
-      count();
+    // Staleness peaks just before a snapshot: at a chunk, or at a timer's due
+    // time between chunks, so it is sampled at both.
+    const auto sample = [&] {
       if (kept > last_size) {
         stale = std::max(stale, static_cast<std::uint64_t>(base::test_now_ns) - last_time);
       }
+    };
+    for (std::int64_t at = profile.tick; at <= profile.duration; at += profile.tick) {
+      const std::int64_t next_chunk = static_cast<std::int64_t>(start) + at;
+      for (;;) {
+        std::optional<std::int64_t> due;
+        for (const auto& task : runner.tasks) {
+          const std::int64_t when = task.posted + task.first;
+          if (when <= next_chunk && (!due || when < *due)) {
+            due = when;
+          }
+        }
+        if (!due) {
+          break;
+        }
+        base::test_now_ns = std::max(base::test_now_ns, *due);
+        sample();
+        RunDueTasks();
+        count();
+      }
+      base::test_now_ns = next_chunk;
+      sample();
       NativeArtifactBodyTee::Deliver(response.pipe, chunk);
       kept = std::min<std::uint64_t>(kept + chunk.size(), reb::kNativeResponseBodyCaptureBytes);
       count();
@@ -673,6 +693,51 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
   const auto quick = ResponseRecord(Ended(Respond(9032), Bytes("{}")));
   Check((quick.flags & reb::kResponseBodySnapshotsWithheld) == 0,
         "A body whose snapshots were never withheld carries no flag");
+  transfers.clear();
+  runner.tasks.clear();
+
+  // A burst only the per-body pace withholds is published through silence
+  // once the pace allows it. With a 1 MiB budget the body's allowance is
+  // 128 KiB, 32 KiB at once, so 40 KiB waits until a twelfth of the 1000 s
+  // session has passed: 83.3 s. One timer per body; an ended body's does nothing.
+  ConfigureResponses({.enabled = true, .budget = 1 * kMiB});
+  transfers.clear();
+  runner.tasks.clear();
+  const auto start = base::test_now_ns;
+  const auto silent = Respond(9033, {.mime = "text/event-stream"});
+  NativeArtifactBodyTee::Deliver(silent.pipe, std::vector<std::uint8_t>(40 * kKiB, 'p'));
+  base::test_now_ns = start + 2 * kSecond;
+  RunDueTasks();
+  NativeArtifactBodyTee::Deliver(silent.pipe, Bytes("q"));
+  Check(runner.tasks.size() == 1 && partials(silent).empty() &&
+            runner.tasks[0].posted + runner.tasks[0].first > start + 83 * kSecond &&
+            runner.tasks[0].posted + runner.tasks[0].first < start + 84 * kSecond,
+        "A burst the pace withholds waits for one timer at the time the pace allows it");
+  base::test_now_ns = start + 83 * kSecond;
+  RunDueTasks();
+  Check(partials(silent).empty(), "Nothing is published before the pace allows it");
+  base::test_now_ns = start + 84 * kSecond;
+  RunDueTasks();
+  const auto paced_snapshots = partials(silent);
+  Check(paced_snapshots.size() == 1 &&
+            ResponseRecord(paced_snapshots[0]).body_length == 40 * kKiB + 1 &&
+            (ResponseRecord(paced_snapshots[0]).flags & reb::kResponseBodySnapshotsWithheld) != 0 &&
+            runner.tasks.empty(),
+        "With no new chunk the pace timer publishes the withheld burst");
+  const auto paced_end = Respond(9034, {.mime = "text/event-stream"});
+  NativeArtifactBodyTee::Deliver(paced_end.pipe, std::vector<std::uint8_t>(40 * kKiB, 'e'));
+  base::test_now_ns += 2 * kSecond;
+  RunDueTasks();
+  Check(runner.tasks.size() == 1, "An ended body's pace timer is pending at its end");
+  Ended(paced_end, {});
+  base::test_now_ns += 100 * kSecond;
+  const auto paced_ended = events.size();
+  RunDueTasks();
+  Check(events.size() == paced_ended && partials(paced_end).empty(),
+        "An ended body's pace timer publishes nothing");
+  NativeArtifactBodyTee::End(silent.pipe, reb::NativeArtifactBodyEnd::kSourceClosed);
+  Completed(silent);
+  base::ThreadPool::RunPending();
   transfers.clear();
   runner.tasks.clear();
   Configure();

@@ -1372,21 +1372,25 @@ fn body_case(row: &Row) -> (&'static str, Option<&BodyChild>) {
 /// the session can name another renderer's request: the source must have the
 /// reuse's web host (a 120-byte reuse host is a prefix) and have started first.
 fn source_mismatch(reuse: &Row, source: &Row) -> Option<&'static str> {
-    let web = |class: u8| (1..=4).contains(&class);
-    let (host, other) = (
-        reuse.path.to_ascii_lowercase(),
-        source.path.to_ascii_lowercase(),
-    );
+    if reuse_host_differs(reuse.scheme_class, &reuse.path, &source.path) {
+        return Some("host_differs");
+    }
+    (source.first_ns > reuse.first_ns).then_some("started_after")
+}
+/// Whether a web reuse's host and its named source's host are known and
+/// differ; a 120-byte reuse host is a prefix. `get_xrefs` applies the same rule.
+pub(crate) fn reuse_host_differs(scheme_class: u8, reuse: &str, source: &str) -> bool {
+    let (host, other) = (reuse.to_ascii_lowercase(), source.to_ascii_lowercase());
     let known = |name: &str| !name.is_empty() && name != UNIDENTIFIED.to_ascii_lowercase();
-    if web(reuse.scheme_class)
+    (1..=4).contains(&scheme_class)
         && known(&host)
         && known(&other)
         && host != other
         && !(host.len() == 120 && other.starts_with(&host))
-    {
-        return Some("host_differs");
-    }
-    (source.first_ns > reuse.first_ns).then_some("started_after")
+}
+/// The host a valid `memory_cache_reuse` record names, else None.
+pub(crate) fn reuse_host(event: &Value) -> Option<String> {
+    memory_cache(event).map(|reuse| reuse.host)
 }
 /// The `response_body` answer of a row: its case and, for a record, what it names.
 fn body_document(row: &Row) -> Value {
@@ -1911,10 +1915,12 @@ impl RequestIndex {
                                     (None, Some(_)) => true,
                                     _ => false,
                                 };
-                                if !newer_snapshot {
-                                    child.snapshot = held.snapshot.take();
-                                }
+                                // A repeated or older record replaces nothing, so
+                                // it must not take the held snapshot either.
                                 if held.sequence < sequence {
+                                    if !newer_snapshot {
+                                        child.snapshot = held.snapshot.take();
+                                    }
                                     *held = child;
                                 } else if newer_snapshot {
                                     held.snapshot = child.snapshot;
@@ -2624,6 +2630,7 @@ impl RequestIndex {
         self.refresh()?;
         let state = self.state.as_ref().expect("index state");
         let mut cases = BTreeMap::<&str, u64>::new();
+        let mut earlier = BTreeMap::<&str, u64>::new();
         let mut withheld = 0u64;
         for row in &state.rows {
             let (case, body) = body_case(row);
@@ -2632,14 +2639,31 @@ impl RequestIndex {
                 body.and_then(|body| body.record.as_ref())
                     .is_some_and(|record| record.flags & 0x80 != 0),
             );
+            // A refused or malformed newest record whose row names an
+            // earlier snapshot, as body_document's earlier_snapshot does.
+            if body.is_some_and(|body| {
+                body.snapshot.is_some()
+                    && body
+                        .record
+                        .as_ref()
+                        .is_none_or(|record| record.artifact == "0")
+            }) {
+                *earlier.entry(case).or_default() += 1;
+            }
         }
+        let counts = |counts: BTreeMap<&str, u64>| {
+            counts
+                .into_iter()
+                .map(|(case, count)| (case.to_owned(), json!(count.to_string())))
+                .collect::<serde_json::Map<_, _>>()
+        };
         Ok(json!({
             "complete": self.caught_up(state.indexed_to),
             "requests": state.rows.len().to_string(),
             "unindexed_records": state.unindexed.to_string(),
             "snapshots_withheld": withheld.to_string(),
-            "cases": cases.into_iter().map(|(case, count)| (case.to_owned(), json!(count.to_string())))
-                .collect::<serde_json::Map<_, _>>(),
+            "cases": counts(cases),
+            "earlier_snapshots": counts(earlier),
         }))
     }
 
@@ -3467,8 +3491,16 @@ mod tests {
         let mut withheld = body(3, 30, 30, 1);
         (withheld[0], withheld[5]) = (2, 0x80);
         answered(12, withheld, "88", 200);
-        // A refused end keeps the snapshot the receiver holds beside it.
+        // A refused end keeps the newest snapshot beside it; Traffic tries
+        // the older one when the receiver refused the newest.
         let refused = answered(6, body(3, 30, 30, 1), "85", 200);
+        store.push(
+            7,
+            976,
+            "response_body",
+            &body(3, 45, 45, 2),
+            child(&refused, "89", 6),
+        );
         store.push(
             7,
             976,
@@ -4675,9 +4707,9 @@ mod tests {
         let refused = &row("S1:R62:6")["response_body"];
         assert_eq!(refused["case"], "not_captured_session_budget");
         assert!(refused["artifact_id"].is_null());
-        assert_eq!(refused["earlier_snapshot"]["artifact_id"], "85");
-        assert_eq!(refused["earlier_snapshot"]["captured_length"], "30");
-        assert_eq!(refused["earlier_snapshot"]["partial_index"], 1);
+        assert_eq!(refused["earlier_snapshot"]["artifact_id"], "89");
+        assert_eq!(refused["earlier_snapshot"]["captured_length"], "45");
+        assert_eq!(refused["earlier_snapshot"]["partial_index"], 2);
         assert!(row("S1:R62:1")["response_body"]["earlier_snapshot"].is_null());
         assert_eq!(
             row("S1:R62:12")["response_body"]["snapshots_withheld"],
@@ -4688,6 +4720,10 @@ mod tests {
             false
         );
         assert_eq!(counts["snapshots_withheld"], "1");
+        assert_eq!(
+            counts["earlier_snapshots"],
+            json!({"not_captured_session_budget": "1"})
+        );
         // A redirect then a failure, a cancel or no end is never redirected.
         for (id, case) in [
             ("S1:R62:9", "failed_before_response"),
@@ -4723,6 +4759,53 @@ mod tests {
         let retained = rows.iter().find(|row| row["id"] == "S1:R61:20").unwrap();
         assert_eq!(retained["response_body"]["case"], "captured");
         assert!(retained["memory_cache_source"].is_null());
+    }
+
+    #[test]
+    fn a_repeated_or_late_body_record_keeps_the_retained_snapshot() {
+        let context = json!({"tab_id": 3, "initiator_process_id": 64, "initiator_request_id": 1});
+        // A duplicate line, then an older record read after the refusal.
+        for late in [None, Some("3")] {
+            let mut store = Store {
+                events: Vec::new(),
+                sequence: 0,
+            };
+            store.push(
+                7,
+                990,
+                "request_started",
+                b"GET late.example.test",
+                context.clone(),
+            );
+            let response = store.push(
+                7,
+                990,
+                "response_started",
+                b"application/json",
+                merge(context.clone(), json!({"status_code": 200})),
+            );
+            let child = |artifact: &str| {
+                merge(
+                    context.clone(),
+                    json!({"parent_event_id": response, "artifact_id": artifact}),
+                )
+            };
+            store.push(7, 990, "response_body", &body(3, 30, 30, 1), child("85"));
+            store.push(7, 990, "response_body", &body(12, 60, 0, 0), child("0"));
+            let mut repeated = store.events.last().unwrap().clone();
+            if let Some(sequence) = late {
+                repeated["sequence_number"] = json!(sequence);
+            }
+            store.events.push(repeated);
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("events.jsonl");
+            write(&path, &store);
+            let mut index = RequestIndex::new(&path);
+            let document = page(&mut index, "limit=10");
+            let body = &document["requests"][0]["response_body"];
+            assert_eq!(body["case"], "not_captured_session_budget", "{late:?}");
+            assert_eq!(body["earlier_snapshot"]["artifact_id"], "85", "{late:?}");
+        }
     }
 
     /// Golden for tools/check-request-index.mjs.

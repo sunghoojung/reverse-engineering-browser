@@ -731,7 +731,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 62, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 63, "Review route coverage when the API changes");
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
@@ -824,7 +824,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 62);
+    assert_eq!(operation_count, 63);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -4777,6 +4777,95 @@ async fn an_unreadable_wasm_run_store_is_an_integrity_error_and_is_moved_aside()
     assert_eq!(std::fs::read(moved).unwrap(), b"{not json");
     let listed: Value = server.get("/api/wasm/runs").await.json().await.unwrap();
     assert_eq!(listed["total"], 1, "{listed}");
+}
+
+#[tokio::test]
+async fn wasm_identification_route_matches_its_contract_and_the_cli() {
+    let server = Server::start().await;
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/fixtures/wasm-identification/rust-wasm-bindgen.wasm"),
+    )
+    .unwrap();
+    let store = |id: &str, kind: &str, bytes: &[u8]| {
+        let hash = hex::encode(Sha256::digest(bytes));
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+        json!({"protocol_version":1,"artifact_id":id,"session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":kind,"url":"https://example.test/module.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")})
+    };
+    let mut malformed = bytes.clone();
+    malformed.truncate(40);
+    let manifest = [
+        store("1", "wasm", &bytes),
+        store("2", "javascript", b"let a = 1;"),
+        store("3", "wasm", &malformed),
+    ];
+    server.file(
+        "artifacts/manifest.jsonl",
+        manifest
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>()
+            .as_bytes(),
+    );
+    let route = "/api/wasm/identification";
+    let body = assert_contract_response(
+        server.get(&format!("{route}?artifact_id=1")).await,
+        "get",
+        route,
+        200,
+    )
+    .await;
+    let report: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(report["schema"], "wasm-identification-v1");
+    assert_eq!(report["artifact_id"], "1");
+    assert_eq!(report["status"], "complete");
+    assert!(
+        report["summary"]["toolchains"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("wasm-bindgen"))
+    );
+    assert_eq!(report["functions"]["suggestions"][0][1], "JS glue: fetch");
+    let page: Value = server
+        .get(&format!("{route}?artifact_id=1&row_offset=2&row_limit=1"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["functions"]["suggestion_window"]["rows"], 1);
+    assert_eq!(page["functions"]["suggestion_window"]["next_offset"], 3);
+    assert_eq!(page["constants"], report["constants"]);
+    for (query, status) in [
+        ("", 400),
+        ("?artifact_id=1&function=1", 400),
+        ("?artifact_id=1&row_limit=0", 400),
+        ("?artifact_id=1&row_limit=1025", 400),
+        ("?artifact_id=1&row_offset=999", 400),
+        ("?artifact_id=2", 400),
+        ("?artifact_id=9", 404),
+        ("?artifact_id=3", 422),
+    ] {
+        let body = assert_contract_response(
+            server.get(&format!("{route}{query}")).await,
+            "get",
+            route,
+            status,
+        )
+        .await;
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert!(error["error"].is_string(), "{query}: {error}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .args(["--artifact-id", "1", "--identification"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        report
+    );
 }
 
 #[tokio::test]

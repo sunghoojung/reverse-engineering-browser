@@ -60,13 +60,13 @@ fn bad(error: wasmparser::BinaryReaderError) -> Error {
     Error::protocol(format!("WASM decoding failed: {error}"))
 }
 
-struct Artifact {
-    bytes: Vec<u8>,
-    artifact_id: Value,
-    sha256: Value,
+pub(crate) struct Artifact {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) artifact_id: Value,
+    pub(crate) sha256: Value,
 }
 
-fn artifact(root: &Path, id: &str) -> Result<Artifact> {
+pub(crate) fn artifact(root: &Path, id: &str) -> Result<Artifact> {
     validation::canonical(&serde_json::json!(id), 64, true, "Artifact ID")?;
     let record = evidence::artifacts(root, 10000)?
         .into_iter()
@@ -260,7 +260,7 @@ pub(crate) fn function_index_named(
 }
 
 /// A name stays one inert line of bounded text, whatever the module supplied.
-fn bounded_name(name: &str) -> String {
+pub(crate) fn bounded_name(name: &str) -> String {
     let mut text = String::new();
     for character in name.chars().flat_map(char::escape_debug) {
         if text.len() + character.len_utf8() > MAX_NAME_BYTES {

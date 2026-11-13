@@ -5092,6 +5092,146 @@
         }
       }
     },
+    "/api/wasm/identification": {
+      "get": {
+        "operationId": "get_wasm_identification",
+        "summary": "Identify a captured WebAssembly module's toolchain, well-known functions and known constants",
+        "description": "Bounded static identification for one hash-verified core WASM artifact, in three parts. toolchain: conclusions such as Rust, wasm-bindgen, Emscripten, WASI, Go, AssemblyScript or .NET, each with a confidence and the exact evidence it rests on (producers entries, custom sections, imports, exports and name-section names, each with a module byte offset), plus the producers, target_features, sourceMappingURL, external_debug_info and custom-section facts read as stored. functions: suggested labels for imported and defined functions, such as JS fetch glue, a WASI call, an allocator or a Rust std function, as compact rows with their evidence offset; these are analyzer suggestions, never captured or analyst names, and they page with row_offset and row_limit. constants: SHA-1, SHA-2, MD5, AES, ChaCha/Salsa, CRC-32, Base64/Base32 tables and hash and PRNG magic values found in data segments or in i32/i64/f32/f64/v128 const immediates, each complete or partial with its matched count, and for a data table the functions whose immediates or load offsets name an address inside it. Nothing is concluded from absence, and the module is never executed. The report is structure and offsets; only the hex preview of a data match is captured content, which --omit-content removes.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "row_offset",
+            "in": "query",
+            "required": false,
+            "description": "First suggestion row of the window. Toolchain conclusions and constant matches are whole on every page. Default 0; an offset past the suggestion count is refused.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "row_limit",
+            "in": "query",
+            "required": false,
+            "description": "Suggestion rows in the window, 1 to 1024. functions.suggestion_window.next_offset continues. Default 1024.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024,
+              "default": 1024
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Versioned identification report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmIdentification"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Verifies captured artifact bytes, then reads sections, names and constant immediates under a five-second deadline. Static identification only; the module is never executed and nothing is written.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_identification.rs",
+              "symbol": "identify"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/wasm_constants.rs",
+              "symbol": "catalog"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
     "/api/wasm": {
       "get": {
         "operationId": "inspect_wasm",
@@ -21764,6 +21904,705 @@
                 }
               }
             }
+          }
+        }
+      },
+      "WasmIdentification": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "byte_size",
+          "status",
+          "evidence",
+          "summary",
+          "toolchain",
+          "functions",
+          "constants",
+          "coverage",
+          "omissions",
+          "limits",
+          "notice"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-identification-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byte_size": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "enum": [
+              "complete",
+              "partial"
+            ]
+          },
+          "evidence": {
+            "const": "static_identification"
+          },
+          "summary": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "toolchains",
+              "labeled_functions",
+              "suggestions",
+              "constant_matches",
+              "complete_constant_matches"
+            ],
+            "properties": {
+              "toolchains": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "labeled_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "suggestions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "constant_matches": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete_constant_matches": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "toolchain": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "conclusions",
+              "producers",
+              "target_features",
+              "source_mapping_url",
+              "external_debug_info",
+              "custom_sections",
+              "name_section"
+            ],
+            "properties": {
+              "conclusions": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "label",
+                    "kind",
+                    "confidence",
+                    "evidence_count",
+                    "evidence_truncated",
+                    "evidence"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "kind": {
+                      "enum": [
+                        "language",
+                        "compiler",
+                        "linker",
+                        "runtime",
+                        "bindings",
+                        "system_interface",
+                        "optimizer"
+                      ]
+                    },
+                    "confidence": {
+                      "enum": [
+                        "high",
+                        "medium",
+                        "low"
+                      ]
+                    },
+                    "evidence_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "evidence_truncated": {
+                      "type": "boolean"
+                    },
+                    "evidence": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "record",
+                          "byte_offset",
+                          "detail",
+                          "function_index",
+                          "confidence"
+                        ],
+                        "properties": {
+                          "record": {
+                            "enum": [
+                              "producers",
+                              "custom_section",
+                              "import",
+                              "export",
+                              "name"
+                            ]
+                          },
+                          "byte_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "detail": {
+                            "type": "string",
+                            "maxLength": 256
+                          },
+                          "function_index": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ],
+                            "minimum": 0
+                          },
+                          "confidence": {
+                            "enum": [
+                              "high",
+                              "medium",
+                              "low"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "producers": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "field",
+                    "name",
+                    "version",
+                    "byte_offset"
+                  ],
+                  "properties": {
+                    "field": {
+                      "type": "string",
+                      "maxLength": 40
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "version": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "target_features": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "prefix",
+                    "name",
+                    "byte_offset"
+                  ],
+                  "properties": {
+                    "prefix": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "source_mapping_url": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "required": [
+                  "url",
+                  "byte_offset"
+                ],
+                "properties": {
+                  "url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 520
+                  },
+                  "byte_offset": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "external_debug_info": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "additionalProperties": false,
+                "required": [
+                  "url",
+                  "byte_offset"
+                ],
+                "properties": {
+                  "url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 520
+                  },
+                  "byte_offset": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              "custom_sections": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "byte_offset",
+                    "byte_end",
+                    "bytes"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "byte_end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "name_section": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "present",
+                  "byte_offset",
+                  "module_name",
+                  "function_names"
+                ],
+                "properties": {
+                  "present": {
+                    "type": "boolean"
+                  },
+                  "byte_offset": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "module_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 128
+                  },
+                  "function_names": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "functions": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "imported_functions",
+              "defined_functions",
+              "labeled_functions",
+              "suggestion_fields",
+              "suggestions",
+              "suggestion_window"
+            ],
+            "properties": {
+              "imported_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "defined_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "labeled_functions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "suggestion_fields": {
+                "const": [
+                  "function_index",
+                  "label",
+                  "category",
+                  "library",
+                  "confidence",
+                  "source",
+                  "byte_offset"
+                ]
+              },
+              "suggestions": {
+                "type": "array",
+                "maxItems": 1024,
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    {
+                      "type": "string",
+                      "maxLength": 256
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "enum": [
+                        "high",
+                        "medium",
+                        "low"
+                      ]
+                    },
+                    {
+                      "enum": [
+                        "import",
+                        "export",
+                        "name"
+                      ]
+                    },
+                    {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  ],
+                  "minItems": 7,
+                  "maxItems": 7
+                }
+              },
+              "suggestion_window": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "offset",
+                  "rows",
+                  "total_rows",
+                  "next_offset"
+                ],
+                "properties": {
+                  "offset": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "total_rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "next_offset": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 1
+                  }
+                }
+              }
+            }
+          },
+          "constants": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "matches"
+            ],
+            "properties": {
+              "matches": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "label",
+                    "family",
+                    "location",
+                    "match",
+                    "matched",
+                    "total",
+                    "byte_offset",
+                    "byte_end"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "family": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "enum": [
+                        "data",
+                        "immediate"
+                      ]
+                    },
+                    "match": {
+                      "enum": [
+                        "complete",
+                        "partial"
+                      ]
+                    },
+                    "matched": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "total": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "byte_end": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "data_segment": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "encoding": {
+                      "enum": [
+                        "bytes",
+                        "u32_le",
+                        "u32_be",
+                        "u64_le",
+                        "u64_be",
+                        "u32_pairs_high_first"
+                      ]
+                    },
+                    "runs": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "memory_address": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "minimum": 0
+                    },
+                    "referenced_by": {
+                      "type": "array",
+                      "maxItems": 16,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "function_index",
+                          "byte_offset",
+                          "via"
+                        ],
+                        "properties": {
+                          "function_index": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "byte_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "via": {
+                            "enum": [
+                              "address_immediate",
+                              "load_offset"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "reference_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "references_truncated": {
+                      "type": "boolean"
+                    },
+                    "hex": {
+                      "type": "string",
+                      "pattern": "^([0-9a-f]{2}){1,64}$",
+                      "description": "Up to 64 matched bytes as stored. Captured content, omitted by --omit-content."
+                    },
+                    "function_index": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "sites": {
+                      "type": "array",
+                      "maxItems": 8,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "byte_offset",
+                          "operator"
+                        ],
+                        "properties": {
+                          "byte_offset": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "operator": {
+                            "enum": [
+                              "i32.const",
+                              "i64.const",
+                              "f32.const",
+                              "f64.const",
+                              "v128.const"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "site_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "sites_truncated": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "data_segments",
+              "data_bytes",
+              "data_bytes_scanned",
+              "data_scan_complete",
+              "functions_scanned",
+              "immediates_scanned"
+            ],
+            "properties": {
+              "data_segments": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "data_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "data_bytes_scanned": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "data_scan_complete": {
+                "type": "boolean"
+              },
+              "functions_scanned": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "immediates_scanned": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "omissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limits": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "notice": {
+            "type": "string"
           }
         }
       },

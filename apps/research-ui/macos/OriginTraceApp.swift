@@ -237,7 +237,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         handleArtifactMap(requestURL, to: urlSchemeTask)
         return
-      case "/api/wasm/functions", "/api/wasm/graph":
+      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification":
         guard urlSchemeTask.request.httpMethod == "GET" else {
           throw LocalHTTPError(status: 405, message: "WASM graph routes require GET")
         }
@@ -1934,7 +1934,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let allowed = url.path == "/api/wasm/graph" ? ["artifact_id", "function"] : ["artifact_id"]
+        let allowed = url.path == "/api/wasm/graph" ? ["artifact_id", "function"]
+          : url.path == "/api/wasm/identification" ? ["artifact_id", "row_offset", "row_limit"] : ["artifact_id"]
         let ids = items.filter { $0.name == "artifact_id" }
         guard items.allSatisfy({ allowed.contains($0.name) }), ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
           id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
@@ -1949,6 +1950,24 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           }
           arguments = ["--graph-function", function]
           schema = "wasm-block-graph-v1"
+        } else if url.path == "/api/wasm/identification" {
+          // The same suggestion window as the loopback route: one value each,
+          // canonical, with the backend's 1024-row page as the ceiling.
+          var window: [String] = []
+          for (name, flag, minimum) in [("row_offset", "--row-offset", 0), ("row_limit", "--row-limit", 1)] {
+            let values = items.filter { $0.name == name }
+            guard values.count <= 1 else {
+              throw NativeDecoderError(status: 400, message: "WASM identification takes one \(name)")
+            }
+            if let raw = values.first?.value {
+              guard let value = Int(raw), value >= minimum, String(value) == raw, name != "row_limit" || value <= 1024 else {
+                throw NativeDecoderError(status: 400, message: name == "row_limit" ? "row_limit is 1 to 1024" : "row_offset is an unsigned integer")
+              }
+              window += [flag, raw]
+            }
+          }
+          arguments = ["--identification"] + window
+          schema = "wasm-identification-v1"
         } else {
           arguments = ["--functions"]
           schema = "wasm-function-index-v1"

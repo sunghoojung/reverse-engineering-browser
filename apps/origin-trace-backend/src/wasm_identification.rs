@@ -1,0 +1,2322 @@
+//! Static library identification for one captured module: which toolchain
+//! and runtime built it, which functions are well-known glue, runtime or libc
+//! code, and where known cryptographic and encoding constants sit.
+//!
+//! Every conclusion lists the exact bytes it rests on (a section, an import,
+//! an export, a name or a constant, each with its module byte offset) and a
+//! confidence. Nothing is concluded from absence: a module without a
+//! producers section is not "not Rust", it is unlabeled. Suggestions are
+//! analyzer output kept apart from captured names and from analyst names, and
+//! the module is never executed. Raw evidence is not changed.
+use crate::{
+    error::{Error, Result},
+    wasm_constants::{self, ConstantSet, Encoding, Run, Width},
+    wasm_graph,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::Path,
+    time::{Duration, Instant},
+};
+use wasmparser::{
+    BinaryReader, DataKind, Encoding as BinaryEncoding, ExternalKind, FunctionBody, KnownCustom,
+    Name, Operator, Parser, Payload, TypeRef,
+};
+
+/// The block graph's input budget: real modules are tens of MiB.
+pub const MAX_BYTES: usize = wasm_graph::MAX_BYTES;
+/// Inside the native helper's five-second process deadline, so a partial
+/// report still reaches the app.
+const DEADLINE: Duration = Duration::from_secs(4);
+const MAX_CONCLUSIONS: usize = 32;
+const MAX_EVIDENCE: usize = 16;
+const MAX_PRODUCERS: usize = 32;
+const MAX_FEATURES: usize = 64;
+const MAX_CUSTOM_SECTIONS: usize = 64;
+const MAX_SUGGESTIONS_PER_FUNCTION: usize = 4;
+/// Suggestions kept in one report. Each is one compact row, so the whole set
+/// stays a few hundred KiB at most and a page fits an MCP result.
+const MAX_SUGGESTIONS: usize = 16_384;
+pub const SUGGESTION_PAGE: usize = 1024;
+const MAX_MATCHES: usize = 128;
+const MAX_REFERENCES: usize = 16;
+const MAX_SITES: usize = 8;
+/// Bytes of a data match returned as `hex`. They are captured content, which
+/// `--omit-content` drops; the match identity is the offsets and counts.
+const MATCH_PREVIEW_BYTES: usize = 64;
+/// Captured text inside a label stays short enough that a read-only result,
+/// which omits strings over 160 characters, keeps the whole label.
+const LABEL_TEXT_BYTES: usize = 96;
+const URL_BYTES: usize = 512;
+
+fn bad(error: wasmparser::BinaryReaderError) -> Error {
+    Error::protocol(format!("WASM decoding failed: {error}"))
+}
+
+/// Escaped, single-line, bounded text of at most `limit` bytes.
+fn bounded(text: &str, limit: usize) -> String {
+    let mut out = String::new();
+    for character in text.chars().flat_map(char::escape_debug) {
+        if out.len() + character.len_utf8() > limit {
+            out.push_str("...");
+            break;
+        }
+        out.push(character);
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl Confidence {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+struct Toolchain {
+    id: &'static str,
+    label: &'static str,
+    kind: &'static str,
+}
+
+#[rustfmt::skip]
+const TOOLCHAINS: [Toolchain; 20] = [
+    Toolchain { id: "rust", label: "Rust", kind: "language" },
+    Toolchain { id: "c_cpp", label: "C or C++", kind: "language" },
+    Toolchain { id: "clang", label: "clang (LLVM)", kind: "compiler" },
+    Toolchain { id: "llvm_wasm_ld", label: "LLVM wasm-ld", kind: "linker" },
+    Toolchain { id: "llvm_object", label: "Unlinked LLVM object file", kind: "linker" },
+    Toolchain { id: "emscripten", label: "Emscripten", kind: "runtime" },
+    Toolchain { id: "wasm_bindgen", label: "wasm-bindgen", kind: "bindings" },
+    Toolchain { id: "wasi", label: "WASI preview 1", kind: "system_interface" },
+    Toolchain { id: "wasi_libc", label: "wasi-libc", kind: "runtime" },
+    Toolchain { id: "go", label: "Go (js/wasm ABI, gc or TinyGo)", kind: "language" },
+    Toolchain { id: "tinygo", label: "TinyGo", kind: "compiler" },
+    Toolchain { id: "assemblyscript", label: "AssemblyScript", kind: "language" },
+    Toolchain { id: "dotnet", label: ".NET (Mono WebAssembly runtime)", kind: "runtime" },
+    Toolchain { id: "kotlin", label: "Kotlin/Wasm", kind: "language" },
+    Toolchain { id: "dart", label: "Dart (dart2wasm)", kind: "language" },
+    Toolchain { id: "swift", label: "Swift (SwiftWasm)", kind: "language" },
+    Toolchain { id: "zig", label: "Zig", kind: "language" },
+    Toolchain { id: "binaryen", label: "Binaryen (wasm-opt)", kind: "optimizer" },
+    Toolchain { id: "asyncify", label: "Binaryen Asyncify", kind: "runtime" },
+    Toolchain { id: "component_model", label: "WebAssembly component tooling (wit-bindgen, wit-component)", kind: "bindings" },
+];
+
+/// One piece of evidence: what was read and where.
+#[derive(Clone)]
+struct Evidence {
+    source: &'static str,
+    byte_offset: usize,
+    detail: String,
+    function_index: Option<u32>,
+}
+
+impl Evidence {
+    fn json(&self) -> Value {
+        json!({"record":self.source,"byte_offset":self.byte_offset,"detail":self.detail,
+            "function_index":self.function_index})
+    }
+}
+
+/// One toolchain's strongest confidence, the evidence kept with its own
+/// strength, and the count of every piece of evidence seen.
+type Conclusion = (Confidence, Vec<(Confidence, Evidence)>, usize);
+
+#[derive(Default)]
+struct Conclusions {
+    by_id: BTreeMap<&'static str, Conclusion>,
+}
+
+impl Conclusions {
+    fn add(&mut self, id: &'static str, confidence: Confidence, evidence: Evidence) {
+        let entry = self
+            .by_id
+            .entry(id)
+            .or_insert_with(|| (confidence, Vec::new(), 0));
+        entry.0 = entry.0.max(confidence);
+        entry.2 += 1;
+        // Strong evidence displaces weak evidence once the list is full, so
+        // a capped list never hides the reason for the confidence it reports.
+        if entry.1.len() < MAX_EVIDENCE {
+            entry.1.push((confidence, evidence));
+        } else if let Some(weakest) = entry
+            .1
+            .iter()
+            .enumerate()
+            .filter(|(_, (kept, _))| *kept < confidence)
+            .min_by_key(|(_, (kept, _))| *kept)
+            .map(|(index, _)| index)
+        {
+            entry.1[weakest] = (confidence, evidence);
+        }
+    }
+}
+
+/// A suggested label for one function.
+struct Suggestion {
+    function: u32,
+    label: String,
+    category: &'static str,
+    library: &'static str,
+    confidence: Confidence,
+    source: &'static str,
+    byte_offset: usize,
+}
+
+struct Import<'a> {
+    module: &'a str,
+    name: &'a str,
+    offset: usize,
+    function: Option<u32>,
+}
+
+struct Export<'a> {
+    name: &'a str,
+    kind: ExternalKind,
+    index: u32,
+    offset: usize,
+}
+
+struct Segment<'a> {
+    index: u32,
+    data: &'a [u8],
+    data_offset: usize,
+    address: Option<u64>,
+}
+
+struct Custom<'a> {
+    name: &'a str,
+    data: &'a [u8],
+    data_offset: usize,
+    end: usize,
+    known: Option<KnownCustom<'a>>,
+}
+
+struct Module<'a> {
+    imports: Vec<Import<'a>>,
+    exports: Vec<Export<'a>>,
+    names: Vec<(u32, &'a str, usize)>,
+    module_name: Option<(&'a str, usize)>,
+    name_section: Option<usize>,
+    customs: Vec<Custom<'a>>,
+    bodies: Vec<FunctionBody<'a>>,
+    imported_functions: u32,
+    segments: Vec<Segment<'a>>,
+    omissions: Vec<String>,
+}
+
+fn read_module(bytes: &[u8]) -> Result<Module<'_>> {
+    if bytes.is_empty() {
+        return Err(Error::protocol("The WASM module is empty"));
+    }
+    let mut module = Module {
+        imports: Vec::new(),
+        exports: Vec::new(),
+        names: Vec::new(),
+        module_name: None,
+        name_section: None,
+        customs: Vec::new(),
+        bodies: Vec::new(),
+        imported_functions: 0,
+        segments: Vec::new(),
+        omissions: Vec::new(),
+    };
+    let mut ended = false;
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload.map_err(bad)? {
+            Payload::Version {
+                num: 1,
+                encoding: BinaryEncoding::Module,
+                ..
+            } => {}
+            Payload::Version { .. } => {
+                return Err(Error::protocol(
+                    "Only WASM core module version 1 is supported",
+                ));
+            }
+            Payload::ImportSection(reader) => {
+                for entry in reader.into_iter_with_offsets() {
+                    let (offset, import) = entry.map_err(bad)?;
+                    let function = if matches!(import.ty, TypeRef::Func(_)) {
+                        let index = module.imported_functions;
+                        module.imported_functions += 1;
+                        Some(index)
+                    } else {
+                        None
+                    };
+                    module.imports.push(Import {
+                        module: import.module,
+                        name: import.name,
+                        offset,
+                        function,
+                    });
+                }
+            }
+            Payload::ExportSection(reader) => {
+                for entry in reader.into_iter_with_offsets() {
+                    let (offset, export) = entry.map_err(bad)?;
+                    module.exports.push(Export {
+                        name: export.name,
+                        kind: export.kind,
+                        index: export.index,
+                        offset,
+                    });
+                }
+            }
+            Payload::CodeSectionEntry(body) => module.bodies.push(body),
+            Payload::DataSection(reader) => {
+                for entry in reader.into_iter() {
+                    let entry = entry.map_err(bad)?;
+                    let address = match &entry.kind {
+                        DataKind::Active { offset_expr, .. } => {
+                            match offset_expr.get_operators_reader().read() {
+                                Ok(Operator::I32Const { value }) => Some(u64::from(value as u32)),
+                                Ok(Operator::I64Const { value }) => Some(value as u64),
+                                _ => None,
+                            }
+                        }
+                        DataKind::Passive => None,
+                    };
+                    module.segments.push(Segment {
+                        index: module.segments.len() as u32,
+                        data: entry.data,
+                        data_offset: entry.range.end - entry.data.len(),
+                        address,
+                    });
+                }
+            }
+            Payload::CustomSection(reader) => {
+                let known = reader.as_known();
+                if let KnownCustom::Name(section) = &known {
+                    module.name_section = Some(reader.data_offset());
+                    for subsection in section.clone() {
+                        match subsection {
+                            Ok(Name::Module { name, name_range }) => {
+                                module.module_name = Some((name, name_range.start));
+                            }
+                            Ok(Name::Function(map)) => {
+                                for naming in map.into_iter_with_offsets() {
+                                    match naming {
+                                        Ok((offset, naming)) => {
+                                            module.names.push((naming.index, naming.name, offset));
+                                        }
+                                        Err(_) => {
+                                            module.omissions.push(
+                                                "The name section's function names are malformed; later names were not read.".into(),
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            // The name section is advisory: a malformed one
+                            // never fails a report built from the rest.
+                            Err(_) => {
+                                module.omissions.push(
+                                    "The name section is malformed; later subsections were not read.".into(),
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+                module.customs.push(Custom {
+                    name: reader.name(),
+                    data: reader.data(),
+                    data_offset: reader.data_offset(),
+                    end: reader.range().end,
+                    known: match known {
+                        KnownCustom::Producers(_) => Some(known),
+                        _ => None,
+                    },
+                });
+            }
+            Payload::End(_) => ended = true,
+            _ => {}
+        }
+    }
+    if !ended {
+        module
+            .omissions
+            .push("Module traversal stopped before its end.".into());
+    }
+    Ok(module)
+}
+
+/// Producers names the toolchain declared, mapped to the conclusions they
+/// support. A name this table does not know stays in the producers list.
+fn producer_toolchain(field: &str, name: &str) -> Option<&'static str> {
+    let name = name.to_ascii_lowercase();
+    match field {
+        "language" => match name.as_str() {
+            "rust" => Some("rust"),
+            "assemblyscript" => Some("assemblyscript"),
+            "go" => Some("go"),
+            "tinygo" => Some("tinygo"),
+            "zig" => Some("zig"),
+            "swift" => Some("swift"),
+            "kotlin" => Some("kotlin"),
+            "dart" => Some("dart"),
+            text if text == "c"
+                || text.starts_with("c++")
+                || text.starts_with("c8")
+                || text.starts_with("c9")
+                || text.starts_with("c1")
+                || text.starts_with("c2") =>
+            {
+                Some("c_cpp")
+            }
+            _ => None,
+        },
+        "processed-by" => match name.as_str() {
+            "rustc" => Some("rust"),
+            "clang" => Some("clang"),
+            "wasm-bindgen" => Some("wasm_bindgen"),
+            "wasm-opt" | "binaryen" => Some("binaryen"),
+            "emscripten" => Some("emscripten"),
+            "tinygo" => Some("tinygo"),
+            "lld" | "wasm-ld" => Some("llvm_wasm_ld"),
+            "swiftc" => Some("swift"),
+            "dart2wasm" => Some("dart"),
+            "kotlin" => Some("kotlin"),
+            "assemblyscript" => Some("assemblyscript"),
+            "go" => Some("go"),
+            text if text.starts_with("wit-component") || text.starts_with("wit-bindgen") => {
+                Some("component_model")
+            }
+            _ => None,
+        },
+        "sdk" => (name == "emscripten").then_some("emscripten"),
+        _ => None,
+    }
+}
+
+const RUST_CRATES: [&str; 18] = [
+    "core",
+    "alloc",
+    "std",
+    "compiler_builtins",
+    "dlmalloc",
+    "wee_alloc",
+    "hashbrown",
+    "wasm_bindgen",
+    "js_sys",
+    "web_sys",
+    "serde",
+    "serde_json",
+    "getrandom",
+    "rand",
+    "rand_core",
+    "console_error_panic_hook",
+    "once_cell",
+    "log",
+];
+
+/// Segments of a legacy-mangled Rust or Itanium name (`_ZN...E`).
+fn mangled_segments(name: &str) -> Option<Vec<&str>> {
+    let mut rest = name
+        .strip_prefix("_ZN")
+        .or_else(|| name.strip_prefix("__ZN"))?;
+    let mut segments = Vec::new();
+    loop {
+        if rest.starts_with('E') || rest.is_empty() {
+            return (!segments.is_empty()).then_some(segments);
+        }
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 || segments.len() >= 64 {
+            return None;
+        }
+        let length: usize = rest[..digits].parse().ok()?;
+        rest = &rest[digits..];
+        if rest.len() < length || !rest.is_char_boundary(length) {
+            return None;
+        }
+        segments.push(&rest[..length]);
+        rest = &rest[length..];
+    }
+}
+
+fn rust_hash(segment: &str) -> bool {
+    segment.len() == 17
+        && segment.starts_with('h')
+        && segment[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The crate a Rust symbol belongs to, from its legacy mangling or its
+/// demangled path, and whether the symbol is certainly Rust.
+fn rust_crate(name: &str) -> (Option<&str>, bool) {
+    if let Some(segments) = mangled_segments(name) {
+        let certain = segments.last().is_some_and(|last| rust_hash(last));
+        let first = segments[0]
+            .trim_start_matches('_')
+            .trim_start_matches("$LT$");
+        let first = first.split("..").next().unwrap_or(first);
+        let known = RUST_CRATES.iter().find(|known| **known == first).copied();
+        return (known, certain);
+    }
+    let trimmed = name
+        .trim_start_matches(['<', '&'])
+        .trim_start_matches("mut ");
+    let crate_name = trimmed.split("::").next().unwrap_or("");
+    let certain = name.rsplit("::").next().is_some_and(rust_hash) && name.contains("::");
+    let known = trimmed
+        .contains("::")
+        .then(|| {
+            RUST_CRATES
+                .iter()
+                .find(|known| **known == crate_name)
+                .copied()
+        })
+        .flatten();
+    (known, certain)
+}
+
+/// Lowercased alphanumeric tokens, split at punctuation and at a lowercase
+/// to uppercase step, so `sha256Update` and `crypto/sha256.block` both
+/// yield `sha256`.
+fn tokens(name: &str) -> Vec<String> {
+    let source = mangled_segments(name).map_or_else(|| name.to_owned(), |parts| parts.join(" "));
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut previous_lower = false;
+    for character in source.chars() {
+        if !character.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+            previous_lower = false;
+            continue;
+        }
+        if character.is_ascii_uppercase() && previous_lower && !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+        }
+        previous_lower = character.is_ascii_lowercase() || character.is_ascii_digit();
+        current.push(character.to_ascii_lowercase());
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+#[rustfmt::skip]
+const ALGORITHM_TOKENS: [(&str, &str, &str); 46] = [
+    ("sha1", "SHA-1", "crypto"),
+    ("sha224", "SHA-224", "crypto"),
+    ("sha256", "SHA-256", "crypto"),
+    ("sha384", "SHA-384", "crypto"),
+    ("sha512", "SHA-512", "crypto"),
+    ("sha2", "SHA-2", "crypto"),
+    ("sha3", "SHA-3", "crypto"),
+    ("keccak", "Keccak", "crypto"),
+    ("md4", "MD4", "crypto"),
+    ("md5", "MD5", "crypto"),
+    ("ripemd160", "RIPEMD-160", "crypto"),
+    ("aes", "AES", "crypto"),
+    ("rijndael", "AES", "crypto"),
+    ("chacha", "ChaCha", "crypto"),
+    ("chacha20", "ChaCha20", "crypto"),
+    ("salsa20", "Salsa20", "crypto"),
+    ("poly1305", "Poly1305", "crypto"),
+    ("blake2", "BLAKE2", "crypto"),
+    ("blake2b", "BLAKE2b", "crypto"),
+    ("blake2s", "BLAKE2s", "crypto"),
+    ("blake3", "BLAKE3", "crypto"),
+    ("hmac", "HMAC", "crypto"),
+    ("pbkdf2", "PBKDF2", "crypto"),
+    ("hkdf", "HKDF", "crypto"),
+    ("argon2", "Argon2", "crypto"),
+    ("scrypt", "scrypt", "crypto"),
+    ("bcrypt", "bcrypt", "crypto"),
+    ("curve25519", "Curve25519", "crypto"),
+    ("x25519", "X25519", "crypto"),
+    ("ed25519", "Ed25519", "crypto"),
+    ("secp256k1", "secp256k1", "crypto"),
+    ("p256", "P-256", "crypto"),
+    ("rsa", "RSA", "crypto"),
+    ("ecdsa", "ECDSA", "crypto"),
+    ("ecdh", "ECDH", "crypto"),
+    ("crc32", "CRC-32", "checksum"),
+    ("crc32c", "CRC-32C", "checksum"),
+    ("adler32", "Adler-32", "checksum"),
+    ("siphash", "SipHash", "hash_mix"),
+    ("murmur3", "MurmurHash3", "hash_mix"),
+    ("murmurhash3", "MurmurHash3", "hash_mix"),
+    ("xxhash", "xxHash", "hash_mix"),
+    ("xxh3", "XXH3", "hash_mix"),
+    ("fnv1a", "FNV-1a", "hash_mix"),
+    ("base64", "Base64", "encoding"),
+    ("hex", "hex encoding", "encoding"),
+];
+
+/// Exactly named runtime and library functions. The label never claims
+/// more than the name: `malloc` is some C allocator, not a specific one.
+#[rustfmt::skip]
+const EXACT: [(&str, &str, &str, &str, Confidence); 74] = {
+    use Confidence::{High, Medium};
+    [
+        ("__wbindgen_malloc", "wasm-bindgen allocator: malloc", "allocator", "wasm-bindgen", High),
+        ("__wbindgen_realloc", "wasm-bindgen allocator: realloc", "allocator", "wasm-bindgen", High),
+        ("__wbindgen_free", "wasm-bindgen allocator: free", "allocator", "wasm-bindgen", High),
+        ("__wbindgen_exn_store", "wasm-bindgen exception store", "runtime", "wasm-bindgen", High),
+        ("__wbindgen_add_to_stack_pointer", "wasm-bindgen shadow stack adjustment", "runtime", "wasm-bindgen", High),
+        ("__wbindgen_start", "wasm-bindgen start function", "entry", "wasm-bindgen", High),
+        ("__rust_alloc", "Rust global allocator: alloc", "allocator", "Rust", High),
+        ("__rust_dealloc", "Rust global allocator: dealloc", "allocator", "Rust", High),
+        ("__rust_realloc", "Rust global allocator: realloc", "allocator", "Rust", High),
+        ("__rust_alloc_zeroed", "Rust global allocator: alloc_zeroed", "allocator", "Rust", High),
+        ("__rg_alloc", "Rust allocator shim: alloc", "allocator", "Rust", High),
+        ("__rg_dealloc", "Rust allocator shim: dealloc", "allocator", "Rust", High),
+        ("__rg_realloc", "Rust allocator shim: realloc", "allocator", "Rust", High),
+        ("__rg_alloc_zeroed", "Rust allocator shim: alloc_zeroed", "allocator", "Rust", High),
+        ("rust_begin_unwind", "Rust panic handler", "runtime", "Rust", High),
+        ("__rust_start_panic", "Rust panic start", "runtime", "Rust", High),
+        ("malloc", "C allocator: malloc", "allocator", "libc", Medium),
+        ("free", "C allocator: free", "allocator", "libc", Medium),
+        ("calloc", "C allocator: calloc", "allocator", "libc", Medium),
+        ("realloc", "C allocator: realloc", "allocator", "libc", Medium),
+        ("aligned_alloc", "C allocator: aligned_alloc", "allocator", "libc", Medium),
+        ("posix_memalign", "C allocator: posix_memalign", "allocator", "libc", Medium),
+        ("memalign", "C allocator: memalign", "allocator", "libc", Medium),
+        ("dlmalloc", "dlmalloc: malloc", "allocator", "dlmalloc", High),
+        ("dlfree", "dlmalloc: free", "allocator", "dlmalloc", High),
+        ("dlrealloc", "dlmalloc: realloc", "allocator", "dlmalloc", High),
+        ("dlcalloc", "dlmalloc: calloc", "allocator", "dlmalloc", High),
+        ("sbrk", "libc: sbrk heap growth", "allocator", "libc", Medium),
+        ("memcpy", "libc: memcpy", "libc", "libc", Medium),
+        ("memmove", "libc: memmove", "libc", "libc", Medium),
+        ("memset", "libc: memset", "libc", "libc", Medium),
+        ("memcmp", "libc: memcmp", "libc", "libc", Medium),
+        ("bcmp", "libc: bcmp", "libc", "libc", Medium),
+        ("strlen", "libc: strlen", "libc", "libc", Medium),
+        ("strcmp", "libc: strcmp", "libc", "libc", Medium),
+        ("strncmp", "libc: strncmp", "libc", "libc", Medium),
+        ("strcpy", "libc: strcpy", "libc", "libc", Medium),
+        ("strncpy", "libc: strncpy", "libc", "libc", Medium),
+        ("strchr", "libc: strchr", "libc", "libc", Medium),
+        ("strrchr", "libc: strrchr", "libc", "libc", Medium),
+        ("strstr", "libc: strstr", "libc", "libc", Medium),
+        ("strerror", "libc: strerror", "libc", "libc", Medium),
+        ("printf", "libc stdio: printf", "libc", "libc", Medium),
+        ("fprintf", "libc stdio: fprintf", "libc", "libc", Medium),
+        ("snprintf", "libc stdio: snprintf", "libc", "libc", Medium),
+        ("vfprintf", "libc stdio: vfprintf", "libc", "libc", Medium),
+        ("vsnprintf", "libc stdio: vsnprintf", "libc", "libc", Medium),
+        ("puts", "libc stdio: puts", "libc", "libc", Medium),
+        ("fwrite", "libc stdio: fwrite", "libc", "libc", Medium),
+        ("fflush", "libc stdio: fflush", "libc", "libc", Medium),
+        ("abort", "libc: abort", "libc", "libc", Medium),
+        ("exit", "libc: exit", "libc", "libc", Medium),
+        ("__errno_location", "libc: errno location", "libc", "libc", Medium),
+        ("qsort", "libc: qsort", "libc", "libc", Medium),
+        ("_start", "WASI command entry (_start)", "entry", "WASI", Medium),
+        ("_initialize", "WASI reactor initializer (_initialize)", "entry", "WASI", Medium),
+        ("__wasm_call_ctors", "Static constructors (__wasm_call_ctors)", "entry", "LLVM", High),
+        ("main", "C main entry", "entry", "libc", Medium),
+        ("__main_argc_argv", "C main entry (argc, argv)", "entry", "libc", Medium),
+        ("__main_void", "C main entry (no arguments)", "entry", "libc", Medium),
+        ("__original_main", "C main entry (original)", "entry", "libc", Medium),
+        ("stackSave", "Emscripten stack helper: stackSave", "runtime", "Emscripten", High),
+        ("stackRestore", "Emscripten stack helper: stackRestore", "runtime", "Emscripten", High),
+        ("stackAlloc", "Emscripten stack helper: stackAlloc", "runtime", "Emscripten", High),
+        ("__cxa_allocate_exception", "C++ ABI: allocate exception", "runtime", "C++ ABI", Medium),
+        ("__cxa_throw", "C++ ABI: throw", "runtime", "C++ ABI", Medium),
+        ("__cxa_begin_catch", "C++ ABI: begin catch", "runtime", "C++ ABI", Medium),
+        ("__cxa_end_catch", "C++ ABI: end catch", "runtime", "C++ ABI", Medium),
+        ("__cxa_atexit", "C++ ABI: atexit", "runtime", "C++ ABI", Medium),
+        ("__cxa_pure_virtual", "C++ ABI: pure virtual call", "runtime", "C++ ABI", Medium),
+        ("_Znwm", "C++ operator new", "allocator", "C++ ABI", Medium),
+        ("_Znwj", "C++ operator new", "allocator", "C++ ABI", Medium),
+        ("_ZdlPv", "C++ operator delete", "allocator", "C++ ABI", Medium),
+        ("go_scheduler", "TinyGo scheduler", "runtime", "TinyGo", High),
+    ]
+};
+
+const ASSEMBLYSCRIPT_RUNTIME: [&str; 10] = [
+    "__new",
+    "__pin",
+    "__unpin",
+    "__collect",
+    "__rtti_base",
+    "__setArgumentsLength",
+    "__alloc",
+    "__retain",
+    "__release",
+    "__instanceof",
+];
+
+const LINKER_SYMBOLS: [&str; 14] = [
+    "__wasm_call_ctors",
+    "__heap_base",
+    "__data_end",
+    "__dso_handle",
+    "__stack_pointer",
+    "__indirect_function_table",
+    "__wasm_apply_data_relocs",
+    "__global_base",
+    "__memory_base",
+    "__table_base",
+    "__stack_low",
+    "__stack_high",
+    "__heap_end",
+    "__tls_base",
+];
+
+const GO_STD: [&str; 19] = [
+    "fmt.",
+    "strings.",
+    "strconv.",
+    "sync.",
+    "sync/",
+    "sort.",
+    "errors.",
+    "reflect.",
+    "unicode/",
+    "unicode.",
+    "encoding/",
+    "internal/",
+    "math.",
+    "math/",
+    "os.",
+    "time.",
+    "io.",
+    "bytes.",
+    "bufio.",
+];
+
+/// What a wasm-bindgen import name calls in JavaScript: the name between
+/// `__wbg_` and the trailing hash, or the whole rest when there is no hash.
+fn bindgen_target(rest: &str) -> &str {
+    if let Some((head, hash)) = rest.rsplit_once('_')
+        && (8..=16).contains(&hash.len())
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !head.is_empty()
+    {
+        return head;
+    }
+    rest
+}
+
+/// What a suggestion says about a function: its category, the library it
+/// belongs to and how strongly the cited record supports it.
+#[derive(Clone, Copy)]
+struct Kind(&'static str, &'static str, Confidence);
+
+/// The record a suggestion or conclusion rests on.
+struct Site<'a> {
+    function: Option<u32>,
+    source: &'static str,
+    offset: usize,
+    shown: &'a str,
+}
+
+/// A matched rule: the toolchain it supports, if any, and the label.
+type Rule = (Option<(&'static str, Confidence)>, String, Kind);
+
+fn tool(id: &'static str, confidence: Confidence) -> Option<(&'static str, Confidence)> {
+    Some((id, confidence))
+}
+
+fn text(value: &str) -> String {
+    bounded(value, LABEL_TEXT_BYTES)
+}
+
+struct Labeler<'a> {
+    suggestions: Vec<Suggestion>,
+    per_function: HashMap<u32, usize>,
+    conclusions: &'a mut Conclusions,
+}
+
+impl Labeler<'_> {
+    fn suggest(&mut self, site: &Site<'_>, label: String, kind: Kind) {
+        let Some(function) = site.function else {
+            return;
+        };
+        let count = self.per_function.entry(function).or_insert(0);
+        let repeated = self
+            .suggestions
+            .iter()
+            .rev()
+            .take(MAX_SUGGESTIONS_PER_FUNCTION * 4)
+            .any(|existing| existing.function == function && existing.label == label);
+        if *count >= MAX_SUGGESTIONS_PER_FUNCTION || repeated {
+            return;
+        }
+        *count += 1;
+        self.suggestions.push(Suggestion {
+            function,
+            label,
+            category: kind.0,
+            library: kind.1,
+            confidence: kind.2,
+            source: site.source,
+            byte_offset: site.offset,
+        });
+    }
+
+    fn conclude(&mut self, site: &Site<'_>, id: &'static str, confidence: Confidence) {
+        let evidence = Evidence {
+            source: site.source,
+            byte_offset: site.offset,
+            detail: format!("{} {}", site.source, site.shown),
+            function_index: site.function,
+        };
+        self.conclusions.add(id, confidence, evidence);
+    }
+
+    fn apply(&mut self, site: &Site<'_>, rule: Option<Rule>) {
+        if let Some((toolchain, label, kind)) = rule {
+            if let Some((id, confidence)) = toolchain {
+                self.conclude(site, id, confidence);
+            }
+            if !label.is_empty() {
+                self.suggest(site, label, kind);
+            }
+        }
+    }
+
+    /// Imports name their host module, which most toolchains fix.
+    fn import(&mut self, import: &Import<'_>) {
+        use Confidence::{High, Medium};
+        let (module, name) = (import.module, import.name);
+        let shown = text(&format!("{module}.{name}"));
+        let site = Site {
+            function: import.function,
+            source: "import",
+            offset: import.offset,
+            shown: &shown,
+        };
+        let bindgen_module = matches!(
+            module,
+            "wbg" | "__wbindgen_placeholder__" | "__wbindgen_externref_xform__"
+        );
+        let rule: Option<Rule> = if let Some(rest) = name.strip_prefix("__wbg_") {
+            let label = format!("JS glue: {}", text(bindgen_target(rest)));
+            Some((
+                tool("wasm_bindgen", High),
+                label,
+                Kind("js_glue", "wasm-bindgen", High),
+            ))
+        } else if let Some(rest) = name.strip_prefix("__wbindgen_") {
+            let label = format!("wasm-bindgen intrinsic: {}", text(rest));
+            Some((
+                tool("wasm_bindgen", High),
+                label,
+                Kind("runtime", "wasm-bindgen", High),
+            ))
+        } else if bindgen_module {
+            let label = format!("JS glue: {}", text(name));
+            Some((
+                tool("wasm_bindgen", High),
+                label,
+                Kind("js_glue", "wasm-bindgen", Medium),
+            ))
+        } else {
+            match module {
+                "wasi_snapshot_preview1" | "wasi_unstable" => {
+                    let label = format!("WASI {}", text(name));
+                    Some((tool("wasi", High), label, Kind("wasi", "WASI", High)))
+                }
+                "gojs" | "go" => Some(match name.strip_prefix("syscall/js.") {
+                    Some(rest) => {
+                        let label = format!("Go syscall/js bridge: {}", text(rest));
+                        (tool("go", High), label, Kind("js_glue", "Go", High))
+                    }
+                    None => {
+                        let label = format!("Go runtime host call: {}", text(name));
+                        (tool("go", High), label, Kind("runtime", "Go", High))
+                    }
+                }),
+                "dotnet" => {
+                    let label = format!(".NET runtime import: {}", text(name));
+                    Some((tool("dotnet", High), label, Kind("runtime", ".NET", High)))
+                }
+                "js_code" => {
+                    let label = format!("Kotlin js() code: {}", text(name));
+                    Some((
+                        tool("kotlin", Medium),
+                        label,
+                        Kind("js_glue", "Kotlin/Wasm", Medium),
+                    ))
+                }
+                "dart2wasm" => {
+                    let label = format!("Dart JS interop: {}", text(name));
+                    Some((tool("dart", High), label, Kind("js_glue", "Dart", High)))
+                }
+                "wasm:js-string" => {
+                    let label = format!("JS String Builtin: {}", text(name));
+                    Some((None, label, Kind("js_glue", "JS String Builtins", High)))
+                }
+                _ => Self::host_import(module, name),
+            }
+        };
+        self.apply(&site, rule);
+    }
+
+    /// Imports from a shared host module such as `env`, named by convention.
+    fn host_import(module: &str, name: &str) -> Option<Rule> {
+        use Confidence::{High, Low, Medium};
+        let emscripten = |label: String, category, confidence| {
+            Some((
+                tool("emscripten", confidence),
+                label,
+                Kind(category, "Emscripten", confidence),
+            ))
+        };
+        if name.starts_with("emscripten_") || name.starts_with("_emscripten_") {
+            emscripten(
+                format!("Emscripten runtime: {}", text(name)),
+                "runtime",
+                High,
+            )
+        } else if let Some(rest) = name.strip_prefix("__syscall_") {
+            emscripten(
+                format!("Emscripten syscall: {}", text(rest)),
+                "syscall",
+                High,
+            )
+        } else if name.starts_with("_embind_") || name.starts_with("_emval_") {
+            emscripten(
+                format!("Emscripten embind: {}", text(name)),
+                "js_glue",
+                High,
+            )
+        } else if let Some(rest) = name.strip_prefix("invoke_") {
+            emscripten(
+                format!("Emscripten invoke wrapper: {}", text(rest)),
+                "runtime",
+                Medium,
+            )
+        } else if let Some(rest) = name.strip_prefix("syscall/js.") {
+            let label = format!("TinyGo syscall/js bridge: {}", text(rest));
+            Some((
+                tool("tinygo", Medium),
+                label,
+                Kind("js_glue", "TinyGo", Medium),
+            ))
+        } else if name.starts_with("mono_wasm_") {
+            let label = format!(".NET runtime import: {}", text(name));
+            Some((
+                tool("dotnet", Medium),
+                label,
+                Kind("runtime", ".NET", Medium),
+            ))
+        } else if module == "env" && matches!(name, "abort" | "trace" | "seed") {
+            let label = match name {
+                "abort" => "Abort handler (AssemblyScript names it env.abort)",
+                "trace" => "AssemblyScript trace",
+                _ => "AssemblyScript random seed",
+            };
+            let kind = Kind("runtime", "AssemblyScript", Low);
+            Some((tool("assemblyscript", Low), label.into(), kind))
+        } else if name.starts_with("__cxa_") {
+            let label = format!("C++ ABI: {}", text(name));
+            Some((None, label, Kind("runtime", "C++ ABI", Medium)))
+        } else {
+            None
+        }
+    }
+
+    /// Exports and name-section names share one vocabulary.
+    fn symbol(&mut self, name: &str, function: Option<u32>, source: &'static str, offset: usize) {
+        use Confidence::{Low, Medium};
+        let shown = text(name);
+        let site = Site {
+            function,
+            source,
+            offset,
+            shown: &shown,
+        };
+        let exact = EXACT.iter().find(|(exact, ..)| *exact == name);
+        if let Some((_, label, category, library, confidence)) = exact {
+            let toolchain = match *library {
+                "wasm-bindgen" => tool("wasm_bindgen", *confidence),
+                "Rust" => tool("rust", *confidence),
+                "Emscripten" => tool("emscripten", *confidence),
+                "TinyGo" => tool("tinygo", *confidence),
+                _ => None,
+            };
+            let kind = Kind(category, library, *confidence);
+            self.apply(&site, Some((toolchain, (*label).into(), kind)));
+        }
+        if LINKER_SYMBOLS.contains(&name) {
+            self.conclude(&site, "llvm_wasm_ld", Medium);
+        }
+        if ASSEMBLYSCRIPT_RUNTIME.contains(&name) {
+            let label = format!("AssemblyScript runtime: {}", text(name));
+            let kind = Kind("runtime", "AssemblyScript", Medium);
+            self.apply(&site, Some((tool("assemblyscript", Medium), label, kind)));
+        }
+        if name == "getsp" {
+            let kind = Kind("runtime", "Go", Medium);
+            let label = "Go stack pointer helper".into();
+            self.apply(&site, Some((tool("go", Medium), label, kind)));
+        }
+        if (name == "_start" || name == "_initialize") && source == "export" {
+            self.conclude(&site, "wasi", Low);
+        }
+        // An exactly named symbol already carries its most specific label.
+        if exact.is_none() {
+            let rule = Self::symbol_rule(name, source);
+            self.apply(&site, rule);
+        }
+        // The most specific algorithm a name mentions: `sha2::sha256` is SHA-256.
+        let algorithm = tokens(name)
+            .iter()
+            .filter_map(|token| ALGORITHM_TOKENS.iter().find(|(key, ..)| key == token))
+            .max_by_key(|(key, ..)| key.len());
+        if let Some((_, algorithm, category)) = algorithm {
+            let label = format!("Name suggests {algorithm}");
+            self.suggest(&site, label, Kind(category, "name", Low));
+        }
+    }
+
+    /// Prefix and namespace rules for an export or a name-section name.
+    fn symbol_rule(name: &str, source: &'static str) -> Option<Rule> {
+        use Confidence::{High, Low, Medium};
+        let named = |id, confidence, label: String, kind| Some((tool(id, confidence), label, kind));
+        if let Some(rest) = name.strip_prefix("__wbindgen_") {
+            let label = format!("wasm-bindgen runtime: {}", text(rest));
+            named(
+                "wasm_bindgen",
+                High,
+                label,
+                Kind("runtime", "wasm-bindgen", High),
+            )
+        } else if let Some(rest) = name.strip_prefix("__wbg_") {
+            let label = match rest.strip_suffix("_free") {
+                Some(object) => format!("wasm-bindgen object destructor: {}", text(object)),
+                None => format!("wasm-bindgen glue: {}", text(bindgen_target(rest))),
+            };
+            named(
+                "wasm_bindgen",
+                High,
+                label,
+                Kind("export_glue", "wasm-bindgen", High),
+            )
+        } else if name.starts_with("emscripten_") || name.starts_with("_emscripten_") {
+            let confidence = if source == "export" { High } else { Medium };
+            let label = format!("Emscripten runtime: {}", text(name));
+            named(
+                "emscripten",
+                confidence,
+                label,
+                Kind("runtime", "Emscripten", High),
+            )
+        } else if name.starts_with("dynCall_") {
+            let label = format!("Emscripten dynCall thunk: {}", text(name));
+            named(
+                "emscripten",
+                High,
+                label,
+                Kind("runtime", "Emscripten", High),
+            )
+        } else if let Some(rest) = name.strip_prefix("asyncify_") {
+            let label = format!("Binaryen Asyncify: {}", text(rest));
+            named("asyncify", High, label, Kind("runtime", "Binaryen", High))
+        } else if name.starts_with("emmalloc_") {
+            let label = format!("Emscripten emmalloc: {}", text(name));
+            named(
+                "emscripten",
+                Medium,
+                label,
+                Kind("allocator", "Emscripten", High),
+            )
+        } else if name.starts_with("mono_wasm_")
+            || (source == "export" && name.starts_with("mono_"))
+        {
+            let label = format!(".NET runtime: {}", text(name));
+            named("dotnet", Medium, label, Kind("runtime", ".NET", Medium))
+        } else if name.starts_with("__wasi_") || name.starts_with("__wasilibc_") {
+            let label = format!("wasi-libc: {}", text(name));
+            named(
+                "wasi_libc",
+                Medium,
+                label,
+                Kind("libc", "wasi-libc", Medium),
+            )
+        } else if let Some(path) = name.strip_prefix("~lib/") {
+            let category = if path.starts_with("rt/") {
+                "runtime"
+            } else {
+                "std"
+            };
+            let label = format!("AssemblyScript std library: {}", text(path));
+            named(
+                "assemblyscript",
+                High,
+                label,
+                Kind(category, "AssemblyScript", High),
+            )
+        } else if let Some(rest) = name.strip_prefix("syscall/js.") {
+            let label = format!("Go syscall/js: {}", text(rest));
+            named("go", Medium, label, Kind("js_glue", "Go", Medium))
+        } else if name.starts_with("runtime.") {
+            let label = format!("Go runtime: {}", text(name));
+            named("go", Medium, label, Kind("runtime", "Go", Medium))
+        } else if name.starts_with("crypto/") {
+            let label = format!("Go crypto library: {}", text(name));
+            Some((None, label, Kind("crypto", "Go", Medium)))
+        } else if GO_STD.iter().any(|prefix| name.starts_with(prefix)) && !name.contains("::") {
+            let label = format!("Go standard library: {}", text(name));
+            Some((None, label, Kind("std", "Go", Low)))
+        } else if ["_ZNSt3__", "_ZNKSt3__", "std::__1::", "std::__2::"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            let label = "libc++ standard library".into();
+            named("c_cpp", Medium, label, Kind("std", "libc++", Medium))
+        } else {
+            let (crate_name, certain) = rust_crate(name);
+            let confidence = if certain { High } else { Medium };
+            match crate_name {
+                Some(crate_name) => {
+                    let category = match crate_name {
+                        "core" | "alloc" | "std" | "compiler_builtins" => "std",
+                        "dlmalloc" | "wee_alloc" => "allocator",
+                        "wasm_bindgen" | "js_sys" | "web_sys" => "js_glue",
+                        _ => "library",
+                    };
+                    let label = format!("Rust {crate_name} library");
+                    named(
+                        "rust",
+                        confidence,
+                        label,
+                        Kind(category, "Rust", confidence),
+                    )
+                }
+                // A certainly-Rust symbol of a crate this table does not
+                // know supports the toolchain but labels nothing.
+                None if certain => Some((tool("rust", High), String::new(), Kind("", "", High))),
+                None => None,
+            }
+        }
+    }
+}
+
+fn custom_conclusions(custom: &Custom<'_>, conclusions: &mut Conclusions) {
+    use Confidence::{High, Medium};
+    let shown = bounded(custom.name, LABEL_TEXT_BYTES);
+    let detail = format!("custom section {shown}");
+    let id = match custom.name {
+        "target_features" => Some(("llvm_wasm_ld", Medium)),
+        "linking" => Some(("llvm_object", High)),
+        name if name.starts_with("reloc.") => Some(("llvm_object", High)),
+        "dylink" | "dylink.0" => Some(("llvm_wasm_ld", Medium)),
+        "emscripten_metadata" => Some(("emscripten", High)),
+        "go:buildid" | "go.buildid" => Some(("go", High)),
+        "__wasm_bindgen_unstable" => Some(("wasm_bindgen", High)),
+        name if name.starts_with("component-type") => Some(("component_model", High)),
+        _ => None,
+    };
+    if let Some((id, confidence)) = id {
+        conclusions.add(
+            id,
+            confidence,
+            Evidence {
+                source: "custom_section",
+                byte_offset: custom.data_offset,
+                detail,
+                function_index: None,
+            },
+        );
+    }
+}
+
+/// A length-prefixed string custom section (`sourceMappingURL`,
+/// `external_debug_info`).
+fn custom_string(custom: &Custom<'_>) -> Option<String> {
+    let mut reader = BinaryReader::new(custom.data, custom.data_offset);
+    reader
+        .read_unlimited_string()
+        .ok()
+        .map(|text| bounded(text, URL_BYTES))
+}
+
+fn target_features(custom: &Custom<'_>, omissions: &mut Vec<String>) -> Vec<Value> {
+    let mut reader = BinaryReader::new(custom.data, custom.data_offset);
+    let mut out = Vec::new();
+    let Ok(count) = reader.read_var_u32() else {
+        omissions.push("The target_features section is malformed; it was not read.".into());
+        return out;
+    };
+    for _ in 0..count {
+        let offset = reader.original_position();
+        let (Ok(prefix), Ok(name)) = (reader.read_u8(), reader.read_string()) else {
+            omissions.push(
+                "The target_features section is malformed; later features were not read.".into(),
+            );
+            break;
+        };
+        if out.len() >= MAX_FEATURES {
+            omissions.push("Target feature limit reached; later features are not listed.".into());
+            break;
+        }
+        out.push(json!({"prefix":(prefix as char).to_string(),"name":bounded(name, LABEL_TEXT_BYTES),"byte_offset":offset}));
+    }
+    out
+}
+
+fn producers(
+    custom: &Custom<'_>,
+    conclusions: &mut Conclusions,
+    omissions: &mut Vec<String>,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Some(KnownCustom::Producers(reader)) = &custom.known else {
+        return out;
+    };
+    for field in reader.clone().into_iter_with_offsets() {
+        let Ok((_, field)) = field else {
+            omissions
+                .push("The producers section is malformed; later fields were not read.".into());
+            break;
+        };
+        for value in field.values.into_iter_with_offsets() {
+            let Ok((offset, value)) = value else {
+                omissions
+                    .push("The producers section is malformed; later values were not read.".into());
+                break;
+            };
+            if out.len() >= MAX_PRODUCERS {
+                omissions.push("Producer limit reached; later producers are not listed.".into());
+                return out;
+            }
+            let name = bounded(value.name, LABEL_TEXT_BYTES);
+            let version = bounded(value.version, LABEL_TEXT_BYTES);
+            if let Some(id) = producer_toolchain(field.name, value.name) {
+                conclusions.add(
+                    id,
+                    Confidence::High,
+                    Evidence {
+                        source: "producers",
+                        byte_offset: offset,
+                        detail: format!(
+                            "{}: {name}{}",
+                            bounded(field.name, 32),
+                            if version.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" {version}")
+                            }
+                        ),
+                        function_index: None,
+                    },
+                );
+            }
+            out.push(json!({"field":bounded(field.name, 32),"name":name,"version":version,"byte_offset":offset}));
+        }
+    }
+    out
+}
+
+/// One reported constant match.
+struct Match {
+    set: usize,
+    location: &'static str,
+    matched: usize,
+    byte_offset: usize,
+    byte_end: usize,
+    /// Data matches.
+    segment: Option<u32>,
+    encoding: Option<Encoding>,
+    runs: usize,
+    address: Option<u64>,
+    references: Vec<Value>,
+    reference_count: usize,
+    /// Immediate matches.
+    function: Option<u32>,
+    sites: Vec<Value>,
+    site_count: usize,
+    values: BTreeSet<u64>,
+}
+
+impl Match {
+    fn complete(&self) -> bool {
+        self.matched == wasm_constants::catalog()[self.set].total()
+    }
+    fn json(&self, bytes: &[u8]) -> Value {
+        let set: &ConstantSet = &wasm_constants::catalog()[self.set];
+        let mut value = json!({"id":set.id,"label":set.label,"family":set.family,"location":self.location,
+            "match":if self.complete() {"complete"} else {"partial"},"matched":self.matched,"total":set.total(),
+            "byte_offset":self.byte_offset,"byte_end":self.byte_end});
+        if self.location == "data" {
+            let end = self.byte_end.min(self.byte_offset + MATCH_PREVIEW_BYTES);
+            value["data_segment"] = json!(self.segment);
+            value["encoding"] = json!(self.encoding.map(Encoding::name));
+            value["runs"] = json!(self.runs);
+            value["memory_address"] = json!(self.address);
+            value["referenced_by"] = json!(self.references);
+            value["reference_count"] = json!(self.reference_count);
+            value["references_truncated"] = json!(self.reference_count > self.references.len());
+            value["hex"] = json!(hex::encode(&bytes[self.byte_offset..end]));
+        } else {
+            value["function_index"] = json!(self.function);
+            value["sites"] = json!(self.sites);
+            value["site_count"] = json!(self.site_count);
+            value["sites_truncated"] = json!(self.site_count > self.sites.len());
+        }
+        value
+    }
+}
+
+fn element_width(set: &ConstantSet) -> usize {
+    match set.width {
+        Width::Byte => 1,
+        Width::Word32 => 4,
+        Width::Word64 => 8,
+    }
+}
+
+/// Runs of one set, encoding and segment become one match when each run
+/// continues the table where the previous one stopped.
+fn cluster(runs: Vec<Run>, segment: &Segment<'_>) -> Vec<Match> {
+    let catalog = wasm_constants::catalog();
+    let mut runs = runs;
+    runs.sort_by_key(|run| (run.set, run.encoding as u8, run.start));
+    let mut out: Vec<(Match, Vec<bool>, usize)> = Vec::new();
+    for run in runs {
+        let set = &catalog[run.set];
+        let span = set.total() * element_width(set);
+        let continues = out.last().is_some_and(|(current, _, last_index)| {
+            current.set == run.set
+                && current.encoding == Some(run.encoding)
+                && run.start + segment.data_offset <= current.byte_end + span
+                && run.first >= *last_index
+        });
+        if !continues {
+            out.push((
+                Match {
+                    set: run.set,
+                    location: "data",
+                    matched: 0,
+                    byte_offset: segment.data_offset + run.start,
+                    byte_end: segment.data_offset + run.end,
+                    segment: Some(segment.index),
+                    encoding: Some(run.encoding),
+                    runs: 0,
+                    address: segment
+                        .address
+                        .map(|base| base.wrapping_add(run.start as u64)),
+                    references: Vec::new(),
+                    reference_count: 0,
+                    function: None,
+                    sites: Vec::new(),
+                    site_count: 0,
+                    values: BTreeSet::new(),
+                },
+                vec![false; set.total()],
+                0,
+            ));
+        }
+        let (current, covered, last_index) = out.last_mut().expect("a cluster");
+        current.runs += 1;
+        current.byte_end = current.byte_end.max(segment.data_offset + run.end);
+        for flag in &mut covered[run.first..run.end_index] {
+            *flag = true;
+        }
+        *last_index = run.end_index;
+    }
+    out.into_iter()
+        .map(|(mut current, covered, _)| {
+            current.matched = covered.iter().filter(|flag| **flag).count();
+            current
+        })
+        .collect()
+}
+
+/// Drops a match another match fully explains: MD5's four words inside a
+/// SHA-1 state, the Base62 alphabet inside a Base64 one.
+fn suppress(matches: Vec<Match>) -> Vec<Match> {
+    let explains = |a: &Match, b: &Match| {
+        if a.location != b.location || a.segment != b.segment || a.function != b.function {
+            return false;
+        }
+        let inside = if a.location == "data" {
+            a.byte_offset >= b.byte_offset && a.byte_end <= b.byte_end
+        } else {
+            a.values.is_subset(&b.values)
+        };
+        let (a_size, b_size) = if a.location == "data" {
+            (a.byte_end - a.byte_offset, b.byte_end - b.byte_offset)
+        } else {
+            (a.values.len(), b.values.len())
+        };
+        inside && (b_size > a_size || (b_size == a_size && b.complete() && !a.complete()))
+    };
+    let keep = (0..matches.len())
+        .map(|a| !(0..matches.len()).any(|b| b != a && explains(&matches[a], &matches[b])))
+        .collect::<Vec<_>>();
+    matches
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(entry, keep)| keep.then_some(entry))
+        .collect()
+}
+
+#[derive(Default)]
+struct Hit {
+    indexes: BTreeSet<u32>,
+    first: usize,
+    sites: Vec<Value>,
+    site_count: usize,
+}
+
+fn memarg_offset(op: &Operator<'_>) -> Option<u64> {
+    use Operator::*;
+    match op {
+        I32Load { memarg }
+        | I64Load { memarg }
+        | F32Load { memarg }
+        | F64Load { memarg }
+        | I32Load8S { memarg }
+        | I32Load8U { memarg }
+        | I32Load16S { memarg }
+        | I32Load16U { memarg }
+        | I64Load8S { memarg }
+        | I64Load8U { memarg }
+        | I64Load16S { memarg }
+        | I64Load16U { memarg }
+        | I64Load32S { memarg }
+        | I64Load32U { memarg }
+        | V128Load { memarg } => Some(memarg.offset),
+        _ => None,
+    }
+}
+
+struct Scan {
+    matches: Vec<Match>,
+    functions_scanned: usize,
+    immediates: usize,
+    stopped: bool,
+}
+
+/// Walks every body once: constant immediates against the immediate table,
+/// and integer immediates and load offsets against the addresses of data
+/// matches. An address hit is a declared static reference, not a load.
+fn scan_functions(
+    module: &Module<'_>,
+    data_matches: &mut [Match],
+    deadline: Instant,
+) -> Result<Scan> {
+    let table = wasm_constants::immediates();
+    let catalog = wasm_constants::catalog();
+    let mut targets = data_matches
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            entry.address.map(|start| {
+                (
+                    start,
+                    start.saturating_add((entry.byte_end - entry.byte_offset) as u64),
+                    index,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    targets.sort_unstable();
+    let mut scan = Scan {
+        matches: Vec::new(),
+        functions_scanned: 0,
+        immediates: 0,
+        stopped: false,
+    };
+    for (position, body) in module.bodies.iter().enumerate() {
+        if Instant::now() > deadline {
+            scan.stopped = true;
+            break;
+        }
+        let function = module.imported_functions + position as u32;
+        let mut hits: BTreeMap<u16, Hit> = BTreeMap::new();
+        let mut reader = body.get_operators_reader().map_err(bad)?;
+        let mut count = 0usize;
+        let record = |hits: &mut BTreeMap<u16, Hit>,
+                      entries: Option<&Vec<(u16, u32)>>,
+                      offset: usize,
+                      operator: &'static str| {
+            for (set, index) in entries.into_iter().flatten() {
+                let hit = hits.entry(*set).or_insert_with(|| Hit {
+                    first: offset,
+                    ..Hit::default()
+                });
+                hit.indexes.insert(*index);
+                hit.site_count += 1;
+                if hit.sites.len() < MAX_SITES {
+                    hit.sites
+                        .push(json!({"byte_offset":offset,"operator":operator}));
+                }
+            }
+        };
+        let address = |value: u64, offset: usize, via: &'static str, data_matches: &mut [Match]| {
+            if value == 0 {
+                return;
+            }
+            let end = targets.partition_point(|(start, ..)| *start <= value);
+            for (start, stop, index) in targets[..end].iter().rev().take(4) {
+                if value >= *start && value < *stop {
+                    let entry = &mut data_matches[*index];
+                    entry.reference_count += 1;
+                    if entry.references.len() < MAX_REFERENCES {
+                        entry.references.push(
+                            json!({"function_index":function,"byte_offset":offset,"via":via}),
+                        );
+                    }
+                }
+            }
+        };
+        while !reader.eof() {
+            count += 1;
+            if count.is_multiple_of(4096) && Instant::now() > deadline {
+                scan.stopped = true;
+                break;
+            }
+            let (op, offset) = reader.read_with_offset().map_err(bad)?;
+            match op {
+                Operator::I32Const { value } => {
+                    scan.immediates += 1;
+                    let value = value as u32;
+                    record(&mut hits, table.four.get(&value), offset, "i32.const");
+                    address(u64::from(value), offset, "address_immediate", data_matches);
+                }
+                Operator::I64Const { value } => {
+                    scan.immediates += 1;
+                    let value = value as u64;
+                    record(&mut hits, table.eight.get(&value), offset, "i64.const");
+                    // Go keeps 32-bit arithmetic in i64 registers.
+                    if let Ok(narrow) = u32::try_from(value) {
+                        record(&mut hits, table.four.get(&narrow), offset, "i64.const");
+                    }
+                    address(value, offset, "address_immediate", data_matches);
+                }
+                // A float immediate is matched by its bits: an optimizer can
+                // move an integer constant through a float store.
+                Operator::F32Const { value } => {
+                    scan.immediates += 1;
+                    record(
+                        &mut hits,
+                        table.four.get(&value.bits()),
+                        offset,
+                        "f32.const",
+                    );
+                }
+                Operator::F64Const { value } => {
+                    scan.immediates += 1;
+                    record(
+                        &mut hits,
+                        table.eight.get(&value.bits()),
+                        offset,
+                        "f64.const",
+                    );
+                }
+                Operator::V128Const { value } => {
+                    scan.immediates += 1;
+                    let lanes = value.bytes();
+                    for lane in lanes.as_chunks::<4>().0 {
+                        let word = u32::from_le_bytes(*lane);
+                        record(&mut hits, table.four.get(&word), offset, "v128.const");
+                    }
+                    for lane in lanes.as_chunks::<8>().0 {
+                        let word = u64::from_le_bytes(*lane);
+                        record(&mut hits, table.eight.get(&word), offset, "v128.const");
+                    }
+                }
+                ref other => {
+                    if let Some(memory_offset) = memarg_offset(other) {
+                        address(memory_offset, offset, "load_offset", data_matches);
+                    }
+                }
+            }
+        }
+        if scan.stopped {
+            break;
+        }
+        scan.functions_scanned += 1;
+        let mut found = Vec::new();
+        for (set_number, hit) in hits {
+            let set = &catalog[set_number as usize];
+            if hit.indexes.len() < set.immediate_min {
+                continue;
+            }
+            found.push(Match {
+                set: set_number as usize,
+                location: "immediate",
+                matched: hit.indexes.len(),
+                byte_offset: hit.first,
+                byte_end: hit.first,
+                segment: None,
+                encoding: None,
+                runs: 0,
+                address: None,
+                references: Vec::new(),
+                reference_count: 0,
+                function: Some(function),
+                sites: hit.sites,
+                site_count: hit.site_count,
+                values: hit
+                    .indexes
+                    .iter()
+                    .map(|index| set.values[*index as usize])
+                    .collect(),
+            });
+        }
+        scan.matches.extend(suppress(found));
+    }
+    Ok(scan)
+}
+
+/// The identification report for one stored artifact.
+pub fn load(root: &Path, id: &str, offset: usize, limit: usize) -> Result<Value> {
+    let artifact = wasm_graph::artifact(root, id)?;
+    let mut document = identify(&artifact.bytes, offset, limit)?;
+    document["artifact_id"] = artifact.artifact_id;
+    document["sha256"] = artifact.sha256;
+    Ok(document)
+}
+
+/// Builds the report. `offset` and `limit` page the suggestion rows only;
+/// every other part is whole on every page.
+pub fn identify(bytes: &[u8], offset: usize, limit: usize) -> Result<Value> {
+    if bytes.len() > MAX_BYTES {
+        return Err(Error::bad("WASM identification input exceeds 64 MiB"));
+    }
+    let started = Instant::now();
+    let deadline = started + DEADLINE;
+    let module = read_module(bytes)?;
+    let mut omissions = module.omissions.clone();
+    let mut conclusions = Conclusions::default();
+
+    let mut producer_rows = Vec::new();
+    let mut feature_rows = Vec::new();
+    let mut source_map = Value::Null;
+    let mut debug_info = Value::Null;
+    let mut custom_rows = Vec::new();
+    for custom in &module.customs {
+        custom_conclusions(custom, &mut conclusions);
+        match custom.name {
+            "producers" => {
+                producer_rows.extend(producers(custom, &mut conclusions, &mut omissions))
+            }
+            "target_features" => feature_rows.extend(target_features(custom, &mut omissions)),
+            "sourceMappingURL" => {
+                source_map = json!({"url":custom_string(custom),"byte_offset":custom.data_offset});
+            }
+            "external_debug_info" => {
+                debug_info = json!({"url":custom_string(custom),"byte_offset":custom.data_offset});
+            }
+            _ => {}
+        }
+        if custom_rows.len() < MAX_CUSTOM_SECTIONS {
+            custom_rows.push(json!({"name":bounded(custom.name, LABEL_TEXT_BYTES),"byte_offset":custom.data_offset,
+                "byte_end":custom.end,"bytes":custom.data.len()}));
+        } else if custom_rows.len() == MAX_CUSTOM_SECTIONS {
+            omissions
+                .push("Custom section limit reached; later custom sections are not listed.".into());
+            custom_rows.push(Value::Null);
+        }
+    }
+    custom_rows.retain(|row| !row.is_null());
+
+    let mut labeler = Labeler {
+        suggestions: Vec::new(),
+        per_function: HashMap::new(),
+        conclusions: &mut conclusions,
+    };
+    for import in &module.imports {
+        labeler.import(import);
+    }
+    for export in &module.exports {
+        let function = (export.kind == ExternalKind::Func).then_some(export.index);
+        labeler.symbol(export.name, function, "export", export.offset);
+    }
+    for (index, name, offset) in &module.names {
+        labeler.symbol(name, Some(*index), "name", *offset);
+    }
+    let mut suggestions = labeler.suggestions;
+    suggestions.sort_by_key(|entry| entry.function);
+    let labeled_functions = suggestions
+        .iter()
+        .map(|entry| entry.function)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let suggestion_total = suggestions.len();
+    if suggestions.len() > MAX_SUGGESTIONS {
+        suggestions.truncate(MAX_SUGGESTIONS);
+        omissions.push(format!(
+            "Suggestion limit reached; {} later suggestions are counted, not listed.",
+            suggestion_total - MAX_SUGGESTIONS
+        ));
+    }
+    if offset > suggestions.len() {
+        return Err(Error::bad("row_offset exceeds the suggestion count"));
+    }
+
+    // Data first: immediates look for references to the tables it finds.
+    let mut data_matches = Vec::new();
+    let data_bytes: usize = module
+        .segments
+        .iter()
+        .map(|segment| segment.data.len())
+        .sum();
+    let mut data_scanned = 0usize;
+    let mut data_stopped = false;
+    for segment in &module.segments {
+        let mut expired = || Instant::now() > deadline;
+        let (runs, scanned, stop) = wasm_constants::scan_data(segment.data, &mut expired);
+        data_scanned += scanned;
+        data_matches.extend(suppress(cluster(runs, segment)));
+        if stop.is_some() {
+            data_stopped = true;
+            omissions.push(format!(
+                "Identification deadline reached in data segment {}; {} of {data_bytes} data bytes were scanned.",
+                segment.index, data_scanned
+            ));
+            break;
+        }
+    }
+    let scan = scan_functions(&module, &mut data_matches, deadline)?;
+    if scan.stopped {
+        omissions.push(format!(
+            "Identification deadline reached; constant immediates of {} of {} function bodies were scanned.",
+            scan.functions_scanned,
+            module.bodies.len()
+        ));
+    }
+    let mut matches = data_matches;
+    matches.extend(scan.matches);
+    let match_total = matches.len();
+    if matches.len() > MAX_MATCHES {
+        matches.truncate(MAX_MATCHES);
+        omissions.push(format!(
+            "Constant match limit reached; {} later matches are counted, not listed.",
+            match_total - MAX_MATCHES
+        ));
+    }
+
+    let mut conclusion_rows = Vec::new();
+    let mut ordered = conclusions.by_id.into_iter().collect::<Vec<_>>();
+    ordered.sort_by(|a, b| b.1.0.cmp(&a.1.0).then(b.1.2.cmp(&a.1.2)));
+    for (id, (confidence, evidence, count)) in ordered.into_iter().take(MAX_CONCLUSIONS) {
+        let toolchain = TOOLCHAINS
+            .iter()
+            .find(|tool| tool.id == id)
+            .expect("known toolchain");
+        conclusion_rows.push(json!({"id":id,"label":toolchain.label,"kind":toolchain.kind,
+            "confidence":confidence.name(),"evidence_count":count,"evidence_truncated":count > evidence.len(),
+            "evidence":evidence.iter().map(|(strength, item)| {
+                let mut row = item.json();
+                row["confidence"] = json!(strength.name());
+                row
+            }).collect::<Vec<_>>()}));
+    }
+    let window = suggestions
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|entry| {
+            json!([
+                entry.function,
+                entry.label,
+                entry.category,
+                entry.library,
+                entry.confidence.name(),
+                entry.source,
+                entry.byte_offset
+            ])
+        })
+        .collect::<Vec<_>>();
+    let next = offset + window.len();
+    let toolchain_labels = conclusion_rows
+        .iter()
+        .filter(|row| row["confidence"] != "low")
+        .map(|row| row["label"].clone())
+        .collect::<Vec<_>>();
+    let complete_matches = matches.iter().filter(|entry| entry.complete()).count();
+    Ok(json!({
+        "schema":"wasm-identification-v1","artifact_id":null,"sha256":null,"byte_size":bytes.len(),
+        "status":if omissions.is_empty() {"complete"} else {"partial"},
+        "evidence":"static_identification",
+        "summary":{"toolchains":toolchain_labels,"labeled_functions":labeled_functions,
+            "suggestions":suggestion_total,"constant_matches":match_total,"complete_constant_matches":complete_matches},
+        "toolchain":{"conclusions":conclusion_rows,"producers":producer_rows,"target_features":feature_rows,
+            "source_mapping_url":source_map,"external_debug_info":debug_info,"custom_sections":custom_rows,
+            "name_section":{"present":module.name_section.is_some(),"byte_offset":module.name_section,
+                "module_name":module.module_name.map(|(name, _)| bounded(name, LABEL_TEXT_BYTES)),
+                "function_names":module.names.len()}},
+        "functions":{"imported_functions":module.imported_functions,"defined_functions":module.bodies.len(),
+            "labeled_functions":labeled_functions,
+            "suggestion_fields":["function_index","label","category","library","confidence","source","byte_offset"],
+            "suggestions":window,
+            "suggestion_window":{"offset":offset,"rows":window.len(),"total_rows":suggestions.len(),
+                "next_offset":if next < suggestions.len() {json!(next)} else {Value::Null}}},
+        "constants":{"matches":matches.iter().map(|entry| entry.json(bytes)).collect::<Vec<_>>()},
+        "coverage":{"data_segments":module.segments.len(),"data_bytes":data_bytes,"data_bytes_scanned":data_scanned,
+            "data_scan_complete":!data_stopped,"functions_scanned":scan.functions_scanned,
+            "immediates_scanned":scan.immediates},
+        "omissions":omissions,
+        "limits":{"max_input_bytes":MAX_BYTES,"deadline_ms":DEADLINE.as_millis() as u64,"max_conclusions":MAX_CONCLUSIONS,
+            "max_evidence_per_conclusion":MAX_EVIDENCE,"max_suggestions":MAX_SUGGESTIONS,"suggestion_page":SUGGESTION_PAGE,
+            "max_suggestions_per_function":MAX_SUGGESTIONS_PER_FUNCTION,"max_constant_matches":MAX_MATCHES,
+            "max_references_per_match":MAX_REFERENCES,"max_sites_per_match":MAX_SITES,"match_preview_bytes":MATCH_PREVIEW_BYTES,
+            "max_label_text_bytes":LABEL_TEXT_BYTES},
+        "notice":"Static identification only. Labels and toolchain conclusions are analyzer suggestions from the cited bytes, never captured or analyst names; a constant match shows the values are present, not that an algorithm runs; an address reference is an immediate inside a matched table, not an observed load. Nothing is concluded from absence."
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/wasm-identification")
+    }
+
+    fn sources() -> Vec<PathBuf> {
+        let mut sources = std::fs::read_dir(fixtures())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "wat"))
+            .collect::<Vec<_>>();
+        sources.sort();
+        assert!(sources.len() >= 4, "identification WAT sources are missing");
+        sources
+    }
+
+    fn report(name: &str) -> Value {
+        let bytes = std::fs::read(fixtures().join(name)).unwrap();
+        identify(&bytes, 0, SUGGESTION_PAGE).unwrap()
+    }
+
+    fn conclusion<'a>(report: &'a Value, id: &str) -> Option<&'a Value> {
+        report["toolchain"]["conclusions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+    }
+
+    fn labels(report: &Value, function: u32) -> Vec<String> {
+        report["functions"]["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row[0] == function)
+            .map(|row| row[1].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn constant<'a>(report: &'a Value, id: &str) -> Vec<&'a Value> {
+        report["constants"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["id"] == id)
+            .collect()
+    }
+
+    /// The checked-in binaries are exactly what the pinned assembler builds
+    /// from the checked-in sources. Run `make wasm-identification-fixtures`
+    /// after editing a `.wat`.
+    #[test]
+    fn identification_fixtures_match_their_wat_sources() {
+        for source in sources() {
+            let built = wat::parse_file(&source).unwrap();
+            wasmparser::Validator::new().validate_all(&built).unwrap();
+            let binary = source.with_extension("wasm");
+            let checked_in = std::fs::read(&binary).unwrap_or_else(|_| {
+                panic!(
+                    "{} is missing; run make wasm-identification-fixtures",
+                    binary.display()
+                )
+            });
+            assert!(
+                built == checked_in,
+                "{} drifted from its source; run make wasm-identification-fixtures",
+                binary.display()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "writes fixtures; run through make wasm-identification-fixtures"]
+    fn write_identification_fixtures() {
+        for source in sources() {
+            let built = wat::parse_file(&source).unwrap();
+            std::fs::write(source.with_extension("wasm"), built).unwrap();
+        }
+    }
+
+    #[test]
+    fn rust_wasm_bindgen_module_is_identified_with_evidence() {
+        let report = report("rust-wasm-bindgen.wasm");
+        assert_eq!(report["schema"], "wasm-identification-v1");
+        assert_eq!(report["status"], "complete", "{report:#}");
+        let rust = conclusion(&report, "rust").unwrap();
+        assert_eq!(rust["confidence"], "high");
+        assert!(
+            rust["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["record"] == "producers" && row["detail"] == "language: Rust")
+        );
+        let bindgen = conclusion(&report, "wasm_bindgen").unwrap();
+        assert_eq!(bindgen["confidence"], "high");
+        // Every piece of evidence names a position inside the module.
+        let size = report["byte_size"].as_u64().unwrap();
+        for row in report["toolchain"]["conclusions"].as_array().unwrap() {
+            for evidence in row["evidence"].as_array().unwrap() {
+                assert!(
+                    evidence["byte_offset"].as_u64().unwrap() < size,
+                    "{evidence}"
+                );
+            }
+        }
+        assert!(conclusion(&report, "llvm_wasm_ld").is_some());
+        assert_eq!(
+            report["toolchain"]["target_features"][0]["name"],
+            "mutable-globals"
+        );
+        assert_eq!(
+            report["toolchain"]["source_mapping_url"]["url"],
+            "https://cdn.test/app.wasm.map"
+        );
+        assert_eq!(labels(&report, 0), ["JS glue: fetch"]);
+        assert_eq!(
+            labels(&report, 1),
+            ["wasm-bindgen intrinsic: object_drop_ref"]
+        );
+        assert!(labels(&report, 2).contains(&"Name suggests SHA-256".to_owned()));
+        assert!(labels(&report, 5).contains(&"wasm-bindgen allocator: malloc".to_owned()));
+        assert_eq!(labels(&report, 7), ["Rust core library"]);
+        // The custom function the module exports is not labeled.
+        assert!(labels(&report, 8).is_empty());
+        let table = constant(&report, "sha256_k");
+        let table = table.iter().find(|row| row["location"] == "data").unwrap();
+        assert_eq!(table["match"], "complete");
+        assert_eq!(
+            (table["matched"].as_u64(), table["total"].as_u64()),
+            (Some(64), Some(64))
+        );
+        assert_eq!(table["encoding"], "u32_le");
+        assert_eq!(table["memory_address"], 1_048_576);
+        assert_eq!(table["referenced_by"][0]["function_index"], 2);
+        assert_eq!(table["referenced_by"][0]["via"], "address_immediate");
+        assert_eq!(table["hex"].as_str().unwrap().len(), 128);
+        let initial = constant(&report, "sha256_h");
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0]["location"], "immediate");
+        assert_eq!(initial[0]["function_index"], 3);
+        assert_eq!(initial[0]["matched"], 8);
+        let alphabet = constant(&report, "base64_standard");
+        assert_eq!(alphabet[0]["match"], "complete");
+        assert_eq!(alphabet[0]["referenced_by"][0]["via"], "load_offset");
+        assert_eq!(alphabet[0]["referenced_by"][0]["function_index"], 4);
+        // The Base62 prefix is explained by the complete Base64 alphabet.
+        assert!(constant(&report, "base62_alphanumeric").is_empty());
+        assert_eq!(report["summary"]["labeled_functions"], 8);
+    }
+
+    #[test]
+    fn emscripten_module_reports_partial_tables_as_partial() {
+        let report = report("emscripten-c.wasm");
+        assert_eq!(
+            conclusion(&report, "emscripten").unwrap()["confidence"],
+            "high"
+        );
+        assert_eq!(conclusion(&report, "wasi").unwrap()["confidence"], "high");
+        assert_eq!(conclusion(&report, "c_cpp").unwrap()["confidence"], "high");
+        assert_eq!(conclusion(&report, "clang").unwrap()["confidence"], "high");
+        assert_eq!(
+            labels(&report, 0),
+            ["Emscripten runtime: emscripten_resize_heap"]
+        );
+        assert_eq!(labels(&report, 1), ["Emscripten syscall: openat"]);
+        assert_eq!(labels(&report, 3), ["WASI fd_write"]);
+        assert_eq!(labels(&report, 5), ["C allocator: malloc"]);
+        let sbox = constant(&report, "aes_sbox");
+        assert_eq!(sbox[0]["match"], "complete");
+        assert_eq!(sbox[0]["referenced_by"][0]["via"], "load_offset");
+        assert_eq!(sbox[0]["referenced_by"][0]["function_index"], 8);
+        let crc = constant(&report, "crc32_table");
+        assert_eq!(crc[0]["match"], "partial");
+        assert_eq!(
+            (crc[0]["matched"].as_u64(), crc[0]["total"].as_u64()),
+            (Some(32), Some(256))
+        );
+        // Four MD5 words without the fifth SHA-1 word stay MD5.
+        assert_eq!(constant(&report, "md5_h")[0]["match"], "complete");
+        assert!(constant(&report, "sha1_h").is_empty());
+        assert_eq!(constant(&report, "chacha_sigma")[0]["match"], "complete");
+        assert!(constant(&report, "salsa_tau").is_empty());
+        let sine = constant(&report, "md5_t");
+        assert_eq!(sine[0]["location"], "immediate");
+        assert_eq!(
+            (sine[0]["match"].as_str(), sine[0]["matched"].as_u64()),
+            (Some("partial"), Some(4))
+        );
+    }
+
+    #[test]
+    fn go_module_matches_i64_immediates_and_suppresses_explained_sets() {
+        let report = report("go-js.wasm");
+        assert_eq!(conclusion(&report, "go").unwrap()["confidence"], "high");
+        assert!(
+            conclusion(&report, "go").unwrap()["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["record"] == "custom_section")
+        );
+        assert_eq!(labels(&report, 1), ["Go syscall/js bridge: valueGet"]);
+        assert_eq!(constant(&report, "fnv1_64")[0]["match"], "complete");
+        let sha1 = constant(&report, "sha1_h");
+        assert_eq!(sha1[0]["match"], "complete");
+        assert_eq!(sha1[0]["sites"][0]["operator"], "i64.const");
+        assert!(constant(&report, "md5_h").is_empty());
+        assert!(
+            labels(&report, 4)
+                .contains(&"Go crypto library: crypto/sha1.(*digest).Reset".to_owned())
+        );
+    }
+
+    #[test]
+    fn nothing_is_concluded_from_absence() {
+        let report = report("unlabeled.wasm");
+        assert_eq!(report["status"], "complete");
+        assert_eq!(report["toolchain"]["conclusions"], json!([]));
+        assert_eq!(report["functions"]["suggestions"], json!([]));
+        assert_eq!(report["constants"]["matches"], json!([]));
+        assert_eq!(report["toolchain"]["name_section"]["present"], false);
+    }
+
+    #[test]
+    fn malformed_empty_component_and_oversized_inputs_are_named_errors() {
+        let empty = identify(&[], 0, 1).unwrap_err();
+        assert_eq!(
+            (empty.status, empty.message.as_str()),
+            (422, "The WASM module is empty")
+        );
+        let garbage = identify(b"\0asm\x01\0\0\0\x01\xff", 0, 1).unwrap_err();
+        assert_eq!(garbage.status, 422);
+        assert!(
+            garbage.message.starts_with("WASM decoding failed"),
+            "{}",
+            garbage.message
+        );
+        let component = identify(b"\0asm\x0d\0\x01\0", 0, 1).unwrap_err();
+        assert_eq!(component.status, 422);
+        let oversized = identify(&vec![0; MAX_BYTES + 1], 0, 1).unwrap_err();
+        assert_eq!(oversized.status, 400);
+        // A malformed name section is advisory: the report names it.
+        let mut bytes = wat::parse_str(r#"(module (func $f))"#).unwrap();
+        let name = bytes
+            .windows(4)
+            .position(|window| window == b"name")
+            .unwrap();
+        bytes[name + 4] = 0x01;
+        bytes[name + 5] = 0x7f;
+        let report = identify(&bytes, 0, 1).unwrap();
+        assert_eq!(report["status"], "partial");
+        assert!(
+            report["omissions"][0]
+                .as_str()
+                .unwrap()
+                .contains("name section")
+        );
+    }
+
+    #[test]
+    fn suggestion_rows_page_and_captured_text_stays_bounded() {
+        let mut text = String::from("(module");
+        for index in 0..40 {
+            text.push_str(&format!(
+                r#" (import "wbg" "__wbg_{}{index}_0123456789abcdef" (func))"#,
+                "x".repeat(300)
+            ));
+        }
+        text.push(')');
+        let bytes = wat::parse_str(&text).unwrap();
+        let first = identify(&bytes, 0, 16).unwrap();
+        let window = &first["functions"]["suggestion_window"];
+        assert_eq!(
+            (window["rows"].as_u64(), window["total_rows"].as_u64()),
+            (Some(16), Some(40))
+        );
+        assert_eq!(window["next_offset"], 16);
+        let last = identify(&bytes, 32, 16).unwrap();
+        assert_eq!(
+            last["functions"]["suggestion_window"]["next_offset"],
+            Value::Null
+        );
+        assert_eq!(last["functions"]["suggestions"][0][0], 32);
+        for row in first["functions"]["suggestions"].as_array().unwrap() {
+            assert!(row[1].as_str().unwrap().len() <= 160, "{row}");
+        }
+        assert!(identify(&bytes, 41, 16).is_err());
+    }
+
+    #[test]
+    #[ignore = "prints the fixture reports for review"]
+    fn print_fixture_reports() {
+        for source in sources() {
+            println!(
+                "{}\n{:#}",
+                source.display(),
+                report(
+                    source
+                        .with_extension("wasm")
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn an_expired_data_scan_stops_and_says_so() {
+        let data = vec![0u8; 200_000];
+        let mut expired = || true;
+        let (runs, scanned, stop) = wasm_constants::scan_data(&data, &mut expired);
+        assert!(runs.is_empty() && scanned == 0 && stop.is_some());
+    }
+
+    /// Every SHA-2 table digests as the sha2 crate does, so a copied table
+    /// cannot drift silently.
+    #[test]
+    fn sha2_tables_reproduce_sha2_digests() {
+        use sha2::Digest;
+        use wasm_constants::{SHA224_H, SHA256_H, SHA256_K, SHA384_H, SHA512_H, SHA512_K};
+        fn sha256(initial: &[u32; 8], message: &[u8], out: usize) -> Vec<u8> {
+            let mut state = *initial;
+            let mut data = message.to_vec();
+            data.push(0x80);
+            while data.len() % 64 != 56 {
+                data.push(0);
+            }
+            data.extend(((message.len() as u64) * 8).to_be_bytes());
+            for block in data.chunks(64) {
+                let mut w = [0u32; 64];
+                for i in 0..16 {
+                    w[i] = u32::from_be_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
+                }
+                for i in 16..64 {
+                    let s0 =
+                        w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+                    let s1 =
+                        w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+                    w[i] = w[i - 16]
+                        .wrapping_add(s0)
+                        .wrapping_add(w[i - 7])
+                        .wrapping_add(s1);
+                }
+                let mut v = state;
+                for i in 0..64 {
+                    let s1 = v[4].rotate_right(6) ^ v[4].rotate_right(11) ^ v[4].rotate_right(25);
+                    let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+                    let t1 = v[7]
+                        .wrapping_add(s1)
+                        .wrapping_add(ch)
+                        .wrapping_add(SHA256_K[i])
+                        .wrapping_add(w[i]);
+                    let s0 = v[0].rotate_right(2) ^ v[0].rotate_right(13) ^ v[0].rotate_right(22);
+                    let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+                    let t2 = s0.wrapping_add(maj);
+                    v = [
+                        t1.wrapping_add(t2),
+                        v[0],
+                        v[1],
+                        v[2],
+                        v[3].wrapping_add(t1),
+                        v[4],
+                        v[5],
+                        v[6],
+                    ];
+                }
+                for (slot, value) in state.iter_mut().zip(v) {
+                    *slot = slot.wrapping_add(value);
+                }
+            }
+            state
+                .iter()
+                .flat_map(|word| word.to_be_bytes())
+                .take(out)
+                .collect()
+        }
+        fn sha512(initial: &[u64; 8], message: &[u8], out: usize) -> Vec<u8> {
+            let mut state = *initial;
+            let mut data = message.to_vec();
+            data.push(0x80);
+            while data.len() % 128 != 112 {
+                data.push(0);
+            }
+            data.extend(((message.len() as u128) * 8).to_be_bytes());
+            for block in data.chunks(128) {
+                let mut w = [0u64; 80];
+                for i in 0..16 {
+                    w[i] = u64::from_be_bytes(block[i * 8..i * 8 + 8].try_into().unwrap());
+                }
+                for i in 16..80 {
+                    let s0 =
+                        w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
+                    let s1 =
+                        w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
+                    w[i] = w[i - 16]
+                        .wrapping_add(s0)
+                        .wrapping_add(w[i - 7])
+                        .wrapping_add(s1);
+                }
+                let mut v = state;
+                for i in 0..80 {
+                    let s1 = v[4].rotate_right(14) ^ v[4].rotate_right(18) ^ v[4].rotate_right(41);
+                    let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
+                    let t1 = v[7]
+                        .wrapping_add(s1)
+                        .wrapping_add(ch)
+                        .wrapping_add(SHA512_K[i])
+                        .wrapping_add(w[i]);
+                    let s0 = v[0].rotate_right(28) ^ v[0].rotate_right(34) ^ v[0].rotate_right(39);
+                    let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+                    let t2 = s0.wrapping_add(maj);
+                    v = [
+                        t1.wrapping_add(t2),
+                        v[0],
+                        v[1],
+                        v[2],
+                        v[3].wrapping_add(t1),
+                        v[4],
+                        v[5],
+                        v[6],
+                    ];
+                }
+                for (slot, value) in state.iter_mut().zip(v) {
+                    *slot = slot.wrapping_add(value);
+                }
+            }
+            state
+                .iter()
+                .flat_map(|word| word.to_be_bytes())
+                .take(out)
+                .collect()
+        }
+        for message in [&b""[..], b"abc", &[0x5a; 200]] {
+            assert_eq!(
+                sha256(&SHA256_H, message, 32),
+                sha2::Sha256::digest(message).to_vec()
+            );
+            assert_eq!(
+                sha256(&SHA224_H, message, 28),
+                sha2::Sha224::digest(message).to_vec()
+            );
+            assert_eq!(
+                sha512(&SHA512_H, message, 64),
+                sha2::Sha512::digest(message).to_vec()
+            );
+            assert_eq!(
+                sha512(&SHA384_H, message, 48),
+                sha2::Sha384::digest(message).to_vec()
+            );
+        }
+    }
+
+    #[test]
+    fn md5_crc_and_aes_tables_reproduce_known_vectors() {
+        fn md5(message: &[u8]) -> String {
+            const SHIFTS: [u32; 16] = [7, 12, 17, 22, 5, 9, 14, 20, 4, 11, 16, 23, 6, 10, 15, 21];
+            let mut state = [0x6745_2301u32, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
+            let mut data = message.to_vec();
+            data.push(0x80);
+            while data.len() % 64 != 56 {
+                data.push(0);
+            }
+            data.extend(((message.len() as u64) * 8).to_le_bytes());
+            for block in data.chunks(64) {
+                let m = (0..16)
+                    .map(|i| u32::from_le_bytes(block[i * 4..i * 4 + 4].try_into().unwrap()))
+                    .collect::<Vec<_>>();
+                let [mut a, mut b, mut c, mut d] = state;
+                for i in 0..64 {
+                    let (f, g) = match i / 16 {
+                        0 => ((b & c) | (!b & d), i),
+                        1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                        2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                        _ => (c ^ (b | !d), (7 * i) % 16),
+                    };
+                    let rotated = a
+                        .wrapping_add(f)
+                        .wrapping_add(wasm_constants::MD5_T[i])
+                        .wrapping_add(m[g])
+                        .rotate_left(SHIFTS[(i / 16) * 4 + i % 4]);
+                    (a, b, c, d) = (d, b.wrapping_add(rotated), b, c);
+                }
+                for (slot, value) in state.iter_mut().zip([a, b, c, d]) {
+                    *slot = slot.wrapping_add(value);
+                }
+            }
+            hex::encode(
+                state
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+        }
+        assert_eq!(md5(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        let check = |polynomial, reflected, init: u32, xorout: u32| {
+            let table = wasm_constants::crc_table(polynomial, reflected);
+            let mut crc = init;
+            for byte in b"123456789" {
+                crc = if reflected {
+                    (crc >> 8) ^ table[((crc ^ u32::from(*byte)) & 0xff) as usize]
+                } else {
+                    (crc << 8) ^ table[(((crc >> 24) ^ u32::from(*byte)) & 0xff) as usize]
+                };
+            }
+            crc ^ xorout
+        };
+        assert_eq!(check(0xedb8_8320, true, !0, !0), 0xcbf4_3926);
+        assert_eq!(check(0x82f6_3b78, true, !0, !0), 0xe306_9283);
+        assert_eq!(check(0x04c1_1db7, false, !0, !0), 0xfc89_1918);
+        let sbox = wasm_constants::aes_sbox();
+        assert_eq!(
+            (sbox[0x00], sbox[0x01], sbox[0x53], sbox[0xff]),
+            (0x63, 0x7c, 0xed, 0x16)
+        );
+        let te0 = &wasm_constants::catalog()
+            .iter()
+            .find(|set| set.id == "aes_te0")
+            .unwrap()
+            .values;
+        let td0 = &wasm_constants::catalog()
+            .iter()
+            .find(|set| set.id == "aes_td0")
+            .unwrap()
+            .values;
+        assert_eq!((te0[0], te0[1]), (0xc663_63a5, 0xf87c_7c84));
+        assert_eq!(td0[0], 0x51f4_a750);
+        // Each set id is unique, so a match names one set.
+        let ids = wasm_constants::catalog()
+            .iter()
+            .map(|set| set.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), wasm_constants::catalog().len());
+    }
+}

@@ -913,7 +913,7 @@ fn build(decoded: &Decoded) -> Graph {
 
 /// Operands for a basic-block row: the same decoded fields as the linear
 /// listing with the field names removed, so a row fits on a card.
-fn operands(op: &Operator<'_>) -> String {
+pub(crate) fn operands(op: &Operator<'_>) -> String {
     match op {
         Operator::LocalGet { local_index }
         | Operator::LocalSet { local_index }

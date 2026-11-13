@@ -731,11 +731,12 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 65, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 66, "Review route coverage when the API changes");
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
+    assert!(ids.contains("get_wasm_value_flow"));
     assert!(ids.contains("get_flow_graph"));
     assert!(ids.contains("post_graph_layout"));
     assert!(
@@ -825,7 +826,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 65);
+    assert_eq!(operation_count, 66);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -5278,6 +5279,88 @@ async fn wasm_pseudocode_route_lifts_one_function_in_windows_and_refuses_bad_inp
         422,
     )
     .await;
+}
+
+#[tokio::test]
+async fn wasm_value_flow_route_matches_its_contract_and_the_native_helper() {
+    let server = Server::start().await;
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tools/fixtures/wasm-value-flow/value-flow.wasm"
+    ))
+    .unwrap();
+    let hash = hex::encode(Sha256::digest(&bytes));
+    let artifact = json!({"protocol_version":1,"artifact_id":"1","session_id":"1","navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://example.test/value-flow.wasm","mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    server.file(&format!("artifacts/blobs/{hash}.bin"), &bytes);
+    let response = server
+        .get("/api/wasm/value-flow?artifact_id=1&function=2&local=0&interprocedural=true")
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let flow: Value = response.json().await.unwrap();
+    let spec = specification();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["WasmValueFlow"],
+        &flow,
+        "value flow",
+    );
+    assert_eq!(flow["schema"], "wasm-value-flow-v1");
+    assert_eq!(flow["sha256"], hash);
+    assert_eq!(flow["complete"], false);
+    assert!(flow["node_count"].as_u64().unwrap() > 10);
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .args([
+            "--artifact-id",
+            "1",
+            "--value-flow",
+            "function=2&local=0&interprocedural=true",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        flow
+    );
+    for (path, expected) in [
+        ("/api/wasm/value-flow?function=2&local=0", 400),
+        ("/api/wasm/value-flow?artifact_id=1&local=0", 400),
+        ("/api/wasm/value-flow?artifact_id=1&function=2", 400),
+        (
+            "/api/wasm/value-flow?artifact_id=1&function=2&local=0&extra=1",
+            400,
+        ),
+        (
+            "/api/wasm/value-flow?artifact_id=1&function=2&offset=1",
+            404,
+        ),
+        ("/api/wasm/value-flow?artifact_id=1&function=0&local=0", 404),
+        ("/api/wasm/value-flow?artifact_id=2&function=2&local=0", 404),
+    ] {
+        let response = server.get(path).await;
+        assert_eq!(response.status().as_u16(), expected, "{path}");
+        let body: Value = response.json().await.unwrap();
+        assert!(body["error"].is_string(), "{path}: {body}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_origin-trace-wasm"))
+        .arg("--artifacts")
+        .arg(server.root.path().join("artifacts"))
+        .args([
+            "--artifact-id",
+            "1",
+            "--value-flow",
+            "artifact_id=1&function=2&local=0",
+        ])
+        .output()
+        .unwrap();
+    let refused: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(refused["status"], 400, "{refused}");
 }
 
 #[tokio::test]

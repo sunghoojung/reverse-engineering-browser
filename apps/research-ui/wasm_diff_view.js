@@ -79,9 +79,8 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
   withLabel.append(el('span', 'wasm-diff-with-text', 'with'));
   const picker = el('select', 'wasm-diff-picker'); picker.setAttribute('aria-label', 'Module to compare with');
   withLabel.append(picker);
-  const run = el('button', 'source-tool wasm-diff-run', 'Compare'); run.type = 'button';
   const close = el('button', 'source-tool wasm-diff-close', 'Close'); close.type = 'button'; close.setAttribute('aria-label', 'Close module comparison');
-  head.append(title, current, withLabel, run, close);
+  head.append(title, current, withLabel, close);
   const summary = el('p', 'wasm-diff-summary'); summary.setAttribute('role', 'status');
   const filters = el('div', 'wasm-diff-filters'); filters.setAttribute('role', 'group'); filters.setAttribute('aria-label', 'Show rows');
   const filterButtons = new Map();
@@ -98,8 +97,12 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
   const body = el('div', 'wasm-diff-body'); body.tabIndex = -1;
   const table = el('table', 'wasm-diff-table');
   const headRow = el('tr');
-  for (const [label, className] of [['Status', 'status'], ['This module (A)', 'side'], ['Compared module (B)', 'side'], ['Method', 'method'], ['Score', 'score']]) {
-    const cell = el('th', `wasm-diff-col-${className}`, label); cell.scope = 'col'; headRow.append(cell);
+  const sideHeads = [];
+  for (const [label, className] of [['Status', 'status'], ['A', 'side'], ['B', 'side'], ['Method', 'method'], ['Score', 'score']]) {
+    const cell = el('th', `wasm-diff-col-${className}`, label); cell.scope = 'col';
+    if (className === 'side') sideHeads.push(cell);
+    if (className === 'score') cell.title = 'Structural similarity from 0 to 1; 1 for an exact byte or normalized match';
+    headRow.append(cell);
   }
   const thead = el('thead'); thead.append(headRow);
   const tbody = el('tbody');
@@ -118,7 +121,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
   }
   function moduleLabel(module) {
     const hash = typeof module.sha256 === 'string' ? module.sha256.slice(0, 8) : '';
-    return `${module.name}${hash ? ` · ${hash}` : ''} · artifact ${module.artifact_id}`;
+    return `#${module.artifact_id} ${module.name}${hash ? ` · ${hash}` : ''}`;
   }
   function fillPicker() {
     const modules = wasmDiffCandidates(listModules() ?? [], source);
@@ -131,7 +134,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
       picker.append(option);
     }
     other = chosen;
-    picker.disabled = run.disabled = !chosen;
+    picker.disabled = !chosen;
     return modules;
   }
   function sideButton(side, artifactId) {
@@ -142,7 +145,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
   }
   function functionButton(side, artifactId) {
     const jump = el('button', 'wasm-diff-fn', wasmDiffFunctionLabel(side)); jump.type = 'button';
-    jump.title = `${wasmDiffFunctionDetail(side)}. ${side.import ? 'An import has no body to draw.' : 'Open in Graph.'}`;
+    jump.title = `${wasmDiffFunctionLabel(side)}: ${wasmDiffFunctionDetail(side)}. ${side.import ? 'An import has no body to draw.' : 'Open in Graph.'}`;
     if (side.import) jump.disabled = true;
     else jump.addEventListener('click', () => openFunction(artifactId, side.function));
     return jump;
@@ -178,6 +181,8 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     more.hidden = doc?.row_window?.next_offset === null || doc?.row_window?.next_offset === undefined;
   }
   function renderDocument(pair) {
+    sideHeads[0].textContent = `A · #${pair.a}`; sideHeads[0].title = `This module: artifact ${pair.a} · ${doc.a.sha256 ?? ''}`;
+    sideHeads[1].textContent = `B · #${pair.b}`; sideHeads[1].title = `Compared module: artifact ${pair.b} · ${doc.b.sha256 ?? ''}`;
     summary.textContent = `${wasmDiffSummaryText(doc)}${doc.status === 'partial' ? ' · partial' : ''}`;
     summary.title = `${Number(doc.summary.matched).toLocaleString()} matched of ${Number(doc.a.analyzed_functions).toLocaleString()} functions in A and ${Number(doc.b.analyzed_functions).toLocaleString()} in B`;
     for (const [key, chip] of filterButtons) {
@@ -249,7 +254,7 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
     for (const view of exclusive) if (view?.getAttribute('aria-pressed') === 'true') view.click();
     isOpen = true; root.hidden = false; split.hidden = true;
     button.setAttribute('aria-pressed', 'true');
-    current.textContent = nameOf(source);
+    current.textContent = `#${source.artifact_id} ${nameOf(source)}`;
     current.title = `A: artifact ${source.artifact_id} · ${source.sha256 ?? ''}`;
     const modules = fillPicker();
     if (!modules.length) {
@@ -269,7 +274,6 @@ function createWasmDiffPanel({button, root, split, exclusive = [], closeOn = [],
   }
   button.addEventListener('click', () => { if (isOpen) closePanel(); else open(); });
   close.addEventListener('click', () => { closePanel(); button.closest('details')?.querySelector('summary')?.focus(); });
-  run.addEventListener('click', () => load());
   retry.addEventListener('click', () => load());
   more.addEventListener('click', () => loadMore());
   picker.addEventListener('change', () => { other = (listModules() ?? []).find(module => module.artifact_id === picker.value) ?? null; load(); });

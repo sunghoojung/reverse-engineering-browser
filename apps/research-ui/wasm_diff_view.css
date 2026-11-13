@@ -16,10 +16,10 @@
 .wasm-diff-head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-height: 36px; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
 .wasm-diff-title { flex: none; color: var(--text); font: 600 12px var(--sans); }
 .wasm-diff-current { flex: 0 1 auto; min-width: 0; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px var(--mono); }
-.wasm-diff-with { flex: 1 1 220px; min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--faint); font: 12px var(--sans); }
+.wasm-diff-with { flex: 1 1 160px; min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--faint); font: 12px var(--sans); }
 .wasm-diff-picker { flex: 1 1 auto; min-width: 0; max-width: 100%; height: 24px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--bg); color: var(--text); font: 11px var(--mono); }
 .wasm-diff-picker:focus-visible, .wasm-diff-fn:focus-visible, .wasm-diff-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.wasm-diff-run, .wasm-diff-close { flex: none; }
+.wasm-diff-close { flex: none; }
 .wasm-diff-summary { flex: none; margin: 0; padding: 6px 10px 0; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wasm-diff-filters { flex: none; display: flex; gap: 4px; padding: 6px 10px; overflow-x: auto; scrollbar-width: none; }
 .wasm-diff-filter { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--line-soft); border-radius: 11px; background: transparent; color: var(--muted); font: 11px var(--sans); }
@@ -36,7 +36,7 @@
 .wasm-diff-body[hidden] { display: none; }
 .wasm-diff-table { width: 100%; border-collapse: collapse; table-layout: fixed; font: 12px var(--sans); }
 .wasm-diff-table th { position: sticky; top: 0; z-index: 1; height: 26px; padding: 0 8px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--faint); font: 600 11px var(--sans); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.wasm-diff-col-status { width: 96px; }
+.wasm-diff-col-status { width: 108px; }
 .wasm-diff-col-method { width: 96px; }
 .wasm-diff-col-score { width: 56px; }
 .wasm-diff-table td { padding: 2px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--text); }

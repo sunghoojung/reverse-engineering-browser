@@ -174,3 +174,5 @@ whose rows fit in the 8 MiB editor index. A longer module keeps a labeled
 prefix, and an offset past that prefix stays disabled. Find searches the
 formatted hex, not bytes left outside the index.
 Inspection errors provide Retry inspection, and Hex remains available.
+A selected instruction row can be traced with Trace value, described in
+[WASM value flow](wasm-value-flow-v1.md).

@@ -1454,6 +1454,7 @@ mod tests {
             "get_wasm_identification",
             "get_wasm_pseudocode",
             "get_wasm_module_diff",
+            "get_wasm_value_flow",
             "validate_evidence_package",
             "export_evidence_package",
             "compare_evidence_packages",

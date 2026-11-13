@@ -3060,6 +3060,94 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await Task.sleep(nanoseconds: 300_000_000)
   }
 
+  // Trace value on the value-flow fixture (artifact 440): select the import
+  // call row in Inspect, trace it, read the slice, reveal a load by keyboard,
+  // and see the slice marked in the listing. Captured text stays inert.
+  @MainActor
+  func test41TraceValueInInspect() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"440\"]", containing: "webassembly compile")
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the value-flow module")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("(state.sourceEditorView?.view?.wasmRows ?? []).some(row => row.byte_offset === 0xd0)", timeout: 30, "the inspection rows did not load")
+      try await ui.waitUntil("!document.querySelector('#value-flow').hidden", "the Trace value panel follows Inspect")
+      let idle = try await ui.value("document.querySelector('#value-flow-run').disabled") as? Bool
+      XCTAssertEqual(idle, true, "\(size.name): nothing to trace before a row is chosen")
+      // Bring the import call row into view, then pick it with the pointer.
+      _ = try await ui.value("""
+        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0xd0);
+          moveSourceWindow(line, 0, {focus: false});
+          const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testTarget = '1'; return line; })()
+        """)
+      try await ui.click("#source-code [data-test-target] .source-text")
+      try await ui.waitUntil("document.querySelector('#value-flow-target').textContent.includes('0xd0')", "the selected row became the trace target")
+      try await ui.click("#value-flow-run")
+      try await ui.waitUntil("document.querySelectorAll('#value-flow-list .value-flow-row').length > 10", timeout: 30, "the slice did not load")
+      let status = try await ui.value("document.querySelector('#value-flow-status').textContent") as? String ?? ""
+      XCTAssertTrue(status.contains("3 joins") && status.contains("not observed"), "\(size.name): the status names joins and static evidence: \(status)")
+      let slice = try await ui.json("""
+        (() => { const rows = [...document.querySelectorAll('#value-flow-list .value-flow-row')];
+          const kind = rows[0]?.querySelector('.value-flow-kind');
+          return {seed: rows[0]?.innerText ?? '', seedKindWhole: Boolean(kind) && kind.getBoundingClientRect().width > 0 && kind.scrollWidth <= kind.clientWidth + 1,
+            sources: rows.filter(row => row.classList.contains('is-source')).length,
+            joins: document.querySelectorAll('#value-flow-list .value-flow-join').length,
+            marked: document.querySelectorAll('#source-code .source-line[data-value-flow]').length,
+            seedMarked: document.querySelectorAll('#source-code .source-line[data-value-flow="seed"]').length}; })()
+        """)
+      XCTAssertTrue((slice["seed"] as? String ?? "").contains("env.send"), "\(size.name): the seed is the JavaScript crossing: \(slice)")
+      XCTAssertEqual(slice["seedKindWhole"] as? Bool, true, "\(size.name): the import name is visible, not cut, at this window size: \(slice)")
+      XCTAssertGreaterThanOrEqual(slice["sources"] as? Int ?? 0, 5, "\(size.name): sources are listed: \(slice)")
+      XCTAssertEqual(slice["joins"] as? Int, 3, "\(size.name): every join lists its incoming edges: \(slice)")
+      XCTAssertGreaterThan(slice["marked"] as? Int ?? 0, 3, "\(size.name): the slice is marked in the listing: \(slice)")
+      XCTAssertEqual(slice["seedMarked"] as? Int, 1, "\(size.name): the seed row is marked: \(slice)")
+      let panel = try await ui.json("""
+        (() => { const panel = document.querySelector('#value-flow').getBoundingClientRect(), wrap = document.querySelector('#source-code-wrap').getBoundingClientRect();
+          return {panel: panel.height, listing: wrap.height, below: panel.top >= wrap.bottom - 1}; })()
+        """)
+      XCTAssertGreaterThanOrEqual(panel["listing"] as? Double ?? 0, 90, "\(size.name): the listing keeps its rows beside the panel: \(panel)")
+      XCTAssertEqual(panel["below"] as? Bool, true, "\(size.name): the panel sits under the listing: \(panel)")
+      try await assertLayout(ui, "#value-flow", "\(size.name) trace value")
+      try await assertInert(ui, "\(size.name) trace value")
+      try await ui.screenshot("trace-value-\(size.name)")
+      // Keyboard: the first link, arrows through the list, Enter reveals a load row.
+      _ = try await ui.value("document.querySelector('#value-flow-list .value-flow-link').focus()")
+      for _ in 0..<40 {
+        let focused = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
+        if focused.hasPrefix("0x7e") { break }
+        try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      }
+      let reached = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
+      XCTAssertTrue(reached.hasPrefix("0x7e"), "\(size.name): arrow keys reach the load: \(reached)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasmRows[Number(line.dataset.localLine)].byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
+      try await ui.waitUntil("document.activeElement.closest('.source-line').dataset.valueFlow === 'source'", "the revealed load is marked as a source")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+      try await Task.sleep(nanoseconds: 600_000_000)
+      try await ui.screenshot("trace-value-light-\(size.name)")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+      // Graph owns the pane while it is open: the panel hides and the graph
+      // keeps its height; closing it brings back the same trace.
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("document.querySelector('#value-flow').hidden && document.querySelector('#source-graph-host').getBoundingClientRect().height > 120", timeout: 30, "Graph hides the panel and keeps its height")
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("!document.querySelector('#value-flow').hidden && document.querySelectorAll('#value-flow-list .value-flow-row').length > 10", "closing Graph restores the trace")
+      try await ui.click("#value-flow-clear")
+      try await ui.waitUntil("document.querySelectorAll('#source-code .source-line[data-value-flow]').length === 0", "Clear removes the marks")
+      // A store row offers its two operands before any trace.
+      _ = try await ui.value("""
+        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0x89);
+          moveSourceWindow(line, 0, {focus: false});
+          const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testStore = '1'; return line; })()
+        """)
+      try await ui.click("#source-code [data-test-store] .source-text")
+      try await ui.waitUntil("document.querySelector('#value-flow-operand').options.length === 3", "the store row offers operands 0 and 1")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("document.querySelector('#value-flow').hidden", "Hex hides the Trace value panel")
+    }
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor

@@ -1679,6 +1679,7 @@ capture, fetch anything or change a row.
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
 | `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
+| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one bounded value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
@@ -2463,6 +2464,40 @@ closes, and laid-out graphs stay in a
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
 A byte budget cuts row text before structure and labels what it cut.
+
+## Trace value
+
+In **Inspect**, select an instruction row (click it or Tab to its offset) and
+use the **Trace value** panel under the listing: pick **Whole instruction** or
+one operand, a direction, then **Trace value**. Instructions with a fixed
+stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
+operands as soon as the row is chosen; calls and branches list theirs after
+the first trace, from its `operand_count`. The panel reads one
+[`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
+`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and a
+ten-second timeout, aborts a superseded read, and keeps the last slice when a
+read fails. Rows are ordered seed, backward, forward, then by distance, and show
+offset, role, kind and the instruction as inert text; a join row lists its
+incoming edges. Arrow keys, Home and End move through the rows; Enter or a click
+reveals that offset in Inspect and focuses its gutter. Offsets with no retained
+Inspect row stay disabled. The slice's mounted rows carry `data-value-flow`
+(seed, source, sink or step), reapplied as the listing remounts. **×** clears
+the trace; Hex or another module hides the panel and drops it. While the block
+graph is open the panel and its marks are hidden, since the graph owns that
+pane, and closing the graph brings the same trace back. Graph blocks are not a
+seed. Each row keeps the identifying part of its kind first (the import name,
+the local or the join kind), so it stays readable at the minimum window. A node
+that is both ends of the slice (a call whose result returns to its own
+argument around a loop) reads **source · sink**, and a loop join left open by
+a simulation stop says it is incomplete. The header always names the trace
+shown; choosing another row, or revealing one from the list, names that row on
+the button instead (**Trace 0x7e**) until it is traced. The panel's controls
+stay on one row at every width: in a narrow panel the field names and then the
+title give way, and the selects keep their accessible names. Beside the
+identification summary and its Details at the minimum window, the listing
+keeps six rows when there is room and otherwise what is left above the
+panel's header, down to two; with less room the Inspect area scrolls.
+`tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
 
 ## Flow workspace
 

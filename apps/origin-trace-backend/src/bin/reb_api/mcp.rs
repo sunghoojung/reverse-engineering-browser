@@ -2620,6 +2620,32 @@ mod tests {
     }
 
     #[test]
+    fn omit_content_keeps_value_flow_structure_and_drops_instruction_text() {
+        let document = json!({
+            "schema": "wasm-value-flow-v1",
+            "nodes": [{"id": 0, "kind": "load", "byte_offset": 126, "role": "source", "local": 1,
+                "text": "i32.const 1337", "expression": "i32.load offset=8 (SECRET)"}],
+            "edges": [{"from": 1, "to": 0, "kind": "address", "operand": 0, "result": 0}],
+            "joins": [{"node": 2, "join": "loop", "incoming": [{"via": "br", "via_offset": 179}]}]
+        });
+        let result = super::omit_content_fields(&document, None, 160, &[], true);
+        let node = &result["nodes"][0];
+        assert_eq!(
+            (
+                node["kind"].as_str(),
+                node["byte_offset"].as_u64(),
+                node["local"].as_u64()
+            ),
+            (Some("load"), Some(126), Some(1))
+        );
+        assert_eq!(node["text"]["omitted"], "string");
+        assert_eq!(node["expression"]["omitted"], "string");
+        assert_eq!(result["edges"], document["edges"]);
+        assert_eq!(result["joins"], document["joins"]);
+        assert!(!result.to_string().contains("1337") && !result.to_string().contains("SECRET"));
+    }
+
+    #[test]
     fn omit_content_keeps_rows_and_identifiers_and_drops_captured_content() {
         let document = json!({
             "events": [

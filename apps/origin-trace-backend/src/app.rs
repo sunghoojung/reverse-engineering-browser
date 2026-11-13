@@ -19,7 +19,7 @@ use crate::{
     request_cookies, request_headers,
     request_index::{self, RequestIndex},
     session_context, session_summary, source_facts, source_format, validation, vm, wasm, wasm_diff,
-    wasm_graph, wasm_identification, wasm_pseudocode,
+    wasm_graph, wasm_identification, wasm_pseudocode, wasm_value_flow,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -39,7 +39,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 80] = [
+const UI_ASSETS: [&str; 82] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -118,6 +118,8 @@ const UI_ASSETS: [&str; 80] = [
     "xrefs_view.css",
     "wasm_runner.js",
     "wasm_runner.css",
+    "value_flow_view.js",
+    "value_flow_view.css",
     "debugger_sidebar.js",
     "debugger_sidebar.css",
 ];
@@ -602,6 +604,18 @@ impl App {
         }
         if path == "/api/wasm/diff" {
             return self.wasm_diff_route(raw_query).await;
+        }
+        if path == "/api/wasm/value-flow" {
+            let request = wasm_value_flow::parse_query(raw_query)?;
+            let id = request
+                .artifact_id
+                .clone()
+                .ok_or_else(|| Error::bad("artifact_id is required"))?;
+            let root = self.options.artifacts.clone();
+            let document = self
+                .blocking(move || wasm_value_flow::value_flow(&root, &id, &request))
+                .await?;
+            return Ok(axum::Json(document).into_response());
         }
         let q = Query::new(raw_query);
         let mut etag = None;

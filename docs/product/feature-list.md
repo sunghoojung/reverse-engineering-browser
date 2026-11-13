@@ -59,7 +59,7 @@ privacy, and implementation limits are documented in
 - [Function matching between two captured modules](./wasm-module-diff-v1.md) is implemented as **Compare with** in Sources: renumbering-tolerant fingerprints, matches with method and score, and changed, added, removed and ambiguous functions. Carrying analyst names across a match remains planned.
 - Record compilation, instantiation, exported calls, imported calls, traps, and memory growth.
 - Connect JavaScript-to-WASM and WASM-to-JavaScript crossings.
-- Search for values moving between WASM, JavaScript, browser APIs, and network requests.
+- Search for values moving between WASM, JavaScript, browser APIs, and network requests. [Static value flow inside one function](./wasm-value-flow-v1.md) (backward and forward slices with joins, memory loads with their address, import calls and one step to direct call sites) is implemented in Sources and for agents; cross-boundary links remain planned.
 - Analyze captured modules through a bounded offline semantic provider that preserves byte offsets for every derived function, instruction, control-flow edge, call, and data reference.
 - Detect WASM-hosted virtual machine candidates and route them to the shared Virtual Machine Laboratory without classifying ordinary compiled WASM as a nested VM.
 

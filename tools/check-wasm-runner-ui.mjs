@@ -115,6 +115,8 @@ for (let i = 0; i < 10; i += 1) await nextTurn();
 const error = node.querySelector('.wasm-run-error');
 assert.equal(error.hidden, false);
 assert.match(error.textContent, /nothing ran/);
+assert.equal(output.hidden, true, 'A failed run hides the previous result');
+assert.equal(output.textContent, '', 'A failed run leaves no stale result behind');
 // A bad field is named before anything is sent.
 byLabel('Arguments').value = 'seven';
 runButton.dispatchEvent(new window.Event('click'));

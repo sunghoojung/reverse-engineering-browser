@@ -215,6 +215,8 @@ function createWasmRunDialog({button, getSource}) {
       renderRecord(record);
     } catch (failure) {
       if (owner !== generation) return;
+      // A failed run has no result, so the previous one must not look like its result.
+      output.hidden = true; output.replaceChildren();
       error.textContent = failure.name === 'AbortError' ? 'The run did not answer in time. Its outcome is unknown; Read stored runs before retrying.' : failure instanceof TypeError ? 'The evidence service is unreachable.' : failure.message;
       error.hidden = false;
     } finally {

@@ -572,13 +572,15 @@ wait_for_events {"type": "request_watch_match", "after": "<query.next_after>", "
 ```
 
 Good: each record has `debugger_observation` with `status: decoded`, the
-same fields `get_native_debugger` lists, `site` and `stack_read`:
+same fields `get_native_debugger` lists, `site` and `stack_read`. Any filter
+or cursor adds it; the unfiltered `get_events` window does not:
 
 - `request_watch_match`: `detail.rule` is the request rule's index in the
   armed set, `request_id` is the request, and `site` is null. Read the stack
-  that started it with `get_request_stack` and the arguments in `stack_read`
-  (drop `operation`): `frames`, innermost first, with `resolution.url`,
-  `line`, `column` and `function_name`.
+  that started it with `get_request_stack`, passing `stack_read` as it is
+  (`stack_read_operation` names that tool): `frames`, innermost first, with
+  `resolution.url`, `line`, `column` and `function_name`. That read covers
+  the newest 64 MiB of the store; an older record answers `outside_scan`.
 - `listener_dispatch`: `detail.event_type`,
   `detail.target`, and `site.resolution` is the listener's file, line and
   column. A click listener usually runs with no script on the stack, so
@@ -588,9 +590,11 @@ same fields `get_native_debugger` lists, `site` and `stack_read`:
 
 A `site` that did not resolve keeps its raw `script_id` and `position` with
 a reason; it is never guessed. `resolution.status: deferred` means this read
-did not try: the unfiltered polling window, more than 32 distinct sites on one
-page (`site_limit`), or a failed identity or manifest read. Read it with
-`stack_read`. `status: invalid` is a record the core refuses, with no fields.
+did not try. With `source_limit` the page's sites named more than 4 scripts;
+read the same cursor again (resolved sites are kept, so the next scripts are
+read) or use a smaller `limit`. With `site_read_failed` the identities or the
+artifact manifest could not be read; read again. `status: invalid` is a
+record the core refuses, with no fields.
 
 A timeout does not mean nothing happened. Rules match only the main thread of
 the document they were armed on, never a worker, another frame or a
@@ -602,9 +606,12 @@ stops after 1,024 records per capture configuration and leaves one
 `debugger_observation_budget` gap; `get_session_summary` lists it. Disarm with
 `{"operation": "unwatch"}`; `stop` disarms too.
 
-These fields carry identities, kinds, positions and names only, so they are
-the same at Read only as at Full access. The payload hex is what the content
-levels omit.
+These fields carry identities, kinds, positions and names only (a rule's
+slot, never its URL text; an armed event name; a host, never a path; an
+exception's kind, never its message; an attribute's name, never its value), so
+they are returned at Read only too and are the same as at Full access, except
+that Read only, Ask and Auto withhold any string longer than 160 characters,
+such as a long script URL. The payload hex is what those levels omit.
 
 ## Response shapes at a glance
 

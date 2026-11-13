@@ -170,12 +170,12 @@ pub fn decode(event: &Value) -> Option<Value> {
 }
 
 /// Puts `debugger_observation` beside the payload of each record of types 40
-/// to 45 on an event page: the object `get_native_debugger` lists for it, its
-/// own frame as `site` and the `get_request_stack` arguments of its stack as
-/// `stack_read`. A record the core would refuse is `{status: invalid}` with no
-/// fields. Sites are resolved by the reads that call
-/// `request_stack::annotate_observation_sites` afterwards; anywhere else
-/// each keeps its raw identity with reason `polling_window`.
+/// to 45 on a filtered or waiting event page: the object `get_native_debugger`
+/// lists for it, its own frame as `site` (raw here, resolved by
+/// `request_stack::ObservationSites`, which calls this), and the exact
+/// arguments of the `get_request_stack` read of its stack as `stack_read`,
+/// with that operation's name beside them. A record the core would refuse is
+/// `{status: invalid}` with no fields.
 pub(crate) fn annotate(events: &mut [Value]) {
     for event in events {
         if !event["type"]
@@ -189,6 +189,7 @@ pub(crate) fn annotate(events: &mut [Value]) {
                 let (site, stack_read) = request_stack::observation_reads(event);
                 decoded["status"] = json!("decoded");
                 decoded["site"] = site;
+                decoded["stack_read_operation"] = json!("get_request_stack");
                 decoded["stack_read"] = stack_read;
                 decoded
             }

@@ -185,6 +185,7 @@ pub struct App {
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
+    observation_sites: Arc<std::sync::Mutex<crate::request_stack::ObservationSites>>,
     artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
@@ -280,6 +281,7 @@ impl App {
             lifecycle: Capture::new(&options),
             requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
             initiator_frames: Arc::default(),
+            observation_sites: Arc::default(),
             invocation_sites,
             invocation_session,
             text_digests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -884,11 +886,10 @@ impl App {
                 });
                 // json! serializes borrowed values; move the retained window instead
                 // of allocating a second complete evidence tree on every refresh.
-                let (mut events, mut network) = (window.events, window.network_events);
+                let mut events = window.events;
                 event_query::annotate_events(&mut events);
-                event_query::annotate_events(&mut network);
                 result["events"] = Value::Array(events);
-                result["network_events"] = Value::Array(network);
+                result["network_events"] = Value::Array(window.network_events);
                 self.event_state(&mut result, capture);
                 if capture.mode == CaptureMode::Demo {
                     result["canvas_render_captures"] =
@@ -1579,11 +1580,13 @@ impl App {
         if matches_etag(headers, Some(&etag)) {
             return Ok(not_modified(&etag));
         }
-        let (path, artifacts, requests) = (
+        let (path, artifacts, requests, sites) = (
             self.options.store.clone(),
             self.options.artifacts.clone(),
             self.requests.clone(),
+            self.observation_sites.clone(),
         );
+        let newest_first = !matches!(cursor, event_query::Cursor::After(_));
         let mut document = self
             .blocking(move || {
                 let mut tally = event_query::Tally::default();
@@ -1597,7 +1600,14 @@ impl App {
                 )?;
                 let mut document =
                     event_query::events_document(&page, &tally, &filter, cursor, limit);
-                observation_sites(&path, &artifacts, &requests, &mut document);
+                observation_sites(
+                    &path,
+                    &artifacts,
+                    &requests,
+                    &sites,
+                    &mut document,
+                    newest_first,
+                );
                 Ok(document)
             })
             .await?;
@@ -1693,21 +1703,20 @@ impl App {
             scan_start: origin,
             ..last
         };
+        // How long the wait itself took, before any site of what it found is resolved.
+        let waited = began.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let cursor = event_query::Cursor::After(origin);
         let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
-        if document["events"].as_array().is_some_and(|events| {
-            events
-                .iter()
-                .any(|e| e.get("debugger_observation").is_some())
-        }) {
-            let (store, artifacts, requests) = (
+        if !timed_out {
+            let (store, artifacts, requests, sites) = (
                 self.options.store.clone(),
                 self.options.artifacts.clone(),
                 self.requests.clone(),
+                self.observation_sites.clone(),
             );
             document = self
                 .blocking(move || {
-                    observation_sites(&store, &artifacts, &requests, &mut document);
+                    observation_sites(&store, &artifacts, &requests, &sites, &mut document, false);
                     Ok(document)
                 })
                 .await?;
@@ -1716,7 +1725,7 @@ impl App {
         document["wait"] = json!({
             "timed_out": timed_out,
             "timeout_ms": timeout,
-            "waited_ms": began.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            "waited_ms": waited,
         });
         Ok(axum::Json(document).into_response())
     }
@@ -2251,21 +2260,35 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
     );
     response
 }
-/// `get_native_debugger` filters: one observation type, one native frame
-/// named by all three identities, and a backward byte cursor.
-/// Resolves the own frames of the debugger observations on a filtered or
-/// waiting event page (protocol/native-debugger-observation-v1.md).
+/// Decodes the debugger observations of a filtered or waiting event page and
+/// resolves their own frames (protocol/native-debugger-observation-v1.md),
+/// newest first on a backward page. A page without one reads nothing more.
 fn observation_sites(
     store: &Path,
     artifacts: &Path,
     requests: &Mutex<RequestIndex>,
+    sites: &std::sync::Mutex<crate::request_stack::ObservationSites>,
     document: &mut Value,
+    newest_first: bool,
 ) {
-    if let Some(events) = document["events"].as_array_mut() {
-        crate::request_stack::annotate_observation_sites(store, artifacts, requests, events);
+    let Some(events) = document["events"].as_array_mut() else {
+        return;
+    };
+    let observed = events.iter().any(|event| {
+        event["type"]
+            .as_str()
+            .is_some_and(|kind| crate::debugger_observation::TYPES.contains(&kind))
+    });
+    if observed {
+        sites
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .annotate(store, artifacts, requests, events, newest_first);
     }
 }
 
+/// `get_native_debugger` filters: one observation type, one native frame
+/// named by all three identities, and a backward byte cursor.
 fn native_debugger_query(q: &Query) -> Result<crate::debugger_observation::Query> {
     use crate::debugger_observation::{PAGE, Query as Observations, RECENT, TYPES, Thread};
     q.only(

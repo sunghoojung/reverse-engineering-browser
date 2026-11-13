@@ -56,21 +56,47 @@ gaps of any kind, within the newest 64 MiB of the store, at most 64.
 `observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
 (above) in that scan, at most 16.
 
-`get_events` and `wait_for_events` put `debugger_observation` beside the hex
-payload of every record of types 40 to 45, so an agent "breaks" by waiting on
-a cursor filtered by `type`. It is the object `get_native_debugger` lists,
-from the same decoder, with `status: decoded`, plus `site` and `stack_read`,
-or `{status: invalid}` with no field for a record the core refuses. `site` is
-the record's own frame resolved as `get_request_stack` resolves it below:
-script URL, one-based line, UTF-16 column and function name when the source is
-retained, else a reason with the raw `script_id` and `position`. A filtered or
-cursor read resolves up to 32 distinct sites per page; the unfiltered polling
-window, a site past those 32 or a read whose identities or manifest failed
-keeps the raw frame with `resolution: {status: deferred}` and the reason
-`polling_window`, `site_limit` or `site_read_failed`. `stack_read` names the
-`get_request_stack` arguments for the record's whole stack. These fields hold
-identities, kinds, positions and names only, so the MCP content levels that
-omit captured content leave them whole.
+A filtered or cursor `get_events` read and every `wait_for_events` put
+`debugger_observation` beside the hex payload of each record of types 40 to
+45, so an agent "breaks" by waiting on a cursor filtered by `type`. The
+unfiltered polling window carries none: the UI reads observations through
+`get_native_debugger`, and the decode would grow that window by a third. It is
+the object `get_native_debugger` lists, from the same decoder, with
+`status: decoded`, plus `site`, `stack_read` and `stack_read_operation`, or
+`{status: invalid}` with no field for a record the core refuses.
+
+`site` is the record's own frame resolved as `get_request_stack` resolves a
+frame below: script URL, one-based line, UTF-16 column and function name when
+the source is retained, else a reason with the raw `script_id` and
+`position`. A page's sites are grouped by script, and each script's source is
+read and walked once for all of them; a resolution that can no longer change
+is kept (at most 4,096, dropped when the store is replaced), so reading the
+same records again reads no source, manifest or identity. A page reads at most
+4 scripts, newest records first on a backward page and oldest first on a
+forward one. A site that was not resolved keeps its raw frame with
+`resolution: {status: deferred}` and a reason, each with the recourse that
+works:
+
+| Reason | Why | Recourse |
+| --- | --- | --- |
+| `source_limit` | The page's sites name more than 4 scripts not yet resolved | Read the same cursor again: kept sites cost nothing, so the next 4 scripts are read. A smaller `limit` names fewer scripts. |
+| `site_read_failed` | The script identities or the artifact manifest could not be read | Read again |
+
+`stack_read` is exactly the arguments of the `get_request_stack` read named by
+`stack_read_operation`, passed as it is. That read covers the newest 64 MiB of
+the store, so for an older record it answers `outside_scan`; the site on the
+event page does not depend on it.
+
+These fields are returned at every MCP permission level, `read-only`
+included, where the hex payload is withheld: none is captured content. A
+request match carries its rule's slot and method flag, never the URL
+substring; a listener's event type equals a name a rule armed; a CSP
+violation names a host only, never a path or query; an exception says only
+its kind, never a message or value; a DOM mutation names an attribute's local
+name, never its value or text; the site carries the script URL, position and
+function name that `get_request_stack` returns at the same levels. At
+`read-only`, `ask` and `auto` a string longer than 160 characters, such as a
+long script URL, is withheld like any other.
 
 `get_request_stack` with `process_id` and `observation_sequence` reads one
 record of types 40 to 45 and resolves its stack like a request's. It adds

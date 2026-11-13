@@ -1669,9 +1669,10 @@ pub fn observation_document(
     Ok(document)
 }
 
-/// Distinct observation sites one event page resolves. A read can return
-/// 5,000 records, and each distinct site can load a 16 MiB source.
-pub const PAGE_SITES: usize = 32;
+/// Distinct scripts one event page reads to resolve its sites. Each is one
+/// source read and one walk over it for every site it holds, up to 16 MiB;
+/// the number of sites in a script costs nothing more.
+pub const PAGE_SOURCES: usize = 4;
 
 /// An observation's own frame before a read resolves it: its raw identity and
 /// why this read did not. `eval` comes from the script identity, so it is
@@ -1694,163 +1695,264 @@ fn deferred_site(site: &[u8; FRAME], reason: &str) -> Value {
 }
 
 /// For one decoded observation record (types 40 to 45): its own frame (the
-/// listener, the timer callback or the throw site) as `site`, unresolved until
-/// `resolve_observation_sites` reads it and null when the record names none,
-/// and the `get_request_stack` arguments that resolve its whole stack.
+/// listener, the timer callback or the throw site) as `site`, raw until
+/// `ObservationSites` resolves it and null when the record names none, and the
+/// exact `get_request_stack` arguments that read its whole stack.
 pub(crate) fn observation_reads(event: &Value) -> (Value, Value) {
     let kind = event["type"].as_str().unwrap_or("");
     let site = payload(event)
         .and_then(|payload| observation_site(kind, &payload))
-        .map_or(Value::Null, |site| deferred_site(&site, "polling_window"));
+        .map_or(Value::Null, |site| deferred_site(&site, "source_limit"));
     let sequence = event["sequence_number"].as_str().unwrap_or("0");
     let process = event["process_id"].as_u64().unwrap_or(0);
     let session = event["session_id"].as_str().unwrap_or("0");
-    let read = (process != 0 && sequence != "0" && session != "0").then(|| {
-        json!({"operation": "get_request_stack", "session_id": session, "process_id": process,
-            "observation_sequence": sequence})
-    });
+    let read = (process != 0 && sequence != "0" && session != "0").then(
+        || json!({"session_id": session, "process_id": process, "observation_sequence": sequence}),
+    );
     (site, read.unwrap_or(Value::Null))
 }
 
-/// Resolves the `site` of each decoded observation of one event page as
-/// `observation_document` resolves a single record's: through the renderer's
-/// script identities, read once per renderer, and the retained sources the
-/// sites name, read once each. At most `PAGE_SITES` distinct sites resolve;
-/// the others keep their raw identity with reason `site_limit`.
-pub fn resolve_observation_sites(
-    store: &Path,
-    artifacts_root: &Path,
-    requests: &Mutex<RequestIndex>,
-    events: &mut [Value],
-) -> Result<()> {
-    struct Wanted {
-        session: String,
-        process: u64,
-        site: [u8; FRAME],
-        events: Vec<usize>,
-    }
-    let mut wanted: Vec<Wanted> = Vec::new();
-    for (at, event) in events.iter_mut().enumerate() {
-        if event["debugger_observation"]["site"].is_null() {
-            continue;
-        }
-        let kind = event["type"].as_str().unwrap_or("");
-        let Some(site) = payload(event).and_then(|payload| observation_site(kind, &payload)) else {
-            continue;
-        };
-        let (session, process) = (
-            event["session_id"].as_str().unwrap_or("").to_owned(),
-            event["process_id"].as_u64().unwrap_or(0),
-        );
-        if let Some(same) = wanted
-            .iter_mut()
-            .find(|w| w.session == session && w.process == process && w.site == site)
-        {
-            same.events.push(at);
-        } else if wanted.len() < PAGE_SITES {
-            wanted.push(Wanted {
-                session,
-                process,
-                site,
-                events: vec![at],
-            });
-        } else {
-            event["debugger_observation"]["site"]["resolution"]["reason"] = json!("site_limit");
-        }
-    }
-    let mut identities = HashMap::new();
-    let mut complete: HashMap<(String, u64), bool> = HashMap::new();
-    for want in &wanted {
-        let renderer = (want.session.clone(), want.process);
-        if complete.contains_key(&renderer) {
-            continue;
-        }
-        let (found, known) = stored_identities(
-            store,
-            requests,
-            &json!({"session_id": want.session}),
-            want.process,
-        )?;
-        identities.extend(found);
-        complete.insert(renderer, known);
-    }
-    // Only the sources the sites name; observation records are the document
-    // main thread's (a version 1 stack summary), whose isolate key is zero.
-    let digests: BTreeSet<String> = wanted
-        .iter()
-        .filter_map(|want| {
-            let key = identity_key(
-                (want.process as u32, Scope::DOCUMENT),
-                u32_at(&want.site, 4),
-            );
-            identities.get(&key)?.sha256.map(hex::encode)
-        })
-        .collect();
-    let sessions: BTreeSet<&str> = wanted.iter().map(|want| want.session.as_str()).collect();
-    let artifacts = if digests.is_empty() {
-        Vec::new()
-    } else {
-        evidence::select_artifacts(artifacts_root, |a| {
-            a["session_id"]
-                .as_str()
-                .is_some_and(|s| sessions.contains(s))
-                && matches!(a["kind"].as_str(), Some("javascript" | "wasm"))
-                && a["sha256"]
-                    .as_str()
-                    .is_some_and(|sha| digests.contains(sha))
-        })?
-    };
-    let sources = std::cell::RefCell::new(HashMap::<String, Vec<u8>>::new());
-    let read = |artifact: &Value, limit: usize| -> Result<Vec<u8>> {
-        let key = artifact["sha256"].as_str().unwrap_or("").to_owned();
-        if let Some(bytes) = sources.borrow().get(&key) {
-            return Ok(bytes.clone());
-        }
-        let bytes = evidence::content(artifacts_root, artifact, limit)?;
-        let mut kept = sources.borrow_mut();
-        if kept.values().map(Vec::len).sum::<usize>() + bytes.len() <= 4 * MAX_SOURCE {
-            kept.insert(key, bytes.clone());
-        }
-        Ok(bytes)
-    };
-    for want in wanted {
-        let renderer = json!({"session_id": want.session, "process_id": want.process});
-        let mut alone = resolve_call(
-            &renderer,
-            Scope::DOCUMENT,
-            &want.site,
-            None,
-            &identities,
-            &artifacts,
-            &read,
-        );
-        if !complete[&(want.session, want.process)] {
-            mark_identities_outside_scan(&mut alone);
-        }
-        let site = alone["frames"][0].take();
-        for at in want.events {
-            events[at]["debugger_observation"]["site"] = site.clone();
-        }
-    }
-    Ok(())
+/// What one page's site resolution read: sources walked, manifest scans and
+/// identity reads. A page whose sites are all settled reads none of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SiteWork {
+    pub source_walks: usize,
+    pub manifest_reads: usize,
+    pub identity_reads: usize,
 }
 
-/// The page's sites, or, when the identities or the manifest cannot be read,
-/// each left with its raw identity and reason `site_read_failed`: a failed
-/// resolution never costs the records themselves.
-pub fn annotate_observation_sites(
-    store: &Path,
-    artifacts_root: &Path,
-    requests: &Mutex<RequestIndex>,
-    events: &mut [Value],
-) {
-    if resolve_observation_sites(store, artifacts_root, requests, events).is_err() {
-        for event in events {
-            let site = &mut event["debugger_observation"]["site"];
-            if site["resolution"]["status"] == "deferred" {
-                site["resolution"]["reason"] = json!("site_read_failed");
+/// Observation sites resolved once and kept, as `InitiatorFrames` keeps
+/// initiator frames: a site's resolution is a fact of retained bytes, so it is
+/// read again only while it can still change (its identity or source not yet
+/// seen). The kept set belongs to one store: a new index epoch or a manifest
+/// that shrank drops it.
+#[derive(Default)]
+pub struct ObservationSites {
+    kept: HashMap<String, Value>,
+    stamp: Option<(String, u64)>,
+}
+
+impl ObservationSites {
+    const KEPT: usize = 4096;
+
+    /// Decodes every observation of one page and resolves its sites, newest
+    /// first when `newest_first` (a backward page), so the records an agent
+    /// reads first are the ones resolved. A failed identity or manifest read
+    /// leaves each unsettled site raw with reason `site_read_failed`; it never
+    /// costs the records themselves.
+    pub fn annotate(
+        &mut self,
+        store: &Path,
+        artifacts_root: &Path,
+        requests: &Mutex<RequestIndex>,
+        events: &mut [Value],
+        newest_first: bool,
+    ) -> SiteWork {
+        crate::debugger_observation::annotate(events);
+        let mut work = SiteWork::default();
+        if self
+            .resolve(
+                store,
+                artifacts_root,
+                requests,
+                events,
+                newest_first,
+                &mut work,
+            )
+            .is_err()
+        {
+            for event in events.iter_mut() {
+                let site = &mut event["debugger_observation"]["site"];
+                if site["resolution"]["status"] == "deferred" {
+                    site["resolution"]["reason"] = json!("site_read_failed");
+                }
             }
         }
+        work
+    }
+
+    fn resolve(
+        &mut self,
+        store: &Path,
+        artifacts_root: &Path,
+        requests: &Mutex<RequestIndex>,
+        events: &mut [Value],
+        newest_first: bool,
+        work: &mut SiteWork,
+    ) -> Result<()> {
+        struct Wanted {
+            key: String,
+            session: String,
+            process: u32,
+            frame: Frame,
+            events: Vec<usize>,
+        }
+        // The kept set belongs to the store it was read from: a manifest that
+        // shrank was replaced. A stat, so a settled page reads nothing else.
+        let manifest = std::fs::metadata(artifacts_root.join("manifest.jsonl"))
+            .map_or(0, |metadata| metadata.len());
+        if self
+            .stamp
+            .as_ref()
+            .is_some_and(|(_, kept)| manifest < *kept)
+        {
+            self.kept.clear();
+            self.stamp = None;
+        }
+        let order: Vec<usize> = if newest_first {
+            (0..events.len()).rev().collect()
+        } else {
+            (0..events.len()).collect()
+        };
+        let mut wanted: Vec<Wanted> = Vec::new();
+        for at in order {
+            let event = &mut events[at];
+            if event["debugger_observation"]["site"].is_null() {
+                continue;
+            }
+            let kind = event["type"].as_str().unwrap_or("");
+            let Some(site) = payload(event).and_then(|payload| observation_site(kind, &payload))
+            else {
+                continue;
+            };
+            let (session, process) = (
+                event["session_id"].as_str().unwrap_or("").to_owned(),
+                event["process_id"].as_u64().unwrap_or(0) as u32,
+            );
+            let key = format!("{session}:{process}:{}", hex::encode(site));
+            if let Some(kept) = self.kept.get(&key) {
+                event["debugger_observation"]["site"] = kept.clone();
+            } else if let Some(same) = wanted.iter_mut().find(|w| w.key == key) {
+                same.events.push(at);
+            } else {
+                wanted.push(Wanted {
+                    key,
+                    session,
+                    process,
+                    frame: Frame::read(&site),
+                    events: vec![at],
+                });
+            }
+        }
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        // Identities once per renderer; reading them refreshes the index.
+        let mut identities = HashMap::new();
+        let mut complete: HashMap<(String, u32), bool> = HashMap::new();
+        for want in &wanted {
+            let renderer = (want.session.clone(), want.process);
+            if complete.contains_key(&renderer) {
+                continue;
+            }
+            work.identity_reads += 1;
+            let (found, known) = stored_identities(
+                store,
+                requests,
+                &json!({"session_id": want.session}),
+                want.process.into(),
+            )?;
+            identities.extend(found);
+            complete.insert(renderer, known);
+        }
+        // A new index epoch is a replaced store: nothing kept from before holds.
+        let epoch = requests
+            .blocking_lock()
+            .position()
+            .map(|(epoch, _)| epoch)
+            .unwrap_or_default();
+        if self.stamp.as_ref().is_some_and(|(kept, _)| *kept != epoch) {
+            self.kept.clear();
+        }
+        self.stamp = Some((epoch, manifest));
+        // The scripts whose sources are read, in the page's order, at most
+        // PAGE_SOURCES; a site of a later script stays raw with source_limit.
+        let scope = |want: &Wanted| (want.process, Scope::DOCUMENT);
+        let mut scripts: Vec<IdentityKey> = Vec::new();
+        let mut limited = BTreeSet::new();
+        for (at, want) in wanted.iter().enumerate() {
+            let key = identity_key(scope(want), want.frame.script_id);
+            let reads = identities.get(&key).is_some_and(|i| i.sha256.is_some());
+            if !reads || scripts.contains(&key) {
+                continue;
+            }
+            if scripts.len() == PAGE_SOURCES {
+                limited.insert(at);
+            } else {
+                scripts.push(key);
+            }
+        }
+        let digests: BTreeSet<String> = scripts
+            .iter()
+            .filter_map(|key| identities.get(key)?.sha256.map(hex::encode))
+            .collect();
+        let sessions: BTreeSet<&str> = wanted.iter().map(|want| want.session.as_str()).collect();
+        let artifacts = if digests.is_empty() {
+            Vec::new()
+        } else {
+            work.manifest_reads += 1;
+            evidence::select_artifacts(artifacts_root, |a| {
+                a["session_id"]
+                    .as_str()
+                    .is_some_and(|s| sessions.contains(s))
+                    && matches!(a["kind"].as_str(), Some("javascript" | "wasm"))
+                    && a["sha256"]
+                        .as_str()
+                        .is_some_and(|sha| digests.contains(sha))
+            })?
+        };
+        let walks = std::cell::Cell::new(0usize);
+        let read = |artifact: &Value, limit: usize| -> Result<Vec<u8>> {
+            walks.set(walks.get() + 1);
+            evidence::content(artifacts_root, artifact, limit)
+        };
+        // One pass per session over every site's script: each source is read
+        // and walked once, for all of its sites' offsets, as resolve() does for
+        // the frames of one stack.
+        for session in sessions {
+            let frames: Vec<(ScriptScope, &Frame)> = wanted
+                .iter()
+                .enumerate()
+                .filter(|(at, want)| want.session == session && !limited.contains(at))
+                .map(|(_, want)| (scope(want), &want.frame))
+                .collect();
+            let sources = load_sources(frames.into_iter(), &identities, &artifacts, session, &read);
+            for (at, want) in wanted.iter().enumerate() {
+                if want.session != session || limited.contains(&at) {
+                    continue;
+                }
+                let mut site =
+                    frame_value(0, &want.frame, false, scope(want), &sources, &identities);
+                let reason = site["resolution"]["reason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
+                if reason == "script_identity_missing"
+                    && !complete[&(want.session.clone(), want.process)]
+                {
+                    site["resolution"]["reason"] = json!("script_identity_outside_scan");
+                }
+                let pending = matches!(
+                    site["resolution"]["reason"].as_str(),
+                    Some(
+                        "script_identity_missing"
+                            | "script_identity_outside_scan"
+                            | "source_artifact_missing"
+                    )
+                );
+                if !pending {
+                    if self.kept.len() == Self::KEPT {
+                        self.kept.clear();
+                    }
+                    self.kept.insert(want.key.clone(), site.clone());
+                }
+                for &event in &want.events {
+                    events[event]["debugger_observation"]["site"] = site.clone();
+                }
+            }
+        }
+        work.source_walks = walks.get();
+        Ok(())
     }
 }
 
@@ -2269,6 +2371,18 @@ pub(crate) mod tests {
                 "payload":hex::encode(&payload),"payload_size":payload.len(),"payload_truncated":false});
             writeln!(events, "{event}").unwrap();
         }
+        // Nine more scripts whose sources are digested but not retained.
+        for script in 20..29u32 {
+            let text = format!("// script {script}\n");
+            let payload = identity_bytes(1, 0x10, script, (0, 0), 99, text.as_bytes());
+            let event = json!({"protocol_version":3,"session_id":"9",
+                "sequence_number":(script + 100).to_string(),"monotonic_time_ns":"1",
+                "navigation_id":"0","frame_id":"1","artifact_id":"0","parent_event_id":"0",
+                "request_id":"0","process_id":42,"thread_id":1,"tab_id":0,
+                "category":"network","type":"script_identity","flags":0,"payload_encoding":"hex",
+                "payload":hex::encode(&payload),"payload_size":payload.len(),"payload_truncated":false});
+            writeln!(events, "{event}").unwrap();
+        }
         let artifacts = root.path().join("artifacts");
         std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
         let sha = hex::encode(Sha256::digest(source));
@@ -2308,38 +2422,41 @@ pub(crate) mod tests {
         assert_eq!(read(9)["status"], "not_recorded");
 
         // The same records on an event page, as get_events and wait_for_events
-        // return them: the object get_native_debugger lists, plus a site that
-        // stays raw until the page's sites are resolved, and the stack's read.
-        let mut page: Vec<Value> = std::fs::read_to_string(&store)
+        // return them: the object get_native_debugger lists, plus the site
+        // resolved by the same frame resolution, and the stack's read.
+        let raw: Vec<Value> = std::fs::read_to_string(&store)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        event_query::annotate_events(&mut page);
-        let deferred = page[1].clone();
-        let decoded = &deferred["debugger_observation"];
+        let mut sites = ObservationSites::default();
+        let mut page = raw.clone();
+        let work = sites.annotate(&store, &artifacts, &index, &mut page, false);
+        let decoded = &page[1]["debugger_observation"];
         let listed = crate::debugger_observation::decode(&page[1]).unwrap();
         for (key, value) in listed.as_object().unwrap() {
             assert_eq!(decoded[key], *value, "{key}");
         }
         assert_eq!(decoded["status"], "decoded");
         assert_eq!(
-            decoded["site"]["resolution"],
-            json!({"status": "deferred", "reason": "polling_window"})
+            decoded["site"], tap["observation"]["site"],
+            "one resolver for both reads"
         );
+        let site = &decoded["site"]["resolution"];
         assert_eq!(
-            (&decoded["site"]["script_id"], &decoded["site"]["position"]),
-            (&json!(7), &json!(start))
+            (&site["url"], &site["line"], &site["column"]),
+            (
+                &json!("https://app.example.test/app.js"),
+                &json!(2),
+                &json!(source.lines().nth(1).unwrap().find("(event)").unwrap() + 1)
+            )
         );
-        assert!(
-            decoded["site"].get("eval").is_none(),
-            "eval is the identity's to say"
-        );
+        // stack_read is exactly the read's arguments; the operation is beside it.
         assert_eq!(
             decoded["stack_read"],
-            json!({"operation": "get_request_stack", "session_id": "9", "process_id": 42,
-                "observation_sequence": "2"})
+            json!({"session_id": "9", "process_id": 42, "observation_sequence": "2"})
         );
+        assert_eq!(decoded["stack_read_operation"], "get_request_stack");
         assert_eq!(page[2]["debugger_observation"]["site"], Value::Null);
         assert_eq!(
             page[3]["debugger_observation"],
@@ -2354,66 +2471,93 @@ pub(crate) mod tests {
             )
             .unwrap();
         }
-        resolve_observation_sites(&store, &artifacts, &index, &mut page).unwrap();
-        let site = &page[1]["debugger_observation"]["site"];
         assert_eq!(
-            *site, tap["observation"]["site"],
-            "one resolver for both reads"
+            work,
+            SiteWork {
+                source_walks: 1,
+                manifest_reads: 1,
+                identity_reads: 1
+            }
+        );
+        // A settled site is kept: the same page again reads nothing.
+        let mut again = raw.clone();
+        let work = sites.annotate(&store, &artifacts, &index, &mut again, false);
+        assert_eq!(
+            work,
+            SiteWork::default(),
+            "a settled page reads no source, manifest or identity"
         );
         assert_eq!(
-            (
-                &site["resolution"]["url"],
-                &site["resolution"]["line"],
-                &site["resolution"]["column"]
-            ),
-            (
-                &json!("https://app.example.test/app.js"),
-                &json!(2),
-                &json!(source.lines().nth(1).unwrap().find("(event)").unwrap() + 1)
-            )
+            again[1]["debugger_observation"],
+            page[1]["debugger_observation"]
         );
+
+        // Many sites in one script cost one walk over its source: the work is
+        // per script, not per site. A position past the source keeps a reason.
+        let record = |script: u32, position: u32, sequence: u32| {
+            let mut event = raw[1].clone();
+            let payload = observation(&listener(&frame(1, 0, script, position, position)));
+            event["payload"] = json!(hex::encode(&payload));
+            event["sequence_number"] = json!(sequence.to_string());
+            event
+        };
+        let mut many: Vec<Value> = (0..200u32)
+            .map(|n| record(7, start + n, 1000 + n))
+            .collect();
+        let work =
+            ObservationSites::default().annotate(&store, &artifacts, &index, &mut many, false);
+        assert_eq!(work.source_walks, 1, "{work:?}");
+        let status = |event: &Value| event["debugger_observation"]["site"]["resolution"].clone();
+        assert_eq!(status(&many[0])["status"], "resolved");
+        assert_eq!(
+            status(&many[199]),
+            json!({"status": "unresolved", "reason": "position_outside_source"})
+        );
+        assert!(
+            many.iter()
+                .all(|event| status(event)["status"] != "deferred"),
+            "no site is left for a later read"
+        );
+
+        // A page whose sites name more scripts than one read loads keeps the
+        // rest raw with source_limit, newest first on a backward page: the
+        // oldest record's script is the one left.
+        let mut scripts: Vec<Value> = (20..29u32)
+            .map(|script| record(script, 1, 2000 + script))
+            .collect();
+        let work =
+            ObservationSites::default().annotate(&store, &artifacts, &index, &mut scripts, true);
+        assert_eq!(work.source_walks, 0, "no source of these is retained");
+        let left = PAGE_SOURCES..scripts.len();
+        for (at, event) in scripts.iter().rev().enumerate() {
+            let expected = if left.contains(&at) {
+                json!({"status": "deferred", "reason": "source_limit"})
+            } else {
+                json!({"status": "unresolved", "reason": "source_not_retained"})
+            };
+            assert_eq!(status(event), expected, "newest first: {at}");
+        }
+        assert_eq!(scripts[0]["debugger_observation"]["site"]["script_id"], 20);
         crate::validation::schema(
             "DebuggerObservationDecode",
-            &page[1]["debugger_observation"],
+            &scripts[0]["debugger_observation"],
             500,
         )
         .unwrap();
-
-        // More distinct sites than one page resolves keep their raw identity;
-        // a repeated site shares the resolution of its first record.
-        let mut many: Vec<Value> = (0..=PAGE_SITES as u32)
-            .map(|n| {
-                let mut event = page[1].clone();
-                let payload = observation(&listener(&frame(1, 0, 7, start + n, start)));
-                event["payload"] = json!(hex::encode(&payload));
-                event["sequence_number"] = json!((100 + n).to_string());
-                event
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("debugger_observation");
-                event
-            })
+        // Forward, the newest are left instead.
+        let mut forward: Vec<Value> = (20..29u32)
+            .map(|script| record(script, 1, 2000 + script))
             .collect();
-        many.push(many[0].clone());
-        event_query::annotate_events(&mut many);
-        resolve_observation_sites(&store, &artifacts, &index, &mut many).unwrap();
-        let status = |event: &Value| event["debugger_observation"]["site"]["resolution"].clone();
-        assert_eq!(status(&many[0])["status"], "resolved");
-        // Read, and past the end of the source: a reason, never a guess.
-        assert_eq!(
-            status(&many[PAGE_SITES - 1]),
-            json!({"status": "unresolved", "reason": "position_outside_source"})
-        );
-        assert_eq!(
-            status(&many[PAGE_SITES]),
-            json!({"status": "deferred", "reason": "site_limit"})
-        );
-        assert_eq!(status(&many[PAGE_SITES + 1]), status(&many[0]));
-        // An unreadable manifest leaves the records and names why.
+        ObservationSites::default().annotate(&store, &artifacts, &index, &mut forward, false);
+        assert_eq!(status(&forward[0])["reason"], "source_not_retained");
+        assert_eq!(status(&forward[8])["reason"], "source_limit");
+
+        // An unreadable manifest leaves the records and names why; nothing
+        // unsettled is kept, so the next read tries again.
         std::fs::write(artifacts.join("manifest.jsonl"), "not json\n").unwrap();
-        let mut failed = page[..2].to_vec();
-        failed[1]["debugger_observation"]["site"] = decoded["site"].clone();
-        annotate_observation_sites(&store, &artifacts, &index, &mut failed);
+        let mut failed = raw[..2].to_vec();
+        let mut fresh = ObservationSites::default();
+        fresh.annotate(&store, &artifacts, &index, &mut failed, false);
         assert_eq!(
             status(&failed[1]),
             json!({"status": "deferred", "reason": "site_read_failed"})
@@ -2422,6 +2566,7 @@ pub(crate) mod tests {
             failed[1]["debugger_observation"]["detail"]["event_type"],
             "click"
         );
+        assert!(fresh.kept.is_empty());
     }
 
     #[test]

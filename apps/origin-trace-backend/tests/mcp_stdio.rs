@@ -2645,10 +2645,13 @@ fn an_agent_waits_on_observation_records_and_reads_their_positions() {
         Value::Null,
         "a request has no frame of its own"
     );
-    let mut arguments = watched["stack_read"].clone();
-    assert_eq!(arguments["operation"], "get_request_stack");
-    arguments.as_object_mut().unwrap().remove("operation");
-    let read = tool_call(&mut levels[0], "get_request_stack", arguments);
+    // stack_read is the read's arguments exactly, passed as they are.
+    assert_eq!(watched["stack_read_operation"], "get_request_stack");
+    let read = tool_call(
+        &mut levels[0],
+        "get_request_stack",
+        watched["stack_read"].clone(),
+    );
     assert_eq!(read["status"], "recorded", "{read}");
     assert_eq!(read["observation"]["type"], "request_watch_match");
     let frame = &read["frames"][0]["resolution"];
@@ -2710,8 +2713,8 @@ fn an_agent_waits_on_observation_records_and_reads_their_positions() {
             "blocked_host": "cdn.blocked.test"})
     );
 
-    // The same records in a filtered get_events page, and the unfiltered
-    // polling window, which leaves sites to a filtered read.
+    // The same records in a filtered get_events page. The unfiltered polling
+    // window, which the UI reads, carries no decode at all.
     let page = tool_call(
         &mut levels[0],
         "get_events",
@@ -2725,22 +2728,22 @@ fn an_agent_waits_on_observation_records_and_reads_their_positions() {
     );
     let window = tool_call(&mut levels[1], "get_events", json!({}));
     assert!(get_events.is_valid(&window), "{window}");
-    let find = |list: &str, kind: &str| {
-        window[list]
+    for list in ["events", "network_events"] {
+        let decoded = window[list]
             .as_array()
             .unwrap()
             .iter()
-            .find(|event| event["type"] == kind)
+            .filter(|event| event.get("debugger_observation").is_some())
+            .count();
+        assert_eq!(decoded, 0, "the polling window's {list} carry no decode");
+    }
+    assert!(
+        window["events"]
+            .as_array()
             .unwrap()
-            .clone()
-    };
-    assert_eq!(
-        find("events", "listener_dispatch")["debugger_observation"]["site"]["resolution"],
-        json!({"status": "deferred", "reason": "polling_window"})
-    );
-    assert_eq!(
-        find("network_events", "request_watch_match")["debugger_observation"]["detail"]["rule"],
-        0
+            .iter()
+            .any(|event| event["type"] == "listener_dispatch"),
+        "the window still holds the record"
     );
 }
 

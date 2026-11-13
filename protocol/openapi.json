@@ -2149,7 +2149,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. Debugger observations, request_watch_match (40) through dom_mutation (45), include debugger_observation beside that hex (DebuggerObservationDecode): status decoded carries the fields get_native_debugger lists, site (the listener, timer callback or throw site, resolved to the retained script's url, line, column and function name, or a reason with its raw script_id and position; any filter or cursor resolves up to 32 distinct sites per page, and the unfiltered window leaves them deferred) and stack_read, the get_request_stack arguments that resolve its stack; status invalid has no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. With any filter or cursor, debugger observations, request_watch_match (40) through dom_mutation (45), include debugger_observation beside that hex (DebuggerObservationDecode); the unfiltered polling window does not. status decoded carries the fields get_native_debugger lists, site (the listener, timer callback or throw site, resolved to the retained script's url, line, column and function name, or a reason with its raw script_id and position; every site in up to 4 scripts per page, newest records first, the rest deferred with source_limit until the same cursor is read again) and stack_read, the exact arguments of get_request_stack (stack_read_operation) for its stack; status invalid has no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -24560,7 +24560,7 @@
         }
       },
       "DebuggerObservationDecode": {
-        "description": "Read-path decode of one debugger observation record (types 40 to 45, protocol/native-debugger-observation-v1.md), placed beside the unchanged payload hex by get_events and wait_for_events. status decoded has the fields get_native_debugger lists for the record, its own frame as site and stack_read; status invalid means the core would refuse the record, and no field is returned. Identities, kinds, positions and names only: never a value, a URL path or source text.",
+        "description": "Read-path decode of one debugger observation record (types 40 to 45, protocol/native-debugger-observation-v1.md), placed beside the unchanged payload hex by filtered and cursor get_events reads and by wait_for_events; the unfiltered polling window carries none. status decoded has the fields get_native_debugger lists for the record, its own frame as site and stack_read; status invalid means the core would refuse the record, and no field is returned. Identities, kinds, positions and names only, never a value, a URL path or source text, so it is returned at every MCP permission level; at read-only a string longer than 160 characters, such as a long script URL, is still withheld.",
         "oneOf": [
           {
             "type": "object",
@@ -24578,6 +24578,7 @@
               "stack",
               "detail",
               "site",
+              "stack_read_operation",
               "stack_read"
             ],
             "properties": {
@@ -24630,7 +24631,7 @@
                 "$ref": "#/components/schemas/DebuggerObservationDetail"
               },
               "site": {
-                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A filtered or cursor read of get_events and every wait_for_events resolve up to 32 distinct sites per page; the unfiltered polling window leaves each deferred.",
+                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; a resolution that cannot change is kept, so reading the same cursor again resolves the next scripts at no cost for the ones already read.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -24640,7 +24641,7 @@
                   },
                   {
                     "type": "object",
-                    "description": "The site's raw identity, not resolved by this read; get_request_stack with stack_read resolves it.",
+                    "description": "The site's raw identity, not resolved by this read.",
                     "required": [
                       "index",
                       "kind",
@@ -24691,11 +24692,10 @@
                           },
                           "reason": {
                             "enum": [
-                              "polling_window",
-                              "site_limit",
+                              "source_limit",
                               "site_read_failed"
                             ],
-                            "description": "polling_window: the unfiltered get_events polling window does not resolve sites; any filter or cursor does. site_limit: the page named more than 32 distinct sites and this one was past them. site_read_failed: the script identities or the artifact manifest could not be read."
+                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
                           }
                         }
                       }
@@ -24703,8 +24703,12 @@
                   }
                 ]
               },
+              "stack_read_operation": {
+                "const": "get_request_stack",
+                "description": "The operation stack_read is the arguments of."
+              },
               "stack_read": {
-                "description": "The get_request_stack arguments that read this record's whole stack, resolved like a request's, with its site again under observation.",
+                "description": "The exact arguments of get_request_stack (stack_read_operation) that read this record's whole stack, resolved like a request's, with its site again under observation; pass it as it is. That read covers the newest 64 MiB of the store: an older record answers outside_scan.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -24713,15 +24717,11 @@
                     "type": "object",
                     "additionalProperties": false,
                     "required": [
-                      "operation",
                       "session_id",
                       "process_id",
                       "observation_sequence"
                     ],
                     "properties": {
-                      "operation": {
-                        "const": "get_request_stack"
-                      },
                       "session_id": {
                         "$ref": "#/components/schemas/NonzeroUint64String"
                       },

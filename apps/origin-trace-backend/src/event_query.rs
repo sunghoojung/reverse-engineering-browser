@@ -797,13 +797,14 @@ pub fn events_document(
     document
 }
 
-/// Puts the decoded Wasm observation, JavaScript invocation or debugger
-/// observation object beside each payload of an event page, as every page
-/// that returns events shows it.
+/// Puts the decoded Wasm observation or JavaScript invocation object beside
+/// each payload of an event page, as every page that returns events shows it.
+/// Debugger observations are decoded by the filtered and waiting reads only
+/// (`request_stack::ObservationSites`): the UI's polling window does not use
+/// them, and they would grow its body by a third.
 pub(crate) fn annotate_events(events: &mut [Value]) {
     crate::vm_opcode::annotate_wasm_observations(events);
     crate::js_invocation::annotate(events);
-    crate::debugger_observation::annotate(events);
 }
 
 /// The waiting read stops at this many concurrent callers rather than queue.

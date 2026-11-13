@@ -2570,6 +2570,15 @@ impl RequestIndex {
         self.store_end.saturating_sub(indexed_to) <= RECORD_BYTES as u64
     }
 
+    /// The store identity the index rows belong to and the byte offset folded
+    /// up to, as of the last refresh: what a cached answer derived from the
+    /// index depends on.
+    pub fn position(&self) -> Option<(String, u64)> {
+        self.state
+            .as_ref()
+            .map(|state| (state.epoch.clone(), state.indexed_to))
+    }
+
     /// Whether the index covers the store, as of the last refresh. A route uses
     /// this to tell a transient "not named yet" from a final one.
     pub fn is_caught_up(&self) -> bool {

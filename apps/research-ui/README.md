@@ -1528,7 +1528,8 @@ Protocol is available from the header menu.
   row's `watch` names the match, so the mark survives every path that builds
   a row: the newest window, a row selected whole from it, a row read from the
   store and each later poll. The rule comes from the backend's decode beside
-  the record, and from the index row where none came with it.
+  the record in a row's store read, and from the index row otherwise: the
+  polling window carries no decode.
 - **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
   Pending has no response yet, and No loader means only the renderer recorded
   the request. End lost means the request's service worker ended it but the

@@ -396,6 +396,24 @@ const pendingWindow = t => {
   assert.equal(t.stats.inspector, settled, 'An unchanged answer does not redraw the inspector');
 }
 {
+  // A watch match's rule is an index row fact too: a later index answer that
+  // changes only it reaches the selected row and draws the inspector again.
+  const t = indexFixture({windowCount: 2, holdIndex: true});
+  const watched = pendingWindow(t);
+  t.setIndexRows([t.row(1, 2), t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.rows().find(row => row.dataset.requestId === watched.id).click();
+  t.releaseIndex(); await quiet();
+  const shown = () => t.state.requests.find(request => request.id === watched.id);
+  assert.equal(shown().watch ?? null, null, 'The first answer names no watch');
+  const drawn = t.stats.inspector;
+  t.setIndexRows([{...t.row(1, 2), watch: {session_id: '1', process_id: 7, sequence_number: '3', frame_id: '9', rule: 2, method_matched: true}}, t.row(0, 2)]);
+  t.state.trafficIndex.invalidate(); await quiet();
+  t.releaseIndex(); await quiet();
+  assert.equal(shown().watch?.rule, 2, 'The selected copy takes the later answer\'s watch');
+  assert(t.stats.inspector > drawn, 'The inspector is drawn again for it');
+}
+{
   // Rows are reused by request ID, so a row first drawn from the newest window
   // keeps its element when the index answers. A click on it afterwards selects
   // through the index, as a row first drawn from the index does: a row the

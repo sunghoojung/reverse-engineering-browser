@@ -70,6 +70,8 @@ pub mod wasm_pseudocode;
 mod wasm_run;
 pub mod wasm_stack;
 pub mod wasm_value_flow;
+#[cfg(test)]
+mod wasm_value_flow_fuzz;
 mod worker;
 mod workspace;
 mod workspace_lease;

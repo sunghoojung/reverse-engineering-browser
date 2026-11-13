@@ -2829,6 +2829,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wasm_diff_deadline_counts_from_arrival_not_from_the_reader_permit() {
+        // A request that waits for a reader past the deadline gets a partial
+        // answer as soon as it runs: the deadline counts from arrival.
+        let root = tempfile::tempdir().unwrap();
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/fixtures/wasm-module-diff");
+        let mut manifest = String::new();
+        for (id, name) in [("1", "build-a"), ("2", "build-b")] {
+            let bytes = std::fs::read(fixtures.join(format!("{name}.wasm"))).unwrap();
+            let hash = hex::encode(sha2::Sha256::digest(&bytes));
+            std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+            manifest.push_str(&format!(
+                "{}\n",
+                json!({"protocol_version":1,"artifact_id":id,"session_id":"1","navigation_id":"1",
+                    "frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm",
+                    "url":format!("fixture://{name}.wasm"),"mime_type":"application/wasm",
+                    "byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+                    "content_path":format!("blobs/{hash}.bin")})
+            ));
+        }
+        std::fs::write(artifacts.join("manifest.jsonl"), manifest).unwrap();
+        let mut options = Options::parse_from(["origin-trace-backend"]);
+        options.store = root.path().join("events.jsonl");
+        options.trace_store = root.path().join("trace.jsonl");
+        options.signal_store = root.path().join("signals.jsonl");
+        options.artifacts = artifacts;
+        options.api_collection = root.path().join("collection.json");
+        options.local_analyst = root.path().join("analyst.json");
+        let app = App::new(options, 0).await;
+        let held = app.io.clone().acquire_many_owned(4).await.unwrap();
+        let request = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.wasm_diff_route("artifact_id=1&compare_artifact_id=2")
+                    .await
+            })
+        };
+        tokio::time::sleep(wasm_diff::DEADLINE + Duration::from_millis(200)).await;
+        drop(held);
+        let response = request.await.unwrap().unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "partial", "{}", body["omissions"]);
+        assert!(body["omissions"].to_string().contains("deadline"));
+        app.stop().await;
+    }
+
+    #[tokio::test]
     async fn artifact_cache_waiters_and_cancellation_preserve_reader_admission() {
         let root = tempfile::tempdir().unwrap();
         let mut options = Options::parse_from(["origin-trace-backend"]);

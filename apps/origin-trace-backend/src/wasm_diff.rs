@@ -64,7 +64,7 @@ const MAX_EXACT_ROUNDS: usize = 4;
 const CHECK_EVERY: u32 = 4096;
 /// Fingerprinting and matching share one deadline. It sits under the native
 /// helper's five-second process limit so a report, partial or not, arrives.
-const DEADLINE: Duration = Duration::from_secs(4);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(4);
 const SIMILARITY_THRESHOLD: f64 = 0.75;
 /// A propagated match must still look like the function it claims to be.
 const PROPAGATION_FLOOR: f64 = 0.5;

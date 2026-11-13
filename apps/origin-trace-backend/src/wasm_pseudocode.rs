@@ -4115,7 +4115,7 @@ mod tests {
         let legacy = seed % 3 == 0;
         for _ in 0..15 + next(80) {
             let available = height - frames.last().unwrap().base;
-            match next(40) {
+            match next(43) {
                 0..=2 => {
                     emit!("i32.const {}", next(9) as i64 - 2);
                     height += 1;
@@ -4320,6 +4320,37 @@ mod tests {
                     emit!("end");
                     let open = frames.pop().unwrap();
                     height = open.base + open.results;
+                }
+                // A handler in this function that reads a local the protected
+                // code writes around calls that throw for some inputs.
+                40..=42 if frames.len() < 6 => {
+                    let written = next(4);
+                    emit!(
+                        "{}",
+                        if legacy {
+                            "try"
+                        } else {
+                            "block try_table (catch_all 0)"
+                        }
+                    );
+                    for _ in 0..1 + next(4) {
+                        match next(5) {
+                            0 => emit!("i32.const {} local.set {written}", next(9)),
+                            1 => emit!(
+                                "i32.const {} local.tee {written} i32.const 1 call $thr drop",
+                                next(9)
+                            ),
+                            2 => emit!(
+                                "i32.const 13 call $f i32.const {} local.set {written} drop",
+                                next(9)
+                            ),
+                            3 => emit!(
+                                "local.get {written} i32.const 1 i32.add local.set {written} local.get 0 call $thr"
+                            ),
+                            _ => emit!("local.get 1 call $f local.set {written}"),
+                        }
+                    }
+                    emit!("{}", if legacy { "catch_all end" } else { "end end" });
                 }
                 _ => {}
             }

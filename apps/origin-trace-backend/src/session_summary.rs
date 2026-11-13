@@ -964,11 +964,22 @@ fn body_case_meaning(case: &str) -> &'static str {
     }
 }
 
-/// The summary's ETag key: capture state, artifact manifest and the request
-/// index's progress, since the body case counts change as the index reads an
-/// unchanged store.
-pub fn etag_key(state: &str, manifest: &str, progress: &str) -> String {
-    format!("summary:{state}:{manifest}:index:{progress}")
+/// The summary's ETag key over the store's tag: capture state and artifact
+/// manifest.
+pub fn etag_key(state: &str, manifest: &str) -> String {
+    format!("summary:{state}:{manifest}")
+}
+
+/// The summary's ETag: the store's tag taken before the request index read
+/// it, and the index's progress after, the point its body case counts were
+/// read at. An answer counted mid-store therefore never shares a tag with the
+/// complete one, and bytes appended during the read change the next tag.
+pub fn etag(before: &str, progress: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "\"{}\"",
+        hex::encode(Sha256::digest(format!("{before}:index:{progress}")))
+    )
 }
 
 /// Every request's response body case, counted from the request index's rows,
@@ -1140,10 +1151,8 @@ mod tests {
         );
         assert_eq!(failed["response_bodies"]["cases"], json!([]));
         // The tag changes as the index reads an unchanged store.
-        assert_ne!(
-            etag_key("live", "m1", "4096"),
-            etag_key("live", "m1", "caught-up")
-        );
+        assert_ne!(etag("\"store\"", "4096"), etag("\"store\"", "caught-up"));
+        assert!(etag("\"store\"", "caught-up").starts_with('"'));
     }
 
     #[test]

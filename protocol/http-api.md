@@ -612,10 +612,12 @@ with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 A refused or malformed body can still name an earlier snapshot of the same
 response that the receiver holds; each case's `earlier_snapshots`, and the
 total beside `cases`, count those rows, which Traffic opens.
-`complete` is false while the index is still reading the store, and the
-route's ETag follows the index's progress, so a revalidating client sees the
-counts complete. When the index cannot answer, `available` is false with a
-`reason` and the rest of the summary stands.
+`complete` is false while the index is still reading the store. The route's
+ETag names the store as it was before the index read and the index's progress
+after it, the point the counts were read at, so an answer counted mid-store
+never revalidates as the complete one. When the index cannot answer,
+`available` is false with a `reason`, the rest of the summary stands, and the
+answer has no ETag, so the next request reads the index again.
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).

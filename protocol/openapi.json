@@ -364,6 +364,8 @@
                 }
               },
               "ETag": {
+                "required": false,
+                "description": "Absent when response_bodies.available is false, so a revalidation reads the request index again.",
                 "schema": {
                   "type": "string"
                 }

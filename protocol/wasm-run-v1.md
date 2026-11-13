@@ -67,11 +67,15 @@ they can be copied between `args`, stubs, `results` and `expect`:
 | `v128` | one hexadecimal integer (optional `0x`), lane 0 in the low bits | `0x` and 32 digits |
 | `funcref`, `externref` | `null` | `null` or `non-null` |
 
-`expect` holds test vectors: `results`, and `memory` entries naming a
-`memory_reads` index and the expected bytes. The record's `expectation` reports
-`results_match`, each memory `match`, and `all_match` (which also requires the
-outcome `returned`). A caller below Full access, whose results omit values and
-bytes, can still learn whether its vectors matched.
+`expect` holds test vectors: `results`, and at most one `memory` entry per
+`memory_reads` index with the expected bytes; a second entry for the same read
+is refused with 400. The record's `expectation` reports `results_match`, each
+memory `match`, and `all_match` (which also requires the outcome `returned`).
+Below Full access only `all_match` is returned: the per-entry results are
+omitted, so a run reveals at most one bit about the values and bytes it
+computed. That bit answers "did these test vectors hold"; it cannot read bytes
+back, because several guesses against one read are refused and the per-entry
+results are not returned.
 
 ## Limits
 
@@ -169,8 +173,9 @@ and is listed only with `--allow-effects`; `get_wasm_runs` is a read.
 (`--permission full`), every `value`, `hex` and `sha256` field is replaced by
 `{"omitted":"content"}` with no length or digest, since the length of a short
 result or the digest of a few bytes would recover it. Outcomes, trap kinds,
-counts, module digests, import names and expectation matches remain, and no
-error message quotes a value. The
+counts, module digests, import names and `expectation.all_match` remain;
+`results_match` and each memory `match` are omitted the same way; and no error
+message quotes a value. The
 native stored-evidence window (`reb://`) does not host the interpreter and
 answers 503.
 

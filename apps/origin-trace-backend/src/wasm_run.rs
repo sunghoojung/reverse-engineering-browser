@@ -297,10 +297,18 @@ impl Request {
             for item in expect.results.iter().flatten() {
                 value(item)?;
             }
+            // One expectation per read: several guesses against one read would
+            // turn each match result into a way to read the bytes back.
+            let mut named = std::collections::BTreeSet::new();
             for memory in &expect.memory {
                 if memory.read >= request.memory_reads.len() {
                     return Err(Error::bad(
                         "An expected memory entry names a read the request does not make",
+                    ));
+                }
+                if !named.insert(memory.read) {
+                    return Err(Error::bad(
+                        "A WASM run takes at most one expected memory entry per read",
                     ));
                 }
                 decode_hex(&memory.hex, "Expected memory")?;
@@ -2330,6 +2338,23 @@ mod tests {
         state.deadline_hit = false;
         assert!(stub_call(&mut state, 0, &[], &mut results).is_ok());
         assert!(matches!(results[0], Val::I32(1)));
+    }
+
+    #[test]
+    fn one_expectation_per_read() {
+        let body = |memory: Value| {
+            json!({"artifact_id":"1","sha256":"0".repeat(64),"export":"run","confirm_offline_execution":true,
+                "memory_reads":[{"offset":0,"length":1},{"offset":1,"length":1}],"expect":{"memory":memory}})
+        };
+        let one_each = body(json!([{"read":0,"hex":"53"},{"read":1,"hex":"45"}]));
+        assert!(Request::parse(&serde_json::to_vec(&one_each).unwrap()).is_ok());
+        let guesses = body(json!([{"read":0,"hex":"52"},{"read":0,"hex":"53"}]));
+        let error = Request::parse(&serde_json::to_vec(&guesses).unwrap()).unwrap_err();
+        assert!(
+            error.message.contains("one expected memory entry per read"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

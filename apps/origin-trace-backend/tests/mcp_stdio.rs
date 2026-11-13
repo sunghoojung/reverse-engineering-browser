@@ -410,6 +410,91 @@ fn wasm_run_values_digests_and_errors_never_reach_an_ask_level_client() {
     }
 }
 
+/// Writes one non-sensitive retained Wasm artifact and returns its sha256.
+fn retained_wasm(server: &Server, bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(bytes));
+    let artifact = json!({"protocol_version": 1, "artifact_id": "1", "session_id": "1",
+        "navigation_id": "1", "frame_id": "1", "parent_artifact_id": "0", "creator_event_id": "0",
+        "kind": "wasm", "url": "https://owned.test/run.wasm", "mime_type": "application/wasm",
+        "byte_size": bytes.len(), "sha256": hash, "sensitive": false,
+        "content_path": format!("blobs/{hash}.bin")});
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), bytes).unwrap();
+    std::fs::write(artifacts.join("manifest.jsonl"), format!("{artifact}\n")).unwrap();
+    hash
+}
+
+#[test]
+fn expectations_reveal_one_bit_per_run_below_full_access() {
+    // With per-entry match results, one run of 256 guesses per one-byte read
+    // read SECRETBYTES back at --permission auto while hex and sha256 were
+    // omitted. Now one guess per read is admitted and only the aggregate
+    // all_match is returned.
+    let server = Server::start();
+    let bytes = wat::parse_str(
+        r#"(module (memory 1) (data (i32.const 0) "SECRETBYTES") (func (export "run")))"#,
+    )
+    .unwrap();
+    let hash = retained_wasm(&server, &bytes);
+    let mut mcp = Mcp::start_with(vec![
+        "mcp".into(),
+        "--base-url".into(),
+        server.url.clone(),
+        "--permission".into(),
+        "auto".into(),
+    ]);
+    let call = |mcp: &mut Mcp, body: Value| {
+        mcp.request(
+            "tools/call",
+            json!({"name": "run_wasm_function", "arguments": {"body": body}}),
+        )
+    };
+    let guesses = (0..=255u8)
+        .map(|byte| json!({"read": 0, "hex": format!("{byte:02x}")}))
+        .collect::<Vec<_>>();
+    let answer = call(
+        &mut mcp,
+        json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "memory_reads": [{"offset": 0, "length": 1}], "expect": {"memory": guesses},
+        "confirm_offline_execution": true}),
+    );
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    // Within the 16-entry schema bound, two guesses at one read are refused
+    // by the server.
+    let answer = call(
+        &mut mcp,
+        json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "memory_reads": [{"offset": 0, "length": 1}],
+        "expect": {"memory": [{"read": 0, "hex": "52"}, {"read": 0, "hex": "53"}]},
+        "confirm_offline_execution": true}),
+    );
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    assert!(
+        tool_text(&answer).contains("one expected memory entry per read"),
+        "{answer}"
+    );
+    // One right guess and one wrong one: the record shows only that not all matched.
+    let answer = call(
+        &mut mcp,
+        json!({"artifact_id": "1", "sha256": hash, "export": "run",
+        "memory_reads": [{"offset": 0, "length": 1}, {"offset": 1, "length": 1}],
+        "expect": {"memory": [{"read": 0, "hex": "53"}, {"read": 1, "hex": "00"}]},
+        "confirm_offline_execution": true}),
+    );
+    assert_eq!(answer["result"]["isError"], false, "{answer}");
+    let record: Value = serde_json::from_str(tool_text(&answer)).unwrap();
+    let marker = json!({"omitted": "content"});
+    let expectation = &record["expectation"];
+    assert_eq!(expectation["all_match"], false, "{expectation}");
+    assert_eq!(expectation["results_match"], marker, "{expectation}");
+    for entry in expectation["memory"].as_array().unwrap() {
+        assert_eq!(entry["match"], marker, "{expectation}");
+    }
+    assert!(!tool_text(&answer).contains("\"match\":true"), "{answer}");
+}
+
 fn float32_artifact_request(artifact: &Value) -> Value {
     let frames = artifact["byte_size"].as_u64().unwrap() / 4;
     json!({"body": {"protocol_version": 1, "reference": null,

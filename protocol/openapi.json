@@ -109,9 +109,11 @@
       "keys": [
         "value",
         "hex",
-        "sha256"
+        "sha256",
+        "results_match",
+        "match"
       ],
-      "description": "Results, stub values and import arguments (value), memory bytes (hex) and memory read digests (sha256) of an offline Wasm run are computed by captured code. Below --allow-content (--permission full) every value under these keys is replaced by {\"omitted\":\"content\"} with no length or digest, because the length of a short return value, or the digest of a few memory bytes, is enough to recover it. Outcomes, trap kinds, counts, import names and expectation matches remain. The gate is content admission itself, so --allow-effects alone omits them too."
+      "description": "Results, stub values and import arguments (value), memory bytes (hex) and memory read digests (sha256) of an offline Wasm run are computed by captured code. Below --allow-content (--permission full) every value under these keys is replaced by {\"omitted\":\"content\"} with no length or digest, because the length of a short return value, or the digest of a few memory bytes, is enough to recover it. Per-entry expectation results (results_match and each memory match) are omitted too, so a guess cannot be checked against one value; only the aggregate expectation.all_match remains, at most one bit per run. Outcomes, trap kinds, counts and import names remain. The gate is content admission itself, so --allow-effects alone omits them too."
     },
     "content_reads": {
       "flag": "--allow-content",
@@ -4930,7 +4932,7 @@
       "post": {
         "operationId": "run_wasm_function",
         "summary": "Run one function of a captured Wasm module offline",
-        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256, with up to 16 arguments and 16 results each). The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly and reports matches without needing the values. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Results, import arguments, memory bytes and memory read digests are content: below Full access the value, hex and sha256 fields are omitted with no length. Requires confirm_offline_execution true; nothing runs without it.",
+        "description": "Explicit, confirmed offline execution of one exported or indexed function of a hash-verified captured core Wasm module in wasmi 2.0.0, a pure-Rust interpreter with fuel metering and no JIT, inside the local backend. Every import is a stub: a function import returns the results the request supplies (results, or one sequence entry per call) and otherwise traps with outcome import_trap; imported memories and tables are fresh and empty, imported globals are zero. No filesystem, network, clock, randomness, browser or page is reachable, so supply every nondeterministic import. Data and element segments initialize as usual; the start function runs only with run_start. memory_writes apply after instantiation (and the start function) and before the call; memory_reads are taken after it, whatever the outcome. Every limit (fuel, memory_pages, table_elements, call_depth, deadline_ms) and every trap is a named outcome.status, with outcome.phase and outcome.trap_kind; wasmi does not report trap byte offsets. Every import call is recorded (first 256, with up to 16 arguments and 16 results each). The memory and table limits are totals across every memory and table of the run. expect compares results and reads exactly, with at most one expected entry per read; below Full access only expectation.all_match is returned, one bit per run. The result carries module_sha256, inputs_digest, the interpreter and the limits, and is stored as a derived experiment record, never captured evidence. Results, import arguments, memory bytes and memory read digests are content: below Full access the value, hex and sha256 fields are omitted with no length. Requires confirm_offline_execution true; nothing runs without it.",
         "tags": [
           "artifacts"
         ],
@@ -22399,7 +22401,7 @@
           "expect": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Test vectors. The result reports matches, so a caller without content access can still compare.",
+            "description": "Test vectors. Below Full access only expectation.all_match is returned, so a caller without content access learns whether all vectors held, one bit per run, and cannot read bytes back.",
             "properties": {
               "results": {
                 "type": "array",
@@ -22410,6 +22412,8 @@
               },
               "memory": {
                 "type": "array",
+                "maxItems": 16,
+                "description": "At most one entry per memory_reads index.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,

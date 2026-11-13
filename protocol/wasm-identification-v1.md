@@ -34,7 +34,8 @@ never changed. Three rules hold everywhere:
   bytes, not that an algorithm runs; a table can be dead data and one immediate
   can coincide with an unrelated value. An address reference is an
   `i32.const` or `i64.const` naming a matched table's start address, or a load
-  whose constant offset falls inside the table, not an observed load. Any
+  whose constant offset falls inside one of the table's runs (never inside the
+  bytes a partial match bridges between runs), not an observed load. Any
   other immediate inside a table's range is not counted: Emscripten's data
   starts at 1024, so loop bounds and sizes land inside tables all the time.
   An empty `referenced_by` is not evidence that a table is unused: an address
@@ -103,7 +104,10 @@ Data segments are scanned for runs of consecutive set elements as bytes, 32-bit
 words in either byte order, and 64-bit words in either order or as two 32-bit
 little-endian halves, high half first. A run starts only at a distinctive
 element and needs a set-specific minimum length; runs of one set that continue
-the table form one match. Immediates are `i32.const`, `i64.const` (also against
+the table form one match. A table split into segments shorter than that
+minimum (8 elements for the CRC and AES tables, 4 for most others) leaves no
+run, so it is not reported and no omission names it: absence of a match is
+not absence of the table. Immediates are `i32.const`, `i64.const` (also against
 32-bit sets, since Go keeps 32-bit values in i64), and `f32.const`, `f64.const`
 and `v128.const` lanes by their bits. Two consecutive value constants, high or
 low half first, that spell one 64-bit element count for the 64-bit set, so a
@@ -117,18 +121,20 @@ elements. A table split across segments whose memory addresses touch, as
 Binaryen's memory packing leaves it, is one match when the second part is the
 next segment in the file and continues the table where the first stopped. Parts
 in another file order, or with an unrelated segment between them, stay separate
-matches, and a merged match is never the container that explains another. Past
-8 segments the rest becomes a separate match and an omission says so. A match
-another match fully explains
-is dropped: four MD5 words inside a five-word SHA-1 state, the alphanumeric
-alphabet inside a complete Base64 alphabet.
+matches. Past 8 segments the rest becomes a separate match and an omission says
+so. A match another match fully explains is dropped: four MD5 words inside a
+five-word SHA-1 state, the alphanumeric alphabet inside a complete Base64
+alphabet. Only one run of a larger match explains: a clustered or merged match
+can bridge unrelated bytes between its runs, so a partial table with runs on
+both sides of a complete one never hides it.
 
 ## Bounds and errors
 
 - Maximum input: 64 MiB, the block graph's budget. Larger artifacts fail with
   HTTP 400.
-- One four-second deadline for the whole report, inside the native helper's
-  five-second process deadline. Reading sections, labeling, the data scan,
+- One 3.5-second deadline for the whole report, counted from the start of the
+  artifact read and hash, well inside the native helper's five-second process
+  kill, so a partial report arrives before it. Reading sections, labeling, the data scan,
   clustering, merging, suppression and the immediate scan all poll it, and
   `omissions` names the phase and how far it got.
 - Records are kept up to 65,536 of each kind (imports, exports, names, data
@@ -140,7 +146,8 @@ alphabet inside a complete Base64 alphabet.
   producers, 32 target features and 32 custom sections across the whole
   module however many sections declare them; a target_features section past
   the cap is not read, and producers are still read for conclusions. Also 4
-  suggestions per function (each label once),
+  suggestions per function (each label once; further labels are counted in an
+  omission),
   16,384 suggestions, 64 constant matches (complete and larger first), and 4
   references and 4 sites per match. Every cap reports a count and an omission
   or `*_truncated` flag. Each kind of omission appears once; a repeated one

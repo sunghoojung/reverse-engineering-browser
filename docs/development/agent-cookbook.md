@@ -592,9 +592,14 @@ A `site` that did not resolve keeps its raw `script_id` and `position` with
 a reason; it is never guessed. `resolution.status: deferred` means this read
 did not try. With `source_limit` the page's sites named more than 4 scripts;
 read the same cursor again (resolved sites are kept, so the next scripts are
+read; that page's tag never matches, so `If-None-Match` does not stop the
 read) or use a smaller `limit`. With `site_read_failed` the identities or the
-artifact manifest could not be read; read again. `status: invalid` is a
-record the core refuses, with no fields.
+artifact manifest could not be read; read again. `source_artifact_missing`
+means the source has not landed (read again after it does);
+`script_identity_outside_scan` means the request index does not hold the
+script's identity yet, or is full: read again once it moves, or read the
+record's `stack_read`, which also scans the store's newest identities.
+`status: invalid` is a record the core refuses, with no fields.
 
 A timeout does not mean nothing happened. Rules match only the main thread of
 the document they were armed on, never a worker, another frame or a

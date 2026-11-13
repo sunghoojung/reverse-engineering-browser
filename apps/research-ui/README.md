@@ -1525,8 +1525,10 @@ Protocol is available from the header menu.
 
 - **Name** is the last path segment and the query, with the host as a muted
   sublabel only when the path was captured. The full URL is the tooltip. A
-  request a debugger watch rule matched carries a **Watched** chip, whose
-  tooltip names the rule. General then has a **Debugger watch** section: the
+  request a debugger watch rule matched carries a **Watched** chip in the
+  network kind's color (the match is a network record), whose tooltip names
+  the rule, or says the rule is not read here when no decode came with the
+  record and the request index has not answered for the row. General then has a **Debugger watch** section: the
   rule (its place in the set armed when it matched; Watch rules shows the set
   armed now), the `request_watch_match` record's sequence, renderer and frame,
   and **Show in debugger**, which opens Sources with the debugger sidebar on

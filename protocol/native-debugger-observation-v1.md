@@ -69,18 +69,28 @@ the object `get_native_debugger` lists, from the same decoder, with
 frame below: script URL, one-based line, UTF-16 column and function name when
 the source is retained, else a reason with the raw `script_id` and
 `position`. A page's sites are grouped by script, and each script's source is
-read and walked once for all of them; a resolution that can no longer change
-is kept (at most 4,096, dropped when the store is replaced), so reading the
-same records again reads no source, manifest or identity. A page reads at most
-4 scripts, newest records first on a backward page and oldest first on a
-forward one. A site that was not resolved keeps its raw frame with
-`resolution: {status: deferred}` and a reason, each with the recourse that
-works:
+read and walked once for all of them. Every outcome is kept, at most 4,096:
+a resolution that can no longer change for good, and one still waiting
+(`source_artifact_missing`, `script_identity_missing`,
+`script_identity_outside_scan`) with the artifact manifest length and the
+request index position it was read at, read again only once either moved.
+The manifest is append-only and is read from where the last read stopped, so
+a later read parses only the lines appended since. Identities come from the
+request index alone, never from a scan of the store. A page reads at most 4
+scripts, newest records first on a backward page and oldest first on a
+forward one. Before any kept answer is used, the event store is checked to be
+the same file it was read from, grown or not (its device, inode and first
+4 KiB); any other store, and clearing the capture, drops everything kept.
+
+A site that does not resolve keeps its raw frame and a reason. These need a
+second look:
 
 | Reason | Why | Recourse |
 | --- | --- | --- |
-| `source_limit` | The page's sites name more than 4 scripts not yet resolved | Read the same cursor again: kept sites cost nothing, so the next 4 scripts are read. A smaller `limit` names fewer scripts. |
-| `site_read_failed` | The script identities or the artifact manifest could not be read | Read again |
+| `source_limit` (deferred) | The page's sites name more than 4 scripts not yet resolved | Read the same cursor again: kept sites cost nothing, so the next 4 scripts are read, and the page's tag never matches a later read while it holds one. A smaller `limit` names fewer scripts. |
+| `site_read_failed` (deferred) | The script identities or the artifact manifest could not be read | Read again |
+| `source_artifact_missing` | The script's source is retained but its artifact has not landed, or never will (a lost artifact channel, a rejected frame) | Read again after the artifact lands; nothing is re-read until the manifest grows |
+| `script_identity_outside_scan` | The request index has not folded the script's identity yet, or holds its 16,384 identities and keeps no more | Read again once the index moves (it folds 64 MiB a step, and the backend's own schedule refreshes it every 30 seconds); `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
 
 `stack_read` is exactly the arguments of the `get_request_stack` read named by
 `stack_read_operation`, passed as it is. That read covers the newest 64 MiB of

@@ -24631,7 +24631,7 @@
                 "$ref": "#/components/schemas/DebuggerObservationDetail"
               },
               "site": {
-                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; a resolution that cannot change is kept, so reading the same cursor again resolves the next scripts at no cost for the ones already read.",
+                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; every outcome is kept, one still waiting for its source artifact or its identity (source_artifact_missing, script_identity_outside_scan) until the artifact manifest or the request index moves, so reading the same cursor again resolves the next scripts at no cost for the ones already read. script_identity_outside_scan means the request index has not folded the identity yet or holds its 16,384 and keeps no more: read again once it moves, or read stack_read, which also scans the newest 4,096 identities.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -24695,7 +24695,7 @@
                               "source_limit",
                               "site_read_failed"
                             ],
-                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
+                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
                           }
                         }
                       }

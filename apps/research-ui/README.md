@@ -1678,6 +1678,7 @@ capture, fetch anything or change a row.
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
+| `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
@@ -2077,7 +2078,8 @@ Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
 The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**,
-**Graph** and **Readable** for a Wasm module, **Map**, **Debugger** and **More**, which holds Go to line,
+**Graph** and **Readable** for a Wasm module, **Map**, **Debugger** and **More**, which holds
+Compare with (for a Wasm module), Go to line,
 Rename, Decode range, Facts, Track calls, Static cleanup, **Run offline…** (for
 a Wasm module) and Details. The row
 never wraps at any width: the URL shortens first (its tooltip keeps it whole),
@@ -2364,6 +2366,25 @@ largest. A researcher's name for the function shows beside the title, from
 the same names as Inspect and Graph; the listing keeps the module's names.
 Lifted text and names are inserted as text. The contract is
 [WASM pseudocode](../../protocol/wasm-pseudocode-v1.md).
+
+## Module comparison
+
+**Compare with…** in **More**, shown for a captured WebAssembly module,
+replaces the code view with a function match table between this module (A)
+and another captured module (B) chosen in the header, read from
+[`/api/wasm/diff`](../../protocol/wasm-module-diff-v1.md). The summary counts
+every status; the filter chips (All, Changed, Added, Removed, Ambiguous,
+Unchanged, and Unclassified when a limit stopped matching) narrow the rows,
+and **Show more rows** reads the next page of 200. Each row shows its status,
+each side's function as `name · func N` (the index alone when unnamed), the
+method and the score. An ambiguous row lists its tied candidates and pairs
+none. Selecting a function opens **Graph** on that function in its own module
+and records the step, so Back returns. Imports have no body and are not
+links. Omissions from a partial comparison are listed above the table, and
+an error keeps **Retry comparison**. Graph, Map and Inspect close the table;
+reopening it on either module of the last pair selects the other. Captured
+names are inserted as text. `wasm_diff_view.js` and `wasm_diff_view.css` own
+the view.
 
 ## Basic-block graphs
 

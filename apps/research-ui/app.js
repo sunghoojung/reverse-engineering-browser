@@ -56,6 +56,16 @@ const wasmIdentification = typeof createWasmIdentificationPanel === 'function' ?
     const problem = revealSourceByteOffset(source, offset, () => { if (typeof entropyMap !== 'undefined') entropyMap.close(); });
     if (problem) elements.sourcePosition.textContent = problem;
   }
+// Compare with: the function match table between two captured Wasm modules.
+const wasmDiffPanel = typeof createWasmDiffPanel === 'function' && document.querySelector('#source-diff-view') ? createWasmDiffPanel({
+  button: document.querySelector('#source-wasm-diff'), root: document.querySelector('#source-diff-view'),
+  split: document.querySelector('#source-view-split'),
+  exclusive: [document.querySelector('#source-graph'), document.querySelector('#source-map')],
+  closeOn: [document.querySelector('#source-graph'), document.querySelector('#source-map'), document.querySelector('#source-wasm')],
+  getSource: selectedSource, nameOf: sourceDisplayName,
+  listModules: () => state.artifacts.filter(artifact => artifact.kind === 'wasm' && isSourceArtifact(artifact))
+    .map(artifact => ({artifact_id: artifact.artifact_id, sha256: artifact.sha256, url: artifact.url, name: sourceDisplayName(artifact)})),
+  openFunction: (artifactId, functionIndex) => openWasmFunction(artifactId, functionIndex)
 }) : null;
 // The Flow workspace: Graph, CFG, Lineage and Timeline share one selection
 // and trail. Its Graph pane draws every recorded stack of the session.
@@ -7967,6 +7977,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.sync(source);
         if (typeof wasmRunDialog !== 'undefined' && wasmRunDialog) wasmRunDialog.sync(source);
         if (typeof sourceReadablePanel !== 'undefined' && sourceReadablePanel) sourceReadablePanel.sync(source);
+        if (typeof wasmDiffPanel !== 'undefined' && wasmDiffPanel) wasmDiffPanel.sync(source);
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
@@ -8834,6 +8845,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return true;
       }
 
+      // A function from the module comparison opens in Graph on its own
+      // module; Back returns to the comparison's module.
+      function openWasmFunction(artifactId, functionIndex) {
+        if (investigationScreen() === 'sources') investigationNavigation?.record();
+        if (selectArtifact(artifactId, null, {passive: true}) === false) return false;
+        if (investigationScreen() !== 'sources') showScreen('sources');
+        return typeof sourceGraphPanel !== 'undefined' && sourceGraphPanel.openFunction(functionIndex);
+      }
+
       function closeSource(source) {
         if (!sourceIsCurrent(source)) return;
         releaseSourcePreview(source);
@@ -9024,6 +9044,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function showScreen(name, trigger = null) {
         if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.setScreenVisible(name === 'sources');
         if (typeof sourceReadablePanel !== 'undefined' && sourceReadablePanel) sourceReadablePanel.setScreenVisible(name === 'sources');
+        if (typeof wasmDiffPanel !== 'undefined' && wasmDiffPanel) wasmDiffPanel.setScreenVisible(name === 'sources');
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if (!document.getElementById(`screen-${screenName}`)) return;
         investigationBeforeScreen(screenName);

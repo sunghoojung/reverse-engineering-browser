@@ -1,0 +1,61 @@
+/* Module comparison: replaces the code view in the Sources editor, like Map. */
+#screen-sources .wasm-diff {
+  grid-row: 3;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel);
+}
+#screen-sources .wasm-diff[hidden] { display: none; }
+/* Line windows and Find status describe the code view this replaces. */
+#screen-sources .sources-editor:has(#source-diff-view:not([hidden])) #source-window,
+#screen-sources .sources-editor:has(#source-diff-view:not([hidden])) #source-search-status { display: none; }
+#screen-sources .source-view-split[hidden] { display: none; }
+.wasm-diff-head { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-height: 36px; padding: 6px 10px; border-bottom: 1px solid var(--line-soft); }
+.wasm-diff-title { flex: none; color: var(--text); font: 600 12px var(--sans); }
+.wasm-diff-current { flex: 0 1 auto; min-width: 0; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px var(--mono); }
+.wasm-diff-with { flex: 1 1 220px; min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--faint); font: 12px var(--sans); }
+.wasm-diff-picker { flex: 1 1 auto; min-width: 0; max-width: 100%; height: 24px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--bg); color: var(--text); font: 11px var(--mono); }
+.wasm-diff-picker:focus-visible, .wasm-diff-fn:focus-visible, .wasm-diff-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wasm-diff-run, .wasm-diff-close { flex: none; }
+.wasm-diff-summary { flex: none; margin: 0; padding: 6px 10px 0; color: var(--muted); font: 12px var(--sans); font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wasm-diff-filters { flex: none; display: flex; gap: 4px; padding: 6px 10px; overflow-x: auto; scrollbar-width: none; }
+.wasm-diff-filter { flex: none; height: 22px; padding: 0 8px; border: 1px solid var(--line-soft); border-radius: 11px; background: transparent; color: var(--muted); font: 11px var(--sans); }
+.wasm-diff-filter:hover { color: var(--text); background: var(--panel-3); }
+.wasm-diff-filter[aria-pressed="true"] { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
+.wasm-diff-filter[hidden] { display: none; }
+.wasm-diff-notes { flex: none; margin: 0; padding: 0 10px 4px 26px; color: var(--amber); font: 11px var(--sans); }
+.wasm-diff-notes[hidden] { display: none; }
+.wasm-diff-state { flex: 1 1 auto; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 16px; color: var(--muted); font: 12px var(--sans); text-align: center; }
+.wasm-diff-state[hidden] { display: none; }
+.wasm-diff-state[data-state="error"] .wasm-diff-state-text { color: var(--red); }
+.wasm-diff-state-text { margin: 0; max-width: 60ch; }
+.wasm-diff-body { flex: 1 1 auto; min-height: 0; overflow: auto; border-top: 1px solid var(--line-soft); }
+.wasm-diff-body[hidden] { display: none; }
+.wasm-diff-table { width: 100%; border-collapse: collapse; table-layout: fixed; font: 12px var(--sans); }
+.wasm-diff-table th { position: sticky; top: 0; z-index: 1; height: 26px; padding: 0 8px; border-bottom: 1px solid var(--line); background: var(--panel-2); color: var(--faint); font: 600 11px var(--sans); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wasm-diff-col-status { width: 96px; }
+.wasm-diff-col-method { width: 96px; }
+.wasm-diff-col-score { width: 56px; }
+.wasm-diff-table td { padding: 2px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--text); }
+.wasm-diff-side { min-width: 0; }
+.wasm-diff-candidates { display: table-cell; }
+.wasm-diff-fn { display: block; max-width: 100%; height: 22px; padding: 0 4px; border: 1px solid transparent; border-radius: var(--control-radius); background: transparent; color: var(--accent); font: 11px var(--mono); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wasm-diff-fn:hover:not(:disabled) { border-color: var(--line); background: var(--panel-3); }
+.wasm-diff-fn:disabled { color: var(--muted); }
+.wasm-diff-absent { color: var(--faint); font: 11px var(--sans); line-height: 22px; }
+.wasm-diff-method { color: var(--muted); font-size: 11px; line-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wasm-diff-score { color: var(--muted); font: 11px/22px var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+.wasm-diff-status { line-height: 22px; }
+.wasm-diff-pill { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 9px; font: 10px/16px var(--sans); color: var(--muted); }
+.wasm-diff-pill-changed { border-color: var(--amber); color: var(--amber); }
+.wasm-diff-pill-added { border-color: var(--green); color: var(--green); }
+.wasm-diff-pill-removed { border-color: var(--red); color: var(--red); }
+.wasm-diff-pill-ambiguous { border-color: var(--accent); color: var(--accent); }
+.wasm-diff-pill-unclassified { border-style: dashed; }
+.wasm-diff-empty { padding: 16px 8px; color: var(--muted); text-align: center; }
+.wasm-diff-more { margin: 8px 10px; }
+.wasm-diff-more[hidden] { display: none; }
+.wasm-diff-limits { flex: none; margin: 0; padding: 4px 10px; border-top: 1px solid var(--line-soft); color: var(--faint); font: 11px var(--sans); }

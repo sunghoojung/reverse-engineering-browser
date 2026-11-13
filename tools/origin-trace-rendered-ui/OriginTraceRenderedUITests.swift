@@ -2970,6 +2970,61 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Compare with: two synthetic builds (artifacts 430 and 431) match in a
+  // table with each status, the tied stubs stay ambiguous, and a function on
+  // either side opens Graph on its own module.
+  @MainActor
+  func test40WasmModuleDiff() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"430\"]")
+      try await ui.waitUntil("!document.querySelector('#source-wasm-diff').hidden", "Compare with is offered for a captured WASM artifact")
+      try await ui.click("#source-more summary")
+      try await ui.click("#source-wasm-diff", containing: "Compare with")
+      try await ui.waitUntil("!document.querySelector('#source-diff-view').hidden && document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 10", timeout: 30, "the module comparison did not load")
+      let table = try await ui.json("""
+        (() => { const view = document.querySelector('#source-diff-view');
+          return {picker: view.querySelector('.wasm-diff-picker').selectedOptions[0]?.textContent ?? '',
+            summary: view.querySelector('.wasm-diff-summary').textContent,
+            statuses: [...view.querySelectorAll('.wasm-diff-row')].map(row => row.dataset.status),
+            ambiguous: view.querySelector('.wasm-diff-row[data-status="ambiguous"]')?.querySelectorAll('.wasm-diff-fn').length ?? 0,
+            methods: [...view.querySelectorAll('.wasm-diff-method')].map(cell => cell.textContent),
+            split: document.querySelector('#source-view-split').hidden}; })()
+        """)
+      XCTAssertTrue((table["picker"] as? String ?? "").contains("diff-build-b"), "\(size.name): B is chosen for its similar URL: \(table)")
+      XCTAssertEqual(table["statuses"] as? [String] ?? [],
+        ["changed", "changed", "added", "added", "removed", "ambiguous", "renumbered", "renumbered", "identical", "identical"], "\(size.name): \(table)")
+      XCTAssertEqual(table["ambiguous"] as? Int, 4, "\(size.name): the tied stubs list both candidates on each side: \(table)")
+      XCTAssertTrue((table["methods"] as? [String] ?? []).contains("structure"), "\(size.name): \(table)")
+      XCTAssertTrue((table["summary"] as? String ?? "").contains("2 changed"), "\(size.name): \(table)")
+      XCTAssertEqual(table["split"] as? Bool, true, "\(size.name): the table replaces the code view")
+      try await assertLayout(ui, "#source-diff-view", "\(size.name) module diff")
+      try await assertInert(ui, "\(size.name) module diff")
+      try await ui.screenshot("wasm-module-diff-\(size.name)")
+
+      try await ui.click("#source-diff-view .wasm-diff-filter", containing: "Changed")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 2", "the Changed filter did not narrow the rows")
+      try await ui.click("#source-diff-view .wasm-diff-filter", containing: "All")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 10", "All did not restore the rows")
+
+      // A's run export opens in Graph on A; B's digest opens in Graph on B.
+      try await ui.click("#source-diff-view .wasm-diff-fn", containing: "run · func 4")
+      try await ui.waitUntil("document.querySelector('#source-diff-view').hidden && (document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('run')", timeout: 30, "A's function did not open in Graph")
+      let first = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
+      XCTAssertTrue(first.contains("diff-build-a"), "\(size.name): A's function opens on A: \(first)")
+      try await ui.click("#source-more summary")
+      try await ui.click("#source-wasm-diff", containing: "Compare with")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 10", timeout: 30, "the comparison did not reopen")
+      try await ui.click("#source-diff-view .wasm-diff-fn", containing: "digest · func 8")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('digest')", timeout: 30, "B's function did not open in Graph")
+      let second = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
+      XCTAssertTrue(second.contains("diff-build-b"), "\(size.name): B's function opens on B: \(second)")
+      try await ui.screenshot("wasm-module-diff-jump-\(size.name)")
+      try await ui.click("#source-graph")
+    }
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor

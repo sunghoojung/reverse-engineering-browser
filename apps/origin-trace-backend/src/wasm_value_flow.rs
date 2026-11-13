@@ -3252,4 +3252,34 @@ mod tests {
         );
         assert_eq!(document["seed"]["nodes"].as_array().unwrap().len(), 2);
     }
+
+    #[test]
+    fn long_float_constants_keep_their_value_under_the_text_cap() {
+        let bytes = wat::parse_str(
+            "(module (func (result f64) (f64.add (f64.const -2.2250738585072014e-308) (f64.const 1.5))) (func (result f32) (f32.const 1e-40)))",
+        )
+        .unwrap();
+        let end = offset_of(&bytes, 0, "end", 0);
+        let document = flow(
+            &bytes,
+            &format!("function=0&offset={end}&direction=backward"),
+        )
+        .unwrap();
+        let texts: Vec<&str> = node(&document, "const")
+            .iter()
+            .map(|n| n["text"].as_str().unwrap())
+            .collect();
+        assert!(
+            texts.contains(&"f64.const -2.2250738585072014e-308"),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"f64.const 1.5"), "{texts:?}");
+        let end = offset_of(&bytes, 1, "end", 0);
+        let document = flow(
+            &bytes,
+            &format!("function=1&offset={end}&direction=backward"),
+        )
+        .unwrap();
+        assert_eq!(node(&document, "const")[0]["text"], "f32.const 1e-40");
+    }
 }

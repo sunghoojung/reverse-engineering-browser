@@ -936,8 +936,14 @@ pub(crate) fn operands(op: &Operator<'_>) -> String {
         }
         Operator::I32Const { value } => value.to_string(),
         Operator::I64Const { value } => value.to_string(),
-        Operator::F32Const { value } => f32::from_bits(value.bits()).to_string(),
-        Operator::F64Const { value } => f64::from_bits(value.bits()).to_string(),
+        Operator::F32Const { value } => {
+            let value = f32::from_bits(value.bits());
+            float_text(value.to_string(), || format!("{value:e}"))
+        }
+        Operator::F64Const { value } => {
+            let value = f64::from_bits(value.bits());
+            float_text(value.to_string(), || format!("{value:e}"))
+        }
         Operator::Br { relative_depth } | Operator::BrIf { relative_depth } => {
             relative_depth.to_string()
         }
@@ -983,6 +989,20 @@ pub(crate) fn operands(op: &Operator<'_>) -> String {
         }
     }
 }
+
+/// A float's plain decimal form, or its shortest round-trip exponent form
+/// when the decimal one is long: `1e-308` prints as hundreds of zeros, and a
+/// capped row or label would keep only those.
+fn float_text(decimal: String, exponent: impl FnOnce() -> String) -> String {
+    if decimal.len() > MAX_FLOAT_DECIMAL {
+        exponent()
+    } else {
+        decimal
+    }
+}
+
+/// Longest plain decimal a float operand keeps; `f64::MAX` takes 309 digits.
+const MAX_FLOAT_DECIMAL: usize = 24;
 
 fn block_run_text(operand: &str, count: u32) -> String {
     let mut text = String::from("block");
@@ -1528,5 +1548,27 @@ mod tests {
         let label = case_label(&many);
         assert!(label.len() <= MAX_LABEL_BYTES + 4, "{label}");
         assert!(label.ends_with(",..."), "{label}");
+    }
+
+    #[test]
+    fn long_float_constants_read_as_their_shortest_exponent_form() {
+        let graph = graph_for(
+            "(module (func (result f64) (f64.add (f64.const -2.2250738585072014e-308) (f64.const 1.5))) (func (result f32) (f32.const 3.4028235e38)))",
+            0,
+        );
+        let rows = graph["rows"].as_str().unwrap();
+        assert!(
+            rows.contains("f64.const -2.2250738585072014e-308\n"),
+            "{rows}"
+        );
+        assert!(rows.contains("f64.const 1.5\n"), "{rows}");
+        let rows = graph_for(
+            "(module (func (result f64) (f64.const 0)) (func (result f32) (f32.const 3.4028235e38)))",
+            1,
+        )["rows"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(rows.contains("f32.const 3.4028235e38\n"), "{rows}");
     }
 }

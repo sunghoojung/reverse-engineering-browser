@@ -200,7 +200,10 @@ indices and edges stay readable at every level.
   then the steps nearest the seed; kept nodes are renumbered in walk order,
   `truncated.bytes` is set and an omission gives the counts.
 - `expression`: three levels deep and 160 bytes. `text`: 160 bytes; a
-  `try_table` lists its first 8 catch clauses and then their count. The seed
+  `try_table` lists its first 8 catch clauses and then their count. A float
+  constant whose decimal form is longer than 24 characters is written in its
+  shortest round-trip exponent form (`-2.2250738585072014e-308`), as the
+  block graph's rows and labels write it, so the cap keeps its value. The seed
   ranks first in the byte cut, so a cut document always lists it.
 - Interprocedural: 64 steps and 256 direct call sites, within the same deadline.
 

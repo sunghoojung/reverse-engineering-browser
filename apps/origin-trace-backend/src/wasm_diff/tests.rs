@@ -1384,3 +1384,31 @@ fn equal_bytes_that_mean_something_else_are_changed_not_identical() {
 }
 
 mod fuzz;
+
+#[test]
+fn equal_bytes_naming_a_global_or_type_of_another_type_are_changed() {
+    // B swaps its globals, so `global.get 0` reads an i64 where A read an
+    // i32; the export pairs the functions and the bytes are equal.
+    let global = report(
+        r#"(module (global (mut i32) (i32.const 0)) (global (mut i64) (i64.const 0))
+            (func (export "f") global.get 0 drop))"#,
+        r#"(module (global (mut i64) (i64.const 0)) (global (mut i32) (i32.const 0))
+            (func (export "f") global.get 0 drop))"#,
+    );
+    assert_eq!(
+        rows(&global),
+        vec![row("changed", Some("export_name"), Some(0), Some(0))]
+    );
+    // B swaps its types, so `call_indirect (type 1)` expects another
+    // signature.
+    let ty = report(
+        r#"(module (type (func (param i32))) (type (func)) (table 1 funcref)
+            (func (export "f") i32.const 0 call_indirect (type 1)))"#,
+        r#"(module (type (func)) (type (func (param i32))) (table 1 funcref)
+            (func (export "f") i32.const 0 call_indirect (type 1)))"#,
+    );
+    assert_eq!(
+        rows(&ty),
+        vec![row("changed", Some("export_name"), Some(0), Some(0))]
+    );
+}

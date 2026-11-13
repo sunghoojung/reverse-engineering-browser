@@ -2094,7 +2094,13 @@ impl<'m> Matcher<'m> {
                     IDENTICAL
                 }
                 (Some(_), Some(_)) => CHANGED,
+                // Equal bytes are equal meaning only when the items the body
+                // names by index have the same types: the normalized hash
+                // carries the signature, each global's type and each called
+                // or referenced type, so an equal-bytes body that reads an
+                // i64 global where A read an i32 one is changed.
                 _ if fa.body == fb.body
+                    && fa.normalized == fb.normalized
                     && fa.addresses == fb.addresses
                     && self.calls_correspond(fa, fb) =>
                 {

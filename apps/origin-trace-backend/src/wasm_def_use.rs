@@ -34,14 +34,16 @@
 //! prefix before them stays valid. Work is bounded by an instruction cap, a
 //! work counter and the caller's deadline.
 //!
-//! Unifying this simulation with the readable lifted view's expression lifter
-//! is planned follow-up work; neither depends on the other today.
+//! Each operator's stack effect and the open control frames come from
+//! [`crate::wasm_stack`], the layer the readable lifted view also folds with;
+//! this module keeps only its payload: values, nodes, edges and the paths that
+//! merge at each frame.
 use crate::error::{Error, Result};
+use crate::wasm_stack::{self, Callee, Clause, Control, Effect, Kind, ModuleTypes, Test};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use wasmparser::{
-    BlockType, CompositeInnerType, ContType, ElementItems, ExternalKind, FuncType, FunctionBody,
-    HeapType, ModuleArity, Operator, Parser, Payload, RefType, SubType, TypeRef, UnpackedIndex,
+    BlockType, ElementItems, ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef,
 };
 
 pub const NONE: u32 = u32::MAX;
@@ -340,11 +342,9 @@ impl Simulation {
 
 /// The module context one body is simulated against.
 pub struct Module<'a> {
-    sub_types: Vec<SubType>,
-    /// The type index of every function, imported functions first.
-    pub func_types: Vec<u32>,
+    /// Types, function declarations and tags, which stack effects read.
+    pub types: ModuleTypes,
     pub imported_functions: u32,
-    tags: Vec<u32>,
     /// Module and field names of imported functions, bounded inert text.
     pub imports: Vec<(String, String)>,
     pub bodies: Vec<FunctionBody<'a>>,
@@ -368,10 +368,8 @@ fn bounded(name: &str) -> String {
 impl<'a> Module<'a> {
     pub fn read(bytes: &'a [u8]) -> Result<Self> {
         let mut module = Module {
-            sub_types: Vec::new(),
-            func_types: Vec::new(),
+            types: ModuleTypes::default(),
             imported_functions: 0,
-            tags: Vec::new(),
             imports: Vec::new(),
             bodies: Vec::new(),
             exported: HashSet::new(),
@@ -383,7 +381,7 @@ impl<'a> Module<'a> {
             match payload.map_err(bad)? {
                 Payload::TypeSection(reader) => {
                     for group in reader {
-                        module.sub_types.extend(group.map_err(bad)?.into_types());
+                        module.types.add_rec_group(group.map_err(bad)?);
                     }
                 }
                 Payload::ImportSection(reader) => {
@@ -391,25 +389,25 @@ impl<'a> Module<'a> {
                         let import = import.map_err(bad)?;
                         match import.ty {
                             TypeRef::Func(ty) => {
-                                module.func_types.push(ty);
+                                module.types.add_imported_function(ty);
                                 module.imported_functions += 1;
                                 module
                                     .imports
                                     .push((bounded(import.module), bounded(import.name)));
                             }
-                            TypeRef::Tag(tag) => module.tags.push(tag.func_type_idx),
+                            TypeRef::Tag(tag) => module.types.add_tag(tag.func_type_idx),
                             _ => {}
                         }
                     }
                 }
                 Payload::FunctionSection(reader) => {
                     for ty in reader {
-                        module.func_types.push(ty.map_err(bad)?);
+                        module.types.add_function(ty.map_err(bad)?);
                     }
                 }
                 Payload::TagSection(reader) => {
                     for tag in reader {
-                        module.tags.push(tag.map_err(bad)?.func_type_idx);
+                        module.types.add_tag(tag.map_err(bad)?.func_type_idx);
                     }
                 }
                 Payload::ExportSection(reader) => {
@@ -452,7 +450,7 @@ impl<'a> Module<'a> {
             return Err(Error::protocol("WASM module ended before its last section"));
         }
         if module.bodies.len() as u64 + module.imported_functions as u64
-            != module.func_types.len() as u64
+            != module.types.function_count()
         {
             return Err(Error::protocol(
                 "WASM function and code section counts differ",
@@ -460,82 +458,6 @@ impl<'a> Module<'a> {
         }
         Ok(module)
     }
-
-    /// Parameter and result counts of a function type, `None` for another
-    /// composite type or an index past the type section.
-    pub fn type_arity(&self, ty: u32) -> Option<(u32, u32)> {
-        let arity = Arity(self);
-        arity.sub_type_arity(arity.sub_type_at(ty)?).filter(|_| {
-            matches!(
-                self.sub_types[ty as usize].composite_type.inner,
-                CompositeInnerType::Func(_)
-            )
-        })
-    }
-
-    fn block_arity(&self, ty: BlockType) -> Option<(u32, u32)> {
-        match ty {
-            BlockType::Empty => Some((0, 0)),
-            BlockType::Type(_) => Some((0, 1)),
-            BlockType::FuncType(index) => self.type_arity(index),
-        }
-    }
-
-    fn tag_params(&self, tag: u32) -> Option<u32> {
-        self.type_arity(*self.tags.get(tag as usize)?)
-            .map(|(params, _)| params)
-    }
-}
-
-struct Arity<'m, 'a>(&'m Module<'a>);
-
-impl ModuleArity for Arity<'_, '_> {
-    fn sub_type_at(&self, type_idx: u32) -> Option<&SubType> {
-        self.0.sub_types.get(type_idx as usize)
-    }
-    fn tag_type_arity(&self, at: u32) -> Option<(u32, u32)> {
-        let ty = *self.0.tags.get(at as usize)?;
-        self.sub_type_arity(self.sub_type_at(ty)?)
-    }
-    fn type_index_of_function(&self, function_idx: u32) -> Option<u32> {
-        self.0.func_types.get(function_idx as usize).copied()
-    }
-    fn func_type_of_cont_type(&self, c: &ContType) -> Option<&FuncType> {
-        match &self
-            .sub_type_at(c.0.as_module_index()?)?
-            .composite_type
-            .inner
-        {
-            CompositeInnerType::Func(function) => Some(function),
-            _ => None,
-        }
-    }
-    fn sub_type_of_ref_type(&self, rt: &RefType) -> Option<&SubType> {
-        match rt.heap_type() {
-            HeapType::Concrete(UnpackedIndex::Module(index)) => self.sub_type_at(index),
-            _ => None,
-        }
-    }
-    // Control operators are simulated directly, so the generic arity is only
-    // asked about operators that never consult the control stack.
-    fn control_stack_height(&self) -> u32 {
-        0
-    }
-    fn label_block(&self, _depth: u32) -> Option<(BlockType, wasmparser::FrameKind)> {
-        None
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FrameKind {
-    Function,
-    Block,
-    Loop,
-    If,
-    Else,
-    Try,
-    Catch,
-    TryTable,
 }
 
 struct Incoming {
@@ -554,14 +476,11 @@ struct TryCatch {
     values: u32,
 }
 
-struct Frame {
-    kind: FrameKind,
-    join: Join,
+/// What the simulation keeps per open frame, beside the shared frame facts.
+#[derive(Default)]
+struct Flow {
     offset: u32,
     instruction: u32,
-    height: usize,
-    params: u32,
-    results: u32,
     param_values: Vec<Value>,
     /// Entry value of every local written since this frame was entered.
     saved: HashMap<u32, Value>,
@@ -576,13 +495,13 @@ struct Frame {
     catches: Vec<TryCatch>,
 }
 
-impl Frame {
-    fn label_arity(&self) -> u32 {
-        if self.kind == FrameKind::Loop {
-            self.params
-        } else {
-            self.results
-        }
+/// The construct a frame's joins belong to.
+fn join_of(kind: Kind) -> Join {
+    match kind {
+        Kind::Loop => Join::Loop,
+        Kind::If | Kind::Else => Join::If,
+        Kind::Try | Kind::Catch | Kind::TryTable => Join::Try,
+        Kind::Function | Kind::Block => Join::Block,
     }
 }
 
@@ -617,7 +536,7 @@ struct Sim<'m, 'a> {
     local_offsets: Vec<(u32, u32)>,
     params: u32,
     body_offset: u32,
-    frames: Vec<Frame>,
+    control: Control<Flow>,
     open_tries: Vec<usize>,
     reachable: bool,
     unknown: u32,
@@ -715,11 +634,11 @@ pub fn simulate_with(
     deadline: Instant,
     limits: Limits,
 ) -> Result<Simulation> {
-    let type_index = *module
-        .func_types
-        .get(function as usize)
+    let type_index = module
+        .types
+        .function_type_index(function)
         .ok_or_else(|| Error::new(404, "WASM function is not declared"))?;
-    let (params, results) = module.type_arity(type_index).ok_or_else(|| {
+    let (params, results) = module.types.type_arity(type_index).ok_or_else(|| {
         Error::protocol(format!(
             "WASM function {function} declares type {type_index}, which is not a function type"
         ))
@@ -755,25 +674,16 @@ pub fn simulate_with(
         local_offsets,
         params,
         body_offset,
-        frames: vec![Frame {
-            kind: FrameKind::Function,
-            join: Join::Block,
-            offset: body_offset,
-            instruction: NONE,
-            height: 0,
-            params: 0,
+        control: Control::new(
+            type_index,
             results,
-            param_values: Vec::new(),
-            saved: HashMap::new(),
-            incoming: Vec::new(),
-            then_end: None,
-            loop_param_phis: Vec::new(),
-            loop_local_phis: Vec::new(),
-            reachable_at_entry: true,
-            try_writes: Vec::new(),
-            catch_phis: None,
-            catches: Vec::new(),
-        }],
+            Flow {
+                offset: body_offset,
+                instruction: NONE,
+                reachable_at_entry: true,
+                ..Flow::default()
+            },
+        ),
         open_tries: Vec::new(),
         reachable: true,
         unknown: NONE,
@@ -862,19 +772,16 @@ pub fn simulate_with(
     }
     let mut open_joins = HashSet::new();
     if let Some(stop) = stopped_at {
-        for frame in sim
-            .frames
-            .iter()
-            .filter(|frame| frame.kind == FrameKind::Loop)
-        {
+        for frame in sim.control.iter().filter(|frame| frame.kind == Kind::Loop) {
             let phis = frame
+                .state
                 .loop_param_phis
                 .iter()
-                .chain(frame.loop_local_phis.iter().map(|(_, phi)| phi));
+                .chain(frame.state.loop_local_phis.iter().map(|(_, phi)| phi));
             open_joins.extend(phis.copied());
             sim.omissions.push(format!(
                 "The loop at byte {} was still open where simulation stopped at byte {stop}; values read in it may also arrive by back edges after the stop, and its header joins are incomplete.",
-                frame.offset
+                frame.state.offset
             ));
         }
     }
@@ -922,16 +829,15 @@ impl Sim<'_, '_> {
                 return Ok(Some(position));
             }
             let op = reader.read().map_err(bad)?;
-            match op {
-                Operator::Loop { .. } => {
+            match wasm_stack::effect(&op) {
+                Effect::Open {
+                    kind: Kind::Loop, ..
+                } => {
                     loops.push(open.len());
                     open.push(Some((index, HashSet::new())));
                 }
-                Operator::Block { .. }
-                | Operator::If { .. }
-                | Operator::Try { .. }
-                | Operator::TryTable { .. } => open.push(None),
-                Operator::End | Operator::Delegate { .. } => {
+                Effect::Open { .. } => open.push(None),
+                Effect::End | Effect::Delegate { .. } => {
                     if let Some(Some((start, set))) = open.pop() {
                         loops.pop();
                         if !self.spend(set.len() as u64) {
@@ -945,15 +851,17 @@ impl Sim<'_, '_> {
                         self.loop_writes.insert(start, locals);
                     }
                 }
-                Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
-                    if let Some(Some((_, set))) = loops.last().map(|at| &mut open[*at]) {
-                        set.insert(local_index);
+                _ => {
+                    if let Operator::LocalSet { local_index } | Operator::LocalTee { local_index } =
+                        &op
+                        && let Some(Some((_, set))) = loops.last().map(|at| &mut open[*at])
+                    {
+                        set.insert(*local_index);
                         if !self.spend(1) {
                             break;
                         }
                     }
                 }
-                _ => {}
             }
             index += 1;
         }
@@ -1082,7 +990,7 @@ impl Sim<'_, '_> {
     }
 
     fn pop(&mut self, offset: u32) -> Value {
-        let height = self.frames.last().map_or(0, |frame| frame.height);
+        let height = self.control.base();
         if self.stack.len() > height {
             return self.stack.pop().expect("stack above height");
         }
@@ -1104,7 +1012,7 @@ impl Sim<'_, '_> {
 
     /// The top `count` values without popping, padded with unknown values.
     fn top(&mut self, count: u32) -> Vec<Value> {
-        let height = self.frames.last().map_or(0, |frame| frame.height);
+        let height = self.control.base();
         self.top_at(height, count)
     }
 
@@ -1165,9 +1073,9 @@ impl Sim<'_, '_> {
 
     /// The values a branch to `depth` carries, read without popping.
     fn carried(&mut self, depth: u32) -> Vec<Value> {
-        match self.frames.len().checked_sub(depth as usize + 1) {
+        match self.control.target(depth) {
             Some(target) => {
-                let arity = self.frames[target].label_arity();
+                let arity = self.control[target].branch_arity();
                 self.top(arity)
             }
             None => Vec::new(),
@@ -1196,12 +1104,12 @@ impl Sim<'_, '_> {
     fn write_local(&mut self, local: u32, value: Value, offset: u32) {
         let old = self.locals[local as usize];
         let mut walked = 0u64;
-        for frame in self.frames.iter_mut().rev() {
-            if frame.saved.contains_key(&local) {
+        for frame in self.control.iter_mut().rev() {
+            if frame.state.saved.contains_key(&local) {
                 break;
             }
             walked += 1;
-            frame.saved.insert(local, old);
+            frame.state.saved.insert(local, old);
         }
         self.spend(walked);
         if self.reachable {
@@ -1210,14 +1118,18 @@ impl Sim<'_, '_> {
                     break;
                 }
                 let frame = self.open_tries[position];
-                self.frames[frame].try_writes.push((local, value, offset));
+                self.control[frame]
+                    .state
+                    .try_writes
+                    .push((local, value, offset));
             }
         }
         self.locals[local as usize] = value;
     }
 
     fn snapshot(&mut self, frame: usize) -> Vec<(u32, Value)> {
-        let mut locals: Vec<(u32, Value)> = self.frames[frame]
+        let mut locals: Vec<(u32, Value)> = self.control[frame]
+            .state
             .saved
             .keys()
             .map(|local| (*local, self.locals[*local as usize]))
@@ -1251,15 +1163,15 @@ impl Sim<'_, '_> {
         if !self.spend(values.len() as u64) {
             return;
         }
-        match self.frames[target].kind {
-            FrameKind::Function => {
+        match self.control[target].kind {
+            Kind::Function => {
                 let node = self.returns(offset, index, &values);
                 if self.instruction_nodes[index as usize] == NONE {
                     self.instruction_nodes[index as usize] = node;
                 }
             }
-            FrameKind::Loop => {
-                let params = self.frames[target].loop_param_phis.clone();
+            Kind::Loop => {
+                let params = self.control[target].state.loop_param_phis.clone();
                 for (slot, phi) in params.iter().enumerate() {
                     if let Some(value) = values.get(slot)
                         && !self.same(*value, Value::of(*phi))
@@ -1267,7 +1179,7 @@ impl Sim<'_, '_> {
                         self.edge(*value, *phi, slot as u32, EdgeKind::Merge, via, offset);
                     }
                 }
-                let locals = self.frames[target].loop_local_phis.clone();
+                let locals = self.control[target].state.loop_local_phis.clone();
                 for (local, phi) in locals {
                     if !self.spend(1) {
                         break;
@@ -1287,7 +1199,7 @@ impl Sim<'_, '_> {
                     values,
                     locals,
                 });
-                self.frames[target].incoming.push(path);
+                self.control[target].state.incoming.push(path);
             }
         }
     }
@@ -1296,32 +1208,31 @@ impl Sim<'_, '_> {
         if !self.reachable {
             return;
         }
-        let Some(target) = self.frames.len().checked_sub(depth as usize + 1) else {
+        let Some(target) = self.control.target(depth) else {
             self.omissions.push(format!(
                 "A branch at byte {offset} names a label past the open frames; its values are not followed."
             ));
             return;
         };
-        let arity = self.frames[target].label_arity();
+        let arity = self.control[target].branch_arity();
         let values = self.top(arity);
         self.branch_to(target, values, via, offset, index);
     }
 
     fn unreachable(&mut self) {
-        let height = self.frames.last().map_or(0, |frame| frame.height);
+        let height = self.control.base();
         self.stack.truncate(height);
         self.reachable = false;
     }
 
     fn push_frame(
         &mut self,
-        kind: FrameKind,
-        join: Join,
+        kind: Kind,
         offset: u32,
         index: u32,
         ty: BlockType,
     ) -> std::result::Result<(), Stop> {
-        let (params, results) = self.module.block_arity(ty).ok_or_else(|| {
+        let (params, results) = self.module.types.block_arity(ty).ok_or_else(|| {
             Stop::Unsupported("A block type that is not a function type".to_owned())
         })?;
         let param_values = self.top(params);
@@ -1329,30 +1240,23 @@ impl Sim<'_, '_> {
             .stack
             .len()
             .saturating_sub(params as usize)
-            .max(self.frames.last().map_or(0, |frame| frame.height));
-        self.frames.push(Frame {
-            kind,
-            join,
-            offset,
-            instruction: index,
-            height,
-            params,
-            results,
-            param_values,
-            saved: HashMap::new(),
-            incoming: Vec::new(),
-            then_end: None,
-            loop_param_phis: Vec::new(),
-            loop_local_phis: Vec::new(),
-            reachable_at_entry: self.reachable,
-            try_writes: Vec::new(),
-            catch_phis: None,
-            catches: Vec::new(),
-        });
+            .max(self.control.base());
         // A block's parameters stay on the stack as the values they are.
         self.stack.truncate(height);
-        let values = self.frames.last().expect("pushed").param_values.clone();
-        self.stack.extend(values);
+        self.stack.extend(param_values.iter().copied());
+        self.control.push(
+            kind,
+            ty,
+            (params, results),
+            height,
+            Flow {
+                offset,
+                instruction: index,
+                param_values,
+                reachable_at_entry: self.reachable,
+                ..Flow::default()
+            },
+        );
         Ok(())
     }
 
@@ -1361,9 +1265,9 @@ impl Sim<'_, '_> {
         if !self.reachable {
             return;
         }
-        let frame = self.frames.len() - 1;
-        let params = self.frames[frame].param_values.clone();
-        let height = self.frames[frame].height;
+        let frame = self.control.len() - 1;
+        let params = self.control[frame].state.param_values.clone();
+        let height = self.control[frame].height;
         let mut phis = Vec::with_capacity(params.len());
         for (slot, value) in params.iter().enumerate() {
             let phi = self.node(NodeKind::Phi, offset, index, NONE, 1);
@@ -1381,7 +1285,7 @@ impl Sim<'_, '_> {
         }
         self.stack.truncate(height);
         self.stack.extend(phis.iter().map(|phi| Value::of(*phi)));
-        self.frames[frame].loop_param_phis = phis;
+        self.control[frame].state.loop_param_phis = phis;
         let written = self.loop_writes.get(&index).cloned().unwrap_or_default();
         let mut local_phis = Vec::with_capacity(written.len());
         for local in written {
@@ -1398,11 +1302,12 @@ impl Sim<'_, '_> {
             self.write_local(local, Value::of(phi), offset);
             local_phis.push((local, phi));
         }
-        self.frames[frame].loop_local_phis = local_phis;
+        self.control[frame].state.loop_local_phis = local_phis;
     }
 
     fn restore_locals(&mut self, frame: usize) {
-        let saved: Vec<(u32, Value)> = self.frames[frame]
+        let saved: Vec<(u32, Value)> = self.control[frame]
+            .state
             .saved
             .iter()
             .map(|(local, value)| (*local, *value))
@@ -1416,19 +1321,20 @@ impl Sim<'_, '_> {
     /// Joins for every local a `try` body defined, with the entry value and
     /// each definition as incoming edges. Created once per `try`.
     fn catch_phis(&mut self, frame: usize) -> Vec<(u32, u32)> {
-        if let Some(phis) = &self.frames[frame].catch_phis {
+        if let Some(phis) = &self.control[frame].state.catch_phis {
             return phis.clone();
         }
-        let writes = std::mem::take(&mut self.frames[frame].try_writes);
-        let offset = self.frames[frame].offset;
-        let instruction = self.frames[frame].instruction;
+        let writes = std::mem::take(&mut self.control[frame].state.try_writes);
+        let offset = self.control[frame].state.offset;
+        let instruction = self.control[frame].state.instruction;
         let mut by_local: Vec<(u32, Value, u32)> = writes;
         by_local.sort_by_key(|(local, _, _)| *local);
         let mut phis = Vec::new();
         let mut position = 0;
         while position < by_local.len() {
             let local = by_local[position].0;
-            let entry = self.frames[frame]
+            let entry = self.control[frame]
+                .state
                 .saved
                 .get(&local)
                 .copied()
@@ -1449,7 +1355,7 @@ impl Sim<'_, '_> {
             }
             phis.push((local, phi));
         }
-        self.frames[frame].catch_phis = Some(phis.clone());
+        self.control[frame].state.catch_phis = Some(phis.clone());
         phis
     }
 
@@ -1487,7 +1393,7 @@ impl Sim<'_, '_> {
     /// or passed through, are recorded as the `end`'s operands so the `end`
     /// itself can be traced.
     fn close(&mut self, offset: u32, index: u32) {
-        let height = self.frames.last().map_or(0, |frame| frame.height);
+        let height = self.control.base();
         self.merge(offset, index);
         let results = self.stack.len().saturating_sub(height);
         if self.reachable && results > 0 {
@@ -1497,18 +1403,15 @@ impl Sim<'_, '_> {
     }
 
     fn merge(&mut self, offset: u32, index: u32) {
-        let position = self.frames.len() - 1;
-        if matches!(
-            self.frames[position].kind,
-            FrameKind::Try | FrameKind::TryTable
-        ) {
+        let position = self.control.len() - 1;
+        if matches!(self.control[position].kind, Kind::Try | Kind::TryTable) {
             self.close_try_body(position);
         }
-        if self.frames[position].kind == FrameKind::TryTable {
+        if self.control[position].kind == Kind::TryTable {
             self.route_try_table(position, offset, index);
         }
-        if self.frames[position].kind == FrameKind::Loop {
-            let frame = self.frames.pop().expect("loop frame");
+        if self.control[position].kind == Kind::Loop {
+            let frame = self.control.pop().expect("loop frame");
             let results = frame.results;
             if self.reachable {
                 let values = self.top_at(frame.height, results);
@@ -1523,13 +1426,13 @@ impl Sim<'_, '_> {
             }
             return;
         }
-        let results = self.frames[position].results;
-        let mut incomings = std::mem::take(&mut self.frames[position].incoming);
-        if let Some(then) = self.frames[position].then_end.take() {
+        let results = self.control[position].results;
+        let mut incomings = std::mem::take(&mut self.control[position].state.incoming);
+        if let Some(then) = self.control[position].state.then_end.take() {
             incomings.insert(0, then);
         }
         if self.reachable {
-            let height = self.frames[position].height;
+            let height = self.control[position].height;
             self.note_leftover(height, results, offset);
             let values = self.top_at(height, results);
             let values = values.into_iter().map(|v| self.materialize(v)).collect();
@@ -1541,11 +1444,14 @@ impl Sim<'_, '_> {
                 locals,
             });
         }
-        if self.frames[position].kind == FrameKind::If && self.frames[position].reachable_at_entry {
-            let entry = self.frames[position].offset;
-            let values = self.frames[position].param_values.clone();
+        if self.control[position].kind == Kind::If
+            && self.control[position].state.reachable_at_entry
+        {
+            let entry = self.control[position].state.offset;
+            let values = self.control[position].state.param_values.clone();
             let values = values.into_iter().map(|v| self.materialize(v)).collect();
-            let mut locals: Vec<(u32, Value)> = self.frames[position]
+            let mut locals: Vec<(u32, Value)> = self.control[position]
+                .state
                 .saved
                 .iter()
                 .map(|(local, value)| (*local, *value))
@@ -1558,11 +1464,11 @@ impl Sim<'_, '_> {
                 locals,
             });
         }
-        let frame = self.frames.pop().expect("frame");
+        let frame = self.control.pop().expect("frame");
         self.stack.truncate(frame.height);
         if incomings.is_empty() {
             self.reachable = false;
-            for (local, value) in &frame.saved {
+            for (local, value) in &frame.state.saved {
                 self.locals[*local as usize] = *value;
             }
             for _ in 0..results {
@@ -1602,7 +1508,7 @@ impl Sim<'_, '_> {
             }
             let phi = self.node(NodeKind::Phi, offset, index, NONE, 1);
             self.nodes[phi as usize].aux = slot as u64;
-            self.nodes[phi as usize].join = frame.join;
+            self.nodes[phi as usize].join = join_of(frame.opened);
             for incoming in &incomings {
                 self.edge(
                     incoming.values[slot],
@@ -1616,6 +1522,7 @@ impl Sim<'_, '_> {
             self.stack.push(Value::of(phi));
         }
         let mut written: Vec<(u32, Value)> = frame
+            .state
             .saved
             .iter()
             .map(|(local, value)| (*local, *value))
@@ -1640,7 +1547,7 @@ impl Sim<'_, '_> {
                 continue;
             }
             let phi = self.node(NodeKind::Phi, offset, index, local, 1);
-            self.nodes[phi as usize].join = frame.join;
+            self.nodes[phi as usize].join = join_of(frame.opened);
             for incoming in &incomings {
                 let value = value_in(incoming);
                 self.edge(
@@ -1689,18 +1596,21 @@ impl Sim<'_, '_> {
     /// A `try_table` catch clause branches to its label from anywhere in the
     /// body, so it carries exception values and the body's definitions.
     fn route_try_table(&mut self, position: usize, offset: u32, index: u32) {
-        if !self.frames[position].reachable_at_entry || self.frames[position].catches.is_empty() {
+        if !self.control[position].state.reachable_at_entry
+            || self.control[position].state.catches.is_empty()
+        {
             return;
         }
         let phis = self.catch_phis(position);
-        let entry_offset = self.frames[position].offset;
-        let instruction = self.frames[position].instruction;
-        let catches: Vec<(usize, u32, u32)> = self.frames[position]
+        let entry_offset = self.control[position].state.offset;
+        let instruction = self.control[position].state.instruction;
+        let catches: Vec<(usize, u32, u32)> = self.control[position]
+            .state
             .catches
             .iter()
             .map(|catch| (catch.target, catch.tag, catch.values))
             .collect();
-        let saved = self.frames[position].saved.clone();
+        let saved = self.control[position].state.saved.clone();
         let _ = (offset, index);
         for (target, tag, count) in catches {
             // A try_table may name thousands of clauses with tags of up to a
@@ -1716,12 +1626,12 @@ impl Sim<'_, '_> {
                     saved.get(&local).copied().unwrap_or(current)
                 }
             };
-            match self.frames[target].kind {
-                FrameKind::Function => {
+            match self.control[target].kind {
+                Kind::Function => {
                     self.returns(entry_offset, instruction, &values);
                 }
-                FrameKind::Loop => {
-                    let params = self.frames[target].loop_param_phis.clone();
+                Kind::Loop => {
+                    let params = self.control[target].state.loop_param_phis.clone();
                     for (slot, phi) in params.iter().enumerate() {
                         if let Some(value) = values.get(slot) {
                             self.edge(
@@ -1734,7 +1644,7 @@ impl Sim<'_, '_> {
                             );
                         }
                     }
-                    let locals = self.frames[target].loop_local_phis.clone();
+                    let locals = self.control[target].state.loop_local_phis.clone();
                     for (local, phi) in locals {
                         if !self.spend(1) {
                             break;
@@ -1746,7 +1656,8 @@ impl Sim<'_, '_> {
                     }
                 }
                 _ => {
-                    let mut locals: Vec<(u32, Value)> = self.frames[target]
+                    let mut locals: Vec<(u32, Value)> = self.control[target]
+                        .state
                         .saved
                         .keys()
                         .map(|local| (*local, local_value(*local, self.locals[*local as usize])))
@@ -1759,7 +1670,7 @@ impl Sim<'_, '_> {
                         values,
                         locals,
                     });
-                    self.frames[target].incoming.push(path);
+                    self.control[target].state.incoming.push(path);
                 }
             }
         }
@@ -1782,80 +1693,70 @@ impl Sim<'_, '_> {
         offset: u32,
         index: u32,
     ) -> std::result::Result<bool, Stop> {
+        let effect = wasm_stack::effect(op);
         // Code no declared path reaches creates no node: its values cannot
         // feed a slice and its calls cannot be reported as sinks. Structure
         // is still tracked so the frames stay aligned with the bytes.
-        if !self.reachable
-            && !matches!(
-                op,
-                Operator::Block { .. }
-                    | Operator::Loop { .. }
-                    | Operator::If { .. }
-                    | Operator::Else
-                    | Operator::End
-                    | Operator::Try { .. }
-                    | Operator::Catch { .. }
-                    | Operator::CatchAll
-                    | Operator::Delegate { .. }
-                    | Operator::TryTable { .. }
-            )
-        {
+        if !self.reachable && !effect.is_structure() {
             return Ok(false);
         }
-        match op {
-            Operator::Nop => {}
-            Operator::Unreachable => {
+        match effect {
+            Effect::Unreachable => self.clear_store(),
+            Effect::Open {
+                kind,
+                block_type,
+                catches,
+            } => {
                 self.clear_store();
-                self.unreachable();
-            }
-            Operator::Block { blockty } => {
-                self.clear_store();
-                self.push_frame(FrameKind::Block, Join::Block, offset, index, *blockty)?;
-            }
-            Operator::Loop { blockty } => {
-                self.clear_store();
-                self.push_frame(FrameKind::Loop, Join::Loop, offset, index, *blockty)?;
-                self.enter_loop(offset, index);
-            }
-            Operator::If { blockty } => {
-                self.clear_store();
-                if self.reachable {
+                if kind == Kind::If && self.reachable {
                     let condition = self.pop(offset);
                     self.selector(index, &[], condition);
                 }
-                self.push_frame(FrameKind::If, Join::If, offset, index, *blockty)?;
+                let catches = self.clauses(catches, offset)?;
+                self.push_frame(kind, offset, index, block_type)?;
+                let frame = self.control.len() - 1;
+                match kind {
+                    Kind::Loop => self.enter_loop(offset, index),
+                    Kind::Try | Kind::TryTable => {
+                        self.control[frame].state.catches = catches;
+                        if self.reachable {
+                            self.open_tries.push(frame);
+                        }
+                    }
+                    _ => {}
+                }
             }
-            Operator::Else => {
+            Effect::Else => {
                 self.clear_store();
-                let position = self.frames.len() - 1;
-                if self.frames[position].kind != FrameKind::If {
+                if !self.control.accepts(&effect) {
                     return Err(Stop::Unsupported("An else without its if".to_owned()));
                 }
+                let position = self.control.len() - 1;
                 if self.reachable {
-                    let height = self.frames[position].height;
-                    let results = self.frames[position].results;
+                    let height = self.control[position].height;
+                    let results = self.control[position].results;
                     let values = self.top_at(height, results);
                     let values = values.into_iter().map(|v| self.materialize(v)).collect();
                     let locals = self.snapshot(position);
-                    self.frames[position].then_end = Some(Incoming {
+                    self.control[position].state.then_end = Some(Incoming {
                         via: Via::ThenEnd,
                         via_offset: offset,
                         values,
                         locals,
                     });
                 }
-                let height = self.frames[position].height;
+                let height = self.control[position].height;
                 self.stack.truncate(height);
-                let params = self.frames[position].param_values.clone();
+                let params = self.control[position].state.param_values.clone();
                 self.stack.extend(params);
                 self.restore_locals(position);
-                self.reachable = self.frames[position].reachable_at_entry;
-                self.frames[position].kind = FrameKind::Else;
+                self.reachable = self.control[position].state.reachable_at_entry;
+                self.control.enter_arm(Kind::Else);
             }
-            Operator::End => {
+            Effect::End => {
                 self.clear_store();
-                if self.frames.len() == 1 {
-                    let results = self.frames[0].results;
+                if self.control.len() == 1 {
+                    let results = self.control[0].results;
                     let mut node = NONE;
                     if self.reachable {
                         self.note_leftover(0, results, offset);
@@ -1864,32 +1765,37 @@ impl Sim<'_, '_> {
                         node = self.returns(offset, index, &values);
                     }
                     self.instruction_nodes[index as usize] = node;
-                    self.frames.pop();
+                    self.control.pop();
                     return Ok(true);
                 }
-                if self.frames.is_empty() {
+                if self.control.is_empty() {
                     return Err(Stop::Unsupported("An end without a block".to_owned()));
                 }
                 self.close(offset, index);
             }
-            Operator::Br { relative_depth } => {
+            Effect::Branch {
+                depth,
+                conditional: false,
+            } => {
                 self.clear_store();
-                if let Some(target) = self.frames.len().checked_sub(*relative_depth as usize + 1) {
-                    let arity = self.frames[target].label_arity();
+                if let Some(target) = self.control.target(depth) {
+                    let arity = self.control[target].branch_arity();
                     let values = self.top(arity);
                     self.record(index, &values);
                 }
-                self.branch(*relative_depth, Via::Br, offset, index);
-                self.unreachable();
+                self.branch(depth, Via::Br, offset, index);
             }
-            Operator::BrIf { relative_depth } => {
+            Effect::Branch {
+                depth,
+                conditional: true,
+            } => {
                 self.clear_store();
                 let condition = self.pop(offset);
-                let carried = self.carried(*relative_depth);
+                let carried = self.carried(depth);
                 self.selector(index, &carried, condition);
-                self.branch(*relative_depth, Via::BrIf, offset, index);
+                self.branch(depth, Via::BrIf, offset, index);
             }
-            Operator::BrTable { targets } => {
+            Effect::BrTable(targets) => {
                 self.clear_store();
                 let selector = self.pop(offset);
                 let carried = self.carried(targets.default());
@@ -1910,19 +1816,251 @@ impl Sim<'_, '_> {
                     }
                     self.branch(depth, Via::BrTable, offset, index);
                 }
-                self.unreachable();
             }
-            Operator::Return => {
+            Effect::Return => {
                 self.clear_store();
                 if self.reachable {
-                    let results = self.frames[0].results;
+                    let results = self.control[0].results;
                     let values = self.top(results);
                     self.record(index, &values);
                     let node = self.returns(offset, index, &values);
                     self.instruction_nodes[index as usize] = node;
                 }
-                self.unreachable();
             }
+            Effect::Call { callee, tail } => {
+                self.clear_store();
+                self.call(callee, tail, offset, index)?;
+            }
+            Effect::Catch { tag } => {
+                self.clear_store();
+                if !self.control.accepts(&effect) {
+                    return Err(Stop::Unsupported("A catch without its try".to_owned()));
+                }
+                let position = self.control.len() - 1;
+                if self.reachable {
+                    let height = self.control[position].height;
+                    let results = self.control[position].results;
+                    let values = self.top_at(height, results);
+                    let values = values.into_iter().map(|v| self.materialize(v)).collect();
+                    let locals = self.snapshot(position);
+                    let path = self.stored_path(Incoming {
+                        via: Via::Fallthrough,
+                        via_offset: offset,
+                        values,
+                        locals,
+                    });
+                    self.control[position].state.incoming.push(path);
+                }
+                self.close_try_body(position);
+                let height = self.control[position].height;
+                self.stack.truncate(height);
+                self.restore_locals(position);
+                self.reachable = self.control[position].state.reachable_at_entry;
+                if self.reachable {
+                    for (local, phi) in self.catch_phis(position) {
+                        self.write_local(local, Value::of(phi), offset);
+                    }
+                }
+                let (tag, count) = match tag {
+                    Some(tag) => (
+                        tag,
+                        self.module.types.tag_params(tag).ok_or_else(|| {
+                            Stop::Unsupported(format!("A catch of undeclared tag {tag}"))
+                        })?,
+                    ),
+                    None => (NONE, 0),
+                };
+                let live = self.reachable;
+                let values = self.exception_values(offset, index, tag, count, live);
+                self.stack.extend(values);
+                self.control.enter_arm(Kind::Catch);
+            }
+            Effect::Delegate { .. } => {
+                self.clear_store();
+                if !self.control.accepts(&effect) {
+                    return Err(Stop::Unsupported("A delegate without its try".to_owned()));
+                }
+                self.close(offset, index);
+            }
+            Effect::Throw { tag: Some(tag) } => {
+                self.clear_store();
+                let count =
+                    self.module.types.tag_params(tag).ok_or_else(|| {
+                        Stop::Unsupported(format!("A throw of undeclared tag {tag}"))
+                    })?;
+                let args = self.pop_n(count, offset);
+                self.consume(NodeKind::Throw, index, tag, 0, &args, |_| {
+                    EdgeKind::Argument
+                });
+            }
+            Effect::Throw { tag: None } => {
+                self.clear_store();
+                let value = self.pop(offset);
+                self.consume(NodeKind::Throw, index, NONE, 0, &[value], |_| {
+                    EdgeKind::Argument
+                });
+            }
+            Effect::Rethrow { .. } => self.clear_store(),
+            Effect::BrOn { depth, test } => {
+                self.clear_store();
+                let reference = self.pop(offset);
+                let node = self.consume(NodeKind::Operation, index, NONE, 0, &[reference], |_| {
+                    EdgeKind::Operand
+                });
+                self.nodes[node as usize].results = 1;
+                let derived = Value::of(node);
+                let Some(target) = self.control.target(depth) else {
+                    self.omissions.push(format!(
+                        "A branch at byte {offset} names a label past the open frames; its values are not followed."
+                    ));
+                    return Ok(false);
+                };
+                let arity = self.control[target].branch_arity();
+                let null = test == Test::Null;
+                if self.reachable {
+                    let mut values = self.top(if null { arity } else { arity.saturating_sub(1) });
+                    if !null {
+                        values.push(derived);
+                    }
+                    self.branch_to(target, values, Via::BrOn, offset, index);
+                }
+                if test != Test::NonNull {
+                    self.stack.push(derived);
+                }
+            }
+            Effect::Switching => return Err(Self::switching(op)),
+            Effect::Plain => self.plain(op, offset, index)?,
+        }
+        if effect.ends_path() {
+            self.unreachable();
+        }
+        Ok(false)
+    }
+
+    fn switching(op: &Operator<'_>) -> Stop {
+        Stop::Unsupported(format!(
+            "The stack-switching operator {}",
+            crate::wasm::mnemonic(op)
+        ))
+    }
+
+    /// A `try_table`'s catch clauses, resolved against the frames around it.
+    /// A clause past the open frames is noted and not followed.
+    fn clauses(
+        &mut self,
+        catches: &[wasmparser::Catch],
+        offset: u32,
+    ) -> std::result::Result<Vec<TryCatch>, Stop> {
+        let mut clauses = Vec::new();
+        for catch in catches {
+            let clause = Clause::of(catch, &self.module.types, &self.control);
+            let Some(target) = clause.target else {
+                self.omissions.push(format!(
+                    "A try_table catch at byte {offset} names a label past the open frames; it is not followed."
+                ));
+                continue;
+            };
+            // `NONE` is this simulation's catch-all tag, so a clause naming
+            // tag index u32::MAX reads as one, as it always has.
+            let tag = clause.tag.unwrap_or(NONE);
+            let values = if tag == NONE {
+                u32::from(clause.with_ref)
+            } else {
+                clause
+                    .values
+                    .ok_or_else(|| Stop::Unsupported(format!("A catch of undeclared tag {tag}")))?
+            };
+            clauses.push(TryCatch {
+                target,
+                tag,
+                values,
+            });
+        }
+        Ok(clauses)
+    }
+
+    /// A call's arguments (and its callee operand) flow into one call node;
+    /// a tail call pushes nothing, since its results go to the caller.
+    fn call(
+        &mut self,
+        callee: Callee,
+        tail: bool,
+        offset: u32,
+        index: u32,
+    ) -> std::result::Result<(), Stop> {
+        let Some((params, results)) = self.module.types.call_arity(callee) else {
+            return Err(Stop::Unsupported(match callee {
+                Callee::Function(function) => format!("A call to undeclared function {function}"),
+                Callee::Indirect { type_index, .. } => {
+                    format!("call_indirect of non-function type {type_index}")
+                }
+                Callee::Ref { type_index } => format!("call_ref of non-function type {type_index}"),
+            }));
+        };
+        let pushed = if tail { 0 } else { results };
+        let node = match callee {
+            Callee::Function(function) => {
+                let args = self.pop_n(params, offset);
+                let kind = if function < self.module.imported_functions {
+                    NodeKind::ImportCall
+                } else {
+                    NodeKind::Call
+                };
+                self.consume(kind, index, function, pushed, &args, |_| EdgeKind::Argument)
+            }
+            Callee::Indirect { type_index, table } => {
+                // The table index is the last operand, after the arguments.
+                let args = self.pop_n(params + 1, offset);
+                let count = params as usize;
+                let node = self.consume(
+                    NodeKind::CallIndirect,
+                    index,
+                    type_index,
+                    pushed,
+                    &args,
+                    |operand| {
+                        if operand == count {
+                            EdgeKind::CalleeIndex
+                        } else {
+                            EdgeKind::Argument
+                        }
+                    },
+                );
+                self.nodes[node as usize].aux = table as u64;
+                node
+            }
+            Callee::Ref { type_index } => {
+                let args = self.pop_n(params + 1, offset);
+                let count = params as usize;
+                self.consume(
+                    NodeKind::CallRef,
+                    index,
+                    type_index,
+                    pushed,
+                    &args,
+                    |operand| {
+                        if operand == count {
+                            EdgeKind::CalleeRef
+                        } else {
+                            EdgeKind::Argument
+                        }
+                    },
+                )
+            }
+        };
+        self.nodes[node as usize].results = results;
+        Ok(())
+    }
+
+    /// An operator with no control effect.
+    fn plain(
+        &mut self,
+        op: &Operator<'_>,
+        offset: u32,
+        index: u32,
+    ) -> std::result::Result<(), Stop> {
+        match op {
+            Operator::Nop => {}
             Operator::LocalGet { local_index } => {
                 let local = *local_index;
                 if local as usize >= self.locals.len() {
@@ -1971,98 +2109,6 @@ impl Sim<'_, '_> {
                     |_| EdgeKind::GlobalSet,
                 );
             }
-            Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
-                self.clear_store();
-                let function = *function_index;
-                let (params, results) = self
-                    .module
-                    .func_types
-                    .get(function as usize)
-                    .and_then(|ty| self.module.type_arity(*ty))
-                    .ok_or_else(|| {
-                        Stop::Unsupported(format!("A call to undeclared function {function}"))
-                    })?;
-                let tail = matches!(op, Operator::ReturnCall { .. });
-                let args = self.pop_n(params, offset);
-                let kind = if function < self.module.imported_functions {
-                    NodeKind::ImportCall
-                } else {
-                    NodeKind::Call
-                };
-                let pushed = if tail { 0 } else { results };
-                let node =
-                    self.consume(kind, index, function, pushed, &args, |_| EdgeKind::Argument);
-                self.nodes[node as usize].results = results;
-                if tail {
-                    self.unreachable();
-                }
-            }
-            Operator::CallIndirect {
-                type_index,
-                table_index,
-            }
-            | Operator::ReturnCallIndirect {
-                type_index,
-                table_index,
-            } => {
-                self.clear_store();
-                let (params, results) = self.module.type_arity(*type_index).ok_or_else(|| {
-                    Stop::Unsupported(format!("call_indirect of non-function type {type_index}"))
-                })?;
-                let tail = matches!(op, Operator::ReturnCallIndirect { .. });
-                let mut args = self.pop_n(params + 1, offset);
-                let selector = args.pop().expect("selector operand");
-                args.push(selector);
-                let count = params as usize;
-                let pushed = if tail { 0 } else { results };
-                let node = self.consume(
-                    NodeKind::CallIndirect,
-                    index,
-                    *type_index,
-                    pushed,
-                    &args,
-                    |operand| {
-                        if operand == count {
-                            EdgeKind::CalleeIndex
-                        } else {
-                            EdgeKind::Argument
-                        }
-                    },
-                );
-                self.nodes[node as usize].aux = *table_index as u64;
-                self.nodes[node as usize].results = results;
-                if tail {
-                    self.unreachable();
-                }
-            }
-            Operator::CallRef { type_index } | Operator::ReturnCallRef { type_index } => {
-                self.clear_store();
-                let (params, results) = self.module.type_arity(*type_index).ok_or_else(|| {
-                    Stop::Unsupported(format!("call_ref of non-function type {type_index}"))
-                })?;
-                let tail = matches!(op, Operator::ReturnCallRef { .. });
-                let args = self.pop_n(params + 1, offset);
-                let count = params as usize;
-                let pushed = if tail { 0 } else { results };
-                let node = self.consume(
-                    NodeKind::CallRef,
-                    index,
-                    *type_index,
-                    pushed,
-                    &args,
-                    |operand| {
-                        if operand == count {
-                            EdgeKind::CalleeRef
-                        } else {
-                            EdgeKind::Argument
-                        }
-                    },
-                );
-                self.nodes[node as usize].results = results;
-                if tail {
-                    self.unreachable();
-                }
-            }
             Operator::Select | Operator::TypedSelect { .. } => {
                 let args = self.pop_n(3, offset);
                 self.consume(NodeKind::Select, index, NONE, 1, &args, |operand| {
@@ -2077,179 +2123,25 @@ impl Sim<'_, '_> {
                 let value = self.pop(offset);
                 self.consume(NodeKind::Drop, index, NONE, 0, &[value], |_| EdgeKind::Drop);
             }
-            Operator::Try { blockty } => {
-                self.clear_store();
-                self.push_frame(FrameKind::Try, Join::Try, offset, index, *blockty)?;
-                let frame = self.frames.len() - 1;
-                if self.reachable {
-                    self.open_tries.push(frame);
-                }
-            }
-            Operator::Catch { .. } | Operator::CatchAll => {
-                self.clear_store();
-                let position = self.frames.len() - 1;
-                if !matches!(
-                    self.frames[position].kind,
-                    FrameKind::Try | FrameKind::Catch
-                ) {
-                    return Err(Stop::Unsupported("A catch without its try".to_owned()));
-                }
-                if self.reachable {
-                    let height = self.frames[position].height;
-                    let results = self.frames[position].results;
-                    let values = self.top_at(height, results);
-                    let values = values.into_iter().map(|v| self.materialize(v)).collect();
-                    let locals = self.snapshot(position);
-                    let path = self.stored_path(Incoming {
-                        via: Via::Fallthrough,
-                        via_offset: offset,
-                        values,
-                        locals,
-                    });
-                    self.frames[position].incoming.push(path);
-                }
-                self.close_try_body(position);
-                let height = self.frames[position].height;
-                self.stack.truncate(height);
-                self.restore_locals(position);
-                self.reachable = self.frames[position].reachable_at_entry;
-                if self.reachable {
-                    for (local, phi) in self.catch_phis(position) {
-                        self.write_local(local, Value::of(phi), offset);
-                    }
-                }
-                let (tag, count) = match op {
-                    Operator::Catch { tag_index } => (
-                        *tag_index,
-                        self.module.tag_params(*tag_index).ok_or_else(|| {
-                            Stop::Unsupported(format!("A catch of undeclared tag {tag_index}"))
-                        })?,
-                    ),
-                    _ => (NONE, 0),
-                };
-                let live = self.reachable;
-                let values = self.exception_values(offset, index, tag, count, live);
-                self.stack.extend(values);
-                self.frames[position].kind = FrameKind::Catch;
-            }
-            Operator::Delegate { .. } => {
-                self.clear_store();
-                if self.frames.last().map(|frame| frame.kind) != Some(FrameKind::Try) {
-                    return Err(Stop::Unsupported("A delegate without its try".to_owned()));
-                }
-                self.close(offset, index);
-            }
-            Operator::TryTable { try_table } => {
-                self.clear_store();
-                let mut catches = Vec::new();
-                let outer = self.frames.len();
-                for catch in &try_table.catches {
-                    let (label, tag, with_ref) = match catch {
-                        wasmparser::Catch::One { tag, label } => (*label, *tag, false),
-                        wasmparser::Catch::OneRef { tag, label } => (*label, *tag, true),
-                        wasmparser::Catch::All { label } => (*label, NONE, false),
-                        wasmparser::Catch::AllRef { label } => (*label, NONE, true),
-                    };
-                    let Some(target) = outer.checked_sub(label as usize + 1) else {
-                        self.omissions.push(format!(
-                            "A try_table catch at byte {offset} names a label past the open frames; it is not followed."
-                        ));
-                        continue;
-                    };
-                    let params = if tag == NONE {
-                        0
-                    } else {
-                        self.module.tag_params(tag).ok_or_else(|| {
-                            Stop::Unsupported(format!("A catch of undeclared tag {tag}"))
-                        })?
-                    };
-                    catches.push(TryCatch {
-                        target,
-                        tag,
-                        values: params + u32::from(with_ref),
-                    });
-                }
-                self.push_frame(FrameKind::TryTable, Join::Try, offset, index, try_table.ty)?;
-                let frame = self.frames.len() - 1;
-                self.frames[frame].catches = catches;
-                if self.reachable {
-                    self.open_tries.push(frame);
-                }
-            }
-            Operator::Throw { tag_index } => {
-                self.clear_store();
-                let count = self.module.tag_params(*tag_index).ok_or_else(|| {
-                    Stop::Unsupported(format!("A throw of undeclared tag {tag_index}"))
-                })?;
-                let args = self.pop_n(count, offset);
-                self.consume(NodeKind::Throw, index, *tag_index, 0, &args, |_| {
-                    EdgeKind::Argument
-                });
-                self.unreachable();
-            }
-            Operator::ThrowRef => {
-                self.clear_store();
-                let value = self.pop(offset);
-                self.consume(NodeKind::Throw, index, NONE, 0, &[value], |_| {
-                    EdgeKind::Argument
-                });
-                self.unreachable();
-            }
-            Operator::Rethrow { .. } => {
-                self.clear_store();
-                self.unreachable();
-            }
-            Operator::BrOnNull { relative_depth }
-            | Operator::BrOnNonNull { relative_depth }
-            | Operator::BrOnCast { relative_depth, .. }
-            | Operator::BrOnCastFail { relative_depth, .. } => {
-                self.clear_store();
-                let reference = self.pop(offset);
-                let node = self.consume(NodeKind::Operation, index, NONE, 0, &[reference], |_| {
-                    EdgeKind::Operand
-                });
-                self.nodes[node as usize].results = 1;
-                let derived = Value::of(node);
-                let Some(target) = self.frames.len().checked_sub(*relative_depth as usize + 1)
-                else {
-                    self.omissions.push(format!(
-                        "A branch at byte {offset} names a label past the open frames; its values are not followed."
-                    ));
-                    return Ok(false);
-                };
-                let arity = self.frames[target].label_arity();
-                let null = matches!(op, Operator::BrOnNull { .. });
-                if self.reachable {
-                    let mut values = self.top(if null { arity } else { arity.saturating_sub(1) });
-                    if !null {
-                        values.push(derived);
-                    }
-                    self.branch_to(target, values, Via::BrOn, offset, index);
-                }
-                if !matches!(op, Operator::BrOnNonNull { .. }) {
-                    self.stack.push(derived);
-                }
-            }
             // The fence's mnemonic is `atomic_fence`, with no `.atomic`, so it
             // is matched here: it orders memory with other agents, and a store
             // before it no longer stands for a load after it.
             Operator::AtomicFence => self.clear_store(),
-            Operator::Resume { .. }
-            | Operator::ResumeThrow { .. }
-            | Operator::Suspend { .. }
-            | Operator::Switch { .. }
-            | Operator::ContBind { .. }
-            | Operator::ContNew { .. } => {
-                return Err(Stop::Unsupported(format!(
-                    "The stack-switching operator {}",
-                    crate::wasm::mnemonic(op)
-                )));
+            // Continuations are values, but this simulation does not follow
+            // what they later resume, so stack switching stops it here.
+            Operator::ContBind { .. } | Operator::ContNew { .. } => {
+                return Err(Self::switching(op));
             }
             other => {
                 let (params, results) =
-                    other.operator_arity(&Arity(self.module)).ok_or_else(|| {
-                        Stop::Unsupported(format!("The operator {}", crate::wasm::mnemonic(other)))
-                    })?;
+                    self.control
+                        .arity(other, &self.module.types)
+                        .ok_or_else(|| {
+                            Stop::Unsupported(format!(
+                                "The operator {}",
+                                crate::wasm::mnemonic(other)
+                            ))
+                        })?;
                 let kind = classify(other);
                 let args = self.pop_n(params, offset);
                 let address_first =
@@ -2311,6 +2203,6 @@ impl Sim<'_, '_> {
                 }
             }
         }
-        Ok(false)
+        Ok(())
     }
 }

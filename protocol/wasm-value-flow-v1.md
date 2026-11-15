@@ -8,7 +8,10 @@ goes. `get_wasm_value_flow` projects the route for agents. The native
 --artifact-id ID --value-flow 'function=1&offset=40'` use the same Rust
 provider ([`wasm_value_flow.rs`](../apps/origin-trace-backend/src/wasm_value_flow.rs)
 over the def-use simulation in
-[`wasm_def_use.rs`](../apps/origin-trace-backend/src/wasm_def_use.rs)). The CLI
+[`wasm_def_use.rs`](../apps/origin-trace-backend/src/wasm_def_use.rs), whose
+operator effects and control frames come from the stack layer
+[`wasm_stack.rs`](../apps/origin-trace-backend/src/wasm_stack.rs) that the
+[readable view](wasm-pseudocode-v1.md) also uses). The CLI
 prints the document or `{error, status}`.
 
 The provider verifies the artifact's size and SHA-256 against the manifest

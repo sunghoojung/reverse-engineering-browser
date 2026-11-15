@@ -271,6 +271,9 @@ output limit and five-second process deadline.
 A readable line is a reading of declared stack effects, not observed
 execution, value provenance or semantics. It does not validate types,
 recover high-level types, or claim that a fallback line is unreachable at run
-time beyond what the binary declares. The intra-function stack layer in
-`wasm_stack.rs` (`ModuleTypes`, `Label`, `arity`, `block_arity`,
-`branch_arity`) is the interface a value-flow analysis can share.
+time beyond what the binary declares. The readable view and
+[value flow](wasm-value-flow-v1.md) share one intra-function stack layer,
+`wasm_stack.rs`: `effect` classifies what each operator does to control,
+`Control` keeps the open frames and resolves labels, `Clause` resolves
+`try_table` clauses, `ModuleTypes` resolves block, call and tag counts, and
+`arity` declares every other stack effect. Each keeps only its own payload.

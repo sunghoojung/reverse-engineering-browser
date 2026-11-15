@@ -5,7 +5,7 @@
 // module in V8 and interprets its listing with the same logging imports, then
 // requires the same result or trap or escaping exception, the same import call
 // log, the same g0, memory pages and first 600 bytes of memory, for every
-// input. The imports throw (f on 13, thr on odd values) into try_table
+// input. The imports throw (f and mv on 13, thr on odd values) into try_table
 // handlers that read locals, so a listing that moves a local write across a
 // call a handler can catch reads a different value here. A mutated listing
 // (an addition read as a subtraction) must then differ, so the check cannot
@@ -31,8 +31,10 @@ class StepLimit extends Error {}
 class Br { constructor(label, values) { this.label = label; } }
 class Ret { constructor(values) { this.values = values; } }
 // A tail call leaves the function, and so every handler in it, before the
-// callee runs; the call is made at the top, outside every try.
-class TailCall { constructor(fn, args) { this.fn = fn; this.args = args; } }
+// callee runs; the call is made at the top, outside every try. `inHandler`
+// records that it left a frame with a handler, so a callee that throws
+// shows the exception escaping instead of being caught there.
+class TailCall { constructor(fn, args) { this.fn = fn; this.args = args; this.inHandler = false; } }
 const catchable = e => (e && e.wasmExc !== undefined) || e instanceof Fuel;
 
 function makeEnv(tag, state) {
@@ -266,7 +268,7 @@ function interpret(listing, a, b, tagless) {
   const names = {f: env.f, g: env.g, h: env.h, two: env.two, tick: env.tick, thr: env.thr, mv: env.mv};
   const table = [names.mv, names.f];
   const u = x => x >>> 0;
-  let steps = 0;
+  let steps = 0, escaped = false;
   function bin(op, x, y) {
     switch (op) {
       case '+': return (x + y) | 0; case '-': return (x - y) | 0; case '*': return Math.imul(x, y);
@@ -389,6 +391,7 @@ function interpret(listing, a, b, tagless) {
           try { exec(it.body); }
           catch (e) {
             if (e instanceof Br && e.label === it.label) break;
+            if (e instanceof TailCall && it.catches.length) e.inHandler = true;
             // A handler catches a thrown exception, or the Fuel error a JS
             // import throws (catch_all catches JS exceptions too). Anything
             // else, an interpreter error included, passes through and fails
@@ -403,6 +406,7 @@ function interpret(listing, a, b, tagless) {
           try { exec(it.body); }
           catch (e) {
             if (e instanceof Br && e.label === it.label) break;
+            if (e instanceof TailCall && it.arms.length) e.inHandler = true;
             if (!it.arms.length || !catchable(e)) throw e;
             caught = true;
           }
@@ -427,7 +431,9 @@ function interpret(listing, a, b, tagless) {
     try { exec(listing); throw Error('fell off function'); }
     catch (e) {
       if (!(e instanceof TailCall)) throw e;
-      const r = e.fn(...e.args);
+      let r;
+      try { r = e.fn(...e.args); }
+      catch (thrown) { escaped = e.inHandler && thrown?.wasmExc !== undefined; throw thrown; }
       throw new Ret(r);
     }
   }
@@ -439,12 +445,15 @@ function interpret(listing, a, b, tagless) {
     else if (e instanceof StepLimit) outcome = `step limit: ${MAX_STEPS} statements without finishing`;
     else throw e;
   }
-  return {outcome, log: state.log.join(' '), g0: vars.g0, pages, mem: Buffer.from(mem.slice(0, 600)).toString('hex'), steps};
+  return {outcome, log: state.log.join(' '), g0: vars.g0, pages, mem: Buffer.from(mem.slice(0, 600)).toString('hex'), steps, escaped};
 }
 
 function check(mutate) {
   let compared = 0, mismatched = 0, skipped = 0, parseErrors = 0, executed = 0, maxSteps = 0, stepLimited = 0;
   const firstMismatches = [];
+  // Generated modules (hand cases excluded) with a run where a tail callee
+  // threw out of a handler and V8 agreed the exception escaped.
+  const escapes = new Set();
   for (const source of rows.slice(0, limit)) {
     const row = {...source};
     const otherFallbacks = row.fallbacks - (row.exception_handlers ?? 0);
@@ -477,18 +486,19 @@ function check(mutate) {
           stepLimited++;
           if (!mutate) console.log(`STEP LIMIT seed ${row.seed} input ${a},${b}: the listing ran ${MAX_STEPS} statements without finishing; V8 gave ${want.outcome}`);
         }
-        if (firstMismatches.length < 6) firstMismatches.push({seed: row.seed, input: [a, b], want: {...want, mem: undefined}, got: {...got, mem: undefined, steps: undefined}, memSame: want.mem === got.mem, body: row.body, text: row.text});
+        if (firstMismatches.length < 6) firstMismatches.push({seed: row.seed, input: [a, b], want: {...want, mem: undefined}, got: {...got, mem: undefined, steps: undefined, escaped: undefined}, memSame: want.mem === got.mem, body: row.body, text: row.text});
         break;
       }
+      if (got.escaped && !String(row.seed).startsWith('hand-')) escapes.add(row.seed);
     }
   }
-  return {compared, mismatched, skipped, parseErrors, executed, maxSteps, stepLimited, firstMismatches};
+  return {compared, mismatched, skipped, parseErrors, executed, maxSteps, stepLimited, escapes: escapes.size, firstMismatches};
 }
 
 const started = Date.now();
 const real = check(false);
 console.log(JSON.stringify({rows: Math.min(limit, rows.length), compared: real.compared, mismatched: real.mismatched, stepLimited: real.stepLimited,
-  skipped: real.skipped, parseErrors: real.parseErrors, maxSteps: real.maxSteps}));
+  skipped: real.skipped, parseErrors: real.parseErrors, maxSteps: real.maxSteps, tailCallEscapes: real.escapes}));
 for (const m of real.firstMismatches) console.log(JSON.stringify(m, null, 1));
 const mutated = check(true);
 const failures = [];
@@ -503,6 +513,11 @@ if (masked) failures.push('an interpreter error inside a handler was taken for a
 if (real.mismatched) failures.push(`${real.mismatched} listings read a different value than V8 ran${real.stepLimited ? ` (${real.stepLimited} ran past the ${MAX_STEPS}-statement cap)` : ''}`);
 if (real.parseErrors) failures.push(`${real.parseErrors} listings could not be read`);
 if (real.compared < 0.8 * INPUTS.length * Math.min(limit, rows.length)) failures.push(`only ${real.compared} runs were compared`);
+// About one generated module in 230 makes a tail call to mv(13) from inside a
+// handler; none in a full corpus means the generator stopped reaching the
+// path where the exception escapes instead of being caught.
+const generated = rows.slice(0, limit).filter(row => !String(row.seed).startsWith('hand-')).length;
+if (generated >= 1000 && real.escapes === 0) failures.push(`none of ${generated} generated modules let a throwing tail callee escape a handler`);
 // The mutated listings must differ from V8 in a minimum share: about a third
 // do (their epilogue or results show it); a much lower share means the check
 // stopped seeing what listings compute.
@@ -510,4 +525,4 @@ const MIN_CAUGHT_SHARE = 0.25;
 if (mutated.mismatched < MIN_CAUGHT_SHARE * mutated.executed) failures.push(`only ${mutated.mismatched} of ${mutated.executed} mutated listings were caught (at least ${MIN_CAUGHT_SHARE * 100}% must be)`);
 if (failures.length) { console.error(`FAIL readable lift values: ${failures.join('; ')}`); process.exit(1); }
 console.log(`PASS readable lift values: ${real.compared} runs of ${Math.min(limit, rows.length)} modules match V8; ${mutated.mismatched} of ${mutated.executed} mutated listings caught; ` +
-  `at most ${real.maxSteps} of ${MAX_STEPS} statements per run (${Date.now() - started} ms)`);
+  `${real.escapes} generated modules let a throwing tail callee escape a handler; at most ${real.maxSteps} of ${MAX_STEPS} statements per run (${Date.now() - started} ms)`);

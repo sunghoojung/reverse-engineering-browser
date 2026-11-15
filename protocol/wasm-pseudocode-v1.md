@@ -118,7 +118,9 @@ the same results, traps, escaping exceptions, call log, global and memory for
 five inputs. The generated programs use `try_table` or, in every third one,
 legacy `try`; they write locals around calls that throw for some inputs and
 end by storing every local to memory. A tail call is made after leaving every
-handler. A run that executes 100,000 listing statements
+handler; a third of the generated tail calls pass the value their callee
+throws on, so some modules let that exception escape a handler, and a full
+corpus without one fails. A run that executes 100,000 listing statements
 without finishing is a mismatch naming its seed and input, so a lift that
 loses a loop's bound fails instead of hanging. A sanity mutation of the
 listings must then differ from V8 in at least a quarter of them.

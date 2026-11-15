@@ -4083,8 +4083,8 @@ mod tests {
     }
 
     /// i32 programs whose callees are imports that log their calls, so a
-    /// listing can be run against a real engine: `f` throws on 13, `thr`
-    /// throws on odd values, `tick` bounds loops. Frames include try_table
+    /// listing can be run against a real engine: `f` and `mv` throw on 13,
+    /// `thr` throws on odd values, `tick` bounds loops. Frames include try_table
     /// with catch_all to an outer label, loops with parameters, and
     /// br/br_if/br_table at depth, tail calls and call_indirect.
     fn value_program(seed: u64) -> String {
@@ -4309,7 +4309,17 @@ mod tests {
                     dead = true;
                 }
                 38 if available >= 1 => {
-                    if next(2) == 0 {
+                    // mv throws on 13, which no generated constant or input
+                    // makes, so a third of tail calls pass it: inside a
+                    // try_table or a legacy try the exception must escape the
+                    // handler. The pick is one draw as before and its parity
+                    // still chooses the callee, so every other choice a seed
+                    // makes is unchanged.
+                    let pick = next(6);
+                    if pick < 2 {
+                        emit!("i32.const 13");
+                    }
+                    if pick % 2 == 0 {
                         emit!("return_call $mv");
                     } else {
                         emit!("i32.const 0 return_call_indirect (type $tmv)");

@@ -185,8 +185,12 @@ process named, and the stated end of a task scheduled with no script, then list
 the async callers still not shown, with nothing clipped and captured names
 inert.
 
-`test37WasmReadableView` opens fixture artifact 400 in Sources and turns on
-**Readable** (from More when it has moved there). At both sizes the folded
+`test37WasmReadableView` opens fixture artifact 400 in Sources, names
+`readable_run` (func 1) with the pencil on its Inspect header row and Enter,
+as test39 does, using a markup-shaped researcher name, then closes Inspect and
+turns on **Readable** (from More when it has moved there). At both sizes the
+italic researcher name must sit beside the module's `readable_run` title as
+text, never in its place or in the listing. The folded
 load, the loop's `br_if` and the quoted, markup-shaped import name must show as
 text with one counted raw line, nothing clipped or overlapping and no captured
 markup in the DOM. Clicking a line and then the down arrow and Enter must each

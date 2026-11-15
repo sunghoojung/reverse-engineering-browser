@@ -2920,22 +2920,54 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // text, and line selection by pointer and keyboard revealing the bytes.
   @MainActor
   func test37WasmReadableView() async throws {
+    // Markup the inertness probe counts (img[src="x"]) if it became DOM.
+    let researcherName = "decode_frame<img src=x>"
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "sources")
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"400\"]")
+      // A researcher name for readable_run (func 1), saved as test39 saves
+      // one: the pencil on its Inspect header row, then Enter. Inspect then
+      // closes so Readable opens beside the view it opened beside before.
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "\(size.name): Inspect is offered for the module")
+      try await clickSourceTool(ui, "#source-wasm")
+      let header = ".source-line[data-wasm-function='1']:not([data-wasm-target]):not([data-wasm-body])"
+      try await ui.waitUntil("document.querySelector(\"\(header) .wasm-function-rename\") !== null", timeout: 30, "\(size.name): readable_run's header row has a rename control")
+      try await ui.click("\(header) .wasm-function-rename")
+      try await ui.waitUntil("document.activeElement === document.querySelector('#source-name-host input')", "\(size.name): the editor took focus")
+      // Select-all then type: the name may already exist from the other size.
+      try await ui.key(0, "a", modifiers: [.command])
+      try await ui.type(researcherName)
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("""
+        (document.querySelector("\(header) .wasm-function-name")?.textContent === \(String(reflecting: researcherName))) &&
+          document.querySelector('#source-name-host form') === null
+        """, timeout: 15, "\(size.name): the header did not show the saved name")
+      try await clickSourceTool(ui, "#source-wasm")
+      try await ui.waitUntil("document.querySelector('#source-wasm').getAttribute('aria-pressed') === 'false'", "\(size.name): Inspect did not close")
       try await ui.waitUntil("!document.querySelector('#source-readable').hidden", "Readable is offered for a captured WASM artifact")
       try await clickSourceTool(ui, "#source-readable")
       try await ui.waitUntil("(document.querySelector('#source-readable-host .wasm-readable-lines')?.textContent ?? '').includes('loop L1 {')", timeout: 30, "the readable lines did not load")
       let view = try await ui.json("""
         (() => { const host = document.querySelector('#source-readable-host'), rows = [...host.querySelectorAll('.wasm-readable-line')];
           const text = rows.map(row => row.querySelector('.wasm-readable-text').textContent.trim());
-          return {title: host.querySelector('.wasm-readable-title').textContent, stats: host.querySelector('.wasm-readable-stats').textContent,
+          const title = host.querySelector('.wasm-readable-title'), analyst = host.querySelector('.wasm-readable-analyst');
+          return {title: title.textContent, stats: host.querySelector('.wasm-readable-stats').textContent,
             text, raw: host.querySelectorAll('.wasm-readable-raw').length, offsets: rows.map(row => row.querySelector('.wasm-readable-offset').textContent),
+            analyst: analyst && !analyst.hidden && analyst.getClientRects().length > 0 ? analyst.textContent : null,
+            analystElements: analyst?.childElementCount ?? -1, besideTitle: title.nextElementSibling === analyst,
+            analystStyle: analyst ? getComputedStyle(analyst).fontStyle : null,
             height: host.getBoundingClientRect().height, pressed: document.querySelector('#source-readable').getAttribute('aria-pressed')}; })()
         """)
       let text = view["text"] as? [String] ?? []
-      XCTAssertTrue((view["title"] as? String ?? "").contains("readable_run"), "\(size.name): the export names the function: \(view)")
+      let title = view["title"] as? String ?? ""
+      XCTAssertTrue(title.contains("readable_run"), "\(size.name): the export names the function: \(view)")
+      XCTAssertFalse(title.contains("decode_frame"), "\(size.name): the researcher name never replaces the module's: \(view)")
+      XCTAssertEqual(view["analyst"] as? String, researcherName, "\(size.name): the researcher name shows, as text: \(view)")
+      XCTAssertEqual(view["analystElements"] as? Int, 0, "\(size.name): the researcher name's markup stays text: \(view)")
+      XCTAssertEqual(view["besideTitle"] as? Bool, true, "\(size.name): the researcher name sits beside the module's: \(view)")
+      XCTAssertEqual(view["analystStyle"] as? String, "italic", "\(size.name): the name reads as a researcher name: \(view)")
+      XCTAssertFalse(text.contains { $0.contains("decode_frame") }, "\(size.name): the listing keeps the module's names: \(text)")
       XCTAssertTrue(text.contains("l1 = i32.load(p0, offset 8) + 1"), "\(size.name): the load folds into one line: \(text)")
       XCTAssertTrue(text.contains("br_if L1 (l1 < p0)"), "\(size.name): the loop branch reads with its condition: \(text)")
       XCTAssertTrue(text.contains("\"<img src=x onerror=alert(1)>\"(l1)"), "\(size.name): the module's name is quoted text: \(text)")

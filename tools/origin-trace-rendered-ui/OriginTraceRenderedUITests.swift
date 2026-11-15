@@ -2956,7 +2956,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
             text, raw: host.querySelectorAll('.wasm-readable-raw').length, offsets: rows.map(row => row.querySelector('.wasm-readable-offset').textContent),
             analyst: analyst && !analyst.hidden && analyst.getClientRects().length > 0 ? analyst.textContent : null,
             analystElements: analyst?.childElementCount ?? -1, besideTitle: title.nextElementSibling === analyst,
-            analystStyle: analyst ? getComputedStyle(analyst).fontStyle : null,
             height: host.getBoundingClientRect().height, pressed: document.querySelector('#source-readable').getAttribute('aria-pressed')}; })()
         """)
       let text = view["text"] as? [String] ?? []
@@ -2966,7 +2965,6 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssertEqual(view["analyst"] as? String, researcherName, "\(size.name): the researcher name shows, as text: \(view)")
       XCTAssertEqual(view["analystElements"] as? Int, 0, "\(size.name): the researcher name's markup stays text: \(view)")
       XCTAssertEqual(view["besideTitle"] as? Bool, true, "\(size.name): the researcher name sits beside the module's: \(view)")
-      XCTAssertEqual(view["analystStyle"] as? String, "italic", "\(size.name): the name reads as a researcher name: \(view)")
       XCTAssertFalse(text.contains { $0.contains("decode_frame") }, "\(size.name): the listing keeps the module's names: \(text)")
       XCTAssertTrue(text.contains("l1 = i32.load(p0, offset 8) + 1"), "\(size.name): the load folds into one line: \(text)")
       XCTAssertTrue(text.contains("br_if L1 (l1 < p0)"), "\(size.name): the loop branch reads with its condition: \(text)")

@@ -1744,7 +1744,8 @@ fn listed_len(record: &Value) -> usize {
 }
 
 /// Keeps the longest prefix of the list under `key` with which `record` fits,
-/// and returns how many of how many entries were kept when that removed any.
+/// and returns how many of how many entries were kept when that removed any:
+/// never for an empty list, so no step reads "first 0 of 0".
 fn keep_prefix(
     record: &mut Value,
     key: &str,
@@ -1752,9 +1753,6 @@ fn keep_prefix(
 ) -> Option<(usize, usize)> {
     let full = record[key].as_array()?.clone();
     let total = full.len();
-    if total == 0 {
-        return None;
-    }
     let (mut low, mut high) = (0usize, total);
     while low < high {
         let middle = (low + high).div_ceil(2);
@@ -3187,6 +3185,47 @@ mod tests {
             record["size_trimmed"],
             json!(["request: replaced by its size; provenance.inputs_digest names it"])
         );
+        // That record fits after the request step, so no later guard was
+        // reached. No run stays over the budget past the import-list step
+        // with no calls and an empty type: 32 and 32 imports with names cut
+        // to 128 bytes beside the full reads come to about 100 KB. So a run
+        // record is grown by hand with 40 imports named 2,000 bytes, which
+        // only the last, hard step can bring under the budget.
+        let mut record = run_stored(
+            &module("(module (memory 1) (func (export \"run\")))"),
+            json!({"export": "run", "memory_reads": full_reads()}),
+        );
+        assert_eq!(record["size_trimmed"], json!([]));
+        assert_eq!(record["import_calls"], json!([]));
+        assert_eq!(record["other_imports"], json!([]));
+        assert_eq!(record["results"], json!([]));
+        assert_eq!(
+            record["function"]["type"],
+            json!({"params": [], "results": []})
+        );
+        record["imports"] = json!(
+            (0..40)
+                .map(|index| json!({"function_index": index, "module": "env",
+                    "field": format!("{index}{}", "f".repeat(2000)), "stub": "trap", "calls": 0}))
+                .collect::<Vec<_>>()
+        );
+        fit(&mut record);
+        let kept = record["imports"].as_array().unwrap().len();
+        assert!(kept > 0 && kept < 32, "{kept}");
+        assert_eq!(
+            record["size_trimmed"],
+            json!([
+                "request: replaced by its size; provenance.inputs_digest names it",
+                "imports: first 32 of 40",
+                format!("imports: first {kept} of 32"),
+            ])
+        );
+        assert_eq!(
+            record["function"]["type"],
+            json!({"params": [], "results": []})
+        );
+        assert_eq!(record["import_calls_truncated"], false);
+        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
     }
 
     #[test]

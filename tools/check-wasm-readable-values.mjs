@@ -18,9 +18,16 @@ const rows = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => 
 const limit = Number(limitArg || rows.length);
 const INPUTS = [[0, 0], [1, 2], [-1, 7], [5, -3], [3, 3]];
 const FUEL = 60;
+// FUEL bounds only the tick() calls a listing makes. A lift that drops or
+// moves a loop's tick() would loop here forever while V8 stops, so the
+// interpreter also counts the statements and frames it executes per run. Runs within FUEL stay far below this cap
+// (the PASS line prints the largest); a run that reaches it is a mismatch
+// naming its seed and input.
+const MAX_STEPS = 100_000;
 
 class Trap extends Error {}
 class Fuel extends Error {}
+class StepLimit extends Error {}
 class Br { constructor(label, values) { this.label = label; } }
 class Ret { constructor(values) { this.values = values; } }
 // A tail call leaves the function, and so every handler in it, before the
@@ -246,11 +253,20 @@ function parseListing(text) {
 function interpret(listing, a, b, tagless) {
   const state = {log: [], counter: 0, ticks: 0, makeExc: x => ({wasmExc: x})};
   const env = makeEnv(null, state);
+  // memory.grow only moves the bound; bytes are allocated when an access
+  // reaches them. A runaway loop that grows memory then costs one statement
+  // per grow, as the step cap assumes, instead of a copy of every page.
   let pages = 1; let mem = new Uint8Array(65536);
+  function reach(end) {
+    if (end <= mem.length) return;
+    const wider = new Uint8Array(Math.min(pages * 65536, Math.max(end, mem.length * 2)));
+    wider.set(mem); mem = wider;
+  }
   const vars = {p0: a | 0, p1: b | 0, l2: 0, l3: 0, g0: 0};
   const names = {f: env.f, g: env.g, h: env.h, two: env.two, tick: env.tick, thr: env.thr, mv: env.mv};
   const table = [names.mv, names.f];
   const u = x => x >>> 0;
+  let steps = 0;
   function bin(op, x, y) {
     switch (op) {
       case '+': return (x + y) | 0; case '-': return (x - y) | 0; case '*': return Math.imul(x, y);
@@ -265,12 +281,12 @@ function interpret(listing, a, b, tagless) {
       default: throw Error(`op ${op}`);
     }
   }
-  function load(addr, offset) { const at = u(addr) + offset; if (at + 4 > pages * 65536) throw new Trap('oob'); return (mem[at] | mem[at + 1] << 8 | mem[at + 2] << 16 | mem[at + 3] << 24) | 0; }
-  function store(addr, offset, v) { const at = u(addr) + offset; if (at + 4 > pages * 65536) throw new Trap('oob'); mem[at] = v & 255; mem[at + 1] = v >> 8 & 255; mem[at + 2] = v >> 16 & 255; mem[at + 3] = v >> 24 & 255; }
+  function load(addr, offset) { const at = u(addr) + offset; if (at + 4 > pages * 65536) throw new Trap('oob'); reach(at + 4); return (mem[at] | mem[at + 1] << 8 | mem[at + 2] << 16 | mem[at + 3] << 24) | 0; }
+  function store(addr, offset, v) { const at = u(addr) + offset; if (at + 4 > pages * 65536) throw new Trap('oob'); reach(at + 4); mem[at] = v & 255; mem[at + 1] = v >> 8 & 255; mem[at + 2] = v >> 16 & 255; mem[at + 3] = v >> 24 & 255; }
   function callv(name, args) {
     if (name === 'i32.load') return load(args[0], 0);
     if (name === 'memory.size') return pages;
-    if (name === 'memory.grow') { const n = u(args[0]); if (pages + n > 65536) return -1; const old = pages; pages += n; const m2 = new Uint8Array(pages * 65536); m2.set(mem); mem = m2; return old; }
+    if (name === 'memory.grow') { const n = u(args[0]); if (pages + n > 65536) return -1; const old = pages; pages += n; return old; }
     if (name === 'select') return args[2] !== 0 ? args[0] : args[1];
     const fn = names[name]; if (!fn) throw Error(`call ${name}`);
     return fn(...args);
@@ -352,6 +368,7 @@ function interpret(listing, a, b, tagless) {
   }
   function exec(items) {
     for (const it of items) {
+      if (++steps > MAX_STEPS) throw new StepLimit();
       switch (it.k) {
         case 'stmt': stmt(it.line); break;
         case 'block': try { exec(it.body); } catch (e) { if (!(e instanceof Br && e.label === it.label)) throw e; } break;
@@ -419,13 +436,14 @@ function interpret(listing, a, b, tagless) {
     else if (e instanceof Trap) outcome = 'trap';
     else if (e instanceof Fuel) outcome = 'fuel';
     else if (e && e.wasmExc !== undefined) outcome = 'exception';
+    else if (e instanceof StepLimit) outcome = `step limit: ${MAX_STEPS} statements without finishing`;
     else throw e;
   }
-  return {outcome, log: state.log.join(' '), g0: vars.g0, pages, mem: Buffer.from(mem.slice(0, 600)).toString('hex')};
+  return {outcome, log: state.log.join(' '), g0: vars.g0, pages, mem: Buffer.from(mem.slice(0, 600)).toString('hex'), steps};
 }
 
 function check(mutate) {
-  let compared = 0, mismatched = 0, skipped = 0, parseErrors = 0, executed = 0;
+  let compared = 0, mismatched = 0, skipped = 0, parseErrors = 0, executed = 0, maxSteps = 0, stepLimited = 0;
   const firstMismatches = [];
   for (const source of rows.slice(0, limit)) {
     const row = {...source};
@@ -449,22 +467,28 @@ function check(mutate) {
       try { got = interpret(listing, a, b); }
       catch (e) { if (e.message === 'UNSUPPORTED') { skipped++; break; } parseErrors++; if (!mutate && parseErrors <= 3) console.log(`EVAL seed ${row.seed}: ${e.stack}\n${row.text}`); break; }
       compared++;
+      maxSteps = Math.max(maxSteps, got.steps);
       // After a trap or an escaping exception there are no results; the log,
       // g0 and memory up to that point still must match.
       const same = want.outcome === got.outcome && want.log === got.log && want.g0 === got.g0 && want.pages === got.pages && want.mem === got.mem;
       if (!same) {
         mismatched++;
-        if (firstMismatches.length < 6) firstMismatches.push({seed: row.seed, input: [a, b], want: {...want, mem: undefined}, got: {...got, mem: undefined}, memSame: want.mem === got.mem, body: row.body, text: row.text});
+        if (got.steps > MAX_STEPS) {
+          stepLimited++;
+          if (!mutate) console.log(`STEP LIMIT seed ${row.seed} input ${a},${b}: the listing ran ${MAX_STEPS} statements without finishing; V8 gave ${want.outcome}`);
+        }
+        if (firstMismatches.length < 6) firstMismatches.push({seed: row.seed, input: [a, b], want: {...want, mem: undefined}, got: {...got, mem: undefined, steps: undefined}, memSame: want.mem === got.mem, body: row.body, text: row.text});
         break;
       }
     }
   }
-  return {compared, mismatched, skipped, parseErrors, executed, firstMismatches};
+  return {compared, mismatched, skipped, parseErrors, executed, maxSteps, stepLimited, firstMismatches};
 }
 
 const started = Date.now();
 const real = check(false);
-console.log(JSON.stringify({rows: Math.min(limit, rows.length), compared: real.compared, mismatched: real.mismatched, skipped: real.skipped, parseErrors: real.parseErrors}));
+console.log(JSON.stringify({rows: Math.min(limit, rows.length), compared: real.compared, mismatched: real.mismatched, stepLimited: real.stepLimited,
+  skipped: real.skipped, parseErrors: real.parseErrors, maxSteps: real.maxSteps}));
 for (const m of real.firstMismatches) console.log(JSON.stringify(m, null, 1));
 const mutated = check(true);
 const failures = [];
@@ -476,7 +500,7 @@ try {
   masked = true;
 } catch {}
 if (masked) failures.push('an interpreter error inside a handler was taken for a caught exception');
-if (real.mismatched) failures.push(`${real.mismatched} listings read a different value than V8 ran`);
+if (real.mismatched) failures.push(`${real.mismatched} listings read a different value than V8 ran${real.stepLimited ? ` (${real.stepLimited} ran past the ${MAX_STEPS}-statement cap)` : ''}`);
 if (real.parseErrors) failures.push(`${real.parseErrors} listings could not be read`);
 if (real.compared < 0.8 * INPUTS.length * Math.min(limit, rows.length)) failures.push(`only ${real.compared} runs were compared`);
 // The mutated listings must differ from V8 in a minimum share: about a third
@@ -485,4 +509,5 @@ if (real.compared < 0.8 * INPUTS.length * Math.min(limit, rows.length)) failures
 const MIN_CAUGHT_SHARE = 0.25;
 if (mutated.mismatched < MIN_CAUGHT_SHARE * mutated.executed) failures.push(`only ${mutated.mismatched} of ${mutated.executed} mutated listings were caught (at least ${MIN_CAUGHT_SHARE * 100}% must be)`);
 if (failures.length) { console.error(`FAIL readable lift values: ${failures.join('; ')}`); process.exit(1); }
-console.log(`PASS readable lift values: ${real.compared} runs of ${Math.min(limit, rows.length)} modules match V8; ${mutated.mismatched} of ${mutated.executed} mutated listings caught (${Date.now() - started} ms)`);
+console.log(`PASS readable lift values: ${real.compared} runs of ${Math.min(limit, rows.length)} modules match V8; ${mutated.mismatched} of ${mutated.executed} mutated listings caught; ` +
+  `at most ${real.maxSteps} of ${MAX_STEPS} statements per run (${Date.now() - started} ms)`);

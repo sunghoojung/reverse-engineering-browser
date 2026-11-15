@@ -68,8 +68,6 @@ const MAX_RECORD_MESSAGE: usize = 1024;
 const MAX_RECORDED_CALLS: usize = 256;
 const MAX_RECORDED_ARGS: usize = 16;
 const MAX_RECORDED_RESULTS: usize = 16;
-/// A stored record past this is returned but not stored.
-const MAX_RECORD_BYTES: usize = 4 * 1024 * 1024;
 /// The longest value literal; a float's shortest round-trip form is at most
 /// 24 characters and a v128 34.
 const MAX_LITERAL: usize = 64;
@@ -2108,14 +2106,9 @@ impl Runs {
             let mut record = run_blocking(&root, &request, limits)?;
             checked(&record)?;
             record["store_notice"] = Value::Null;
-            let stored = if serde_json::to_vec(&record)?.len() > MAX_RECORD_BYTES {
-                Err(Error::bad(
-                    "The run record exceeds 4 MiB and was not stored",
-                ))
-            } else {
-                persist(&root, &record)
-            };
-            match stored {
+            // fit() already brought the record under RECORD_INLINE_BUDGET, so
+            // the only reason it is not stored is a storage failure.
+            match persist(&root, &record) {
                 Ok(notice) => {
                     record["stored"] = json!(true);
                     record["store_error"] = Value::Null;

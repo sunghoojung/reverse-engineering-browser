@@ -94,8 +94,8 @@ memories and 16 tables, 64 operators in any constant expression, 262,144
 element segment items, one expected memory entry per read (so at most 16),
 captured import and export names cut to 128 bytes and outcome messages to 1,024
 in the record (measured as JSON, so control characters, quotes and backslashes
-count as their escapes), a 4 MiB record, 64 stored runs and a 16 MiB store. A limit
-outside its range is refused with 400.
+count as their escapes), 64 stored runs and a 16 MiB store. A limit outside its
+range is refused with 400.
 
 A record always fits the 128 KiB that `reb-api mcp` returns inline, alone and
 as a one-record `get_wasm_runs` listing, so a Full client gets every byte it
@@ -199,8 +199,9 @@ without its confirmation), the interpreter and its version, the effective
 limits, and the rewrite. The record is checked against the `WasmRun` contract
 before it is stored; a record that fails is neither stored nor returned, and
 the 500 says so without quoting any value. The POST result adds `stored` and
-`store_error`; when storage fails, or the record exceeds 4 MiB, the record is
-still returned with `stored: false`.
+`store_error`; the record is already trimmed to fit 120 KiB, so `stored: false`
+means only that storage failed, and the record is still returned with
+`store_error` saying why.
 
 The store keeps the newest 64 runs; older ones are evicted and counted in
 `evicted_runs`. An unreadable store is an integrity failure, not a request

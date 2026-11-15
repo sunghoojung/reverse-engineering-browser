@@ -68,8 +68,6 @@ const MAX_RECORD_MESSAGE: usize = 1024;
 const MAX_RECORDED_CALLS: usize = 256;
 const MAX_RECORDED_ARGS: usize = 16;
 const MAX_RECORDED_RESULTS: usize = 16;
-/// A stored record past this is returned but not stored.
-const MAX_RECORD_BYTES: usize = 4 * 1024 * 1024;
 /// The longest value literal; a float's shortest round-trip form is at most
 /// 24 characters and a v128 34.
 const MAX_LITERAL: usize = 64;
@@ -1744,7 +1742,8 @@ fn listed_len(record: &Value) -> usize {
 }
 
 /// Keeps the longest prefix of the list under `key` with which `record` fits,
-/// and returns how many of how many entries were kept when that removed any.
+/// and returns how many of how many entries were kept when that removed any:
+/// never for an empty list, so no step reads "first 0 of 0".
 fn keep_prefix(
     record: &mut Value,
     key: &str,
@@ -1752,9 +1751,6 @@ fn keep_prefix(
 ) -> Option<(usize, usize)> {
     let full = record[key].as_array()?.clone();
     let total = full.len();
-    if total == 0 {
-        return None;
-    }
     let (mut low, mut high) = (0usize, total);
     while low < high {
         let middle = (low + high).div_ceil(2);
@@ -1769,6 +1765,40 @@ fn keep_prefix(
     (low < total).then_some((low, total))
 }
 
+/// Whether `record` fits RECORD_INLINE_BUDGET as a one-record listing.
+fn fits(record: &Value) -> bool {
+    listed_len(record) <= RECORD_INLINE_BUDGET
+}
+
+/// Adds a step to `size_trimmed`, which is measured with the rest of the
+/// record, so every later step is sized with it.
+fn note(record: &mut Value, trimmed: &mut Vec<String>, step: String) {
+    trimmed.push(step);
+    record["size_trimmed"] = json!(trimmed);
+}
+
+/// keep_prefix on `key`, sized with the widest step `describe` can add (a
+/// kept count has no more digits than the total), and noted when it removed
+/// any entry.
+fn trim_prefix(
+    record: &mut Value,
+    trimmed: &mut Vec<String>,
+    key: &str,
+    describe: impl Fn(usize, usize) -> String,
+) -> bool {
+    let total = record[key].as_array().map_or(0, Vec::len);
+    let mut widest = trimmed.clone();
+    widest.push(describe(total, total));
+    record["size_trimmed"] = json!(widest);
+    let kept = keep_prefix(record, key, fits);
+    record["size_trimmed"] = json!(trimmed);
+    let Some((kept, total)) = kept else {
+        return false;
+    };
+    note(record, trimmed, describe(kept, total));
+    true
+}
+
 /// Trims a record until it fits RECORD_INLINE_BUDGET as a one-record
 /// `get_wasm_runs` listing (and so also alone), in a fixed order, recording in
 /// `size_trimmed` only the steps that removed something. Outcomes, counts,
@@ -1778,12 +1808,19 @@ fn fit(record: &mut Value) {
     if let Some(message) = record["outcome"]["message"].as_str() {
         record["outcome"]["message"] = json!(bounded(message, MAX_RECORD_MESSAGE));
     }
+    // The list is measured as it grows: added only after the last step, it
+    // took a record whose calls were sized to the byte 162 bytes past the
+    // budget.
     let mut trimmed = Vec::new();
-    let fits = |record: &Value| listed_len(record) <= RECORD_INLINE_BUDGET;
+    record["size_trimmed"] = json!(trimmed);
     if !fits(record) && record["request"].get("omitted").is_none() {
         let bytes = serde_json::to_vec(&record["request"]).map_or(0, |bytes| bytes.len());
         record["request"] = json!({"omitted": "size", "bytes": bytes});
-        trimmed.push("request: replaced by its size; provenance.inputs_digest names it".into());
+        note(
+            record,
+            &mut trimmed,
+            "request: replaced by its size; provenance.inputs_digest names it".into(),
+        );
     }
     for key in ["imports", "other_imports"] {
         if !fits(record)
@@ -1792,7 +1829,7 @@ fn fit(record: &mut Value) {
         {
             let total = list.len();
             list.truncate(32);
-            trimmed.push(format!("{key}: first 32 of {total}"));
+            note(record, &mut trimmed, format!("{key}: first 32 of {total}"));
         }
     }
     let lists = |record: &Value| {
@@ -1811,33 +1848,42 @@ fn fit(record: &mut Value) {
     {
         let counts = lists(record);
         record["function"]["type"] = json!({"params_count": counts[0], "results_count": counts[1]});
-        trimmed.push("function.type: replaced by its counts".into());
+        note(
+            record,
+            &mut trimmed,
+            "function.type: replaced by its counts".into(),
+        );
     }
-    if !fits(record)
-        && let Some((kept, total)) = keep_prefix(record, "import_calls", fits)
-    {
-        record["import_calls_truncated"] = json!(true);
-        trimmed.push(format!(
-            "import_calls: first {kept} of {total} recorded calls"
-        ));
-    }
+    // Results are cut before the calls are sized: sized against all 1000
+    // results, the calls could all be dropped from a record that then had
+    // room for about half of them.
     if !fits(record)
         && let Some(list) = record["results"].as_array_mut()
         && list.len() > 64
     {
         let total = list.len();
         list.truncate(64);
-        trimmed.push(format!("results: first 64 of {total}"));
+        note(
+            record,
+            &mut trimmed,
+            format!("results: first 64 of {total}"),
+        );
+    }
+    if !fits(record)
+        && trim_prefix(record, &mut trimmed, "import_calls", |kept, total| {
+            format!("import_calls: first {kept} of {total} recorded calls")
+        })
+    {
+        record["import_calls_truncated"] = json!(true);
     }
     // A last, hard step: the import lists keep only as many entries as fit.
     for key in ["imports", "other_imports"] {
-        if !fits(record)
-            && let Some((kept, total)) = keep_prefix(record, key, fits)
-        {
-            trimmed.push(format!("{key}: first {kept} of {total}"));
+        if !fits(record) {
+            trim_prefix(record, &mut trimmed, key, |kept, total| {
+                format!("{key}: first {kept} of {total}")
+            });
         }
     }
-    record["size_trimmed"] = json!(trimmed);
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2060,14 +2106,9 @@ impl Runs {
             let mut record = run_blocking(&root, &request, limits)?;
             checked(&record)?;
             record["store_notice"] = Value::Null;
-            let stored = if serde_json::to_vec(&record)?.len() > MAX_RECORD_BYTES {
-                Err(Error::bad(
-                    "The run record exceeds 4 MiB and was not stored",
-                ))
-            } else {
-                persist(&root, &record)
-            };
-            match stored {
+            // fit() already brought the record under RECORD_INLINE_BUDGET, so
+            // the only reason it is not stored is a storage failure.
+            match persist(&root, &record) {
                 Ok(notice) => {
                     record["stored"] = json!(true);
                     record["store_error"] = Value::Null;
@@ -3080,6 +3121,48 @@ mod tests {
     }
 
     #[test]
+    fn import_calls_are_sized_after_results_are_trimmed() {
+        // The calls were sized against a record that still held all 1000
+        // results, so "import_calls: first 0 of 256" was kept in a 77,150-byte
+        // listing with room for 121 of them.
+        let wide = " i32".repeat(1000);
+        let source = format!(
+            "(module (import \"env\" \"f\" (func $f (param i32))) (memory 1) (func (export \"run\") (result{wide}) (local $n i32) (local.set $n (i32.const 256)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n))) (call $f (i32.const 7)) (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again))) {}))",
+            "(i32.const -2147483648)".repeat(1000)
+        );
+        let mut record = run_stored(
+            &module(&source),
+            json!({"export": "run",
+            "imports": [{"module": "env", "field": "f", "results": []}], "memory_reads": full_reads()}),
+        );
+        assert_eq!(
+            record["outcome"]["status"], "returned",
+            "{}",
+            record["outcome"]
+        );
+        let steps = record["size_trimmed"].to_string();
+        assert!(steps.contains("results: first 64 of 1000"), "{steps}");
+        assert_eq!(record["results"].as_array().unwrap().len(), 64);
+        let kept = record["import_calls"].as_array().unwrap().len();
+        assert!(kept > 64, "only {kept} calls kept: {steps}");
+        assert!(kept < 256, "every call fit: {steps}");
+        assert!(
+            steps.contains(&format!("import_calls: first {kept} of 256 recorded calls")),
+            "{steps}"
+        );
+        assert_eq!(record["import_calls_truncated"], true);
+        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
+        // The prefix is the longest that fits: every call has the same
+        // argument, so the next one differs from the last kept only in its
+        // sequence number.
+        let calls = record["import_calls"].as_array_mut().unwrap();
+        let mut next = calls[kept - 1].clone();
+        next["sequence"] = json!(kept);
+        calls.push(next);
+        assert!(listed_len(&record) > RECORD_INLINE_BUDGET);
+    }
+
+    #[test]
     fn only_steps_that_removed_something_are_recorded() {
         // A record over the budget only through its request echo recorded
         // "import_calls: 0 of 0" too, and a function with no parameters or
@@ -3095,6 +3178,47 @@ mod tests {
             record["size_trimmed"],
             json!(["request: replaced by its size; provenance.inputs_digest names it"])
         );
+        // That record fits after the request step, so no later guard was
+        // reached. No run stays over the budget past the import-list step
+        // with no calls and an empty type: 32 and 32 imports with names cut
+        // to 128 bytes beside the full reads come to about 100 KB. So a run
+        // record is grown by hand with 40 imports named 2,000 bytes, which
+        // only the last, hard step can bring under the budget.
+        let mut record = run_stored(
+            &module("(module (memory 1) (func (export \"run\")))"),
+            json!({"export": "run", "memory_reads": full_reads()}),
+        );
+        assert_eq!(record["size_trimmed"], json!([]));
+        assert_eq!(record["import_calls"], json!([]));
+        assert_eq!(record["other_imports"], json!([]));
+        assert_eq!(record["results"], json!([]));
+        assert_eq!(
+            record["function"]["type"],
+            json!({"params": [], "results": []})
+        );
+        record["imports"] = json!(
+            (0..40)
+                .map(|index| json!({"function_index": index, "module": "env",
+                    "field": format!("{index}{}", "f".repeat(2000)), "stub": "trap", "calls": 0}))
+                .collect::<Vec<_>>()
+        );
+        fit(&mut record);
+        let kept = record["imports"].as_array().unwrap().len();
+        assert!(kept > 0 && kept < 32, "{kept}");
+        assert_eq!(
+            record["size_trimmed"],
+            json!([
+                "request: replaced by its size; provenance.inputs_digest names it",
+                "imports: first 32 of 40",
+                format!("imports: first {kept} of 32"),
+            ])
+        );
+        assert_eq!(
+            record["function"]["type"],
+            json!({"params": [], "results": []})
+        );
+        assert_eq!(record["import_calls_truncated"], false);
+        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
     }
 
     #[test]

@@ -94,8 +94,8 @@ memories and 16 tables, 64 operators in any constant expression, 262,144
 element segment items, one expected memory entry per read (so at most 16),
 captured import and export names cut to 128 bytes and outcome messages to 1,024
 in the record (measured as JSON, so control characters, quotes and backslashes
-count as their escapes), a 4 MiB record, 64 stored runs and a 16 MiB store. A limit
-outside its range is refused with 400.
+count as their escapes), 64 stored runs and a 16 MiB store. A limit outside its
+range is refused with 400.
 
 A record always fits the 128 KiB that `reb-api mcp` returns inline, alone and
 as a one-record `get_wasm_runs` listing, so a Full client gets every byte it
@@ -109,12 +109,16 @@ order until it fits:
    names it).
 2. `imports` and `other_imports` keep their first 32 entries.
 3. `function.type` becomes its two counts.
-4. `import_calls` keeps the longest prefix that fits, and
-   `import_calls_truncated` is set; `import_calls_total` stays.
-5. `results` keeps its first 64 values.
+4. `results` keeps its first 64 values.
+5. `import_calls` keeps the longest prefix that fits, and
+   `import_calls_truncated` is set; `import_calls_total` stays. The calls are
+   sized after `results` is cut, so a function with 1000 results keeps the
+   calls that fit beside its first 64.
 6. `imports` and `other_imports` keep only as many entries as fit.
 
 `size_trimmed` lists each step that removed something and is empty otherwise.
+It is part of the measured record: each step is sized with the steps listed
+before it and its own entry.
 Outcomes, counts, memory reads, digests and the expectation are never trimmed;
 the expectation is computed before any trimming. The trimmed record is what the
 HTTP response returns and what the store keeps: trimming happens once, before
@@ -195,8 +199,9 @@ without its confirmation), the interpreter and its version, the effective
 limits, and the rewrite. The record is checked against the `WasmRun` contract
 before it is stored; a record that fails is neither stored nor returned, and
 the 500 says so without quoting any value. The POST result adds `stored` and
-`store_error`; when storage fails, or the record exceeds 4 MiB, the record is
-still returned with `stored: false`.
+`store_error`; the record is already trimmed to fit 120 KiB, so `stored: false`
+means only that storage failed, and the record is still returned with
+`store_error` saying why.
 
 The store keeps the newest 64 runs; older ones are evicted and counted in
 `evicted_runs`. An unreadable store is an integrity failure, not a request

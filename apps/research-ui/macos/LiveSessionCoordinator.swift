@@ -168,8 +168,10 @@ struct LivePanelStart: Equatable {
 // once from its mode, the panel's limits and the app environment, and
 // LiveSessionCoordinator.captureDefaults gives the launcher exactly these in
 // place of any inherited value. Metadata turns every one off, whatever the
-// environment holds, as the agent path does (session_launch.rs), so a panel
-// that names Metadata always names what the launcher got.
+// environment holds, as the agent path does (session_launch.rs). The start
+// panel holds a failed start's value and Retry starts from it, never from a
+// new reading of the environment, so the mode and limits the panel names are
+// always what the launcher got.
 //
 // Other inherited switches are not content and stay as the environment sets
 // them: browser-internal and extension traffic keep the same content gates,

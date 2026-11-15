@@ -2693,8 +2693,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // The panel chose this run's mode, so it decides request content over an
   // inherited REB_CAPTURE_REQUEST_CONTENT, in reopens as well.
   private var panelChoseMode = false
-  // How the session on screen was started, for its Retry.
-  private var lastStartModeChosen = false
   // Continue Offline holds for the rest of the run: a reopen starts nothing.
   private var automaticSessionSuppressed = false
   // The panel shows a start or failure decision. Nothing starts a session
@@ -2951,7 +2949,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     guard !liveSessionCoordinator.isRunning else { return }
     // REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1 is the advanced route to the macOS
     // Keychain for these automatic sessions; the panel never offers it.
-    lastStartModeChosen = panelChoseMode
     startAutomaticLiveSession(
       LiveCaptureContent.resolve(
         environment: ProcessInfo.processInfo.environment, mode: selectedCaptureMode,
@@ -2993,16 +2990,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       let content = LiveCaptureContent.resolve(
         environment: ProcessInfo.processInfo.environment, mode: mode, limits: limits, modeChosen: true)
       // Not a decision, so the start below is not refused as one behind it.
-      sessionPanel.content = .starting(mode: mode, limits: content.limits)
-      lastStartModeChosen = true
+      sessionPanel.content = .starting(content)
       startAutomaticLiveSession(content, useSystemKeychain: false)
-    case (.retry, .failed(_, let mode, let limits)):
-      sessionPanel.content = .starting(mode: mode, limits: limits)
+    // Exactly the failed start's content switches, never a new reading of the
+    // environment, so the session is the one the panel names.
+    case (.retry, .failed(_, let content)):
+      sessionPanel.content = .starting(content)
       liveSessionCoordinator.stop()
-      startAutomaticLiveSession(
-        LiveCaptureContent.resolve(
-          environment: ProcessInfo.processInfo.environment, mode: mode, limits: limits, modeChosen: lastStartModeChosen),
-        useSystemKeychain: false)
+      startAutomaticLiveSession(content, useSystemKeychain: false)
     case (.offline, .choose), (.offline, .failed):
       sessionPanel.content = .hidden
       automaticSessionSuppressed = true
@@ -3465,7 +3460,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     presentOriginTraceWindow()
-    sessionPanel?.content = .failed(failure, mode: content.mode, limits: content.limits)
+    sessionPanel?.content = .failed(failure, content)
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

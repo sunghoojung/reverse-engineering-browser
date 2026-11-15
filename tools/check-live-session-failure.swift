@@ -353,6 +353,53 @@ enum LiveSessionFailureChecks {
     precondition(leaks.isEmpty, "Metadata starts were given content-derived switches:\n" + leaks.joined(separator: "\n"))
     print("PASS native Metadata start: no request content, Canvas images, invocation digests, budgets or media, from the panel or the automatic launch, whatever the environment holds")
 
+    // Retry gives the launcher the failed start's content switches, never a
+    // new reading of the environment, so the mode and limits the panel names
+    // are always what the launcher got. The failed starts include the case
+    // that leaked: an automatic Metadata launch with an inherited
+    // REB_CAPTURE_REQUEST_CONTENT=1.
+    let automaticMetadata = ["REB_AUTOMATIC_CAPTURE_MODE": "metadata", "REB_CAPTURE_REQUEST_CONTENT": "1"]
+    let automaticContent = ["REB_REQUEST_CONTENT_BUDGET_MIB": "64", "REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]
+    let failedStarts: [(String, [String: String], LiveCaptureContent)] = [
+      ("automatic Metadata with an inherited 1", automaticMetadata, LiveCaptureContent.resolve(
+        environment: automaticMetadata, mode: LiveCaptureMode.configured(automaticMetadata), limits: nil, modeChosen: false)),
+      ("panel Metadata over every content switch", everyContentSwitch, LiveCaptureContent.resolve(
+        environment: everyContentSwitch, mode: .metadata, limits: nil, modeChosen: true)),
+      ("panel Content with raised limits", media, LiveCaptureContent.resolve(environment: media, mode: .content, limits: raised, modeChosen: true)),
+      ("automatic Content with the environment's limits", automaticContent, LiveCaptureContent.resolve(
+        environment: automaticContent, mode: LiveCaptureMode.configured(automaticContent), limits: nil, modeChosen: false)),
+      ("panel Content with a mask without Network", ["REB_CAPTURE_CATEGORY_MASK": "0x600"], LiveCaptureContent.resolve(
+        environment: ["REB_CAPTURE_CATEGORY_MASK": "0x600"], mode: .content, limits: raised, modeChosen: true)),
+    ]
+    let retryEnvironments: [(String, [String: String])] = [
+      ("nothing", [:]), ("every content switch on", everyContentSwitch),
+      ("every content switch off", ["REB_CAPTURE_REQUEST_CONTENT": "0", "REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]),
+    ]
+    var mismatches: [String] = []
+    for (name, given, failed) in failedStarts {
+      let mask = given["REB_CAPTURE_CATEGORY_MASK"].map { ["REB_CAPTURE_CATEGORY_MASK": $0] } ?? [:]
+      let first = LiveSessionCoordinator.captureDefaults(environment: given, content: failed, savedInvocationSites: saved)
+      let firstSwitches = LiveCaptureContent.names.map { first[$0] }
+      // The panel's label: Metadata keeps nothing, and named limits are the ones given.
+      if failed.mode == .metadata, LiveCaptureContent.names.contains(where: { first[$0] != metadataOff[$0] }) {
+        mismatches.append("\(name): labeled \(failed.mode.title) but given \(firstSwitches)")
+      }
+      if failed.retainsRequestContent != (first["REB_CAPTURE_REQUEST_CONTENT"] == "1") {
+        mismatches.append("\(name): request content \(failed.retainsRequestContent) but given \(first["REB_CAPTURE_REQUEST_CONTENT"] ?? "unset")")
+      }
+      if let limits = failed.limits, limits.launcherEnvironment.contains(where: { first[$0.key] != $0.value }) {
+        mismatches.append("\(name): names limits \(limits) but given \(firstSwitches)")
+      }
+      for (retryName, environment) in retryEnvironments {
+        let retried = LiveSessionCoordinator.captureDefaults(
+          environment: environment.merging(mask) { a, _ in a }, content: failed, savedInvocationSites: saved)
+        if LiveCaptureContent.names.map({ retried[$0] }) != firstSwitches {
+          mismatches.append("\(name), Retry with \(retryName) inherited: \(LiveCaptureContent.names.map { retried[$0] }) after \(firstSwitches)")
+        }
+      }
+    }
+    precondition(mismatches.isEmpty, "Retry or its label differed from the failed start:\n" + mismatches.joined(separator: "\n"))
+    print("PASS native live Retry: the failed start's content switches whatever the environment holds, Metadata labels that keep nothing and named limits that were given")
 
     // The Swift store reads and writes exactly what the backend and browser do.
     let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

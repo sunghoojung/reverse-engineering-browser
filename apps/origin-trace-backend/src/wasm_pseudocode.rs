@@ -3470,12 +3470,25 @@ mod tests {
     /// The MCP server inlines a result only when its compact and its pretty
     /// JSON are both at most 131,072 bytes.
     fn assert_pages_fit(bytes: &[u8], function: u32, line_limit: usize) -> usize {
+        assert_named_pages_fit(bytes, function, line_limit, None, &|_| {})
+    }
+    /// [`assert_pages_fit`] with researcher names joined as the route joins
+    /// them; `each` checks every page.
+    fn assert_named_pages_fit(
+        bytes: &[u8],
+        function: u32,
+        line_limit: usize,
+        analyst: Option<&crate::wasm_names::Names>,
+        each: &dyn Fn(&Value),
+    ) -> usize {
         let directory = store(bytes);
         let mut offset = 0;
         let mut pages = 0;
         let mut seen = 0;
         loop {
-            let text = pseudocode(directory.path(), "7", function, offset, line_limit).unwrap();
+            let text =
+                pseudocode_named(directory.path(), "7", function, offset, line_limit, analyst)
+                    .unwrap();
             let document: Value = serde_json::from_str(&text).unwrap();
             let pretty = serde_json::to_string_pretty(&document).unwrap();
             assert!(
@@ -3484,6 +3497,7 @@ mod tests {
                 text.len(),
                 pretty.len()
             );
+            each(&document);
             let lines = document["window"]["lines"].as_u64().unwrap() as usize;
             assert!(lines >= 1);
             seen += lines;
@@ -3576,6 +3590,114 @@ mod tests {
         wat.push_str("))");
         let bytes = wat::parse_str(&wat).unwrap();
         assert!(assert_pages_fit(&bytes, 0, MAX_LINE_LIMIT) > 2);
+    }
+
+    #[test]
+    fn every_page_fits_with_researcher_names_at_their_limits() {
+        use crate::wasm_names::{self, Cache, Status};
+        use crate::workspace::{Kind, Store};
+        use sha2::{Digest, Sha256};
+        // 520 functions with quote-heavy export names and a caller of every
+        // one, so each window lists many quoted lines and callees.
+        const CALLEES: u32 = 520;
+        let mut wat = String::from("(module");
+        for index in 0..CALLEES {
+            let _ = write!(
+                wat,
+                r#" (func (export "std::__2::basic_string<char, \"traits\"<char>>::__grow_by_and_replace_{index}") (param i32) (result i32) local.get 0)"#
+            );
+        }
+        wat.push_str(r#" (func (export "run") (param i32) (result i32)"#);
+        for index in 0..1_200 {
+            let _ = write!(wat, " local.get 0 call {} local.set 0", index % CALLEES);
+        }
+        wat.push_str(" local.get 0))");
+        let bytes = wat::parse_str(&wat).unwrap();
+        let sha = hex::encode(Sha256::digest(&bytes));
+        // The caller and 499 callees are named, 500 names in all. Each name
+        // is quotes, which JSON escapes to two bytes, grown in turn until the
+        // compact document is exactly at its byte limit.
+        let named: Vec<u32> = std::iter::once(CALLEES)
+            .chain(0..wasm_names::MAX_NAMES as u32 - 1)
+            .collect();
+        let mut names: Vec<String> = named.iter().map(|index| format!("\"{index}\"")).collect();
+        let document = |names: &[String]| {
+            let functions: Vec<Value> = named
+                .iter()
+                .zip(names)
+                .map(|(index, name)| json!({"function": index, "name": name}))
+                .collect();
+            json!({"document_kind": wasm_names::KIND, "contract_version": 2,
+                "scope": "local-analyst-library", "requests": [], "artifacts": [], "vm_programs": [],
+                "wasm_modules": [{"sha256": sha, "functions": functions}]})
+            .to_string()
+        };
+        let mut size = document(&names).len();
+        let mut turn = 0;
+        while size < wasm_names::MAX_DOCUMENT_BYTES {
+            let name = &mut names[turn % named.len()];
+            turn += 1;
+            if name.chars().count() == wasm_names::MAX_CHARACTERS {
+                continue;
+            }
+            if size + 2 <= wasm_names::MAX_DOCUMENT_BYTES {
+                name.insert(0, '"');
+                size += 2;
+            } else {
+                name.insert(0, 'q');
+                size += 1;
+            }
+        }
+        let text = document(&names);
+        assert_eq!(text.len(), wasm_names::MAX_DOCUMENT_BYTES);
+        // Loaded the way the route loads it: from the Analyst library file.
+        let library = tempfile::tempdir().unwrap();
+        let store = Store::new(library.path().join("analyst.json"), Kind::Analyst);
+        store
+            .replace(&json!({"action": "replace_local_analyst_workspace", "expected_generation": 0,
+                "folders": [{"id": 1, "name": "Analyst Workspace", "parent_id": null}],
+                "files": [{"id": 1, "folder_id": 1, "name": wasm_names::FILE_NAME, "kind": "scratchpad",
+                    "language": "json", "content": text}]}))
+            .unwrap();
+        let analyst = Cache::default().get(&store);
+        assert_eq!(
+            analyst.status,
+            Status::Ready,
+            "a store at both limits is read"
+        );
+        assert_eq!(
+            analyst.module(&sha).map(|module| module.len()),
+            Some(wasm_names::MAX_NAMES)
+        );
+        let mut pairs: Vec<(u32, &str)> = named
+            .iter()
+            .copied()
+            .zip(names.iter().map(String::as_str))
+            .collect();
+        pairs.sort_unstable();
+        let expected: Vec<Value> = pairs
+            .iter()
+            .map(|(index, name)| json!([index, name]))
+            .collect();
+        let expected = Value::Array(expected);
+        let cut = std::cell::Cell::new(0);
+        let each = |document: &Value| {
+            assert_eq!(document["analyst_name"], names[0].as_str());
+            assert_eq!(document["name"], "run", "the module's name stays");
+            assert_eq!(document["analyst_names"]["status"], "ready");
+            assert_eq!(document["analyst_names"]["module_sha256"], sha.as_str());
+            assert!(
+                document["analyst_names"]["functions"] == expected,
+                "every name survives on every page"
+            );
+            if document["truncation"]["window_bytes"] == true {
+                cut.set(cut.get() + 1);
+            }
+        };
+        for line_limit in [DEFAULT_LINE_LIMIT, MAX_LINE_LIMIT] {
+            assert!(assert_named_pages_fit(&bytes, CALLEES, line_limit, Some(&analyst), &each) > 1);
+        }
+        assert!(cut.get() > 0, "the names are measured into some window");
     }
 
     /// The folding guarantee, checked on a lift: read in line order, with an
@@ -4083,8 +4205,8 @@ mod tests {
     }
 
     /// i32 programs whose callees are imports that log their calls, so a
-    /// listing can be run against a real engine: `f` throws on 13, `thr`
-    /// throws on odd values, `tick` bounds loops. Frames include try_table
+    /// listing can be run against a real engine: `f` and `mv` throw on 13,
+    /// `thr` throws on odd values, `tick` bounds loops. Frames include try_table
     /// with catch_all to an outer label, loops with parameters, and
     /// br/br_if/br_table at depth, tail calls and call_indirect.
     fn value_program(seed: u64) -> String {
@@ -4309,7 +4431,17 @@ mod tests {
                     dead = true;
                 }
                 38 if available >= 1 => {
-                    if next(2) == 0 {
+                    // mv throws on 13, which no generated constant or input
+                    // makes, so a third of tail calls pass it: inside a
+                    // try_table or a legacy try the exception must escape the
+                    // handler. The pick is one draw as before and its parity
+                    // still chooses the callee, so every other choice a seed
+                    // makes is unchanged.
+                    let pick = next(6);
+                    if pick < 2 {
+                        emit!("i32.const 13");
+                    }
+                    if pick % 2 == 0 {
                         emit!("return_call $mv");
                     } else {
                         emit!("i32.const 0 return_call_indirect (type $tmv)");

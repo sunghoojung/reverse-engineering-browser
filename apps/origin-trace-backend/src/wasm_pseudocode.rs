@@ -558,7 +558,7 @@ impl<'m> Lifter<'m> {
             ends: Vec::new(),
             lines: Vec::new(),
             stack: Vec::new(),
-            control: Control::new(type_index, results, Fold::default()),
+            control: Control::new(results, Fold::default()),
             targeted: vec![false],
             next_temp: 0,
             fallbacks: [0; 6],
@@ -991,7 +991,6 @@ impl<'m> Lifter<'m> {
         let height = self.stack.len();
         self.control.push(
             kind,
-            block_type,
             (params, results),
             height,
             Fold {
@@ -1112,7 +1111,7 @@ impl<'m> Lifter<'m> {
         if closing.state.catching {
             self.catching -= 1;
         }
-        self.stack.truncate(closing.height);
+        self.stack.truncate(closing.height());
         let line = self.push_line(LineKind::Close, text, vec![index], &[]);
         self.closed.push(Closed {
             open_line: closing.state.open_line,
@@ -1217,7 +1216,6 @@ impl<'m> Lifter<'m> {
                     let height = self.stack.len();
                     self.control.push(
                         Kind::Block,
-                        BlockType::Empty,
                         (0, 0),
                         height,
                         Fold {
@@ -1399,11 +1397,12 @@ impl<'m> Lifter<'m> {
                 };
                 self.statement(LineKind::Statement, text, Vec::new(), index, THROWING);
             }
-            Effect::BrOn { depth, .. } => {
-                if let Some(frame) = self.target(depth) {
+            Effect::BrOn { depth, test } => {
+                let target = self.target(depth);
+                if let Some(frame) = target {
                     self.label_name(frame);
                 }
-                match self.control.arity(op, self.module) {
+                match target.and_then(|frame| test.arity(self.control[frame].branch_arity())) {
                     Some((pops, pushes)) => {
                         self.fallback_with_effect(GC_BRANCH, op, index, pops, pushes)
                     }
@@ -1412,7 +1411,7 @@ impl<'m> Lifter<'m> {
                     }
                 }
             }
-            Effect::Switching => match self.control.arity(op, self.module) {
+            Effect::Switching => match wasm_stack::plain_arity(op, self.module) {
                 Some((pops, pushes)) => {
                     self.fallback_with_effect(STACK_SWITCHING, op, index, pops, pushes)
                 }
@@ -1769,7 +1768,7 @@ impl<'m> Lifter<'m> {
     /// typed loads and stores with their offset and alignment, and calls of
     /// the mnemonic for the rest.
     fn generic(&mut self, op: &Operator<'_>, index: u32) {
-        let Some((pops, pushes)) = self.control.arity(op, self.module) else {
+        let Some((pops, pushes)) = wasm_stack::plain_arity(op, self.module) else {
             self.fallback_unknown(op, index);
             return;
         };

@@ -19,8 +19,7 @@
 //! - [`Control`] is the stack of open frames, the function's own frame at
 //!   position 0. Each [`Frame`] has the shared facts (its [`Kind`], parameter
 //!   and result counts, and the operand-stack height below it) and the
-//!   consumer's own `state`. It resolves branch labels and keeps the
-//!   [`Label`] list [`arity`] needs.
+//!   consumer's own `state`. It resolves branch labels and branch arity.
 //! - [`arity`] returns `(pops, pushes)` for any operator wasmparser decodes,
 //!   from wasmparser's own `operator_arity` table, so every opcode the pinned
 //!   parser knows has a declared effect. `None` means the effect depends on
@@ -206,17 +205,6 @@ impl Kind {
             Self::TryTable => "try_table",
         }
     }
-    fn label_kind(self) -> FrameKind {
-        match self {
-            Self::Function | Self::Block => FrameKind::Block,
-            Self::Loop => FrameKind::Loop,
-            Self::If => FrameKind::If,
-            Self::Else => FrameKind::Else,
-            Self::Try => FrameKind::LegacyTry,
-            Self::Catch => FrameKind::LegacyCatch,
-            Self::TryTable => FrameKind::TryTable,
-        }
-    }
 }
 
 /// The function a call reaches: a direct index, a table entry of a declared
@@ -239,6 +227,18 @@ pub enum Test {
     NonNull,
     Cast,
     CastFail,
+}
+
+impl Test {
+    /// Declared `(pops, pushes)` of the branch when its label carries
+    /// `carried` values, as wasmparser's `operator_arity` declares them.
+    pub fn arity(self, carried: u32) -> Option<(u32, u32)> {
+        match self {
+            Self::Null => Some((carried + 1, carried + 1)),
+            Self::NonNull => Some((carried, carried.checked_sub(1)?)),
+            Self::Cast | Self::CastFail => Some((carried, carried)),
+        }
+    }
 }
 
 /// What one operator does to the open frames and to control flow.
@@ -473,12 +473,17 @@ pub struct Frame<S> {
     pub opened: Kind,
     pub params: u32,
     pub results: u32,
-    /// Operand-stack height below the frame's own values.
-    pub height: usize,
+    /// Kept as `u32` so the shared facts pack into 16 bytes beside the
+    /// consumer's state: deep nesting holds one frame per level.
+    height: u32,
     pub state: S,
 }
 
 impl<S> Frame<S> {
+    /// Operand-stack height below the frame's own values.
+    pub fn height(&self) -> usize {
+        self.height as usize
+    }
     /// How many values a branch to this frame carries: a loop's parameters
     /// (a branch to a loop restarts it), any other frame's results.
     pub fn branch_arity(&self) -> u32 {
@@ -490,17 +495,15 @@ impl<S> Frame<S> {
     }
 }
 
-/// The open frames of one body, outermost first, with the labels [`arity`]
-/// reads kept beside them.
+/// The open frames of one body, outermost first.
 pub struct Control<S> {
     frames: Vec<Frame<S>>,
-    labels: Vec<Label>,
 }
 
 impl<S> Control<S> {
-    /// The function's own frame, of the function type at `type_index`. It has
-    /// no parameters on the stack, and a branch to it returns `results`.
-    pub fn new(type_index: u32, results: u32, state: S) -> Self {
+    /// The function's own frame. It has no parameters on the stack, and a
+    /// branch to it returns `results`.
+    pub fn new(results: u32, state: S) -> Self {
         Control {
             frames: vec![Frame {
                 kind: Kind::Function,
@@ -510,37 +513,23 @@ impl<S> Control<S> {
                 height: 0,
                 state,
             }],
-            labels: vec![Label {
-                kind: Kind::Function.label_kind(),
-                block_type: BlockType::FuncType(type_index),
-            }],
         }
     }
     /// Opens a frame whose `(params, results)` are `arity`, with `height`
-    /// values of enclosing frames below it.
-    pub fn push(
-        &mut self,
-        kind: Kind,
-        block_type: BlockType,
-        (params, results): (u32, u32),
-        height: usize,
-        state: S,
-    ) {
+    /// values of enclosing frames below it. An operand stack is never taller
+    /// than the values a body's instructions push, far below `u32::MAX` for
+    /// any body a consumer simulates within its budgets.
+    pub fn push(&mut self, kind: Kind, (params, results): (u32, u32), height: usize, state: S) {
         self.frames.push(Frame {
             kind,
             opened: kind,
             params,
             results,
-            height,
+            height: u32::try_from(height).unwrap_or(u32::MAX),
             state,
-        });
-        self.labels.push(Label {
-            kind: kind.label_kind(),
-            block_type,
         });
     }
     pub fn pop(&mut self) -> Option<Frame<S>> {
-        self.labels.pop();
         self.frames.pop()
     }
     pub fn len(&self) -> usize {
@@ -564,7 +553,7 @@ impl<S> Control<S> {
     /// The operand-stack height the innermost frame starts at: a pop below
     /// it reads past what the frame owns.
     pub fn base(&self) -> usize {
-        self.frames.last().map_or(0, |frame| frame.height)
+        self.frames.last().map_or(0, Frame::height)
     }
     /// The frame a branch of relative `depth` names, `None` past the open
     /// frames.
@@ -592,14 +581,16 @@ impl<S> Control<S> {
         if let Some(frame) = self.frames.last_mut() {
             frame.kind = kind;
         }
-        if let Some(label) = self.labels.last_mut() {
-            label.kind = kind.label_kind();
-        }
     }
-    /// Declared `(pops, pushes)` of `op` with these frames open.
-    pub fn arity(&self, op: &Operator<'_>, module: &ModuleTypes) -> Option<(u32, u32)> {
-        arity(op, module, &self.labels)
-    }
+}
+
+/// Declared `(pops, pushes)` of an operator that reads no label. Every
+/// operator that does (branches, `return`, arms and ends) has its own
+/// [`Effect`], resolved with [`Control::target`], [`Frame::branch_arity`]
+/// and [`Test::arity`], so frames keep no label list: for those this answers
+/// `None`, an unknown effect.
+pub fn plain_arity(op: &Operator<'_>, module: &ModuleTypes) -> Option<(u32, u32)> {
+    arity(op, module, &[])
 }
 
 impl<S> Index<usize> for Control<S> {
@@ -697,9 +688,9 @@ mod tests {
             }),
             Some((2, 1))
         );
-        let mut control = Control::new(2, 0, ());
-        control.push(Kind::Block, BlockType::Empty, (0, 0), 0, ());
-        control.push(Kind::Loop, BlockType::FuncType(0), (2, 1), 0, ());
+        let mut control = Control::new(0, ());
+        control.push(Kind::Block, (0, 0), 0, ());
+        control.push(Kind::Loop, (2, 1), 0, ());
         assert_eq!(control.target(0), Some(2));
         assert_eq!(control.target(3), None);
         // A branch to the loop restarts it with its parameters.
@@ -718,7 +709,7 @@ mod tests {
         assert_eq!((clauses[1].target, clauses[1].values), (Some(2), Some(1)));
         assert_eq!((clauses[2].target, clauses[2].values), (None, None));
         control.pop();
-        control.push(Kind::Try, BlockType::Empty, (0, 0), 0, ());
+        control.push(Kind::Try, (0, 0), 0, ());
         assert!(control.accepts(&Effect::Catch { tag: None }));
         assert!(!control.accepts(&Effect::Else));
         assert_eq!(control.delegate_target(0), Some(1));
@@ -743,6 +734,10 @@ mod tests {
         assert!(ends(Operator::Rethrow { relative_depth: 0 }));
         assert!(!ends(Operator::BrOnNull { relative_depth: 0 }));
         assert!(!ends(Operator::I32Add));
+        // GC branches declare their counts from the label they name.
+        assert_eq!(Test::Null.arity(2), Some((3, 3)));
+        assert_eq!(Test::NonNull.arity(0), None);
+        assert_eq!(Test::Cast.arity(1), Some((1, 1)));
         assert!(effect(&Operator::Delegate { relative_depth: 0 }).is_structure());
         assert!(!effect(&Operator::Br { relative_depth: 0 }).is_structure());
     }

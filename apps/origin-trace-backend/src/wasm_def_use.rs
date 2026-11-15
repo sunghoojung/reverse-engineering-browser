@@ -675,7 +675,6 @@ pub fn simulate_with(
         params,
         body_offset,
         control: Control::new(
-            type_index,
             results,
             Flow {
                 offset: body_offset,
@@ -1246,7 +1245,6 @@ impl Sim<'_, '_> {
         self.stack.extend(param_values.iter().copied());
         self.control.push(
             kind,
-            ty,
             (params, results),
             height,
             Flow {
@@ -1267,7 +1265,7 @@ impl Sim<'_, '_> {
         }
         let frame = self.control.len() - 1;
         let params = self.control[frame].state.param_values.clone();
-        let height = self.control[frame].height;
+        let height = self.control[frame].height();
         let mut phis = Vec::with_capacity(params.len());
         for (slot, value) in params.iter().enumerate() {
             let phi = self.node(NodeKind::Phi, offset, index, NONE, 1);
@@ -1414,11 +1412,11 @@ impl Sim<'_, '_> {
             let frame = self.control.pop().expect("loop frame");
             let results = frame.results;
             if self.reachable {
-                let values = self.top_at(frame.height, results);
-                self.stack.truncate(frame.height);
+                let values = self.top_at(frame.height(), results);
+                self.stack.truncate(frame.height());
                 self.stack.extend(values);
             } else {
-                self.stack.truncate(frame.height);
+                self.stack.truncate(frame.height());
                 for _ in 0..results {
                     let unknown = self.unknown_value();
                     self.stack.push(unknown);
@@ -1432,7 +1430,7 @@ impl Sim<'_, '_> {
             incomings.insert(0, then);
         }
         if self.reachable {
-            let height = self.control[position].height;
+            let height = self.control[position].height();
             self.note_leftover(height, results, offset);
             let values = self.top_at(height, results);
             let values = values.into_iter().map(|v| self.materialize(v)).collect();
@@ -1465,7 +1463,7 @@ impl Sim<'_, '_> {
             });
         }
         let frame = self.control.pop().expect("frame");
-        self.stack.truncate(frame.height);
+        self.stack.truncate(frame.height());
         if incomings.is_empty() {
             self.reachable = false;
             for (local, value) in &frame.state.saved {
@@ -1733,7 +1731,7 @@ impl Sim<'_, '_> {
                 }
                 let position = self.control.len() - 1;
                 if self.reachable {
-                    let height = self.control[position].height;
+                    let height = self.control[position].height();
                     let results = self.control[position].results;
                     let values = self.top_at(height, results);
                     let values = values.into_iter().map(|v| self.materialize(v)).collect();
@@ -1745,7 +1743,7 @@ impl Sim<'_, '_> {
                         locals,
                     });
                 }
-                let height = self.control[position].height;
+                let height = self.control[position].height();
                 self.stack.truncate(height);
                 let params = self.control[position].state.param_values.clone();
                 self.stack.extend(params);
@@ -1838,7 +1836,7 @@ impl Sim<'_, '_> {
                 }
                 let position = self.control.len() - 1;
                 if self.reachable {
-                    let height = self.control[position].height;
+                    let height = self.control[position].height();
                     let results = self.control[position].results;
                     let values = self.top_at(height, results);
                     let values = values.into_iter().map(|v| self.materialize(v)).collect();
@@ -1852,7 +1850,7 @@ impl Sim<'_, '_> {
                     self.control[position].state.incoming.push(path);
                 }
                 self.close_try_body(position);
-                let height = self.control[position].height;
+                let height = self.control[position].height();
                 self.stack.truncate(height);
                 self.restore_locals(position);
                 self.reachable = self.control[position].state.reachable_at_entry;
@@ -2133,15 +2131,10 @@ impl Sim<'_, '_> {
                 return Err(Self::switching(op));
             }
             other => {
-                let (params, results) =
-                    self.control
-                        .arity(other, &self.module.types)
-                        .ok_or_else(|| {
-                            Stop::Unsupported(format!(
-                                "The operator {}",
-                                crate::wasm::mnemonic(other)
-                            ))
-                        })?;
+                let (params, results) = wasm_stack::plain_arity(other, &self.module.types)
+                    .ok_or_else(|| {
+                        Stop::Unsupported(format!("The operator {}", crate::wasm::mnemonic(other)))
+                    })?;
                 let kind = classify(other);
                 let args = self.pop_n(params, offset);
                 let address_first =

@@ -172,8 +172,9 @@ dialog shows "Tracking N functions" with each label and Remove and Clear All;
 the titlebar names what the running capture tracks.
 
 Digests follow the capture mode: on in Content mode when sites are saved, off
-in Metadata mode. An explicit `REB_NATIVE_JS_INVOCATION_SITES` or
-`REB_NATIVE_JS_INVOCATION_DIGESTS` wins. Agent-started sessions arm sites and
+in Metadata mode whatever the environment holds. An explicit
+`REB_NATIVE_JS_INVOCATION_SITES` wins, and in Content mode so does an explicit
+`REB_NATIVE_JS_INVOCATION_DIGESTS`. Agent-started sessions arm sites and
 digests only when the start request names them (`js_invocation_sites`,
 `js_invocation_saved_sites`, `js_invocation_digests` with
 `confirm_sensitive_capture`), never from the caller's environment. They keep

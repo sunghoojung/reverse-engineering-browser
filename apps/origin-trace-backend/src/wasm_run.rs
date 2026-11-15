@@ -1769,6 +1769,40 @@ fn keep_prefix(
     (low < total).then_some((low, total))
 }
 
+/// Whether `record` fits RECORD_INLINE_BUDGET as a one-record listing.
+fn fits(record: &Value) -> bool {
+    listed_len(record) <= RECORD_INLINE_BUDGET
+}
+
+/// Adds a step to `size_trimmed`, which is measured with the rest of the
+/// record, so every later step is sized with it.
+fn note(record: &mut Value, trimmed: &mut Vec<String>, step: String) {
+    trimmed.push(step);
+    record["size_trimmed"] = json!(trimmed);
+}
+
+/// keep_prefix on `key`, sized with the widest step `describe` can add (a
+/// kept count has no more digits than the total), and noted when it removed
+/// any entry.
+fn trim_prefix(
+    record: &mut Value,
+    trimmed: &mut Vec<String>,
+    key: &str,
+    describe: impl Fn(usize, usize) -> String,
+) -> bool {
+    let total = record[key].as_array().map_or(0, Vec::len);
+    let mut widest = trimmed.clone();
+    widest.push(describe(total, total));
+    record["size_trimmed"] = json!(widest);
+    let kept = keep_prefix(record, key, fits);
+    record["size_trimmed"] = json!(trimmed);
+    let Some((kept, total)) = kept else {
+        return false;
+    };
+    note(record, trimmed, describe(kept, total));
+    true
+}
+
 /// Trims a record until it fits RECORD_INLINE_BUDGET as a one-record
 /// `get_wasm_runs` listing (and so also alone), in a fixed order, recording in
 /// `size_trimmed` only the steps that removed something. Outcomes, counts,
@@ -1778,12 +1812,19 @@ fn fit(record: &mut Value) {
     if let Some(message) = record["outcome"]["message"].as_str() {
         record["outcome"]["message"] = json!(bounded(message, MAX_RECORD_MESSAGE));
     }
+    // The list is measured as it grows: added only after the last step, it
+    // took a record whose calls were sized to the byte 162 bytes past the
+    // budget.
     let mut trimmed = Vec::new();
-    let fits = |record: &Value| listed_len(record) <= RECORD_INLINE_BUDGET;
+    record["size_trimmed"] = json!(trimmed);
     if !fits(record) && record["request"].get("omitted").is_none() {
         let bytes = serde_json::to_vec(&record["request"]).map_or(0, |bytes| bytes.len());
         record["request"] = json!({"omitted": "size", "bytes": bytes});
-        trimmed.push("request: replaced by its size; provenance.inputs_digest names it".into());
+        note(
+            record,
+            &mut trimmed,
+            "request: replaced by its size; provenance.inputs_digest names it".into(),
+        );
     }
     for key in ["imports", "other_imports"] {
         if !fits(record)
@@ -1792,7 +1833,7 @@ fn fit(record: &mut Value) {
         {
             let total = list.len();
             list.truncate(32);
-            trimmed.push(format!("{key}: first 32 of {total}"));
+            note(record, &mut trimmed, format!("{key}: first 32 of {total}"));
         }
     }
     let lists = |record: &Value| {
@@ -1811,15 +1852,18 @@ fn fit(record: &mut Value) {
     {
         let counts = lists(record);
         record["function"]["type"] = json!({"params_count": counts[0], "results_count": counts[1]});
-        trimmed.push("function.type: replaced by its counts".into());
+        note(
+            record,
+            &mut trimmed,
+            "function.type: replaced by its counts".into(),
+        );
     }
     if !fits(record)
-        && let Some((kept, total)) = keep_prefix(record, "import_calls", fits)
+        && trim_prefix(record, &mut trimmed, "import_calls", |kept, total| {
+            format!("import_calls: first {kept} of {total} recorded calls")
+        })
     {
         record["import_calls_truncated"] = json!(true);
-        trimmed.push(format!(
-            "import_calls: first {kept} of {total} recorded calls"
-        ));
     }
     if !fits(record)
         && let Some(list) = record["results"].as_array_mut()
@@ -1827,17 +1871,20 @@ fn fit(record: &mut Value) {
     {
         let total = list.len();
         list.truncate(64);
-        trimmed.push(format!("results: first 64 of {total}"));
+        note(
+            record,
+            &mut trimmed,
+            format!("results: first 64 of {total}"),
+        );
     }
     // A last, hard step: the import lists keep only as many entries as fit.
     for key in ["imports", "other_imports"] {
-        if !fits(record)
-            && let Some((kept, total)) = keep_prefix(record, key, fits)
-        {
-            trimmed.push(format!("{key}: first {kept} of {total}"));
+        if !fits(record) {
+            trim_prefix(record, &mut trimmed, key, |kept, total| {
+                format!("{key}: first {kept} of {total}")
+            });
         }
     }
-    record["size_trimmed"] = json!(trimmed);
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -115,6 +115,8 @@ order until it fits:
 6. `imports` and `other_imports` keep only as many entries as fit.
 
 `size_trimmed` lists each step that removed something and is empty otherwise.
+It is part of the measured record: each step is sized with the steps listed
+before it and its own entry.
 Outcomes, counts, memory reads, digests and the expectation are never trimmed;
 the expectation is computed before any trimming. The trimmed record is what the
 HTTP response returns and what the store keeps: trimming happens once, before

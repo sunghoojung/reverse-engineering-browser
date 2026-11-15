@@ -109,9 +109,11 @@ order until it fits:
    names it).
 2. `imports` and `other_imports` keep their first 32 entries.
 3. `function.type` becomes its two counts.
-4. `import_calls` keeps the longest prefix that fits, and
-   `import_calls_truncated` is set; `import_calls_total` stays.
-5. `results` keeps its first 64 values.
+4. `results` keeps its first 64 values.
+5. `import_calls` keeps the longest prefix that fits, and
+   `import_calls_truncated` is set; `import_calls_total` stays. The calls are
+   sized after `results` is cut, so a function with 1000 results keeps the
+   calls that fit beside its first 64.
 6. `imports` and `other_imports` keep only as many entries as fit.
 
 `size_trimmed` lists each step that removed something and is empty otherwise.

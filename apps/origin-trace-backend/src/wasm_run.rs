@@ -1858,13 +1858,9 @@ fn fit(record: &mut Value) {
             "function.type: replaced by its counts".into(),
         );
     }
-    if !fits(record)
-        && trim_prefix(record, &mut trimmed, "import_calls", |kept, total| {
-            format!("import_calls: first {kept} of {total} recorded calls")
-        })
-    {
-        record["import_calls_truncated"] = json!(true);
-    }
+    // Results are cut before the calls are sized: sized against all 1000
+    // results, the calls could all be dropped from a record that then had
+    // room for about half of them.
     if !fits(record)
         && let Some(list) = record["results"].as_array_mut()
         && list.len() > 64
@@ -1876,6 +1872,13 @@ fn fit(record: &mut Value) {
             &mut trimmed,
             format!("results: first 64 of {total}"),
         );
+    }
+    if !fits(record)
+        && trim_prefix(record, &mut trimmed, "import_calls", |kept, total| {
+            format!("import_calls: first {kept} of {total} recorded calls")
+        })
+    {
+        record["import_calls_truncated"] = json!(true);
     }
     // A last, hard step: the import lists keep only as many entries as fit.
     for key in ["imports", "other_imports"] {
@@ -3124,6 +3127,48 @@ mod tests {
             json!({"params_count": 1000, "results_count": 1000})
         );
         assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
+    }
+
+    #[test]
+    fn import_calls_are_sized_after_results_are_trimmed() {
+        // The calls were sized against a record that still held all 1000
+        // results, so "import_calls: first 0 of 256" was kept in a 77,150-byte
+        // listing with room for 121 of them.
+        let wide = " i32".repeat(1000);
+        let source = format!(
+            "(module (import \"env\" \"f\" (func $f (param i32))) (memory 1) (func (export \"run\") (result{wide}) (local $n i32) (local.set $n (i32.const 256)) (block $done (loop $again (br_if $done (i32.eqz (local.get $n))) (call $f (i32.const 7)) (local.set $n (i32.sub (local.get $n) (i32.const 1))) (br $again))) {}))",
+            "(i32.const -2147483648)".repeat(1000)
+        );
+        let mut record = run_stored(
+            &module(&source),
+            json!({"export": "run",
+            "imports": [{"module": "env", "field": "f", "results": []}], "memory_reads": full_reads()}),
+        );
+        assert_eq!(
+            record["outcome"]["status"], "returned",
+            "{}",
+            record["outcome"]
+        );
+        let steps = record["size_trimmed"].to_string();
+        assert!(steps.contains("results: first 64 of 1000"), "{steps}");
+        assert_eq!(record["results"].as_array().unwrap().len(), 64);
+        let kept = record["import_calls"].as_array().unwrap().len();
+        assert!(kept > 64, "only {kept} calls kept: {steps}");
+        assert!(kept < 256, "every call fit: {steps}");
+        assert!(
+            steps.contains(&format!("import_calls: first {kept} of 256 recorded calls")),
+            "{steps}"
+        );
+        assert_eq!(record["import_calls_truncated"], true);
+        assert!(listed_len(&record) <= RECORD_INLINE_BUDGET);
+        // The prefix is the longest that fits: every call has the same
+        // argument, so the next one differs from the last kept only in its
+        // sequence number.
+        let calls = record["import_calls"].as_array_mut().unwrap();
+        let mut next = calls[kept - 1].clone();
+        next["sequence"] = json!(kept);
+        calls.push(next);
+        assert!(listed_len(&record) > RECORD_INLINE_BUDGET);
     }
 
     #[test]

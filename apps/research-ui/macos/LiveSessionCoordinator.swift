@@ -162,6 +162,75 @@ struct LivePanelStart: Equatable {
   }
 }
 
+// The content-derived launcher switches of one app-started capture: request
+// content with the three switches only it reads, Canvas images, and the
+// settled-value digests of armed invocation sites. Each start resolves them
+// once from its mode, the panel's limits and the app environment, and
+// LiveSessionCoordinator.captureDefaults gives the launcher exactly these in
+// place of any inherited value. Metadata turns every one off, whatever the
+// environment holds, as the agent path does (session_launch.rs), so a panel
+// that names Metadata always names what the launcher got.
+//
+// Other inherited switches are not content and stay as the environment sets
+// them: browser-internal and extension traffic keep the same content gates,
+// request and promise stacks record positions only, and dispatch-site and
+// guest-state capture need a researcher-supplied file.
+struct LiveCaptureContent: Equatable {
+  static let requestContent = "REB_CAPTURE_REQUEST_CONTENT"
+  static let canvasImages = "REB_CAPTURE_CANVAS_IMAGES"
+  static let invocationDigests = "REB_NATIVE_JS_INVOCATION_DIGESTS"
+  static let names = [requestContent, canvasImages, invocationDigests] + ContentLimits.defaults.launcherEnvironment.keys.sorted()
+
+  let mode: LiveCaptureMode
+  // The limits the start panel chose, present only for a session that retains
+  // request content; nil otherwise and for limits taken from the environment.
+  let limits: ContentLimits?
+  // The value of each name the launcher is given; a name absent here is
+  // removed. Without a digest value, the saved sites a start arms take the
+  // Content default (captureDefaults).
+  let switches: [String: String]
+
+  var retainsRequestContent: Bool { switches[Self.requestContent] == "1" }
+
+  // `modeChosen` says the start panel chose the mode, which then decides
+  // request content over an inherited REB_CAPTURE_REQUEST_CONTENT; otherwise an
+  // explicit value wins in Content mode. Each default also needs its
+  // categories in the mask, read with the launcher's grammar, so a narrower
+  // mask leaves it off rather than failing the launch, and an unreadable mask
+  // turns nothing on.
+  static func resolve(
+    environment: [String: String], mode: LiveCaptureMode, limits: ContentLimits?, modeChosen: Bool
+  ) -> LiveCaptureContent {
+    guard mode.capturesNetworkContent else {
+      return LiveCaptureContent(
+        mode: mode, limits: nil, switches: [requestContent: "0", canvasImages: "0", invocationDigests: "0"])
+    }
+    let mask = LiveSessionCoordinator.categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
+    let allows = { (required: UInt32) in mask & required == required }
+    var switches: [String: String] = [:]
+    // Canvas images need Canvas (1) and Artifact (1024).
+    switches[canvasImages] = environment[canvasImages] ?? (allows(1025) ? "1" : "0")
+    // Request paths, queries and bounded bodies need both Network (256) and
+    // Artifact (1024); a narrower mask keeps hosts only.
+    let requestDefault = allows(1280) ? "1" : "0"
+    switches[requestContent] = modeChosen ? requestDefault : environment[requestContent] ?? requestDefault
+    switches[invocationDigests] = environment[invocationDigests]
+    // A session that keeps no request content is given none of the three
+    // content-only switches, inherited or chosen. Until the panel chooses
+    // limits, the environment's pass as they are and the launcher checks them.
+    var chosen: ContentLimits?
+    if switches[requestContent] == "1" {
+      if let limits {
+        switches.merge(limits.launcherEnvironment) { _, limit in limit }
+        chosen = limits
+      } else {
+        for name in ContentLimits.defaults.launcherEnvironment.keys { switches[name] = environment[name] }
+      }
+    }
+    return LiveCaptureContent(mode: mode, limits: chosen, switches: switches)
+  }
+}
+
 // The app's saved native JavaScript invocation sites, which every capture it
 // starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
 // is exactly the browser's native-js-invocation-sites-v1 form with 1 to 8
@@ -387,9 +456,7 @@ final class LiveSessionCoordinator {
 
   func start(
     braveExecutableURL: URL,
-    captureNetworkContent: Bool,
-    contentLimits: ContentLimits? = nil,
-    modeChosen: Bool = false,
+    content: LiveCaptureContent,
     useSystemKeychain: Bool,
     ready: @escaping (URL) -> Void,
     failed: @escaping (Failure) -> Void
@@ -400,9 +467,7 @@ final class LiveSessionCoordinator {
     do {
       let configuration = try makeConfiguration(
         braveExecutableURL: braveExecutableURL,
-        captureNetworkContent: captureNetworkContent,
-        contentLimits: contentLimits,
-        modeChosen: modeChosen,
+        content: content,
         useSystemKeychain: useSystemKeychain
       )
       let child = Process()
@@ -503,9 +568,7 @@ final class LiveSessionCoordinator {
 
   private func makeConfiguration(
     braveExecutableURL: URL,
-    captureNetworkContent: Bool,
-    contentLimits: ContentLimits?,
-    modeChosen: Bool,
+    content: LiveCaptureContent,
     useSystemKeychain: Bool
   ) throws -> Configuration {
     guard let resourcesURL = Bundle.main.resourceURL else {
@@ -603,8 +666,7 @@ final class LiveSessionCoordinator {
       invocationSitesURL = copy
     }
     environment = Self.captureDefaults(
-      environment: environment, captureNetworkContent: captureNetworkContent,
-      savedInvocationSites: invocationSitesURL, contentLimits: contentLimits, modeChosen: modeChosen)
+      environment: environment, content: content, savedInvocationSites: invocationSitesURL)
     // A mask without VM leaves the copy unused.
     if let copy = invocationSitesURL, environment["REB_NATIVE_JS_INVOCATION_SITES"] != copy.path {
       try? FileManager.default.removeItem(at: copy)
@@ -713,45 +775,27 @@ final class LiveSessionCoordinator {
     return UInt32(mask)
   }
 
-  // Defaults the packaged app adds for a live session. An explicit environment
-  // value always wins. Each default capture also needs its categories in the
-  // mask, read with the launcher's grammar, so a narrower mask leaves it off
-  // rather than failing the launch, and an unreadable mask turns nothing on.
+  // Defaults the packaged app adds for a live session. The content-derived
+  // switches are exactly `content`, this start's resolved value, whatever the
+  // environment holds. For every other switch an explicit environment value
+  // wins. Each default capture also needs its categories in the mask, read
+  // with the launcher's grammar, so a narrower mask leaves it off rather than
+  // failing the launch, and an unreadable mask turns nothing on.
   //
   // `savedInvocationSites` is this launch's private copy of the app's saved
   // site set, or nil when the set is empty. The sites need the VM category
   // (512). The launcher arms them only if this Brave defines invocation
   // capture, and otherwise starts without them and says so. Their settled-value
-  // digests are sensitive capture: on in Content mode, off in Metadata mode.
-  //
-  // `contentLimits` are the start panel's budgets and media choice, or nil
-  // when this run's panel has not chosen any. They are the researcher's
-  // explicit choice, so they replace the environment's values. `modeChosen`
-  // says the start panel chose the mode, which then decides request content
-  // over an inherited REB_CAPTURE_REQUEST_CONTENT. A session that does not
-  // retain request content is given none of the three content-only switches,
-  // inherited or chosen, as the agent path removes them.
+  // digests are sensitive capture: on in Content mode unless set to 0, never in
+  // Metadata mode.
   static func captureDefaults(
-    environment: [String: String], captureNetworkContent: Bool, savedInvocationSites: URL? = nil,
-    contentLimits: ContentLimits? = nil, modeChosen: Bool = false
+    environment: [String: String], content: LiveCaptureContent, savedInvocationSites: URL? = nil
   ) -> [String: String] {
     var environment = environment
     let mask = categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
     let allows = { (required: UInt32) in mask & required == required }
-    // Canvas images need Canvas (1) and Artifact (1024).
-    environment["REB_CAPTURE_CANVAS_IMAGES"] =
-      environment["REB_CAPTURE_CANVAS_IMAGES"]
-      ?? (captureNetworkContent && allows(1025) ? "1" : "0")
-    // The content mode's request paths, queries and bounded bodies need both
-    // Network (256) and Artifact (1024); a narrower mask keeps hosts only.
-    let requestContent = captureNetworkContent && allows(1280) ? "1" : "0"
-    environment["REB_CAPTURE_REQUEST_CONTENT"] =
-      modeChosen ? requestContent : environment["REB_CAPTURE_REQUEST_CONTENT"] ?? requestContent
-    if environment["REB_CAPTURE_REQUEST_CONTENT"] != "1" {
-      for name in ContentLimits.defaults.launcherEnvironment.keys { environment.removeValue(forKey: name) }
-    } else if let contentLimits {
-      environment.merge(contentLimits.launcherEnvironment) { _, chosen in chosen }
-    }
+    for name in LiveCaptureContent.names { environment.removeValue(forKey: name) }
+    environment.merge(content.switches) { _, resolved in resolved }
     // The packaged app turns on every native switch that needs no per-target input
     // file. Guest-state and JavaScript dispatch-site capture stay off because they
     // need a researcher-supplied adapter or site file. An explicit "0" still opts
@@ -774,23 +818,13 @@ final class LiveSessionCoordinator {
     // unavailable. An explicit "0" opts out.
     environment["REB_CONSOLE_DOCUMENT_START"] = environment["REB_CONSOLE_DOCUMENT_START"] ?? "1"
     // An explicit REB_NATIVE_JS_INVOCATION_SITES, even an empty one, wins, and
-    // then the environment alone decides digests, as for make live.
+    // then the resolved switch alone decides digests, as for make live.
     if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil, let saved = savedInvocationSites, allows(512) {
       environment["REB_NATIVE_JS_INVOCATION_SITES"] = saved.path
       environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] = environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] ?? "1"
-      environment["REB_NATIVE_JS_INVOCATION_DIGESTS"] =
-        environment["REB_NATIVE_JS_INVOCATION_DIGESTS"] ?? (captureNetworkContent ? "1" : "0")
+      environment[LiveCaptureContent.invocationDigests] = environment[LiveCaptureContent.invocationDigests] ?? "1"
     }
     return environment
-  }
-
-  // Whether a session started this way retains request content, so the
-  // start panel names limits only for a session they apply to.
-  static func retainsRequestContent(
-    environment: [String: String], captureNetworkContent: Bool, modeChosen: Bool
-  ) -> Bool {
-    captureDefaults(environment: environment, captureNetworkContent: captureNetworkContent, modeChosen: modeChosen)[
-      "REB_CAPTURE_REQUEST_CONTENT"] == "1"
   }
 
   static func failureCause(in data: Data?, fallback: String = startupFallback) -> String {

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstring>
 
+#include "base/compiler_specific.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -16,6 +17,9 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
 
+// Chromium builds this directory with -Wunsafe-buffer-usage as an error. The
+// records here are fixed layouts written at offsets their sizes bound, so
+// each raw offset and memcpy is marked UNSAFE_BUFFERS.
 namespace reb {
 
 namespace {
@@ -40,7 +44,7 @@ std::array<std::uint8_t, 48> Tail() noexcept {
 void PutFrame(std::array<std::uint8_t, 48>& tail,
               const std::size_t at,
               const NativeStackFrame& frame) noexcept {
-  std::memcpy(tail.data() + at, &frame, sizeof(frame));
+  UNSAFE_BUFFERS(std::memcpy(tail.data() + at, &frame, sizeof(frame)));
 }
 
 void PutName(std::array<std::uint8_t, 48>& tail,
@@ -50,7 +54,7 @@ void PutName(std::array<std::uint8_t, 48>& tail,
              const std::size_t limit) noexcept {
   const std::size_t n = std::min(text.size(), limit);
   tail[length_at] = static_cast<std::uint8_t>(n);
-  std::memcpy(tail.data() + text_at, text.data(), n);
+  UNSAFE_BUFFERS(std::memcpy(tail.data() + text_at, text.data(), n));
 }
 
 }  // namespace
@@ -99,9 +103,9 @@ bool NativeWatchRules::AddRequest(const std::string_view url_contains,
     return false;
   }
   NativeWatchRequestRule& rule = requests[request_count++];
-  std::memcpy(rule.url.data(), url_contains.data(), url_contains.size());
+  UNSAFE_BUFFERS(std::memcpy(rule.url.data(), url_contains.data(), url_contains.size()));
   rule.url_length = url_contains.size();
-  std::memcpy(rule.method.data(), method.data(), method.size());
+  UNSAFE_BUFFERS(std::memcpy(rule.method.data(), method.data(), method.size()));
   rule.method_length = method.size();
   return true;
 }
@@ -118,7 +122,7 @@ bool NativeWatchRules::AddEvent(const std::string_view type) noexcept {
       return false;
     }
   }
-  std::memcpy(events[event_count].data(), type.data(), type.size());
+  UNSAFE_BUFFERS(std::memcpy(events[event_count].data(), type.data(), type.size()));
   event_lengths[event_count++] = type.size();
   return true;
 }
@@ -238,7 +242,7 @@ void NativeDebuggerWatch::Listener(const std::uint64_t frame_id,
   std::array<std::uint8_t, 48> tail = Tail();
   tail[0] = static_cast<std::uint8_t>(slot);
   tail[1] = target_kind;
-  std::memcpy(tail.data() + 2, &node_type, sizeof(node_type));
+  UNSAFE_BUFFERS(std::memcpy(tail.data() + 2, &node_type, sizeof(node_type)));
   PutFrame(tail, 4, listener);
   PutName(tail, 20, 21, event_type, kNativeWatchEventBytes);
   NativeRequestStackWalk::RecordObservation(NativeProbeType::kListenerDispatch, 0, 0, frame_id,
@@ -259,9 +263,9 @@ void NativeDebuggerWatch::Timer(const std::uint64_t frame_id,
   tail[0] = fired ? 2 : 1;
   tail[1] = interval ? 2 : 1;
   const std::uint16_t flags = string_callback ? 1 : 0;
-  std::memcpy(tail.data() + 2, &flags, sizeof(flags));
-  std::memcpy(tail.data() + 4, &timer_id, sizeof(timer_id));
-  std::memcpy(tail.data() + 8, &delay_ms, sizeof(delay_ms));
+  UNSAFE_BUFFERS(std::memcpy(tail.data() + 2, &flags, sizeof(flags)));
+  UNSAFE_BUFFERS(std::memcpy(tail.data() + 4, &timer_id, sizeof(timer_id)));
+  UNSAFE_BUFFERS(std::memcpy(tail.data() + 8, &delay_ms, sizeof(delay_ms)));
   PutFrame(tail, 12, callback);
   NativeRequestStackWalk::RecordObservation(NativeProbeType::kTimerObservation, 0, 0, frame_id,
                                             tail);
@@ -335,7 +339,7 @@ void NativeDebuggerWatch::Mutation(const std::uint64_t frame_id,
   std::array<std::uint8_t, 48> tail = Tail();
   tail[0] = kind;
   tail[1] = static_cast<std::uint8_t>(slot);
-  std::memcpy(tail.data() + 2, &node_type, sizeof(node_type));
+  UNSAFE_BUFFERS(std::memcpy(tail.data() + 2, &node_type, sizeof(node_type)));
   if (kind == kNativeWatchAttribute) {
     PutName(tail, 4, 5, attribute, kNativeWatchAttributeBytes);
   }

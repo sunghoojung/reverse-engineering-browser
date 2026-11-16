@@ -589,13 +589,16 @@ inline void ReleaseNativeWasmBudgetAdmission(const NativeWasmBudgetAdmission& ad
   std::FILE* file = std::fopen(text.c_str(), "r");
   if (file == nullptr)
     return std::nullopt;
-  char buffer[32] = {};
-  const auto read = std::fread(buffer, 1, sizeof(buffer), file);
+  // Byte by byte: Chromium refuses fread's raw buffer under -Wunsafe-buffer-usage.
+  std::array<char, 32> buffer{};
+  std::size_t read = 0;
+  for (int c = 0; read < buffer.size() && (c = std::fgetc(file)) != EOF;)
+    buffer[read++] = static_cast<char>(c);
   std::fclose(file);
   // A full buffer may be truncated. Generations are short decimals.
-  if (read == 0 || read >= sizeof(buffer))
+  if (read == 0 || read >= buffer.size())
     return std::nullopt;
-  return ParseNativeWasmBudgetResetGeneration(std::string_view(buffer, read));
+  return ParseNativeWasmBudgetResetGeneration(std::string_view(buffer.data(), read));
 }
 
 }  // namespace reb

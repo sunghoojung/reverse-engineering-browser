@@ -50,6 +50,11 @@ Checked without a checkout or compiler in #501:
   files pass `check-brave-services.py --brave` under the pinned gn.
 - Every object `brave-probe-check` compiles maps to the GN target that builds
   its source at the pins.
+- Host clang with `-Wunsafe-buffer-usage` and its libc check, over the offline
+  harnesses, finds no raw pointer offset or libc buffer call in integration
+  code without a compiled v0.5.1 precedent; Chromium makes both errors in
+  `brave/`, Blink and content. No overlay or patch code calls a deprecated V8
+  15.7 API.
 
 None of this is a compile. Overload resolution, templates, `-Werror` warnings,
 Mojo-generated code and Brave's `chromium_src` overrides are first checked by
@@ -141,8 +146,20 @@ fix to one existing patch-owned file keeps the checkout through `advance-patch`;
 anything else goes through the development loop and ends with a fresh `--init`
 from the merged fix. `adopt` and `advance-patch` compare the two commits, so
 make the fix on a branch from the build commit with nothing else in it.
-Suspected first failures and their likely fixes are in #501. Each fix moves the
-build commit of step 1 to the fixed commit.
+Each fix moves the build commit of step 1 to the fixed commit.
+
+None of these has been seen; they are where a first build is most likely to stop:
+
+| If it stops at | The likely fix |
+| --- | --- |
+| Brave's `pnpm install` with a `devEngines` package manager error | pnpm is older than 11.11.0: have Corepack provide a newer one |
+| `gn gen` naming an overlay or patched `BUILD.gn` label | a dependency moved at 157: find its new label and change the overlay `BUILD.gn` or the patch |
+| `gn gen` header-check errors | `CI` is set in the environment, which makes Brave pass `--check`; unset it. The overlay's `*_blink.h` headers belong to no target by design |
+| `-Wunsafe-buffer-usage` or `-Wunsafe-buffer-usage-in-libc-call` in an overlay or patched file | iterator arithmetic on a type without bounded iterators, or a libc buffer call: wrap the expression in `UNSAFE_BUFFERS` (`base/compiler_specific.h`) as the probe sink does, or copy through `base::span` |
+| Mojo-generated code for `cloneable_message.mojom` | a typemap the build uses lacks the `reb_task_origin` getter; the Blink and common traits both have it. (`BeginNavigationParams` keeps its old constructor: its REB field is `[MinVersion=1]` and last, and Mojo emits one constructor per version) |
+| A `chromium_src` override or Brave macro next to a REB hunk | Brave changed the override at `v1.99.57`; only textual replay was checked. Move the REB hunk to the overridden function |
+| The Siso `chromium_src` redirect or the `sccache` patches (Brave 0008 to 0010) | Brave's Siso config changed shape; rebuild without `cc_wrapper` to confirm, then regenerate those patches |
+| The full build, in a file outside the probe list | an indirect include or a template from a changed header; fix it in the development loop and add the file to the probe list |
 
 ### 6. Focused gates on the built browser
 

@@ -108,8 +108,9 @@ undetectable is a non-goal, and the interface says when it is active.
 An in-process `v8_inspector::V8InspectorSession`, connected to Blink's
 `MainThreadDebugger` through a local channel. No remote debugging port, no
 protocol endpoint, no DevTools frontend. The decision was taken from the
-pinned sources in `browser/config/*.rev` (Chromium 151.0.7922.108, V8
-`20ad8d00`):
+sources pinned at the time (Chromium 151.0.7922.108, V8 `20ad8d00`), and every
+point below still holds at the current pins in `browser/config/*.rev`
+(Chromium 157.0.8103.79, V8 15.7.112.43):
 
 - A raw `v8::debug::DebugDelegate` was rejected. `Debug` holds exactly one
   delegate per isolate (`v8/src/debug/debug.h`, `debug_delegate_`), and
@@ -139,7 +140,8 @@ The session is driven with inspector protocol messages built and read inside
 the renderer, because that is the only interface V8 exposes to breakpoints,
 call frames, scopes and `Debugger.evaluateOnCallFrame`: `V8InspectorSession`'s
 C++ surface stops at `breakProgram`, `resume`, `stepOver` and
-`setSkipAllPauses`. Those messages are a renderer-internal detail. Nothing
+`setSkipAllPauses` (V8 15.7 adds `setSkipAllPausesForInternalUse`, a temporary
+override of that same setting). Those messages are a renderer-internal detail. Nothing
 accepts them from outside the process, none of them crosses the command socket,
 and the socket carries fixed binary records instead.
 

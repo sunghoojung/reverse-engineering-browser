@@ -3256,6 +3256,29 @@ mod tests {
     }
 
     #[test]
+    fn a_clause_naming_tag_u32_max_is_not_a_catch_all() {
+        // u32::MAX is the simulation's own catch-all marker; a clause naming
+        // that tag index names a tag no module declares.
+        let module = |clause: &str| {
+            wat::parse_str(format!(
+                "(module (import \"env\" \"f\" (func $f)) (func block try_table ({clause} 0) call $f end end))"
+            ))
+            .unwrap()
+        };
+        let sim = simulate_limited(&module("catch 4294967295"), 1, wasm_def_use::MAX_WORK);
+        assert!(sim.stopped_at.is_some(), "{:?}", sim.omissions);
+        assert!(
+            sim.omissions
+                .iter()
+                .any(|o| o.contains("A catch of undeclared tag 4294967295")),
+            "{:?}",
+            sim.omissions
+        );
+        let sim = simulate_limited(&module("catch_all"), 1, wasm_def_use::MAX_WORK);
+        assert_eq!(sim.stopped_at, None, "{:?}", sim.omissions);
+    }
+
+    #[test]
     fn every_carried_copy_and_merge_slot_is_charged() {
         // N br_if carry A values each to one block: per branch the carried
         // read, its record, the branch's own copy and the stored path, and A

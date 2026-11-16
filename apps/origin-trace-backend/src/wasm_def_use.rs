@@ -1981,16 +1981,16 @@ impl Sim<'_, '_> {
                 ));
                 continue;
             };
-            // `NONE` is this simulation's catch-all tag, so a clause naming
-            // tag index u32::MAX reads as one, as it always has.
-            let tag = clause.tag.unwrap_or(NONE);
-            let values = if tag == NONE {
-                u32::from(clause.with_ref)
-            } else {
-                clause
-                    .values
-                    .ok_or_else(|| Stop::Unsupported(format!("A catch of undeclared tag {tag}")))?
+            // The clause's own tag decides, not the index: `NONE` is this
+            // simulation's catch-all tag, and a clause naming tag index
+            // u32::MAX names a tag no module can declare.
+            let Some(values) = clause.values else {
+                let tag = clause.tag.unwrap_or(NONE);
+                return Err(Stop::Unsupported(format!(
+                    "A catch of undeclared tag {tag}"
+                )));
             };
+            let tag = clause.tag.unwrap_or(NONE);
             clauses.push(TryCatch {
                 target,
                 tag,

@@ -507,6 +507,16 @@ costs one relaxed load while disarmed. See
 
 ## Pausing debugger (experiment)
 
+These sources are tracked but have never been compiled into Brave or run
+live: they merged by maintainer decision without `make brave-probe-check`.
+The only check they get here is `make native-debugger-pause-compile`, a
+syntax-only compile of the overlay against stand-in declarations of the
+pinned types, which nothing links or runs. The `BUILD.gn` entries are
+unconditional, so a compile error in them fails every Brave build from these
+inputs whether or not the experiment is on. The compile and live checks still
+owed are listed under Acceptance still required in
+[native debugger v1](../../../docs/product/native-debugger-v1.md#acceptance-still-required).
+
 `--reb-native-debugger=<socket path>` makes the browser open one private
 command socket and lets a renderer create the pausing debugger. It is never
 set by the packaged app or by `make live`. Without it the renderer creates no

@@ -6,15 +6,18 @@ written into [SAFETY.md](../../SAFETY.md). Phase 3, the pausing debugger, is
 specified by [native debugger pause v1](../../protocol/native-debugger-pause-v1.md),
 and its two halves are separate changes. The backend half, the contract, the
 records, the projection and the interface are implemented and tested. The
-browser half is a source candidate on `t3/pausing-debugger-browser`: three
-rounds of review each found code in it that does not compile, and its
-`BUILD.gn` edits would add those sources to every Brave build from these
-inputs whether or not the experiment is on, so it does not merge until a
-machine has compiled it with `make brave-probe-check` and run it live. Until
-then `get_native_debugger` reports the pausing debugger unsupported and every
-action is refused before anything is sent, and the engine and control-path
-sections below are a specification read from the pinned sources rather than a
-description of shipped code.
+browser half is in the tracked overlay and patches as a source candidate,
+merged by maintainer decision without `make brave-probe-check`, a compile or
+a live run. Three rounds of review each found code in it that did not
+compile; a host harness now compiles it against stand-in declarations, which
+checks names and conversions but is not a Chromium build. Its `BUILD.gn`
+edits add those sources to every Brave build from these inputs whether or not
+the experiment is on, so the first such build is also the first compile of
+this half. No Brave build serves the peer yet, so `get_native_debugger`
+reports the pausing debugger unsupported and every action is refused before
+anything is sent, and the engine and control-path sections below are a
+specification read from the pinned sources rather than a description of
+shipped code.
 
 ## Phase 1: observe without pausing
 
@@ -312,8 +315,16 @@ attestation waits for the sidebar to land.
   and the experiment off leaves no agent and no inspector session created.
 - Phase 3 in the packaged app, once the Sources debugger sidebar is merged: a
   rendered test of the paused sections and its screenshots.
-- Phase 3's browser half compiled before it merges: `make brave-probe-check`
-  on an initialized toolchain, then the live checks listed on its own branch.
+- Phase 3's browser half compiled and run live. It merged without either, by
+  maintainer decision, so this comes first: `make brave-probe-check` on an
+  initialized toolchain, then the phase 3 checks above and three more from
+  that half's review: a `pause` while a same-process sibling frame runs is
+  recorded, reported and ended at once; a logpoint or condition whose own
+  code detaches the selected iframe tears down as cleanly as an evaluation
+  that does; and whether the 200 ms evaluation timeout can fire inside a
+  pause at all, given that `DebugScope` holds a `PostponeInterruptsScope`. If
+  it cannot, the contract's evaluation deadline needs saying differently.
   Policy in [SAFETY.md](../../SAFETY.md) describes the pausing commands and
   what an implementation must do; it says so as a specification, and becomes
-  a description of this product only when that half lands.
+  a description of this product only when that half has been compiled,
+  verified live and approved.

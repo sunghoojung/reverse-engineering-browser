@@ -24,6 +24,43 @@ PIN_SHAPES = {
     "build_source": r"[0-9a-f]{40}",
 }
 PROVENANCE_SCHEMA = "reb-brave-distribution-provenance-v1"
+# The browser the previous release paired, for the notes' upgrade line.
+PREVIOUS_BROWSER = "Brave v1.95.52 on Chromium 151.0.7922.108"
+# What the notes may say the new browser build captures. Each claim is behavior
+# a live session on that exact build has to show, so it starts here, pending,
+# and stays out of the notes. The build-day runbook in
+# docs/development/paired-release.md runs each one; move a claim to
+# ACCEPTED_LIVE only with that evidence, and delete one that did not hold.
+# A pair is not recorded while any claim is still pending.
+PENDING_LIVE = (
+    "A fresh live session with this build on an owned local fixture recorded Wasm "
+    "`br_table` and `call_indirect` observations, the Canvas readback image, network "
+    "and fingerprint surfaces, and the native Console runtime check passed on the "
+    "extracted ZIP.",
+    "Every script V8 compiles is captured, so `eval` and `new Function` on a page "
+    "with no CSP, and worker scripts, are recorded with their source.",
+    "Request and response headers and each request's cookies are recorded natively, "
+    "`document.cookie` reads are named per cookie, and every header block or cookie "
+    "list that was not kept is counted by reason.",
+    "Response bodies are kept with exact bytes or a stated reason, a memory-cache "
+    "reuse links to the bytes that first loaded it, and streamed bodies are kept as "
+    "they arrive.",
+    "Full URLs and request bodies up to 16 MiB, including file, blob and stream "
+    "bodies, are kept within the byte budget the start panel sets.",
+    "Every Traffic request links to its browser tab, including worker, service "
+    "worker, worklet, early-hints and prefetch requests; a request with no tab is "
+    "counted with a reason.",
+    "With request stacks on, a renderer request carries the JavaScript and Wasm "
+    "stack that started it, in workers too, linked across message posts.",
+    "Synchronous XHR, service-worker failures and memory-cache reuse finish their "
+    "requests in the renderer.",
+    "Debugger observations (watched requests, uncaught exceptions and rejections, "
+    "listener dispatches, timers, CSP violations and DOM mutations) arrive from the "
+    "page for an agent to wait on.",
+    "Each Wasm `br_table` sample names its direct caller, and Wasm traps, calls still "
+    "executing and dispatch scope gaps are recorded.",
+)
+ACCEPTED_LIVE = ()
 
 
 def digest(path):
@@ -103,12 +140,36 @@ def notes_text(tag, brave_tag, source_sha, run_url, assets, browser):
         f"the unchanged Brave Browser Development build first published with {brave_tag}"
         if reused else "a new Brave Browser Development build that carries its native probes"
     )
-    validated = f"Before {brave_tag} was published" if reused else "Before publishing"
-    unchanged = (
-        f"- **Browser:** the Brave build is the {brave_tag} build byte for byte: the same "
-        "ZIP, provenance and code signature. The browser inputs and protocol match its "
-        "build commit.\n" if reused else ""
-    )
+    if reused:
+        browser_change = (
+            f"- **Browser:** the Brave build is the {brave_tag} build byte for byte: the same "
+            "ZIP, provenance and code signature. The browser inputs and protocol match its "
+            "build commit.\n"
+        )
+        validation = (
+            f"- Before {brave_tag} was published, a fresh live session with this browser "
+            "build on a local fixture recorded Wasm `br_table` and `call_indirect` "
+            "observations, the Canvas readback image, network and fingerprint surfaces, "
+            "and the native Console runtime check passed on the extracted ZIP. "
+            "Guest-state adapters, JavaScript dispatch sites and Finder automatic launch "
+            "were not exercised live.\n"
+        )
+        accepted = ""
+    else:
+        browser_change = (
+            f"- **Browser:** Brave {pins['brave_core']} on Chromium {pins['chromium']}, "
+            f"up from {PREVIOUS_BROWSER}, with this project's overlays and patches "
+            "carried onto it.\n"
+        )
+        validation = (
+            "- Guest-state adapters, JavaScript dispatch sites and Finder automatic "
+            "launch were not exercised live. The pausing debugger is built in but off: "
+            "nothing in Origin Trace turns it on.\n"
+        )
+        accepted = "## Checked live on this build\n\n" + (
+            "".join(f"- {claim}\n" for claim in ACCEPTED_LIVE) if ACCEPTED_LIVE
+            else "- No browser capture beyond startup is claimed for this build.\n"
+        ) + "\n"
     return (
         f"Origin Trace {tag} is a paired macOS Apple silicon release: the Origin Trace "
         f"app and {paired}.\n\n"
@@ -116,13 +177,25 @@ def notes_text(tag, brave_tag, source_sha, run_url, assets, browser):
         f"[Brave Browser Development for Apple silicon]({downloads}/{brave.name}). "
         "Extract the app bundles beside each other, or install Brave Browser "
         "Development in `/Applications`.\n\n"
-        "## Changes since v0.5.1\n\n"
-        "- **MCP reconnects:** `reb-api mcp` now exits with status 3 after it refuses a "
-        "call because its endpoint file or backend instance changed, for example after "
-        "a live session restart. MCP clients then show the server as stopped instead of "
-        "connected while every call fails, and restarting the server connects it to the "
-        "current session. No call is sent to the replaced backend.\n"
-        f"{unchanged}\n"
+        "## Changes since v0.5.2\n\n"
+        f"{browser_change}"
+        "- **Traffic, Sources and debugger:** Headers, Cookies, Response, Preview and "
+        "Initiator tabs in Traffic; an entropy and kind map, a cross-references dock and "
+        "a debugger sidebar with Threads in Sources; agents can wait on debugger "
+        "observations and Traffic marks watched requests.\n"
+        "- **Flow workspace:** a session flow graph with linked panes and focus mode, and "
+        "Wasm and VM control flow drawn as basic-block graphs.\n"
+        "- **Wasm analysis:** a readable lifted view of one function, toolchain and "
+        "well-known function identification, names that persist across reads, a function "
+        "match between two modules, value flow for one operand or local, and an offline "
+        "run of one function in a stubbed interpreter.\n"
+        "- **In-app agent:** a chat dock that works over the `reb-api` MCP with a Claude or "
+        "ChatGPT API key, or a Claude, ChatGPT or Grok subscription, at one of four "
+        "permission levels.\n"
+        "- **Starting a session:** an in-window start panel replaces the startup alerts, "
+        "with Content limits for the request and response budgets and media capture.\n"
+        "- **Look:** one color system and a Rosé Pine Dawn light theme.\n\n"
+        f"{accepted}"
         "## Live sessions\n\n"
         "Opening Origin Trace starts a live session directly with the Brave Browser "
         "Development build it finds, with no pairing prompt. This release was validated "
@@ -144,11 +217,7 @@ def notes_text(tag, brave_tag, source_sha, run_url, assets, browser):
         "Wallet) stay off in this build.\n"
         "- Worker and proxy foundations remain dormant; live proxy routing is not "
         "implemented.\n"
-        f"- {validated}, a fresh live session with this browser build on a local "
-        "fixture recorded Wasm `br_table` and `call_indirect` observations, the Canvas "
-        "readback image, network and fingerprint surfaces, and the native Console "
-        "runtime check passed on the extracted ZIP. Guest-state adapters, JavaScript "
-        "dispatch sites and Finder automatic launch were not exercised live.\n\n"
+        f"{validation}\n"
         f"Source: `{source_sha}`. [Validation pipeline]({run_url}). "
         f"[Pair provenance]({downloads}/{pair.name}). "
         f"[Checksums]({downloads}/{sums.name}).\n"
@@ -181,6 +250,11 @@ def main():
     brave_tag = re.fullmatch(PIN_SHAPES["brave_name"], name).group(1)
     if version_key(brave_tag) > version_key(tag):
         raise ValueError("The paired browser was built for a later release")
+    if brave_tag == tag and PENDING_LIVE:
+        raise ValueError(
+            f"{len(PENDING_LIVE)} release note claims about the new browser build are still "
+            "pending live acceptance. Run them on the paired build, then move each one to "
+            "ACCEPTED_LIVE or delete it")
     source_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=root, text=True
     ).strip()

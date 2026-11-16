@@ -97,10 +97,15 @@ same global.
 
 Operators whose stack effect v1 does not model (stack switching) stop the
 simulation with a named omission, and so do the instruction cap, the work
-budget and the deadline. The prefix before the stop is valid with one
-exception: a loop still open at the stop is named in an omission, values read
-in it may also arrive by back edges after the stop, and its header joins carry
-`incomplete: true`. The document is `partial`.
+budget and the deadline. When one instruction spends the last of the work
+budget (a `br_table` or `try_table` fan-out, or a call or `end` whose values
+take the stack past it), the stop is at that instruction's byte and value
+flow from it on is not computed. A body whose calls leave many values that
+nothing consumes therefore stops at the call that runs out the budget. The
+prefix before the stop is valid with one exception: a loop still open at the
+stop is named in an omission, values read in it may also arrive by back edges
+after the stop, and its header joins carry `incomplete: true`. The document
+is `partial`.
 
 Captured bytes need not validate. A reachable instruction that finds fewer
 operands than it needs gets `unknown` values; a path that carries fewer or more
@@ -188,7 +193,11 @@ indices and edges stay readable at every level.
   loop-write, snapshot and join entries, every `br_table` target and every
   `try_table` catch clause with its values, and every value an instruction
   records, a branch copies or carries, or a merge joins, so a block with many
-  results and many branches to it is bounded in time and memory). The
+  results and many branches to it is bounded in time and memory). An
+  instruction's own unit also pays for one value it grows the operand stack
+  by, and each further value costs one unit, so the values calls, block and
+  loop ends and handlers leave on the stack are bounded by the budget whether
+  or not anything consumes them, whatever types the module declares. The
   loop-write pass reads the whole body and records a write
   in the innermost loop only and passes each loop's set to its enclosing loop
   at `end`, so it is linear in the bytes plus the joins it implies. Loops that

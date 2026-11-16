@@ -53,7 +53,8 @@ pub const MAX_LOCALS: u64 = 50_000;
 /// Instructions simulated per body. A body at the engine size limit holds a
 /// few million instructions; past this the prefix is returned as partial.
 pub const MAX_INSTRUCTIONS: usize = 2_000_000;
-/// Instructions plus loop-write, snapshot and join entries. Loop joins grow
+/// Instructions plus loop-write, snapshot and join entries, and every value
+/// an instruction leaves on the operand stack past its first. Loop joins grow
 /// with nesting depth times the locals written, so this is what bounds time
 /// and memory on deeply nested bodies; it is checked inside every such loop.
 pub const MAX_WORK: u64 = 4_000_000;
@@ -316,6 +317,8 @@ pub struct Simulation {
     /// Values and locals stored on incoming paths for later merges: the
     /// memory a branch fan-out holds beyond nodes and edges.
     pub stored: u64,
+    /// The most values the operand stack held after any instruction.
+    pub stack_peak: u64,
     pub omissions: Vec<String>,
     /// Header joins of loops still open where the simulation stopped: their
     /// back edges after the stop were never read, so they are incomplete.
@@ -546,6 +549,7 @@ struct Sim<'m, 'a> {
     work: u64,
     limits: Limits,
     stored: u64,
+    stack_peak: usize,
     deadline: Instant,
     /// Set once a budget runs out inside an instruction; the main loop stops
     /// at that instruction.
@@ -691,6 +695,7 @@ pub fn simulate_with(
         work: 0,
         limits,
         stored: 0,
+        stack_peak: 0,
         deadline,
         exhausted: None,
         omissions: Vec::new(),
@@ -738,7 +743,9 @@ pub fn simulate_with(
             sim.instruction_live.push(sim.reachable);
             sim.input_start.push(sim.inputs.len() as u32);
             sim.work += 1;
+            let height = sim.stack.len();
             let step = sim.step(&op, offset as u32, index);
+            sim.charge_growth(height);
             if sim.reachable {
                 sim.instruction_live[index as usize] = true;
             }
@@ -799,6 +806,7 @@ pub fn simulate_with(
         stopped_at,
         work: sim.work,
         stored: sim.stored,
+        stack_peak: sim.stack_peak as u64,
         omissions: sim.omissions,
         open_joins,
     })
@@ -902,6 +910,21 @@ impl Sim<'_, '_> {
             return false;
         }
         true
+    }
+
+    /// Charges what one instruction grew the operand stack by, from `height`
+    /// before it. Its own unit pays for one value; every further value (a
+    /// call's or block's results, the unknown results of a block no path
+    /// leaves, a handler's tag values) costs one unit, so the stack never
+    /// holds more values than the budget, whatever types the module declares.
+    /// Values pushed in place of the operands an instruction consumed are not
+    /// charged twice: `record` already charged those operands.
+    fn charge_growth(&mut self, height: usize) {
+        let grown = self.stack.len().saturating_sub(height + 1);
+        if grown > 0 {
+            self.spend(grown as u64);
+        }
+        self.stack_peak = self.stack_peak.max(self.stack.len());
     }
 
     fn node(
@@ -1958,16 +1981,16 @@ impl Sim<'_, '_> {
                 ));
                 continue;
             };
-            // `NONE` is this simulation's catch-all tag, so a clause naming
-            // tag index u32::MAX reads as one, as it always has.
-            let tag = clause.tag.unwrap_or(NONE);
-            let values = if tag == NONE {
-                u32::from(clause.with_ref)
-            } else {
-                clause
-                    .values
-                    .ok_or_else(|| Stop::Unsupported(format!("A catch of undeclared tag {tag}")))?
+            // The clause's own tag decides, not the index: `NONE` is this
+            // simulation's catch-all tag, and a clause naming tag index
+            // u32::MAX names a tag no module can declare.
+            let Some(values) = clause.values else {
+                let tag = clause.tag.unwrap_or(NONE);
+                return Err(Stop::Unsupported(format!(
+                    "A catch of undeclared tag {tag}"
+                )));
             };
+            let tag = clause.tag.unwrap_or(NONE);
             clauses.push(TryCatch {
                 target,
                 tag,

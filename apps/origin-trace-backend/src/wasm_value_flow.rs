@@ -3178,6 +3178,11 @@ mod tests {
             "{} carried values stored on paths",
             sim.stored
         );
+        assert!(
+            sim.stack_peak <= max_work + slack,
+            "{} values held on the operand stack",
+            sim.stack_peak
+        );
     }
 
     #[test]
@@ -3214,6 +3219,63 @@ mod tests {
         let bytes = wat::parse_str(text).unwrap();
         let sim = simulate_limited(&bytes, 1, 20_000);
         assert_bounded(&sim, 20_000, values as u64 + 1);
+    }
+
+    #[test]
+    fn values_calls_push_stop_inside_the_budget() {
+        // About 100 KB of code: every call leaves 1,000 values nothing
+        // consumes. Pushed for free, the 50,000 calls held 50 million stack
+        // entries (400 MB) whatever the work budget said, and the stack grew
+        // with the body up to the instruction cap.
+        let (calls, results) = (50_000, 1_000);
+        let text = format!(
+            "(module {} (import \"env\" \"f\" (func $f (type $r))) (func{}))",
+            results_type(results),
+            " call $f".repeat(calls)
+        );
+        let bytes = wat::parse_str(text).unwrap();
+        let sim = simulate_limited(&bytes, 1, 20_000);
+        assert_bounded(&sim, 20_000, results as u64 + 1);
+    }
+
+    #[test]
+    fn unknown_results_at_an_unreachable_end_stop_inside_the_budget() {
+        // A block or loop no path leaves pushes its declared results as
+        // unknown values at its end, for four bytes of code each time.
+        let results = 1_000;
+        for construct in ["block", "loop"] {
+            let text = format!(
+                "(module {} (func{}))",
+                results_type(results),
+                format!(" {construct} (type $r) unreachable end").repeat(20_000)
+            );
+            let bytes = wat::parse_str(text).unwrap();
+            let sim = simulate_limited(&bytes, 0, 20_000);
+            assert_bounded(&sim, 20_000, results as u64 + 1);
+        }
+    }
+
+    #[test]
+    fn a_clause_naming_tag_u32_max_is_not_a_catch_all() {
+        // u32::MAX is the simulation's own catch-all marker; a clause naming
+        // that tag index names a tag no module declares.
+        let module = |clause: &str| {
+            wat::parse_str(format!(
+                "(module (import \"env\" \"f\" (func $f)) (func block try_table ({clause} 0) call $f end end))"
+            ))
+            .unwrap()
+        };
+        let sim = simulate_limited(&module("catch 4294967295"), 1, wasm_def_use::MAX_WORK);
+        assert!(sim.stopped_at.is_some(), "{:?}", sim.omissions);
+        assert!(
+            sim.omissions
+                .iter()
+                .any(|o| o.contains("A catch of undeclared tag 4294967295")),
+            "{:?}",
+            sim.omissions
+        );
+        let sim = simulate_limited(&module("catch_all"), 1, wasm_def_use::MAX_WORK);
+        assert_eq!(sim.stopped_at, None, "{:?}", sim.omissions);
     }
 
     #[test]

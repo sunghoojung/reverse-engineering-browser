@@ -3,6 +3,19 @@ import Foundation
 // Compile with the production coordinator, so these exercise its actual parser.
 @main
 enum LiveSessionFailureChecks {
+  // Starts as the app does: resolve the content switches once from the mode,
+  // the panel's limits and the environment, then build the launcher's
+  // environment from them.
+  static func launch(
+    _ environment: [String: String], content: Bool, sites: URL? = nil, limits: ContentLimits? = nil, chosen: Bool = false
+  ) -> [String: String] {
+    LiveSessionCoordinator.captureDefaults(
+      environment: environment,
+      content: LiveCaptureContent.resolve(
+        environment: environment, mode: content ? .content : .metadata, limits: limits, modeChosen: chosen),
+      savedInvocationSites: sites)
+  }
+
   static func main() {
     let fallback = "The live capture coordinator stopped before startup completed."
     let prefix = "REB_LIVE_SESSION_FAILURE: "
@@ -80,8 +93,7 @@ enum LiveSessionFailureChecks {
     // Content mode turns on only what the mask allows, and an unreadable mask
     // never reads as every category.
     let defaults = { (mask: String?, content: Bool) -> [String: String] in
-      LiveSessionCoordinator.captureDefaults(
-        environment: mask.map { ["REB_CAPTURE_CATEGORY_MASK": $0] } ?? [:], captureNetworkContent: content)
+      launch(mask.map { ["REB_CAPTURE_CATEGORY_MASK": $0] } ?? [:], content: content)
     }
     let names = [
       "REB_CAPTURE_CANVAS_IMAGES", "REB_CAPTURE_REQUEST_CONTENT", "REB_NATIVE_WASM_DISPATCH",
@@ -99,10 +111,9 @@ enum LiveSessionFailureChecks {
       precondition(names.map { environment[$0] } == expected, "defaults \(String(describing: mask)) content=\(content)")
       precondition(environment["REB_NATIVE_QUIET_MODE"] == "1", "quiet mode default")
     }
-    // An explicit setting always wins, even where the mask would not allow it.
-    let explicit = LiveSessionCoordinator.captureDefaults(
-      environment: ["REB_CAPTURE_CATEGORY_MASK": "256", "REB_CAPTURE_REQUEST_CONTENT": "1", "REB_NATIVE_WASM_DISPATCH": "0"],
-      captureNetworkContent: false)
+    // An explicit setting wins in Content mode, even where the mask would not allow it.
+    let explicit = launch(
+      ["REB_CAPTURE_CATEGORY_MASK": "256", "REB_CAPTURE_REQUEST_CONTENT": "1", "REB_NATIVE_WASM_DISPATCH": "0"], content: true)
     precondition(explicit["REB_CAPTURE_REQUEST_CONTENT"] == "1" && explicit["REB_NATIVE_WASM_DISPATCH"] == "0", "explicit values")
     print("PASS native live category mask: the launcher's decimal and 0x grammar, content defaults only where the mask allows, no 4095 fallback for unreadable text")
 
@@ -120,7 +131,7 @@ enum LiveSessionFailureChecks {
     precondition(LiveCaptureMode.content.title.contains("default") && !LiveCaptureMode.metadata.title.contains("recommended"), "mode labels")
     // The default mode retains content; an explicit Metadata choice keeps hosts only.
     let byMode = { (mode: LiveCaptureMode) in
-      LiveSessionCoordinator.captureDefaults(environment: [:], captureNetworkContent: mode.capturesNetworkContent)
+      launch([:], content: mode.capturesNetworkContent)
     }
     let defaultMode = byMode(LiveCaptureMode.configured([:]))
     precondition(defaultMode["REB_CAPTURE_REQUEST_CONTENT"] == "1" && defaultMode["REB_CAPTURE_CANVAS_IMAGES"] == "1", "default mode content")
@@ -134,8 +145,7 @@ enum LiveSessionFailureChecks {
       precondition(defaults(mask, content)["REB_CONSOLE_DOCUMENT_START"] == "1", "document-start default \(String(describing: mask))")
     }
     for value in ["0", "1"] {
-      let explicitStart = LiveSessionCoordinator.captureDefaults(
-        environment: ["REB_CONSOLE_DOCUMENT_START": value], captureNetworkContent: true)
+      let explicitStart = launch(["REB_CONSOLE_DOCUMENT_START": value], content: true)
       precondition(explicitStart["REB_CONSOLE_DOCUMENT_START"] == value, "explicit document-start \(value)")
     }
     print("PASS native live document-start permission: on by default for app captures, an explicit 0 survives")
@@ -212,7 +222,7 @@ enum LiveSessionFailureChecks {
       ("content off by the environment passes nothing", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, raised, [nil, nil, nil]),
     ]
     for (name, given, content, limits, expected) in limitCases {
-      let environment = LiveSessionCoordinator.captureDefaults(environment: given, captureNetworkContent: content, contentLimits: limits)
+      let environment = launch(given, content: content, limits: limits)
       precondition(limitNames.map { environment[$0] } == expected, "content limits: \(name) \(limitNames.map { environment[$0] })")
     }
     // The start panel message SessionPanel.swift accepts only through LivePanelStart.parse.
@@ -243,22 +253,27 @@ enum LiveSessionFailureChecks {
       ("a chosen Content mode wins over an inherited 0", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, true, raised, "1", ["1024", "2048", "1"]),
       ("a chosen Metadata mode wins over an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, false, true, nil, "0",
         [nil, nil, nil]),
-      ("an automatic launch keeps an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, false, false, nil, "1",
-        ["999", "99", "1"]),
+      ("an automatic Metadata launch drops an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, false, false,
+        nil, "0", [nil, nil, nil]),
+      ("an automatic Content launch keeps an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, true, false,
+        nil, "1", ["999", "99", "1"]),
       ("an automatic launch keeps an inherited 0 and drops the rest", ["REB_CAPTURE_REQUEST_CONTENT": "0"].merging(media) { a, _ in a }, true, false,
         raised, "0", [nil, nil, nil]),
     ]
     for (name, given, content, chosen, limits, expectedContent, expected) in modeCases {
-      let environment = LiveSessionCoordinator.captureDefaults(
-        environment: given, captureNetworkContent: content, contentLimits: limits, modeChosen: chosen)
+      let environment = launch(given, content: content, limits: limits, chosen: chosen)
       precondition(environment["REB_CAPTURE_REQUEST_CONTENT"] == expectedContent, "request content: \(name)")
       precondition(limitNames.map { environment[$0] } == expected, "content switches: \(name) \(limitNames.map { environment[$0] })")
     }
-    precondition(LiveSessionCoordinator.retainsRequestContent(environment: [:], captureNetworkContent: true, modeChosen: true), "content retains")
-    precondition(!LiveSessionCoordinator.retainsRequestContent(environment: ["REB_CAPTURE_CATEGORY_MASK": "0x300"], captureNetworkContent: true,
-      modeChosen: true), "a mask without Network and Artifact retains nothing, so the panel names no limits")
-    precondition(LiveSessionCoordinator.retainsRequestContent(environment: ["REB_CAPTURE_REQUEST_CONTENT": "0"], captureNetworkContent: true,
-      modeChosen: true), "a chosen Content mode retains content over an inherited 0")
+    let panelContent = { (given: [String: String]) in
+      LiveCaptureContent.resolve(environment: given, mode: .content, limits: raised, modeChosen: true)
+    }
+    precondition(panelContent([:]).retainsRequestContent && panelContent([:]).limits == raised, "content retains")
+    let hostsOnly = panelContent(["REB_CAPTURE_CATEGORY_MASK": "0x300"])
+    precondition(!hostsOnly.retainsRequestContent && hostsOnly.limits == nil,
+      "a mask without Network and Artifact retains nothing, so the panel names no limits")
+    precondition(panelContent(["REB_CAPTURE_REQUEST_CONTENT": "0"]).retainsRequestContent,
+      "a chosen Content mode retains content over an inherited 0")
     // An inherited REB_CAPTURE_REQUEST_CONTENT=0 still protects someone who
     // just presses Start: the panel preselects Metadata and says why, and only
     // choosing Content there captures content.
@@ -271,14 +286,13 @@ enum LiveSessionFailureChecks {
     precondition(LiveCaptureMode.optOutNote.contains("Metadata is preselected"), "the panel says why")
     let preselected = LiveCaptureMode.configured(optedOut)
     guard case .success(let untouched) = parse(["mode": preselected.rawValue]) else { preconditionFailure("preselected start") }
-    let pressed = LiveSessionCoordinator.captureDefaults(environment: optedOut.merging(media) { a, _ in a },
-      captureNetworkContent: untouched.mode.capturesNetworkContent, contentLimits: untouched.limits, modeChosen: true)
+    let pressed = launch(optedOut.merging(media) { a, _ in a }, content: untouched.mode.capturesNetworkContent,
+      limits: untouched.limits, chosen: true)
     precondition(untouched.mode == .metadata && pressed["REB_CAPTURE_REQUEST_CONTENT"] == "0"
       && limitNames.allSatisfy({ pressed[$0] == nil }), "Start pressed without touching the mode is a Metadata start")
     guard case .success(let chosen) = parse(["mode": "content", "request_content_budget_mib": NSNumber(value: 256),
       "response_body_budget_mib": NSNumber(value: 512), "response_media": no]) else { preconditionFailure("chosen content") }
-    let content = LiveSessionCoordinator.captureDefaults(environment: optedOut, captureNetworkContent: chosen.mode.capturesNetworkContent,
-      contentLimits: chosen.limits, modeChosen: true)
+    let content = launch(optedOut, content: chosen.mode.capturesNetworkContent, limits: chosen.limits, chosen: true)
     precondition(content["REB_CAPTURE_REQUEST_CONTENT"] == "1" && content["REB_REQUEST_CONTENT_BUDGET_MIB"] == "256",
       "choosing Content there is a Content start")
     print("PASS native content limits: the launcher's bounds and grammar for the panel's first values, start messages checked as the agent path checks them, launcher switches only for a session that retains content, inherited content-only switches dropped otherwise, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
@@ -292,7 +306,10 @@ enum LiveSessionFailureChecks {
       ("metadata", [:], false, saved, [saved.path, "0", "1"]),
       ("nothing saved", [:], true, nil, [nil, nil, nil]),
       ("explicit digests off", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "0"], true, saved, [saved.path, "0", "1"]),
-      ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "1", "1"]),
+      ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], true, saved, [saved.path, "1", "1"]),
+      ("explicit digests never reach Metadata", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "0", "1"]),
+      ("nor with explicit sites", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1", "REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], false, saved,
+        ["/explicit.json", "0", nil]),
       ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", nil, nil]),
       ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", nil, nil]),
       ("strict check kept", ["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED": "0"], true, saved, [saved.path, "1", "0"]),
@@ -300,11 +317,89 @@ enum LiveSessionFailureChecks {
       ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, nil, nil]),
     ]
     for (name, given, content, url, expected) in invocationCases {
-      let environment = LiveSessionCoordinator.captureDefaults(
-        environment: given, captureNetworkContent: content, savedInvocationSites: url)
+      let environment = launch(given, content: content, sites: url)
       precondition(invocationNames.map { environment[$0] } == expected, "invocation defaults: \(name) \(invocationNames.map { environment[$0] })")
     }
-    print("PASS native live invocation sites: saved sites armed with digests in Content and without in Metadata, explicit sites and digests win, no VM category arms nothing")
+    print("PASS native live invocation sites: saved sites armed with digests in Content and without in Metadata, explicit sites and Content digests win, no VM category arms nothing")
+
+    // A Metadata start decides every content-derived switch, whatever the
+    // environment holds: chosen in the panel or by REB_AUTOMATIC_CAPTURE_MODE,
+    // with saved, explicit or no invocation sites. Each leak is listed.
+    let metadataOff = ["REB_CAPTURE_REQUEST_CONTENT": "0", "REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]
+    let everyContentSwitch = ["REB_CAPTURE_REQUEST_CONTENT": "1", "REB_CAPTURE_CANVAS_IMAGES": "1",
+      "REB_NATIVE_JS_INVOCATION_DIGESTS": "1"].merging(media) { a, _ in a }
+    let inheritedCases: [(String, [String: String])] = [
+      ("nothing", [:]),
+      ("request content", ["REB_CAPTURE_REQUEST_CONTENT": "1"]),
+      ("Canvas images", ["REB_CAPTURE_CANVAS_IMAGES": "1"]),
+      ("invocation digests", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"]),
+      ("explicit sites and digests", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json", "REB_NATIVE_JS_INVOCATION_DIGESTS": "1"]),
+      ("every content switch", everyContentSwitch),
+    ]
+    var leaks: [String] = []
+    for (name, given) in inheritedCases {
+      for (start, chosen) in [("panel", true), ("automatic", false)] {
+        // The automatic launch's Metadata comes from the app environment.
+        let environment = chosen ? given : given.merging(["REB_AUTOMATIC_CAPTURE_MODE": "metadata"]) { a, _ in a }
+        let mode = chosen ? LiveCaptureMode.metadata : LiveCaptureMode.configured(environment)
+        for sites in [saved, nil] as [URL?] {
+          let launched = launch(environment, content: mode.capturesNetworkContent, sites: sites, chosen: chosen)
+          for key in LiveCaptureContent.names where launched[key] != metadataOff[key] {
+            leaks.append("\(start) Metadata start, inherited \(name), \(sites == nil ? "no" : "saved") sites: \(key)=\(launched[key] ?? "unset")")
+          }
+        }
+      }
+    }
+    precondition(leaks.isEmpty, "Metadata starts were given content-derived switches:\n" + leaks.joined(separator: "\n"))
+    print("PASS native Metadata start: no request content, Canvas images, invocation digests, budgets or media, from the panel or the automatic launch, whatever the environment holds")
+
+    // Retry gives the launcher the failed start's content switches, never a
+    // new reading of the environment, so the mode and limits the panel names
+    // are always what the launcher got. The failed starts include the case
+    // that leaked: an automatic Metadata launch with an inherited
+    // REB_CAPTURE_REQUEST_CONTENT=1.
+    let automaticMetadata = ["REB_AUTOMATIC_CAPTURE_MODE": "metadata", "REB_CAPTURE_REQUEST_CONTENT": "1"]
+    let automaticContent = ["REB_REQUEST_CONTENT_BUDGET_MIB": "64", "REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]
+    let failedStarts: [(String, [String: String], LiveCaptureContent)] = [
+      ("automatic Metadata with an inherited 1", automaticMetadata, LiveCaptureContent.resolve(
+        environment: automaticMetadata, mode: LiveCaptureMode.configured(automaticMetadata), limits: nil, modeChosen: false)),
+      ("panel Metadata over every content switch", everyContentSwitch, LiveCaptureContent.resolve(
+        environment: everyContentSwitch, mode: .metadata, limits: nil, modeChosen: true)),
+      ("panel Content with raised limits", media, LiveCaptureContent.resolve(environment: media, mode: .content, limits: raised, modeChosen: true)),
+      ("automatic Content with the environment's limits", automaticContent, LiveCaptureContent.resolve(
+        environment: automaticContent, mode: LiveCaptureMode.configured(automaticContent), limits: nil, modeChosen: false)),
+      ("panel Content with a mask without Network", ["REB_CAPTURE_CATEGORY_MASK": "0x600"], LiveCaptureContent.resolve(
+        environment: ["REB_CAPTURE_CATEGORY_MASK": "0x600"], mode: .content, limits: raised, modeChosen: true)),
+    ]
+    let retryEnvironments: [(String, [String: String])] = [
+      ("nothing", [:]), ("every content switch on", everyContentSwitch),
+      ("every content switch off", ["REB_CAPTURE_REQUEST_CONTENT": "0", "REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]),
+    ]
+    var mismatches: [String] = []
+    for (name, given, failed) in failedStarts {
+      let mask = given["REB_CAPTURE_CATEGORY_MASK"].map { ["REB_CAPTURE_CATEGORY_MASK": $0] } ?? [:]
+      let first = LiveSessionCoordinator.captureDefaults(environment: given, content: failed, savedInvocationSites: saved)
+      let firstSwitches = LiveCaptureContent.names.map { first[$0] }
+      // The panel's label: Metadata keeps nothing, and named limits are the ones given.
+      if failed.mode == .metadata, LiveCaptureContent.names.contains(where: { first[$0] != metadataOff[$0] }) {
+        mismatches.append("\(name): labeled \(failed.mode.title) but given \(firstSwitches)")
+      }
+      if failed.retainsRequestContent != (first["REB_CAPTURE_REQUEST_CONTENT"] == "1") {
+        mismatches.append("\(name): request content \(failed.retainsRequestContent) but given \(first["REB_CAPTURE_REQUEST_CONTENT"] ?? "unset")")
+      }
+      if let limits = failed.limits, limits.launcherEnvironment.contains(where: { first[$0.key] != $0.value }) {
+        mismatches.append("\(name): names limits \(limits) but given \(firstSwitches)")
+      }
+      for (retryName, environment) in retryEnvironments {
+        let retried = LiveSessionCoordinator.captureDefaults(
+          environment: environment.merging(mask) { a, _ in a }, content: failed, savedInvocationSites: saved)
+        if LiveCaptureContent.names.map({ retried[$0] }) != firstSwitches {
+          mismatches.append("\(name), Retry with \(retryName) inherited: \(LiveCaptureContent.names.map { retried[$0] }) after \(firstSwitches)")
+        }
+      }
+    }
+    precondition(mismatches.isEmpty, "Retry or its label differed from the failed start:\n" + mismatches.joined(separator: "\n"))
+    print("PASS native live Retry: the failed start's content switches whatever the environment holds, Metadata labels that keep nothing and named limits that were given")
 
     // The Swift store reads and writes exactly what the backend and browser do.
     let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

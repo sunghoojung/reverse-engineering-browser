@@ -2693,8 +2693,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // The panel chose this run's mode, so it decides request content over an
   // inherited REB_CAPTURE_REQUEST_CONTENT, in reopens as well.
   private var panelChoseMode = false
-  // How the session on screen was started, for its Retry.
-  private var lastStartModeChosen = false
   // Continue Offline holds for the rest of the run: a reopen starts nothing.
   private var automaticSessionSuppressed = false
   // The panel shows a start or failure decision. Nothing starts a session
@@ -2821,16 +2819,18 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     load(requestedUIURL ?? localApplicationURL)
     if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
       // Exercise the real startup failure path without a browser or modal dialog.
+      let content = LiveCaptureContent.resolve(
+        environment: ProcessInfo.processInfo.environment, mode: .metadata, limits: nil, modeChosen: false)
       liveSessionCoordinator.start(
         braveExecutableURL: resourcesURL.appendingPathComponent("__missing_smoke_browser__"),
-        captureNetworkContent: false,
+        content: content,
         useSystemKeychain: false,
         ready: { _ in
           print("SMOKE_ERROR Unexpected live session readiness")
           NSApp.terminate(nil)
         },
         failed: { [weak self] failure in
-          self?.presentLiveSessionError(failure, captureMode: .metadata)
+          self?.presentLiveSessionError(failure, content: content)
         }
       )
     }
@@ -2950,9 +2950,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     // REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1 is the advanced route to the macOS
     // Keychain for these automatic sessions; the panel never offers it.
     startAutomaticLiveSession(
-      captureMode: selectedCaptureMode,
-      contentLimits: selectedCaptureMode.capturesNetworkContent ? selectedContentLimits : nil,
-      modeChosen: panelChoseMode,
+      LiveCaptureContent.resolve(
+        environment: ProcessInfo.processInfo.environment, mode: selectedCaptureMode,
+        limits: selectedCaptureMode.capturesNetworkContent ? selectedContentLimits : nil, modeChosen: panelChoseMode),
       useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
@@ -2987,17 +2987,17 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       if let limits { selectedContentLimits = limits }
       // The panel names limits only for a session they apply to: a category
       // mask without Network and Artifact keeps no request content.
-      let applied = LiveSessionCoordinator.retainsRequestContent(
-        environment: ProcessInfo.processInfo.environment, captureNetworkContent: mode.capturesNetworkContent,
-        modeChosen: true) ? limits : nil
+      let content = LiveCaptureContent.resolve(
+        environment: ProcessInfo.processInfo.environment, mode: mode, limits: limits, modeChosen: true)
       // Not a decision, so the start below is not refused as one behind it.
-      sessionPanel.content = .starting(mode: mode, limits: applied)
-      startAutomaticLiveSession(captureMode: mode, contentLimits: applied, modeChosen: true, useSystemKeychain: false)
-    case (.retry, .failed(_, let mode, let limits)):
-      sessionPanel.content = .starting(mode: mode, limits: limits)
+      sessionPanel.content = .starting(content)
+      startAutomaticLiveSession(content, useSystemKeychain: false)
+    // Exactly the failed start's content switches, never a new reading of the
+    // environment, so the session is the one the panel names.
+    case (.retry, .failed(_, let content)):
+      sessionPanel.content = .starting(content)
       liveSessionCoordinator.stop()
-      startAutomaticLiveSession(
-        captureMode: mode, contentLimits: limits, modeChosen: lastStartModeChosen, useSystemKeychain: false)
+      startAutomaticLiveSession(content, useSystemKeychain: false)
     case (.offline, .choose), (.offline, .failed):
       sessionPanel.content = .hidden
       automaticSessionSuppressed = true
@@ -3008,14 +3008,8 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
   }
 
-  private func startAutomaticLiveSession(
-    captureMode: LiveCaptureMode,
-    contentLimits: ContentLimits?,
-    modeChosen: Bool,
-    useSystemKeychain: Bool
-  ) {
+  private func startAutomaticLiveSession(_ content: LiveCaptureContent, useSystemKeychain: Bool) {
     guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
-    lastStartModeChosen = modeChosen
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
       let braveExecutableURL = braveBundle.executableURL
@@ -3028,15 +3022,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           } ?? "Origin Trace could not find Brave Browser Development. "
             + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
           afterStartup: false),
-        captureMode: captureMode, contentLimits: contentLimits
+        content: content
       )
       return
     }
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,
-      captureNetworkContent: captureMode.capturesNetworkContent,
-      contentLimits: contentLimits,
-      modeChosen: modeChosen,
+      content: content,
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self else { return }
@@ -3044,14 +3036,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         guard nativeUIURL(liveURL.absoluteString) != nil else {
           self.presentLiveSessionError(
             .init(message: "Origin Trace received an invalid loopback UI URL.", afterStartup: false),
-            captureMode: captureMode, contentLimits: contentLimits
+            content: content
           )
           return
         }
         self.openLiveWorkspace(nil)
       },
       failed: { [weak self] failure in
-        self?.presentLiveSessionError(failure, captureMode: captureMode, contentLimits: contentLimits)
+        self?.presentLiveSessionError(failure, content: content)
       }
     )
   }
@@ -3459,11 +3451,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   // A failed or ended session is a decision in the start panel, with Retry
   // and Continue Offline, over whichever workspace the window shows.
-  private func presentLiveSessionError(
-    _ failure: LiveSessionCoordinator.Failure,
-    captureMode: LiveCaptureMode,
-    contentLimits: ContentLimits? = nil
-  ) {
+  private func presentLiveSessionError(_ failure: LiveSessionCoordinator.Failure, content: LiveCaptureContent) {
     // No modal any more, so a failure at launch, before the event loop runs,
     // is held by the panel and drawn once the page loads.
     if smokeTest {
@@ -3472,7 +3460,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     presentOriginTraceWindow()
-    sessionPanel?.content = .failed(failure, mode: captureMode, limits: contentLimits)
+    sessionPanel?.content = .failed(failure, content)
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

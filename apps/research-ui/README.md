@@ -952,7 +952,9 @@ unless set to `0`).
 The app does not mark the session live until the launcher publishes its loopback
 handshake. A failure shows in the window's **start panel**, at the right edge
 of the workspace, with **Retry**, which starts again with the same capture mode
-without restarting Origin Trace, and **Continue Offline**.
+without restarting Origin Trace, and **Continue Offline**. Retry gives the
+launcher exactly the content switches the failed start had, never a new reading
+of the environment, so the mode and limits the panel names are what it runs.
 Retry is focused, so Return retries.
 Startup allows up to 60 seconds for the bounded broker, receiver, backend and
 browser readiness stages; individual helper failures are reported sooner.
@@ -981,7 +983,11 @@ and preselects it in the start panel, which says so beside the mode, so
 pressing Start keeps no request content; choosing Content there captures it.
 `REB_CAPTURE_CANVAS_IMAGES=0` turns Canvas images off. Once the start panel has
 chosen a mode, that mode decides request content for the rest of the run, over
-an inherited `REB_CAPTURE_REQUEST_CONTENT`.
+an inherited `REB_CAPTURE_REQUEST_CONTENT`. Metadata only, from the panel or
+`REB_AUTOMATIC_CAPTURE_MODE`, decides every content-derived switch: the
+launcher gets `REB_CAPTURE_REQUEST_CONTENT=0`, `REB_CAPTURE_CANVAS_IMAGES=0`
+and `REB_NATIVE_JS_INVOCATION_DIGESTS=0` whatever the environment holds
+([`LiveCaptureContent`](macos/LiveSessionCoordinator.swift)).
 
 With Content chosen, the panel also shows the session's **Content limits**:
 
@@ -1031,7 +1037,7 @@ file and stay off until one is supplied. JavaScript invocation capture arms the
 functions saved with [Track calls](#track-calls-to-a-function); an explicit
 `REB_NATIVE_JS_INVOCATION_SITES` replaces that set, and an empty value turns it
 off. With saved sites, Content mode also records their settled-value digests
-(sensitive capture) and Metadata mode does not; an explicit
+(sensitive capture) and Metadata mode does not; in Content mode an explicit
 `REB_NATIVE_JS_INVOCATION_DIGESTS` wins. A request
 trace shows `issued_during_invocation`, `invocation_settlement` and
 `invocation_value_flow` steps, and VM Lab rows name the JavaScript invocation a

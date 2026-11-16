@@ -194,7 +194,11 @@ it.
   the titlebar labels that session "Content capture". **Metadata
   only** is the opt-out, chosen in the start panel that **New Live Session…**
   opens, or with `REB_AUTOMATIC_CAPTURE_MODE=metadata` for the automatic
-  launch too; any other value but `content` also selects it. The app saves no choice between launches, and a choice made in the
+  launch too; any other value but `content` also selects it. A Metadata session
+  the app starts or retries gets no request content, Canvas images or
+  invocation value digests, whatever the environment holds, and Retry starts
+  with the failed start's content switches, never a new reading of the
+  environment. The app saves no choice between launches, and a choice made in the
   start panel holds for the rest of that app run. The standalone `make live` launcher
   leaves request content and Canvas images off unless set to `1`. Agent-started
   sessions (`reb-api session start`, MCP `start_live_session`) retain request
@@ -466,7 +470,7 @@ of the data-handling policy:
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
 | Agent-started sessions get request content, document-start permission, invocation sites and digests only when the start request names them, never inherited | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
-| App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
+| App-started Metadata content switches, digest default and agent-session exclusion | `LiveCaptureContent.resolve` and `LiveSessionCoordinator.captureDefaults` (Metadata turns request content, Canvas images and digests off; digests by default in Content mode with saved sites only, where an explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
 | In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level and sensitive choice consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
 | Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
 | Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |

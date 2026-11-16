@@ -19,13 +19,14 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
 
   // What the panel shows. Choose and Failed are open decisions: until one is
   // answered nothing starts a session behind it. Choose offers `limits` for a
-  // Content session; Starting and Failed carry the limits the panel chose, or
-  // nil for a session it did not start, whose limits are the environment's.
+  // Content session. Starting and Failed carry the session's resolved content
+  // switches and name its mode and the limits the panel chose, or none for
+  // limits taken from the environment; a Retry starts from that same value.
   enum Content: Equatable {
     case hidden
     case choose(mode: LiveCaptureMode, limits: ContentLimits)
-    case starting(mode: LiveCaptureMode, limits: ContentLimits?)
-    case failed(LiveSessionCoordinator.Failure, mode: LiveCaptureMode, limits: ContentLimits?)
+    case starting(LiveCaptureContent)
+    case failed(LiveSessionCoordinator.Failure, LiveCaptureContent)
   }
 
   enum Choice {
@@ -214,23 +215,23 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
     switch content {
     case .hidden:
       return ["panel": "hidden"]
-    case .starting(let mode, let limits):
-      var value: [String: Any] = ["panel": "starting", "mode": mode.rawValue, "modes": modes]
-      if let limits { value["limits"] = limits.panelState }
+    case .starting(let session):
+      var value: [String: Any] = ["panel": "starting", "mode": session.mode.rawValue, "modes": modes]
+      if let limits = session.limits { value["limits"] = limits.panelState }
       return value
     case .choose(let mode, let limits):
       var value: [String: Any] = ["panel": "choose", "mode": mode.rawValue, "modes": modes, "sites": siteState(), "limits": limits.panelState]
       if let modeNote { value["modeNote"] = modeNote }
       return value
-    case .failed(let failure, let mode, let limits):
+    case .failed(let failure, let session):
       var value: [String: Any] = [
-        "panel": "failed", "mode": mode.rawValue, "modes": modes,
+        "panel": "failed", "mode": session.mode.rawValue, "modes": modes,
         "failure": [
           "title": failure.afterStartup ? "Live session ended" : "Live session unavailable",
           "message": failure.message, "afterStartup": failure.afterStartup,
         ],
       ]
-      if let limits { value["limits"] = limits.panelState }
+      if let limits = session.limits { value["limits"] = limits.panelState }
       return value
     }
   }

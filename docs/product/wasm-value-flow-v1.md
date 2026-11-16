@@ -37,5 +37,6 @@ This is the intra-function increment of "Search for values moving between WASM,
 JavaScript, browser APIs, and network requests" in the
 [WASM Laboratory roadmap](feature-list.md#webassembly-laboratory). Linking a
 slice to observed calls, request fields and JavaScript values remains planned.
-The def-use simulation is separate from the readable lifted view's expression
-lifter; unifying them is follow-up work.
+The def-use simulation and the readable lifted view's expression lifter share
+one stack and control-frame layer, `wasm_stack.rs`, and each keeps its own
+payload, so an operator or proposal is modeled once for both.

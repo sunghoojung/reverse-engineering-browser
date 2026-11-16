@@ -1,7 +1,8 @@
 //! A readable lifted listing of one Wasm function, derived on request.
 //!
-//! The operand stack is simulated with the declared effects in `wasm_stack`
-//! and instructions fold into nested expressions, as `wasm2wat --fold-exprs`
+//! The operand stack and the open frames are simulated with `wasm_stack`, the
+//! layer value flow also builds on, and instructions fold into nested
+//! expressions, as `wasm2wat --fold-exprs`
 //! and `wasm-decompile` do: `l3 = i32.load(l1, offset 8) + 1`. Every decoded
 //! instruction is owned by exactly one output line, and every line carries the
 //! original module byte ranges it covers, so a line can always be checked
@@ -19,7 +20,7 @@
 use crate::{
     error::{Error, Result},
     wasm, wasm_graph,
-    wasm_stack::{self, Label, ModuleTypes},
+    wasm_stack::{self, Callee, Clause, Control, Effect, Kind, ModuleTypes},
 };
 use serde_json::{Value, json};
 use std::{
@@ -29,8 +30,8 @@ use std::{
     time::{Duration, Instant},
 };
 use wasmparser::{
-    BlockType, ExternalKind, FrameKind, FuncValidatorAllocations, FunctionBody, KnownCustom,
-    MemArg, Name, Operator, Parser, Payload, TypeRef, ValidPayload, Validator, WasmFeatures,
+    BlockType, ExternalKind, FuncValidatorAllocations, FunctionBody, KnownCustom, MemArg, Name,
+    Operator, Parser, Payload, TypeRef, ValidPayload, Validator, WasmFeatures,
 };
 
 /// A lift keeps per-instruction offsets and per-line text; this many
@@ -322,56 +323,19 @@ struct Line {
     run: Option<(u32, u32)>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Function,
-    Block,
-    Loop,
-    If,
-    Else,
-    Try,
-    Catch,
-    TryTable,
-}
-const KIND_NAMES: [&str; 8] = [
-    "function",
-    "block",
-    "loop",
-    "if",
-    "else",
-    "try",
-    "catch",
-    "try_table",
-];
-fn frame_kind(kind: Kind) -> FrameKind {
-    match kind {
-        Kind::Function | Kind::Block => FrameKind::Block,
-        Kind::Loop => FrameKind::Loop,
-        Kind::If => FrameKind::If,
-        Kind::Else => FrameKind::Else,
-        Kind::Try => FrameKind::LegacyTry,
-        Kind::Catch => FrameKind::LegacyCatch,
-        Kind::TryTable => FrameKind::TryTable,
-    }
-}
-
-struct Frame {
-    kind: Kind,
-    /// The kind it opened as; `Else` and `Catch` keep `If` and `Try` here.
-    opened: Kind,
-    height: usize,
+/// What the lift keeps per open frame, beside the shared frame facts.
+#[derive(Default)]
+struct Fold {
     /// Parameters as temporaries, restored for an `else` or `catch` arm.
-    params: Vec<Expr>,
+    arm_params: Vec<Expr>,
     label: u32,
     /// Temporaries a branch to this frame assigns: a loop's parameters, any
     /// other frame's results. Allocated on first use.
     slots: Vec<String>,
-    branch_values: u32,
     /// Temporaries a loop's results reach its end in. A branch to a loop
     /// goes back to its start, so its results are not its branch values.
     /// Every other frame's results are its branch values, `slots`.
     result_slots: Vec<String>,
-    results: u32,
     unreachable: bool,
     /// A frame whose body can catch: a legacy `try` before its first catch
     /// arm, or a `try_table` with catch clauses.
@@ -400,8 +364,7 @@ struct Lifter<'m> {
     ends: Vec<u32>,
     lines: Vec<Line>,
     stack: Vec<Expr>,
-    frames: Vec<Frame>,
-    labels: Vec<Label>,
+    control: Control<Fold>,
     targeted: Vec<bool>,
     next_temp: u32,
     fallbacks: [u32; 6],
@@ -584,10 +547,6 @@ fn joined(values: &[Expr]) -> String {
 
 impl<'m> Lifter<'m> {
     fn new(module: &'m ModuleTypes, names: &'m Names, type_index: u32, params: u32) -> Self {
-        let function_label = Label {
-            kind: FrameKind::Block,
-            block_type: BlockType::FuncType(type_index),
-        };
         let results = module
             .func_type(type_index)
             .map_or(0, |ty| ty.results().len() as u32);
@@ -599,23 +558,7 @@ impl<'m> Lifter<'m> {
             ends: Vec::new(),
             lines: Vec::new(),
             stack: Vec::new(),
-            frames: vec![Frame {
-                kind: Kind::Function,
-                opened: Kind::Function,
-                height: 0,
-                params: Vec::new(),
-                label: 0,
-                slots: Vec::new(),
-                branch_values: results,
-                result_slots: Vec::new(),
-                results,
-                unreachable: false,
-                catching: false,
-                dead: 0,
-                open_line: 0,
-                open_offset: 0,
-            }],
-            labels: vec![function_label],
+            control: Control::new(results, Fold::default()),
             targeted: vec![false],
             next_temp: 0,
             fallbacks: [0; 6],
@@ -649,14 +592,14 @@ impl<'m> Lifter<'m> {
         self.next_temp += 1;
         name
     }
-    fn top(&mut self) -> &mut Frame {
-        self.frames.last_mut().expect("an open frame")
+    fn top(&mut self) -> &mut Fold {
+        &mut self.control.last_mut().expect("an open frame").state
     }
     fn base(&self) -> usize {
-        self.frames.last().map_or(0, |frame| frame.height)
+        self.control.base()
     }
     fn depth(&self) -> u32 {
-        self.frames.len() as u32 + self.frames.last().map_or(0, |frame| frame.dead)
+        self.control.len() as u32 + self.control.last().map_or(0, |frame| frame.state.dead)
     }
 
     fn push_line(
@@ -841,30 +784,30 @@ impl<'m> Lifter<'m> {
     }
 
     fn label_name(&mut self, frame: usize) -> String {
-        let label = self.frames[frame].label;
+        let label = self.control[frame].state.label;
         self.targeted[label as usize] = true;
         format!("L{label}")
     }
     fn slots(&mut self, frame: usize) -> Vec<String> {
-        let wanted = self.frames[frame].branch_values as usize;
-        while self.frames[frame].slots.len() < wanted {
+        let wanted = self.control[frame].branch_arity() as usize;
+        while self.control[frame].state.slots.len() < wanted {
             let name = self.temp();
-            self.frames[frame].slots.push(name);
+            self.control[frame].state.slots.push(name);
         }
-        self.frames[frame].slots.clone()
+        self.control[frame].state.slots.clone()
     }
     /// The temporaries a frame's results reach its end in: a loop's own
     /// result slots, any other frame's branch slots.
     fn result_slots(&mut self, frame: usize) -> Vec<String> {
-        if self.frames[frame].kind != Kind::Loop {
+        if self.control[frame].kind != Kind::Loop {
             return self.slots(frame);
         }
-        let wanted = self.frames[frame].results as usize;
-        while self.frames[frame].result_slots.len() < wanted {
+        let wanted = self.control[frame].results as usize;
+        while self.control[frame].state.result_slots.len() < wanted {
             let name = self.temp();
-            self.frames[frame].result_slots.push(name);
+            self.control[frame].state.result_slots.push(name);
         }
-        self.frames[frame].result_slots.clone()
+        self.control[frame].state.result_slots.clone()
     }
     /// The text of a branch to `frame` carrying `values`, taken when `cond`
     /// holds if there is one. A branch to the function's frame is a return.
@@ -875,7 +818,7 @@ impl<'m> Lifter<'m> {
         values: &[Expr],
         cond: Option<&str>,
     ) -> String {
-        if self.frames[frame].kind == Kind::Function {
+        if self.control[frame].kind == Kind::Function {
             let back = if values.is_empty() {
                 "return".to_owned()
             } else {
@@ -904,7 +847,7 @@ impl<'m> Lifter<'m> {
         text
     }
     fn target(&self, depth: u32) -> Option<usize> {
-        self.frames.len().checked_sub(depth as usize + 1)
+        self.control.target(depth)
     }
     /// Values reaching a frame's end by falling through are assigned to its
     /// result slots, as a branch out of it would.
@@ -981,7 +924,7 @@ impl<'m> Lifter<'m> {
         cond: Option<Expr>,
         extra: String,
     ) -> Result<()> {
-        let Some((params, results)) = wasm_stack::block_arity(self.module, block_type) else {
+        let Some((params, results)) = self.module.block_arity(block_type) else {
             return Err(Error::protocol(
                 "WASM block type names a type this module does not declare",
             ));
@@ -1022,7 +965,6 @@ impl<'m> Lifter<'m> {
             _ => "block".to_owned(),
         };
         let at = text.len();
-        let branch_values = if kind == Kind::Loop { params } else { results };
         let mut slots = Vec::new();
         let mut inner = values.clone();
         if kind == Kind::Loop && params > 0 {
@@ -1047,49 +989,43 @@ impl<'m> Lifter<'m> {
         let line = self.push_line(LineKind::Open, text, owned, &[]);
         self.lines[line].label = Some((label, at));
         let height = self.stack.len();
-        self.frames.push(Frame {
+        self.control.push(
             kind,
-            opened: kind,
+            (params, results),
             height,
-            params: values
-                .iter()
-                .map(|value| Expr::temp(value.text.clone()))
-                .collect(),
-            label,
-            slots,
-            branch_values,
-            result_slots: Vec::new(),
-            results,
-            unreachable: false,
-            catching: kind == Kind::Try,
-            dead: 0,
-            open_line: line,
-            open_offset: self.starts[index as usize],
-        });
-        self.labels.push(Label {
-            kind: frame_kind(kind),
-            block_type,
-        });
+            Fold {
+                arm_params: values
+                    .iter()
+                    .map(|value| Expr::temp(value.text.clone()))
+                    .collect(),
+                label,
+                slots,
+                catching: kind == Kind::Try,
+                open_line: line,
+                open_offset: self.starts[index as usize],
+                ..Fold::default()
+            },
+        );
         if kind == Kind::Try {
             self.catching += 1;
         }
-        self.max_depth = self.max_depth.max(self.frames.len() as u32 - 1);
+        self.max_depth = self.max_depth.max(self.control.len() as u32 - 1);
         self.stack.extend(inner);
         Ok(())
     }
 
     /// The `else`, `catch` and `catch_all` of the innermost frame.
     fn middle(&mut self, kind: Kind, index: u32, text: String, pushes: u32) {
-        let frame = self.frames.len() - 1;
-        if !self.frames[frame].unreachable {
-            let results = self.frames[frame].results;
+        let frame = self.control.len() - 1;
+        if !self.control[frame].state.unreachable {
+            let results = self.control[frame].results;
             let values = self.pop_n(results);
             self.assign_slots(frame, values);
             self.flush();
         }
         let base = self.base();
         self.stack.truncate(base);
-        let params = self.frames[frame].params.clone();
+        let params = self.control[frame].state.arm_params.clone();
         self.stack.extend(params);
         let outputs: Vec<String> = (0..pushes).map(|_| self.temp()).collect();
         let mut text = text;
@@ -1097,8 +1033,8 @@ impl<'m> Lifter<'m> {
             let _ = write!(text, " -> {}", outputs.join(", "));
         }
         text.push_str(" {");
+        self.control.enter_arm(kind);
         let top = self.top();
-        top.kind = kind;
         top.unreachable = false;
         top.dead = 0;
         // A catch arm runs after the throw it handles; a throw inside it
@@ -1110,9 +1046,6 @@ impl<'m> Lifter<'m> {
         // The arm's opener reads at the frame's own depth.
         let line = self.push_line(LineKind::Middle, text, vec![index], &[]);
         self.lines[line].depth -= 1;
-        if let Some(label) = self.labels.last_mut() {
-            label.kind = frame_kind(kind);
-        }
         for name in outputs {
             self.stack.push(Expr::temp(name));
         }
@@ -1120,12 +1053,12 @@ impl<'m> Lifter<'m> {
 
     /// The `end` or `delegate` of the innermost frame.
     fn close(&mut self, index: u32, suffix: String) {
-        let frame = self.frames.len() - 1;
-        let kind = self.frames[frame].kind;
-        let opened = self.frames[frame].opened;
-        let results = self.frames[frame].results;
+        let frame = self.control.len() - 1;
+        let kind = self.control[frame].kind;
+        let opened = self.control[frame].opened;
+        let results = self.control[frame].results;
         let mut carried = None;
-        if !self.frames[frame].unreachable {
+        if !self.control[frame].state.unreachable {
             let values = self.pop_n(results);
             if kind == Kind::Function {
                 self.flush();
@@ -1142,7 +1075,9 @@ impl<'m> Lifter<'m> {
                     self.spill_before(effects);
                     self.push_line(LineKind::Statement, text, owned, &calls);
                 }
-            } else if kind == Kind::Block && !self.targeted[self.frames[frame].label as usize] {
+            } else if kind == Kind::Block
+                && !self.targeted[self.control[frame].state.label as usize]
+            {
                 // The only way out is falling through, so the result stays a
                 // pending value instead of a temporary. A try_table's result
                 // is assigned inside it instead: carried past its end, the
@@ -1158,7 +1093,7 @@ impl<'m> Lifter<'m> {
         if kind == Kind::If && results > 0 {
             // No else arm: the false path passes the parameters through.
             let slots = self.slots(frame);
-            let params = &self.frames[frame].params;
+            let params = &self.control[frame].state.arm_params;
             let pairs: Vec<String> = slots
                 .iter()
                 .zip(params)
@@ -1172,20 +1107,19 @@ impl<'m> Lifter<'m> {
         } else {
             Vec::new()
         };
-        let closing = self.frames.pop().expect("an open frame");
-        if closing.catching {
+        let closing = self.control.pop().expect("an open frame");
+        if closing.state.catching {
             self.catching -= 1;
         }
-        self.labels.pop();
-        self.stack.truncate(closing.height);
+        self.stack.truncate(closing.height());
         let line = self.push_line(LineKind::Close, text, vec![index], &[]);
         self.closed.push(Closed {
-            open_line: closing.open_line,
+            open_line: closing.state.open_line,
             close_line: Some(line),
-            depth: self.frames.len() as u32,
+            depth: self.control.len() as u32,
             kind: opened,
-            label: closing.label,
-            byte_offset: closing.open_offset,
+            label: closing.state.label,
+            byte_offset: closing.state.open_offset,
         });
         if kind == Kind::Function {
             self.ended = true;
@@ -1214,45 +1148,62 @@ impl<'m> Lifter<'m> {
             ));
         }
         let run = self.run.take();
-        if self.frames.last().is_some_and(|frame| frame.unreachable) {
-            let dead = self.frames.last().map_or(0, |frame| frame.dead);
-            match op {
-                Operator::Block { .. }
-                | Operator::Loop { .. }
-                | Operator::If { .. }
-                | Operator::Try { .. }
-                | Operator::TryTable { .. } => {
+        let effect = wasm_stack::effect(op);
+        if self
+            .control
+            .last()
+            .is_some_and(|frame| frame.state.unreachable)
+        {
+            let dead = self.control.last().map_or(0, |frame| frame.state.dead);
+            match effect {
+                Effect::Open { .. } => {
                     self.fallback(UNREACHABLE_CODE, op, index);
                     self.top().dead += 1;
                     return Ok(());
                 }
-                Operator::End | Operator::Delegate { .. } if dead > 0 => {
+                Effect::End | Effect::Delegate { .. } if dead > 0 => {
                     self.top().dead -= 1;
                     self.fallback(UNREACHABLE_CODE, op, index);
                     return Ok(());
                 }
-                Operator::Else | Operator::Catch { .. } | Operator::CatchAll if dead > 0 => {
+                Effect::Else | Effect::Catch { .. } if dead > 0 => {
                     self.top().dead -= 1;
                     self.fallback(UNREACHABLE_CODE, op, index);
                     self.top().dead += 1;
                     return Ok(());
                 }
-                Operator::Else
-                | Operator::Catch { .. }
-                | Operator::CatchAll
-                | Operator::End
-                | Operator::Delegate { .. } => {}
+                Effect::Else | Effect::Catch { .. } | Effect::End | Effect::Delegate { .. } => {}
                 _ => {
                     self.fallback(UNREACHABLE_CODE, op, index);
                     return Ok(());
                 }
             }
         }
-        match op {
-            Operator::Block { blockty } => {
+        self.apply(effect, op, index, run)?;
+        if effect.ends_path() {
+            self.unreachable_after();
+        }
+        Ok(())
+    }
+
+    /// Lifts one reachable instruction by its effect.
+    fn apply(
+        &mut self,
+        effect: Effect<'_>,
+        op: &Operator<'_>,
+        index: u32,
+        run: Option<(usize, u32)>,
+    ) -> Result<()> {
+        match effect {
+            Effect::Open {
+                kind,
+                block_type,
+                catches,
+            } => {
                 // A run of plain openers (a dispatcher's) reads as one line.
-                if let Some((line, last)) = run
-                    && *blockty == BlockType::Empty
+                if kind == Kind::Block
+                    && let Some((line, last)) = run
+                    && block_type == BlockType::Empty
                     && last + 1 == index
                     && self.stack.len() == self.base()
                 {
@@ -1263,72 +1214,41 @@ impl<'m> Lifter<'m> {
                     let (first, count) = entry.run.unwrap_or((label - 1, 1));
                     entry.run = Some((first, count + 1));
                     let height = self.stack.len();
-                    self.frames.push(Frame {
-                        kind: Kind::Block,
-                        opened: Kind::Block,
+                    self.control.push(
+                        Kind::Block,
+                        (0, 0),
                         height,
-                        params: Vec::new(),
-                        label,
-                        slots: Vec::new(),
-                        branch_values: 0,
-                        result_slots: Vec::new(),
-                        results: 0,
-                        unreachable: false,
-                        catching: false,
-                        dead: 0,
-                        open_line: line,
-                        open_offset: self.starts[index as usize],
-                    });
-                    self.labels.push(Label {
-                        kind: FrameKind::Block,
-                        block_type: BlockType::Empty,
-                    });
-                    self.max_depth = self.max_depth.max(self.frames.len() as u32 - 1);
+                        Fold {
+                            label,
+                            open_line: line,
+                            open_offset: self.starts[index as usize],
+                            ..Fold::default()
+                        },
+                    );
+                    self.max_depth = self.max_depth.max(self.control.len() as u32 - 1);
                     self.count("block");
                     self.run = Some((line, index));
                     return Ok(());
                 }
-                self.count("block");
-                self.open(Kind::Block, *blockty, index, None, String::new())?;
-                if *blockty == BlockType::Empty {
-                    self.run = Some((self.lines.len() - 1, index));
-                }
-            }
-            Operator::Loop { blockty } => {
-                self.count("loop");
-                self.open(Kind::Loop, *blockty, index, None, String::new())?;
-            }
-            Operator::If { blockty } => {
-                self.count("if");
-                let cond = self.pop();
-                self.open(Kind::If, *blockty, index, Some(cond), String::new())?;
-            }
-            Operator::Try { blockty } => {
-                self.count("try");
-                self.open(Kind::Try, *blockty, index, None, String::new())?;
-            }
-            Operator::TryTable { try_table } => {
-                self.count("try_table");
+                self.count(kind.name());
+                let cond = (kind == Kind::If).then(|| self.pop());
                 // Catch clauses name labels outside this frame and deliver
                 // values the lift does not assign, so the opener is counted.
                 let mut clauses = Vec::new();
-                for catch in &try_table.catches {
-                    let (what, label) = match catch {
-                        wasmparser::Catch::One { tag, label } => {
-                            (format!("catch tag {tag}"), *label)
-                        }
-                        wasmparser::Catch::OneRef { tag, label } => {
-                            (format!("catch_ref tag {tag}"), *label)
-                        }
-                        wasmparser::Catch::All { label } => ("catch_all".to_owned(), *label),
-                        wasmparser::Catch::AllRef { label } => ("catch_all_ref".to_owned(), *label),
+                for catch in catches {
+                    let clause = Clause::of(catch, self.module, &self.control);
+                    let what = match (clause.tag, clause.with_ref) {
+                        (Some(tag), false) => format!("catch tag {tag}"),
+                        (Some(tag), true) => format!("catch_ref tag {tag}"),
+                        (None, false) => "catch_all".to_owned(),
+                        (None, true) => "catch_all_ref".to_owned(),
                     };
-                    let target = match self.target(label) {
-                        Some(frame) if self.frames[frame].kind == Kind::Function => {
+                    let target = match clause.target {
+                        Some(frame) if self.control[frame].kind == Kind::Function => {
                             "return".to_owned()
                         }
                         Some(frame) => self.label_name(frame),
-                        None => format!("label {label} (out of range)"),
+                        None => format!("label {} (out of range)", clause.label),
                     };
                     clauses.push(format!("{what} -> {target}"));
                 }
@@ -1337,87 +1257,74 @@ impl<'m> Lifter<'m> {
                 } else {
                     format!(" {}", clauses.join(", "))
                 };
-                self.open(Kind::TryTable, try_table.ty, index, None, extra)?;
-                if !try_table.catches.is_empty() {
+                self.open(kind, block_type, index, cond, extra)?;
+                if kind == Kind::Block && block_type == BlockType::Empty {
+                    self.run = Some((self.lines.len() - 1, index));
+                }
+                if !catches.is_empty() {
                     self.top().catching = true;
                     self.catching += 1;
                     self.fallbacks[EXCEPTION_HANDLER] += 1;
-                    let line = self.frames.last().map_or(0, |frame| frame.open_line);
+                    let line = self.control.last().map_or(0, |frame| frame.state.open_line);
                     self.lines[line].kind = LineKind::Fallback;
                 }
             }
-            Operator::Else => {
-                if self
-                    .frames
-                    .last()
-                    .is_none_or(|frame| frame.kind != Kind::If)
-                {
+            Effect::Else => {
+                if !self.control.accepts(&effect) {
                     return Err(Error::protocol("WASM else does not match an if"));
                 }
                 self.count("else");
                 self.middle(Kind::Else, index, "} else".to_owned(), 0);
             }
-            Operator::Catch { tag_index: tag } => {
-                if self
-                    .frames
-                    .last()
-                    .is_none_or(|frame| !matches!(frame.kind, Kind::Try | Kind::Catch))
-                {
+            Effect::Catch { tag } => {
+                if !self.control.accepts(&effect) {
                     return Err(Error::protocol("WASM catch does not match a try"));
                 }
-                let pushes = wasm_stack::arity(op, self.module, &self.labels)
-                    .map_or(0, |(_, pushes)| pushes);
-                self.middle(Kind::Catch, index, format!("}} catch tag {tag}"), pushes);
-            }
-            Operator::CatchAll => {
-                if self
-                    .frames
-                    .last()
-                    .is_none_or(|frame| !matches!(frame.kind, Kind::Try | Kind::Catch))
-                {
-                    return Err(Error::protocol("WASM catch does not match a try"));
+                match tag {
+                    Some(tag) => {
+                        let pushes = self.module.tag_params(tag).unwrap_or(0);
+                        self.middle(Kind::Catch, index, format!("}} catch tag {tag}"), pushes);
+                    }
+                    None => self.middle(Kind::Catch, index, "} catch_all".to_owned(), 0),
                 }
-                self.middle(Kind::Catch, index, "} catch_all".to_owned(), 0);
             }
-            Operator::End => self.close(index, String::new()),
-            Operator::Delegate { relative_depth } => {
-                if self
-                    .frames
-                    .last()
-                    .is_none_or(|frame| frame.kind != Kind::Try)
-                {
+            Effect::End => self.close(index, String::new()),
+            Effect::Delegate { depth } => {
+                if !self.control.accepts(&effect) {
                     return Err(Error::protocol("WASM delegate does not match a try"));
                 }
-                // The depth counts from the frame around the try.
-                let target = self.frames.len().checked_sub(*relative_depth as usize + 2);
-                let suffix = match target {
-                    Some(frame) if self.frames[frame].kind == Kind::Function => {
+                let suffix = match self.control.delegate_target(depth) {
+                    Some(frame) if self.control[frame].kind == Kind::Function => {
                         " delegate caller".to_owned()
                     }
                     Some(frame) => format!(" delegate {}", self.label_name(frame)),
-                    None => format!(" delegate label {relative_depth} (out of range)"),
+                    None => format!(" delegate label {depth} (out of range)"),
                 };
                 self.close(index, suffix);
             }
-            Operator::Br { relative_depth } => {
-                let Some(frame) = self.target(*relative_depth) else {
+            Effect::Branch {
+                depth,
+                conditional: false,
+            } => {
+                let Some(frame) = self.target(depth) else {
                     self.fallback(LABEL_OUT_OF_RANGE, op, index);
-                    self.unreachable_after();
                     return Ok(());
                 };
-                let values = self.pop_n(self.frames[frame].branch_values);
+                let values = self.pop_n(self.control[frame].branch_arity());
                 self.flush();
                 let text = self.branch_text("br", frame, &values, None);
                 self.statement(LineKind::Statement, text, values, index, Effects::default());
-                self.unreachable_after();
             }
-            Operator::BrIf { relative_depth } => {
-                let Some(frame) = self.target(*relative_depth) else {
+            Effect::Branch {
+                depth,
+                conditional: true,
+            } => {
+                let Some(frame) = self.target(depth) else {
                     self.fallback(LABEL_OUT_OF_RANGE, op, index);
                     return Ok(());
                 };
                 let cond = self.pop();
-                let count = self.frames[frame].branch_values as usize;
+                let count = self.control[frame].branch_arity() as usize;
                 // Everything pending ran before the branch whether or not it
                 // is taken, so a value with an effect (a call, a load, a
                 // global, a local write) is assigned first, deepest first.
@@ -1445,9 +1352,9 @@ impl<'m> Lifter<'m> {
                 self.statement(LineKind::Statement, text, inputs, index, Effects::default());
                 self.stack.extend(values);
             }
-            Operator::BrTable { targets } => self.br_table(targets, index)?,
-            Operator::Return => {
-                let results = self.frames[0].results;
+            Effect::BrTable(targets) => self.br_table(targets, index)?,
+            Effect::Return => {
+                let results = self.control[0].results;
                 let values = self.pop_n(results);
                 self.flush();
                 let text = if values.is_empty() {
@@ -1456,9 +1363,8 @@ impl<'m> Lifter<'m> {
                     format!("return {}", joined(&values))
                 };
                 self.statement(LineKind::Statement, text, values, index, Effects::default());
-                self.unreachable_after();
             }
-            Operator::Unreachable => {
+            Effect::Unreachable => {
                 self.flush();
                 self.statement(
                     LineKind::Statement,
@@ -1467,8 +1373,120 @@ impl<'m> Lifter<'m> {
                     index,
                     Effects::default(),
                 );
-                self.unreachable_after();
             }
+            Effect::Call { callee, tail } => self.call(op, callee, tail, index),
+            Effect::Throw { tag: Some(tag) } => {
+                let pops = self.module.tag_params(tag).unwrap_or(0);
+                let args = self.pop_n(pops);
+                self.flush();
+                let text = format!("throw tag {tag}({})", joined(&args));
+                let impure = THROWING;
+                self.statement(LineKind::Statement, text, args, index, impure);
+            }
+            Effect::Throw { tag: None } => {
+                let value = self.pop();
+                self.flush();
+                let text = format!("throw_ref({})", value.text);
+                self.statement(LineKind::Statement, text, vec![value], index, THROWING);
+            }
+            Effect::Rethrow { depth } => {
+                self.flush();
+                let text = match self.target(depth) {
+                    Some(frame) => format!("rethrow {}", self.label_name(frame)),
+                    None => format!("rethrow label {depth} (out of range)"),
+                };
+                self.statement(LineKind::Statement, text, Vec::new(), index, THROWING);
+            }
+            Effect::BrOn { depth, test } => {
+                let target = self.target(depth);
+                if let Some(frame) = target {
+                    self.label_name(frame);
+                }
+                match target.and_then(|frame| test.arity(self.control[frame].branch_arity())) {
+                    Some((pops, pushes)) => {
+                        self.fallback_with_effect(GC_BRANCH, op, index, pops, pushes)
+                    }
+                    None => {
+                        self.fallback_unknown(op, index);
+                    }
+                }
+            }
+            Effect::Switching => match wasm_stack::plain_arity(op, self.module) {
+                Some((pops, pushes)) => {
+                    self.fallback_with_effect(STACK_SWITCHING, op, index, pops, pushes)
+                }
+                None => {
+                    self.fallback_unknown(op, index);
+                }
+            },
+            Effect::Plain => self.plain(op, index),
+        }
+        Ok(())
+    }
+
+    /// A call folds its arguments, then its callee operand for an indirect
+    /// or reference call, into one expression.
+    fn call(&mut self, op: &Operator<'_>, callee: Callee, tail: bool, index: u32) {
+        let Some((params, pushes)) = self.module.call_arity(callee) else {
+            self.fallback_unknown(op, index);
+            return;
+        };
+        let impure = THROWING;
+        let call = match callee {
+            Callee::Function(function) => {
+                let args = self.pop_n(params);
+                let (name, _) = display_name(self.names, function);
+                let mut call = self.combine(args, index, impure, false, |values| {
+                    format!("{name}({})", joined(values))
+                });
+                call.calls.push(function);
+                call
+            }
+            Callee::Indirect { type_index, table } => {
+                let callee = self.pop();
+                let mut args = self.pop_n(params);
+                args.push(callee);
+                self.combine(args, index, impure, false, |values| {
+                    let (callee, args) = values.split_last().expect("a callee");
+                    if args.is_empty() {
+                        format!(
+                            "call_indirect(index {}, type {type_index}, table {table})",
+                            callee.text
+                        )
+                    } else {
+                        format!(
+                            "call_indirect({}; index {}, type {type_index}, table {table})",
+                            joined(args),
+                            callee.text
+                        )
+                    }
+                })
+            }
+            Callee::Ref { type_index } => {
+                let callee = self.pop();
+                let mut args = self.pop_n(params);
+                args.push(callee);
+                self.combine(args, index, impure, false, |values| {
+                    let (callee, args) = values.split_last().expect("a callee");
+                    if args.is_empty() {
+                        format!("call_ref(ref {}, type {type_index})", callee.text)
+                    } else {
+                        format!(
+                            "call_ref({}; ref {}, type {type_index})",
+                            joined(args),
+                            callee.text
+                        )
+                    }
+                })
+            }
+        };
+        self.push_call(call, pushes, tail);
+    }
+
+    /// An operator with no control effect: locals, globals, constants and
+    /// `select` fold by name, everything else by its declared effect.
+    fn plain(&mut self, op: &Operator<'_>, index: u32) {
+        match op {
             Operator::Nop => {
                 self.push_line(LineKind::Statement, "nop".into(), vec![index], &[]);
             }
@@ -1583,151 +1601,8 @@ impl<'m> Lifter<'m> {
                 );
                 self.stack.push(folded);
             }
-            Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
-                let Some((pops, pushes)) = wasm_stack::arity(
-                    &Operator::Call {
-                        function_index: *function_index,
-                    },
-                    self.module,
-                    &self.labels,
-                ) else {
-                    self.fallback_unknown(op, index);
-                    return Ok(());
-                };
-                let args = self.pop_n(pops);
-                let (name, _) = display_name(self.names, *function_index);
-                let impure = THROWING;
-                let mut call = self.combine(args, index, impure, false, |values| {
-                    format!("{name}({})", joined(values))
-                });
-                call.calls.push(*function_index);
-                let tail = matches!(op, Operator::ReturnCall { .. });
-                self.push_call(call, pushes, tail);
-            }
-            Operator::CallIndirect {
-                type_index,
-                table_index,
-            }
-            | Operator::ReturnCallIndirect {
-                type_index,
-                table_index,
-            } => {
-                let Some((params, pushes)) = self
-                    .module
-                    .func_type(*type_index)
-                    .map(|ty| (ty.params().len() as u32, ty.results().len() as u32))
-                else {
-                    self.fallback_unknown(op, index);
-                    return Ok(());
-                };
-                let callee = self.pop();
-                let mut args = self.pop_n(params);
-                args.push(callee);
-                let impure = THROWING;
-                let (type_index, table_index) = (*type_index, *table_index);
-                let call = self.combine(args, index, impure, false, |values| {
-                    let (callee, args) = values.split_last().expect("a callee");
-                    if args.is_empty() {
-                        format!(
-                            "call_indirect(index {}, type {type_index}, table {table_index})",
-                            callee.text
-                        )
-                    } else {
-                        format!(
-                            "call_indirect({}; index {}, type {type_index}, table {table_index})",
-                            joined(args),
-                            callee.text
-                        )
-                    }
-                });
-                let tail = matches!(op, Operator::ReturnCallIndirect { .. });
-                self.push_call(call, pushes, tail);
-            }
-            Operator::CallRef { type_index } | Operator::ReturnCallRef { type_index } => {
-                let Some((params, pushes)) = self
-                    .module
-                    .func_type(*type_index)
-                    .map(|ty| (ty.params().len() as u32, ty.results().len() as u32))
-                else {
-                    self.fallback_unknown(op, index);
-                    return Ok(());
-                };
-                let callee = self.pop();
-                let mut args = self.pop_n(params);
-                args.push(callee);
-                let impure = THROWING;
-                let type_index = *type_index;
-                let call = self.combine(args, index, impure, false, |values| {
-                    let (callee, args) = values.split_last().expect("a callee");
-                    if args.is_empty() {
-                        format!("call_ref(ref {}, type {type_index})", callee.text)
-                    } else {
-                        format!(
-                            "call_ref({}; ref {}, type {type_index})",
-                            joined(args),
-                            callee.text
-                        )
-                    }
-                });
-                let tail = matches!(op, Operator::ReturnCallRef { .. });
-                self.push_call(call, pushes, tail);
-            }
-            Operator::Throw { tag_index } => {
-                let pops =
-                    wasm_stack::arity(op, self.module, &self.labels).map_or(0, |(pops, _)| pops);
-                let args = self.pop_n(pops);
-                self.flush();
-                let text = format!("throw tag {tag_index}({})", joined(&args));
-                let impure = THROWING;
-                self.statement(LineKind::Statement, text, args, index, impure);
-                self.unreachable_after();
-            }
-            Operator::ThrowRef => {
-                let value = self.pop();
-                self.flush();
-                let text = format!("throw_ref({})", value.text);
-                self.statement(LineKind::Statement, text, vec![value], index, THROWING);
-                self.unreachable_after();
-            }
-            Operator::Rethrow { relative_depth } => {
-                self.flush();
-                let text = match self.target(*relative_depth) {
-                    Some(frame) => format!("rethrow {}", self.label_name(frame)),
-                    None => format!("rethrow label {relative_depth} (out of range)"),
-                };
-                self.statement(LineKind::Statement, text, Vec::new(), index, THROWING);
-                self.unreachable_after();
-            }
-            Operator::BrOnNull { relative_depth }
-            | Operator::BrOnNonNull { relative_depth }
-            | Operator::BrOnCast { relative_depth, .. }
-            | Operator::BrOnCastFail { relative_depth, .. } => {
-                if let Some(frame) = self.target(*relative_depth) {
-                    self.label_name(frame);
-                }
-                match wasm_stack::arity(op, self.module, &self.labels) {
-                    Some((pops, pushes)) => {
-                        self.fallback_with_effect(GC_BRANCH, op, index, pops, pushes)
-                    }
-                    None => {
-                        self.fallback_unknown(op, index);
-                    }
-                }
-            }
-            Operator::Resume { .. }
-            | Operator::ResumeThrow { .. }
-            | Operator::Switch { .. }
-            | Operator::Suspend { .. } => match wasm_stack::arity(op, self.module, &self.labels) {
-                Some((pops, pushes)) => {
-                    self.fallback_with_effect(STACK_SWITCHING, op, index, pops, pushes)
-                }
-                None => {
-                    self.fallback_unknown(op, index);
-                }
-            },
             _ => self.generic(op, index),
         }
-        Ok(())
     }
 
     /// A call's result: a pending value, a statement, temporaries for several
@@ -1743,7 +1618,6 @@ impl<'m> Lifter<'m> {
             let calls = call.calls.clone();
             self.spill_before(call.effects);
             self.push_line(LineKind::Statement, text, call.instrs, &calls);
-            self.unreachable_after();
             return;
         }
         match pushes {
@@ -1790,12 +1664,11 @@ impl<'m> Lifter<'m> {
             });
             self.flush();
             self.push_line(LineKind::Fallback, text, vec![index], &[]);
-            self.unreachable_after();
             return Ok(());
         };
         self.count("br_table");
         let selector = self.pop();
-        let count = self.frames[default_frame].branch_values;
+        let count = self.control[default_frame].branch_arity();
         let mut values = self.pop_n(count);
         for value in values.iter_mut() {
             let taken = std::mem::take(value);
@@ -1880,7 +1753,6 @@ impl<'m> Lifter<'m> {
         self.case_line(text, index, LineKind::Case);
         let close = self.push_line(LineKind::Close, "}".into(), Vec::new(), &[]);
         self.lines[close].refs.push(index);
-        self.unreachable_after();
         Ok(())
     }
     fn over_budget(&self) -> bool {
@@ -1896,7 +1768,7 @@ impl<'m> Lifter<'m> {
     /// typed loads and stores with their offset and alignment, and calls of
     /// the mnemonic for the rest.
     fn generic(&mut self, op: &Operator<'_>, index: u32) {
-        let Some((pops, pushes)) = wasm_stack::arity(op, self.module, &self.labels) else {
+        let Some((pops, pushes)) = wasm_stack::plain_arity(op, self.module) else {
             self.fallback_unknown(op, index);
             return;
         };
@@ -1992,17 +1864,17 @@ impl<'m> Lifter<'m> {
     fn finish(mut self, stopped: Option<&'static str>, instruction_count: usize) -> Lift {
         // Frames still open when a limit stopped the lift.
         let open: Vec<Closed> = self
-            .frames
+            .control
             .iter()
             .enumerate()
             .skip(1)
             .map(|(depth, frame)| Closed {
-                open_line: frame.open_line,
+                open_line: frame.state.open_line,
                 close_line: None,
                 depth: depth as u32,
                 kind: frame.opened,
-                label: frame.label,
-                byte_offset: frame.open_offset,
+                label: frame.state.label,
+                byte_offset: frame.state.open_offset,
             })
             .collect();
         self.closed.extend(open);
@@ -2600,7 +2472,7 @@ fn window_document(
                 frame.open_line,
                 frame.close_line,
                 frame.depth,
-                KIND_NAMES[frame.kind as usize],
+                frame.kind.name(),
                 frame.label,
                 frame.byte_offset
             ])

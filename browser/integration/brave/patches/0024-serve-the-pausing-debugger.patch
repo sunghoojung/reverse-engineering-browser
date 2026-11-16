@@ -1,8 +1,8 @@
 diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
-index f92d657..8593eda 100644
+index 2365a6a..8e7dfa7 100644
 --- a/browser/brave_content_browser_client.cc
 +++ b/browser/brave_content_browser_client.cc
-@@ -92,6 +92,7 @@
+@@ -93,6 +93,7 @@
  #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
  #include "brave/components/reverse_engineering_browser/browser/native_console_document_start.h"
  #include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
@@ -10,7 +10,7 @@ index f92d657..8593eda 100644
  #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
  #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
  #include "brave/components/request_otr/common/buildflags/buildflags.h"
-@@ -579,6 +580,9 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
+@@ -608,6 +609,9 @@ void BraveContentBrowserClient::RenderProcessWillLaunch(
      }
      reb::StartNativeConsoleSession(std::move(retired));
    }
@@ -20,7 +20,7 @@ index f92d657..8593eda 100644
    Profile* profile = Profile::FromBrowserContext(host->GetBrowserContext());
    // The BraveRendererUpdater might be null for some irregular profiles, e.g.
    // the System Profile.
-@@ -1143,6 +1147,11 @@ void BraveContentBrowserClient::AppendExtraCommandLineSwitches(
+@@ -1201,6 +1205,11 @@ void BraveContentBrowserClient::AppendExtraCommandLineSwitches(
    std::string process_type =
        command_line->GetSwitchValueASCII(switches::kProcessType);
    if (process_type == switches::kRendererProcess) {
@@ -33,18 +33,18 @@ index f92d657..8593eda 100644
        command_line->AppendSwitch("reb-native-console");
        // Permission only. A renderer that receives this switch still runs
 diff --git a/renderer/brave_content_renderer_client.cc b/renderer/brave_content_renderer_client.cc
-index 3490cdd..be4e0a2 100644
+index 7d369d1..b09b1d8 100644
 --- a/renderer/brave_content_renderer_client.cc
 +++ b/renderer/brave_content_renderer_client.cc
-@@ -21,6 +21,7 @@
+@@ -22,6 +22,7 @@
  #include "brave/components/playlist/core/common/buildflags/buildflags.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_console_agent.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_debugger_pause_agent.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
- #include "brave/components/safe_builtins/renderer/safe_builtins.h"
  #include "brave/components/script_injector/renderer/script_injector_render_frame_observer.h"
-@@ -180,6 +181,7 @@ void BraveContentRendererClient::RenderFrameCreated(
+ #include "brave/components/skus/common/features.h"
+@@ -211,6 +212,7 @@ void BraveContentRendererClient::RenderFrameCreated(
      content::RenderFrame* render_frame) {
    ChromeContentRendererClient::RenderFrameCreated(render_frame);
    reb::NativeConsoleAgent::CreateIfEnabled(render_frame);

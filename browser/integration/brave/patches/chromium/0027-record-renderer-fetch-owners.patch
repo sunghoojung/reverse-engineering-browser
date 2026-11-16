@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/core/loader/base_fetch_context.cc b/third_party/blink/renderer/core/loader/base_fetch_context.cc
-index 85af31d..351fcda 100644
+index d76d483..c9fcc2b 100644
 --- a/third_party/blink/renderer/core/loader/base_fetch_context.cc
 +++ b/third_party/blink/renderer/core/loader/base_fetch_context.cc
 @@ -8,6 +8,7 @@
@@ -39,12 +39,12 @@ index 85af31d..351fcda 100644
      ResourceType type,
      const ResourceRequest& resource_request,
 diff --git a/third_party/blink/renderer/core/loader/base_fetch_context.h b/third_party/blink/renderer/core/loader/base_fetch_context.h
-index 2db9e03..4d4e898 100644
+index b5443c3..8ab6f41 100644
 --- a/third_party/blink/renderer/core/loader/base_fetch_context.h
 +++ b/third_party/blink/renderer/core/loader/base_fetch_context.h
-@@ -101,6 +101,8 @@ class CORE_EXPORT BaseFetchContext : public FetchContext {
+@@ -103,6 +103,8 @@ class CORE_EXPORT BaseFetchContext : public FetchContext {
        const FetchInitiatorInfo& initiator_info,
-       bool scan_stack_for_ads) override;
+       bool scan_javascript_stack) override;
  
 +  reb::NativeFetchOwner GetNativeFetchOwner() const override;
 +
@@ -52,7 +52,7 @@ index 2db9e03..4d4e898 100644
    BaseFetchContext(const DetachableResourceFetcherProperties& properties,
                     DetachableConsoleLogger* logger)
 diff --git a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
-index 78ac21c..c0ac1c8 100644
+index 804d206..b13f05a 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
 +++ b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
 @@ -37,6 +37,7 @@
@@ -75,7 +75,7 @@ index 78ac21c..c0ac1c8 100644
    const Vector<KURL> empty_unused_preloads_;
  };
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
-index c5a4576..d0bf070 100644
+index b4d33c0..e66b39c 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
 @@ -113,6 +113,13 @@ namespace blink {
@@ -92,7 +92,7 @@ index c5a4576..d0bf070 100644
  reb::NativeRendererRequest RecordNativeDataUrlStart(
      const ResourceRequestHead& request) {
    if (!reb::NativeProbeSink::Get().IsCaptureArmed()) [[likely]] {
-@@ -1269,6 +1276,7 @@ void ResourceLoader::HandleError(const ResourceError& error) {
+@@ -1256,6 +1263,7 @@ void ResourceLoader::HandleError(const ResourceError& error) {
  }
  
  void ResourceLoader::RequestSynchronously() {
@@ -100,7 +100,7 @@ index c5a4576..d0bf070 100644
    DCHECK(IsLoading());
    DCHECK_EQ(resource_->GetResourceRequest().Priority(),
              ResourceLoadPriority::kHighest);
-@@ -1353,6 +1361,7 @@ void ResourceLoader::RequestSynchronously() {
+@@ -1339,6 +1347,7 @@ void ResourceLoader::RequestSynchronously() {
  }
  
  void ResourceLoader::RequestAsynchronously() {
@@ -109,10 +109,10 @@ index c5a4576..d0bf070 100644
      CHECK(!network_resource_request_);
      CHECK(!loader_);
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc
-index f34b41a..2244a70 100644
+index 023bb04..1621103 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/background_url_loader.cc
-@@ -16,6 +16,8 @@
+@@ -17,6 +17,8 @@
  #include "base/task/sequenced_task_runner.h"
  #include "base/task/single_thread_task_runner.h"
  #include "base/time/time.h"
@@ -121,7 +121,7 @@ index f34b41a..2244a70 100644
  #include "services/network/public/cpp/resource_request.h"
  #include "services/network/public/cpp/url_loader_completion_status.h"
  #include "services/network/public/mojom/url_response_head.mojom.h"
-@@ -366,6 +368,17 @@ class BackgroundURLLoader::Context
+@@ -396,6 +398,17 @@ class BackgroundURLLoader::Context
        throttles.push_back(
            std::make_unique<MimeSniffingThrottle>(background_task_runner_));
      }

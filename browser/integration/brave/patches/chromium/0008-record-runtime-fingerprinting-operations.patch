@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc b/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc
-index e2a76e4dd3..8df496c59e 100644
+index ffcb12a6b9..70927d3ed9 100644
 --- a/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/use_counter_callback.cc
 @@ -4,6 +4,13 @@
@@ -16,7 +16,7 @@ index e2a76e4dd3..8df496c59e 100644
  #include "third_party/blink/public/common/scheme_registry.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
  #include "third_party/blink/renderer/core/execution_context/execution_context.h"
-@@ -15,12 +23,122 @@
+@@ -15,12 +22,122 @@
  
  namespace blink {
  
@@ -140,14 +140,14 @@ index e2a76e4dd3..8df496c59e 100644
    std::optional<WebDXFeature> webdx_feature;
    bool deprecated = false;
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
-index a4a53a9003..c439ad904f 100644
+index 69e94bc7b0..213af8eaaf 100644
 --- a/third_party/blink/renderer/core/BUILD.gn
 +++ b/third_party/blink/renderer/core/BUILD.gn
-@@ -408,6 +408,7 @@ component("core") {
+@@ -413,6 +413,7 @@ component("core") {
      ":make_deprecation_info",
      ":xml_ffi",
      "//base",
 +    "//brave/components/reverse_engineering_browser:renderer_sink",
-     "//components/attribution_reporting",
-     "//components/attribution_reporting:mojom_blink",
      "//components/paint_preview/common",
+     "//components/performance_manager/public/mojom:mojom_blink",
+     "//components/shared_highlighting/core/common",

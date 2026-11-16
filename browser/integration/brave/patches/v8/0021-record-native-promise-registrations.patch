@@ -46,10 +46,10 @@ index 9f29470..140f45e 100644
  
  #endif  // INCLUDE_V8_NATIVE_STACK_H_
 diff --git a/src/codegen/code-stub-assembler.cc b/src/codegen/code-stub-assembler.cc
-index faad5a4..e149294 100644
+index 96cc1c9..edb4f78 100644
 --- a/src/codegen/code-stub-assembler.cc
 +++ b/src/codegen/code-stub-assembler.cc
-@@ -19299,9 +19299,10 @@ TNode<BoolT> CodeStubAssembler::IsDebugActive() {
+@@ -20118,9 +20118,10 @@ TNode<BoolT> CodeStubAssembler::IsDebugActive() {
  }
  
  TNode<BoolT> CodeStubAssembler::HasAsyncEventDelegate() {
@@ -64,10 +64,10 @@ index faad5a4..e149294 100644
  
  TNode<Uint32T> CodeStubAssembler::PromiseHookFlags() {
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index a296e08..4ed6100 100644
+index 34ccc00..a171e99 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
-@@ -7415,7 +7415,8 @@ void Isolate::PromiseHookStateUpdated() {
+@@ -7514,7 +7514,8 @@ void Isolate::PromiseHookStateUpdated() {
    promise_hook_flags_ =
        (promise_hook_flags_ & PromiseHookFields::HasContextPromiseHook::kMask) |
        PromiseHookFields::HasIsolatePromiseHook::encode(promise_hook_) |
@@ -77,7 +77,7 @@ index a296e08..4ed6100 100644
        PromiseHookFields::IsDebugActive::encode(debug()->is_active());
  
    if (promise_hook_flags_ != 0) {
-@@ -7887,17 +7888,29 @@ void Isolate::OnAsyncFunctionSuspended(DirectHandle<JSPromise> promise,
+@@ -7998,17 +7999,30 @@ void Isolate::OnAsyncFunctionSuspended(DirectHandle<JSPromise> promise,
    DCHECK(!promise->has_async_task_id());
    RunAllPromiseHooks(PromiseHookType::kInit, promise, parent);
    if (HasAsyncEventDelegate()) {
@@ -88,11 +88,12 @@ index a296e08..4ed6100 100644
      current_async_task_id_ =
          JSPromise::GetNextAsyncTaskId(current_async_task_id_);
      promise->set_async_task_id(current_async_task_id_);
--    async_event_delegate_->AsyncEventOccurred(debug::kDebugAwait,
--                                              promise->async_task_id(), false);
+-    async_event_delegate_->AsyncEventOccurred(
+-        debug::kDebugAwait, promise->async_task_id(), false, skip_frame_count);
 +    if (async_event_delegate_) {
-+      async_event_delegate_->AsyncEventOccurred(
-+          debug::kDebugAwait, promise->async_task_id(), false);
++      async_event_delegate_->AsyncEventOccurred(debug::kDebugAwait,
++                                                promise->async_task_id(), false,
++                                                skip_frame_count);
 +    }
 +    if (reb) {
 +      reb_promise_callbacks_->registered(
@@ -110,17 +111,19 @@ index a296e08..4ed6100 100644
    Maybe<debug::DebugAsyncActionType> action_type =
        Nothing<debug::DebugAsyncActionType>();
    for (JavaScriptStackFrameIterator frame_it(this); !frame_it.done();
-@@ -7927,9 +7940,21 @@ void Isolate::OnPromiseThen(DirectHandle<JSPromise> promise) {
+@@ -8038,10 +8052,22 @@ void Isolate::OnPromiseThen(DirectHandle<JSPromise> promise) {
          current_async_task_id_ =
              JSPromise::GetNextAsyncTaskId(current_async_task_id_);
          promise->set_async_task_id(current_async_task_id_);
--        async_event_delegate_->AsyncEventOccurred(action_type.FromJust(),
--                                                  promise->async_task_id(),
--                                                  debug()->IsBlackboxed(info));
+-        const int kDontSkipFrames = 0;
+-        async_event_delegate_->AsyncEventOccurred(
+-            action_type.FromJust(), promise->async_task_id(),
+-            debug()->IsBlackboxed(info), kDontSkipFrames);
 +        if (async_event_delegate_) {
++          const int kDontSkipFrames = 0;
 +          async_event_delegate_->AsyncEventOccurred(
 +              action_type.FromJust(), promise->async_task_id(),
-+              debug()->IsBlackboxed(info));
++              debug()->IsBlackboxed(info), kDontSkipFrames);
 +        }
 +        if (reb) {
 +          const debug::DebugAsyncActionType action = action_type.FromJust();
@@ -135,15 +138,19 @@ index a296e08..4ed6100 100644
        }
        return;
      }
-@@ -7941,8 +7966,13 @@ void Isolate::OnPromiseBefore(DirectHandle<JSPromise> promise) {
+@@ -8053,10 +8079,15 @@ void Isolate::OnPromiseBefore(DirectHandle<JSPromise> promise) {
                   factory()->undefined_value());
    if (HasAsyncEventDelegate()) {
      if (promise->has_async_task_id()) {
--      async_event_delegate_->AsyncEventOccurred(
--          debug::kDebugWillHandle, promise->async_task_id(), false);
+-      const int kDontSkipFrames = 0;
+-      async_event_delegate_->AsyncEventOccurred(debug::kDebugWillHandle,
+-                                                promise->async_task_id(), false,
+-                                                kDontSkipFrames);
 +      if (async_event_delegate_) {
++        const int kDontSkipFrames = 0;
 +        async_event_delegate_->AsyncEventOccurred(
-+            debug::kDebugWillHandle, promise->async_task_id(), false);
++            debug::kDebugWillHandle, promise->async_task_id(), false,
++            kDontSkipFrames);
 +      }
 +      if (reb_promise_callbacks_) {
 +        reb_promise_callbacks_->will_handle(promise->async_task_id());
@@ -151,15 +158,19 @@ index a296e08..4ed6100 100644
      }
    }
  }
-@@ -7952,14 +7982,19 @@ void Isolate::OnPromiseAfter(DirectHandle<JSPromise> promise) {
+@@ -8066,16 +8097,21 @@ void Isolate::OnPromiseAfter(DirectHandle<JSPromise> promise) {
                   factory()->undefined_value());
    if (HasAsyncEventDelegate()) {
      if (promise->has_async_task_id()) {
--      async_event_delegate_->AsyncEventOccurred(
--          debug::kDebugDidHandle, promise->async_task_id(), false);
+-      const int kDontSkipFrames = 0;
+-      async_event_delegate_->AsyncEventOccurred(debug::kDebugDidHandle,
+-                                                promise->async_task_id(), false,
+-                                                kDontSkipFrames);
 +      if (async_event_delegate_) {
++        const int kDontSkipFrames = 0;
 +        async_event_delegate_->AsyncEventOccurred(
-+            debug::kDebugDidHandle, promise->async_task_id(), false);
++            debug::kDebugDidHandle, promise->async_task_id(), false,
++            kDontSkipFrames);
 +      }
 +      if (reb_promise_callbacks_) {
 +        reb_promise_callbacks_->did_handle(promise->async_task_id());
@@ -171,10 +182,10 @@ index a296e08..4ed6100 100644
  void Isolate::OnStackTraceCaptured(DirectHandle<StackTraceInfo> stack_trace) {
 -  if (HasAsyncEventDelegate()) {
 +  if (HasAsyncEventDelegate() && async_event_delegate_) {
+     const int kDontSkipFrames = 0;
      async_event_delegate_->AsyncEventOccurred(debug::kDebugStackTraceCaptured,
-                                               stack_trace->id(), false);
-   }
-@@ -8823,6 +8858,29 @@ bool CaptureNativeStack(Isolate* isolate, NativeStackCapture& capture,
+                                               stack_trace->id(), false,
+@@ -8980,6 +9016,29 @@ bool CaptureNativeStack(Isolate* isolate, NativeStackCapture& capture,
                          callbacks);
  }
  
@@ -205,10 +216,10 @@ index a296e08..4ed6100 100644
    if (isolate) {
      reinterpret_cast<internal::Isolate*>(isolate)->set_native_throw_observer(
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 8d7f1c7..760ec19 100644
+index 8be139f..5d1c726 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -90,6 +90,7 @@ class V8Inspector;
+@@ -91,6 +91,7 @@ class V8Inspector;
  namespace v8 {
  
  class EmbedderState;
@@ -216,7 +227,7 @@ index 8d7f1c7..760ec19 100644
  
  namespace base {
  class RandomNumberGenerator;
-@@ -1090,6 +1091,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -1102,6 +1103,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
      async_event_delegate_ = delegate;
      PromiseHookStateUpdated();
    }
@@ -229,8 +240,8 @@ index 8d7f1c7..760ec19 100644
  
    // Async function and promise instrumentation support.
    void OnAsyncFunctionSuspended(DirectHandle<JSPromise> promise,
-@@ -2996,6 +3003,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
-   debug::ConsoleDelegate* console_delegate_ = nullptr;
+@@ -3026,6 +3033,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   cppgc::Persistent<debug::ConsoleDelegate> console_delegate_;
  
    debug::AsyncEventDelegate* async_event_delegate_ = nullptr;
 +  const v8::NativePromiseCallbacks* reb_promise_callbacks_ = nullptr;
@@ -238,10 +249,10 @@ index 8d7f1c7..760ec19 100644
    uint32_t current_async_task_id_ = 0;
  
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index 3c5816f..076472a 100644
+index 5921bc2..2ab8a58 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -3445,6 +3445,9 @@ DEFINE_BOOL(async_stack_traces, true,
+@@ -3450,6 +3450,9 @@ DEFINE_BOOL(async_stack_traces, true,
              "include async stack traces in Error.stack")
  DEFINE_BOOL(reb_request_stacks, false,
              "let the embedder record request initiator stack identities")
@@ -252,7 +263,7 @@ index 3c5816f..076472a 100644
              "print stack trace when an illegal exception is thrown")
  DEFINE_BOOL(abort_on_uncaught_exception, false,
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index 207e899..655a7b6 100644
+index 31e6f4a..a13876e 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
 @@ -59,6 +59,7 @@
@@ -263,7 +274,7 @@ index 207e899..655a7b6 100644
  #include "include/v8-primitive-object.h"
  #include "include/v8-regexp.h"
  #include "include/v8-util.h"
-@@ -33381,3 +33382,137 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
+@@ -34101,3 +34102,137 @@ TEST(RebNativeCompiledScriptDisabledRunsNothing) {
    CompileRun("eval('8 + 8');");
    CHECK(reb_compiled_scripts.empty());
  }

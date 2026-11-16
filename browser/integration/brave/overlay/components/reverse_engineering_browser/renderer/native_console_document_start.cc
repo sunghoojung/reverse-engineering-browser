@@ -155,7 +155,11 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
   // an inert no-op, so clearing the experiment stops all output.
   void Report(const v8::FunctionCallbackInfo<v8::Value>& info) {
     auto* frame = blink::WebLocalFrame::FrameForCurrentContext();
-    const auto data = info.Data()->IsInt32() ? info.Data().As<v8::Int32>()->Value() : -1;
+    // V8 15.7 deprecates Data() in favor of DataV2(), which returns v8::Data.
+    const v8::Local<v8::Data> bound = info.DataV2();
+    const auto data = !bound.IsEmpty() && bound->IsValue() && bound.As<v8::Value>()->IsInt32()
+                          ? bound.As<v8::Int32>()->Value()
+                          : -1;
     if (!frame || data < 0)
       return;
     const auto epoch = static_cast<std::uint32_t>(data) / kNativeConsoleDocumentStartScriptLimit;

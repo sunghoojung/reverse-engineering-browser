@@ -56,7 +56,7 @@ compromised renderer.
 `Begin` gives a generation-bound ticket before source processing. Capture
 rechecks it under the queue lock and after copying. Old tickets cannot silently
 submit source into a replacement session, even if the worker token is unchanged.
-At Chromium `151.0.7922.108`, `DedicatedWorkerGlobalScope` returns its dedicated
+At Chromium `157.0.8103.79` (as at `151.0.7922.108`), `DedicatedWorkerGlobalScope` returns its dedicated
 worker token as its execution-context token; all 128 bits are preserved. The
 parent context token is an observation hint only. No frame, tab, navigation,
 browser ownership, or causal edge is inferred from it.
@@ -183,16 +183,21 @@ the 2 MiB boundary; output buffer limits; queue overflow and recovery; stale
 generations; retirement; expiration; and concurrent capture/dequeue accounting.
 These are protocol/foundation tests, not browser acceptance.
 
-Chromium patch `0010-observe-dedicated-worker-sources.patch` targets these exact
-files at `151.0.7922.108`:
+Chromium patch `0010-observe-dedicated-worker-sources.patch` targets these
+files at `157.0.8103.79` (Chromium Git blob; the blob after Brave `v1.99.57`'s
+own patches where Brave edits the file):
 
 - `third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc`, Git blob
-  `ecb68ce4e23d76b82da09ffb4ee60619a9a35462`
+  `ff1be98b9b109e647eed8c78019a49bfec00df4a`, after Brave
+  `036c566c8ed1b0022a6b858e5302f9af982c552c`
 - `third_party/blink/renderer/core/workers/worker_global_scope.cc`, Git blob
-  `d7453149e4ac065f481f4197df6a25a8178e84a7`
+  `a70870c22a963f86609261e72e397890c7c2d1f6`
 
-The patch was forward/reverse preflighted against byte-verified downloads of
-these pinned files. No earlier tracked patch touches them. This proves only
+The patch was replayed against byte-verified downloads of these pinned files
+with Brave's patches applied (at `151.0.7922.108` the blobs were
+`ecb68ce4e23d76b82da09ffb4ee60619a9a35462` and
+`d7453149e4ac065f481f4197df6a25a8178e84a7`). No earlier tracked patch touches
+them. This proves only
 this patch's source-context applicability, not the full synchronization stack,
 GN dependency correctness, native compilation, or runtime behavior. Apply the
 complete integration only through `scripts/sync-browser-integration.sh` in a

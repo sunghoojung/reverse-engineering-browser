@@ -16,9 +16,11 @@ native group UI, and real browser/proxy tests are not implemented. The source
 constant remains `kRuntimeIntegrated = false`; the separate GN target is not
 linked into the browser. See [the versioned contract](../../protocol/native-proxy-containers-v1.md).
 
-Research pins are Chromium `151.0.7922.108` and Brave `v1.95.52`, matching
-`browser/config/`. Findings below are pinned-source inspection, not a claim
-that a full pinned browser was compiled or tested in this task.
+This research was done at Chromium `151.0.7922.108` and Brave `v1.95.52`, the
+pins at the time; the links below cite those revisions. The pins have since
+moved to Chromium `157.0.8103.79` and Brave `v1.99.57` (#439), and these
+findings have not been re-reviewed there. Findings below are pinned-source
+inspection, not a claim that a full pinned browser was compiled or tested.
 
 ## Supported same-window storage ownership
 

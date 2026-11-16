@@ -198,15 +198,21 @@ standalone portable `.app`.
 
 The source-of-truth pins remain:
 
-- Brave: `v1.95.52` (`browser/config/brave-core.rev`)
-- Chromium: `151.0.7922.108` (`browser/config/chromium.rev`)
-- V8: `20ad8d002c17ccc7ccfbefc6c4dcf1242fe80921` (`browser/config/v8.rev`)
+- Brave: `v1.99.57` (`browser/config/brave-core.rev`)
+- Chromium: `157.0.8103.79` (`browser/config/chromium.rev`)
+- V8: `307108153d1e35e6e74528ee55f97b0cd59bf182` (15.7.112.43, `browser/config/v8.rev`)
 
 The build tooling pin is depot_tools
-`a20039648c0de69d8156906b18052bd47e9bf230` (`browser/config/depot_tools.rev`),
+`1afcf0756e47f3a6ee82d7736b9fcda2d57b268e` (`browser/config/depot_tools.rev`),
 which `--init` writes to Brave's ignored `.env` before Brave installs depot_tools.
 `--init` also applies the pre-initialization stack in
-`browser/integration/brave/patches/init/` before Brave reads `DEPS`.
+`browser/integration/brave/patches/init/` before Brave reads `DEPS`; that
+stack is empty at `v1.99.57`.
+
+These pins moved from Brave `v1.95.52` (Chromium `151.0.7922.108`) in #439 by
+file-level replay of every patch, without an initialized checkout. No browser
+has been built from them yet. A pin change needs a fresh pinned checkout and
+full build; `adopt` and `advance-patch` do not cover it.
 
 A full browser build does **not** compile the proxy preparation-only targets by
 itself. Do not add proxy dependencies to `:browser` or activate dormant worker

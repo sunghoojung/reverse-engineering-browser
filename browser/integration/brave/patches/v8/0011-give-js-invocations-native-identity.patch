@@ -1,8 +1,8 @@
 diff --git a/BUILD.gn b/BUILD.gn
-index 8ae797fb39769a695470c5749a74048642f3d5f6..813138c1b1faaa6768ff109db3d618fd14bbd990 100644
+index de5fad538ca84c8f9ec8f56e6fe8c91c1808841e..7ef596a5cec47b6fe03cd8565f0e0c935eda9130 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -4283,6 +4283,7 @@ v8_header_set("v8_internal_headers") {
+@@ -4635,6 +4635,7 @@ v8_header_set("v8_internal_headers") {
      "src/interpreter/interpreter.h",
      "src/interpreter/prototype-assignment-sequence-builder.h",
      "src/interpreter/reb-js-dispatch.h",
@@ -10,7 +10,7 @@ index 8ae797fb39769a695470c5749a74048642f3d5f6..813138c1b1faaa6768ff109db3d618fd
      "src/json/json-parser.h",
      "src/json/json-stringifier.h",
      "src/libsampler/sampler.h",
-@@ -6145,6 +6146,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+@@ -6543,6 +6544,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
      "src/interpreter/interpreter.cc",
      "src/interpreter/prototype-assignment-sequence-builder.cc",
      "src/interpreter/reb-js-dispatch.cc",
@@ -19,10 +19,10 @@ index 8ae797fb39769a695470c5749a74048642f3d5f6..813138c1b1faaa6768ff109db3d618fd
      "src/json/json-stringifier.cc",
      "src/libsampler/sampler.cc",
 diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
-index e0f09f1cab1218e878a1cc159a639e8b1cd7b0c0..82afcfff99f8f0bff988b6ef458b7a69abf070f3 100644
+index f6ef15a4ece79b7475ef280b65d0d8399e656c2b..fad42aa8da693df56925d23e020f9d411b0ad316 100644
 --- a/include/v8-callbacks.h
 +++ b/include/v8-callbacks.h
-@@ -691,6 +691,151 @@ struct JsDispatchCallbacks {
+@@ -707,6 +707,151 @@ struct JsDispatchCallbacks {
    JsDispatchStatusCallback status = nullptr;
  };
  
@@ -175,10 +175,10 @@ index e0f09f1cab1218e878a1cc159a639e8b1cd7b0c0..82afcfff99f8f0bff988b6ef458b7a69
  /**
   * Callback to selectively enable ETW tracing based on the document URL.
 diff --git a/include/v8-isolate.h b/include/v8-isolate.h
-index a16807b1abbfff1c68c5d046314aef01da63d08d..06f9c6e5be6128e972dcf66b6ee4c35465fcbb86 100644
+index 8a16bc6caddabb3585235a88193bd7a211028b6a..c358f8a1353e7a1b978f3f380129092526221d50 100644
 --- a/include/v8-isolate.h
 +++ b/include/v8-isolate.h
-@@ -1484,6 +1484,21 @@ class V8_EXPORT Isolate {
+@@ -1504,6 +1504,21 @@ class V8_EXPORT Isolate {
     */
    void SetJsDispatchCallbacks(const JsDispatchCallbacks& callbacks);
  
@@ -201,33 +201,11 @@ index a16807b1abbfff1c68c5d046314aef01da63d08d..06f9c6e5be6128e972dcf66b6ee4c354
     * Enables the host application to provide a mechanism for recording
     * statistics counters.
 diff --git a/src/api/api.cc b/src/api/api.cc
-index b9d7709ab6b5bc17f030ee096e3fbec0f1c935d7..4794a8e4e4c049e9887c9d736e0636474f46afae 100644
+index 94facc5123de18c8f630aae206c34988a8817fc3..dc3a77097c27f2d9e7fad9285d3b384a4ec8ee21 100644
 --- a/src/api/api.cc
 +++ b/src/api/api.cc
-@@ -10445,8 +10445,10 @@ i::ValueHelper::InternalRepresentationType Isolate::GetDataFromSnapshotOnce(
- Local<Value> Isolate::GetContinuationPreservedEmbedderData() {
-   i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
- #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
-+  // A REB invocation wrapper is never visible to the embedder.
-   return ToApiHandle<Object>(i::direct_handle(
--      i_isolate->isolate_data()->continuation_preserved_embedder_data(),
-+      i::interpreter::RebJsInvocation::EmbedderData(
-+          i_isolate->isolate_data()->continuation_preserved_embedder_data()),
-       i_isolate));
- #else   // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
-   return v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
-@@ -10459,16 +10461,18 @@ void Isolate::SetContinuationPreservedEmbedderData(Local<Value> data) {
-   if (data.IsEmpty()) {
-     data = v8::Undefined(reinterpret_cast<v8::Isolate*>(this));
-   }
--  i_isolate->isolate_data()->set_continuation_preserved_embedder_data(
--      *Utils::OpenDirectHandle(*data));
-+  i_isolate->reb_js_invocation().SetEmbedderData(
-+      i_isolate, Utils::OpenDirectHandle(*data));
- #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
- }
- 
- Local<Data> Isolate::GetContinuationPreservedEmbedderDataV2() {
+@@ -10523,8 +10523,10 @@ void Isolate::SetContinuationPreservedEmbedderDataV2(Local<Data> data) {
+ Local<Data> Isolate::GetContinuationPreservedEmbedderData() {
    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
  #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 +  // A REB invocation wrapper is never visible to the embedder.
@@ -238,7 +216,7 @@ index b9d7709ab6b5bc17f030ee096e3fbec0f1c935d7..4794a8e4e4c049e9887c9d736e063647
        i_isolate));
  #else   // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
    return v8::Undefined(reinterpret_cast<v8::Isolate*>(i_isolate));
-@@ -10481,8 +10485,8 @@ void Isolate::SetContinuationPreservedEmbedderDataV2(Local<Data> data) {
+@@ -10537,8 +10539,8 @@ void Isolate::SetContinuationPreservedEmbedderData(Local<Data> data) {
    if (data.IsEmpty()) {
      data = v8::Undefined(reinterpret_cast<v8::Isolate*>(this));
    }
@@ -249,7 +227,7 @@ index b9d7709ab6b5bc17f030ee096e3fbec0f1c935d7..4794a8e4e4c049e9887c9d736e063647
  #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
  }
  
-@@ -10780,6 +10784,17 @@ void Isolate::SetJsDispatchCallbacks(const JsDispatchCallbacks& callbacks) {
+@@ -10836,6 +10838,17 @@ void Isolate::SetJsDispatchCallbacks(const JsDispatchCallbacks& callbacks) {
    i_isolate->reb_js_dispatch().SetCallbacks(i_isolate, callbacks);
  }
  
@@ -268,10 +246,10 @@ index b9d7709ab6b5bc17f030ee096e3fbec0f1c935d7..4794a8e4e4c049e9887c9d736e063647
    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(this);
    i_isolate->counters()->ResetCounterFunction(callback);
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index ac3acc9bef4df04501e6b25690660cd4cbd47c3c..98e06bf08e17e50179d89e7a92676f15e55ea93c 100644
+index 37aaa7ff35702f316c7c0b800a9ea3eeeb0b57c2..749ff978793a94d8974d5d1d7b524bd107df14ca 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -44,6 +44,7 @@
+@@ -45,6 +45,7 @@
  #include "src/heap/read-only-heap.h"
  #include "src/init/isolate-group.h"
  #include "src/interpreter/reb-js-dispatch.h"
@@ -279,7 +257,7 @@ index ac3acc9bef4df04501e6b25690660cd4cbd47c3c..98e06bf08e17e50179d89e7a92676f15
  #include "src/objects/code.h"
  #include "src/objects/contexts.h"
  #include "src/objects/debug-objects.h"
-@@ -2107,6 +2108,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2133,6 +2134,11 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
    // REB native JavaScript dispatch capture state; main thread only.
    interpreter::RebJsDispatch& reb_js_dispatch() { return reb_js_dispatch_; }
  
@@ -291,7 +269,7 @@ index ac3acc9bef4df04501e6b25690660cd4cbd47c3c..98e06bf08e17e50179d89e7a92676f15
    bool IsInCreationContext(Tagged<JSObject> object, uint32_t index);
  
    void ClearKeptObjects();
-@@ -2855,6 +2861,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2888,6 +2894,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
  
    std::unique_ptr<LazyCompileDispatcher> lazy_compile_dispatcher_;
    interpreter::RebJsDispatch reb_js_dispatch_;
@@ -300,10 +278,10 @@ index ac3acc9bef4df04501e6b25690660cd4cbd47c3c..98e06bf08e17e50179d89e7a92676f15
    baseline::BaselineBatchCompiler* baseline_batch_compiler_ = nullptr;
  #endif  // V8_ENABLE_SPARKPLUG
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index 0c16ad6c18757a0288d479ad6496d7d1a1202dad..40c8ea58aa25f00941535e4e9bf8990091c47a01 100644
+index f37f2e44dfff3e49cf4a4b4d715d46d59cb1a227..acc399ab168fe194fea67a69991ab281d50d0be4 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -3213,6 +3213,15 @@ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, parallel_compile_tasks_for_lazy)
+@@ -3233,6 +3233,15 @@ DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, parallel_compile_tasks_for_lazy)
  DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, enable_lazy_source_positions)
  DEFINE_NEG_IMPLICATION(reb_js_dispatch_capture, stress_lazy_source_positions)
  
@@ -320,10 +298,10 @@ index 0c16ad6c18757a0288d479ad6496d7d1a1202dad..40c8ea58aa25f00941535e4e9bf89900
  
  // lazy-compile-dispatcher.cc
 diff --git a/src/interpreter/bytecode-generator.cc b/src/interpreter/bytecode-generator.cc
-index 1981396888cc224bb825151832fb74491104f4da..4f863852e1d5641b8def29ae2dee4603989aed57 100644
+index 49088c75de29ea15cbdc10f3d12fb6ff27b2fe30..5783f5f00dca4f1d5da92f8788344d2677b62c83 100644
 --- a/src/interpreter/bytecode-generator.cc
 +++ b/src/interpreter/bytecode-generator.cc
-@@ -1793,9 +1793,46 @@ void BytecodeGenerator::FindRebArmedSites(uintptr_t stack_limit) {
+@@ -1794,9 +1794,46 @@ void BytecodeGenerator::FindRebArmedSites(uintptr_t stack_limit) {
    if (!finder.found()) reb_armed_ = {};
  }
  
@@ -367,10 +345,10 @@ index 1981396888cc224bb825151832fb74491104f4da..4f863852e1d5641b8def29ae2dee4603
    InitializeAstVisitor(stack_limit);
    FindRebArmedSites(stack_limit);
 +  FindRebInvocationEntry();
-   if (v8_flags.stress_lazy_compilation && local_isolate_->is_main_thread() &&
+   if (V8_UNLIKELY(v8_flags.stress_lazy_compilation) &&
+       local_isolate_->is_main_thread() &&
        !local_isolate_->AsIsolate()->bootstrapper()->IsActive()) {
-     // Trigger stack overflow with 1/stress_lazy_compilation probability.
-@@ -1823,14 +1860,46 @@ void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
+@@ -1825,14 +1862,46 @@ void BytecodeGenerator::GenerateBytecode(uintptr_t stack_limit) {
      BuildGeneratorPrologue();
    }
  
@@ -424,7 +402,7 @@ index 1981396888cc224bb825151832fb74491104f4da..4f863852e1d5641b8def29ae2dee4603
    }
  
    // Reset variables with hole check bitmap indices for subsequent compilations
-@@ -2176,6 +2245,10 @@ void BytecodeGenerator::AllocateTopLevelRegisters() {
+@@ -2178,6 +2247,10 @@ void BytecodeGenerator::AllocateTopLevelRegisters() {
      // generator suspends. It starts undefined like every register.
      reb_activation_ = register_allocator()->NewRegister();
    }
@@ -435,7 +413,7 @@ index 1981396888cc224bb825151832fb74491104f4da..4f863852e1d5641b8def29ae2dee4603
  }
  
  void BytecodeGenerator::BuildGeneratorPrologue() {
-@@ -4955,6 +5028,9 @@ void BytecodeGenerator::BuildVariableLoadForAccumulatorValue(
+@@ -4965,6 +5038,9 @@ void BytecodeGenerator::BuildVariableLoadForAccumulatorValue(
  }
  
  void BytecodeGenerator::BuildReturn(int source_position) {
@@ -445,7 +423,7 @@ index 1981396888cc224bb825151832fb74491104f4da..4f863852e1d5641b8def29ae2dee4603
    if (v8_flags.trace) {
      RegisterAllocationScope register_scope(this);
      Register result = register_allocator()->NewRegister();
-@@ -6150,6 +6226,11 @@ void BytecodeGenerator::BuildSuspendPoint(int position) {
+@@ -6224,6 +6300,11 @@ void BytecodeGenerator::BuildSuspendPoint(int position) {
    if (builder()->RemainderOfBlockIsDead()) {
      return;
    }
@@ -458,7 +436,7 @@ index 1981396888cc224bb825151832fb74491104f4da..4f863852e1d5641b8def29ae2dee4603
  
    RegisterList registers = register_allocator()->AllLiveRegisters();
 diff --git a/src/interpreter/bytecode-generator.h b/src/interpreter/bytecode-generator.h
-index 0cd179915d2b56e6fec4cf1d15f81e0306adfa5e..d0736a4bad1a707c2a4025760b454f07e08d1e7a 100644
+index 1f5b4bce94497cb9053e912915c99c176defebeb..964b8862dda28eef7250945a099133949a51f568 100644
 --- a/src/interpreter/bytecode-generator.h
 +++ b/src/interpreter/bytecode-generator.h
 @@ -13,6 +13,7 @@
@@ -478,7 +456,7 @@ index 0cd179915d2b56e6fec4cf1d15f81e0306adfa5e..d0736a4bad1a707c2a4025760b454f07
    const RebJsDispatchAnchors& reb_emitted_anchors() const {
      return reb_emitted_;
    }
-@@ -416,6 +419,9 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+@@ -415,6 +418,9 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
    void BuildCreateObjectLiteral(Register literal, uint8_t flags, size_t entry);
    void AllocateTopLevelRegisters();
    void FindRebArmedSites(uintptr_t stack_limit);
@@ -488,7 +466,7 @@ index 0cd179915d2b56e6fec4cf1d15f81e0306adfa5e..d0736a4bad1a707c2a4025760b454f07
    void BuildRebIndexedCallee(Property* property, Property* keyed, Register key,
                               RegisterList* args, Register callee,
                               Register* handler);
-@@ -714,6 +720,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
+@@ -713,6 +719,12 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
    RebJsDispatchAnchors reb_armed_;
    RebJsDispatchAnchors reb_emitted_;
    Register reb_activation_;
@@ -502,10 +480,10 @@ index 0cd179915d2b56e6fec4cf1d15f81e0306adfa5e..d0736a4bad1a707c2a4025760b454f07
  
  }  // namespace interpreter
 diff --git a/src/interpreter/interpreter.cc b/src/interpreter/interpreter.cc
-index f6452a1327bcd4756c52873a63324385383c8146..31484656a4d7595ef180ba4f05ca58d5d350ef5f 100644
+index 4bb86a13765869efebd16a95d89a1a387cc3627f..1482532bb65d888133ac9348a82fa0a27305f479 100644
 --- a/src/interpreter/interpreter.cc
 +++ b/src/interpreter/interpreter.cc
-@@ -301,6 +301,18 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
+@@ -284,6 +284,18 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
            generator()->reb_activation_register().index(),
            generator()->reb_emitted_anchors());
      }
@@ -526,10 +504,10 @@ index f6452a1327bcd4756c52873a63324385383c8146..31484656a4d7595ef180ba4f05ca58d5
    if (compilation_info()->SourcePositionRecordingMode() ==
 diff --git a/src/interpreter/reb-js-invocation.cc b/src/interpreter/reb-js-invocation.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabbca1ae753
+index 0000000000000000000000000000000000000000..51e35ae598a67940c03d8e6784b9b30b58d494fa
 --- /dev/null
 +++ b/src/interpreter/reb-js-invocation.cc
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,745 @@
 +// Copyright 2026 the V8 project authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -547,7 +525,7 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +#include "src/execution/isolate-inl.h"
 +#include "src/flags/flags.h"
 +#include "src/handles/handles-inl.h"
-+#include "src/heap/factory.h"
++#include "src/heap/factory-inl.h"
 +#include "src/objects/fixed-array-inl.h"
 +#include "src/objects/js-array-buffer-inl.h"
 +#include "src/objects/js-array-inl.h"
@@ -736,8 +714,10 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +void OnWatchedPromise(const v8::FunctionCallbackInfo<v8::Value>& info,
 +                      bool fulfilled) {
 +  Isolate* isolate = reinterpret_cast<Isolate*>(info.GetIsolate());
-+  v8::Local<v8::Value> data = info.Data();
-+  if (data.IsEmpty() || !data->IsUint32()) return;
++  v8::Local<v8::Data> data = info.DataV2();
++  if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsUint32()) {
++    return;
++  }
 +  const uint32_t encoded = data.As<v8::Uint32>()->Value();
 +  DirectHandle<Object> value = isolate->factory()->undefined_value();
 +  if (info.Length() > 0) value = Utils::OpenDirectHandle(*info[0]);
@@ -1097,8 +1077,8 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +  // untouched, so unhandled rejection is reported to the page as before; no
 +  // then, species or getter runs; and with an undefined capability, as for
 +  // await, the job has no result promise.
-+  DirectHandle<PromiseReaction> reaction = Cast<PromiseReaction>(
-+      isolate->factory()->NewStruct(PROMISE_REACTION_TYPE));
++  DirectHandle<PromiseReaction> reaction =
++      isolate->factory()->New<PromiseReaction, AllocationType::kYoung>();
 +  Tagged<UnionOf<Smi, PromiseReaction>> next =
 +      Cast<UnionOf<Smi, PromiseReaction>>(promise->reactions());
 +  reaction->set_next(next);
@@ -1275,7 +1255,7 @@ index 0000000000000000000000000000000000000000..f116cb133cd5999acb68eb59621fbabb
 +}  // namespace v8::internal::interpreter
 diff --git a/src/interpreter/reb-js-invocation.h b/src/interpreter/reb-js-invocation.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..00f8e8d6b51f26a5708c805134d41b54ca77f007
+index 0000000000000000000000000000000000000000..d457bb30a49b2ee7bc10e268fa68db9004852c33
 --- /dev/null
 +++ b/src/interpreter/reb-js-invocation.h
 @@ -0,0 +1,152 @@
@@ -1432,10 +1412,10 @@ index 0000000000000000000000000000000000000000..00f8e8d6b51f26a5708c805134d41b54
 +
 +#endif  // V8_INTERPRETER_REB_JS_INVOCATION_H_
 diff --git a/src/runtime/runtime-internal.cc b/src/runtime/runtime-internal.cc
-index e0eaf48de2ea43db102ff49ca73403255c19d095..d363bdd362bc147b219eb7eef47101e302b21519 100644
+index fbe26b6efc89f09a4fa91424fd2e320b215bf4de..611b5c160b101dabbb540c99a251028fa830d6dc 100644
 --- a/src/runtime/runtime-internal.cc
 +++ b/src/runtime/runtime-internal.cc
-@@ -255,6 +255,28 @@ RUNTIME_FUNCTION(Runtime_RebTraceJsDispatch) {
+@@ -278,6 +278,28 @@ RUNTIME_FUNCTION(Runtime_RebTraceJsDispatch) {
                                            Smi::ToInt(args[4]));
  }
  
@@ -1465,10 +1445,10 @@ index e0eaf48de2ea43db102ff49ca73403255c19d095..d363bdd362bc147b219eb7eef47101e3
    HandleScope scope(isolate);
    DCHECK_EQ(1, args.length());
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 96c4130c2092c4815450f9506eef194a1d9d096b..6e6dc91f5c66337cb03e8b81a1d141d171afa3ec 100644
+index 55b4e30784116682282220857212a5905ddf56e4..379edce62c68615af1eef645ec0b7a1345028a50 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -307,6 +307,8 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -309,6 +309,8 @@ constexpr bool CanTriggerGC(T... properties) {
    F(NewTypeError, -1 /* [1, 4] */, 1)                      \
    F(OrdinaryHasInstance, 2, 1)                             \
    F(PropagateException, 0, 1)                              \
@@ -1478,10 +1458,10 @@ index 96c4130c2092c4815450f9506eef194a1d9d096b..6e6dc91f5c66337cb03e8b81a1d141d1
    F(ReportMessageFromMicrotask, 1, 1)                      \
    F(RunMicrotaskCallback, 2, 1)                            \
 diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
-index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fced20cdc5a 100644
+index 1c329aef0b7ce7269a4d15cb3a630cc24d2cc86a..e99cc4a7f53716373da0092996e7f0dbe260caa9 100644
 --- a/test/cctest/test-api.cc
 +++ b/test/cctest/test-api.cc
-@@ -32665,3 +32665,493 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
+@@ -33385,3 +33385,493 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
             records[0].observation.slot);
    CHECK(records[0].observation.new_activation);
  }
@@ -1566,11 +1546,11 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +
 +void RebJsInvocationReadData(const v8::FunctionCallbackInfo<v8::Value>& info) {
 +  info.GetReturnValue().Set(
-+      info.GetIsolate()->GetContinuationPreservedEmbedderDataV2().As<v8::Value>());
++      info.GetIsolate()->GetContinuationPreservedEmbedderData().As<v8::Value>());
 +}
 +
 +void RebJsInvocationWriteData(const v8::FunctionCallbackInfo<v8::Value>& info) {
-+  info.GetIsolate()->SetContinuationPreservedEmbedderDataV2(info[0]);
++  info.GetIsolate()->SetContinuationPreservedEmbedderData(info[0]);
 +}
 +
 +v8::JsInvocationSite RebInvocationSite(const std::string& source,
@@ -1879,12 +1859,12 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +      "return inside + '/' + forked; } var rebLater;";
 +  capture.Arm(2, {RebInvocationSite(source, RebAnchor(source, "rebData(", 7))});
 +  CompileRun(source.c_str());
-+  isolate->SetContinuationPreservedEmbedderDataV2(v8_str("outer"));
++  isolate->SetContinuationPreservedEmbedderData(v8_str("outer"));
 +  CHECK(CompileRun("rebData(0)")
 +            ->Equals(env.local(), v8_str("outer/fork"))
 +            .FromJust());
 +  // The caller continues with exactly its own value.
-+  CHECK(isolate->GetContinuationPreservedEmbedderDataV2()
++  CHECK(isolate->GetContinuationPreservedEmbedderData()
 +            .As<v8::Value>()
 +            ->Equals(env.local(), v8_str("outer"))
 +            .FromJust());
@@ -1897,10 +1877,10 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +  CHECK(observed[1].second.state == v8::JsInvocationContextState::kInside);
 +  CHECK_EQ(observed[0].second.invocation_id, observed[1].second.invocation_id);
 +  // A top-level write, with no JavaScript on the stack, carries none.
-+  isolate->SetContinuationPreservedEmbedderDataV2(v8_str("next task"));
++  isolate->SetContinuationPreservedEmbedderData(v8_str("next task"));
 +  CHECK(isolate->GetCurrentJsInvocation().state ==
 +        v8::JsInvocationContextState::kNone);
-+  isolate->SetContinuationPreservedEmbedderDataV2(v8::Undefined(isolate));
++  isolate->SetContinuationPreservedEmbedderData(v8::Undefined(isolate));
 +}
 +
 +namespace {
@@ -1975,3 +1955,40 @@ index e9addc26f28685ad74d07a09347dbbaa347e5ceb..5fadada03863578a9703476414c76fce
 +  CHECK_EQ(0u, capture.embedder().starts[0].slot);
 +}
 +#endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+diff --git a/src/objects/promise-inl.h b/src/objects/promise-inl.h
+index 13211f99228ee69f5caaddb738dd9142a22bef1f..8500ac207cc06e2941ab42dc71058abd074155cf 100644
+--- a/src/objects/promise-inl.h
++++ b/src/objects/promise-inl.h
+@@ -106,6 +106,17 @@ Tagged<JSAny> PromiseCapability::resolve() const { return resolve_.load(); }
+ 
+ Tagged<JSAny> PromiseCapability::reject() const { return reject_.load(); }
+ 
++PromiseReaction::PromiseReaction(const AllocationWitness& witness)
++    : Struct(witness.roots().promise_reaction_map()),
++#ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
++      continuation_preserved_embedder_data_(witness.roots().undefined_value()),
++#endif
++      next_(Smi::zero()),
++      reject_handler_(witness.roots().undefined_value()),
++      fulfill_handler_(witness.roots().undefined_value()),
++      promise_or_capability_(witness.roots().undefined_value()) {
++}
++
+ #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+ Tagged<Object> PromiseReaction::continuation_preserved_embedder_data() const {
+   return continuation_preserved_embedder_data_.load();
+diff --git a/src/objects/promise.h b/src/objects/promise.h
+index 7d05058d5e904bc32ec96f71af89047bba5637ee..d7bbc2264f33aa030555a16c141fa167a5451c49 100644
+--- a/src/objects/promise.h
++++ b/src/objects/promise.h
+@@ -172,6 +172,10 @@ V8_OBJECT class PromiseReaction : public Struct {
+  public:
+   enum Type { kFulfill, kReject };
+ 
++  // An empty reaction for the REB invocation settlement observer, the one
++  // C++ allocation site; Torque allocates every other reaction.
++  inline explicit PromiseReaction(const AllocationWitness& witness);
++
+ #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+   inline Tagged<Object> continuation_preserved_embedder_data() const;
+   inline void set_continuation_preserved_embedder_data(

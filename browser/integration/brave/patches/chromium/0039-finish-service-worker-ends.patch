@@ -1,8 +1,8 @@
 diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
-index 24128fe..b72ca91 100644
+index a63c3be..94619da 100644
 --- a/content/renderer/BUILD.gn
 +++ b/content/renderer/BUILD.gn
-@@ -229,6 +229,7 @@ target(link_target_type, "renderer") {
+@@ -230,6 +230,7 @@ target(link_target_type, "renderer") {
    deps = [
      "//base",
      "//base:i18n",
@@ -11,7 +11,7 @@ index 24128fe..b72ca91 100644
      "//cc",
      "//cc/animation",
 diff --git a/content/renderer/service_worker/service_worker_subresource_loader.cc b/content/renderer/service_worker/service_worker_subresource_loader.cc
-index 4f84533..0a895a4 100644
+index 737f7d8..275fbbd 100644
 --- a/content/renderer/service_worker/service_worker_subresource_loader.cc
 +++ b/content/renderer/service_worker/service_worker_subresource_loader.cc
 @@ -5,6 +5,7 @@
@@ -22,7 +22,7 @@ index 4f84533..0a895a4 100644
  
  #include "base/debug/crash_logging.h"
  #include "base/functional/bind.h"
-@@ -18,6 +19,7 @@
+@@ -19,6 +20,7 @@
  #include "base/task/sequenced_task_runner.h"
  #include "base/timer/elapsed_timer.h"
  #include "base/trace_event/trace_event.h"
@@ -30,7 +30,7 @@ index 4f84533..0a895a4 100644
  #include "content/common/features.h"
  #include "content/common/fetch/fetch_request_type_converters.h"
  #include "content/common/service_worker/race_network_request_url_loader_client.h"
-@@ -183,6 +185,17 @@ blink::mojom::ServiceWorkerFetchEventTimingPtr AdjustTimingIfNeededCrBug1342408(
+@@ -186,6 +188,17 @@ blink::mojom::ServiceWorkerFetchEventTimingPtr AdjustTimingIfNeededCrBug1342408(
    return timing;
  }
  
@@ -48,7 +48,7 @@ index 4f84533..0a895a4 100644
  }  // namespace
  
  // A ServiceWorkerStreamCallback implementation which waits for completion of
-@@ -342,6 +355,14 @@ ServiceWorkerSubresourceLoader::~ServiceWorkerSubresourceLoader() {
+@@ -345,6 +358,14 @@ ServiceWorkerSubresourceLoader::~ServiceWorkerSubresourceLoader() {
  }
  
  void ServiceWorkerSubresourceLoader::OnMojoDisconnect() {
@@ -63,7 +63,7 @@ index 4f84533..0a895a4 100644
    MaybeDeleteThis();
  }
  
-@@ -1001,6 +1022,13 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
+@@ -1043,6 +1064,13 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(
                "error_code", net::ErrorToString(error_code), "reason",
                TRACE_STR_COPY(reason));
  
@@ -77,9 +77,9 @@ index 4f84533..0a895a4 100644
    TransitionToStatus(Status::kCompleted);
    if (error_code == net::OK) {
      switch (commit_responsibility()) {
-@@ -1024,6 +1052,10 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(int error_code,
-   status.error_code = error_code;
+@@ -1067,6 +1095,10 @@ void ServiceWorkerSubresourceLoader::CommitCompleted(
    status.completion_time = base::TimeTicks::Now();
+   status.blocked_by_response_reason = blocked_by_response_reason;
    url_loader_client_->OnComplete(status);
 +  if (reb_unanswered) {
 +    RecordNativeServiceWorkerEnd(request_id_, resource_request_.url,

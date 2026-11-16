@@ -2,8 +2,8 @@
 """Build the pinned native V8 runtime tests, not a Brave/browser acceptance run.
 
 This independent system-Clang profile does not fetch Chromium's binary
-toolchains. Authored C++ patches are unchanged. Brave-specific GN wiring is
-omitted; modernized upstream lifetime-attribute spellings are receipt-recorded.
+toolchains or hermetic Python. Authored C++ patches are unchanged and
+Brave-specific GN wiring is omitted.
 """
 
 import argparse
@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -141,24 +142,27 @@ def binary_dependencies(deps):
     raise ValueError("Missing DEPS dictionary")
 
 
-ABSEIL_CAPTURE_COUNTS = {
-    "status/statusor.h": 1,
-    "synchronization/mutex.h": 8,
-    "base/internal/spinlock.h": 1,
-    "container/internal/raw_hash_map.h": 8,
-    "container/internal/raw_hash_set.h": 4,
-    "container/internal/btree_container.h": 5,
-}
+# Chromium's //build adds these for a newer Clang than the pinned release.
+# Each only disables a warning Clang 23 does not have, so dropping it changes
+# no diagnostic, while passing it fails -Werror as an unknown warning option.
+DROPPED_COMPILER_FLAGS = ("-Wno-stringop-overread",)
+COMPILER_DRIVERS = ("clang", "clang++")
 
 
-def modernize_abseil_capture(source, expected):
-    # Preserve lifetime analysis: Clang23 replaced the deprecated spelling for
-    # captures by this with a dedicated attribute, not an absent annotation.
-    pattern = r"ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY\((?:\s|\\\n)*this\s*\)"
-    result, count = re.subn(pattern, "[[clang::lifetime_capture_by_this]]", source)
-    if count != expected:
-        raise ValueError("Pinned Abseil lifetime annotations changed; review required")
-    return result
+def compiler_wrapper(real):
+    """A driver that drops DROPPED_COMPILER_FLAGS; it names the real binary's
+    digest so a content-checked compiler cache still sees compiler changes."""
+    digest = hashlib.sha256(real.resolve().read_bytes()).hexdigest()
+    patterns = "|".join(DROPPED_COMPILER_FLAGS)
+    return (
+        "#!/bin/sh\n"
+        f"# Standalone V8 profile driver for {real} (sha256 {digest}).\n"
+        "for argument do\n"
+        "  shift\n"
+        f"  case \"$argument\" in {patterns}) ;; *) set -- \"$@\" \"$argument\" ;; esac\n"
+        "done\n"
+        f"exec {shlex.quote(str(real))} \"$@\"\n"
+    )
 
 
 def create_clang_toolchain_view(destination, system_base, resource_dir, builtins):
@@ -168,7 +172,15 @@ def create_clang_toolchain_view(destination, system_base, resource_dir, builtins
     if builtins.read_bytes()[:8] != b"!<arch>\n":
         raise ValueError("Compiler-reported builtins must be a real archive")
     destination.mkdir()
-    (destination / "bin").symlink_to(system_base / "bin", target_is_directory=True)
+    bin_view = destination / "bin"
+    bin_view.mkdir()
+    for tool in (system_base / "bin").iterdir():
+        if tool.name not in COMPILER_DRIVERS:
+            (bin_view / tool.name).symlink_to(tool)
+    for name in COMPILER_DRIVERS:
+        driver = bin_view / name
+        driver.write_text(compiler_wrapper(system_base / "bin" / name))
+        driver.chmod(0o755)
     resource_view = destination / "lib/clang/23"
     runtime_view = resource_view / "lib/x86_64-unknown-linux-gnu"
     runtime_view.mkdir(parents=True)
@@ -229,18 +241,6 @@ def self_test():
     assert binary_dependencies("deps={'tool':{'dep_type':'gcs'},'src':'git','gn':{'dep_type':'cipd'}}") == {
         "v8/tool": None, "v8/gn": None,
     }
-    original = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(this)"
-    assert modernize_abseil_capture(original, 1) == "[[clang::lifetime_capture_by_this]]"
-    multiline = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(" + "\\" + "\n this)"
-    assert modernize_abseil_capture(multiline, 1) == "[[clang::lifetime_capture_by_this]]"
-    other_owner = "ABSL_INTERNAL_ATTRIBUTE_CAPTURED_BY(owner)"
-    assert modernize_abseil_capture(other_owner, 0) == other_owner
-    try:
-        modernize_abseil_capture(original, 2)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("Changed Abseil annotations must fail closed")
     with tempfile.TemporaryDirectory() as directory:
         # Resolve once: macOS temp directories live behind a /var symlink.
         root = Path(directory).resolve()
@@ -250,10 +250,22 @@ def self_test():
         (resource / "include").mkdir(parents=True)
         builtins = root / "libclang_rt.builtins-x86_64.a"
         builtins.write_bytes(b"!<arch>\n")
+        for name in (*COMPILER_DRIVERS, "ld.lld"):
+            tool = system / "bin" / name
+            tool.write_text("#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\"\n")
+            tool.chmod(0o755)
         view = create_clang_toolchain_view(root / "view", system, resource, builtins)
         linked = view / "lib/clang/23/lib/x86_64-unknown-linux-gnu/libclang_rt.builtins.a"
         assert linked.resolve() == builtins and linked.read_bytes() == builtins.read_bytes()
-        assert (view / "bin").resolve() == system / "bin"
+        assert (view / "bin/ld.lld").resolve() == system / "bin/ld.lld"
+        for name in COMPILER_DRIVERS:
+            seen = subprocess.check_output(
+                [str(view / "bin" / name), "-c", "a b.cc", *DROPPED_COMPILER_FLAGS,
+                 "-Wno-unused-parameter"], text=True).splitlines()
+            # The real driver runs under its own name with every other argument intact.
+            assert seen == [str(system / "bin" / name), "-c", "a b.cc", "-Wno-unused-parameter"], seen
+            assert hashlib.sha256((system / "bin" / name).read_bytes()).hexdigest() in (
+                view / "bin" / name).read_text()
         builtins.write_text("not an archive")
         try:
             create_clang_toolchain_view(root / "invalid", system, resource, builtins)
@@ -511,7 +523,7 @@ def main():
         receipt["system_clang_runtime"] = {
             "system_base": str(system_clang_base), "resource_dir": str(resource_dir),
             "builtins": str(builtins), "builtins_sha256": hashlib.sha256(builtins.read_bytes()).hexdigest(),
-            "view": str(clang_base),
+            "view": str(clang_base), "dropped_compiler_flags": list(DROPPED_COMPILER_FLAGS),
         }
         v8_pin = (ROOT / "browser/config/v8.rev").read_text().strip()
         assert re.fullmatch(r"[0-9a-f]{40}", v8_pin)
@@ -569,27 +581,19 @@ def main():
                     run(["git", "apply", "--check", str(temporary)], v8)
                     run(["git", "apply", str(temporary)], v8)
             receipt["patches"].append(entry)
-        receipt["standalone_upstream_annotations"] = []
-        for relative, count in ABSEIL_CAPTURE_COUNTS.items():
-            path = v8 / "third_party/abseil-cpp/absl" / relative
-            original = path.read_text()
-            modernized = modernize_abseil_capture(original, count)
-            path.write_text(modernized)
-            receipt["standalone_upstream_annotations"].append({
-                "path": str(path.relative_to(v8)), "count": count,
-                "change": "lifetime_capture_by(this) to lifetime_capture_by_this",
-                "before_sha256": hashlib.sha256(original.encode()).hexdigest(),
-                "after_sha256": hashlib.sha256(modernized.encode()).hexdigest(),
-            })
         save_receipt()
         # Temporal alone pulls Rust into this standalone build; guest capture
-        # and the public QuickJS fixture do not use the Temporal API.
+        # and the public QuickJS fixture do not use the Temporal API. V8 15.7
+        # generates instance types with metagen, which needs the prebuilt
+        # libclang GCS package this job never fetches; V8 keeps the Torque
+        # path behind v8_use_metagen=false for its transition. Brave builds
+        # with metagen, so this profile differs there.
         gn_args = " ".join((
             'is_debug=false', 'is_component_build=false', 'symbol_level=0',
             'is_clang=true', 'use_lld=true',
             'clang_use_chrome_plugins=false', 'clang_version="23"', 'clang_base_path=' + json.dumps(str(clang_base)), 'use_custom_libcxx=true', 'use_sysroot=false',
             'use_custom_libcxx_for_host=true', 'v8_enable_sandbox=true',
-            'enable_rust=false', 'v8_enable_temporal_support=false',
+            'enable_rust=false', 'v8_enable_temporal_support=false', 'v8_use_metagen=false',
             'use_remoteexec=false', 'treat_warnings_as_errors=true',
             'target_cpu="x64"', 'v8_target_cpu="x64"', 'v8_enable_i18n_support=false',
             'v8_use_external_startup_data=false', 'v8_dcheck_always_on=true',
@@ -606,8 +610,17 @@ def main():
         run(["node", str(fixture / "check-native-hook-loader.mjs"), str(public_inputs)], ROOT)
         receipt["public_fixture_inputs"] = json.loads((public_inputs / "input-receipt.json").read_text())
         save_receipt()
-        run([str(gn_binary), "gen", "out/native-runtime", "--fail-on-unused-args", "--args=" + gn_args], v8)
-        run(["ninja", "-C", "out/native-runtime", "-j", str(args.jobs), "d8", "cctest"], v8)
+        # V8's .gn runs GN scripts with the CIPD CPython this job never
+        # fetches; the system interpreter runs them instead.
+        script_python = shutil.which("python3", path=base_path)
+        if script_python is None:
+            raise RuntimeError("Missing python3 for GN scripts")
+        receipt["gn_script_executable"] = str(Path(script_python).resolve())
+        run([str(gn_binary), "gen", "out/native-runtime", "--fail-on-unused-args",
+             "--script-executable=" + receipt["gn_script_executable"], "--args=" + gn_args], v8)
+        # -k 0 keeps compiling past a failed object, so one run reports every
+        # patch that no longer builds instead of only the first.
+        run(["ninja", "-C", "out/native-runtime", "-k", "0", "-j", str(args.jobs), "d8", "cctest"], v8)
         binary = v8 / "out/native-runtime/cctest"
         listed = run([str(binary), "--list"], v8, True)
         for name in TEST_NAMES:

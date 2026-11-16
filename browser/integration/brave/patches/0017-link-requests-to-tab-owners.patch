@@ -1,8 +1,8 @@
 diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
-index b83895a..e014d58 100644
+index 0399ba7..98026b3 100644
 --- a/browser/net/brave_proxying_url_loader_factory.cc
 +++ b/browser/net/brave_proxying_url_loader_factory.cc
-@@ -26,6 +26,11 @@
+@@ -27,6 +27,11 @@
  #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
  #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
  #include "brave/components/reverse_engineering_browser/common/native_request_namespace.h"
@@ -14,7 +14,7 @@ index b83895a..e014d58 100644
  #include "content/public/browser/browser_context.h"
  #include "content/public/browser/browser_task_traits.h"
  #include "content/public/browser/browser_thread.h"
-@@ -111,17 +116,29 @@ std::uint64_t FrameId(
+@@ -113,17 +118,29 @@ std::uint64_t FrameId(
           token.GetLowForSerialization();
  }
  
@@ -53,7 +53,7 @@ index b83895a..e014d58 100644
  }
  
  // Helper struct for crafting responses.
-@@ -203,6 +220,7 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+@@ -205,6 +222,7 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
        native_capture_lifecycle_(
            (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
             reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
@@ -61,7 +61,7 @@ index b83895a..e014d58 100644
                    reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)
                ? reb::NativeNetworkCaptureSink::Get().generation()
                : 0),
-@@ -222,7 +240,16 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+@@ -224,7 +242,16 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
      reb::NativeNetworkCaptureSink::Get().RecordRequestStarted(
          request_id_, native_initiator_request_id_, initiator_process_id_,
          tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
@@ -79,7 +79,7 @@ index b83895a..e014d58 100644
    }
    // If there is a client error, clean up the request.
    target_client_.set_disconnect_handler(base::BindOnce(
-@@ -252,7 +279,8 @@ void BraveProxyingURLLoaderFactory<
+@@ -254,7 +281,8 @@ void BraveProxyingURLLoaderFactory<
    if (native_capture_identity_initialized_) {
      return;
    }
@@ -89,16 +89,16 @@ index b83895a..e014d58 100644
    // The renderer request id lives in the process that calls GenerateRequestId.
    // Document, worker, and service-worker subresource factories are used by
    // that process. Navigations and browser-fetched worker scripts are not, so
-@@ -910,6 +938,8 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
-       url_loader_factory_type_(url_loader_factory_type),
+@@ -991,6 +1019,8 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
        request_initiator_(request_initiator),
        isolation_info_(isolation_info),
+       navigation_id_(navigation_id),
 +      native_exclusion_(
 +          NativeExclusion(url_loader_factory_type, request_initiator)),
        request_id_generator_(request_id_generator),
        disconnect_callback_(std::move(on_disconnect)),
        navigation_response_task_runner_(
-@@ -918,6 +948,14 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
+@@ -999,6 +1029,14 @@ BraveProxyingURLLoaderFactory<T>::BraveProxyingURLLoaderFactory(
    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
    DCHECK(proxy_receivers_.empty());
    DCHECK(!target_factory_.is_bound());
@@ -114,13 +114,13 @@ index b83895a..e014d58 100644
    auto [receiver, target_factory] = factory_builder.Append();
  
 diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
-index 28c3621..a3594cd 100644
+index cdd784d..470f0a7 100644
 --- a/browser/net/brave_proxying_url_loader_factory.h
 +++ b/browser/net/brave_proxying_url_loader_factory.h
-@@ -267,6 +267,10 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
-       url_loader_factory_type_;
-   const url::Origin request_initiator_;
+@@ -309,6 +309,10 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
    const net::IsolationInfo isolation_info_;
+   const std::optional<int64_t> navigation_id_;
+   bool bypass_redirect_checks_ = false;
 +  // Resolved when the factory is created, while its frame is alive; see
 +  // protocol/native-network-v3.md "Request owners and tabs".
 +  uint32_t native_tab_id_ = 0;

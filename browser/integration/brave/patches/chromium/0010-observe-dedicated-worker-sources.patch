@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-index ecb68ce..38ed358 100644
+index 036c566..ed5d850 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 @@ -27,6 +27,8 @@
@@ -11,7 +11,7 @@ index ecb68ce..38ed358 100644
  #include "build/build_config.h"
  #include "third_party/blink/public/common/features.h"
  #include "third_party/blink/public/common/page/v8_compile_hints_histograms.h"
-@@ -73,6 +75,48 @@ namespace blink {
+@@ -75,6 +77,48 @@ namespace blink {
  
  namespace {
  
@@ -60,7 +60,7 @@ index ecb68ce..38ed358 100644
  // Used to throw an exception before we exceed the C++ stack and crash.
  // This limit was arrived at arbitrarily. crbug.com/449744
  const int kMaxRecursionDepth = 44;
-@@ -335,9 +379,15 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+@@ -367,9 +411,15 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
                           script_start_position.column_.ZeroBasedInt());
  
    if (!*TRACE_EVENT_API_GET_CATEGORY_GROUP_ENABLED(kTraceEventCategoryGroup)) {
@@ -79,7 +79,7 @@ index ecb68ce..38ed358 100644
    }
  
    std::optional<inspector_compile_script_event::V8ConsumeCacheResult>
-@@ -346,6 +396,12 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript(
+@@ -378,6 +428,12 @@ v8::MaybeLocal<v8::Script> V8ScriptRunner::CompileScript_ChromiumImpl(
        isolate, script_state, classic_script, origin, compile_options,
        no_cache_reason, can_use_crowdsourced_compile_hints, &cache_result);
  
@@ -89,10 +89,10 @@ index ecb68ce..38ed358 100644
 +        reb::NativeWorkerSourceKind::kClassic);
 +  }
 +
-   TRACE_EVENT_END1(
-       kTraceEventCategoryGroup, "v8.compile", "data",
-       [&](perfetto::TracedValue context) {
-@@ -457,6 +513,12 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule(
+   TRACE_EVENT_END(
+       kTraceEventCategoryGroup, "data", [&](perfetto::TracedValue context) {
+         inspector_compile_script_event::Data(
+@@ -488,6 +544,12 @@ v8::MaybeLocal<v8::Module> V8ScriptRunner::CompileModule_ChromiumImpl(
      }
    }
  
@@ -102,11 +102,11 @@ index ecb68ce..38ed358 100644
 +        params.GetSourceText(), file_name, reb::NativeWorkerSourceKind::kModule);
 +  }
 +
-   TRACE_EVENT_END1(kTraceEventCategoryGroup, "v8.compileModule", "data",
-                    [&](perfetto::TracedValue context) {
-                      inspector_compile_script_event::Data(
+   TRACE_EVENT_END(
+       kTraceEventCategoryGroup, "data", [&](perfetto::TracedValue context) {
+         inspector_compile_script_event::Data(
 diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.cc b/third_party/blink/renderer/core/workers/worker_global_scope.cc
-index d745314..a501bfd 100644
+index a70870c..f7ce2b1 100644
 --- a/third_party/blink/renderer/core/workers/worker_global_scope.cc
 +++ b/third_party/blink/renderer/core/workers/worker_global_scope.cc
 @@ -30,6 +30,7 @@
@@ -117,7 +117,7 @@ index d745314..a501bfd 100644
  #include "mojo/public/cpp/bindings/pending_remote.h"
  #include "services/metrics/public/cpp/mojo_ukm_recorder.h"
  #include "third_party/blink/public/common/loader/javascript_framework_detection.h"
-@@ -214,6 +215,12 @@ scheduler::WorkerScheduler* WorkerGlobalScope::GetScheduler() {
+@@ -218,6 +219,12 @@ scheduler::WorkerScheduler* WorkerGlobalScope::GetScheduler() {
  }
  
  void WorkerGlobalScope::Dispose() {
@@ -128,5 +128,5 @@ index d745314..a501bfd 100644
 +    }));
 +  }
    DCHECK(IsContextThread());
-   loading_virtual_time_pauser_ = WebScopedVirtualTimePauser();
-   closing_ = true;
+   if (animation_frame_timing_monitor_) {
+     CHECK(RuntimeEnabledFeatures::LongAnimationFrameWorkerEnabled());

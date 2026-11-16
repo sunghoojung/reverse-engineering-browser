@@ -1,8 +1,8 @@
 diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
-index bb89aa6..f92d657 100644
+index ed19487..2365a6a 100644
 --- a/browser/brave_content_browser_client.cc
 +++ b/browser/brave_content_browser_client.cc
-@@ -89,8 +89,10 @@
+@@ -90,8 +90,10 @@
  #include "brave/components/password_strength_meter/password_strength_meter.mojom.h"
  #include "brave/components/playlist/core/common/buildflags/buildflags.h"
  #include "brave/components/psst/buildflags/buildflags.h"
@@ -13,10 +13,10 @@ index bb89aa6..f92d657 100644
  #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
  #include "brave/components/request_otr/common/buildflags/buildflags.h"
  #include "brave/components/skus/common/features.h"
-@@ -1264,6 +1266,30 @@ void BraveContentBrowserClient::WillCreateURLLoaderFactory(
-     bool* disable_secure_dns,
+@@ -1323,6 +1325,30 @@ void BraveContentBrowserClient::WillCreateURLLoaderFactory(
      network::mojom::URLLoaderFactoryOverridePtr* factory_override,
-     scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner) {
+     scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
+     bool is_for_network_service) {
 +  // Chromium patch 0043 lets early-hints preloads reach this hook only so
 +  // native capture can record them. Stock Brave and Chromium never proxy
 +  // them, so neither Shields nor extensions act on them here: while capture
@@ -29,51 +29,51 @@ index bb89aa6..f92d657 100644
 +      if (base::FeatureList::IsEnabled(features::kBraveRequestInfoUniquePtr)) {
 +        BraveProxyingURLLoaderFactory<base::WeakPtr>::MaybeProxyRequest(
 +            browser_context, frame, factory_builder, type, request_initiator,
-+            isolation_info, navigation_response_task_runner, render_process_id,
-+            /*observe_only=*/true);
++            isolation_info, navigation_id, navigation_response_task_runner,
++            render_process_id, /*observe_only=*/true);
 +      } else {
 +        BraveProxyingURLLoaderFactory<std::shared_ptr>::  // nocheck
 +            MaybeProxyRequest(browser_context, frame, factory_builder, type,
 +                              request_initiator, isolation_info,
-+                              navigation_response_task_runner,
++                              navigation_id, navigation_response_task_runner,
 +                              render_process_id, /*observe_only=*/true);
 +      }
 +    }
 +    return;
 +  }
    // TODO(iefremov): Skip proxying for certain requests?
+   base::OnceCallback<void(bool)> set_bypass_redirect_checks;
    if (base::FeatureList::IsEnabled(features::kBraveRequestInfoUniquePtr)) {
-     BraveProxyingURLLoaderFactory<base::WeakPtr>::MaybeProxyRequest(
 diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
-index c2cb00f..6e602ad 100644
+index b564bd0..c72e6a6 100644
 --- a/browser/net/brave_proxying_url_loader_factory.cc
 +++ b/browser/net/brave_proxying_url_loader_factory.cc
-@@ -980,14 +980,16 @@ void BraveProxyingURLLoaderFactory<T>::MaybeProxyRequest(
-     const url::Origin& request_initiator,
+@@ -1063,7 +1063,8 @@ BraveProxyingURLLoaderFactory<T>::MaybeProxyRequest(
      const net::IsolationInfo& isolation_info,
+     std::optional<int64_t> navigation_id,
      scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
 -    int render_process_id) {
 +    int render_process_id,
 +    bool observe_only) {
    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-   ResourceContextData<T>::StartProxying(
+   return ResourceContextData<T>::StartProxying(
        browser_context,
-       render_frame_host ? render_frame_host->GetGlobalFrameToken()
+@@ -1071,7 +1072,7 @@ BraveProxyingURLLoaderFactory<T>::MaybeProxyRequest(
                          : content::GlobalRenderFrameHostToken(),
        factory_builder, url_loader_factory_type, request_initiator,
--      isolation_info, navigation_response_task_runner, render_process_id);
-+      isolation_info, navigation_response_task_runner, render_process_id,
-+      observe_only);
+       isolation_info, navigation_id, navigation_response_task_runner,
+-      render_process_id);
++      render_process_id, observe_only);
  }
  
  template <template <typename> class T>
 diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
-index 7245eb4..8513b9d 100644
+index cdc3bb2..406a1d5 100644
 --- a/browser/net/brave_proxying_url_loader_factory.h
 +++ b/browser/net/brave_proxying_url_loader_factory.h
-@@ -236,7 +236,8 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
-       const url::Origin& request_initiator,
+@@ -270,7 +270,8 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
        const net::IsolationInfo& isolation_info,
+       std::optional<int64_t> navigation_id,
        scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
 -      int render_process_id = -1);
 +      int render_process_id = -1,
@@ -82,7 +82,7 @@ index 7245eb4..8513b9d 100644
    // network::mojom::URLLoaderFactory:
    void CreateLoaderAndStart(
 diff --git a/browser/net/resource_context_data.cc b/browser/net/resource_context_data.cc
-index ee7b642..89bfb71 100644
+index 118d4dd..1c3297c 100644
 --- a/browser/net/resource_context_data.cc
 +++ b/browser/net/resource_context_data.cc
 @@ -17,11 +17,41 @@
@@ -127,9 +127,9 @@ index ee7b642..89bfb71 100644
  RequestIDGenerator::RequestIDGenerator() = default;
  
  template <template <typename> class T>
-@@ -44,7 +74,8 @@ void ResourceContextData<T>::StartProxying(
-     const url::Origin& request_initiator,
+@@ -45,7 +75,8 @@ BraveProxyingURLLoaderFactory<T>* ResourceContextData<T>::StartProxying(
      const net::IsolationInfo& isolation_info,
+     std::optional<int64_t> navigation_id,
      scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
 -    int render_process_id) {
 +    int render_process_id,
@@ -137,7 +137,7 @@ index ee7b642..89bfb71 100644
    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
  
    auto* self = static_cast<ResourceContextData*>(
-@@ -55,12 +86,17 @@ void ResourceContextData<T>::StartProxying(
+@@ -56,12 +87,17 @@ BraveProxyingURLLoaderFactory<T>* ResourceContextData<T>::StartProxying(
                                   base::WrapUnique(self));
    }
  
@@ -155,15 +155,15 @@ index ee7b642..89bfb71 100644
 +      observe_only ? *self->observing_handler_ : *self->request_handler_,
 +      browser_context, render_frame_token,
        factory_builder, url_loader_factory_type, request_initiator,
-       isolation_info, self->request_id_generator_,
+       isolation_info, navigation_id, self->request_id_generator_,
        base::BindOnce(&ResourceContextData::RemoveProxy,
 diff --git a/browser/net/resource_context_data.h b/browser/net/resource_context_data.h
-index e2ef55a..19df4f7 100644
+index 1a2a219..09ba656 100644
 --- a/browser/net/resource_context_data.h
 +++ b/browser/net/resource_context_data.h
-@@ -76,7 +76,8 @@ class ResourceContextData : public base::SupportsUserData::Data {
-       const url::Origin& request_initiator,
+@@ -77,7 +77,8 @@ class ResourceContextData : public base::SupportsUserData::Data {
        const net::IsolationInfo& isolation_info,
+       std::optional<int64_t> navigation_id,
        scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
 -      int render_process_id = -1);
 +      int render_process_id = -1,
@@ -171,7 +171,7 @@ index e2ef55a..19df4f7 100644
  
    static BraveProxyingWebSocket<T>* CreateProxyingWebSocket(
        content::ContentBrowserClient::WebSocketFactory factory,
-@@ -94,6 +95,9 @@ class ResourceContextData : public base::SupportsUserData::Data {
+@@ -95,6 +96,9 @@ class ResourceContextData : public base::SupportsUserData::Data {
    ResourceContextData();
  
    std::unique_ptr<BraveRequestHandler<T>> request_handler_;

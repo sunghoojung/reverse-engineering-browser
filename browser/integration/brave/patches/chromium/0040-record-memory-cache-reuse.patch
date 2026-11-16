@@ -1,8 +1,8 @@
 diff --git a/third_party/blink/renderer/core/loader/frame_fetch_context.cc b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
-index 41d6770..c5b944e 100644
+index b2a1bd1..4d675ce 100644
 --- a/third_party/blink/renderer/core/loader/frame_fetch_context.cc
 +++ b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
-@@ -1177,6 +1177,14 @@ ContentSecurityPolicy* FrameFetchContext::GetContentSecurityPolicyForWorld(
+@@ -1155,6 +1155,14 @@ ContentSecurityPolicy* FrameFetchContext::GetContentSecurityPolicyForWorld(
        world);
  }
  
@@ -18,7 +18,7 @@ index 41d6770..c5b944e 100644
    if (GetResourceFetcherProperties().IsDetached()) {
      return frozen_state_->is_isolated_svg_chrome_client;
 diff --git a/third_party/blink/renderer/core/loader/frame_fetch_context.h b/third_party/blink/renderer/core/loader/frame_fetch_context.h
-index a78afa3..02f7803 100644
+index 9149604..3466369 100644
 --- a/third_party/blink/renderer/core/loader/frame_fetch_context.h
 +++ b/third_party/blink/renderer/core/loader/frame_fetch_context.h
 @@ -192,6 +192,7 @@ class CORE_EXPORT FrameFetchContext final : public BaseFetchContext,
@@ -28,9 +28,9 @@ index a78afa3..02f7803 100644
 +  bool IsOrdinaryPageForNativeCapture() const override;
    void CountUsage(WebFeature) const override;
    void CountDeprecation(WebFeature) const override;
-   bool ShouldBlockWebSocketByMixedContentCheck(const KURL&) const override;
+   bool ShouldBlockWebSocketByMixedContentCheck(
 diff --git a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
-index c0ac1c8..5b7941f 100644
+index b13f05a..a1e8792 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
 +++ b/third_party/blink/renderer/platform/loader/fetch/fetch_context.h
 @@ -289,6 +289,11 @@ class PLATFORM_EXPORT FetchContext : public GarbageCollected<FetchContext> {
@@ -46,7 +46,7 @@ index c0ac1c8..5b7941f 100644
    const Vector<KURL> empty_unused_preloads_;
  };
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-index 8a48724..8e25a67 100644
+index 70867cf..c295198 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 @@ -45,6 +45,9 @@
@@ -129,7 +129,7 @@ index 8a48724..8e25a67 100644
  }  // namespace
  
  // Used to ensure a ResourceRequest is correctly configured. Specifically
-@@ -935,6 +994,8 @@ void ResourceFetcher::DidLoadResourceFromMemoryCache(
+@@ -938,6 +997,8 @@ void ResourceFetcher::DidLoadResourceFromMemoryCache(
    if (IsDetached() || !resource_load_observer_) {
      return;
    }

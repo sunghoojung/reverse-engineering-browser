@@ -86,10 +86,12 @@ nothing to arm for them.
 
 ## Bytecode flushing
 
-V8 ages every flushable `SharedFunctionInfo` once per major GC and flushes its
-bytecode when the age reaches `bytecode_old_age` (default 6,
-`flag-definitions.h:2827`; `MarkingVisitorBase::VisitSharedFunctionInfo` and
-`IsOld`, `marking-visitor-inl.h:455` and `:542`). Old bytecode is visited
+V8 ages every flushable `SharedFunctionInfo` and flushes its bytecode when the
+age reaches `bytecode_old_time` (default 180, counted in seconds; V8 15.7
+`flag-definitions.h:2839`, `MarkingVisitorBase::VisitSharedFunctionInfo` and
+`IsOld`, `marking-visitor-inl.h:470` and `:558`). V8 15.7 removed the
+GC-count alternative (`bytecode_old_age`, `flush_code_based_on_time`) that the
+original 15.1 review cited. Old bytecode is visited
 weakly, so a `BytecodeArray` still referenced from a live interpreter or
 Sparkplug frame stays marked and is not flushed. A running dispatch loop is
 therefore never flushed under its own activation.

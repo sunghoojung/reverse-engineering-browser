@@ -139,7 +139,7 @@ configure_node() {
     fi
   done
 
-  echo "Brave requires Node.js >=24.16.0 and <25. Set REB_NODE_DIRECTORY or install node@24." >&2
+  echo "Brave needs Node.js >=24.16.0; this checkout pins it to the 24 line. Set REB_NODE_DIRECTORY or install node@24." >&2
   exit 1
 }
 

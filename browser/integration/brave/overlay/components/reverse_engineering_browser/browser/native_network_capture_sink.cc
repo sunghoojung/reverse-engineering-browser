@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -1246,8 +1247,12 @@ void NativeNetworkCaptureSink::RecordRequestCompleted(
       session_id_.load(std::memory_order_relaxed), request_id, initiator_request_id,
       initiator_process_id, tab_id, frame_id, browser_context_id_high, browser_context_id_low);
   event.header.error_code = status.error_code;
-  event.header.encoded_data_length = status.encoded_data_length;
-  event.header.decoded_body_length = status.decoded_body_length;
+  // Chromium 157 counts these as unsigned base::ByteSize; the record keeps
+  // its signed 64-bit fields.
+  event.header.encoded_data_length =
+      base::saturated_cast<std::int64_t>(status.encoded_data_length.InBytes());
+  event.header.decoded_body_length =
+      base::saturated_cast<std::int64_t>(status.decoded_body_length.InBytes());
   SetPayload(event,
              disposition.empty() ? (status.error_code == 0 ? "completed" : "failed") : disposition);
   emitter(event);

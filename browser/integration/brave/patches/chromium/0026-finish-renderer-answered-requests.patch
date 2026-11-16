@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
-index 460cf05..c5a4576 100644
+index e725681..b4d33c0 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
 @@ -45,6 +45,7 @@
@@ -53,7 +53,7 @@ index 460cf05..c5a4576 100644
  enum class RequestOutcome { kSuccess, kFail };
  
  const char* RequestOutcomeToString(RequestOutcome outcome) {
-@@ -1261,6 +1291,9 @@ void ResourceLoader::RequestSynchronously() {
+@@ -1248,6 +1278,9 @@ void ResourceLoader::RequestSynchronously() {
      auto [result, response, data] = network_utils::ParseDataURL(
          resource_->Url(), request.HttpMethod(), request.GetUkmSourceId(),
          fetcher_->UkmRecorder());
@@ -63,7 +63,7 @@ index 460cf05..c5a4576 100644
      if (result != net::OK) {
        error_out = WebURLError(result, resource_->Url());
      } else {
-@@ -1323,6 +1356,8 @@ void ResourceLoader::RequestAsynchronously() {
+@@ -1309,6 +1342,8 @@ void ResourceLoader::RequestAsynchronously() {
    if (resource_->Url().ProtocolIsData()) {
      CHECK(!network_resource_request_);
      CHECK(!loader_);
@@ -72,7 +72,7 @@ index 460cf05..c5a4576 100644
      // Handle DataURL in another task instead of using |loader_|.
      GetLoadingTaskRunner()->PostTask(
          FROM_HERE,
-@@ -1466,6 +1501,8 @@ ResourceLoader::CheckResponseNosniff(
+@@ -1452,6 +1487,8 @@ ResourceLoader::CheckResponseNosniff(
  
  void ResourceLoader::HandleDataUrl() {
    if (!IsLoading()) {
@@ -81,7 +81,7 @@ index 460cf05..c5a4576 100644
      return;
    }
    if (freeze_mode_ != LoaderFreezeMode::kNone) {
-@@ -1482,6 +1519,8 @@ void ResourceLoader::HandleDataUrl() {
+@@ -1468,6 +1505,8 @@ void ResourceLoader::HandleDataUrl() {
        resource_->Url(), resource_->GetResourceRequest().HttpMethod(),
        resource_->GetResourceRequest().GetUkmSourceId(),
        fetcher_->UkmRecorder());
@@ -112,10 +112,18 @@ index 1c0f7d8..9d81f6b 100644
    HeapTaskRunnerTimer<ResourceLoader> cancel_timer_;
  
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
-index 1c5faac..b3efcb6 100644
+index a98ebec..d5a6c68 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
-@@ -278,8 +278,8 @@ int ResourceRequestSender::SendAsync(
+@@ -21,6 +21,7 @@
+ #include "base/memory/weak_ptr.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
++#include "base/numerics/safe_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "base/synchronization/waitable_event.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -277,8 +278,8 @@ int ResourceRequestSender::SendAsync(
  
    // Compute a unique request_id for this renderer process.
    int request_id = GenerateRequestId();
@@ -126,7 +134,7 @@ index 1c5faac..b3efcb6 100644
    // The JavaScript invocation that started this request, when one is
    // current; see protocol/native-js-invocation-v1.md.
    reb::NativeProbeSink::Get().RecordNativeJsInvocationRequest(request_id);
-@@ -376,6 +376,13 @@ void ResourceRequestSender::DeletePendingRequest(
+@@ -375,6 +376,13 @@ void ResourceRequestSender::DeletePendingRequest(
        request_info_->resource_load_info_notifier_wrapper
            ->NotifyResourceLoadCanceled(request_info_->net_error);
      }
@@ -140,7 +148,7 @@ index 1c5faac..b3efcb6 100644
    }
  
    // Cancel loading.
-@@ -490,6 +497,10 @@ void ResourceRequestSender::OnReceivedResponse(
+@@ -488,6 +496,10 @@ void ResourceRequestSender::OnReceivedResponse(
    request_info_->local_response_start = response_ipc_arrival_time;
    request_info_->remote_request_start =
        response_head->load_timing.request_start;
@@ -151,7 +159,7 @@ index 1c5faac..b3efcb6 100644
    // Now that response_start has been set, we can properly set the TimeTicks in
    // the URLResponseHead.
    base::TimeTicks remote_response_start =
-@@ -611,6 +622,14 @@ void ResourceRequestSender::OnRequestComplete(
+@@ -611,6 +623,15 @@ void ResourceRequestSender::OnRequestComplete(
      return;
    }
    request_info_->net_error = status.error_code;
@@ -161,16 +169,17 @@ index 1c5faac..b3efcb6 100644
 +    const std::string_view target = url.PathForRequestPiece();
 +    reb::NativeProbeSink::Get().RecordRendererRequestComplete(
 +        reb_request_, target, target.size(), url.IntPort(), status.error_code,
-+        status.encoded_data_length, status.decoded_body_length);
++        base::saturated_cast<int64_t>(status.encoded_data_length.InBytes()),
++        base::saturated_cast<int64_t>(status.decoded_body_length.InBytes()));
 +  }
  
    request_info_->resource_load_info_notifier_wrapper
        ->NotifyResourceLoadCompleted(status);
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
-index 44d8ebb..f8d5249 100644
+index 8f5e011..b714354 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
 +++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.h
-@@ -15,6 +15,7 @@
+@@ -16,6 +16,7 @@
  #include "base/memory/weak_ptr.h"
  #include "base/task/sequenced_task_runner.h"
  #include "base/time/time.h"
@@ -178,7 +187,7 @@ index 44d8ebb..f8d5249 100644
  #include "mojo/public/cpp/base/big_buffer.h"
  #include "mojo/public/cpp/system/data_pipe.h"
  #include "net/base/host_port_pair.h"
-@@ -249,6 +250,9 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
+@@ -250,6 +251,9 @@ class BLINK_PLATFORM_EXPORT ResourceRequestSender {
    // This is used to prevent OnReceivedResponse from being called twice.
    bool response_sent_to_client_ = false;
  

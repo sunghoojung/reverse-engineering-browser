@@ -1,7 +1,7 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -26,13 +26,20 @@
+@@ -26,16 +26,23 @@
  #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
  
  #include <algorithm>
@@ -18,11 +18,14 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
  #include "base/debug/crash_logging.h"
  #include "base/memory/scoped_refptr.h"
  #include "base/metrics/histogram_functions.h"
+ #include "base/numerics/safe_conversions.h"
  #include "base/system/sys_info.h"
  #include "base/time/time.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
  #include "build/build_config.h"
-@@ -170,6 +177,81 @@ String ToBlinkString(v8::Local<v8::Context> context,
+ #include "components/crash/core/common/crash_key.h"
+ #include "services/metrics/public/cpp/ukm_builders.h"
+@@ -175,6 +182,81 @@ String ToBlinkString(v8::Local<v8::Context> context,
    return result;
  }
  
@@ -104,7 +107,7 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
  // NOTE: when editing this, please also edit the error messages we throw when
  // the size is exceeded (see uses of the constant), which use the human-friendly
  // "8MB" text.
-@@ -597,13 +678,17 @@ V8Initializer::CodeGenerationCheckCallbackInMainThread(
+@@ -567,14 +649,18 @@ V8Initializer::CodeGenerationCheckCallbackInMainThread(
    }
  
    if (stringified_source.IsEmpty()) {
@@ -124,9 +127,12 @@ diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/thi
 +  CaptureDynamicJavaScript(context, checked_source);
    return {true, std::move(stringified_source)};
  }
-@@ -913,4 +998,5 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+ 
+@@ -874,6 +960,7 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+   isolate->SetUseCounterCallback(&UseCounterCallback);
    isolate->SetWasmModuleCallback(WasmModuleOverride);
    isolate->SetWasmInstanceCallback(WasmInstanceOverride);
 +  isolate->SetWasmModuleBytesCallback(CaptureWasmModuleBytes);
    isolate->SetWasmCustomDescriptorsEnabledCallback(
        WasmCustomDescriptorsEnabledCallback);
+   isolate->SetSharedArrayBufferConstructorEnabledCallback(

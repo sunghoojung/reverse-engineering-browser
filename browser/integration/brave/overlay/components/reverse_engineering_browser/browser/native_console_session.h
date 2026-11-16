@@ -34,6 +34,11 @@ void StartNativeConsoleSession(base::OnceClosure retired);
 // ID. The renderer's document token is never published. Bounded; returns 0 when
 // the frame is not an eligible Console document.
 [[nodiscard]] std::uint64_t NativeConsoleDocumentId(content::RenderFrameHost* frame);
+// The same identity, looked up without assigning one: 0 when this document
+// has no ID yet. A walk that only wants to find the document behind an ID a
+// client already holds uses this, so it does not label every document it
+// passes or recycle the oldest entry of the bounded table.
+[[nodiscard]] std::uint64_t NativeConsoleDocumentIdIfAssigned(content::RenderFrameHost* frame);
 
 }  // namespace reb
 

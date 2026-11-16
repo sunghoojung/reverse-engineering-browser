@@ -12,7 +12,9 @@ claims. Worker and proxy foundations remain dormant.
 
 Use a clean checkout of the intended source revision on an Apple silicon Mac with
 full Xcode (including an already accepted license), C++20 and zlib, Make,
-Python 3.8 or newer, Rust/Cargo, Node.js >=24.16.0 and <25, and Corepack or pnpm. The entrypoint never
+Python 3.8 or newer, Rust/Cargo, Node.js >=24.16.0 and <25, and Corepack or pnpm
+11.11.0 or newer (Brave `v1.99.57` declares that minimum and its install refuses an
+older pnpm, including the one a Corepack cache recorded for an earlier pin). The entrypoint never
 installs system tools, accepts licenses, changes global Xcode selection, or enables
 worker/proxy capture. Set `DEVELOPER_DIR` for a nonstandard full Xcode location,
 and `REB_NODE_DIRECTORY` for the supported Node installation if necessary.
@@ -151,6 +153,70 @@ no-op. Preserve conflicting receipts
 or audits separately; never edit them to admit an unexplained source state.
 Successful-build proof and the smaller disk reserve are not inherited.
 
+### Fixing a compile error
+
+The wrapper builds only the exact recorded state of its own integration commit,
+so a fix needs either one of the two handoffs above or a fresh pinned checkout.
+Choose by what the fix changes:
+
+| The fix changes | Fastest guarded path |
+| --- | --- |
+| Only build tooling, or only patch routing | Commit, then `adopt` and rerun the wrapper on the same checkout |
+| One existing file that a patch owns, nothing else | Commit, then `advance-patch` and rerun the wrapper on the same checkout |
+| An overlay file, a GN or mojom file, a new file, or several patched files | Iterate in the development loop below, then build the final candidate from a fresh `--init` |
+
+`adopt` and `advance-patch` need the checkout still in its recorded state, so use
+them before the development loop touches it, not after.
+
+**Development loop.** A sync from a source checkout that holds no receipt for
+the Brave checkout is not guarded, because the receipt that guards it lives in
+the original source checkout's `build/`. Keep the failed checkout, its output
+and the original receipts, and work from a second worktree of this repository:
+
+```sh
+git -C "$REPO" worktree add "$REPO-fix" <build commit>
+cd "$REPO-fix"
+git switch -c <fix branch>
+export REB_BRAVE_DIRECTORY=/absolute/path/to/worktree/src/brave
+# Edit the overlay under browser/integration/brave/overlay/, then:
+make browser-sync              # copies the overlay; applied patches stay as they are
+make brave-probe-check         # gn gen, then every integration object only
+./scripts/brave-toolchain.sh build   # incremental full browser, for errors outside the probe list
+```
+
+Add the `sccache` overrides from [fast-browser-builds.md](fast-browser-builds.md)
+to this checkout's `out/Component_arm64/args.gn` to make repeated compiles cheap.
+
+Sync never reverses a patch, and it refuses a checkout whose applied patch no
+longer matches the stack. To change a patch, first reverse that stack's old
+patches from the original checkout, newest first, down to and including the one
+you change, then let the sync apply the new versions:
+
+```sh
+stack=chromium   # chromium for src, v8 for src/v8, or empty for src/brave
+changed=0047-carry-message-task-origins.patch
+case "$stack" in
+  chromium) tree="${REB_BRAVE_DIRECTORY}/.." ;;
+  v8) tree="${REB_BRAVE_DIRECTORY}/../v8" ;;
+  *) tree="${REB_BRAVE_DIRECTORY}" ;;
+esac
+for patch in $(find "$REPO/browser/integration/brave/patches/$stack" -maxdepth 1 \
+    -name '*.patch' | LC_ALL=C sort -r); do
+  git -C "$tree" apply -R "$patch" || { echo "stopped at $patch; inspect $tree"; break; }
+  [ "$(basename "$patch")" = "$changed" ] && break
+done
+make browser-sync
+```
+
+Regenerate a changed patch against the state just before it, as the
+[maintenance procedure](../../.agents/skills/reb-brave-verify/references/fork-maintenance.md)
+describes; a file Brave also patches carries Brave's own uncommitted changes in
+that state. When the browser builds, commit the fix, run the repository gate and
+merge it. The development checkout is no longer in a recorded state and the
+wrapper refuses it: build the final candidate from the merged commit with a
+fresh `--init` in a new `REB_BRAVE_WORKTREE`, and delete the development checkout
+once that candidate passes.
+
 The wrapper runs the existing doctor and sync, offline native foundations,
 Brave's prepare-only stage, and the `components/policy:generate_policy_templates`
 target before recording the compilation inputs. These stages copy branding and
@@ -159,7 +225,9 @@ those authorized copies before the full build and still rejects unexpected
 changes before preparation or after compilation. Preparation and policy generation create Brave's component GN args. It then
 runs pinned probe compilation (including the native Console runtime) and the
 separate proxy adapter unit-test executable before the full development browser
-build. Native compilation failures therefore stop before the aggregate compile.
+build. The probe list in `scripts/brave-toolchain.sh` names every overlay source
+linked into the browser and every upstream browser source the three patch stacks
+change, so integration compilation failures stop before the aggregate compile.
 Origin Trace packaging/Console checks follow the browser build. It verifies the companion signature.
 The ordinary `make native-console-check` uses the real C++ bridge and Rust HTTP
 backend with a synthetic Python browser peer. Companion JavaScriptCore checks are a separate layer. Neither establishes
@@ -212,7 +280,9 @@ stack is empty at `v1.99.57`.
 These pins moved from Brave `v1.95.52` (Chromium `151.0.7922.108`) in #439 by
 file-level replay of every patch, without an initialized checkout. No browser
 has been built from them yet. A pin change needs a fresh pinned checkout and
-full build; `adopt` and `advance-patch` do not cover it.
+full build; `adopt` and `advance-patch` do not cover it. The
+[v0.6.0 build-day runbook](paired-release.md#build-day-runbook-for-v060) orders that
+first build and its acceptance.
 
 A full browser build does **not** compile the proxy preparation-only targets by
 itself. Do not add proxy dependencies to `:browser` or activate dormant worker

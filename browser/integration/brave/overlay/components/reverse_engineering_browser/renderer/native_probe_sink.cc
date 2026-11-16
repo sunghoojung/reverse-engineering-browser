@@ -3766,7 +3766,7 @@ void NativeProbeSink::NoteWasmInstrumentedSite(const std::uint64_t generation,
   call.frame_id = frame_id;
   call.document_token_high = document_token_high;
   call.document_token_low = document_token_low;
-  std::memcpy(call.url.data(), source_url.data(), source_url.size());
+  UNSAFE_BUFFERS(std::memcpy(call.url.data(), source_url.data(), source_url.size()));
   call.url_size = static_cast<std::uint32_t>(source_url.size());
 }
 

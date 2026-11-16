@@ -15,6 +15,7 @@
 #include <string_view>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/synchronization/lock.h"
@@ -26,6 +27,9 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "crypto/hash.h"
 
+// Chromium builds this directory with -Wunsafe-buffer-usage as an error. The
+// records here are fixed layouts written at offsets their sizes bound, so
+// each raw offset and memcpy is marked UNSAFE_BUFFERS.
 namespace reb {
 
 // One thread's tables: written only by that thread's walks, except the
@@ -244,7 +248,7 @@ std::size_t Mix(std::uint64_t value) noexcept {
 
 std::uint64_t DigestKey(const std::array<std::uint8_t, 32>& digest) noexcept {
   std::uint64_t key = 0;
-  std::memcpy(&key, digest.data(), sizeof(key));
+  UNSAFE_BUFFERS(std::memcpy(&key, digest.data(), sizeof(key)));
   return key;
 }
 
@@ -646,7 +650,7 @@ void AppendChainFrom(const NativeRequestStackTables& state,
       flags |= kNativeRequestStackTaskChainTruncated;
       return false;
     }
-    std::memcpy(out + kNativeTaskSegmentSize * count++, &segment, sizeof(segment));
+    UNSAFE_BUFFERS(std::memcpy(out + kNativeTaskSegmentSize * count++, &segment, sizeof(segment)));
     return true;
   };
   while (next != 0) {
@@ -1043,15 +1047,15 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
   std::uint16_t count = 0;
   std::uint8_t flags = 0;
   if (state) {
-    AppendChainFrom(*state, segment, generation, out.data() + kNativeTaskOriginHeaderSize, count,
-                    flags);
+    AppendChainFrom(*state, segment, generation,
+                    UNSAFE_BUFFERS(out.data() + kNativeTaskOriginHeaderSize), count, flags);
   } else {
     // A post with no script on a thread with no tables yet: one no_script
     // segment, which needs none.
     NativeTaskSegment last;
     last.kind = static_cast<std::uint8_t>(kind);
     last.state = static_cast<std::uint8_t>(NativeTaskSegmentState::kNoScript);
-    std::memcpy(out.data() + kNativeTaskOriginHeaderSize, &last, sizeof(last));
+    UNSAFE_BUFFERS(std::memcpy(out.data() + kNativeTaskOriginHeaderSize, &last, sizeof(last)));
     count = 1;
   }
   if (count == 0) {
@@ -1063,7 +1067,7 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
   header.flags = static_cast<std::uint8_t>(
       ((flags & kNativeRequestStackTaskChainCut) != 0 ? kNativeTaskOriginCut : 0) |
       ((flags & kNativeRequestStackTaskChainTruncated) != 0 ? kNativeTaskOriginTruncated : 0));
-  std::memcpy(out.data(), &header, sizeof(header));
+  UNSAFE_BUFFERS(std::memcpy(out.data(), &header, sizeof(header)));
   const std::size_t size = kNativeTaskOriginHeaderSize + kNativeTaskSegmentSize * count;
   if (state && (segment & kSyntheticSegment) == 0) {
     state->posts[state->post_next++ % state->posts.size()] = {generation,
@@ -1118,8 +1122,8 @@ std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
         ((flags & kNativeRequestStackTaskChainCut) != 0 ? kNativeTaskOriginCut : 0) |
         ((flags & kNativeRequestStackTaskChainTruncated) != 0 ? kNativeTaskOriginTruncated : 0));
     if (linked == header.count && ends == header.flags &&
-        std::memcmp(chain.data(), origin.data() + kNativeTaskOriginHeaderSize,
-                    kNativeTaskSegmentSize * linked) == 0) {
+        UNSAFE_BUFFERS(std::memcmp(chain.data(), origin.data() + kNativeTaskOriginHeaderSize,
+                                   kNativeTaskSegmentSize * linked)) == 0) {
       return post.serial;
     }
   }
@@ -1385,7 +1389,7 @@ std::size_t NativeRequestStackWalk::AppendTaskChain(std::uint8_t* const out,
   std::uint64_t next = g_current_segment;
   if (in_microtask_) {
     const NativeTaskSegment microtask = MicrotaskSegment();
-    std::memcpy(out, &microtask, sizeof(microtask));
+    UNSAFE_BUFFERS(std::memcpy(out, &microtask, sizeof(microtask)));
     count = 1;
     next = AttributedSegment(state, task_attribution_, generation_);
     if (next == 0) {
@@ -1446,8 +1450,8 @@ void NativeRequestStackWalk::FramesReady(const std::uint32_t total_depth,
   const std::size_t header_size =
       tasks ? kNativeStackArtifactScopeHeaderSize : kNativeStackArtifactHeaderSize;
   const std::span<const NativeStackFrame> sync(state.frames.data(), recorded);
-  const std::span<const NativeStackFrame> async(state.frames.data() + kNativeRequestStackSyncLimit,
-                                                async_frames);
+  const std::span<const NativeStackFrame> async(
+      UNSAFE_BUFFERS(state.frames.data() + kNativeRequestStackSyncLimit), async_frames);
   std::size_t size = header_size;
   for (std::size_t i = 0; i < std::size_t{recorded} + async_frames; ++i) {
     const bool is_async = i >= recorded;
@@ -1458,11 +1462,12 @@ void NativeRequestStackWalk::FramesReady(const std::uint32_t total_depth,
       return;
     }
     payload.wasm_frames += frame.kind == static_cast<std::uint8_t>(NativeStackFrameKind::kWasm);
-    std::memcpy(state.artifact.data() + size, &frame, sizeof(frame));
+    UNSAFE_BUFFERS(std::memcpy(state.artifact.data() + size, &frame, sizeof(frame)));
     size += sizeof(frame);
   }
   if (tasks) {
-    size += AppendTaskChain(state.artifact.data() + size, payload.task_segments, payload.flags);
+    size += AppendTaskChain(UNSAFE_BUFFERS(state.artifact.data() + size), payload.task_segments,
+                            payload.flags);
     payload.async_segments =
         static_cast<std::uint16_t>(payload.async_segments + payload.task_segments);
   }
@@ -1479,13 +1484,13 @@ void NativeRequestStackWalk::FramesReady(const std::uint32_t total_depth,
   header.async_frames = payload.async_frames;
   header.async_segments = payload.async_segments;
   header.task_segments = payload.task_segments;
-  std::memcpy(state.artifact.data(), &header, sizeof(header));
+  UNSAFE_BUFFERS(std::memcpy(state.artifact.data(), &header, sizeof(header)));
   if (tasks) {
     NativeStackArtifactScope scope;
     scope.process_id = state.process_id;
     scope.thread = state.scope.thread;
     scope.isolate_key = state.scope.isolate_key;
-    std::memcpy(state.artifact.data() + sizeof(header), &scope, sizeof(scope));
+    UNSAFE_BUFFERS(std::memcpy(state.artifact.data() + sizeof(header), &scope, sizeof(scope)));
   }
   payload.scripts = CountDistinctScripts(state, sync, async);
   payload.innermost = state.frames[0];
@@ -1543,7 +1548,7 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
       return;
     }
     payload.wasm_frames += frame.kind == static_cast<std::uint8_t>(NativeStackFrameKind::kWasm);
-    std::memcpy(state.artifact.data() + size, &frame, sizeof(frame));
+    UNSAFE_BUFFERS(std::memcpy(state.artifact.data() + size, &frame, sizeof(frame)));
     size += sizeof(frame);
   }
   NativeStackArtifactHeader header;
@@ -1551,12 +1556,12 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
   header.header_size = static_cast<std::uint16_t>(kNativeStackArtifactScopeHeaderSize);
   header.total_depth = recorded;
   header.recorded = recorded;
-  std::memcpy(state.artifact.data(), &header, sizeof(header));
+  UNSAFE_BUFFERS(std::memcpy(state.artifact.data(), &header, sizeof(header)));
   NativeStackArtifactScope scope;
   scope.process_id = state.process_id;
   scope.thread = state.scope.thread;
   scope.isolate_key = state.scope.isolate_key;
-  std::memcpy(state.artifact.data() + sizeof(header), &scope, sizeof(scope));
+  UNSAFE_BUFFERS(std::memcpy(state.artifact.data() + sizeof(header), &scope, sizeof(scope)));
   payload.scripts = CountDistinctScripts(state, frames, {});
   payload.innermost = frames[0];
   const std::span<const std::uint8_t> content(state.artifact.data(), size);

@@ -14,10 +14,10 @@ from urllib.request import Request, urlopen
 REPOSITORY = "sunghoojung/reverse-engineering-browser"
 # The one paired release this source admits. Publishing another version needs
 # a new review of this constant, the browser pin and the release notes.
-REVIEWED_TAG = "v0.5.2"
+REVIEWED_TAG = "v0.6.0"
 # The release the paired browser build was made for. An unchanged build keeps
 # its original asset names when a later release pairs it again.
-REVIEWED_BRAVE_TAG = "v0.5.1"
+REVIEWED_BRAVE_TAG = "v0.6.0"
 
 
 def digest(path):

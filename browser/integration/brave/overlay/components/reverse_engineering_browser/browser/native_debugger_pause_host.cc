@@ -10,8 +10,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -516,7 +516,7 @@ void StartNativeDebuggerPauseHost() {
   }
   sockaddr_un address{};
   address.sun_family = AF_UNIX;
-  std::memcpy(address.sun_path, path.data(), path.size());
+  std::copy(path.begin(), path.end(), address.sun_path);
   if (bind(listener.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0 ||
       listen(listener.get(), 8) != 0) {
     return;

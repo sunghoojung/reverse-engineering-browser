@@ -15,8 +15,8 @@ from unittest.mock import patch
 
 HELPER = Path(__file__).with_name("write-release-pair.py")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-TAG = "v0.5.2"
-# The paired browser is the unchanged v0.5.1 build, so it keeps that release's name.
+TAG = "v0.6.0"
+# An unchanged earlier build keeps that release's name; v0.5.1 stands in for one.
 BRAVE_TAG = "v0.5.1"
 NAME = f"Brave-Browser-Development-{BRAVE_TAG}-macos-arm64"
 CDHASH = "c" * 40
@@ -44,7 +44,7 @@ class ReleasePair(unittest.TestCase):
         self.output = self.root / "build/release-pair"
         self.output.mkdir(parents=True)
         self.info = {
-            "CFBundleShortVersionString": "0.5.2",
+            "CFBundleShortVersionString": "0.6.0",
             "OriginTraceReleaseType": "paired",
         }
         self.plist = self.root / "apps/research-ui/macos/Info.plist"
@@ -113,13 +113,14 @@ class ReleasePair(unittest.TestCase):
         for phrase in [f"{downloads}/{NAME}.zip", f"{downloads}/{NAME}.provenance.json",
                        f"{downloads}/SHA256SUMS-{TAG}.txt", CDHASH, "a" * 40,
                        "Brave v1.95.52 and Chromium 151.0.7922.108", "not an official Brave release",
-                       "not Apple-notarized", "consumer services", "dormant", "since v0.5.1",
-                       "first published with v0.5.1", "exits with status 3", "byte for byte",
+                       "not Apple-notarized", "consumer services", "dormant", "since v0.5.2",
+                       "first published with v0.5.1", "Flow workspace", "byte for byte",
                        "Before v0.5.1 was published", "REB_NATIVE_WASM_CALL_INDIRECT",
                        "defines every native V8 flag", "`REB_NATIVE_QUIET_MODE=0`"]:
             self.assertIn(phrase, notes)
         self.assertNotIn("\u2014", notes)
         self.assertNotIn("a new Brave Browser Development build", notes)
+        self.assertNotIn("Checked live on this build", notes)
 
     def test_browser_built_for_this_release_is_described_as_new(self):
         name = f"Brave-Browser-Development-{TAG}-macos-arm64"
@@ -128,19 +129,53 @@ class ReleasePair(unittest.TestCase):
         self.provenance = self.provenance.with_name(f"{name}.provenance.json")
         self.write_provenance({**self.browser, "release": TAG, "artifact": f"{name}.zip"})
         self.write_pin(brave_name=name)
-        self.run_helper()
+        accepted = self.helper.PENDING_LIVE[:2]
+        with patch.object(self.helper, "PENDING_LIVE", ()), patch.object(
+                self.helper, "ACCEPTED_LIVE", accepted):
+            self.run_helper()
         notes = (self.output / "release-notes.md").read_text()
         self.assertIn("a new Brave Browser Development build", notes)
-        self.assertIn("Before publishing", notes)
+        self.assertIn("up from Brave v1.95.52 on Chromium 151.0.7922.108", notes)
+        self.assertIn("## Checked live on this build", notes)
+        for claim in accepted:
+            self.assertIn(f"- {claim}\n", notes)
+        self.assertNotIn(self.helper.PENDING_LIVE[2], notes)
         self.assertNotIn("byte for byte", notes)
+        self.assertNotIn("\u2014", notes)
         self.assertTrue((self.output / f"{name}.zip").exists())
 
-    def test_browser_built_for_a_later_release_is_rejected(self):
-        name = "Brave-Browser-Development-v0.5.3-macos-arm64"
+    def test_new_browser_with_claims_pending_live_acceptance_is_refused(self):
+        name = f"Brave-Browser-Development-{TAG}-macos-arm64"
         self.brave = self.brave.rename(self.brave.with_name(f"{name}.zip"))
         self.provenance.unlink()
         self.provenance = self.provenance.with_name(f"{name}.provenance.json")
-        self.write_provenance({**self.browser, "release": "v0.5.3", "artifact": f"{name}.zip"})
+        self.write_provenance({**self.browser, "release": TAG, "artifact": f"{name}.zip"})
+        self.write_pin(brave_name=name)
+        self.assertTrue(self.helper.PENDING_LIVE)
+        with self.assertRaisesRegex(ValueError, "pending live acceptance"):
+            self.run_helper()
+        self.assertFalse((self.output / f"{name}.zip").exists())
+        self.assertFalse((self.output / "release-notes.md").exists())
+
+    def test_new_browser_with_no_accepted_claim_says_so(self):
+        name = f"Brave-Browser-Development-{TAG}-macos-arm64"
+        self.brave = self.brave.rename(self.brave.with_name(f"{name}.zip"))
+        self.provenance.unlink()
+        self.provenance = self.provenance.with_name(f"{name}.provenance.json")
+        self.write_provenance({**self.browser, "release": TAG, "artifact": f"{name}.zip"})
+        self.write_pin(brave_name=name)
+        with patch.object(self.helper, "PENDING_LIVE", ()), patch.object(
+                self.helper, "ACCEPTED_LIVE", ()):
+            self.run_helper()
+        notes = (self.output / "release-notes.md").read_text()
+        self.assertIn("No browser capture beyond startup is claimed", notes)
+
+    def test_browser_built_for_a_later_release_is_rejected(self):
+        name = "Brave-Browser-Development-v0.6.1-macos-arm64"
+        self.brave = self.brave.rename(self.brave.with_name(f"{name}.zip"))
+        self.provenance.unlink()
+        self.provenance = self.provenance.with_name(f"{name}.provenance.json")
+        self.write_provenance({**self.browser, "release": "v0.6.1", "artifact": f"{name}.zip"})
         self.write_pin(brave_name=name)
         with self.assertRaises(ValueError):
             self.run_helper()
@@ -169,7 +204,7 @@ class ReleasePair(unittest.TestCase):
         for key, value in [("source_url", "PLACEHOLDER"), ("brave_sha256", "PLACEHOLDER"),
                            ("provenance_sha256", "PLACEHOLDER"), ("build_source", "PLACEHOLDER"),
                            ("source_url", "https://example.invalid/releases/download/x"),
-                           ("brave_name", "Brave-Browser-Development-v0.5.3-macos-arm64")]:
+                           ("brave_name", "Brave-Browser-Development-v0.6.1-macos-arm64")]:
             with self.subTest(key=key, value=value):
                 self.write_pin(**{key: value})
                 with self.assertRaises(ValueError):

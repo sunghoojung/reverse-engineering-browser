@@ -178,12 +178,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       switch requestURL.path {
       case "", "/", "/index.html":
         response = (try Data(contentsOf: indexURL), "text/html; charset=utf-8", 200, [:])
-      case "/app.css", "/xrefs_view.css", "/entropy_map.css", "/block_graph.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css":
+      case "/app.css", "/wasm_readable.css", "/xrefs_view.css", "/wasm_runner.css", "/entropy_map.css", "/wasm_identification.css", "/block_graph.css", "/wasm_diff_view.css", "/value_flow_view.css", "/flow_graph.css", "/flow_workspace.css", "/agent_panel.css", "/session_panel.css", "/debugger_sidebar.css", "/debugger_pause.css":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/block_graph_layout.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/invocation_sites.js", "/entropy_map.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -208,6 +208,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "error": "Metadata packages are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
           "code": "dependency_unavailable", "details": [:]
         ]), "application/json; charset=utf-8", 503, [:])
+      case "/api/wasm/runs":
+        // Offline runs execute in the Rust backend's interpreter, which the
+        // stored-evidence scheme does not host.
+        response = (try JSONSerialization.data(withJSONObject: [
+          "error": "Offline Wasm runs need a live workspace. Nothing ran.",
+          "code": "dependency_unavailable", "details": [:]
+        ]), "application/json; charset=utf-8", 503, [:])
       case "/api/source-facts":
         // The stored-evidence scheme has no reviewed source-facts adapter.
         // Live workspaces use the bundled Rust HTTP backend instead.
@@ -230,11 +237,17 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         handleArtifactMap(requestURL, to: urlSchemeTask)
         return
-      case "/api/wasm/functions", "/api/wasm/graph":
+      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow":
         guard urlSchemeTask.request.httpMethod == "GET" else {
           throw LocalHTTPError(status: 405, message: "WASM graph routes require GET")
         }
         handleWasmGraph(requestURL, to: urlSchemeTask)
+        return
+      case "/api/wasm/diff":
+        guard urlSchemeTask.request.httpMethod == "GET" else {
+          throw LocalHTTPError(status: 405, message: "The WASM module diff requires GET")
+        }
+        handleWasmDiff(requestURL, to: urlSchemeTask)
         return
       case "/api/decoder":
         response = (try decoderService.state(), "application/json; charset=utf-8", 200, [:])
@@ -1927,7 +1940,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let allowed = url.path == "/api/wasm/graph" ? ["artifact_id", "function"] : ["artifact_id"]
+        let valueFlow = ["function", "offset", "operand", "local", "direction", "max_nodes", "max_depth", "interprocedural"]
+        let allowed = url.path == "/api/wasm/pseudocode" ? ["artifact_id", "function", "line_offset", "line_limit"]
+          : url.path == "/api/wasm/graph" ? ["artifact_id", "function"]
+          : url.path == "/api/wasm/identification" ? ["artifact_id", "row_offset", "row_limit"]
+          : url.path == "/api/wasm/value-flow" ? ["artifact_id"] + valueFlow : ["artifact_id"]
         let ids = items.filter { $0.name == "artifact_id" }
         guard items.allSatisfy({ allowed.contains($0.name) }), ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
           id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
@@ -1935,13 +1952,60 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         let arguments: [String]
         let schema: String
-        if url.path == "/api/wasm/graph" {
+        if url.path == "/api/wasm/pseudocode" {
+          let functions = items.filter { $0.name == "function" }
+          guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
+            throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")
+          }
+          // The helper refuses a window past the line count or the line limit.
+          var window: [String] = []
+          for name in ["line_offset", "line_limit"] {
+            let values = items.filter { $0.name == name }
+            guard values.count <= 1 else { throw NativeDecoderError(status: 400, message: "Specify \(name) only once") }
+            if let value = values.first?.value {
+              guard let number = UInt32(value), name == "line_offset" || number > 0 else {
+                throw NativeDecoderError(status: 400, message: "\(name) is an unsigned 32-bit integer")
+              }
+              window += ["--\(name.replacingOccurrences(of: "_", with: "-"))", String(number)]
+            }
+          }
+          arguments = ["--pseudocode-function", function] + window
+          schema = "wasm-pseudocode-v1"
+        } else if url.path == "/api/wasm/value-flow" {
+          // The Rust provider validates every parameter; values are ASCII
+          // digits or words, so the query passes through as it came.
+          let names = items.map(\.name)
+          guard Set(names).count == names.count, items.allSatisfy({ ($0.value ?? "").range(of: #"^[a-z0-9]{1,20}$"#, options: .regularExpression) != nil }) else {
+            throw NativeDecoderError(status: 400, message: "WASM value flow takes each parameter once, as a number or a word")
+          }
+          let query = items.filter { $0.name != "artifact_id" }.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
+          arguments = ["--value-flow", query]
+          schema = "wasm-value-flow-v1"
+        } else if url.path == "/api/wasm/graph" {
           let functions = items.filter { $0.name == "function" }
           guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
             throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")
           }
           arguments = ["--graph-function", function]
           schema = "wasm-block-graph-v1"
+        } else if url.path == "/api/wasm/identification" {
+          // The same suggestion window as the loopback route: one value each,
+          // canonical, with the backend's 1024-row page as the ceiling.
+          var window: [String] = []
+          for (name, flag, minimum) in [("row_offset", "--row-offset", 0), ("row_limit", "--row-limit", 1)] {
+            let values = items.filter { $0.name == name }
+            guard values.count <= 1 else {
+              throw NativeDecoderError(status: 400, message: "WASM identification takes one \(name)")
+            }
+            if let raw = values.first?.value {
+              guard let value = Int(raw), value >= minimum, String(value) == raw, name != "row_limit" || value <= 1024 else {
+                throw NativeDecoderError(status: 400, message: name == "row_limit" ? "row_limit is 1 to 1024" : "row_offset is an unsigned integer")
+              }
+              window += [flag, raw]
+            }
+          }
+          arguments = ["--identification"] + window
+          schema = "wasm-identification-v1"
         } else {
           arguments = ["--functions"]
           schema = "wasm-function-index-v1"
@@ -1953,6 +2017,46 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         self.completeDeobfuscation(body, status: error.status, to: task)
       } catch {
         let body = (try? JSONSerialization.data(withJSONObject: ["error": "WASM graph decoding is unavailable"])) ?? Data()
+        self.completeDeobfuscation(body, status: 500, to: task)
+      }
+    }
+  }
+
+  /// The helper validates the page and statuses again; this only refuses a
+  /// parameter it would not pass on, so nothing unchecked reaches its argv.
+  private func handleWasmDiff(_ url: URL, to task: WKURLSchemeTask) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let allowed = ["artifact_id", "compare_artifact_id", "status", "row_offset", "row_limit"]
+        func one(_ name: String, pattern: String, required: Bool) throws -> String? {
+          let values = items.filter { $0.name == name }
+          if values.isEmpty, !required { return nil }
+          guard values.count == 1, let value = values[0].value, value.count <= 128,
+            value.range(of: pattern, options: .regularExpression) != nil else {
+            throw NativeDecoderError(status: 400, message: "The WASM module diff takes one canonical artifact_id and compare_artifact_id with optional status, row_offset and row_limit")
+          }
+          return value
+        }
+        guard items.allSatisfy({ allowed.contains($0.name) }) else {
+          throw NativeDecoderError(status: 400, message: "The WASM module diff takes artifact_id and compare_artifact_id with optional status, row_offset and row_limit")
+        }
+        let canonical = #"^[1-9][0-9]{0,19}$"#
+        guard let id = try one("artifact_id", pattern: canonical, required: true), UInt64(id) != nil,
+          let other = try one("compare_artifact_id", pattern: canonical, required: true), UInt64(other) != nil else {
+          throw NativeDecoderError(status: 400, message: "Artifact IDs are canonical nonzero unsigned 64-bit integers")
+        }
+        var arguments = ["--diff-with", other]
+        if let status = try one("status", pattern: #"^[a-z]+(,[a-z]+)*$"#, required: false) { arguments += ["--status", status] }
+        if let offset = try one("row_offset", pattern: #"^[0-9]{1,10}$"#, required: false) { arguments += ["--row-offset", offset] }
+        if let limit = try one("row_limit", pattern: #"^[0-9]{1,4}$"#, required: false) { arguments += ["--row-limit", limit] }
+        let body = try self.wasmService.graphDocument(root: self.artifactStoreURL, artifactID: id, extraArguments: arguments, schema: "wasm-module-diff-v1")
+        self.completeDeobfuscation(body, status: 200, to: task)
+      } catch let error as NativeDecoderError {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
+        self.completeDeobfuscation(body, status: error.status, to: task)
+      } catch {
+        let body = (try? JSONSerialization.data(withJSONObject: ["error": "The WASM module diff is unavailable"])) ?? Data()
         self.completeDeobfuscation(body, status: 500, to: task)
       }
     }
@@ -2582,6 +2686,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // environment and follows the start panel, so a later panel or reopen never
   // replaces Metadata with the default.
   private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
+  // The content limits last chosen in the panel, held for the run as the mode
+  // is. Nil until the panel starts a Content session: until then a session
+  // takes them from the environment, and the panel offers those.
+  private var selectedContentLimits: ContentLimits?
+  // The panel chose this run's mode, so it decides request content over an
+  // inherited REB_CAPTURE_REQUEST_CONTENT, in reopens as well.
+  private var panelChoseMode = false
   // Continue Offline holds for the rest of the run: a reopen starts nothing.
   private var automaticSessionSuppressed = false
   // The panel shows a start or failure decision. Nothing starts a session
@@ -2708,16 +2819,18 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     load(requestedUIURL ?? localApplicationURL)
     if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
       // Exercise the real startup failure path without a browser or modal dialog.
+      let content = LiveCaptureContent.resolve(
+        environment: ProcessInfo.processInfo.environment, mode: .metadata, limits: nil, modeChosen: false)
       liveSessionCoordinator.start(
         braveExecutableURL: resourcesURL.appendingPathComponent("__missing_smoke_browser__"),
-        captureNetworkContent: false,
+        content: content,
         useSystemKeychain: false,
         ready: { _ in
           print("SMOKE_ERROR Unexpected live session readiness")
           NSApp.terminate(nil)
         },
         failed: { [weak self] failure in
-          self?.presentLiveSessionError(failure, captureMode: .metadata)
+          self?.presentLiveSessionError(failure, content: content)
         }
       )
     }
@@ -2837,7 +2950,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     // REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1 is the advanced route to the macOS
     // Keychain for these automatic sessions; the panel never offers it.
     startAutomaticLiveSession(
-      captureMode: selectedCaptureMode,
+      LiveCaptureContent.resolve(
+        environment: ProcessInfo.processInfo.environment, mode: selectedCaptureMode,
+        limits: selectedCaptureMode.capturesNetworkContent ? selectedContentLimits : nil, modeChosen: panelChoseMode),
       useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
@@ -2848,7 +2963,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func presentLiveSessionSetup() {
     guard !liveSessionCoordinator.isRunning, let sessionPanel else { return }
     presentOriginTraceWindow()
-    sessionPanel.content = .choose(mode: selectedCaptureMode)
+    // Until the panel chooses, an inherited REB_CAPTURE_REQUEST_CONTENT=0
+    // preselects Metadata (LiveCaptureMode.configured), and the panel says so.
+    let environment = ProcessInfo.processInfo.environment
+    sessionPanel.modeNote = !panelChoseMode && LiveCaptureMode.requestContentOptedOut(environment) ? LiveCaptureMode.optOutNote : nil
+    sessionPanel.content = .choose(
+      mode: selectedCaptureMode,
+      limits: selectedContentLimits ?? ContentLimits.configured(environment))
   }
 
   // The panel already accepted this choice for the decision on screen; it is
@@ -2858,16 +2979,25 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     switch (choice, sessionPanel.content) {
     // A session the panel starts or retries uses the isolated, prompt-free
     // research profile; the page cannot ask for the macOS Keychain.
-    case (.start(let mode), .choose):
+    case (.start(let mode, let limits), .choose):
       automaticSessionSuppressed = false
       selectedCaptureMode = mode
+      panelChoseMode = true
+      // A Metadata start keeps the last Content limits for a later Content one.
+      if let limits { selectedContentLimits = limits }
+      // The panel names limits only for a session they apply to: a category
+      // mask without Network and Artifact keeps no request content.
+      let content = LiveCaptureContent.resolve(
+        environment: ProcessInfo.processInfo.environment, mode: mode, limits: limits, modeChosen: true)
       // Not a decision, so the start below is not refused as one behind it.
-      sessionPanel.content = .starting(mode: mode)
-      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: false)
-    case (.retry, .failed(_, let mode)):
-      sessionPanel.content = .starting(mode: mode)
+      sessionPanel.content = .starting(content)
+      startAutomaticLiveSession(content, useSystemKeychain: false)
+    // Exactly the failed start's content switches, never a new reading of the
+    // environment, so the session is the one the panel names.
+    case (.retry, .failed(_, let content)):
+      sessionPanel.content = .starting(content)
       liveSessionCoordinator.stop()
-      startAutomaticLiveSession(captureMode: mode, useSystemKeychain: false)
+      startAutomaticLiveSession(content, useSystemKeychain: false)
     case (.offline, .choose), (.offline, .failed):
       sessionPanel.content = .hidden
       automaticSessionSuppressed = true
@@ -2878,10 +3008,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     }
   }
 
-  private func startAutomaticLiveSession(
-    captureMode: LiveCaptureMode,
-    useSystemKeychain: Bool
-  ) {
+  private func startAutomaticLiveSession(_ content: LiveCaptureContent, useSystemKeychain: Bool) {
     guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
@@ -2895,13 +3022,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
           } ?? "Origin Trace could not find Brave Browser Development. "
             + "Place it beside Origin Trace or set REB_BRAVE_BINARY.",
           afterStartup: false),
-        captureMode: captureMode
+        content: content
       )
       return
     }
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,
-      captureNetworkContent: captureMode.capturesNetworkContent,
+      content: content,
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self else { return }
@@ -2909,14 +3036,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
         guard nativeUIURL(liveURL.absoluteString) != nil else {
           self.presentLiveSessionError(
             .init(message: "Origin Trace received an invalid loopback UI URL.", afterStartup: false),
-            captureMode: captureMode
+            content: content
           )
           return
         }
         self.openLiveWorkspace(nil)
       },
       failed: { [weak self] failure in
-        self?.presentLiveSessionError(failure, captureMode: captureMode)
+        self?.presentLiveSessionError(failure, content: content)
       }
     )
   }
@@ -3324,10 +3451,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
 
   // A failed or ended session is a decision in the start panel, with Retry
   // and Continue Offline, over whichever workspace the window shows.
-  private func presentLiveSessionError(
-    _ failure: LiveSessionCoordinator.Failure,
-    captureMode: LiveCaptureMode
-  ) {
+  private func presentLiveSessionError(_ failure: LiveSessionCoordinator.Failure, content: LiveCaptureContent) {
     // No modal any more, so a failure at launch, before the event loop runs,
     // is held by the panel and drawn once the page loads.
     if smokeTest {
@@ -3336,7 +3460,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       return
     }
     presentOriginTraceWindow()
-    sessionPanel?.content = .failed(failure, mode: captureMode)
+    sessionPanel?.content = .failed(failure, content)
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

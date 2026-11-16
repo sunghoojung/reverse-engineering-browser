@@ -132,6 +132,9 @@ The Origin Trace UI requests whole-module inspection and renders `status` and
 `omissions`, so a filtered document would be shown as partial with its requested
 sections named. It does not send `sections` today.
 
+Toolchain, well-known function and constant identification for the same
+artifact is a separate report, [WASM identification](wasm-identification-v1.md).
+
 ## Function index and block graph
 
 `GET /api/wasm/functions?artifact_id=<id>` returns `wasm-function-index-v1`: each
@@ -161,6 +164,9 @@ decode deadline. Anything cut sets `status` to `partial` and is named in
 `omissions`; structure is kept before row text, and an edge leaving the retained
 prefix stays labeled.
 
+`GET /api/wasm/pseudocode` lifts one function into readable lines with the
+same artifact checks; [WASM pseudocode](wasm-pseudocode-v1.md) defines it.
+
 Sources opens captured WASM in Hex. Inspect switches to the derived listing;
 Hex returns to original evidence. Enabled offset buttons reveal the matching
 hex row when that byte was formatted. Hex formatting covers every retained byte
@@ -168,3 +174,5 @@ whose rows fit in the 8 MiB editor index. A longer module keeps a labeled
 prefix, and an offset past that prefix stays disabled. Find searches the
 formatted hex, not bytes left outside the index.
 Inspection errors provide Retry inspection, and Hex remains available.
+A selected instruction row can be traced with Trace value, described in
+[WASM value flow](wasm-value-flow-v1.md).

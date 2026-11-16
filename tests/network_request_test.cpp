@@ -91,6 +91,8 @@ static_assert(reb::kScriptCookieNamePrefixBytes == reb::kNativeScriptCookieNameP
 static_assert(static_cast<std::uint8_t>(reb::ScriptCookieApi::kCookieStoreDelete) ==
               static_cast<std::uint8_t>(reb::NativeScriptCookieApi::kCookieStoreDelete));
 static_assert(reb::kScriptCookieTableFull == reb::kNativeScriptCookieTableFull);
+static_assert(reb::kScriptCookieReadRecord == reb::kNativeScriptCookieReadRecord);
+static_assert(reb::kScriptCookiePayloadVersion == reb::kNativeScriptCookiePayloadVersion);
 
 reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                                       const reb::NativeRequestBodyState state,
@@ -800,10 +802,37 @@ void CheckCookies() {
   value.stack_digest.fill(0x11);
   value.flags |= reb::kNativeScriptCookieStackRecorded;
   add("script cookie with stack", script_event(value), true);
-  value = get;
+  // Version 3: a document.cookie read is a nameless read record, whose offset
+  // 16 counts the names no name record counts, plus one record per name.
+  const auto read_record = [&get] {
+    auto read = get;
+    read.name_length = 0;
+    read.name_prefix = {};
+    read.flags |= reb::kNativeScriptCookieReadRecord;
+    read.unrecorded_names = 7;
+    return read;
+  }();
+  event = script_event(read_record);
+  add("script cookie read record", event, true);
+  reb::ScriptCookiePayload decoded;
+  Check(reb::DecodeScriptCookiePayload(event.inline_payload, decoded) &&
+            decoded.value_length == 7 && reb::IsScriptCookieReadRecord(decoded),
+        "a read record carries its unrecorded names at offset 16");
+  value = read_record;
   value.flags |= reb::kNativeScriptCookieTableFull;
   value.count = 1;
   add("script cookie read table full", script_event(value), true);
+  value = get;
+  value.name_length = 0;
+  value.name_prefix = {};
+  add("script cookie empty name read", script_event(value), true);
+  // Version 1 and 2 reads were the whole jar, with no name record.
+  event = script_event(get);
+  event.inline_payload[0] = std::byte{2};
+  add("script cookie version 2 read", event, true);
+  event = script_event(read_record);
+  event.inline_payload[0] = std::byte{2};
+  add("script cookie version 2 read record flag", event, false);
   // Version 2 names the isolate: a service worker's cookieStore write names
   // the worker by its context ID as frame_id.
   value = script(reb::NativeScriptCookieApi::kCookieStoreSet);
@@ -858,7 +887,15 @@ void CheckCookies() {
       {"stack flag without digest", set,
        [](auto& v) { v.flags |= reb::kNativeScriptCookieStackRecorded; }},
       {"table full write", set, [](auto& v) { v.flags |= reb::kNativeScriptCookieTableFull; }},
-      {"unknown flag", set, [](auto& v) { v.flags |= 0x10; }},
+      {"unknown flag", set, [](auto& v) { v.flags |= 0x20; }},
+      {"read record on a write", set,
+       [](auto& v) { v.flags |= reb::kNativeScriptCookieReadRecord; }},
+      {"read record on a store read", script(reb::NativeScriptCookieApi::kCookieStoreGet),
+       [](auto& v) { v.flags |= reb::kNativeScriptCookieReadRecord; }},
+      {"read record with a name", get,
+       [](auto& v) { v.flags |= reb::kNativeScriptCookieReadRecord; }},
+      {"name read table full", get, [](auto& v) { v.flags |= reb::kNativeScriptCookieTableFull; }},
+      {"name read shorter than its name", get, [](auto& v) { v.string_length = 2; }},
       {"thread five", set, [](auto& v) { v.thread = 5; }},
       {"frame without thread", set, [](auto& v) { v.thread = 0; }},
   };
@@ -1092,7 +1129,7 @@ void CheckResponseBodies() {
   }
   reb::ResponseBodyPayload decoded;
   Check(reb::DecodeResponseBodyPayload(reb::EncodeNativeResponseBodyPayload(full), decoded) &&
-            decoded.protocol_version == 1 && decoded.payload_size == 128 && decoded.state == 3 &&
+            decoded.protocol_version == 2 && decoded.payload_size == 128 && decoded.state == 3 &&
             decoded.flags == 0x5a && decoded.content_type_length == 0x3f &&
             decoded.coding_count == 3 && decoded.body_length == full.body_length &&
             decoded.captured_length == full.captured_length &&
@@ -1134,6 +1171,11 @@ void CheckResponseBodies() {
   encoded.flags |= reb::kNativeResponseBodyStillEncoded | reb::kNativeResponseBodyServiceWorker;
   auto unobserved = ResponseSummary(S::kCaptured, 12, 12);
   unobserved.flags |= reb::kNativeResponseBodyCompletionUnobserved;
+  // Version 2 bit 7: a snapshot the spacing allowed was withheld by a byte bound.
+  auto withheld = ResponseSummary(S::kPartial, 300, 300);
+  withheld.flags |= reb::kNativeResponseBodySnapshotsWithheld;
+  auto withheld_end = ResponseSummary(S::kNotCapturedSessionBudget, 4096);
+  withheld_end.flags |= reb::kNativeResponseBodySnapshotsWithheld;
   auto untyped = ResponseSummary(S::kNotModified, 0);
   untyped.flags = 0;
   untyped.content_type = {};
@@ -1157,12 +1199,19 @@ void CheckResponseBodies() {
       {"response artifact unavailable", ResponseSummary(S::kNotCapturedArtifactUnavailable, 77), 0},
       {"response transfer refused", ResponseSummary(S::kNotCapturedTransferRefused, 0), 0},
       {"response session budget", ResponseSummary(S::kNotCapturedSessionBudget, 4096), 0},
+      {"response partial with snapshots withheld", withheld, 919},
+      {"response refused with snapshots withheld", withheld_end, 0},
   };
   for (const Valid& item : valid) {
     golden.emplace_back(item.name, ResponseEvent(item.summary, item.artifact_id));
     Check(reb::IsValidEvent(golden.back().second),
           std::string("valid response body state: ") + item.name);
   }
+  // Version 1 records, from before bit 7, stay valid.
+  auto version_one = ResponseEvent(ResponseSummary(S::kCaptured, 900, 900), 911);
+  version_one.inline_payload[0] = std::byte{1};
+  golden.emplace_back("response version 1", version_one);
+  Check(reb::IsValidEvent(version_one), "valid response body state: version 1");
 
   using Mutation = std::function<void(reb::NativeResponseBodySummary&, reb::EventRecord&)>;
   struct Invalid {
@@ -1182,11 +1231,16 @@ void CheckResponseBodies() {
     };
   };
   const Invalid invalid[] = {
-      {"response version 2", captured, 911, byte(0, std::byte{2})},
+      {"response version 3", captured, 911, byte(0, std::byte{3})},
+      {"response version 0", captured, 911, byte(0, std::byte{0})},
+      {"response version 1 with bit 7", captured, 911,
+       [](reb::NativeResponseBodySummary&, reb::EventRecord& event) {
+         event.inline_payload[0] = std::byte{1};
+         event.inline_payload[5] |= std::byte{0x80};
+       }},
       {"response reserved", captured, 911, byte(30, std::byte{1})},
       {"response state 0", captured, 911, byte(4, std::byte{0})},
       {"response state 13", refused, 0, byte(4, std::byte{13})},
-      {"response unknown flag", captured, 911, byte(5, std::byte{0xc0})},
       {"response captured without artifact", captured, 0, {}},
       {"response artifact without bytes", refused, 911, {}},
       {"response digest without bytes", refused, 0,

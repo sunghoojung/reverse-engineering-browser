@@ -335,7 +335,11 @@
         const result = await runtime({operation: 'source', handle: value.handle}, scope.target, false, scope.session, scope.generation);
         if (result?.text && disclosure.isConnected) { pager.hidden = true; status.textContent = result.status === 'ok' ? 'Native function source' : 'Source unavailable'; const source = document.createElement('pre'); appendCommandColors(source, result.text); children.replaceChildren(source); disclosure.open = true; loaded = true; boundRow(container.closest('article')); }
       }));
-      if (value.text.startsWith('<')) actions.append(button('Event listeners', async () => {
+      // An element describes itself by its tag; window and document describe
+      // themselves as a plain Object, and the runtime lists their listeners
+      // too (getEventListeners(window)). It refuses any other object, and says so.
+      const element = value.text.startsWith('<');
+      if (element || value.type === 'object' && value.text === 'Object') actions.append(button('Event listeners', async () => {
         const result = await runtime({operation: 'listeners', handle: value.handle}, scope.target, false, scope.session, scope.generation);
         if (!result) return;
         children.replaceChildren(); pager.hidden = true; status.textContent = 'Registered event listeners'; loaded = true; disclosure.open = true;
@@ -346,8 +350,10 @@
         }
         if (result.truncated) children.append(document.createTextNode('Listener listing truncated at 32.'));
         boundRow(container.closest('article'));
-      }), button('Monitor events', async () => { const result = await runtime({operation: 'monitor', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text); }),
-      button('Stop monitoring', async () => { const result = await runtime({operation: 'unmonitor', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text); }));
+      }));
+      // Monitoring is per element only.
+      if (element) actions.append(button('Monitor events', async () => { const result = await runtime({operation: 'monitor', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text); }),
+        button('Stop monitoring', async () => { const result = await runtime({operation: 'unmonitor', handle: value.handle}, scope.target, false, scope.session, scope.generation); if (result) notice(result.text); }));
       const actionDetails = document.createElement('details'); actionDetails.className = 'native-console-value-actions';
       const actionSummary = document.createElement('summary'); actionSummary.textContent = 'Value actions'; actionDetails.append(actionSummary, actions);
       disclosure.append(summary, status, children, pager, actionDetails); container.append(disclosure);

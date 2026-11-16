@@ -51,10 +51,15 @@ privacy, and implementation limits are documented in
 - Detect network-loaded modules and modules compiled from runtime bytes.
 - Preserve module bytes, hashes, origin, creator artifact, and lifecycle events.
 - Display imports, exports, types, functions, tables, memories, globals, strings, data segments, and custom sections.
-- [Captured module inspection and byte-offset disassembly](./wasm-inspection-v1.md) are implemented in Sources. Higher-level readable reconstruction remains planned.
+- [Captured module inspection and byte-offset disassembly](./wasm-inspection-v1.md) are implemented in Sources.
+- A [readable view of one function](./wasm-readable-view-v1.md) is implemented in Sources and for agents: folded expressions with every line mapped to its bytes, names only from the module, and counted raw lines for what it does not fold. Type recovery and value provenance remain planned.
+- [Researcher function names](./wasm-function-names-v1.md) keyed by module SHA-256 and function index are implemented: renamed from Inspect, Graph and Flow, shown in every Wasm view and joined into every agent-facing Wasm read.
+- [Offline function runs](./wasm-offline-runner-v1.md) are implemented: one function of a captured module runs on an explicit confirmed request in a local interpreter with every import stubbed, under fuel, memory, table, call-depth and deadline limits, and the result is a derived experiment record.
+- [Library identification](./wasm-identification-v1.md) is implemented: toolchain and runtime conclusions with their evidence offsets, well-known function label suggestions, and complete or partial crypto and encoding constant matches. Cross-module signature matching remains planned.
+- [Function matching between two captured modules](./wasm-module-diff-v1.md) is implemented as **Compare with** in Sources: renumbering-tolerant fingerprints, matches with method and score, and changed, added, removed and ambiguous functions. Carrying analyst names across a match remains planned.
 - Record compilation, instantiation, exported calls, imported calls, traps, and memory growth.
 - Connect JavaScript-to-WASM and WASM-to-JavaScript crossings.
-- Search for values moving between WASM, JavaScript, browser APIs, and network requests.
+- Search for values moving between WASM, JavaScript, browser APIs, and network requests. [Static value flow inside one function](./wasm-value-flow-v1.md) (backward and forward slices with joins, memory loads with their address, import calls and one step to direct call sites) is implemented in Sources and for agents; cross-boundary links remain planned.
 - Analyze captured modules through a bounded offline semantic provider that preserves byte offsets for every derived function, instruction, control-flow edge, call, and data reference.
 - Detect WASM-hosted virtual machine candidates and route them to the shared Virtual Machine Laboratory without classifying ordinary compiled WASM as a nested VM.
 
@@ -132,6 +137,7 @@ privacy, and implementation limits are documented in
 ## Experiment Lab
 
 - Branch an immutable Baseline into a disposable experiment.
+- Run one function of a captured WASM module offline against chosen inputs and test vectors ([offline function runs](./wasm-offline-runner-v1.md)).
 - Patch selected values, objects, functions, browser API results, requests, or responses.
 - Replay captured actions and requests with explicit fixtures.
 - Use isolated profiles, credentials, cookies, storage, and permissions.

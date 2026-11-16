@@ -61,10 +61,20 @@ checks:
   scanned range only.
 - `browser_internal_excluded`: `chrome:`, `devtools:` and WebUI pages were
   counted, not recorded. Not a loss; see `exclusions`.
+- `final_headers_missing`: requests that ended with provisional headers only.
+  Its `reason` says why; `from_cache`, `service_worker`, `download` and
+  `failed` are expected, `not_reported` is a capture gap. `get_request_headers`
+  names the reason per hop as `network_block_missing`.
 - `memory_cache_reuse_not_recorded`: a renderer passed its 4,096 memory-cache
   rows for the capture; later reuses were counted, not recorded. Reuses in a
   page that is not ordinary (an SVG image's own document), which no tab owns,
   are the separate `non_ordinary_page_reuse` exclusion.
+- `response_bodies_not_observed`: some responses never reached the browser
+  proxy (served by a service worker, reused from the memory cache, answered in
+  the renderer), so no body is retained under their own request.
+  `response_bodies.cases` counts every request's body case; each
+  `get_requests` row names its own as `response_body.case`, and a reuse's
+  `memory_cache_source` names the request whose retained body Blink reused.
 - `network_tab_unresolved` (error): requests without a tab. Read one with
   `get_events` and the `process_id` and `request_id` from `request_tabs`; its
   `reason` says which owner failed (`document_frame`, `worker`, `no_frame`,
@@ -317,7 +327,9 @@ permits document-start Console scripts (recipe 19). `"js_invocation_sites": "/ab
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
 `js_invocation_site_action`, arms invocation tracking. None of these is ever
 taken from the environment; `options` in the result and
-`capture_options` in `get_session_context` show what the session runs with. A guest adapter
+`capture_options` in `get_session_context` show what the session runs with,
+its budgets and media choice in `capture_options.content_limits` (null without
+request content). A guest adapter
 needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
 An error names the launcher's reason, for example a Brave build that lacks a
 requested V8 flag; nothing is left running. From a shell, `reb-api session
@@ -530,10 +542,246 @@ asking, while the researcher watches every call. A complete loop:
    session this connection was opened on.
 2. `start_live_session {"url": "<the authorized page>", "request_stacks":
    true}` when a fresh capture is needed. Wait with `wait_for_events`.
-3. Read with recipes 2, 10 and 21 to 23, and act with the Console (recipe 18)
+3. Read with recipes 2, 10, 21 to 23 and 31, and act with the Console (recipe 18)
    or input (recipe 17) inside the authorized target only.
 4. `session_action {"body": {"action": "end", "confirm": true}}`. The
    connection returns to the session it was opened on.
+
+## 25. Break on a request, a click handler or a CSP violation, without pausing
+
+Needs `--allow-effects`, a live capture of the authorized page and a Console
+connection to the document to watch (recipe 18). Nothing pauses: the page
+keeps running, and the agent "breaks" by waiting on a cursor filtered to one
+observation type ([native debugger observation v1](../../protocol/native-debugger-observation-v1.md)).
+Start the session with `request_stacks` to get stacks; without it they read
+`no_script`. Load the page first, then arm:
+
+```text
+native_console_action {"body": {"action": "runtime", "session_id": "<session_id>",
+  "target_id": "<id>", "command": {"operation": "watch", "rules": {
+  "requests": [{"url_contains": "/api/x", "method": "POST"}],
+  "events": ["click"], "csp": true}}}}
+wait_for_events {"timeout_ms": 1}
+```
+
+Then act (a click with recipe 17, or an `evaluate`), and wait with the
+cursor from the second call:
+
+```text
+wait_for_events {"type": "request_watch_match", "after": "<query.next_after>", "timeout_ms": 30000}
+```
+
+Good: each record has `debugger_observation` with `status: decoded`, the
+same fields `get_native_debugger` lists, `site` and `stack_read`. Any filter
+or cursor adds it; the unfiltered `get_events` window does not:
+
+- `request_watch_match`: `detail.rule` is the request rule's index in the
+  armed set, `request_id` is the request, and `site` is null. Read the stack
+  that started it with `get_request_stack`, passing `stack_read` as it is
+  (`stack_read_operation` names that tool): `frames`, innermost first, with
+  `resolution.url`, `line`, `column` and `function_name`. That read covers
+  the newest 64 MiB of the store; an older record answers `outside_scan`.
+- `listener_dispatch`: `detail.event_type`,
+  `detail.target`, and `site.resolution` is the listener's file, line and
+  column. A click listener usually runs with no script on the stack, so
+  `stack.state` is `no_script` and `site` is the position to open.
+- `csp_violation`: `detail.directive`, `detail.disposition` and
+  `detail.blocked_host`, never a path or query.
+
+A `site` that did not resolve keeps its raw `script_id` and `position` with
+a reason; it is never guessed. `resolution.status: deferred` means this read
+did not try. With `source_limit` the page's sites named more than 4 scripts;
+read the same cursor again (resolved sites are kept, so the next scripts are
+read; that page's tag never matches, so `If-None-Match` does not stop the
+read) or use a smaller `limit`. With `site_read_failed` the identities or the
+artifact manifest could not be read, or one of the store and the manifest was
+replaced during the read; read again. `source_artifact_missing`
+means the source has not landed (read again after it does);
+`script_identity_outside_scan` means the request index does not hold the
+script's identity yet, or is full: read again once it moves, or read the
+record's `stack_read`, which also scans the store's newest identities.
+`status: invalid` is a record the core refuses, with no fields.
+
+A timeout does not mean nothing happened. Rules match only the main thread of
+the document they were armed on, never a worker, another frame or a
+same-process iframe, and one document is armed at a time. A navigation clears
+them, and they cannot be armed ahead of a page load, so what a new page does
+before you arm it again is not recorded. `get_native_debugger` `watch` says
+what the renderer has armed now (`--permission ask` and up). A renderer
+stops after 1,024 records per capture configuration and leaves one
+`debugger_observation_budget` gap; `get_session_summary` lists it. Disarm with
+`{"operation": "unwatch"}`; `stop` disarms too.
+
+These fields carry identities, kinds, positions and names only (a rule's
+slot, never its URL text; an armed event name; a host, never a path; an
+exception's kind, never its message; an attribute's name, never its value), so
+they are returned at Read only too and are the same as at Full access, except
+that Read only, Ask and Auto withhold any string longer than 160 characters,
+such as a long script URL. The payload hex is what those levels omit.
+
+## 26. Name a Wasm function so every read shows it
+
+Setting a name needs Ask for actions; reading names works at every level.
+
+```text
+inspect_wasm {"artifact_id": "9", "sections": "import,function,code", "row_limit": 256}
+analyst_action {"body": {"action": "set_wasm_function_name", "sha256": "<module sha256>", "function": 1337, "name": "encode_payload", "expected_name": null}}
+get_wasm_function_graph {"artifact_id": "9", "function": 1337}
+```
+
+Good: the result's `changed` is true and `key` is
+`wasm-function:<sha256>:1337`. Later reads show `analyst_name` beside the
+captured identity: function header rows, `target_analyst_name` on calls to it
+(next to `target_function_index`), graph `analyst_name`, xref rows, Flow nodes
+and Initiator frames. Every artifact with the same bytes shares the name. A 409
+means someone renamed it first: read again and pass the current name as
+`expected_name`. An empty `name` clears it. `analyst_names.status` other than
+`ready` or `none` means the names file needs the researcher's attention.
+
+## 27. Run one Wasm function offline against test vectors
+
+Needs Full access (`--permission full`). Running captured code is a content
+read: a run's outcome, fuel, import calls, timing and repeated expectations can
+all disclose values the code computed, so `run_wasm_function` and
+`get_wasm_runs` are not listed at Read only, Ask or Auto-approve. Call it only
+when the researcher asked for that test. It runs in a local interpreter with every import stubbed, never in
+the page. Find the module and the function first:
+
+```text
+get_artifacts {"kind": "wasm", "limit": 20}
+get_wasm_functions {"artifact_id": "9"}
+run_wasm_function {"artifact_id": "9", "sha256": "<its sha256>", "export": "digest",
+  "args": [{"type": "i32", "value": "1024"}, {"type": "i32", "value": "3"}],
+  "memory_writes": [{"offset": 1024, "hex": "616263"}],
+  "memory_reads": [{"offset": 2048, "length": 32}],
+  "imports": [{"module": "env", "field": "now", "results": [{"type": "f64", "value": "0"}]}],
+  "expect": {"memory": [{"read": 0, "hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]},
+  "confirm_offline_execution": true}
+```
+
+Good: `outcome.status` `returned` and `expectation.all_match` true. Other
+statuses are answers, not failures: `trap` with `trap_kind`, `import_trap` with
+`outcome.import` (stub that import, using `import_calls` to see its arguments
+and call order, and supply every clock or random source), `fuel_exhausted`,
+`deadline_exceeded` or `call_depth_exceeded` (raise `limits` or choose another
+function), `memory_limit` or `table_limit` (the limits are totals across every
+memory and table), and `memory_write_out_of_bounds`. Each read takes at most
+one expected entry. A
+match holds for these inputs only. Keep reads within 32 KiB in total; a run
+result always inlines, and `size_trimmed` says what was dropped to make it fit.
+`get_wasm_runs {"artifact_id": "9"}` returns the newest run; pass a larger
+`limit` only when the records are small. Details: [WASM run v1](../../protocol/wasm-run-v1.md).
+
+## 28. Tell library code from custom code in a Wasm module
+
+Read the identification report before disassembling anything:
+
+```text
+get_wasm_identification {"artifact_id": "9"}
+get_wasm_identification {"artifact_id": "9", "row_offset": 1024}
+```
+
+Good: `summary.toolchains` and `toolchain.conclusions[].evidence` (each with
+`record` and `byte_offset`); `functions.suggestions` rows
+`[function_index, label, category, library, confidence, source, byte_offset]`,
+paged until `suggestion_window.next_offset` is null (a page stops at 1024 rows or
+the page byte budget, so every page fits the inline limit); `constants.matches` with
+`match`, `matched`/`total` and, for a data table, `referenced_by`. Functions with
+a high or medium suggestion are usually runtime, glue or library code; start
+with the unlabeled ones and with the functions that name a crypto table, then
+read them with `get_wasm_function_graph` or recipe 23. A suggestion is not a
+name and a constant match is not proof the algorithm runs; cite the offsets.
+Below Full access the matched bytes (`hex`) are omitted.
+
+## 29. Read one Wasm function as folded expressions
+
+`get_wasm_functions` names the function; `get_wasm_pseudocode` lifts it.
+
+```text
+get_wasm_functions {"artifact_id": "9"}
+get_wasm_pseudocode {"artifact_id": "9", "function": 41, "line_limit": 400}
+get_wasm_pseudocode {"artifact_id": "9", "function": 41, "line_offset": 400, "line_limit": 400}
+```
+
+Good: `status: complete` and `lifted_instructions` equal to
+`instruction_count`; continue with `window.next_line_offset` until it is null.
+Cite a line by its `ranges` (module byte offsets) and the module `sha256`, not
+by its text: `inspect_wasm` rows at those offsets are the evidence. A line of
+kind `fallback` is the raw instruction, and `fallbacks` says why it was not
+folded. Below Full access `text` is omitted, but `lines`, `frames`, `nesting`
+and `callees` still show the shape: where the loops and switches are and what
+the function calls. Names in the text come only from the module; a
+researcher's name is `analyst_name`, and `analyst_names.functions` resolves
+callee indexes (recipe 26). A line reading `return_call f(args)` is a tail
+call: what `f` throws is not caught by a handler of this function.
+
+## 30. Compare two builds of a Wasm module
+
+Works at every level: the result is structure only. Find both modules first,
+then read what changed before what stayed.
+
+```text
+get_artifacts {"kind": "wasm", "limit": 20}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous,unclassified"}
+get_wasm_module_diff {"artifact_id": "9", "compare_artifact_id": "14", "status": "changed,added,removed,ambiguous,unclassified", "row_offset": <row_window.next_offset>}
+```
+
+The filter keeps `unclassified`: those are the rows a `partial` report
+leaves when a limit stopped a step. Good: `status: "complete"`,
+`summary.statuses` with every count, and rows
+whose `a` and `b` sides name a `function` index. Page with the previous
+page's `row_window.next_offset`, never a fixed step: a page stops early when
+its rows are long.
+
+- **Identity**: `a.sha256` and a side's `function` identify a function in A;
+  carry what you know about it to the B side of its row.
+- **`identical`**: the body bytes and normalized hashes are equal, so the
+  signature and the types of every global and type the body names agree;
+  each static address sits at the same segment and offset; and every call
+  and `ref.func` reaches the matched function. Its limits: it cannot tell
+  apart two globals of the same type, and it compares where an address
+  points, not the bytes stored there, so changed data under an unchanged
+  layout stays `identical`.
+- **`renumbered`**: the bytes differ only in ways the contract can explain as
+  renumbering or relocation, and every call and `ref.func` reaches the
+  matched function. It has the same two limits, so treat it as strong
+  evidence, not proof.
+- **Data inserted inside a segment** moves every later offset in it, so the
+  functions reading past the insertion point are `changed` even when they
+  read the same bytes. Expect a run of `changed` readers after such an edit.
+- **`call_graph`, `structural`, `export_name`, `name`**: hypotheses with a
+  `score`. Check them with `get_wasm_function_graph` on both sides.
+- **`ambiguous`**: one row per member of a tie, with `group` saying how many
+  functions of each module tie. No pair was chosen.
+- **`unclassified`, or a `partial` status**: a limit or the deadline stopped a
+  step; `omissions` says which, and those functions may not really be added or
+  removed. Do not page a partial report: each page is compared again and can
+  stop elsewhere, so pages can repeat or skip rows. Ask again, and page only
+  once `status` is `complete`.
+
+## 31. Trace a value inside a Wasm function
+
+Find where an import call's argument comes from, then where a parameter goes.
+Structure works at every level; `text` and `expression` need Full access.
+
+```text
+get_wasm_functions {"artifact_id": "9"}
+get_wasm_function_graph {"artifact_id": "9", "function": 12}
+get_wasm_value_flow {"artifact_id": "9", "function": 12, "offset": 4410, "operand": 0, "direction": "backward"}
+get_wasm_value_flow {"artifact_id": "9", "function": 12, "local": 0, "direction": "forward", "interprocedural": true}
+```
+
+Take `offset` from a graph row or an `inspect_wasm` row (both are original
+module byte offsets). Good: `status` `computed`; `sources` are the params,
+constants, globals, loads and call results that feed the operand, and a load
+node's `address` edges are its address slice. Forward, `sinks` with kind
+`import_call` are where the value crosses into JavaScript, and `store` sinks say
+by edge kind whether it is the address or the stored value. Each `joins` entry
+lists every incoming edge with `via` and `via_offset`. `interprocedural.steps`
+gives the direct call sites of a parameter (`caller_argument`) and returns
+(`caller_result`); `also_reachable_indirectly` true means those are not every
+caller. `partial` with `truncated` set: narrow `direction`, raise `max_nodes`
+(up to 4096) or `max_depth`, or seed a nearer instruction.
 
 ## Response shapes at a glance
 
@@ -542,8 +790,10 @@ asking, while the researcher watches every call. A complete loop:
 | `get_session_summary` | `checks`, `events.by_type`, `events.frames`, `artifacts.items` |
 | `get_events` | `events`, `named_gaps`, `query` |
 | `get_artifacts` | `artifacts`, `query` |
-| `wait_for_events` | `wait.timed_out`, `events`, `query.next_after` |
-| `inspect_wasm` | `coverage`, then the requested section rows |
+| `wait_for_events` | `wait.timed_out`, `events`, `query.next_after`; `debugger_observation` on types 40 to 45 |
+| `inspect_wasm` | `coverage`, then the requested section rows; `analyst_names` for researcher names |
+| `get_wasm_identification` | `summary`, `toolchain.conclusions`, `functions.suggestions`, `constants.matches`, `omissions` |
+| `get_wasm_module_diff` | `status`, `summary.statuses`, `rows` (`status`, `method`, `score`, `a.function`, `b.function`), `row_window` |
 | `start_live_session` | `session_id`, `url_opened`, `capture_observed`, `options` |
 | `session_action` `list_inputs` | `elements` with `role`, `name`, `visible`, `x`, `y` |
 | `get_native_console` | `binding_id`, `targets` (`frame`, `origin`, `top_relation`, `out_of_process`), `selection` |

@@ -7,6 +7,18 @@ research UI. Authorization, capture, and privacy rules are defined in
 [WASM Inspection v1](wasm-inspection-v1.md) defines bounded static module
 inspection and its original-byte coordinates.
 
+[Wasm function names v1](wasm-function-names-v1.md) defines researcher names
+for Wasm functions, keyed by module SHA-256 and full function index, their
+version 2 evidence-names storage and their join into every agent-facing Wasm
+read.
+
+[WASM run v1](wasm-run-v1.md) defines confirmed offline execution of one
+function of a captured module in a stubbed interpreter, its limits and named
+outcomes, and the derived run records it stores.
+
+[WASM module diff v1](wasm-module-diff-v1.md) defines function fingerprints and
+the static function matching between two captured modules.
+
 [Artifact map v1](artifact-map-v1.md) defines the fixed-size whole-artifact
 entropy and kind summary behind the Sources Map view.
 

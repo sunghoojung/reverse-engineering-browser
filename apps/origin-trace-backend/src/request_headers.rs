@@ -10,6 +10,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::event_window;
 use crate::evidence;
 
 const BLOCK_LIMIT: usize = 320 * 1024;
@@ -69,6 +70,211 @@ const POLICIES: [&str; 9] = [
     "strict-origin",
     "no-referrer",
 ];
+
+/// Why a hop of a content session's request has no `network` request block,
+/// from the request's own browser lifecycle records ("Missing final blocks"
+/// in protocol/native-network-v3.md), in the order they are decided.
+pub(crate) const MISSING_REASONS: [(&str, &str); 9] = [
+    (
+        "in_progress",
+        "the request has not ended, so the network service may still report what it sent",
+    ),
+    (
+        "download",
+        "downloads load through the browser's own factory, which has no DevTools observer at the pinned Chromium",
+    ),
+    (
+        "service_worker",
+        "a service worker answered it, so no request reached the network",
+    ),
+    (
+        "from_cache",
+        "the HTTP cache answered it without sending a request, so there are no sent headers or cookies",
+    ),
+    (
+        "failed",
+        "it failed before the network service reported the headers it sent",
+    ),
+    (
+        "redirect_not_sent",
+        "nothing was sent for this redirect hop: it was an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered, while a later hop of the request reported what it sent",
+    ),
+    (
+        "not_reported",
+        "the network service reported no sent headers for this hop: its factory had no DevTools observer, or the block arrived for a request the capture no longer tracked",
+    ),
+    (
+        "record_dropped",
+        "a full queue dropped records while this request ran, so its block or list may have been lost",
+    ),
+    // A hop with a sent cookie list and no received one.
+    (
+        "no_raw_response",
+        "the network service reported what was sent for this hop but no response headers: no response arrived, or it arrived after the capture stopped tracking the request",
+    ),
+];
+
+/// What one request's browser records say about how it ended.
+#[derive(Default)]
+pub(crate) struct Lifecycle {
+    pub(crate) ended: bool,
+    pub(crate) failed: bool,
+    pub(crate) responded: bool,
+    pub(crate) from_cache: bool,
+    pub(crate) from_service_worker: bool,
+    pub(crate) download: bool,
+}
+
+impl Lifecycle {
+    /// Folds one lifecycle record of the request into what is known.
+    pub(crate) fn record(&mut self, event: &Value) {
+        let flags = event["flags"].as_u64().unwrap_or(0);
+        match event["type"].as_str() {
+            Some("request_started") => self.download |= event["loader_kind"] == 2,
+            Some("response_started") => {
+                self.responded = true;
+                self.from_cache |= flags & 2 != 0;
+                self.from_service_worker |= flags & 4 != 0;
+            }
+            Some("request_completed" | "response_completed") => self.ended = true,
+            Some("request_failed") => {
+                self.ended = true;
+                self.failed = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// The reason a hop without a `network` block has none; `last` is whether
+    /// it is the request's final hop, the one its response belongs to, and
+    /// `later_reported` whether a later hop of the request has a block.
+    pub(crate) fn missing_reason(&self, last: bool, later_reported: bool) -> &'static str {
+        if last && !self.ended {
+            "in_progress"
+        } else if self.download {
+            "download"
+        } else if !last && later_reported {
+            // The factory observes and tracks this request, so nothing was sent.
+            "redirect_not_sent"
+        } else if last && self.from_service_worker {
+            "service_worker"
+        } else if last && self.from_cache {
+            "from_cache"
+        } else if last && self.failed && !self.responded {
+            "failed"
+        } else {
+            "not_reported"
+        }
+    }
+}
+
+impl Lifecycle {
+    /// The reason a hop with a sent cookie list has no received one: the
+    /// network service reports it with the response headers.
+    pub(crate) fn missing_received_reason(&self, last: bool) -> &'static str {
+        if last && !self.ended {
+            "in_progress"
+        } else if last && self.failed && !self.responded {
+            "failed"
+        } else {
+            "no_raw_response"
+        }
+    }
+}
+
+/// The hops of `request` with a provisional (`browser`) request block, which
+/// a content session records for every hop, and its browser process.
+pub(crate) fn provisional_hops(
+    events: &[Value],
+    session: &str,
+    request: &str,
+) -> (BTreeSet<u32>, Option<u64>) {
+    let mut hops = BTreeSet::new();
+    let mut process = None;
+    for event in events.iter().filter(|event| {
+        event["session_id"] == session
+            && event["request_id"] == request
+            && event["category"] == "network"
+            && event["type"] == "request_headers"
+    }) {
+        if let Some(block) = decode(event).filter(|block| block.source == 1) {
+            hops.insert(block.hop);
+            process.get_or_insert(event["process_id"].as_u64().unwrap_or(0));
+        }
+    }
+    (hops, process)
+}
+
+/// How long after a request's last record a drop of one of its records can
+/// still be reported: the browser's writer reports drops on its next wake, at
+/// most 250 ms later, then sends its batch.
+pub(crate) const DROP_REPORT_SLACK_NS: u64 = 1_000_000_000;
+
+/// The session's records lost to full queues, by the time of the gap that
+/// reported them, from gap records of any category and process.
+#[derive(Default)]
+pub(crate) struct Drops(Vec<(u64, u64)>);
+
+impl Drops {
+    /// From (gap time, records dropped) pairs of one session.
+    pub(crate) fn new(mut drops: Vec<(u64, u64)>) -> Self {
+        drops.sort_unstable();
+        Self(drops)
+    }
+    #[cfg(test)]
+    pub(crate) fn of(gaps: &[Value], session: &str) -> Self {
+        let mut drops: Vec<(u64, u64)> = gaps
+            .iter()
+            .filter(|gap| gap["session_id"] == session)
+            .filter_map(|gap| {
+                let count = event_window::dropped_records(gap);
+                let time = event_window::unsigned(&gap["monotonic_time_ns"])?;
+                (count > 0).then_some((time, count))
+            })
+            .collect();
+        drops.sort_unstable();
+        Self(drops)
+    }
+    /// Records lost at or after `from`, and at or before `to` when given.
+    pub(crate) fn between(&self, from: u64, to: Option<u64>) -> u64 {
+        self.0
+            .iter()
+            .filter(|(time, _)| *time >= from && to.is_none_or(|to| *time <= to))
+            .fold(0u64, |sum, (_, count)| sum.saturating_add(*count))
+    }
+    /// Whether a record of a request spanning `first` to `last` may have been
+    /// lost: a drop while it ran, or reported just after; any later one while
+    /// it has not ended.
+    pub(crate) fn during(&self, first: u64, last: u64, ended: bool) -> bool {
+        self.between(
+            first,
+            ended.then(|| last.saturating_add(DROP_REPORT_SLACK_NS)),
+        ) > 0
+    }
+}
+
+/// A reason inferred from a block's absence, which a dropped record makes
+/// unsure; a reason from a record that is there (cache, service worker,
+/// download, failure, still open) stands.
+pub(crate) fn qualified(reason: &'static str, dropped: bool) -> &'static str {
+    if dropped
+        && matches!(
+            reason,
+            "redirect_not_sent" | "not_reported" | "no_raw_response"
+        )
+    {
+        "record_dropped"
+    } else {
+        reason
+    }
+}
+
+pub(crate) fn missing_meaning(reason: &str) -> &'static str {
+    MISSING_REASONS
+        .iter()
+        .find(|(code, _)| *code == reason)
+        .map_or("", |(_, meaning)| meaning)
+}
 
 struct Block {
     response: bool,
@@ -181,6 +387,26 @@ fn decode(event: &Value) -> Option<Block> {
         && zero(&block.digest) == limited
         && (event["artifact_id"] != "0") == matches!(block.state, 1 | 2);
     valid.then_some(block)
+}
+
+/// A valid header record's direction, source, state, hop and unattributed
+/// count, for counts that read no block.
+pub(crate) struct BlockFacts {
+    pub(crate) response: bool,
+    pub(crate) source: u8,
+    pub(crate) state: u8,
+    pub(crate) hop: u32,
+    pub(crate) unattributed: u32,
+}
+
+pub(crate) fn block_facts(event: &Value) -> Option<BlockFacts> {
+    decode(event).map(|block| BlockFacts {
+        response: block.response,
+        source: block.source,
+        state: block.state,
+        hop: block.hop,
+        unattributed: block.unattributed,
+    })
 }
 
 /// `name: value` CRLF lines, split at the first colon after the first byte.
@@ -305,9 +531,55 @@ fn describe(event: &Value, block: &Block, artifacts: &[Value], root: &Path) -> V
     value
 }
 
-/// Header blocks of `request_id` in `session_id`, grouped by hop.
+/// The first and last record times of `request` in its browser `process`.
+pub(crate) fn span_of(
+    events: &[Value],
+    session: &str,
+    request: &str,
+    process: Option<u64>,
+) -> Option<(u64, u64)> {
+    let process = process?;
+    let times = events
+        .iter()
+        .filter(|event| {
+            event["session_id"] == session
+                && event["request_id"] == request
+                && event["process_id"].as_u64() == Some(process)
+        })
+        .filter_map(|event| event_window::unsigned(&event["monotonic_time_ns"]));
+    times.fold(None, |span, time| match span {
+        None => Some((time, time)),
+        Some((first, last)) => Some((first.min(time), last.max(time))),
+    })
+}
+
+/// The lifecycle of `request` as its browser `process` recorded it.
+pub(crate) fn lifecycle_of(
+    events: &[Value],
+    session: &str,
+    request: &str,
+    process: Option<u64>,
+) -> Lifecycle {
+    let mut lifecycle = Lifecycle::default();
+    let Some(process) = process else {
+        return lifecycle;
+    };
+    for event in events.iter().filter(|event| {
+        event["session_id"] == session
+            && event["request_id"] == request
+            && event["category"] == "network"
+            && event["process_id"].as_u64() == Some(process)
+    }) {
+        lifecycle.record(event);
+    }
+    lifecycle
+}
+
+/// Header blocks of `request_id` in `session_id`, grouped by hop. `drops` are
+/// the session's, which say whether a block may have been lost.
 pub fn build(
     events: &[Value],
+    drops: &Drops,
     artifacts: &[Value],
     root: &Path,
     session: &str,
@@ -337,6 +609,8 @@ pub fn build(
     let mut hops: BTreeMap<u32, (Vec<Value>, Vec<Value>)> = BTreeMap::new();
     let mut malformed = Vec::new();
     let mut unattached = 0usize;
+    let mut sources: BTreeMap<u32, (bool, bool)> = BTreeMap::new();
+    let mut browser_process = None;
     let mut records: Vec<&Value> = events
         .iter()
         .filter(|event| {
@@ -373,15 +647,36 @@ pub fn build(
         if block.response {
             entry.1.push(described);
         } else {
+            let seen = sources.entry(block.hop).or_default();
+            if block.source == 1 {
+                seen.0 = true;
+                browser_process.get_or_insert(parent.0);
+            } else {
+                seen.1 = true;
+            }
             entry.0.push(described);
         }
     }
+    let lifecycle = lifecycle_of(events, session, request, browser_process);
+    let dropped = span_of(events, session, request, browser_process)
+        .is_some_and(|(first, last)| drops.during(first, last, lifecycle.ended));
+    let last = sources.keys().next_back().copied();
     let hops: Vec<Value> = hops
         .into_iter()
         .map(|(hop, (request, response))| {
-            let provisional = !request.is_empty()
-                && request.iter().all(|block| block["source"] == "browser");
-            json!({"hop": hop, "provisional": provisional, "request": request, "response": response})
+            let provisional =
+                !request.is_empty() && request.iter().all(|block| block["source"] == "browser");
+            // A content session's hop that the network never reported.
+            let later_reported = sources.range(hop + 1..).any(|(_, seen)| seen.1);
+            let missing = match sources.get(&hop) {
+                Some((true, false)) => json!(qualified(
+                    lifecycle.missing_reason(Some(hop) == last, later_reported),
+                    dropped
+                )),
+                _ => Value::Null,
+            };
+            json!({"hop": hop, "provisional": provisional, "network_block_missing": missing,
+                "request": request, "response": response})
         })
         .collect();
     json!({
@@ -468,7 +763,7 @@ mod tests {
             record("request_headers", 23, 9, payload(2, 3, 0, b"", 0, 0), "0"),
             record("request_headers", 24, 20, payload(1, 1, 0, sent, 1, 0), "5"),
         ];
-        let result = build(&events, &artifacts, &root, "7", "17");
+        let result = build(&events, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(result["unattached_records"], 1);
         assert_eq!(result["malformed_records"], json!(["24"]));
         let hop0 = &result["hops"][0];
@@ -487,6 +782,125 @@ mod tests {
         assert_eq!(hop1["request"][0]["state"], "captured_shared");
         assert_eq!(hop1["request"][0]["artifact"], "verified");
         assert!(!result.to_string().contains("secret"));
+        // Hops the network never reported say why, from the request's records.
+        assert_eq!(hop0["network_block_missing"], "not_reported");
+        assert_eq!(hop1["network_block_missing"], "in_progress");
+        let mut ended = events.clone();
+        ended.push(
+            json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"response_started","process_id":42,"sequence_number":"30","flags":2}),
+        );
+        ended.push(
+            json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_completed","process_id":42,"sequence_number":"31","flags":0}),
+        );
+        // Another process's records of the same ID are not this request's.
+        ended.push(
+            json!({"session_id":"7","request_id":"17","category":"network",
+            "type":"request_failed","process_id":43,"sequence_number":"32","flags":0}),
+        );
+        let cached = build(&ended, &Drops::default(), &artifacts, &root, "7", "17");
+        assert_eq!(cached["hops"][1]["network_block_missing"], "from_cache");
+        assert_eq!(cached["hops"][0]["network_block_missing"], "not_reported");
+        let lifecycle = |kinds: &[(&str, u64)], loader: u64| {
+            let mut life = Lifecycle::default();
+            life.record(&json!({"type":"request_started","loader_kind":loader,"flags":0}));
+            for (kind, flags) in kinds {
+                life.record(&json!({"type":kind,"flags":flags}));
+            }
+            life
+        };
+        assert_eq!(
+            lifecycle(&[("request_failed", 0)], 3).missing_reason(true, false),
+            "failed"
+        );
+        assert_eq!(
+            lifecycle(&[("response_started", 0), ("request_failed", 0)], 3)
+                .missing_reason(true, false),
+            "not_reported"
+        );
+        assert_eq!(
+            lifecycle(&[("response_started", 4), ("request_completed", 0)], 3)
+                .missing_reason(true, false),
+            "service_worker"
+        );
+        assert_eq!(
+            lifecycle(&[("request_completed", 0)], 2).missing_reason(true, false),
+            "download"
+        );
+        // A service worker answered from its cache: no request reached the network.
+        assert_eq!(
+            lifecycle(&[("response_started", 6), ("request_completed", 0)], 3)
+                .missing_reason(true, false),
+            "service_worker"
+        );
+        // An earlier hop of a request whose later hop was reported sent nothing.
+        let finished = lifecycle(&[("response_started", 0), ("request_completed", 0)], 3);
+        assert_eq!(finished.missing_reason(false, true), "redirect_not_sent");
+        assert_eq!(finished.missing_reason(false, false), "not_reported");
+        assert_eq!(finished.missing_received_reason(true), "no_raw_response");
+        let mut redirected = events.clone();
+        redirected.push(record(
+            "request_headers",
+            25,
+            20,
+            payload(2, 3, 0, b"", 1, 0),
+            "0",
+        ));
+        let reported = build(&redirected, &Drops::default(), &artifacts, &root, "7", "17");
+        assert_eq!(
+            reported["hops"][0]["network_block_missing"],
+            "redirect_not_sent"
+        );
+        assert_eq!(reported["hops"][1]["network_block_missing"], Value::Null);
+        // A full queue dropping records while the request ran, in a gap of any
+        // category, makes a reason drawn from an absence unsure; a reason from
+        // a record that is there stands. An ended request ignores drops past
+        // the report slack.
+        let gap = |time: u64, category: &str| {
+            json!({"session_id":"7","type":"gap","category":category,"process_id":42,
+                "sequence_number":"40","monotonic_time_ns":time.to_string(),
+                "payload":hex::encode("3"),"payload_truncated":false})
+        };
+        let lossy = build(
+            &redirected,
+            &Drops::of(&[gap(1, "canvas")], "7"),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+        );
+        assert_eq!(lossy["hops"][0]["network_block_missing"], "record_dropped");
+        let cached_lossy = build(
+            &ended,
+            &Drops::of(&[gap(500_000_001, "network")], "7"),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+        );
+        assert_eq!(
+            cached_lossy["hops"][0]["network_block_missing"],
+            "record_dropped"
+        );
+        assert_eq!(
+            cached_lossy["hops"][1]["network_block_missing"],
+            "from_cache"
+        );
+        let late = build(
+            &ended,
+            &Drops::of(&[gap(2_000_000_001, "network")], "7"),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+        );
+        assert_eq!(late["hops"][0]["network_block_missing"], "not_reported");
+        assert!(
+            MISSING_REASONS
+                .iter()
+                .all(|(code, _)| !missing_meaning(code).is_empty())
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

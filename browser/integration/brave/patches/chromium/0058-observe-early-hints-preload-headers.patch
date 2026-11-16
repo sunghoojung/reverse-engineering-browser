@@ -1,0 +1,41 @@
+diff --git a/content/browser/url_loader_factory_params_helper.cc b/content/browser/url_loader_factory_params_helper.cc
+--- a/content/browser/url_loader_factory_params_helper.cc
++++ b/content/browser/url_loader_factory_params_helper.cc
+@@ -12,6 +12,7 @@
+ #include "base/feature_list.h"
+ #include "base/no_destructor.h"
+ #include "base/not_fatal_until.h"
++#include "brave/components/reverse_engineering_browser/common/native_network_headers_hook.h"
+ #include "content/browser/devtools/network_service_devtools_observer.h"
+ #include "content/browser/renderer_host/frame_tree_node.h"
+ #include "content/browser/renderer_host/navigation_request.h"
+@@ -392,6 +393,19 @@ URLLoaderFactoryParamsHelper::CreateForEarlyHintsPreload(
+           network::mojom::LocalNetworkAccessRequestPolicy::kBlock,
+           network::DocumentIsolationPolicy());
+ 
++  // Native header capture (protocol/native-network-v3.md): preloads have no
++  // DevTools observer. In a current content-capture session they get one with
++  // no agent, so only the capture hook sees their raw headers and cookies.
++  // Content gives preloads no DevTools instrumentation (crbug.com/40188470);
++  // their only DevTools request ID is the Brave proxy's `reb-` one, which no
++  // agent knows. So the response head's emitted_extra_info reaches only
++  // PreloadURLLoaderClient, which reads two cache flags.
++  mojo::PendingRemote<network::mojom::DevToolsObserver> devtools_observer;
++  if (reb::NativeNetworkHeadersObserved()) {
++    devtools_observer =
++        NetworkServiceDevToolsObserver::MakeSelfOwned(std::string());
++  }
++
+   // A NoOp network restrictions ID is used for Early Hints
+   // URLLoaderFactoryParams because the connection allowlists check is done by
+   // `NavigationEarlyHintsManager::HandleEarlyHints`. The check does not depend
+@@ -408,8 +422,7 @@ URLLoaderFactoryParamsHelper::CreateForEarlyHintsPreload(
+       /*allow_universal_access_from_file_urls=*/false,
+       /*is_for_isolated_world=*/false, std::move(cookie_observer),
+       std::move(trust_token_observer), std::move(shared_dictionary_observer),
+-      std::move(url_loader_network_observer),
+-      /*devtools_observer=*/mojo::NullRemote(),
++      std::move(url_loader_network_observer), std::move(devtools_observer),
+       std::move(device_bound_session_observer),
+       network::mojom::TrustTokenOperationPolicyVerdict::kForbid,
+       network::mojom::TrustTokenOperationPolicyVerdict::kForbid,

@@ -8,7 +8,7 @@
 //! whole-module structure.
 use crate::{
     error::{Error, Result},
-    evidence, validation, wasm,
+    evidence, validation, wasm, wasm_names,
 };
 use serde_json::Value;
 use std::{
@@ -22,7 +22,7 @@ use wasmparser::{ExternalKind, KnownCustom, Name, Operator, Parser, Payload};
 /// limit can be raised; 64 MiB covers both without an unbounded read.
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Web engines reject a body above this size, so a longer one cannot have run.
-const MAX_BODY_BYTES: usize = 7_654_321;
+pub(crate) const MAX_BODY_BYTES: usize = 7_654_321;
 /// Instruction rows are the bulk of a large function's response.
 const MAX_ROW_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STRUCTURE_BYTES: usize = 32 * 1024 * 1024;
@@ -60,13 +60,13 @@ fn bad(error: wasmparser::BinaryReaderError) -> Error {
     Error::protocol(format!("WASM decoding failed: {error}"))
 }
 
-struct Artifact {
-    bytes: Vec<u8>,
-    artifact_id: Value,
-    sha256: Value,
+pub(crate) struct Artifact {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) artifact_id: Value,
+    pub(crate) sha256: Value,
 }
 
-fn artifact(root: &Path, id: &str) -> Result<Artifact> {
+pub(crate) fn artifact(root: &Path, id: &str) -> Result<Artifact> {
     validation::canonical(&serde_json::json!(id), 64, true, "Artifact ID")?;
     let record = evidence::artifacts(root, 10000)?
         .into_iter()
@@ -93,6 +93,16 @@ struct Row {
 
 /// Lists a module's functions without decoding any instruction.
 pub fn function_index(root: &Path, id: &str) -> Result<String> {
+    function_index_named(root, id, None)
+}
+
+/// The function list with the researcher names of this module's functions as
+/// an `analyst_names` member beside the name-section `names`.
+pub(crate) fn function_index_named(
+    root: &Path,
+    id: &str,
+    analyst: Option<&wasm_names::Names>,
+) -> Result<String> {
     let artifact = artifact(root, id)?;
     let mut imported = 0u32;
     let mut types = Vec::new();
@@ -237,11 +247,20 @@ pub fn function_index(root: &Path, id: &str) -> Result<String> {
         "],\"omissions\":{},\"limits\":{{\"max_input_bytes\":{MAX_BYTES},\"max_index_bytes\":{MAX_INDEX_BYTES},\"max_name_bytes\":{MAX_NAME_BYTES}}},\"notice\":\"Static function list. Graphs are computed one function at a time.\"}}",
         serde_json::to_string(&omissions).expect("JSON strings"),
     );
-    Ok(out)
+    Ok(match (analyst, artifact.sha256.as_str()) {
+        (Some(names), Some(sha)) => wasm_names::append_members(
+            out,
+            &[(
+                "analyst_names",
+                names.module_member(sha, u64::from(imported) + types.len() as u64),
+            )],
+        ),
+        _ => out,
+    })
 }
 
 /// A name stays one inert line of bounded text, whatever the module supplied.
-fn bounded_name(name: &str) -> String {
+pub(crate) fn bounded_name(name: &str) -> String {
     let mut text = String::new();
     for character in name.chars().flat_map(char::escape_debug) {
         if text.len() + character.len_utf8() > MAX_NAME_BYTES {
@@ -894,7 +913,7 @@ fn build(decoded: &Decoded) -> Graph {
 
 /// Operands for a basic-block row: the same decoded fields as the linear
 /// listing with the field names removed, so a row fits on a card.
-fn operands(op: &Operator<'_>) -> String {
+pub(crate) fn operands(op: &Operator<'_>) -> String {
     match op {
         Operator::LocalGet { local_index }
         | Operator::LocalSet { local_index }
@@ -917,8 +936,14 @@ fn operands(op: &Operator<'_>) -> String {
         }
         Operator::I32Const { value } => value.to_string(),
         Operator::I64Const { value } => value.to_string(),
-        Operator::F32Const { value } => f32::from_bits(value.bits()).to_string(),
-        Operator::F64Const { value } => f64::from_bits(value.bits()).to_string(),
+        Operator::F32Const { value } => {
+            let value = f32::from_bits(value.bits());
+            float_text(value.to_string(), || format!("{value:e}"))
+        }
+        Operator::F64Const { value } => {
+            let value = f64::from_bits(value.bits());
+            float_text(value.to_string(), || format!("{value:e}"))
+        }
         Operator::Br { relative_depth } | Operator::BrIf { relative_depth } => {
             relative_depth.to_string()
         }
@@ -965,6 +990,20 @@ fn operands(op: &Operator<'_>) -> String {
     }
 }
 
+/// A float's plain decimal form, or its shortest round-trip exponent form
+/// when the decimal one is long: `1e-308` prints as hundreds of zeros, and a
+/// capped row or label would keep only those.
+fn float_text(decimal: String, exponent: impl FnOnce() -> String) -> String {
+    if decimal.len() > MAX_FLOAT_DECIMAL {
+        exponent()
+    } else {
+        decimal
+    }
+}
+
+/// Longest plain decimal a float operand keeps; `f64::MAX` takes 309 digits.
+const MAX_FLOAT_DECIMAL: usize = 24;
+
 fn block_run_text(operand: &str, count: u32) -> String {
     let mut text = String::from("block");
     if count > 1 {
@@ -983,6 +1022,17 @@ fn json_string(out: &mut String, value: &str) {
 
 /// Basic blocks for one defined function, or a provider error a caller shows.
 pub fn function_graph(root: &Path, id: &str, function: u32) -> Result<String> {
+    function_graph_named(root, id, function, None)
+}
+
+/// The block graph with the function's researcher name as `analyst_name` and
+/// every name of its module as `analyst_names`, so a `call N` row resolves.
+pub(crate) fn function_graph_named(
+    root: &Path,
+    id: &str,
+    function: u32,
+    analyst: Option<&wasm_names::Names>,
+) -> Result<String> {
     let artifact = artifact(root, id)?;
     let started = Instant::now();
     let deadline = started + DEADLINE;
@@ -1018,7 +1068,19 @@ pub fn function_graph(root: &Path, id: &str, function: u32) -> Result<String> {
                     )));
                 }
                 let ty = types.get(position as usize - 1).copied();
-                return graph_document(&artifact, function, ty, &body, deadline);
+                let out = graph_document(&artifact, function, ty, &body, deadline)?;
+                let (Some(names), Some(sha)) = (analyst, artifact.sha256.as_str()) else {
+                    return Ok(out);
+                };
+                let mut members = Vec::new();
+                if let Some(name) = names.function(sha, function) {
+                    members.push(("analyst_name", serde_json::json!(name)));
+                }
+                members.push((
+                    "analyst_names",
+                    names.module_member(sha, u64::from(imported) + types.len() as u64),
+                ));
+                return Ok(wasm_names::append_members(out, &members));
             }
             Payload::End(_) => break,
             _ => {}
@@ -1486,5 +1548,27 @@ mod tests {
         let label = case_label(&many);
         assert!(label.len() <= MAX_LABEL_BYTES + 4, "{label}");
         assert!(label.ends_with(",..."), "{label}");
+    }
+
+    #[test]
+    fn long_float_constants_read_as_their_shortest_exponent_form() {
+        let graph = graph_for(
+            "(module (func (result f64) (f64.add (f64.const -2.2250738585072014e-308) (f64.const 1.5))) (func (result f32) (f32.const 3.4028235e38)))",
+            0,
+        );
+        let rows = graph["rows"].as_str().unwrap();
+        assert!(
+            rows.contains("f64.const -2.2250738585072014e-308\n"),
+            "{rows}"
+        );
+        assert!(rows.contains("f64.const 1.5\n"), "{rows}");
+        let rows = graph_for(
+            "(module (func (result f64) (f64.const 0)) (func (result f32) (f32.const 3.4028235e38)))",
+            1,
+        )["rows"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(rows.contains("f32.const 3.4028235e38\n"), "{rows}");
     }
 }

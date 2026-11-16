@@ -691,6 +691,7 @@ function createEvidenceWorkspace({getContext, packagePanel, onTrace, onRequest, 
         section.append(heading, node('p', description, 'evidence-group-note'));
         for (const row of members) {
           const element = node('button', '', 'evidence-observation'); element.type = 'button'; element.dataset.evidenceKey = row.key; element.dataset.relationship = row.group;
+          element.dataset.category = row.event.category;
           element.setAttribute('aria-current', String(row.key === selectedKey));
           const line = node('span', '', 'evidence-observation-meta'); line.append(node('span', row.event.category.replaceAll('_', ' ')), node('time', evidenceMonotonicLabel(row.event.monotonic_time_ns)));
           element.append(line, node('strong', row.title, titleClass(row)), node('span', row.duplicate ? 'Duplicate event identity · relationship unknown' : row.artifact.artifact?.url || (row.payload.text === row.title ? row.outcome : row.payload.text) || row.outcome, 'evidence-observation-preview'));

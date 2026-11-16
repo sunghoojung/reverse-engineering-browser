@@ -21,6 +21,13 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 jsonschema = { version = "0.33", default-features = false }
 unicode-casefold = "0.2"
 wasmparser = "0.240"
+# Pure-Rust Wasm interpreter with fuel metering and no JIT, for run_wasm_function.
+# portable-dispatch is a loop: the default tail-call dispatch relies on LLVM
+# sibling-call optimization, and without it a long captured loop overflows the
+# native stack and aborts the backend.
+wasmi = { version = "=2.0.0", default-features = false, features = ["std", "stable", "portable-dispatch", "validate", "simd", "deterministic"] }
+# Names the error type of wasmi's ResourceLimiter trait, which wasmi does not re-export.
+wasmi_core = { version = "=2.0.0", default-features = false }
 oxc_allocator = "=0.155.0"
 oxc_parser = "=0.155.0"
 oxc_ast = "=0.155.0"
@@ -36,3 +43,9 @@ cc = "=1.10.0"
 
 [dev-dependencies]
 wat = "=1.240.0"
+
+# The interpreter runs captured functions under fuel and a wall-clock deadline.
+# Unoptimized, it spends most of a deadline on dispatch overhead, so the debug
+# backend and its tests keep it optimized.
+[profile.dev.package.wasmi]
+opt-level = 3

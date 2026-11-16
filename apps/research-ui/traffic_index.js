@@ -107,6 +107,22 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
     row(id) {
       return answer?.rows.find(request => request.id === id) ?? null;
     },
+    // One bounded read beside the table's: rows a detail view looks for by
+    // filter and time range. It never changes the table's answer.
+    async search(parameters, signal) {
+      if (unsupported) return {status: 'unavailable', rows: []};
+      const query = new URLSearchParams(parameters);
+      query.set('limit', String(Math.min(Number(query.get('limit')) || 100, 500)));
+      const response = await fetcher(`/api/requests?${query}`, {cache: 'no-store', signal});
+      if (!response.ok) throw new Error(`the request index returned HTTP ${response.status}`);
+      const document = await response.json();
+      if (!document || document.format !== 'reb-request-index-v1' || !Array.isArray(document.requests)) {
+        throw new Error('the request index answer is malformed');
+      }
+      // `capped`: more rows matched than the answer holds, so the rest were not read.
+      return {status: 'ready', capped: Number(document.matching) > document.requests.length,
+        rows: document.requests.map(row => trafficIndexRequest(row, answer?.origin ?? 'live'))};
+    },
     // Each member is read forward from the row's first offset, up to its record count.
     // `partial` means some records were not read, so a missing one is unknown, not absent.
     async events(row, signal) {

@@ -150,16 +150,30 @@ be a form control with `disabled` set, and nothing that cannot be disabled, a
 link, a `summary`, a `role`, a `tabindex` or an editable region, may appear.
 It photographs them in both themes.
 
+`test41TraceValueInInspect` opens the repository-owned value-flow module
+(artifact 440, from `tools/fixtures/wasm-value-flow`) in Inspect at both window
+sizes, picks the import call row with the pointer and traces it. The slice must
+name the JavaScript crossing as its seed, list at least five sources and the
+three joins with their incoming edges, and mark the seed row and other slice
+rows in the listing, while the listing keeps at least 90 px above the panel.
+Arrow keys must reach the load row and Enter must reveal and focus it in
+Inspect, marked as a source, and the import name must be visible whole in the
+row at both sizes. It photographs both themes. Opening Graph must hide the
+panel while the graph keeps its height, and closing it must bring the same
+trace back. Clear must remove the marks, a store row must offer its two
+operands before any trace, and Hex must hide the panel.
+
 `test27StartPanelStartRetryAndKeyboard` takes the start panel through a whole
 decision at both window sizes. The driver names a `REB_BRAVE_BINARY` that does
 not exist, so Start fails at once and no browser launches on any machine. The
 panel must sit inside the workspace with nothing clipped, open with Start
-Session focused and this run's last choice, reach every control with Shift+Tab
-and visible focus, change the mode with an arrow key and the Keychain with
-Space, and start on Return. The failure must name the cause, say Retry uses
-the mode and Keychain choice made by keyboard (so native received them), and
-focus Retry; Return on Retry must fail afresh, and Continue Offline must close
-the panel and return focus to the workspace.
+Session focused and this run's last choice, with no Keychain choice, reach
+every control with Shift+Tab and visible focus (in Content, the media choice
+and both budgets sit between the mode and the actions), change the mode with an
+arrow key, and start on Return. The failure must name the cause, say Retry uses
+the mode chosen by keyboard (so native received it), and focus Retry; Return
+on Retry must fail afresh, and Continue Offline must close the panel and return
+focus to the workspace.
 
 `test30WorkerInitiatorStack` opens the synthetic request a dedicated worker
 started (two synthetic renderer processes, version 3 stack records,
@@ -170,6 +184,92 @@ a `MessagePort.postMessage` segment in the posting renderer's isolate with its
 process named, and the stated end of a task scheduled with no script, then list
 the async callers still not shown, with nothing clipped and captured names
 inert.
+
+`test37WasmReadableView` opens fixture artifact 400 in Sources, names
+`readable_run` (func 1) with the pencil on its Inspect header row and Enter,
+as test39 does, using a markup-shaped researcher name, then closes Inspect and
+turns on **Readable** (from More when it has moved there). At both sizes the
+researcher name must sit beside the module's `readable_run` title as text,
+never in its place or in the listing. The folded
+load, the loop's `br_if` and the quoted, markup-shaped import name must show as
+text with one counted raw line, nothing clipped or overlapping and no captured
+markup in the DOM. Clicking a line and then the down arrow and Enter must each
+reveal the line's bytes in the linear view with visible focus, and opening
+Graph must close Readable.
+
+`test38WasmLibraryIdentification` opens the synthetic Rust and wasm-bindgen
+module (artifact 410, built from
+[`rust-wasm-bindgen.wat`](../fixtures/wasm-identification/rust-wasm-bindgen.wat))
+in Inspect. At both sizes the
+[identification](../../protocol/wasm-identification-v1.md) summary must name the
+toolchain, the complete SHA-256 and Base64 tables and the labeled count above
+the listing without clipping; Enter on Details must list the fetch glue label
+and the function that reads the SHA-256 table, a constant chip must reveal its
+data segment row, and the Graph's Functions menu must show category badges
+while the summary steps aside for the graph.
+
+`test35MissingFinalHeaders` opens a content-session request the HTTP cache
+answered, which has only a provisional request block that the session budget
+refused ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
+At both sizes the Traffic footer must show one **2 header gaps** item that adds
+no footer line and leaves nothing cut off; Space must open its breakdown with
+the refused block and the request without final headers, each with its reason,
+and Escape must close it and return focus. The Headers tab must say the HTTP
+cache answered without sending a request and that the block was not retained;
+and the Cookies tab must list the hop with the same reason in place of a bare
+"No cookie list was retained", with nothing clipped and captured text inert.
+
+`test36StartPanelContentLimits` takes the start panel's **Content limits**
+through both window sizes ([#428](https://github.com/sunghoojung/reverse-engineering-browser/issues/428),
+[#436](https://github.com/sunghoojung/reverse-engineering-browser/issues/436)).
+Normal opens with the defaults (256 and 512 MiB, media skipped), in both
+themes, with every limit a Shift+Tab stop with a visible ring. A typed 5000
+sent with Return is named at its field and starts nothing; native refuses an
+out-of-bounds, fractional, missing or Metadata-only limit sent past the page
+with the agent path's reasons. A raised 1,024 MiB budget and media capture
+typed and checked from the keyboard reach the start, whose failure (the
+missing Brave) names them. Narrow opens with those limits, held for the run;
+Metadata hides them and its start names none. In Traffic, the fixture's
+`api.budget.test` row is a content-session POST whose target past its first
+116 bytes, body and response met their budgets. The footer must take its
+counts from the session summary (two request records, one response) and, as
+this harness backend is not live, name no size; once the page reads a live
+session context (64 and 128 MiB), the footer, the Request URL row and the
+Payload tab name those sizes, and the Response tab names the control, all
+without an environment variable. At the narrow size with the request open the
+footer must show a one-line button instead of the line, fully visible, which
+Return or Space opens to the whole sentence and Escape closes with focus kept;
+focus leaving it, a press elsewhere and closing the request close it too, and a
+request opened again starts with it closed. Beside `test35`'s **header gaps**
+item, the two must not overlap when both are open, and each Escape must close
+only its own and not the request. Both themes, nothing clipped.
+
+`test39WasmFunctionNames` opens the synthetic module artifact 420 (an import,
+a helper and an exported caller) in Sources Inspect, renames the helper with
+the pencil on its header row and Enter, and requires at both sizes that the
+italic name follows the unchanged captured header and the call row that
+targets it, and that F2 after a click on the call row opens the callee's
+editor. The Graph's **Functions** list must show the name beside `func 1`; the
+open popover covers the graph by design, so its layout is checked on its own
+and the Graph's once it closes. Choosing that row must put the name beside the
+Graph title. The Graph then moves to `func 2` while the last clicked Inspect
+row is the call into `func 1`, and F2 after a click on the graph must open the
+editor for `func 2`, the function the Graph draws, which Escape closes. Layout and inertness are checked at each step,
+and the Graph is photographed in both themes
+([Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
+
+`test42RunOfflineInSources` opens fixture artifact 450, a hand-built module
+whose second export (`stamp<b>`) reads the import `env.now`, and chooses
+**More > Run offline…**. At both sizes the dialog must name the local sandbox
+above every field, list the export names as text, and keep **Run** disabled
+until the confirmation is checked with a pointer click. A run without stubs
+must show **Import trapped** with the recorded `env.now` call; a run with
+`env.now` stubbed to 1000 must return `i32 1001`. After each run the outcome
+line must be inside the dialog's visible frame and be the topmost element at
+its position, since the result follows the fields and starts below the visible
+area until the dialog scrolls to it. Nothing may be clipped, captured names stay
+inert, and Escape closes the dialog. Screenshots: `run-offline-dialog-*` and
+`run-offline-result-*`, each also in the light theme (`*-light-*`).
 
 `testLaunchStartsWithoutStartPanel` runs alone in a second launch pass. That
 pass starts the copied app without `--ui-url` or an evidence-store argument,

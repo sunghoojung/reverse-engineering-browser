@@ -110,7 +110,8 @@ missing hook, refusals and receiver refusal.
 Response bodies (protocol/native-network-v3.md): the unchanged network sink,
 artifact sink and `native_response_body_capture.cc` in a content session tee
 JSON, gzip HTML, brotli and service-worker JSON, a fetched PNG, a chunked event
-stream (a partial snapshot, then the ended body), an aborted prefix and
+stream (two partial snapshots a second apart, then the ended body), a body
+with a declared length retained as partial, an aborted prefix and
 records for a 304, a redirect, a cancelled body and a skipped font. The
 production receiver retains each as a sensitive `response_body` artifact
 created by its `response_started` record; `response-bodies.json` names the
@@ -118,7 +119,12 @@ expected joins, which the stage checks through the receiver and broker.
 `response_bodies_test.h` also covers dedupe, the byte budget and its
 exhaustion, a receiver refusal refund, 50 parallel bodies, the shared pool,
 16 MiB truncation, a missing completion, coding order, the capture-end
-partial, media opt-in, metadata-only sessions and tee refusal.
+partial, media opt-in, metadata-only sessions and tee refusal. Its schedule
+stage checks the partial body schedule: a two-hour stream snapshotted far
+past the old limit of 15 with the age spacing and allowance held, the paced
+allowance under a 1 MiB budget, the session's snapshot share and its refund,
+and the 16 MiB seal that publishes a stream without a copy and names it from
+every later record (truncated, exactly 16 MiB, cancelled and at capture end).
 
 Each content request's provisional header block (protocol/native-network-v3.md)
 takes the same sink path as a sensitive `request_headers` artifact;

@@ -2292,6 +2292,7 @@ int main() {
   Run<&RequestTargetRanges>();
   Run<&MemoryCacheReuses>();
   Run<&ScriptCookieAccess>();
+  Run<&ScriptCookieReadNames>();
   Run<&CanvasCreatorAdmission>();
   Run<&RuntimeCreatorAdmission>();
   Run<&RuntimeScriptProvenance>();

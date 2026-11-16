@@ -22,6 +22,7 @@ pub mod evidence_comparison;
 pub mod evidence_package;
 pub mod float32;
 mod flow_graph;
+mod gap_tally;
 mod graph_layout;
 mod js_invocation;
 mod js_invocation_sites;
@@ -59,7 +60,20 @@ pub mod vm_pack;
 mod vm_reachability;
 mod vm_request_links;
 pub mod wasm;
+mod wasm_constants;
+pub mod wasm_def_use;
+pub mod wasm_diff;
 pub mod wasm_graph;
+pub mod wasm_identification;
+mod wasm_names;
+pub mod wasm_pseudocode;
+mod wasm_run;
+pub mod wasm_stack;
+pub mod wasm_value_flow;
+#[cfg(test)]
+mod wasm_value_flow_fuzz;
+#[cfg(test)]
+mod wasm_value_flow_fuzz_extended;
 mod worker;
 mod workspace;
 mod workspace_lease;

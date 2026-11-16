@@ -7,7 +7,8 @@ use crate::{
     artifact_query::{self, MANIFEST_RECORD_BYTES},
     error::Result,
     event_query::{self, Cursor, EVENT_RECORD_BYTES, SCAN_BYTES, Tally},
-    event_window,
+    event_window, request_cookies,
+    request_headers::{self, DROP_REPORT_SLACK_NS, Lifecycle},
     request_tabs::RequestTabs,
     session_context,
 };
@@ -23,6 +24,9 @@ const FRAME_TYPES: usize = 8;
 const SESSIONS: usize = 16;
 const ARTIFACTS: usize = 32;
 const REFUSAL_REASONS: usize = 32;
+/// Browser requests followed for a final header block, as many as the
+/// request index holds; the rest are counted as untracked.
+const HEADER_REQUESTS: usize = if cfg!(test) { 16 } else { 131_072 };
 
 /// Live state the backend knows outside the stores.
 pub struct CaptureState<'a> {
@@ -32,6 +36,69 @@ pub struct CaptureState<'a> {
     pub capture_stopped: bool,
     pub artifact_receiver_configured: bool,
     pub artifact_receiver_connected: bool,
+    /// `session_context::content_limits`: the budgets this session runs with,
+    /// or null when unknown or without request content.
+    pub content_limits: Value,
+}
+
+/// A content session's two byte budgets: which refusals and which retained
+/// artifact kinds each one counts (native-network-v2.md, native-network-v3.md).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Budget {
+    RequestContent,
+    ResponseBody,
+}
+impl Budget {
+    fn of_refusal(category: &str, reason: &str) -> Option<Self> {
+        // Header blocks and cookie lists have their own fixed 64 MiB budget,
+        // which no start panel control sets, so they are not named here.
+        match (category, reason) {
+            ("response_body", "not_captured_session_budget") => Some(Self::ResponseBody),
+            ("request_body", "not_captured_session_budget")
+            | ("request_target", "not_retained_session_budget") => Some(Self::RequestContent),
+            _ => None,
+        }
+    }
+    fn of_kind(kind: &str) -> Option<Self> {
+        match kind {
+            "request_body" | "request_target" => Some(Self::RequestContent),
+            "response_body" => Some(Self::ResponseBody),
+            _ => None,
+        }
+    }
+    /// The start option, as content_limits and start_live_session name it.
+    fn option(self) -> &'static str {
+        match self {
+            Self::RequestContent => "request_content_budget_mib",
+            Self::ResponseBody => "response_body_budget_mib",
+        }
+    }
+    /// The start panel control that sets it.
+    fn control(self) -> &'static str {
+        match self {
+            Self::RequestContent => "Request content budget",
+            Self::ResponseBody => "Response body budget",
+        }
+    }
+    fn contents(self) -> &'static str {
+        match self {
+            Self::RequestContent => "request bodies and full targets",
+            Self::ResponseBody => "response bodies",
+        }
+    }
+}
+
+/// Unique bytes a budget's artifacts hold in the scanned manifest. The browser
+/// charges unique bytes, so identical content counts once; a digest is kept
+/// as its first 64 bits, which cannot collide in a manifest this size.
+#[derive(Default)]
+struct Retained {
+    digests: HashSet<u64>,
+    bytes: u64,
+}
+
+fn mib(bytes: u64) -> String {
+    format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
 }
 
 #[derive(Default)]
@@ -198,9 +265,28 @@ impl Refusals {
                     *self.content.entry(("request_target", reason)).or_default() += 1;
                 }
             }
+            (Some("network"), Some(kind @ ("request_headers" | "response_headers"))) => {
+                if let Some(reason) = request_headers::block_facts(event)
+                    .and_then(|facts| header_refusal(facts.state))
+                {
+                    let kind = if kind == "request_headers" {
+                        "request_headers"
+                    } else {
+                        "response_headers"
+                    };
+                    *self.content.entry((kind, reason)).or_default() += 1;
+                }
+            }
+            (Some("network"), Some("cookie_list")) => {
+                if let Some(reason) =
+                    request_cookies::list_facts(event).and_then(|(state, _)| header_refusal(state))
+                {
+                    *self.content.entry(("cookie_list", reason)).or_default() += 1;
+                }
+            }
             (Some("network"), Some("response_body")) => {
                 if let Some(reason) = payload()
-                    .filter(|b| b.len() == 128 && b[0] == 1)
+                    .filter(|b| b.len() == 128 && (b[0] == 1 || b[0] == 2))
                     .and_then(|b| response_refusal(b[4]))
                 {
                     *self.content.entry(("response_body", reason)).or_default() += 1;
@@ -209,6 +295,176 @@ impl Refusals {
             _ => {}
         }
     }
+}
+
+/// Header block and cookie list states that retained no bytes (native-network-v3.md).
+fn header_refusal(state: u8) -> Option<&'static str> {
+    Some(match state {
+        4 => "not_captured_block_limit",
+        5 => "not_captured_artifact_unavailable",
+        6 => "not_captured_transfer_refused",
+        7 => "not_captured_session_budget",
+        8 => "not_captured_url",
+        _ => return None,
+    })
+}
+
+/// One browser request's header blocks and how it ended.
+#[derive(Default)]
+struct RequestHeaderFacts {
+    /// Hops (bit n for hop n) with a provisional or a `network` request block.
+    provisional: u64,
+    network: u64,
+    lifecycle: Lifecycle,
+    /// The first and last times of its records in the window.
+    span: Option<(u64, u64)>,
+}
+
+/// Header blocks and cookie lists no row shows, and the requests of content
+/// sessions that ended without a `network` request block, with the reason
+/// ("Missing final blocks" in protocol/native-network-v3.md).
+#[derive(Default)]
+struct HeaderCoverage {
+    /// The newest unattributed count per producer: each record carries its
+    /// configuration's count so far.
+    unattributed_blocks: BTreeMap<(u64, u64), u64>,
+    unattributed_lists: BTreeMap<(u64, u64), u64>,
+    requests: HashMap<(u64, u64, u64), RequestHeaderFacts>,
+    untracked: u64,
+    /// Gap times and drop counts of every category: a dropped block makes an
+    /// absent one unsure. Past the bound every request counts as overlapped.
+    drops: Vec<(u64, u64, u64)>,
+    drops_overflowed: bool,
+}
+impl HeaderCoverage {
+    fn record(&mut self, event: &Value) {
+        let number = |key: &str| event_window::unsigned(&event[key]).unwrap_or(0);
+        let dropped = event_window::dropped_records(event);
+        if dropped > 0 {
+            if self.drops.len() < HEADER_REQUESTS {
+                self.drops
+                    .push((number("session_id"), number("monotonic_time_ns"), dropped));
+            } else {
+                self.drops_overflowed = true;
+            }
+        }
+        let producer = (number("session_id"), number("process_id"));
+        let key = (producer.0, producer.1, number("request_id"));
+        let time = number("monotonic_time_ns");
+        match event["type"].as_str() {
+            Some("request_headers" | "response_headers") => {
+                let Some(facts) = request_headers::block_facts(event) else {
+                    return;
+                };
+                let newest = self.unattributed_blocks.entry(producer).or_default();
+                *newest = (*newest).max(u64::from(facts.unattributed));
+                if facts.response || facts.hop >= 64 {
+                    return;
+                }
+                if let Some(request) = self.request(key, true) {
+                    request.widen(time);
+                    if facts.source == 1 {
+                        request.provisional |= 1 << facts.hop;
+                    } else {
+                        request.network |= 1 << facts.hop;
+                    }
+                }
+            }
+            _ if event["category"] != "network" => {}
+            Some("cookie_list") => {
+                if let Some((_, unattributed)) = request_cookies::list_facts(event) {
+                    let newest = self.unattributed_lists.entry(producer).or_default();
+                    *newest = (*newest).max(u64::from(unattributed));
+                }
+            }
+            // Browser lifecycle records; a renderer row has no header block.
+            Some(
+                "request_started" | "response_started" | "request_completed" | "response_completed"
+                | "request_failed",
+            ) if event["browser_context_id_high"].as_str().unwrap_or("0") != "0"
+                || event["browser_context_id_low"].as_str().unwrap_or("0") != "0" =>
+            {
+                if let Some(request) = self.request(key, false) {
+                    request.widen(time);
+                    request.lifecycle.record(event);
+                }
+            }
+            _ => {}
+        }
+    }
+    /// The request's facts. Only a header record past the bound is counted
+    /// as untracked: a request with no header record has no final block to
+    /// miss, as in a metadata-only session, whose lifecycle records are simply
+    /// not followed then.
+    fn request(&mut self, key: (u64, u64, u64), header: bool) -> Option<&mut RequestHeaderFacts> {
+        if key.2 == 0 {
+            return None;
+        }
+        if !self.requests.contains_key(&key) && self.requests.len() >= HEADER_REQUESTS {
+            self.untracked += u64::from(header);
+            return None;
+        }
+        Some(self.requests.entry(key).or_default())
+    }
+    /// Requests that ended without a `network` block on their final hop.
+    fn missing(&self) -> BTreeMap<&'static str, u64> {
+        let mut missing = BTreeMap::new();
+        for (key, request) in &self.requests {
+            if request.provisional == 0 {
+                continue;
+            }
+            let last = 63 - request.provisional.leading_zeros();
+            if request.network & (1 << last) != 0 {
+                continue;
+            }
+            let dropped = self.drops_overflowed
+                || request.span.is_some_and(|(first, last)| {
+                    let to = request
+                        .lifecycle
+                        .ended
+                        .then(|| last.saturating_add(DROP_REPORT_SLACK_NS));
+                    self.drops.iter().any(|(session, time, _)| {
+                        *session == key.0 && *time >= first && to.is_none_or(|to| *time <= to)
+                    })
+                });
+            let reason =
+                request_headers::qualified(request.lifecycle.missing_reason(true, false), dropped);
+            if reason != "in_progress" {
+                *missing.entry(reason).or_default() += 1;
+            }
+        }
+        missing
+    }
+}
+
+impl RequestHeaderFacts {
+    fn widen(&mut self, time: u64) {
+        self.span = Some(self.span.map_or((time, time), |(first, last)| {
+            (first.min(time), last.max(time))
+        }));
+    }
+}
+
+fn missing_check(reason: &str, count: u64) -> Value {
+    // A request that failed, or that the cache, a service worker or a
+    // download answered, has no final headers by design; the rest are gaps.
+    let severity = if matches!(reason, "not_reported" | "record_dropped") {
+        "warning"
+    } else {
+        "info"
+    };
+    let mut item = check(
+        "final_headers_missing",
+        severity,
+        format!(
+            "{count} {} of a content session ended with only provisional headers and no cookie lists: {}.",
+            if count == 1 { "request" } else { "requests" },
+            request_headers::missing_meaning(reason)
+        ),
+    );
+    item["reason"] = json!(reason);
+    item["count"] = json!(count.to_string());
+    item
 }
 
 /// request_body states that keep less than the whole body (native-network-v2.md).
@@ -249,19 +505,65 @@ fn response_refusal(state: u8) -> Option<&'static str> {
     })
 }
 
-fn content_meaning(category: &str, reason: &str, count: u64) -> String {
-    let what = match category {
+/// A budget refusal names the budget in force, what this session retained
+/// against it, and the remedy: the start panel control, or the start option,
+/// for the next session.
+fn budget_meaning(
+    budget: Budget,
+    what: &str,
+    count: u64,
+    budget_mib: &Value,
+    retained: u64,
+    complete: bool,
+) -> String {
+    let size = budget_mib
+        .as_u64()
+        .map(|value| format!("{value} MiB "))
+        .unwrap_or_default();
+    format!(
+        "{count} {what} arrived after this session's {size}{} was used; {}{} of unique {} are retained. Raise {} in the start panel (New Live Session…) for the next session; an agent's start_live_session sets {}.",
+        budget.control().to_ascii_lowercase(),
+        if complete { "" } else { "at least " },
+        mib(retained),
+        budget.contents(),
+        budget.control(),
+        budget.option(),
+    )
+}
+
+fn content_noun(category: &str) -> &'static str {
+    match category {
         "request_body" => "request bodies",
         "response_body" => "response bodies",
+        "request_headers" => "request header blocks",
+        "response_headers" => "response header blocks",
+        "cookie_list" => "cookie lists",
         _ => "full request targets",
-    };
+    }
+}
+
+fn content_meaning(category: &str, reason: &str, count: u64) -> String {
+    let what = content_noun(category);
+    let headers = matches!(
+        category,
+        "request_headers" | "response_headers" | "cookie_list"
+    );
     let why = match reason {
+        "not_captured_block_limit" if category == "cookie_list" => {
+            "were longer than the 2 MiB list limit, so only their counts and size are recorded"
+        }
+        "not_captured_block_limit" => {
+            "were longer than the 320 KiB block limit, so only their header count and size are recorded"
+        }
+        "not_captured_session_budget" if headers => {
+            "arrived after the configuration retained 64 MiB of header blocks and cookie lists. Start a new session for a fresh budget"
+        }
+        "not_captured_url" if headers => {
+            "had no HTTP(S) URL, a URL longer than 8 KiB, or a hop the capture no longer tracked"
+        }
         "captured_truncated" => "were longer than 16 MiB, so only their first 16 MiB is retained",
         "not_captured_type" => {
-            "were images, audio, video or fonts that page elements load, which are kept only with REB_CAPTURE_RESPONSE_MEDIA=1"
-        }
-        "not_captured_session_budget" if category == "response_body" => {
-            "arrived after the session's response body byte budget was used. Start a new session, or raise REB_RESPONSE_BODY_BUDGET_MIB"
+            "were images, audio, video or fonts that page elements load, which are kept only when Capture media and fonts is on in the start panel (New Live Session…) for the next session, or an agent's start_live_session sets response_media"
         }
         "not_captured_body_kind" => {
             "had a part the browser does not read, so they are described but not read"
@@ -274,9 +576,6 @@ fn content_meaning(category: &str, reason: &str, count: u64) -> String {
         }
         "not_captured_url" | "not_retained_url" => {
             "had no HTTP(S) or WebSocket origin, or exceeded Chromium's URL limit"
-        }
-        "not_captured_session_budget" | "not_retained_session_budget" => {
-            "arrived after the session's request-content byte budget was used. Start a new session, or raise REB_REQUEST_CONTENT_BUDGET_MIB"
         }
         "not_captured_artifact_unavailable" | "not_retained_artifact_unavailable" => {
             "had no artifact channel: the Artifact category was off or the receiver was disconnected"
@@ -291,6 +590,7 @@ struct ArtifactCounts {
     total: u64,
     by_kind: BTreeMap<String, u64>,
     items: Vec<Value>,
+    retained: BTreeMap<Budget, Retained>,
 }
 impl ArtifactCounts {
     fn record(&mut self, artifact: &Value) {
@@ -299,6 +599,19 @@ impl ArtifactCounts {
             .by_kind
             .entry(artifact["kind"].as_str().unwrap_or("").to_owned())
             .or_default() += 1;
+        if let (Some(budget), Some(digest), Some(size)) = (
+            Budget::of_kind(artifact["kind"].as_str().unwrap_or("")),
+            artifact["sha256"]
+                .as_str()
+                .and_then(|text| text.get(..16))
+                .and_then(|prefix| u64::from_str_radix(prefix, 16).ok()),
+            artifact["byte_size"].as_u64(),
+        ) {
+            let retained = self.retained.entry(budget).or_default();
+            if retained.digests.insert(digest) {
+                retained.bytes = retained.bytes.saturating_add(size);
+            }
+        }
         // The manifest is read newest first.
         if self.items.len() < ARTIFACTS {
             let mut item = json!({});
@@ -412,6 +725,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
     let mut exclusions = Exclusions::default();
     let mut request_tabs = RequestTabs::default();
     let mut refusals = Refusals::default();
+    let mut header_coverage = HeaderCoverage::default();
     let mut tally = Tally::default();
     let event_page = event_query::read_page(
         store,
@@ -428,6 +742,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             exclusions.record(&event);
             request_tabs.record(&event);
             refusals.record(&event);
+            header_coverage.record(&event);
             Ok(None)
         },
     )?;
@@ -503,14 +818,67 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
         checks.push(item);
     }
     for ((category, reason), count) in &refusals.content {
-        let mut item = check(
-            "request_content_not_retained",
-            "warning",
-            content_meaning(category, reason, *count),
-        );
+        let budget = Budget::of_refusal(category, reason);
+        let message = match budget {
+            Some(budget) => budget_meaning(
+                budget,
+                content_noun(category),
+                *count,
+                &state.content_limits[budget.option()],
+                stored
+                    .retained
+                    .get(&budget)
+                    .map_or(0, |retained| retained.bytes),
+                !artifact_page.exhausted,
+            ),
+            None => content_meaning(category, reason, *count),
+        };
+        let mut item = check("request_content_not_retained", "warning", message);
         item["category"] = json!(category);
         item["reason"] = json!(reason);
         item["count"] = json!(count.to_string());
+        // The budget in force (null when this backend does not know it) and
+        // the unique bytes retained against it in the scanned manifest.
+        if let Some(budget) = budget {
+            item["budget_mib"] = state.content_limits[budget.option()].clone();
+            item["retained_bytes"] = json!(
+                stored
+                    .retained
+                    .get(&budget)
+                    .map_or(0, |retained| retained.bytes)
+                    .to_string()
+            );
+            item["retained_complete"] = json!(!artifact_page.exhausted);
+        }
+        checks.push(item);
+    }
+    let blocks: u64 = header_coverage.unattributed_blocks.values().sum();
+    let lists: u64 = header_coverage.unattributed_lists.values().sum();
+    if blocks > 0 || lists > 0 {
+        let mut item = check(
+            "network_headers_unattributed",
+            "warning",
+            format!(
+                "{blocks} network header blocks and {lists} cookie lists arrived for requests the capture no longer tracked (ended, or past 4,096 in flight), so they are on no row."
+            ),
+        );
+        item["blocks"] = json!(blocks.to_string());
+        item["lists"] = json!(lists.to_string());
+        checks.push(item);
+    }
+    for (reason, count) in header_coverage.missing() {
+        checks.push(missing_check(reason, count));
+    }
+    if header_coverage.untracked > 0 {
+        let mut item = check(
+            "final_headers_untracked",
+            "info",
+            format!(
+                "{} header records belong to requests past the {HEADER_REQUESTS} this summary follows, so whether those requests have final headers is not counted.",
+                header_coverage.untracked
+            ),
+        );
+        item["count"] = json!(header_coverage.untracked.to_string());
         checks.push(item);
     }
     let (drops, _) = tally.queue_drops();
@@ -674,9 +1042,254 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
     }))
 }
 
+/// What each request's response body case of the request index means
+/// (protocol/native-network-v3.md "Bodies the proxy never sees").
+fn body_case_meaning(case: &str) -> &'static str {
+    match case {
+        "captured" => "retained in full",
+        "captured_truncated" => "retained up to the 16 MiB capture limit",
+        "partial" => "still arriving; the newest snapshot is retained",
+        "aborted" => "the network failed mid-body; what arrived is retained",
+        "cancelled" => "the page or browser stopped reading; what arrived is retained",
+        "empty" => "the body had no bytes",
+        "not_modified" => "HTTP 304: the server sent no body",
+        "redirected" => {
+            "redirected, then ended with no other response; Chromium discards redirect bodies"
+        }
+        "not_captured_type" => {
+            "images, audio, video or fonts that page elements load, kept only when Capture media and fonts is on in the start panel (New Live Session…), or an agent's start_live_session sets response_media"
+        }
+        "not_captured_artifact_unavailable" => {
+            "no artifact channel: the Artifact category was off or the receiver was disconnected"
+        }
+        "not_captured_transfer_refused" => {
+            "refused by the bounded in-flight memory pool or artifact queue"
+        }
+        "not_captured_session_budget" => "arrived after the response body budget was used",
+        "malformed" => "the response body record is malformed",
+        "source_artifact" => "a script or Wasm response, retained as a source artifact",
+        "no_record" => {
+            "the browser saw a response but no body record is indexed: not a content capture session, or still arriving"
+        }
+        "memory_cache" => "reused from Blink's memory cache: no request was made",
+        "service_worker" => {
+            "answered by a service worker in the renderer, which the browser proxy never sees"
+        }
+        "failed_before_response" => "failed before any response",
+        "cancelled_before_response" => "cancelled before any response",
+        "interrupted" => "observation ended before the outcome was known",
+        "end_lost" => {
+            "a service worker ended it, but its start slot was reused, so its outcome was not recorded"
+        }
+        "pending" => "no response or end yet",
+        "renderer_answered" => {
+            "answered in the renderer without a URL loader (data:, blob: and other local schemes)"
+        }
+        _ => "ended with no response record",
+    }
+}
+
+/// The summary's ETag key over the store's tag: capture state and artifact
+/// manifest.
+pub fn etag_key(state: &str, manifest: &str) -> String {
+    format!("summary:{state}:{manifest}")
+}
+
+/// The summary's ETag: the store's tag taken before the request index read
+/// it, and the index's progress after, the point its body case counts were
+/// read at. An answer counted mid-store therefore never shares a tag with the
+/// complete one, and bytes appended during the read change the next tag.
+pub fn etag(before: &str, progress: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "\"{}\"",
+        hex::encode(Sha256::digest(format!("{before}:index:{progress}")))
+    )
+}
+
+/// Every request's response body case, counted from the request index's rows,
+/// and a check naming the bodies the browser proxy can never see. An index
+/// that cannot answer leaves the counts unavailable, with its reason.
+pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Value, String>) {
+    let counts = match counts {
+        Ok(counts) => counts,
+        Err(reason) => {
+            summary["response_bodies"] = json!({"available": false, "reason": reason,
+                "complete": false, "requests": "0", "unindexed_records": "0",
+                "snapshots_withheld": "0", "earlier_snapshots": "0", "cases": []});
+            return;
+        }
+    };
+    let count = |case: &str| {
+        counts["cases"][case]
+            .as_str()
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    // A refused or malformed body may still name an earlier snapshot the
+    // receiver holds, which Traffic opens; each case says how many do.
+    let earlier = |case: &str| {
+        counts["earlier_snapshots"][case]
+            .as_str()
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let cases = counts["cases"]
+        .as_object()
+        .map(|cases| {
+            cases
+                .iter()
+                .map(|(case, value)| json!({"case": case, "count": value,
+                    "earlier_snapshots": earlier(case).to_string(), "meaning": body_case_meaning(case)}))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let earlier_total = counts["earlier_snapshots"]
+        .as_object()
+        .map(|cases| {
+            cases
+                .values()
+                .filter_map(|count| count.as_str()?.parse::<u64>().ok())
+                .sum::<u64>()
+        })
+        .unwrap_or(0);
+    let (worker, reused, local) = (
+        count("service_worker"),
+        count("memory_cache"),
+        count("renderer_answered"),
+    );
+    summary["response_bodies"] = json!({
+        "available": true, "reason": null,
+        "complete": counts["complete"], "requests": counts["requests"],
+        "unindexed_records": counts["unindexed_records"],
+        "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"),
+        "earlier_snapshots": earlier_total.to_string(), "cases": cases,
+    });
+    let withheld = counts["snapshots_withheld"]
+        .as_str()
+        .and_then(|count| count.parse::<u64>().ok())
+        .unwrap_or(0);
+    if withheld > 0 {
+        let mut item = check(
+            "response_snapshots_withheld",
+            "info",
+            format!(
+                "{withheld} response bodies had a snapshot withheld while they arrived: their own snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
+            ),
+        );
+        item["count"] = json!(withheld.to_string());
+        if let Some(checks) = summary["checks"].as_array_mut() {
+            checks.push(item);
+        }
+    }
+    if worker + reused + local > 0 {
+        let mut item = check(
+            "response_bodies_not_observed",
+            "info",
+            format!(
+                "{} responses never reached the browser proxy, so their bodies are not retained under their own request: {worker} served by a service worker, {reused} reused from the memory cache and {local} answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, when those were retained.",
+                worker + reused + local
+            ),
+        );
+        item["count"] = json!((worker + reused + local).to_string());
+        if let Some(checks) = summary["checks"].as_array_mut() {
+            checks.push(item);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_body_cases_are_counted_with_their_meaning() {
+        let mut summary = json!({"checks": []});
+        add_response_bodies(
+            &mut summary,
+            Ok(
+                json!({"complete": true, "requests": "8", "unindexed_records": "0", "snapshots_withheld": "3",
+                "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1",
+                    "not_captured_session_budget": "2"},
+                "earlier_snapshots": {"not_captured_session_budget": "1"}}),
+            ),
+        );
+        assert_eq!(summary["response_bodies"]["available"], true);
+        assert_eq!(summary["response_bodies"]["snapshots_withheld"], "3");
+        let withheld = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "response_snapshots_withheld")
+            .unwrap();
+        assert_eq!(withheld["count"], "3");
+        // A remedy names the start panel's control, never an environment
+        // variable a person using the packaged app cannot set.
+        let remedy = withheld["message"].as_str().unwrap();
+        assert!(
+            remedy.contains("Raise Response body budget in the start panel"),
+            "{remedy}"
+        );
+        assert!(!remedy.contains("REB_"), "{remedy}");
+        let media = body_case_meaning("not_captured_type");
+        assert!(media.contains("Capture media and fonts"), "{media}");
+        assert!(!media.contains("REB_"), "{media}");
+        let cases = summary["response_bodies"]["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 5);
+        // A refused body that keeps an earlier snapshot is counted as such.
+        assert_eq!(summary["response_bodies"]["earlier_snapshots"], "1");
+        let refused = cases
+            .iter()
+            .find(|case| case["case"] == "not_captured_session_budget")
+            .unwrap();
+        assert_eq!(refused["earlier_snapshots"], "1");
+        assert_eq!(cases[0]["earlier_snapshots"], "0");
+        let worker = cases
+            .iter()
+            .find(|case| case["case"] == "service_worker")
+            .unwrap();
+        assert_eq!(worker["count"], "2");
+        assert!(worker["meaning"].as_str().unwrap().contains("never sees"));
+        let check = summary["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "response_bodies_not_observed")
+            .unwrap();
+        assert_eq!(check["count"], "4");
+        assert!(
+            check["message"]
+                .as_str()
+                .unwrap()
+                .contains("2 served by a service worker, 1 reused")
+        );
+        assert!(
+            check["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("4 responses never reached")
+        );
+        let mut quiet = json!({"checks": []});
+        add_response_bodies(
+            &mut quiet,
+            Ok(
+                json!({"complete": true, "requests": "2", "unindexed_records": "0", "cases": {"captured": "2"}}),
+            ),
+        );
+        assert!(quiet["checks"].as_array().unwrap().is_empty());
+        // An index that cannot answer leaves the counts unavailable, never the summary.
+        let mut failed = json!({"checks": []});
+        add_response_bodies(&mut failed, Err("The request index is unreadable".into()));
+        assert_eq!(failed["response_bodies"]["available"], false);
+        assert_eq!(
+            failed["response_bodies"]["reason"],
+            "The request index is unreadable"
+        );
+        assert_eq!(failed["response_bodies"]["cases"], json!([]));
+        // The tag changes as the index reads an unchanged store.
+        assert_ne!(etag("\"store\"", "4096"), etag("\"store\"", "caught-up"));
+        assert!(etag("\"store\"", "caught-up").starts_with('"'));
+    }
 
     #[test]
     fn filtered_wasm_gap_is_a_policy_exclusion() {
@@ -722,6 +1335,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: true,
             artifact_receiver_connected: true,
+            content_limits: Value::Null,
         };
         let summary = build(&store, &artifacts, &state).unwrap();
         let events = &summary["events"];
@@ -749,6 +1363,467 @@ mod tests {
         assert_eq!(summary["artifacts"]["total"], "0");
         let text = summary.to_string();
         assert!(!text.contains(&hex::encode("native_wasm")));
+    }
+
+    /// A `request_headers` (or `response_headers`) record of request 17 + n.
+    fn header(
+        sequence: u64,
+        parent: u64,
+        request: u64,
+        response: bool,
+        source: u8,
+        state: u8,
+        hop: u32,
+        unattributed: u32,
+    ) -> Value {
+        let mut payload = vec![0u8; 128];
+        payload[0] = 1;
+        payload[2] = 128;
+        payload[4] = source;
+        payload[5] = state;
+        payload[6] = if !response && source == 1 { 4 } else { 0 };
+        let (count, length): (u32, u32) = match state {
+            3 => (0, 0),
+            4 => (1, 400 * 1024),
+            _ => (1, 10),
+        };
+        payload[8..12].copy_from_slice(&count.to_le_bytes());
+        payload[12..16].copy_from_slice(&length.to_le_bytes());
+        payload[16..20].copy_from_slice(&hop.to_le_bytes());
+        if response {
+            payload[20..22].copy_from_slice(&200u16.to_le_bytes());
+        }
+        payload[40..44].copy_from_slice(&unattributed.to_le_bytes());
+        if state != 4 {
+            payload[48..80].fill(0x5a);
+        }
+        let kind = if response {
+            "response_headers"
+        } else {
+            "request_headers"
+        };
+        let mut event = lifecycle(sequence, kind, request);
+        event["payload"] = json!(hex::encode(&payload));
+        event["payload_size"] = json!(128);
+        event["parent_event_id"] = json!(parent.to_string());
+        event["artifact_id"] = json!("0");
+        event["status_code"] = json!(0);
+        event
+    }
+
+    /// A browser lifecycle record of `request`.
+    fn lifecycle(sequence: u64, kind: &str, request: u64) -> Value {
+        let mut event = event(sequence, "network", kind, 3, "");
+        event["request_id"] = json!(request.to_string());
+        event["process_id"] = json!(1);
+        event["navigation_id"] = json!("0");
+        event["browser_context_id_high"] = json!("5");
+        event["browser_context_id_low"] = json!("6");
+        for key in [
+            "parent_event_id",
+            "encoded_data_length",
+            "decoded_body_length",
+        ] {
+            event[key] = json!("0");
+        }
+        for key in ["status_code", "error_code", "resource_type", "flags"] {
+            event[key] = json!(0);
+        }
+        event["payload_truncated"] = json!(false);
+        event
+    }
+
+    #[test]
+    fn a_drop_while_a_request_ran_makes_its_missing_block_unsure() {
+        let summarize = |with_gap: bool| {
+            let root = tempfile::tempdir().unwrap();
+            let store = root.path().join("events.jsonl");
+            let artifacts = root.path().join("artifacts");
+            std::fs::create_dir_all(&artifacts).unwrap();
+            let mut events = vec![
+                lifecycle(1, "request_started", 1),
+                header(2, 1, 1, false, 1, 3, 0, 0),
+                lifecycle(4, "response_started", 1),
+                lifecycle(5, "request_completed", 1),
+            ];
+            if with_gap {
+                // A renderer's drop gap takes the category of its last record.
+                let mut gap = event(3, "canvas", "gap", 3, "2");
+                gap["process_id"] = json!(9);
+                events.push(gap);
+            }
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+            let state = CaptureState {
+                instance_id: "1:2",
+                capture_mode: "live",
+                broker_connected: true,
+                capture_stopped: false,
+                artifact_receiver_configured: false,
+                artifact_receiver_connected: false,
+                content_limits: Value::Null,
+            };
+            build(&store, &artifacts, &state).unwrap()["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|check| check["code"] == "final_headers_missing")
+                .map(|check| (check["reason"].clone(), check["severity"].clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            summarize(false),
+            vec![(json!("not_reported"), json!("warning"))]
+        );
+        assert_eq!(
+            summarize(true),
+            vec![(json!("record_dropped"), json!("warning"))]
+        );
+    }
+
+    #[test]
+    fn untracked_final_blocks_are_counted_only_for_header_records() {
+        let summarize = |events: Vec<Value>| {
+            let root = tempfile::tempdir().unwrap();
+            let store = root.path().join("events.jsonl");
+            let artifacts = root.path().join("artifacts");
+            std::fs::create_dir_all(&artifacts).unwrap();
+            let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+            std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+            let state = CaptureState {
+                instance_id: "1:2",
+                capture_mode: "live",
+                broker_connected: true,
+                capture_stopped: false,
+                artifact_receiver_configured: false,
+                artifact_receiver_connected: false,
+                content_limits: Value::Null,
+            };
+            build(&store, &artifacts, &state).unwrap()["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|check| check["code"] == "final_headers_untracked")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // A metadata-only session past the bound has no final block to miss.
+        let mut sequence = 0;
+        let mut metadata = Vec::new();
+        for request in 1..=HEADER_REQUESTS as u64 + 4 {
+            for kind in ["request_started", "response_started", "request_completed"] {
+                sequence += 1;
+                metadata.push(lifecycle(sequence, kind, request));
+            }
+        }
+        assert_eq!(summarize(metadata), Vec::<Value>::new());
+        // A content session's header records past it are counted.
+        let mut content = Vec::new();
+        let mut sequence = 0;
+        for request in 1..=HEADER_REQUESTS as u64 + 4 {
+            sequence += 1;
+            let start = sequence;
+            content.push(lifecycle(start, "request_started", request));
+            sequence += 1;
+            content.push(header(sequence, start, request, false, 1, 3, 0, 0));
+        }
+        let untracked = summarize(content);
+        assert_eq!(untracked.len(), 1);
+        assert_eq!(untracked[0]["count"], "4");
+    }
+
+    #[test]
+    fn header_refusals_and_missing_final_blocks_are_counted_with_reasons() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let mut sequence = 0;
+        let mut next = || {
+            sequence += 1;
+            sequence
+        };
+        let mut events = Vec::new();
+        // One request per case: request 1 has its final block; 2 came from the
+        // cache; 3 failed before sending; 4 is a download; 5 is still open; 6
+        // was answered without a block nobody explains; 7 redirected, and only
+        // its first hop has a network block.
+        for request in 1..=7u64 {
+            let start = next();
+            let mut started = lifecycle(start, "request_started", request);
+            if request == 4 {
+                started["loader_kind"] = json!(2);
+            }
+            events.push(started);
+            events.push(header(next(), start, request, false, 1, 3, 0, 0));
+            if matches!(request, 1 | 7) {
+                events.push(header(next(), start, request, false, 2, 3, 0, 0));
+            }
+            if request == 7 {
+                let redirect = next();
+                events.push(lifecycle(redirect, "request_redirected", request));
+                events.push(header(next(), redirect, request, false, 1, 3, 1, 0));
+            }
+            if request == 3 {
+                events.push(lifecycle(next(), "request_failed", request));
+                continue;
+            }
+            if request == 5 {
+                continue;
+            }
+            let mut response = lifecycle(next(), "response_started", request);
+            if request == 2 {
+                response["flags"] = json!(2);
+            }
+            events.push(response);
+            events.push(lifecycle(next(), "request_completed", request));
+        }
+        // Blocks and lists not retained, with their reasons, and late blocks.
+        let start = next();
+        events.push(lifecycle(start, "request_started", 8));
+        events.push(header(next(), start, 8, false, 1, 7, 0, 2));
+        events.push(header(next(), start, 8, true, 1, 4, 0, 3));
+        let mut list = vec![0u8; 128];
+        list[0] = 1;
+        list[2] = 128;
+        list[4] = 1;
+        list[5] = 6;
+        list[8] = 1;
+        list[16] = 80;
+        list[24] = 4;
+        list[32..64].fill(0x5a);
+        let mut cookie = lifecycle(next(), "cookie_list", 8);
+        cookie["payload"] = json!(hex::encode(&list));
+        cookie["payload_size"] = json!(128);
+        cookie["parent_event_id"] = json!(start.to_string());
+        cookie["artifact_id"] = json!("0");
+        events.push(cookie);
+        let lines: Vec<String> = events.iter().map(Value::to_string).collect();
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        let state = CaptureState {
+            instance_id: "1:2",
+            capture_mode: "live",
+            broker_connected: true,
+            capture_stopped: false,
+            artifact_receiver_configured: false,
+            artifact_receiver_connected: false,
+            content_limits: Value::Null,
+        };
+        let summary = build(&store, &artifacts, &state).unwrap();
+        let checks = summary["checks"].as_array().unwrap();
+        let find = |code: &str| {
+            checks
+                .iter()
+                .filter(|check| check["code"] == code)
+                .map(|check| {
+                    (
+                        check["reason"].as_str().unwrap_or("").to_owned(),
+                        check.clone(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let missing = find("final_headers_missing");
+        assert_eq!(
+            missing.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["download", "failed", "from_cache", "not_reported"]
+        );
+        for reason in ["download", "failed", "from_cache"] {
+            assert_eq!(missing[reason]["count"], "1");
+            assert_eq!(missing[reason]["severity"], "info");
+        }
+        // Request 6 and request 7's final hop: the gaps nobody explains.
+        assert_eq!(missing["not_reported"]["count"], "2");
+        assert_eq!(missing["not_reported"]["severity"], "warning");
+        assert!(
+            missing["from_cache"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP cache")
+        );
+        let refused = checks
+            .iter()
+            .filter(|check| check["code"] == "request_content_not_retained")
+            .map(|check| {
+                (
+                    check["category"].as_str().unwrap().to_owned(),
+                    check["reason"].as_str().unwrap().to_owned(),
+                    check["count"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refused,
+            vec![
+                (
+                    "cookie_list".into(),
+                    "not_captured_transfer_refused".into(),
+                    "1".into()
+                ),
+                (
+                    "request_headers".into(),
+                    "not_captured_session_budget".into(),
+                    "1".into()
+                ),
+                (
+                    "response_headers".into(),
+                    "not_captured_block_limit".into(),
+                    "1".into()
+                ),
+            ]
+        );
+        let late = &find("network_headers_unattributed")[""];
+        assert_eq!(late["blocks"], "3");
+        assert_eq!(late["lists"], "4");
+        assert!(find("final_headers_untracked").is_empty());
+    }
+
+    #[test]
+    fn budget_refusals_name_the_budget_what_it_holds_and_the_control() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let child = |sequence: u64, kind: &str, set: &dyn Fn(&mut Vec<u8>)| {
+            let mut payload = vec![0u8; 128];
+            set(&mut payload);
+            let mut event = event(sequence, "network", kind, 5, "");
+            event["payload"] = json!(hex::encode(&payload));
+            event["payload_size"] = json!(128);
+            event.to_string()
+        };
+        let lines = [
+            child(1, "response_body", &|p| {
+                p[0] = 1;
+                p[4] = 12;
+            }),
+            child(2, "response_body", &|p| {
+                p[0] = 1;
+                p[4] = 12;
+            }),
+            child(3, "response_body", &|p| {
+                p[0] = 1;
+                p[4] = 9;
+            }),
+            child(4, "request_body", &|p| p[5] = 10),
+            child(5, "request_target", &|p| {
+                p[0] = 2;
+                p[9] = 4;
+            }),
+            // A header block past its own fixed budget, which no start panel
+            // control sets.
+            header(6, 1, 0, false, 1, 7, 0, 0).to_string(),
+        ];
+        std::fs::write(&store, lines.join("\n") + "\n").unwrap();
+        // Two distinct response bodies and a repeat of one, one request body
+        // and one full target: the repeat is stored once and counted once.
+        let row = |id: u64, kind: &str, digest: char, size: u64| {
+            let hash = digest.to_string().repeat(64);
+            json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"9","navigation_id":"0",
+                "frame_id":"5","parent_artifact_id":"0","creator_event_id":"1","execution_context_id":"0",
+                "capture_origin":if kind == "response_body" {"network_response"} else {"network_request"},
+                "kind":kind,"url":"https://owned.example/x","mime_type":"application/json",
+                "byte_size":size,"sha256":hash,"sensitive":true,"content_path":format!("blobs/{hash}.bin")})
+            .to_string()
+        };
+        let manifest = [
+            row(1, "response_body", 'a', 3 * 1_048_576),
+            row(2, "response_body", 'b', 1_048_576),
+            row(3, "response_body", 'a', 3 * 1_048_576),
+            row(4, "request_body", 'c', 524_288),
+            row(5, "request_target", 'd', 524_288),
+        ];
+        std::fs::write(artifacts.join("manifest.jsonl"), manifest.join("\n") + "\n").unwrap();
+        let summarize = |content_limits: Value| {
+            let state = CaptureState {
+                instance_id: "1:2",
+                capture_mode: "live",
+                broker_connected: true,
+                capture_stopped: false,
+                artifact_receiver_configured: true,
+                artifact_receiver_connected: true,
+                content_limits,
+            };
+            build(&store, &artifacts, &state).unwrap()
+        };
+        // Different budgets, so a check that reports the other one fails.
+        let summary = summarize(json!({"version":1,"request_content_budget_mib":3,
+            "response_body_budget_mib":8,"response_media":false}));
+        let find = |summary: &Value, category: &str, reason: &str| {
+            summary["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["category"] == category && check["reason"] == reason)
+                .cloned()
+                .unwrap()
+        };
+        let response = find(&summary, "response_body", "not_captured_session_budget");
+        assert_eq!(response["count"], "2");
+        assert_eq!(response["budget_mib"], 8);
+        assert_eq!(response["retained_bytes"], (4 * 1_048_576).to_string());
+        assert_eq!(response["retained_complete"], true);
+        assert_eq!(
+            response["message"],
+            "2 response bodies arrived after this session's 8 MiB response body budget was used; 4.0 MiB of unique response bodies are retained. Raise Response body budget in the start panel (New Live Session…) for the next session; an agent's start_live_session sets response_body_budget_mib."
+        );
+        // Request bodies and full targets share the request content budget.
+        for (category, reason, noun) in [
+            (
+                "request_body",
+                "not_captured_session_budget",
+                "request bodies",
+            ),
+            (
+                "request_target",
+                "not_retained_session_budget",
+                "full request targets",
+            ),
+        ] {
+            let check = find(&summary, category, reason);
+            assert_eq!(check["budget_mib"], 3, "{category}");
+            assert_eq!(check["retained_bytes"], "1048576", "{category}");
+            let message = check["message"].as_str().unwrap();
+            assert!(message.starts_with(&format!("1 {noun} arrived after this session's 3 MiB request content budget was used; 1.0 MiB of unique request bodies and full targets are retained.")), "{message}");
+            assert!(message.contains("Raise Request content budget in the start panel (New Live Session…) for the next session"), "{message}");
+            assert!(message.contains("request_content_budget_mib"), "{message}");
+            assert!(!message.contains("REB_"), "{message}");
+        }
+        let headers = find(&summary, "request_headers", "not_captured_session_budget");
+        assert!(headers.get("budget_mib").is_none(), "{headers}");
+        assert!(headers.get("retained_bytes").is_none(), "{headers}");
+        assert!(
+            headers["message"]
+                .as_str()
+                .unwrap()
+                .contains("64 MiB of header blocks"),
+            "{headers}"
+        );
+        let media = find(&summary, "response_body", "not_captured_type");
+        assert!(
+            media.get("budget_mib").is_none(),
+            "media is not a budget refusal"
+        );
+        let media = media["message"].as_str().unwrap();
+        assert!(media.contains("Capture media and fonts is on in the start panel (New Live Session…) for the next session"), "{media}");
+        assert!(
+            media.contains("response_media") && !media.contains("REB_"),
+            "{media}"
+        );
+        // A backend that does not know the budget says so rather than guessing.
+        let unknown = find(
+            &summarize(Value::Null),
+            "response_body",
+            "not_captured_session_budget",
+        );
+        assert!(unknown["budget_mib"].is_null());
+        assert_eq!(unknown["retained_bytes"], (4 * 1_048_576).to_string());
+        assert!(
+            unknown["message"]
+                .as_str()
+                .unwrap()
+                .contains("after this session's response body budget was used; 4.0 MiB")
+        );
     }
 
     #[test]
@@ -790,6 +1865,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
+            content_limits: Value::Null,
         };
         let summary = build(&store, &artifacts, &state).unwrap();
         let gap = summary["checks"]
@@ -871,6 +1947,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
+            content_limits: Value::Null,
         };
         let summary = build(&store, &artifacts, &state).unwrap();
         assert_eq!(
@@ -963,6 +2040,7 @@ mod tests {
             capture_stopped: false,
             artifact_receiver_configured: false,
             artifact_receiver_connected: false,
+            content_limits: Value::Null,
         };
         let summary = build(
             &root.path().join("events.jsonl"),

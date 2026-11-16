@@ -12,7 +12,8 @@
 namespace reb {
 // The response_body record, see protocol/native-network-v3.md. The Brave
 // overlay's common/native_network_response_body.h is the producer half.
-inline constexpr std::uint16_t kResponseBodyPayloadVersion = 1;
+// Version 2 adds flag bit 7; version 1 records stay valid without it.
+inline constexpr std::uint16_t kResponseBodyPayloadVersion = 2;
 inline constexpr std::uint64_t kResponseBodyCaptureBytes = 16ULL * 1024ULL * 1024ULL;
 
 enum class ResponseBodyState : std::uint8_t {
@@ -37,6 +38,9 @@ inline constexpr std::uint8_t kResponseBodyStillEncoded = 1U << 3U;
 inline constexpr std::uint8_t kResponseBodyCodingsOmitted = 1U << 4U;
 inline constexpr std::uint8_t kResponseBodyCompletionUnobserved = 1U << 5U;
 inline constexpr std::uint8_t kResponseBodyContentTypePresent = 1U << 6U;
+// Version 2: a snapshot the schedule's spacing allowed was withheld by a byte
+// bound (the body's allowance, the session's snapshot share or the budget).
+inline constexpr std::uint8_t kResponseBodySnapshotsWithheld = 1U << 7U;
 inline constexpr std::uint8_t kResponseBodyKnownFlags = 0x7FU;
 
 struct ResponseBodyPayload final {
@@ -103,10 +107,14 @@ static_assert(offsetof(ResponseBodyPayload, content_type) == 64);
   const auto state = static_cast<ResponseBodyState>(value.state);
   const std::span<const char> type(value.content_type);
   const bool type_present = (value.flags & kResponseBodyContentTypePresent) != 0;
-  if (value.protocol_version != kResponseBodyPayloadVersion || value.payload_size != 128 ||
-      value.reserved0 != 0 || value.state < static_cast<std::uint8_t>(kCaptured) ||
+  const std::uint8_t known_flags =
+      kResponseBodyKnownFlags |
+      (value.protocol_version >= 2 ? kResponseBodySnapshotsWithheld : std::uint8_t{0});
+  if (value.protocol_version == 0 || value.protocol_version > kResponseBodyPayloadVersion ||
+      value.payload_size != 128 || value.reserved0 != 0 ||
+      value.state < static_cast<std::uint8_t>(kCaptured) ||
       value.state > static_cast<std::uint8_t>(kNotCapturedSessionBudget) ||
-      (value.flags & ~kResponseBodyKnownFlags) != 0 ||
+      (value.flags & static_cast<std::uint8_t>(~known_flags)) != 0 ||
       value.content_type_length > kRequestContentTypeBytes ||
       type_present != (value.content_type_length != 0) ||
       !request_detail::AllZero(type.subspan(value.content_type_length)) ||

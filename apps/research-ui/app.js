@@ -3,10 +3,24 @@ const sourceGraphPanel = createSourceGraphPanel({
   host: document.querySelector('#source-graph-host'),
   editor: document.querySelector('#source-graph-host').closest('.sources-editor'),
   button: document.querySelector('#source-graph'),
-  // Graph and Map are alternative views of one artifact; opening Map closes Graph.
-  closeOn: document.querySelector('#source-map'),
+  // Graph, Readable and Map are alternative views of one artifact; opening one closes the others.
+  closeOn: [document.querySelector('#source-map'), document.querySelector('#source-readable')],
   revealOffset: offset => revealGraphByteOffset(offset)
 });
+// Run offline (wasm_runner.js): one function, only on an explicit confirmed run.
+const wasmRunDialog = typeof createWasmRunDialog === 'function'
+  ? createWasmRunDialog({button: document.querySelector('#source-run-offline'), getSource: () => selectedSource()})
+  : null;
+const sourceReadablePanel = typeof createWasmReadablePanel === 'function' && document.querySelector('#source-readable-host')
+  ? createWasmReadablePanel({
+    host: document.querySelector('#source-readable-host'),
+    editor: document.querySelector('#source-readable-host').closest('.sources-editor'),
+    button: document.querySelector('#source-readable'),
+    closeOn: [document.querySelector('#source-graph'), document.querySelector('#source-map')],
+    revealOffset: offset => revealGraphByteOffset(offset),
+    initialFunction: () => (typeof sourceGraphPanel !== 'undefined' ? sourceGraphPanel.functionIndex?.() : null)
+  })
+  : null;
 const sourceFactsPanel = createSourceFactsPanel({
   getSource: selectedSource, onNavigate: revealSourceFactRange,
   openSidebar() { state.sourceSidebarOpen = true; renderSourceSidebar(); }
@@ -33,6 +47,27 @@ const entropyMap = createEntropyMap({
   toolbar: document.querySelector('.source-editor-toolbar'),
   getSource: selectedSource, identityOf: sourceIdentity, reveal: revealSourceByteOffset
 });
+// Library identification for the Wasm module open in Inspect
+// (wasm_identification.js); its chips reveal evidence bytes as the map does.
+const wasmIdentification = typeof createWasmIdentificationPanel === 'function' ? createWasmIdentificationPanel({
+  root: document.querySelector('#wasm-identification'), getSource: selectedSource,
+  inspecting: source => Boolean(state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact'),
+  reveal: (source, offset) => {
+    const problem = revealSourceByteOffset(source, offset, () => { if (typeof entropyMap !== 'undefined') entropyMap.close(); });
+    if (problem) elements.sourcePosition.textContent = problem;
+  }
+}) : null;
+// Compare with: the function match table between two captured Wasm modules.
+const wasmDiffPanel = typeof createWasmDiffPanel === 'function' && document.querySelector('#source-diff-view') ? createWasmDiffPanel({
+  button: document.querySelector('#source-wasm-diff'), root: document.querySelector('#source-diff-view'),
+  split: document.querySelector('#source-view-split'),
+  exclusive: [document.querySelector('#source-graph'), document.querySelector('#source-map')],
+  closeOn: [document.querySelector('#source-graph'), document.querySelector('#source-map'), document.querySelector('#source-wasm')],
+  getSource: selectedSource, nameOf: sourceDisplayName,
+  listModules: () => state.artifacts.filter(artifact => artifact.kind === 'wasm' && isSourceArtifact(artifact))
+    .map(artifact => ({artifact_id: artifact.artifact_id, sha256: artifact.sha256, url: artifact.url, name: sourceDisplayName(artifact)})),
+  openFunction: (artifactId, functionIndex) => openWasmFunction(artifactId, functionIndex)
+}) : null;
 // The Flow workspace: Graph, CFG, Lineage and Timeline share one selection
 // and trail. Its Graph pane draws every recorded stack of the session.
 const flowWorkspace = createFlowWorkspace({
@@ -94,7 +129,7 @@ if (typeof MutationObserver === 'function' && elements.sourcePosition?.parentEle
 // A wrapped second row is not an option: WebKit does not re-measure the
 // toolbar's auto grid row when a width change alters its line count, so the
 // code view would cover that row. The menu is left alone while it is open.
-const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-map', 'source-debugger-toggle'];
+const SOURCE_TOOLBAR_OVERFLOW = ['source-wasm', 'source-graph', 'source-readable', 'source-map', 'source-debugger-toggle'];
 let sourceToolbarObserver = null;
 function fitSourceToolbar() {
   const row = document.querySelector('#source-editor-controls'), more = elements.sourceMore, first = elements.sourceGoto;
@@ -988,6 +1023,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const card = document.createElement('button');
           card.type = 'button';
           card.className = 'signal-surface-card';
+          card.dataset.category = category;
           card.dataset.present = String(familyEvents.length > 0);
           card.title = `${operations.size} unique operations${top ? ` · ${top[0]} × ${top[1]}` : ' · Not observed'}`;
           card.setAttribute('aria-label', `${label}, ${familyEvents.length} events. Open activity.`);
@@ -1355,6 +1391,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const row = document.createElement('button');
           row.type = 'button';
           row.className = 'signal-event-row';
+          row.dataset.category = event.category;
           row.dataset.signalEventKey = signalEventKey(event);
           row.dataset.new = String(state.signalNewKeys.has(row.dataset.signalEventKey));
           row.setAttribute('role', 'option');
@@ -1404,7 +1441,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (loaded && !trafficIndexActive()) for (const id of loaded.keys()) if (id !== state.selectedRequestId) loaded.delete(id);
         if (!loaded?.size) {
           state.requests = state.nativeRequests;
-          markTrafficEndLostRows();
+          applyTrafficIndexAnswer();
           return;
         }
         // Rows read on selection stay selectable and replace a window copy with fewer records.
@@ -1415,7 +1452,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const windowIds = new Set(state.nativeRequests.map(request => request.id));
         for (const [id, request] of loaded) if (!windowIds.has(id)) merged.push(request);
         state.requests = merged;
-        markTrafficEndLostRows();
+        applyTrafficIndexAnswer();
       }
 
       // A service_worker_end_lost gap names its row by initiator fields, not
@@ -1428,10 +1465,64 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (request.rank < 5 && !request.failed && !request.interrupted) request.status = 'incomplete';
       }
 
-      function markTrafficEndLostRows() {
+      // Every retained row takes the index-only facts of its row in the last
+      // index answer. Polls and index answers arrive in either order, so both
+      // run this: a poll for its fresh rows, an answer for the rows it names.
+      function applyTrafficIndexAnswer() {
         const rows = state.trafficIndex?.answer?.()?.rows ?? [];
-        const lost = new Set(rows.filter(row => row.endLost).map(row => row.id));
-        if (lost.size) for (const request of state.requests) if (lost.has(request.id)) markTrafficEndLost(request);
+        const indexed = new Map(rows.map(row => [row.id, row]));
+        if (indexed.size) for (const request of state.requests) if (indexed.has(request.id)) copyTrafficIndexFacts(request, indexed.get(request.id));
+      }
+
+      // The index alone knows End lost, every row's body answer (a window row
+      // can lack its response_started), the row a reuse names with its body,
+      // and a store copy's tabs (protocol/request-index-v1.md). Copied in
+      // place; the row is then checked against the index.
+      function copyTrafficIndexFacts(request, indexed) {
+        if (!indexed) return;
+        if (indexed.endLost) markTrafficEndLost(request);
+        // A watch match's rule, where no decode came with the record (the
+        // stored-evidence window's own event window carries none).
+        if (indexed.watch && (!request.watch || request.watch.ruleRead === false)) request.watch = indexed.watch;
+        if (indexed.memoryCacheSourceRow) request.memoryCacheSourceRow = indexed.memoryCacheSourceRow;
+        if (indexed.responseBodyIndex) request.responseBodyIndex = indexed.responseBodyIndex;
+        // Tab sets and links have no request ID, so a store read lacks them;
+        // window rows link their own from the window's tab records.
+        if (request.tabsFromIndex) {
+          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
+            extensionId: indexed.extensionId, tabReason: indexed.tabReason});
+        }
+        request.indexChecked = true;
+      }
+
+      // The newest window keeps no gap records (event_window.rs), so until an
+      // index answer has held a row, its Pending cannot rule out End lost.
+      function trafficIndexUnchecked(request) {
+        return Boolean(request && state.trafficIndex && state.sessionMode !== 'preview' && request.origin !== 'sample' &&
+          !request.indexRow && request.indexChecked !== true);
+      }
+
+      // What the selected row shows from the index: an answer that changes it
+      // redraws the strip and the inspector, as the table already follows it.
+      function trafficIndexFactsKey(request) {
+        return request ? JSON.stringify([request.endLost, request.status, request.indexChecked, request.tabIds, request.tabLink,
+          request.extensionId, request.tabReason, request.responseBodyIndex, request.memoryCacheSourceRow, request.watch]) : null;
+      }
+
+      // Each index answer, first or later, reaches the rows retained for
+      // selection, so the inspector never keeps a Pending the table has
+      // replaced with End lost.
+      function trafficIndexChanged() {
+        const selected = state.selectedRequestId === null ? null : state.requests.find(request => request.id === state.selectedRequestId);
+        const before = trafficIndexFactsKey(selected);
+        applyTrafficIndexAnswer();
+        renderRequests();
+        renderNetworkNotice();
+        const current = state.selectedRequestId === null ? null : state.requests.find(request => request.id === state.selectedRequestId);
+        if (current && (current !== selected || trafficIndexFactsKey(current) !== before)) {
+          updateSelectionSummary(current);
+          renderInspector();
+        }
       }
 
       function renderShellStatus() {
@@ -1464,14 +1555,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
         // switch, so each row and body still says what was actually captured.
-        elements.sessionContent.title = `Content capture is on for this session: ${retained.join(' and ')}, kept locally. Each Traffic row and body shows what was actually captured. A Metadata only session keeps request hosts and body digests instead.`;
+        // The limits from the session context (capture_options.content_limits),
+        // so the session's budgets stay visible after the start panel closes.
+        const limits = state.requestContentCaptureEnabled ? state.sessionContentLimits : null;
+        const mib = value => `${value.toLocaleString('en-US')} MiB`;
+        const budgets = limits?.request_content_budget_mib && limits?.response_body_budget_mib
+          ? ` Budgets: ${mib(limits.request_content_budget_mib)} of request content and ${mib(limits.response_body_budget_mib)} of response bodies${
+            typeof limits.response_media === 'boolean' ? `; media and fonts ${limits.response_media ? 'kept' : 'skipped'}` : ''}.`
+          : '';
+        elements.sessionContent.title = `Content capture is on for this session: ${retained.join(' and ')}, kept locally.${budgets} Each Traffic row and body shows what was actually captured. A Metadata only session keeps request hosts and body digests instead.`;
         elements.sessionContent.setAttribute('aria-label', `Content capture: ${retained.join(' and ')}`);
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
         elements.capture.classList.toggle('preview', preview);
+        // No session is a neutral state; the ok color belongs to a live broker.
+        elements.capture.classList.toggle('idle', idle && !offline && !artifactOffline);
         elements.capture.querySelector('span:last-child').textContent = captureLabel;
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
         elements.broker.classList.toggle('offline', offline);
+        elements.broker.classList.toggle('idle', !offline && (connecting || idle || preview));
         elements.broker.textContent = connecting ? 'connecting to evidence'
           : offline ? state.connection === 'unresponsive' ? 'broker not responding' : 'broker unavailable'
             : live ? 'broker connected' : idle ? 'no capture session'
@@ -1492,6 +1594,28 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         document.title = live ? 'Origin Trace - Live Session'
           : idle ? 'Origin Trace' : preview ? 'Origin Trace - Preview' : 'Origin Trace - Demo Evidence';
+      }
+
+      // Splits the status bar's gap label into one span per clause, so each
+      // carries its own state: recorded loss reads as a failure, a sampling
+      // limit as a caution and a zero count as meta. The text is unchanged;
+      // a clause count that disagrees with the label leaves it plain.
+      function markGapClauses(gapCount, reportedDrops, namedGaps = []) {
+        const node = elements.gaps;
+        if (typeof node.replaceChildren !== 'function' || typeof namedGapTotal !== 'function') return;
+        const named = (matching, kind) => namedGapTotal(matching) > 0n ? [kind] : [];
+        const kinds = [gapCount > 0n ? 'loss' : '', ...(reportedDrops > 0n ? ['loss'] : []),
+          ...named(namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'limit'),
+          ...named(namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'limit'),
+          ...named(namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'loss')];
+        const clauses = node.textContent.split(' · ');
+        if (clauses.length !== kinds.length) return;
+        node.replaceChildren(...clauses.map((clause, index) => {
+          const span = document.createElement('span');
+          span.textContent = index ? ` · ${clause}` : clause;
+          if (kinds[index]) span.dataset.kind = kinds[index];
+          return span;
+        }));
       }
 
       function resetRequestSelection() {
@@ -3076,6 +3200,140 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.trafficSort, state.trafficSortDirection, state.trafficFlags, range && `${range.from}:${range.to}`]);
       }
 
+      // Bodies and full URLs a content session listed but did not keep because
+      // a budget was used. The counts are the session summary's, which covers
+      // the whole session (its newest 64 MiB of events); until it answers, or
+      // when it is older than the loaded rows, the loaded rows give a lower
+      // bound. Each budget names its size from the session context, the unique
+      // bytes kept against it and the start panel control for the next session.
+      const TRAFFIC_BUDGETS = [
+        {key: 'request_content_budget_mib', category: 'request', control: 'Request content budget',
+          one: 'request body or URL', many: 'request bodies or URLs',
+          reasons: [['request_body', 'not_captured_session_budget'], ['request_target', 'not_retained_session_budget']],
+          refused: request => request.body?.state === 'not_captured_session_budget' || request.fullTarget?.retention === 'not_retained_session_budget'},
+        {key: 'response_body_budget_mib', category: 'response', control: 'Response body budget',
+          one: 'response body', many: 'response bodies', reasons: [['response_body', 'not_captured_session_budget']],
+          refused: request => request.responseBody?.state === 'not_captured_session_budget'},
+      ];
+      function renderTrafficBudget() {
+        const notice = document.querySelector('#request-budget');
+        if (!notice) return;
+        const loaded = TRAFFIC_BUDGETS.map(() => 0);
+        for (const request of state.requests) TRAFFIC_BUDGETS.forEach((budget, index) => { if (budget.refused(request)) loaded[index] += 1; });
+        // Every session's summary is read once, a stored one included, since a
+        // budget can be met outside the loaded rows; it is read again, at most
+        // every 30 s, in a content session or while a budget shows as used.
+        const last = state.trafficBudgetUse?.use ?? null;
+        const used = last && Object.values(last.counts).some(Boolean);
+        if (!last || used || state.requestContentCaptureEnabled || state.sessionContentLimits || loaded.some(Boolean)) refreshTrafficBudgetUse();
+        const use = state.trafficBudgetUse?.use ?? null;
+        // Exact only while nothing has arrived since the summary was read: a
+        // live session whose event store changed, or a read that failed after
+        // it, makes the figure a lower bound. Other backends gain no events.
+        const current = Boolean(use) && !use.stale &&
+          (state.sessionMode !== 'live' || (use.marker !== null && use.marker === (state.eventEtag ?? null)));
+        const shown = TRAFFIC_BUDGETS.map((budget, index) => {
+          const summary = use ? use.counts[budget.category] ?? 0 : null;
+          const count = Math.max(loaded[index], summary ?? 0);
+          return {budget, count, exact: summary !== null && current && !use.bounded && summary >= loaded[index]};
+        }).filter(entry => entry.count > 0);
+        notice.hidden = shown.length === 0;
+        const toggle = notice.querySelector('#request-budget-toggle'), line = notice.querySelector('#request-budget-text');
+        if (!shown.length) {
+          if (line) line.textContent = '';
+          notice.dataset.expanded = 'false';
+          toggle?.setAttribute('aria-expanded', 'false');
+          return;
+        }
+        // In the budget's own unit, MiB, rather than the row sizes' decimal units.
+        const amount = bytes => bytes >= 104858
+          ? `${(bytes / 1048576).toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})} MiB`
+          : `${Math.ceil(bytes / 1024).toLocaleString('en-US')} KiB`;
+        const parts = shown.map(({budget, count, exact}) => {
+          const size = state.sessionContentLimits?.[budget.key] ?? use?.budgets[budget.category] ?? null;
+          const kept = use?.retained[budget.category];
+          return `${budget.control}${size ? ` (${size.toLocaleString('en-US')} MiB)` : ''} used`
+            + `${kept ? `, ${kept.complete ? '' : 'at least '}${amount(kept.bytes)} kept` : ''}: `
+            + `${exact ? '' : 'at least '}${count.toLocaleString('en-US')} ${count === 1 ? budget.one : budget.many} not kept`;
+        });
+        const text = `${parts.join(' · ')} · Raise ${parts.length === 1 ? 'it' : 'them'} in New Live Session… for the next session.`;
+        if (line && line.textContent !== text) line.textContent = text;
+        // The short stacked layout shows only this one-line button while a
+        // request is open; it opens the sentence above it (app.css).
+        const label = shown.length === 1 ? `${shown[0].budget.control} used` : 'Budgets used';
+        if (toggle && toggle.textContent !== label) toggle.textContent = label;
+      }
+
+      function toggleTrafficBudget(open) {
+        const notice = document.querySelector('#request-budget');
+        const toggle = notice?.querySelector('#request-budget-toggle');
+        if (!toggle) return;
+        const next = open ?? notice.dataset.expanded !== 'true';
+        notice.dataset.expanded = String(next);
+        toggle.setAttribute('aria-expanded', String(next));
+      }
+
+      // The summary's budget checks: their counts, the unique bytes kept and
+      // the budget each names, whether its event scan stopped at its bound,
+      // and the event poll's tag when it was read (`marker`), so a later store
+      // change is known. Read at most every 30 s while Traffic shows; a refused
+      // or malformed read keeps the last answer, marked stale.
+      function refreshTrafficBudgetUse() {
+        const use = state.trafficBudgetUse;
+        if (typeof fetch !== 'function' || use?.pending || (use && Date.now() - use.at < 30000)) return;
+        if (document.querySelector('#screen-traffic')?.hidden === true) return;
+        state.trafficBudgetUse = {at: Date.now(), pending: true, use: use?.use ?? null};
+        const marker = state.eventEtag ?? null;
+        const integer = text => /^(0|[1-9][0-9]{0,19})$/.test(text ?? '') ? Number(text) : null;
+        fetch('/api/session/summary', {cache: 'no-store'})
+          .then(response => response.ok ? response.json() : null)
+          .then(summary => {
+            if (!Array.isArray(summary?.checks)) throw new Error('No session summary');
+            const next = {counts: {}, retained: {}, budgets: {}, marker, stale: false,
+              bounded: summary.checks.some(check => check?.code === 'bounded_scope')};
+            for (const budget of TRAFFIC_BUDGETS) {
+              for (const check of summary.checks) {
+                if (check?.code !== 'request_content_not_retained' ||
+                    !budget.reasons.some(([category, reason]) => check.category === category && check.reason === reason)) continue;
+                next.counts[budget.category] = (next.counts[budget.category] ?? 0) + (integer(check.count) ?? 0);
+                if (integer(check.retained_bytes) !== null) {
+                  next.retained[budget.category] = {bytes: integer(check.retained_bytes), complete: check.retained_complete === true};
+                }
+                if (Number.isSafeInteger(check.budget_mib)) next.budgets[budget.category] = check.budget_mib;
+              }
+            }
+            state.trafficBudgetUse = {at: Date.now(), pending: false, use: next};
+          })
+          .catch(() => {
+            const kept = state.trafficBudgetUse?.use ?? null;
+            state.trafficBudgetUse = {at: Date.now(), pending: false, use: kept && {...kept, stale: true}};
+          })
+          .finally(renderTrafficBudget);
+      }
+
+      // The limits this session runs with, from the versioned session context
+      // (capture_options.content_limits, protocol/http-api.md), the only source
+      // of a budget's size. Read after each valid poll until it answers; a
+      // session that is not live, or keeps no content, has none.
+      function refreshSessionContentLimits() {
+        if (typeof fetch !== 'function' || state.sessionContentLimitsRead) return;
+        state.sessionContentLimitsRead = 'pending';
+        const budget = (value, max) => Number.isSafeInteger(value) && value >= 1 && value <= max ? value : null;
+        fetch('/api/session/context', {cache: 'no-store'})
+          .then(response => response.ok ? response.json() : Promise.reject(new Error(`Session context returned ${response.status}`)))
+          .then(context => {
+            const limits = context?.capture_options?.content_limits;
+            state.sessionContentLimits = limits?.version === 1 ? Object.freeze({
+              request_content_budget_mib: budget(limits.request_content_budget_mib, 4096),
+              response_body_budget_mib: budget(limits.response_body_budget_mib, 16384),
+              response_media: typeof limits.response_media === 'boolean' ? limits.response_media : null}) : null;
+            state.sessionContentLimitsRead = 'answered';
+            if (typeof renderShellStatus === 'function') renderShellStatus();
+            renderTrafficBudget();
+          })
+          .catch(() => { state.sessionContentLimitsRead = null; });
+      }
+
       // A null visible count is a query the request index has not answered yet.
       // `totals`: the index's matching sizes, hidden browser-internal rows and rows without a tab.
       function renderTrafficWindowStatus(visibleCount, totalCount, outside, note = '', totals = null) {
@@ -3094,6 +3352,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         errors.hidden = unresolved === 0;
         errors.textContent = globalThis.RebRequestTabs?.unresolvedNotice(unresolved) ?? '';
         errors.setAttribute('aria-pressed', String(state.requestTabId === 'unresolved'));
+        // Header and cookie gaps are one footer item, with their reasons a click away.
+        if (typeof renderTrafficHeaderGaps === 'function') {
+          renderTrafficHeaderGaps(document.querySelector('#request-header-gaps'),
+            document.querySelector('#request-header-gaps-detail'), state.headerCoverage);
+        }
+        renderTrafficBudget();
       }
 
       // The waterfall spans the selected time range, else the timeline of every matching start.
@@ -3408,8 +3672,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         if (!request) {
           elements.selectedMethod.textContent = '-';
+          if (elements.selectedMethod.dataset) elements.selectedMethod.dataset.method = 'safe';
           elements.selectedStatus.textContent = '-';
-          elements.selectedStatus.classList.remove('status-error');
+          elements.selectedStatus.title = '';
+          elements.selectedStatus.classList.remove('status-error', 'status-redirect', 'status-client', 'status-server');
           elements.selectedStatus.classList.add('status-neutral');
           elements.selectedUrl.textContent = state.trafficSelectionNotice || (state.requests.length ? 'Select a request to inspect its evidence.' : 'No request selected');
           elements.selectedUrl.title = '';
@@ -3417,10 +3683,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return;
         }
         elements.selectedMethod.textContent = request.method;
+        if (elements.selectedMethod.dataset) elements.selectedMethod.dataset.method = typeof trafficMethodClass === 'function' ? trafficMethodClass(request.method) : 'safe';
         elements.selectedStatus.textContent = request.endLost ? 'end lost' : request.status;
+        // Until an index answer holds the row, its Pending is the window's alone.
+        elements.selectedStatus.title = request.status === 'pending' && !request.endLost &&
+          typeof trafficIndexUnchecked === 'function' && trafficIndexUnchecked(request)
+          ? 'Pending in the newest window. The request index, which alone records an end the renderer could not join (End lost), has not answered for this request yet.'
+          : '';
         const numericStatus = Number(request.status);
         const failed = Boolean(request.failed) || Number.isFinite(numericStatus) && numericStatus >= 400;
         elements.selectedStatus.classList.toggle('status-error', failed);
+        // The strip shares the ledger's status classes, so a 404 reads the same in both.
+        elements.selectedStatus.classList.toggle('status-redirect', !failed && numericStatus >= 300 && numericStatus < 400);
+        elements.selectedStatus.classList.toggle('status-client', !request.failed && numericStatus >= 400 && numericStatus < 500);
+        elements.selectedStatus.classList.toggle('status-server', Boolean(request.failed) || numericStatus >= 500);
         elements.selectedStatus.classList.toggle('status-neutral', !failed && (!Number.isFinite(numericStatus) || request.status === 'pending'));
         const fullUrl = request.urlTruncated ? requestFullUrl(request) : null;
         elements.selectedUrl.textContent = request.origin === 'sample'
@@ -3533,7 +3809,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const indexed = state.trafficIndex?.row(id) ?? null;
         const retained = state.requests.find(request => request.id === id);
         if (retained && (!indexed || trafficRecordCount(retained) >= indexed.indexRow.records)) {
-          if (indexed?.endLost) markTrafficEndLost(retained);
+          copyTrafficIndexFacts(retained, indexed);
           selectRequest(id);
           focusRequestRow(id);
         } else if (indexed) loadTrafficRequest(indexed, true);
@@ -3554,10 +3830,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
-          // Tab sets and links have no request ID, so the store read lacks them; the index row has them.
-          Object.assign(request, {tabIds: indexed.tabIds, tabLink: indexed.tabLink, tabLinkLabel: indexed.tabLinkLabel,
-            extensionId: indexed.extensionId, tabReason: indexed.tabReason, recordsPartial: partial});
-          if (indexed.endLost) markTrafficEndLost(request);
+          // Tab sets and links have no request ID, so the store read lacks them;
+          // the index row has them, now and in each later answer.
+          Object.assign(request, {tabsFromIndex: true, recordsPartial: partial});
+          copyTrafficIndexFacts(request, indexed);
           retainTrafficRequest(request);
           rebuildTrafficRequests();
           if (select) {
@@ -4019,7 +4295,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // Response and Preview tabs, protocol/native-network-v3.md.
       const trafficResponse = createTrafficResponse({getArtifacts: () => state.artifacts, getEvents: () => state.events,
         contentSession: () => state.requestContentCaptureEnabled, readable: () => location.protocol !== 'file:',
-        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector()});
+        lookup: (record, request) => trafficArtifacts.lookup(record, trafficStoreOffset(request)), onChange: () => renderInspector(),
+        getRequests: () => state.requests,
+        // Rows open while the answered request was, of which the response view
+        // keeps the service worker's own requests for the same URL.
+        related: request => {
+          if (!state.trafficIndex?.search || !request.host) return {status: 'ready', rows: []};
+          return state.trafficIndex.search({from_ns: String(request.firstTimestamp ?? 0n), to_ns: String(request.lastTimestamp ?? 0n),
+            sort: 'start', limit: '500'}, AbortSignal.timeout(10000));
+        },
+        open: id => selectTrafficRow(id)});
       // get_request_stack positions are one-based; Sources reveals zero-based ones.
       function openResolvedFrame(resolution) {
         const line = Number.isSafeInteger(resolution.artifact_line) && resolution.artifact_line > 0 ? resolution.artifact_line - 1 : null;
@@ -4046,7 +4331,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const request = state.requests.find(candidate => candidate.id === state.selectedRequestId);
         updateSelectionSummary(request);
 
-        document.querySelector('.traffic-grid').dataset.detailOpen = String(state.trafficDetailOpen);
+        const trafficGrid = document.querySelector('.traffic-grid');
+        // The stacked footer's budget sentence never outlives the request it
+        // was opened beside, so a request opened later starts with it closed.
+        if (trafficGrid.dataset.detailOpen !== String(state.trafficDetailOpen) && typeof toggleTrafficBudget === 'function') {
+          toggleTrafficBudget(false);
+        }
+        trafficGrid.dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
         exchangeInspector.hidden = !showingGeneral;
         exchangeInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -4096,7 +4387,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         if (showingGeneral) {
           state.requestBodyViewKey = requestContentViewKey(request);
-          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, requestTargetView(request));
+          renderTrafficDetails(exchangeInspector, request, state.trafficSelectionNotice, requestTargetView(request),
+            typeof trafficIndexUnchecked === 'function' && trafficIndexUnchecked(request));
           return;
         }
         elements.requestInspector.setAttribute('aria-labelledby', `inspector-tab-${state.inspectorTab}`);
@@ -4158,8 +4450,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.fieldTabs.hidden = true;
           elements.traceDock.hidden = true;
           const lifecycleEvents = request?.events ?? [];
-          const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0);
-          const initiated = lifecycleEvents.find(event => event.type === 'request_initiated');
+          // A memory-cache reuse's initiator fields name the request whose
+          // response Blink reused, never an initiator (protocol/native-network-v3.md).
+          const correlated = lifecycleEvents.find(event => event.protocol_version >= 2 && event.initiator_process_id > 0 &&
+            event.type !== 'memory_cache_reuse');
+          const reuse = lifecycleEvents.find(event => event.type === 'memory_cache_reuse');
+          const initiated = lifecycleEvents.find(event => event.type === 'request_initiated') ?? reuse;
           const contextEvent = lifecycleEvents.find(event => browserContextToken(event));
           if (correlated || initiated || contextEvent) {
             const source = correlated ?? initiated ?? contextEvent;
@@ -4179,6 +4475,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               );
             }
             details.push({ key: 'Frame', value: integerText(source, 'frame_id'), type: 'id' });
+            if (reuse && !correlated) {
+              details.push({ key: 'Reused response of', value: request.memoryCacheSource
+                ? `${request.memoryCacheSource}: Blink reused this request's response; it did not start this load`
+                : 'No request named: no request was made', type: request.memoryCacheSource ? 'id' : 'unavailable' });
+            }
             requestStackPanel.render(elements.fieldTree, request, inspectorDetailRows(details));
           } else {
             const empty = document.createElement('div');
@@ -5958,7 +6259,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const runnerBusy = state.localAnalystRunner?.active_run_id !== null && state.localAnalystRunner?.active_run_id !== undefined &&
           state.localAnalystRunner?.active_run_id !== state.analystActiveRunId;
         analystElements.runnerBadge.textContent = runnerAvailable ? runnerBusy ? 'Runner busy' : 'Runner ready' : 'Runner unavailable';
-        analystElements.runnerBadge.style.color = runnerAvailable ? '' : 'var(--red)';
+        if (analystElements.runnerBadge.dataset) analystElements.runnerBadge.dataset.kind = runnerAvailable ? runnerBusy ? 'busy' : '' : 'offline';
         analystElements.includeSelected.disabled = !selected || state.analystRunPending;
         if (!selected) analystElements.includeSelected.checked = false;
         analystElements.sensitiveRow.hidden = !(selected?.sensitive && analystElements.includeSelected.checked);
@@ -6352,7 +6653,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function renderDecoder() {
         toolsElements.engineBadge.textContent = state.decoderEngine.available ? (state.decoderEngine.busy ? 'Engine busy' : 'Native engine ready') : 'Engine unavailable';
-        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? '' : 'offline';
+        toolsElements.engineBadge.dataset.kind = state.decoderEngine.available ? state.decoderEngine.busy ? 'busy' : '' : 'offline';
         let parsedInput = null;
         let inputError = null;
         try { parsedInput = state.decoderInputSnapshot ? decoderBase64ToBytes(state.decoderInputSnapshot.base64) : decoderParseInput(); }
@@ -7015,6 +7316,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const icon = document.createElement('span');
           icon.className = 'source-file-icon';
           icon.dataset.icon = sourceTreeFileIcon(source);
+          icon.dataset.origin = source.capture_origin ?? '';
           icon.textContent = sourceIcon(source);
           icon.title = sourceKindLabel(source.kind)?.[1] ?? source.kind;
           const name = document.createElement('span');
@@ -7616,6 +7918,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           displayed.append(text);
           if (excerpt.columnEnd < excerpt.fullLength) displayed.append(textElement('span', 'source-excerpt-notice', ` ⟪ columns ${excerpt.columnEnd + 1}–${excerpt.fullLength} omitted; use Find or Go to column ⟫`));
           row.append(gutter, displayed);
+          if (view.wasmRows && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow(row, view.wasmRows[index], source.sha256);
           return row;
         });
         elements.sourceCode.replaceChildren(...nodes);
@@ -7673,6 +7976,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function renderSources() {
         const source = selectedSource();
         if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.sync(source);
+        if (typeof wasmRunDialog !== 'undefined' && wasmRunDialog) wasmRunDialog.sync(source);
+        if (typeof sourceReadablePanel !== 'undefined' && sourceReadablePanel) sourceReadablePanel.sync(source);
+        if (typeof wasmDiffPanel !== 'undefined' && wasmDiffPanel) wasmDiffPanel.sync(source);
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
         const view = source?.content !== undefined ? sourceDisplayView(source) : null;
@@ -7689,6 +7995,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         syncSourceDisplayControls(source, view);
         renderSourceContent(source, view);
         if (typeof entropyMap !== 'undefined') entropyMap.sync();
+        if (typeof wasmIdentification !== 'undefined' && wasmIdentification) wasmIdentification.sync();
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
         const reveal = state.sourceReveal;
@@ -8539,6 +8846,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return true;
       }
 
+      // A function from the module comparison opens in Graph on its own
+      // module; Back returns to the comparison's module.
+      function openWasmFunction(artifactId, functionIndex) {
+        if (investigationScreen() === 'sources') investigationNavigation?.record();
+        // A function of the module already open keeps the selection, so the
+        // table is closed here rather than by the selection change.
+        if (typeof wasmDiffPanel !== 'undefined' && wasmDiffPanel) wasmDiffPanel.close();
+        if (selectArtifact(artifactId, null, {passive: true}) === false) return false;
+        if (investigationScreen() !== 'sources') showScreen('sources');
+        return typeof sourceGraphPanel !== 'undefined' && sourceGraphPanel.openFunction(functionIndex);
+      }
+
       function closeSource(source) {
         if (!sourceIsCurrent(source)) return;
         releaseSourcePreview(source);
@@ -8728,6 +9047,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function showScreen(name, trigger = null) {
         if (typeof sourceGraphPanel !== 'undefined') sourceGraphPanel.setScreenVisible(name === 'sources');
+        if (typeof sourceReadablePanel !== 'undefined' && sourceReadablePanel) sourceReadablePanel.setScreenVisible(name === 'sources');
+        if (typeof wasmDiffPanel !== 'undefined' && wasmDiffPanel) wasmDiffPanel.setScreenVisible(name === 'sources');
         const screenName = name === 'backtraces' ? 'backtrace' : name;
         if (!document.getElementById(`screen-${screenName}`)) return;
         investigationBeforeScreen(screenName);
@@ -8865,6 +9186,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.nativeRequests = requestsFromEvents(body.network_events ?? state.events, eventOrigin);
           globalThis.RebRequestTabs?.attachRequestTabs(state.nativeRequests, body.network_events ?? state.events);
           state.captureExclusions = globalThis.RebNetworkScope?.captureExclusionTotals(body.network_events ?? state.events) ?? null;
+          // Header blocks and cookie lists not retained or joined, and requests without final headers.
+          state.headerCoverage = typeof trafficHeaderCoverage === 'function' ? trafficHeaderCoverage(state.nativeRequests) : null;
           rebuildTrafficRequests();
           state.trafficIndex?.invalidate();
           let selectedRequest = state.requests.find(request => request.id === state.selectedRequestId);
@@ -8878,6 +9201,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             : (state.events.length > 0 ? 'last valid evidence retained' : 'no live evidence');
           renderShellStatus();
           elements.gaps.textContent = eventGapLabel(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
+          if (typeof markGapClauses === 'function') markGapClauses(shownSequenceGaps(), shownQueueDrops(), shownNamedGaps());
           renderNetworkNotice();
           renderRequests();
           renderInspector();
@@ -8912,6 +9236,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // poll keeps the connection state current meanwhile.
       async function refreshPollDependents(eventsChanged) {
         retryTrafficUnreadSelection();
+        // Guarded for the checks that run this section alone.
+        if (typeof refreshSessionContentLimits === 'function') refreshSessionContentLimits();
         if (state.refreshingDependents) {
           if (eventsChanged) renderVmLab();
           return;
@@ -9241,11 +9567,49 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
       });
+      {
+        const gaps = document.querySelector('#request-header-gaps');
+        const gapsDetail = document.querySelector('#request-header-gaps-detail');
+        gaps?.addEventListener('click', () => {
+          if (typeof setTrafficHeaderGapsOpen === 'function') {
+            setTrafficHeaderGapsOpen(gaps, gapsDetail, gaps.getAttribute('aria-expanded') !== 'true');
+          }
+        });
+        // Escape closes the breakdown and returns focus to its button.
+        for (const node of [gaps, gapsDetail]) {
+          node?.addEventListener('keydown', event => {
+            if (event.key !== 'Escape' || gaps.getAttribute('aria-expanded') !== 'true') return;
+            event.preventDefault();
+            event.stopPropagation();
+            setTrafficHeaderGapsOpen(gaps, gapsDetail, false);
+            gaps.focus();
+          });
+        }
+      }
       document.querySelector('#request-unresolved').addEventListener('click', () => {
         state.requestTabId = state.requestTabId === 'unresolved' ? 'all' : 'unresolved';
         state.requestDomain = 'all';
         renderRequests();
       });
+      // The stacked layout's one-line budget button opens the whole sentence
+      // over the ledger's rows. Escape closes it and keeps focus on the button;
+      // focus leaving it or a press anywhere else closes it too, so it never
+      // stays over rows that the researcher is reaching for.
+      const trafficBudget = document.querySelector('#request-budget');
+      document.querySelector('#request-budget-toggle').addEventListener('click', () => toggleTrafficBudget());
+      trafficBudget.addEventListener('keydown', event => {
+        if (event.key !== 'Escape' || trafficBudget.dataset.expanded !== 'true') return;
+        event.preventDefault();
+        event.stopPropagation();
+        toggleTrafficBudget(false);
+        document.querySelector('#request-budget-toggle').focus();
+      });
+      trafficBudget.addEventListener('focusout', event => {
+        if (trafficBudget.dataset.expanded === 'true' && !trafficBudget.contains(event.relatedTarget)) toggleTrafficBudget(false);
+      });
+      document.addEventListener('pointerdown', event => {
+        if (trafficBudget.dataset.expanded === 'true' && !trafficBudget.contains(event.target)) toggleTrafficBudget(false);
+      }, true);
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;
         state.requestType = 'all';
@@ -9961,6 +10325,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderSourceTree(false);
         renderSourceTabs();
         refreshVmHandlerNames();
+        // Wasm function names (wasm_function_names.js) patch their views in place.
+        if (typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.changed();
       }
 
       // Names change without a new VM workspace. Patch the listing, Symbol Tree
@@ -10101,7 +10467,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       state.trafficIndex = location.protocol === 'file:' || typeof createTrafficIndex !== 'function' ? null
-        : createTrafficIndex({onChange: () => { renderRequests(); renderNetworkNotice(); }});
+        : createTrafficIndex({onChange: trafficIndexChanged});
       if (typeof mountTrafficColumns === 'function') mountTrafficColumns(document.querySelector('#screen-traffic .request-table'));
       state.trafficOverview = typeof mountTrafficOverview === 'function'
         ? mountTrafficOverview(document.querySelector('#request-overview'), {onRange: range => {
@@ -10126,7 +10492,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         refreshDecoderEngine();
         evidenceNames.load();
 
-        setInterval(refresh, 2000);
+        // The same tick asks whether the names library changed (one stat on
+        // the backend while it has not), so names an agent sets appear.
+        setInterval(() => { refresh(); evidenceNames.poll?.(); }, 2000);
       }
 
       initializeInvestigationNavigation();

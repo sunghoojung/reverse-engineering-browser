@@ -1,0 +1,14 @@
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+index 8e25a67..3134763 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+@@ -463,6 +463,9 @@ void RecordNativeMemoryCacheReuse(const FetchContext& context,
+   reuse.static_data = is_static_data;
+   reuse.status_code = resource.GetResponse().HttpStatusCode();
+   reuse.decoded_body_length = resource.GetResponse().DecodedBodyLength();
++  // URLLoader::Context sets each response's RequestId() to the GenerateRequestId
++  // value its request_initiated record carries, so the reuse names that row.
++  reuse.source_request_id = resource.GetResponse().RequestId();
+   sink.RecordMemoryCacheReuse(admission, reuse);
+ }
+ 

@@ -142,20 +142,25 @@ it.
   paths, queries and body bytes are sensitive capture: they are retained only
   with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
   mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
-  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` sets another
-  budget. Those bytes include uploaded files, blobs and stream bodies, which the
+  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` or the start panel's
+  **Request content budget** sets another, from 1 MiB to 4 GiB. Those bytes
+  include uploaded files, blobs and stream bodies, which the
   browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
   sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
-  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget; images,
+  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget, including
+  partial copies of bodies still arriving, which use at most a quarter of it; images,
   audio, video and fonts that page elements load need
-  `REB_CAPTURE_RESPONSE_MEDIA=1`. See [Native network v3](protocol/native-network-v3.md).
+  `REB_CAPTURE_RESPONSE_MEDIA=1` or the start panel's **Capture media and
+  fonts**, and the panel's **Response body budget** sets that budget, from
+  1 MiB to 16 GiB. See [Native network v3](protocol/native-network-v3.md).
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
   ([request index v1](protocol/request-index-v1.md)).
   A load Blink answers from a resource it already holds (its memory cache, or
   a `data:` URL or MHTML archive resource it decodes itself) makes no request
   and is still recorded as one row: its host, status, decoded size, Blink
-  resource type and frame always, and its path and query only in content
+  resource type, frame and the ID of the renderer request that loaded it
+  always, and its path and query only in content
   capture and only as a 116-byte prefix, which for a `data:` URL is the start
   of the data itself. At most 4,096 are recorded per renderer configuration;
   the rest, and those in pages that are not ordinary, such as an SVG image's
@@ -189,7 +194,11 @@ it.
   the titlebar labels that session "Content capture". **Metadata
   only** is the opt-out, chosen in the start panel that **New Live Session…**
   opens, or with `REB_AUTOMATIC_CAPTURE_MODE=metadata` for the automatic
-  launch too; any other value but `content` also selects it. The app saves no choice between launches, and a choice made in the
+  launch too; any other value but `content` also selects it. A Metadata session
+  the app starts or retries gets no request content, Canvas images or
+  invocation value digests, whatever the environment holds, and Retry starts
+  with the failed start's content switches, never a new reading of the
+  environment. The app saves no choice between launches, and a choice made in the
   start panel holds for the rest of that app run. The standalone `make live` launcher
   leaves request content and Canvas images off unless set to `1`. Agent-started
   sessions (`reb-api session start`, MCP `start_live_session`) retain request
@@ -294,7 +303,34 @@ it.
   embeds one. No DevTools protocol or page JavaScript is involved.
 - Run mutable tools in a disposable experiment context by default. Experiments
   do not read or modify baseline tabs, production cookies, storage, or
-  credentials. Never execute extracted code automatically.
+  credentials. Never execute extracted code automatically or as a side effect
+  of analysis.
+- The offline Wasm runner (`run_wasm_function`) is the only path that executes
+  captured code. It runs one function of a captured module only on an explicit
+  researcher or agent request that sets `confirm_offline_execution`. It runs
+  offline, in the pure `wasmi` interpreter (no JIT) inside the local backend,
+  under a fuel limit, one total limit on the memory of all its memories, one
+  total limit on the elements of all its tables, a call-depth limit and a
+  wall-clock deadline. A module with more memories, tables, constant
+  expression operators or element segment items than the runner's fixed
+  bounds is refused or stopped before any of its code runs. Compiling and
+  instantiating a module cannot be interrupted; those bounds and the 16 MiB
+  module cap limit them, and compiling can hold about 30 times the module's
+  size in memory. Every import is a stub that returns only values
+  the request supplies, or traps, so the module reaches no filesystem, network,
+  clock, randomness, browser, page or other host state. Nothing runs it
+  automatically, from analysis, or on a schedule. A run is a derived experiment
+  record, never captured evidence.
+- Running captured code is a content read. Everything a run reports can
+  disclose values the code computed: its results and memory bytes, and also
+  its outcome, trap kind, fuel used, import call count and arguments, memory
+  growth, timing, and the answer to repeated expectations. No subset of a run's
+  record is safe to show below Full access. So an agent can run captured code,
+  or read stored runs (`get_wasm_runs`), only at Full access
+  (`--permission full`, which sets `--allow-content`), and running also needs
+  `--allow-effects` and `confirm_offline_execution`. At Read only, Ask for
+  actions and Auto-approve actions neither tool is listed, and a call is refused
+  before anything is sent.
 
 - The native Console defaults to a separate disposable browser profile. Explicit
   Live capture mode additionally requires a specifically selected native document
@@ -397,6 +433,12 @@ it.
   `--allow-content`) sends captured content to that client's model provider in
   the same way, and `--allow-sensitive-capture` is the same separate consent
   for sensitive options in the sessions it starts.
+- Researcher names for Wasm functions (Analyst evidence names) are joined
+  into the Wasm reads as `analyst_name` at every level, like identifiers, so
+  they go to the provider with the structural results. They are the
+  researcher's own text, at most 80 characters; do not put a captured secret
+  in a name. Request, source and VM handler names are not joined into any
+  read. See [Wasm function names](protocol/wasm-function-names-v1.md).
 - The agent can instead use the researcher's own subscription. A ChatGPT
   subscription signs in through OpenAI token sharing in the researcher's
   browser; its tokens and client registration stay in the macOS Keychain and
@@ -428,7 +470,7 @@ of the data-handling policy:
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
 | Agent-started sessions get request content, document-start permission, invocation sites and digests only when the start request names them, never inherited | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
-| App-started digest default and agent-session exclusion | `LiveSessionCoordinator.captureDefaults` (Content mode with saved sites only, explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
+| App-started Metadata content switches, digest default and agent-session exclusion | `LiveCaptureContent.resolve` and `LiveSessionCoordinator.captureDefaults` (Metadata turns request content, Canvas images and digests off; digests by default in Content mode with saved sites only, where an explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
 | In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level and sensitive choice consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
 | Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
 | Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |

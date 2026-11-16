@@ -16,7 +16,7 @@ const part = (source, first, last) => {
   return source.slice(start, end);
 };
 
-function fixture(appSource = app, trafficSource = traffic, count = 5000) {
+function fixture(appSource = app, trafficSource = traffic, count = 5000, extra = {}) {
   const stats = {};
   const clearStats = () => {
     for (const name of ['created', 'geometryReads', 'scrollWrites', 'attributeWrites', 'moves', 'searches', 'sorts', 'scopes', 'inspector', 'profiles', 'history']) stats[name] = 0;
@@ -105,7 +105,7 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
       return id === undefined ? [] : [{id: `request-${id}`, method: 'GET', path: `https://fixture.invalid/item-${id}`, status: 200, time: 1,
         type: 'xhr', origin, tabId: '1', firstTimestamp: 1n, operation: 'authored_fixture', events, details: []}];
     },
-    setImmediate};
+    setImmediate, ...extra};
   const instrument = `
     const search = trafficSearchRequests;
     trafficSearchRequests = (...args) => { stats.searches++; return search(...args); };
@@ -114,13 +114,14 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
     const scopes = renderRequestScopes;
     renderRequestScopes = (...args) => { stats.scopes++; return scopes(...args); };
   `;
-  const added = ['selectTrafficRow', 'loadTrafficRequest', 'rebuildTrafficRequests', 'renderIndexedRequests', 'trafficIndexActive', 'createTrafficIndex'];
+  const added = ['selectTrafficRow', 'loadTrafficRequest', 'rebuildTrafficRequests', 'renderIndexedRequests', 'trafficIndexActive', 'createTrafficIndex',
+    'trafficIndexChanged', 'trafficIndexUnchecked', 'trafficIndexRequest'];
   const rebuild = appSource.includes('      function rebuildTrafficRequests(') ? part(appSource, '      function rebuildTrafficRequests(', '      function renderShellStatus(') : '';
   const api = runInNewContext(trafficSource + '\n' +
     part(appSource, '      function requestDomain(', '      function requestTraceRoot(') + rebuild + instrument +
-    `;({renderRequests, selectRequest, moveRequestSelection, remountTrafficRows, ${added.map(name => `${name}: typeof ${name} === 'function' ? ${name} : undefined`).join(', ')}})`, context);
+    `;({renderRequests, selectRequest, moveRequestSelection, remountTrafficRows, renderTrafficBudget: typeof renderTrafficBudget === 'function' ? renderTrafficBudget : undefined, ${added.map(name => `${name}: typeof ${name} === 'function' ? ${name} : undefined`).join(', ')}})`, context);
   const rows = () => elements.requestRows.querySelectorAll('.request-row');
-  return {state, elements, document, stats, clearStats, api, rows, nodes};
+  return {state, elements, document, stats, clearStats, api, rows, nodes, context};
 }
 
 {
@@ -208,8 +209,8 @@ function fixture(appSource = app, trafficSource = traffic, count = 5000) {
 
 // The request index path: a real createTrafficIndex over scripted answers, the
 // production selection and load functions, and the shared row renderer.
-function indexFixture({windowCount = 6} = {}) {
-  const t = fixture(app, traffic, windowCount);
+function indexFixture({windowCount = 6, holdIndex = false} = {}) {
+  const t = fixture(app, traffic, windowCount, {renderNetworkNotice() {}});
   const {state, api} = t;
   state.sessionMode = 'live'; state.requests.forEach(row => { row.origin = 'live'; }); state.nativeRequests = state.requests;
   state.trafficDetailOpen = false; state.trafficAppliedAnswer = null; state.trafficSeenThrough = null;
@@ -228,14 +229,26 @@ function indexFixture({windowCount = 6} = {}) {
   const held = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return {promise, resolve}; };
   const answer = body => new Response(JSON.stringify(body), {headers: {ETag: '"a"'}});
   let indexRows = [];
-  state.trafficIndex = api.createTrafficIndex({onChange: () => api.renderRequests(), fetcher: async (url, init) => {
+  // A held index read answers only when released, on a later macrotask, as a
+  // backend busy with other reads would answer after the event poll.
+  const indexGates = [];
+  const indexAnswer = () => new Promise(resolve => setImmediate(() => resolve(answer(document_(indexRows)))));
+  // The production handler when app.js has one (it is wired to the index below).
+  const onChange = () => typeof api.trafficIndexChanged === 'function' ? api.trafficIndexChanged() : api.renderRequests();
+  state.trafficIndex = api.createTrafficIndex({onChange, fetcher: async (url, init) => {
     reads.push(url);
-    if (url.startsWith('/api/requests?')) return answer(document_(indexRows));
+    if (url.startsWith('/api/requests?')) {
+      if (!holdIndex) return answer(document_(indexRows));
+      const gate = held();
+      indexGates.push(gate);
+      return gate.promise.then(indexAnswer);
+    }
     const gate = held();
     pending.push({url, signal: init.signal, gate});
     return gate.promise;
   }});
-  return {...t, row, setIndexRows: rows => { indexRows = rows; }, pending, reads, answer};
+  const releaseIndex = () => { for (const gate of indexGates.splice(0)) gate.resolve(); };
+  return {...t, row, setIndexRows: rows => { indexRows = rows; }, pending, reads, answer, releaseIndex, indexGates};
 }
 const quiet = async () => { for (let turn = 0; turn < 8; turn++) await new Promise(resolve => setImmediate(resolve)); };
 const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) => ({session_id: '1', process_id: 7, sequence_number: String(sequence + 1), monotonic_time_ns: String(sequence + 1), request_id: id}));
@@ -298,6 +311,34 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   assert.equal(t.state.trafficLoaded.get('request-5').endLost, true, 'The store copy keeps the index row\'s End lost');
 }
 {
+  // The row a reuse names, with its body, lives only in the index row: the
+  // store copy, a row the window holds whole and a later poll all keep it.
+  const source = {id: 'S1:R9:41', found: true, path: '/sprite', type: 'img', response_body: {case: 'captured', artifact_id: '7'}};
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([{...t.row(5, 2), memory_cache_source: source, response_body: {case: 'memory_cache'}}]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.deepEqual(t.state.trafficLoaded.get('request-5').memoryCacheSourceRow, source, 'The store copy keeps the reuse\'s source');
+  const w = indexFixture({windowCount: 2});
+  w.state.requests = w.state.nativeRequests = w.state.nativeRequests.map(request =>
+    ({...request, events: [{}, {}], details: [], origin: 'live', rank: 2, status: 'pending'}));
+  const whole = w.state.requests[1];
+  w.setIndexRows([{...w.row(1, 2), memory_cache_source: source}, {...w.row(0, 2), response_body: {case: 'captured', artifact_id: '9'}}]);
+  w.api.renderRequests(); await quiet();
+  w.api.selectTrafficRow(whole.id);
+  const held = () => w.state.requests.find(request => request.id === whole.id);
+  assert.deepEqual(held().memoryCacheSourceRow, source, 'A row the window holds whole keeps the reuse\'s source');
+  w.state.nativeRequests = w.state.nativeRequests.map(request => ({...request, memoryCacheSourceRow: null}));
+  w.api.rebuildTrafficRequests();
+  assert.deepEqual(held().memoryCacheSourceRow, source, 'A later poll keeps the reuse\'s source');
+  // Every window row takes its row's body answer: its response_started may have left the window.
+  const other = w.state.requests.find(request => request.id !== whole.id);
+  assert.equal(other.responseBodyIndex?.case, 'captured', 'A window row without a reuse source keeps its index body answer');
+}
+{
   // The window can hold the row whole and still lack the gap: selecting it, and
   // the rebuild after a later poll, keep End lost from the index row.
   const t = indexFixture({windowCount: 2});
@@ -314,6 +355,172 @@ const eventsOf = (id, records) => Array.from({length: records}, (_, sequence) =>
   t.api.rebuildTrafficRequests();
   assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'A later poll keeps End lost');
   assert.equal(t.state.requests.find(request => request.id !== whole.id).endLost, false, 'Only the named row is marked');
+}
+// The index's own answer reaches the selected row: the app wires its handler.
+assert.match(app, /createTrafficIndex\(\{onChange: trafficIndexChanged\}\)/, 'The request index reports its answers to trafficIndexChanged');
+const pendingWindow = t => {
+  t.state.requests = t.state.nativeRequests = t.state.nativeRequests.map(request =>
+    ({...request, events: [{}, {}], details: [], origin: 'live', rank: 2, status: 'pending', endLost: false}));
+  return t.state.requests[1];
+};
+{
+  // The newest window keeps no gap records (event_window.rs), so it cannot see
+  // a service_worker_end_lost gap. A row chosen before the index first answers
+  // reads Pending, not yet checked against the index; when the index answers,
+  // the selected copy, the strip and the inspector read End lost with the
+  // table, with no poll and no second click (rendered test29).
+  const t = indexFixture({windowCount: 2, holdIndex: true});
+  const lost = pendingWindow(t);
+  t.setIndexRows([{...t.row(1, 2), end_lost: true, response_body: {case: 'end_lost'}}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  assert(t.state.trafficIndex.answer() === null && t.indexGates.length === 1, 'The first index read is still outstanding');
+  t.rows().find(row => row.dataset.requestId === lost.id).click();
+  const shown = () => t.state.requests.find(request => request.id === lost.id);
+  assert.equal(t.state.selectedRequestId, lost.id, 'A window row selects while the index has not answered');
+  assert.equal(t.elements.selectedStatus.textContent, 'pending', 'Before the index answers, the window says Pending');
+  assert.equal(t.api.trafficIndexUnchecked?.(shown()), true, 'and that Pending is not yet checked against the index');
+  const drawn = t.stats.inspector;
+  t.releaseIndex(); await quiet();
+  assert(t.state.trafficIndex.answer() !== null, 'The index answered');
+  assert.equal(t.rows().find(row => row.dataset.requestId === lost.id)?.getAttribute('aria-label')?.includes('End lost'), true,
+    'The table reads End lost from the index row');
+  assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'The selected copy reads End lost once the index answers');
+  assert.equal(shown().responseBodyIndex?.case, 'end_lost', 'and takes its body answer');
+  assert.equal(t.elements.selectedStatus.textContent, 'end lost', 'The strip follows the index answer');
+  assert(t.stats.inspector > drawn, 'The inspector is drawn again from the index answer');
+  assert.equal(t.api.trafficIndexUnchecked(shown()), false, 'The row is checked against the index');
+  assert.equal(t.state.requests.find(request => request.id !== lost.id).endLost, false, 'Only the named row is marked');
+  // A later answer that changes nothing for the selection draws nothing again.
+  const settled = t.stats.inspector;
+  t.state.trafficIndex.invalidate(); await quiet();
+  assert.equal(t.stats.inspector, settled, 'An unchanged answer does not redraw the inspector');
+}
+{
+  // A watch match's rule is an index row fact too: a later index answer that
+  // changes only it reaches the selected row and draws the inspector again.
+  const t = indexFixture({windowCount: 2, holdIndex: true});
+  const watched = pendingWindow(t);
+  t.setIndexRows([t.row(1, 2), t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.rows().find(row => row.dataset.requestId === watched.id).click();
+  t.releaseIndex(); await quiet();
+  const shown = () => t.state.requests.find(request => request.id === watched.id);
+  assert.equal(shown().watch ?? null, null, 'The first answer names no watch');
+  const drawn = t.stats.inspector;
+  t.setIndexRows([{...t.row(1, 2), watch: {session_id: '1', process_id: 7, sequence_number: '3', frame_id: '9', rule: 2, method_matched: true}}, t.row(0, 2)]);
+  t.state.trafficIndex.invalidate(); await quiet();
+  t.releaseIndex(); await quiet();
+  assert.equal(shown().watch?.rule, 2, 'The selected copy takes the later answer\'s watch');
+  assert(t.stats.inspector > drawn, 'The inspector is drawn again for it');
+}
+{
+  // Rows are reused by request ID, so a row first drawn from the newest window
+  // keeps its element when the index answers. A click on it afterwards selects
+  // through the index, as a row first drawn from the index does: a row the
+  // window does not hold whole is read from the store before it opens.
+  const t = indexFixture({windowCount: 2, holdIndex: true});
+  const partial = pendingWindow(t);
+  t.setIndexRows([{...t.row(1, 9), end_lost: true}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  const element = t.rows().find(row => row.dataset.requestId === partial.id);
+  t.releaseIndex(); await quiet();
+  assert.equal(t.rows().find(row => row.dataset.requestId === partial.id), element, 'The index answer reuses the window row\'s element');
+  element.click();
+  assert.equal(t.state.trafficLoadingId, partial.id, 'The reused row selects through the index: its records are read from the store');
+  assert.equal(t.state.selectedRequestId, null, 'and it opens only once they are read');
+}
+{
+  // A poll rebuilds its rows from the index answer it has, which can predate
+  // the gap; the next answer, read because of that poll, names it. The
+  // selected row follows that answer without waiting for another poll.
+  const t = indexFixture({windowCount: 2});
+  const lost = pendingWindow(t);
+  t.setIndexRows([t.row(1, 2), t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow(lost.id);
+  const shown = () => t.state.requests.find(request => request.id === lost.id);
+  assert.deepEqual([shown().endLost, t.elements.selectedStatus.textContent], [false, 'pending'], 'The first answer has no gap');
+  assert.equal(t.api.trafficIndexUnchecked?.(shown()), false, 'A row the index answered for is checked');
+  t.setIndexRows([{...t.row(1, 2), end_lost: true}, t.row(0, 2)]);
+  t.state.trafficIndex.invalidate(); await quiet();
+  assert.deepEqual([shown().endLost, shown().status], [true, 'incomplete'], 'The later answer marks the selected row');
+  assert.equal(t.elements.selectedStatus.textContent, 'end lost', 'The strip follows the later answer');
+}
+{
+  // A store copy takes its tabs from the index row; a later answer that links
+  // the row to more tabs reaches the copy, as it reaches the table.
+  const t = indexFixture({windowCount: 1});
+  t.setIndexRows([t.row(5, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow('request-5');
+  await quiet();
+  t.pending[0].gate.resolve(t.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  const copy = () => t.state.requests.find(request => request.id === 'request-5');
+  assert.deepEqual([...copy().tabIds], ['1'], 'The store copy has the index row\'s tabs');
+  const drawn = t.stats.inspector;
+  t.setIndexRows([{...t.row(5, 2), tab_ids: ['1', '2'], tab_link: {kind: 2, count: 2, complete: true}}]);
+  t.state.trafficIndex.invalidate(); await quiet();
+  assert.deepEqual([...copy().tabIds], ['1', '2'], 'The store copy follows the later answer\'s tabs');
+  assert.deepEqual({...copy().tabLink}, {kind: 2, count: 2, complete: true}, 'and its tab link');
+  assert(t.stats.inspector > drawn, 'The inspector is drawn again for the new tabs');
+}
+{
+  // A watch match's rule comes from the backend's decode beside the record;
+  // where none came (the stored-evidence window's own window), the index row
+  // names it, on every path that rebuilds the row.
+  const watch = {session_id: '1', process_id: 7, sequence_number: '3', frame_id: '9', rule: 2, method_matched: true};
+  const shownWatch = {sessionId: '1', processId: 7, sequenceNumber: '3', frameId: '9', rule: 2, methodMatched: true, ruleRead: true};
+  const read = indexFixture({windowCount: 1});
+  read.setIndexRows([{...read.row(5, 2), watch}]);
+  read.api.renderRequests(); await quiet();
+  read.api.selectTrafficRow('request-5');
+  await quiet();
+  read.pending[0].gate.resolve(read.answer({events: eventsOf('5', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(JSON.stringify(read.state.trafficLoaded.get('request-5').watch), JSON.stringify(shownWatch), 'The store copy keeps the index row\'s watch');
+  const t = indexFixture({windowCount: 2});
+  t.state.requests = t.state.nativeRequests = t.state.nativeRequests.map(request =>
+    ({...request, events: [{}, {}], details: [], origin: 'live', watch: null}));
+  const whole = t.state.requests[1], other = t.state.requests[0];
+  t.setIndexRows([{...t.row(1, 2), watch}, t.row(0, 2)]);
+  t.api.renderRequests(); await quiet();
+  t.api.selectTrafficRow(whole.id);
+  assert.equal(t.state.selectedRequestId, whole.id, 'A row the window holds whole selects without a store read');
+  const shown = () => t.state.requests.find(request => request.id === whole.id);
+  assert.equal(JSON.stringify(shown().watch), JSON.stringify(shownWatch), 'The selected window row is marked watched');
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, watch: null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch?.rule, 2, 'A later poll keeps the watch mark');
+  assert.equal(t.state.requests.find(request => request.id === other.id).watch, null, 'Only the watched row is marked');
+  // A row the index answer does not hold (the debugger sidebar locates one
+  // outside Traffic's block): no rebuild can restore the mark, so the store
+  // read itself must carry it.
+  const located = indexFixture({windowCount: 1});
+  located.setIndexRows([]);
+  located.api.renderRequests(); await quiet();
+  located.api.loadTrafficRequest(located.api.trafficIndexRequest({...located.row(9, 2), watch}, 'live'), true);
+  await quiet();
+  located.pending[0].gate.resolve(located.answer({events: eventsOf('9', 2), query: {limited: false, budget_exhausted: false, next_after: '9'}}));
+  await quiet();
+  assert.equal(located.state.trafficIndex.row('request-9'), null, 'the index answer does not hold the row');
+  assert.equal(JSON.stringify(located.state.requests.find(request => request.id === 'request-9')?.watch), JSON.stringify(shownWatch),
+    'a located row read from the store is marked watched');
+  // A window row carries no decode: its match names no rule read here, and the
+  // index row's rule replaces it; a record the core refused (read, no rule) stays.
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request,
+    watch: request.id === whole.id ? {...shownWatch, rule: null, methodMatched: null, ruleRead: false} : null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch.rule, 2, 'an unread rule takes the index row\'s');
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request,
+    watch: request.id === whole.id ? {...shownWatch, rule: null, methodMatched: null, ruleRead: true} : null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch.rule, null, 'a record read and refused keeps no rule');
+  // A rule the record's own decode names is never replaced.
+  const decoded = {...shownWatch, rule: 4};
+  t.state.nativeRequests = t.state.nativeRequests.map(request => ({...request, watch: request.id === whole.id ? decoded : null}));
+  t.api.rebuildTrafficRequests();
+  assert.equal(shown().watch.rule, 4, 'The record\'s own decode wins');
 }
 {
   // A store read finishing after the researcher moved to the filter box leaves focus there.
@@ -492,6 +699,136 @@ for (const change of [
   api.useStandalonePreview(); assert.equal(state.trafficRenderedView, null); assert.equal(state.requests.length, 0);
 }
 console.log('PASS Traffic selection reuses rendered search/sort/window; only rows in view plus overscan mount with list positions for assistive technology; no geometry reads, remounts or scroll writes on selection; keyboard across unmounted rows, focus hand-off and return, filters, exact-identity refusal, mutation refresh, partial/empty/evicted selection (controller/DOM model, not rendered UI)');
+
+// The Traffic footer names each used budget. Its counts are the session
+// summary's (the whole session), not the loaded rows', which give only a lower
+// bound until the summary answers; the size comes from the session context.
+// In a live session the figure is exact only while nothing has arrived since
+// the summary was read.
+{
+  const check = (category, reason, count, extra = {}) => ({code: 'request_content_not_retained', category, reason, count: String(count),
+    budget_mib: null, retained_bytes: '0', retained_complete: true, ...extra});
+  const settle = async () => { for (let turn = 0; turn < 4; turn += 1) await new Promise(resolve => setImmediate(resolve)); };
+  const footer = ({summary, context = null, live = false} = {}) => {
+    const reads = [];
+    const answers = {summary, context};
+    let release = null;
+    const fetch = async url => {
+      reads.push(url);
+      if (release) await new Promise(resolve => { const go = release; release = null; go(resolve); });
+      const body = url === '/api/session/summary' ? answers.summary : answers.context;
+      return {ok: body !== null, json: async () => body};
+    };
+    const clock = {now: 1_000_000};
+    const t = fixture(app, traffic, 40, {fetch, Date: {now: () => clock.now}, renderShellStatus() {}});
+    if (live) { t.state.sessionMode = 'live'; t.state.requestContentCaptureEnabled = true; t.state.eventEtag = '"store-1"'; }
+    const notice = t.document.querySelector('#request-budget');
+    const toggle = t.document.createElement('button'), line = t.document.createElement('span');
+    notice.querySelector = selector => ({'#request-budget-toggle': toggle, '#request-budget-text': line})[selector] ?? null;
+    notice.dataset.expanded = 'false';
+    const api = runInNewContext(`({renderTrafficBudget, refreshSessionContentLimits, toggleTrafficBudget})`, t.context);
+    return {t, api, reads, answers, clock, notice, toggle, line, hold: () => { let go; release = resume => { go = resume; }; return () => go(); }};
+  };
+
+  // A session that used no budget reads the summary once and shows nothing.
+  {
+    const quiet = footer({summary: {checks: []}});
+    quiet.api.renderTrafficBudget(); await settle();
+    assert.deepEqual(quiet.reads, ['/api/session/summary'], 'every session reads the summary once');
+    assert.equal(quiet.notice.hidden, true, 'no refusal, no notice');
+    quiet.api.renderTrafficBudget(); await settle();
+    assert.equal(quiet.reads.length, 1, 'a session with nothing used and no content does not read it again');
+  }
+  // A stored capture whose refusals are all outside the loaded rows still shows
+  // them: nothing arrives in a stored window, so the figure is exact.
+  {
+    const stored = footer({summary: {checks: [check('response_body', 'not_captured_session_budget', 5)]}});
+    stored.api.renderTrafficBudget(); await settle();
+    assert.equal(stored.notice.hidden, false);
+    assert.equal(stored.line.textContent, 'Response body budget used, 0 KiB kept: 5 response bodies not kept · Raise it in New Live Session… for the next session.');
+  }
+
+  // A live content session.
+  const f = footer({live: true,
+    summary: {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+      check('request_body', 'not_captured_session_budget', 30, {retained_bytes: '1048576', retained_complete: false}),
+      check('request_target', 'not_retained_session_budget', 12, {retained_bytes: '1048576', retained_complete: false}),
+      check('response_body', 'not_captured_type', 7)]},
+    context: {capture_options: {content_limits: {version: 1, request_content_budget_mib: 256, response_body_budget_mib: 512, response_media: false}}}});
+  const {t, api, reads, line, toggle, notice, clock} = f;
+  // Two response refusals and one request refusal are loaded: a lower bound
+  // until the summary answers.
+  t.state.requests[3].responseBody = {state: 'not_captured_session_budget'};
+  t.state.requests[4].responseBody = {state: 'not_captured_session_budget'};
+  t.state.requests[5].body = {state: 'not_captured_session_budget'};
+  t.state.requests[7].responseBody = {state: 'captured'};
+  const resume = f.hold();
+  api.renderTrafficBudget();
+  assert.equal(notice.hidden, false);
+  assert.equal(line.textContent, 'Request content budget used: at least 1 request body or URL not kept · '
+    + 'Response body budget used: at least 2 response bodies not kept · Raise them in New Live Session… for the next session.');
+  assert.equal(toggle.textContent, 'Budgets used', 'the stacked layout\'s one-line button');
+  // The session context names each budget's size; the summary its whole count,
+  // exact while the store is as it was when the summary was read.
+  api.refreshSessionContentLimits();
+  resume(); await settle();
+  assert.deepEqual(reads, ['/api/session/summary', '/api/session/context']);
+  assert.equal(line.textContent, 'Request content budget (256 MiB) used, at least 1.0 MiB kept: 42 request bodies or URLs not kept · '
+    + 'Response body budget (512 MiB) used, 511.0 MiB kept: 2,400 response bodies not kept · Raise them in New Live Session… for the next session.');
+  assert.doesNotMatch(line.textContent, /REB_/);
+  api.refreshSessionContentLimits();
+  assert.equal(reads.length, 2, 'the context is read once it answers');
+  // 50 more bodies are refused and 3 of them load: the store changed since the
+  // summary was read, so its figure is a lower bound until the next read.
+  t.state.eventEtag = '"store-2"';
+  for (const index of [8, 9, 10]) t.state.requests[index].responseBody = {state: 'not_captured_session_budget'};
+  api.renderTrafficBudget();
+  assert.equal(reads.length, 2, 'within 30 s the summary is not read again');
+  assert.match(line.textContent, / · Response body budget \(512 MiB\) used, 511\.0 MiB kept: at least 2,400 response bodies not kept · /,
+    'a figure read before the store changed is a lower bound');
+  assert.match(line.textContent, /: at least 42 request bodies or URLs not kept · /);
+  // The next read is exact again while nothing arrives.
+  clock.now += 30_000;
+  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2450, {retained_bytes: String(511 * 1048576)})]};
+  api.renderTrafficBudget(); await settle();
+  assert.equal(reads.length, 3);
+  assert.match(line.textContent, /Response body budget \(512 MiB\) used, 511\.0 MiB kept: 2,450 response bodies not kept · Raise /);
+  // A failed re-read keeps the last figure, as a lower bound, even though the
+  // store has not changed since.
+  clock.now += 30_000;
+  f.answers.summary = null;
+  api.renderTrafficBudget(); await settle();
+  assert.equal(reads.length, 4);
+  assert.match(line.textContent, /: at least 2,450 response bodies not kept · /, 'a failed read makes the figure a lower bound');
+  // Refusals outside the loaded rows still show, from the summary alone; a
+  // bounded summary scan is a lower bound too.
+  clock.now += 30_000;
+  for (const index of [3, 4, 5, 8, 9, 10]) { t.state.requests[index].responseBody = null; t.state.requests[index].body = null; }
+  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+    {code: 'bounded_scope', severity: 'info', message: 'bounded'}]};
+  api.renderTrafficBudget(); await settle();
+  assert.equal(reads.length, 5);
+  assert.equal(line.textContent, 'Response body budget (512 MiB) used, 511.0 MiB kept: at least 2,400 response bodies not kept · '
+    + 'Raise it in New Live Session… for the next session.');
+  assert.equal(toggle.textContent, 'Response body budget used');
+  // The stacked layout's button opens and closes the sentence.
+  api.toggleTrafficBudget();
+  assert.equal(notice.dataset.expanded, 'true');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  api.toggleTrafficBudget(false);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  // A session that is not live or keeps no content has no size.
+  const stored = fixture(app, traffic, 40, {fetch: async () => ({ok: true, json: async () => ({capture_options: {content_limits: null}})}),
+    renderShellStatus() {}});
+  runInNewContext('refreshSessionContentLimits()', stored.context); await settle();
+  assert.equal(stored.state.sessionContentLimits, null);
+  assert.equal(stored.state.sessionContentLimitsRead, 'answered');
+  const odd = fixture(app, traffic, 40, {fetch: async () => ({ok: true, json: async () => ({capture_options: {content_limits:
+    {version: 2, request_content_budget_mib: 64, response_body_budget_mib: 128, response_media: true}}})}), renderShellStatus() {}});
+  runInNewContext('refreshSessionContentLimits()', odd.context); await settle();
+  assert.equal(odd.state.sessionContentLimits, null, 'an unknown version names no size');
+}
+console.log('PASS Traffic footer budget notice: the summary read once in every session, its whole-session counts, at least the loaded rows\' until it answers, after the live store changed, after a failed read or when its scan was bounded, refusals outside the loaded rows, sizes only from the versioned session context, the bytes kept, the stacked layout\'s button and the start panel control for the next session');
 
 const baseline = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length);
 if (baseline) {

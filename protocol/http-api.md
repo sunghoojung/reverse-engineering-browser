@@ -152,7 +152,7 @@ stands for, and the server applies exactly those:
 | Level | Stands for | Lists |
 | --- | --- | --- |
 | `read-only` | `--omit-content` | The read-only projection, content omitted |
-| `ask` | `--allow-effects --omit-content` | Also every effectful operation |
+| `ask` | `--allow-effects --omit-content` | Also every effectful operation except `run_wasm_function`, which is a content read (`full` only) |
 | `auto` | `--allow-effects --omit-content` | The same as `ask`; whether a person approves each call is the client's setting |
 | `full` | `--allow-effects --allow-session-start --allow-content` | Also `start_live_session`, `session_action` and the content reads, with content in results |
 
@@ -168,7 +168,9 @@ legacy `--allow-session-start` keeps accepting them with
 `confirm_sensitive_capture`. None of these flags is authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
-content, `get_artifact_text` and `search_artifact_text`. They are listed only
+content, `get_artifact_text` and `search_artifact_text`, and the offline Wasm
+runs `run_wasm_function` and `get_wasm_runs`, since running captured code
+discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
 it, `get_source_format` also lays out request and response bodies. Content is
@@ -357,6 +359,55 @@ bounded by byte budgets; a partial status names what was cut. See
 graph is declared static flow for one function at a time. Edge kinds are never
 inferred from execution, and `complete` is always false.
 
+`get_wasm_pseudocode` projects `GET /api/wasm/pseudocode`: one function's
+readable lift in line windows (`line_offset`, `line_limit`), every line mapped
+to module byte ranges. It is read-only; its `text` is content and is omitted
+below `--allow-content`. See [WASM pseudocode](wasm-pseudocode-v1.md).
+
+## Offline WASM function runs
+
+`run_wasm_function` projects `POST /api/wasm/runs`: one confirmed run of one
+function of a captured module in the backend's `wasmi` interpreter, with every
+import stubbed. Running captured code is a content read, so MCP lists it, and
+`get_wasm_runs` (`GET /api/wasm/runs`, the stored derived records), only with
+`--allow-content` (`x-reb-mcp.content_reads`, which only `--permission full`
+sets). Running is also effectful (`code-execution`, `filesystem-write`), so it
+needs `--allow-effects` too, and the server refuses a body without
+`confirm_offline_execution: true` before reading the artifact. See
+[WASM run v1](wasm-run-v1.md).
+
+## WASM identification
+
+`get_wasm_identification` projects `GET /api/wasm/identification`: toolchain
+conclusions with evidence offsets, function label suggestions paged by
+`row_offset` and `row_limit` (at most 1024 rows, and a page always fits the
+131,072-byte MCP inline limit), and constant matches. It is
+read-only and bounded by a 3.5-second deadline and listed caps; a partial
+status names what was cut. Only `hex` on a data match is captured content. See
+[WASM identification](wasm-identification-v1.md).
+
+## WASM module diff
+
+`get_wasm_module_diff` projects `GET /api/wasm/diff` with `artifact_id` (A) and
+`compare_artifact_id` (B), optional `status`, `row_offset` and `row_limit`. It
+is read-only and structure only: rows give each side's function index, body
+range, name, signature and fingerprints, with the match method and score, and
+never instruction text or constant values. Each member of a tie is its own
+`ambiguous` row, and one four-second deadline, counted from the request's
+arrival, bounds the work. Only complete reports are cached, and only they
+page reliably: a partial report says its pages can repeat or skip rows. Page with
+`row_window.next_offset`.
+See [WASM module diff v1](wasm-module-diff-v1.md).
+
+## WASM value flow
+
+`get_wasm_value_flow` projects `GET /api/wasm/value-flow`: a bounded static
+slice of where one instruction operand or one local of a defined function comes
+from and where it goes, with joins at structured merges and one optional step
+to direct call sites. It is read-only and refuses unknown or repeated
+parameters. `text` and `expression` are content and are omitted below Full
+access. See [WASM value flow](wasm-value-flow-v1.md).
+
 ## Compact session context
 
 `GET /api/session/context` (`get_session_context`) is the compact first read for
@@ -369,7 +420,8 @@ conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for
 every live session (agent, app or `make live`): `request_content`,
-`canvas_images`, `request_stacks`, `document_start` (`permitted` or `not_permitted`; whether
+`content_limits`, `canvas_images`, `request_stacks`, `document_start`
+(`permitted` or `not_permitted`; whether
 this Brave honors it is `document_start_supported` in `get_native_console`),
 and `js_invocation` with `state` (`not_armed`, `armed`, `browser_unsupported`
 or `unreadable`), `count` and `digests`. `run-live-session.sh` passes the
@@ -378,6 +430,18 @@ backend `--session-request-content`, `--session-canvas-images`,
 enable nothing. Idle and demo
 backends report `source: not_live` with everything off. Site labels and
 source URLs stay in `get_js_invocation_sites`.
+
+`content_limits` is a versioned addition to `capture_options`: for a session
+with `request_content` it is `{"version": 1, "request_content_budget_mib",
+"response_body_budget_mib", "response_media"}`, the limits the session runs
+with, named as the start options are, whichever of the app's start panel, the
+start options or the launcher environment set them. Otherwise it is null. The
+launcher passes them as `--session-request-content-budget-mib`,
+`--session-response-body-budget-mib` and `--session-response-media` (`0` or
+`1`), which the backend accepts only with `--session-request-content` and
+within the launcher's bounds; a value no launcher named is null, never a
+guessed default. The schema does not require `content_limits`: a backend from
+before the addition omits it, and a reader treats that as not reported.
 
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
@@ -587,15 +651,37 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `no_events` | The store is empty. |
 | `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
 | `artifact_capture_failed` | Some artifact bodies were not stored. |
+| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the scanned manifest, and `retained_complete`, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
+| `network_headers_unattributed` | Severity `warning`: `blocks` network header blocks and `lists` cookie lists arrived for requests the capture no longer tracked, so no row shows them. |
+| `final_headers_missing` | `count` requests of a content session ended with provisional headers and no cookie lists, one check per `reason`: `download`, `service_worker`, `from_cache` or `failed` (`info`, no request reached the network or it failed first), `not_reported` (`warning`, no observer or an untracked block) and `record_dropped` (`warning`, a full queue dropped records while it ran, so the block may have been lost). See [missing final blocks](native-network-v3.md#missing-final-blocks). |
+| `final_headers_untracked` | Header records of requests past the 131,072 the summary follows; their final blocks are not counted. Never raised for a metadata-only session, which records no header. |
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
 | `sequence_gaps` | Sequence numbers missing inside the scanned events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
 | `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
+| `response_bodies_not_observed` | `count` responses never reached the browser proxy, so their bodies are not retained under their own request: the message counts those a service worker served, those reused from the memory cache and those answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, where those were retained. |
+| `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: their snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
 | `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
+
+`response_bodies` counts every request's response body case from the request
+index's rows ([request index v1](request-index-v1.md)): `cases` lists each case
+with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
+`redirected`, `aborted`, `cancelled`, `empty`, `service_worker`, `memory_cache`,
+`failed_before_response` and `cancelled_before_response`
+([native network v3](native-network-v3.md#bodies-the-proxy-never-sees)).
+A refused or malformed body can still name an earlier snapshot of the same
+response that the receiver holds; each case's `earlier_snapshots`, and the
+total beside `cases`, count those rows, which Traffic opens.
+`complete` is false while the index is still reading the store. The route's
+ETag names the store as it was before the index read and the index's progress
+after it, the point the counts were read at, so an answer counted mid-store
+never revalidates as the complete one. When the index cannot answer,
+`available` is false with a `reason`, the rest of the summary stands, and the
+answer has no ETag, so the next request reads the index again.
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).
@@ -1159,7 +1245,11 @@ analysis already cached in this backend and reports `analysis-not-ready` rather
 than computing one.
 
 Rows are links the stores already hold: the recorded parent event, the renderer
-request named as a request's initiator, its lifecycle events and captured
+request named as a request's initiator (for a memory-cache reuse, the request
+whose response Blink reused, as `reused_response`, never as an initiator, and
+only when it has the reuse's host and started before it, as the request index
+decides; otherwise the gap `reused-source-not-this-load` says which), its
+lifecycle events and captured
 response, the host events whose exact parent is a retained dispatch sample of the
 selection, the artifact's creator event, parent and children, and Wasm import,
 export and direct-call uses. A link that was not recorded is listed under `gaps`

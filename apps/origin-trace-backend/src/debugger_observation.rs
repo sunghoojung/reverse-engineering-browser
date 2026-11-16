@@ -169,6 +169,38 @@ pub fn decode(event: &Value) -> Option<Value> {
     }))
 }
 
+/// Puts `debugger_observation` beside the payload of each record of types 40
+/// to 45 on a filtered or waiting event page: the object `get_native_debugger`
+/// lists for it, its own frame as `site` (raw here, resolved by
+/// `request_stack::ObservationSites`, which calls this), and the exact
+/// arguments of the `get_request_stack` read of its stack as `stack_read`,
+/// with that operation's name beside them. A record the core would refuse is
+/// `{status: invalid}` with no fields.
+pub(crate) fn annotate(events: &mut [Value]) {
+    for event in events {
+        if !event["type"]
+            .as_str()
+            .is_some_and(|kind| TYPES.contains(&kind))
+        {
+            continue;
+        }
+        let annotation = match decode(event) {
+            Some(mut decoded) => {
+                let (site, stack_read) = request_stack::observation_reads(event);
+                decoded["status"] = json!("decoded");
+                decoded["site"] = site;
+                decoded["stack_read_operation"] = json!("get_request_stack");
+                decoded["stack_read"] = stack_read;
+                decoded
+            }
+            None => json!({"status": "invalid"}),
+        };
+        if let Some(object) = event.as_object_mut() {
+            object.insert("debugger_observation".to_owned(), annotation);
+        }
+    }
+}
+
 /// The newest records and how many lines of the read were damaged.
 fn tail(store: &Path, types: &[&str], limit: usize) -> Result<(Vec<Value>, u64)> {
     let filter = EventFilter::exact(types, Vec::new());

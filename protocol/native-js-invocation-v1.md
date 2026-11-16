@@ -288,7 +288,10 @@ a negative. The body is the sensitive `request_body` artifact of
 whose creator is the traced request's `request_body` child record, read only
 when its size and SHA-256 match the manifest. It exists only under request
 content capture (`REB_CAPTURE_REQUEST_CONTENT=1`) and holds at most the first
-256 KiB of the body; without it the join has no input and reports nothing.
+16 MiB of the body. The join reads a body only when it is at most 1 MiB
+(`REQUEST_BODY_LIMIT` in `apps/origin-trace-backend/src/origin_trace.rs`).
+Without a retained body, or past that size, the join has no input and reports
+nothing.
 
 ## Validation boundary
 

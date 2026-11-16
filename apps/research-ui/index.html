@@ -8,8 +8,13 @@
     <title>Origin Trace - Reverse Engineering Browser</title>
     <link rel="stylesheet" href="app.css">
     <link rel="stylesheet" href="xrefs_view.css">
+    <link rel="stylesheet" href="wasm_runner.css">
     <link rel="stylesheet" href="entropy_map.css">
+    <link rel="stylesheet" href="wasm_identification.css">
     <link rel="stylesheet" href="block_graph.css">
+    <link rel="stylesheet" href="wasm_readable.css">
+    <link rel="stylesheet" href="wasm_diff_view.css">
+    <link rel="stylesheet" href="value_flow_view.css">
     <link rel="stylesheet" href="flow_graph.css">
     <link rel="stylesheet" href="flow_workspace.css">
     <link rel="stylesheet" href="agent_panel.css">
@@ -120,7 +125,7 @@
                 <div class="request-table" data-hidden-columns="protocol">
                   <div class="request-head" role="group" aria-label="Sort requests"><button type="button" data-column="name" data-request-sort="name" aria-pressed="false">Name<span aria-hidden="true"></span></button><button type="button" data-column="status" data-request-sort="status" aria-pressed="false">Status<span aria-hidden="true"></span></button><button type="button" data-column="type" data-request-sort="type" aria-pressed="false">Type<span aria-hidden="true"></span></button><button type="button" data-column="method" data-request-sort="method" aria-pressed="false">Method<span aria-hidden="true"></span></button><button type="button" data-column="protocol" data-request-sort="protocol" aria-pressed="false">Protocol<span aria-hidden="true"></span></button><button type="button" data-column="initiator" data-request-sort="initiator" aria-pressed="false">Initiator<span aria-hidden="true"></span></button><button type="button" data-column="size" data-request-sort="size" aria-pressed="false">Size<span aria-hidden="true"></span></button><button type="button" data-column="time" data-request-sort="time" aria-pressed="false">Time<span aria-hidden="true"></span></button><button type="button" data-column="waterfall" data-request-sort="start" aria-pressed="false">Waterfall<span aria-hidden="true"></span></button></div>
                   <div id="request-rows" class="request-rows" role="listbox" aria-label="Captured requests" tabindex="0"></div>
-                  <div class="request-window"><span id="request-window-status">0 requests</span><button id="request-latest" type="button" hidden>New requests</button><button id="request-unresolved" type="button" aria-pressed="false" title="List the requests the capture could not link to a tab" hidden></button><button id="request-order" type="button" title="Restore capture order, newest first">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button></div>
+                  <div class="request-window"><span id="request-window-status">0 requests</span><span id="request-budget" class="request-budget" data-expanded="false" hidden><button id="request-budget-toggle" class="request-budget-toggle" type="button" aria-expanded="false" aria-controls="request-budget-text"></button><span id="request-budget-text" class="request-budget-text"></span></span><button id="request-latest" type="button" hidden>New requests</button><button id="request-unresolved" type="button" aria-pressed="false" title="List the requests the capture could not link to a tab" hidden></button><button id="request-header-gaps" type="button" aria-expanded="false" aria-controls="request-header-gaps-detail" title="Header blocks and cookie lists not retained, and requests without final headers" hidden></button><button id="request-order" type="button" title="Restore capture order, newest first">Capture order</button><button id="open-captured-export" type="button" data-export-open="capture" aria-haspopup="dialog">Export…</button><div id="request-header-gaps-detail" class="request-header-gaps-detail" role="region" aria-label="Header gaps" hidden></div></div>
                 </div>
               </div>
 
@@ -285,17 +290,20 @@
                 <input id="source-search" class="source-search" type="search" maxlength="512" placeholder="Find" aria-label="Find in source" aria-keyshortcuts="Meta+F Control+F" aria-describedby="source-search-status" title="Find retained text; Enter for next, Shift+Enter for previous (single-line literal, first 1000 matches)" />
                 <button id="source-wasm" class="source-tool" type="button" aria-label="Inspect WebAssembly module" aria-pressed="false" hidden>Inspect</button>
                 <button id="source-graph" class="source-tool" type="button" aria-label="Show basic-block graph" aria-pressed="false" hidden>Graph</button>
+                <button id="source-readable" class="source-tool" type="button" aria-label="Show readable lifted function" aria-pressed="false" title="One function as folded expressions, each line mapped to its bytes" hidden>Readable</button>
                 <button id="source-map" class="source-tool" type="button" aria-label="Show artifact map" aria-pressed="false" hidden>Map</button>
                 <button id="source-debugger-toggle" class="source-tool" type="button" aria-controls="debugger-sidebar" aria-expanded="false" aria-pressed="false" title="Threads, watch rules and native observations; never pauses">Debugger</button>
                 <details id="source-more" class="source-more">
                   <summary class="source-tool" title="More source actions">More</summary>
                   <div class="source-more-menu" role="group" aria-label="Source actions">
+                    <button id="source-wasm-diff" class="source-tool" type="button" aria-controls="source-diff-view" aria-pressed="false" title="Match this module's functions with another captured WebAssembly module" hidden>Compare with…</button>
                     <button id="source-goto" class="source-tool" type="button" aria-keyshortcuts="Control+G" disabled>Go to line…</button>
                     <button id="source-rename" class="source-tool" type="button" aria-keyshortcuts="F2" title="Open a captured source to name it." disabled>Rename</button>
                     <button id="investigation-decode-range" class="source-tool" type="button" title="First select an Original bytes link in Facts; this copies at most 64 KiB without running a transformation" disabled>Decode range</button>
                     <button id="source-facts-toggle" class="source-tool" type="button" aria-controls="source-facts-details" aria-expanded="false" disabled>Facts</button>
                     <button id="source-track-calls" class="source-tool" type="button" aria-controls="invocation-sites-details" disabled>Track calls</button>
                     <button id="source-deob" class="source-tool" type="button" aria-label="Run local static cleanup" title="Run local static cleanup" disabled>Static cleanup</button>
+                    <button id="source-run-offline" class="source-tool" type="button" title="Run one function of this module offline in a local sandbox, with every import stubbed" hidden>Run offline…</button>
                     <button id="source-sidebar-toggle" class="source-tool" type="button" aria-controls="source-sidebar" aria-expanded="false">Details</button>
                   </div>
                 </details>
@@ -309,9 +317,11 @@
                 <p id="source-search-status" class="source-search-status" hidden></p>
                 <div id="source-name-host" class="evidence-name-host"></div>
                 <p id="source-limit-notice" class="source-limit-notice" role="status" hidden></p>
+                <section id="wasm-identification" class="wasm-identification" aria-label="Library identification" hidden></section>
               </div>
               <div id="source-view-split" class="source-view-split">
               <div id="source-graph-host" class="block-graph" hidden></div>
+              <section id="source-readable-host" aria-label="Readable function" hidden></section>
               <div id="source-code-wrap" class="source-code-wrap" tabindex="0">
                 <button id="source-window-previous" class="source-window-edge" type="button" aria-label="Previous source lines" hidden></button>
                 <div id="source-code-empty" class="source-empty">Select a JavaScript file, WASM module, source map, or approved response body.</div>
@@ -320,6 +330,7 @@
               </div>
               </div>
               <section id="source-map-view" class="source-map-view" aria-label="Artifact map" hidden></section>
+              <section id="source-diff-view" class="wasm-diff" aria-label="Module comparison" hidden></section>
               <div class="source-editor-status">
                 <span id="source-position">Line 1, Column 1</span>
                 <span id="source-selection" hidden></span>
@@ -944,6 +955,9 @@
     <!-- Loaded here as well so the page and the Worker share one script; it does work only inside the Worker. -->
     <script src="block_graph_layout.js"></script>
     <script src="block_graph.js"></script>
+    <script src="wasm_runner.js"></script>
+    <script src="wasm_readable.js"></script>
+    <script src="wasm_diff_view.js"></script>
     <script src="flow_graph_layout.js"></script>
     <script src="flow_graph.js"></script>
     <script src="flow_timeline.js"></script>
@@ -962,16 +976,19 @@
     <script src="investigation_navigation.js"></script>
     <script src="investigation_notebook.js"></script>
     <script src="evidence_names.js"></script>
+    <script src="wasm_function_names.js"></script>
     <script src="invocation_sites.js"></script>
     <!-- The paused-state sections register with the Sources debugger
          sidebar; without that registry they add nothing. -->
     <script src="debugger_pause.js"></script>
     <script src="entropy_map.js"></script>
+    <script src="wasm_identification.js"></script>
 
     <script src="app.js"></script>
     <script src="agent_panel.js"></script>
     <script src="session_panel.js"></script>
     <script src="vm_program_workspace.js"></script>
     <script src="xrefs_view.js"></script>
+    <script src="value_flow_view.js"></script>
   </body>
 </html>

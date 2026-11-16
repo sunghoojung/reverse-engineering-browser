@@ -558,6 +558,62 @@ pub fn select_artifacts(root: &Path, keep: impl Fn(&Value) -> bool) -> Result<Ve
     })?;
     Ok(selected)
 }
+/// The validated manifest records after byte `offset`, a record boundary a
+/// previous call returned, up to the last complete line, and the offset after
+/// them. The manifest is append-only, so a reader that keeps its offset parses
+/// each line once. A missing manifest has no records; an offset past the end
+/// or inside a line is an error, since the file was replaced or truncated.
+pub fn manifest_from(root: &Path, offset: u64) -> Result<(Vec<Value>, u64)> {
+    use std::io::{BufRead, Seek, SeekFrom};
+    let path = root.join("manifest.jsonl");
+    let mut file = match regular_file(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && offset == 0 => {
+            return Ok((Vec::new(), 0));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let length = file.metadata()?.len();
+    let manifest_moved = || Error::new(409, "The artifact manifest was replaced or truncated");
+    if offset > length {
+        return Err(manifest_moved());
+    }
+    if offset > 0 {
+        let mut before = [0u8; 1];
+        file.seek(SeekFrom::Start(offset - 1))?;
+        std::io::Read::read_exact(&mut file, &mut before)?;
+        if before[0] != b'\n' {
+            return Err(manifest_moved());
+        }
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = std::io::BufReader::new(file);
+    let (mut records, mut at) = (Vec::new(), offset);
+    loop {
+        let mut bytes = Vec::new();
+        let size = reader.by_ref().take(8193).read_until(b'\n', &mut bytes)?;
+        if size == 0 || bytes.last() != Some(&b'\n') {
+            // The end, or a line still being written: read it next time.
+            break;
+        }
+        if size > 8192 {
+            return Err(Error::new(
+                500,
+                "The artifact manifest contains an oversized record",
+            ));
+        }
+        at += size as u64;
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let mut value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::new(500, "The artifact manifest contains malformed JSON"))?;
+        validate_artifact(&mut value)?;
+        records.push(value);
+    }
+    Ok((records, at))
+}
+
 /// Validates every manifest record and visits each; a missing manifest has none.
 fn scan_manifest(
     root: &Path,

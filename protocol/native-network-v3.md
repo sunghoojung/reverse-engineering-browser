@@ -57,6 +57,11 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Probe queue version 4 | the memory-cache counters | Request scope and tabs |
 | Chromium patch 0038 | `record-synchronous-requests-on-calling-thread` | Request scope and tabs |
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
+| `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
+| `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
+| Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
+| Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
+| `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
 Cookies, Initiator, Timing, Signals, Evidence.
@@ -332,7 +337,32 @@ handles each call after its detached and observer check:
 
 The record names no method: Blink adds only GET resources to the memory cache
 (`ShouldResourceBeAddedToMemoryCache`), and static data is GET too, so
-consumers show GET. A reuse a worker owns is linked to its tabs by the drain
+consumers show GET.
+
+The reuse also names the request that loaded the resource. At the pin
+`URLLoader::Context` keeps the `int` its `ResourceRequestSender::SendAsync`
+returns, which is the `GenerateRequestId` value that request's
+`request_initiated` record carries, and `WebURLResponse::Create` sets it as
+the response's `ResourceResponse::RequestId()`. The memory cache is per
+renderer process and Blink reuses only a resource whose status is `kCached`,
+whose response is that load's, so Chromium patch
+`0062-name-memory-cache-reuse-sources` passes
+`resource.GetResponse().RequestId()` to the sink. A revalidation that Blink
+answers `304` keeps the first response's request ID, because
+`Resource::RevalidationSucceeded` only updates its headers, so the named
+request is the one whose bytes Blink holds. Static data had no request.
+`GenerateRequestId` starts each renderer process at a random value from 0 to
+2^20 (`GetInitialRequestID` in `web_url_request_util.cc`) and counts up, so 0
+is a real ID only when that start is 0, and it is also what a response no
+request set carries; a reuse names a source only for an ID above 0 that is
+not static data. The source names a row as a `request_tab_link` names a renderer
+record: `initiator_process_id` (the record's own process) and
+`initiator_request_id`. A reuse's own row stays keyed by its own request ID;
+consumers never join it to its source by those fields, and they leave them
+out of its legacy browser key. They are never its initiator either: Traffic's
+Initiator tab shows the reuse's own renderer request and names the source as
+"Reused response of", and `get_xrefs` lists it as `reused_response`, with the
+same host and start-time guard as the request index's `memory_cache_source`. A reuse a worker owns is linked to its tabs by the drain
 with a `request_tab_link`, as a worker request start is.
 
 ##### `memory_cache_reuse` (type 52)
@@ -351,10 +381,10 @@ record. Payload size 128, little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2` (`1` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | resource type: Blink `ResourceType` at the pin, 1 to 15 |
-| 5 | 1 | flags: bit 0 `static_data`, bit 1 `host_truncated` |
+| 5 | 1 | flags: bit 0 `static_data`, bit 1 `host_truncated`, bit 2 `source_named` (version 2) |
 | 6 | 1 | host length, 0 to 120 |
 | 7 | 1 | reserved, zero |
 | 8 | 120 | host as KURL gives it, zero after its length |
@@ -372,7 +402,11 @@ record. Payload size 128, little endian:
 
 Bit 0 marks static data (a `data:` URL or MHTML archive resource Blink decoded
 in place). Bit 1 marks a host longer than 120 bytes, and then the length is
-120. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
+120. Bit 2, in version 2 only and never with bit 0, says the envelope's
+`initiator_process_id` equals its `process_id` and its nonzero
+`initiator_request_id` is the source request above; without bit 2 both are
+zero. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
+Version 1 records, which name no source, stay valid.
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
 would be, unless the configuration opts in, and returns its budget charge.
@@ -503,13 +537,20 @@ neither Shields nor an extension's `webRequest` or `declarativeNetRequest` acts
 on them. While native capture runs for the owned profile it first attaches
 Brave's proxy with a request handler that answers every hook with `net::OK`, so
 no header, referrer, block or redirect decision changes. Capture itself still
-adds four things, none visible to the page or the server beyond timing:
+adds five things, none visible to the page, the server or DevTools beyond
+timing:
 
 - In content sessions the proxy gives a preload without one a `reb-` DevTools
   request ID (Brave patch 0018), so the network service also sends SSL info
   with the response and transfer-size updates. `NavigationEarlyHintsManager`'s
   `PreloadURLLoaderClient` reads only the response head's cache flags and
   records transfer sizes to UMA.
+- In a current content session with the Network category, Chromium patch 0058
+  gives the preload factory an agentless DevTools observer, so the network
+  service reports the preload's raw headers and cookie lists to the capture
+  hook and marks its response head `emitted_extra_info`. Only the throttles
+  and `PreloadURLLoaderClient` see that head, and no DevTools agent sees a
+  preload ([binding](#network-service-binding-at-the-pinned-chromium)).
 - In content sessions the response body is teed for artifact capture, as for
   any request; the manager still drains its own copy.
 - Each preload's messages take an extra hop through the proxy on the UI thread.
@@ -953,12 +994,92 @@ to `browser/native_response_body_capture.cc`:
   10 s and flagged.
 - Bytes stream to the receiver as they arrive
   ([artifact channel v2](../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
-  A body without a declared length that is still open after a second is
-  published as `partial` by a receiver checkpoint of what arrived when it has
-  grown by half since the last one, at most 15 times, so snapshots stay within
-  three times the body. Open bodies at capture end or expiry end their stream
-  as one last `partial` record, or `not_captured_artifact_unavailable` when no
-  byte has arrived. The record of the ended body supersedes every snapshot.
+  A body still arriving is published as `partial` on the schedule in
+  [partial bodies](#partial-bodies), whether or not it declared a length. Open
+  bodies at capture end or expiry end their stream as one last `partial`
+  record, or `not_captured_artifact_unavailable` when no byte has arrived. The
+  record of the ended body supersedes every snapshot.
+
+### Partial bodies
+
+Server-sent events, long polling and slow downloads stay open for minutes or
+the whole session, so a body is readable while it arrives. A snapshot is a
+receiver checkpoint: the receiver copies every byte it holds of the stream
+into a new artifact, which a `partial` record names. A snapshot costs a copy of
+the whole kept prefix, so the schedule bounds copies by bytes and time instead
+of by a count. Snapshot n+1 of an open body is taken when a chunk arrives and
+all of these hold:
+
+1. The body grew since snapshot n.
+2. At least the larger of 1 s and a 32nd of the body's age has passed since
+   snapshot n (since the body opened, for the first). A body open for an hour
+   is snapshotted at most about 180 times, a day about 300, so the 16-bit
+   partial index is never reached.
+3. The copy fits the body's allowance, an eighth of the session's response body
+   budget (64 MiB of the default 512 MiB). A quarter of it may be spent at
+   once; of the rest, the share spendable so far is the larger of the share of
+   the session left when the body opened that has passed, and the share of the
+   16 MiB limit the body has filled. So a body spends its allowance evenly over
+   the session, or faster when it fills toward the limit.
+4. All snapshots of the session together stay within a quarter of the budget
+   (128 MiB by default), so whole bodies always keep three quarters, and the
+   copy fits what is left of the budget. Snapshots are charged to the budget;
+   a receiver refusal refunds them.
+
+A snapshot the spacing holds back, or one only the body's paced allowance
+holds back, is not left waiting for the next chunk: the first chunk that
+arrives too soon posts one delayed task on the capture's sequence for the time
+the spacing, or the pace, allows. The task takes the snapshot then if the body
+is still open and the byte bounds allow it, or posts again for the next such
+time; a body has at most one pending. It finds the body by key and capture ID,
+as the completion wait does, so a body that ended or a new configuration
+leaves it nothing to do. A burst followed by silence is therefore published
+within the spacing, or once the session has run long enough for the body's
+pace to allow it. A snapshot the session quarter or the budget withholds waits
+for the next chunk, because time alone frees neither.
+
+A snapshot the spacing allows but a byte bound withholds (the body's
+allowance, the session's quarter, or the budget) is not taken, and the
+session quarter goes to whichever bodies asked first. That is a counted limit:
+every later record of that body carries flag bit 7, `snapshots_withheld`
+(payload version 2), Traffic says the newest snapshot is older than the
+schedule would make it, and `get_session_summary` counts such bodies in
+`response_bodies.snapshots_withheld` with a `response_snapshots_withheld`
+check. The receiver keeps every snapshot it accepted, so a superseded one
+cannot be released to make room.
+
+A body whose kept prefix reaches the 16 MiB limit is sealed: those bytes can no
+longer change, so its stream ends there and a `partial` record names that
+artifact at once, without a copy. Later bytes are counted, and every later
+record of the body, including its end, names the sealed artifact.
+
+The bounds come from real streams. Wikimedia's public `recentchange` event
+stream ran at about 60 KB/s (42 events a second) and its `page-create` stream at
+about 3.6 KB/s (two 1.3 KB events a second); a chat completion streams 1 to
+20 KB/s for under a minute, and a notification channel sends a heartbeat of a
+few bytes every 15 to 30 s. In a one-hour session with the default budget:
+
+| Stream | Snapshots | Copied | Newest snapshot at most |
+| --- | ---: | ---: | --- |
+| 60 KB/s | 33 | 58 MiB | 82 s old, then sealed after 279 s |
+| 3.6 KB/s | 97 | 62 MiB | 888 s old |
+| 10 KB/s for 60 s | 51 | 13 MiB | 1 s old |
+| a heartbeat every 15 s | 95 | 0 MiB | 110 s old |
+
+Snapshots count `partial` records, the seal included; copied counts the
+receiver checkpoints, so not the seal. `make native-artifact-capture-check`
+replays these streams through the capture itself (chunks every 250 ms for the
+fast and chat streams, every 500 ms for the medium one, each posted timer run
+at its due time) and fails when this table differs from the replay. The newest
+snapshot's age is sampled just before each chunk and just before each timer
+runs, where it peaks.
+
+A larger budget (`REB_RESPONSE_BODY_BUDGET_MIB`) keeps a medium stream
+fresher, because its allowance grows with it; the 1 MiB minimum budget leaves
+a body 128 KiB of snapshots, so a stream past that is read when it ends.
+`make native-artifact-capture-check` drives a two-hour stream past the old
+limit of 15 snapshots and checks the spacing, the allowance, the session share
+and its refund, a declared length, and the seal.
 
 ### `response_body` (type 33)
 
@@ -970,7 +1091,7 @@ time is when the body ended or was snapshotted. Little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `2` (`1` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | state |
 | 5 | 1 | flags |
@@ -1003,7 +1124,9 @@ Flags: bit 0 `shared`, identical bytes were already retained in this
 configuration and `artifact_id` names that earlier artifact; bit 1 served from
 the HTTP cache; bit 2 served by a service worker; bit 3 bytes still encoded
 (client-side decoding); bit 4 more than four codings, the rest not recorded;
-bit 5 completion not observed; bit 6 content type present. Other bits are zero.
+bit 5 completion not observed; bit 6 content type present; bit 7, in version 2
+only, a snapshot the schedule's spacing allowed was withheld by a byte bound
+([partial bodies](#partial-bodies)). Version 1 records stay valid without it.
 
 Codings: 1 `gzip` (and `x-gzip`), 2 `deflate`, 3 `br`, 4 `zstd`, 5 `dcb`,
 6 `dcz`, 7 `compress`, 15 any other token. `identity` is not a coding.
@@ -1051,20 +1174,132 @@ launcher passes for content sessions.
 - SHA-256 grows by at most one 64 KiB tee read per task, so the record carries
   the digest when the body ends; the receiver verifies it.
 - Unique bytes per session are budgeted: 512 MiB by default, 1 MiB to 16 GiB
-  with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`).
+  with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`, the
+  app start panel's **Response body budget**, or the start option
+  `response_body_budget_mib`). Media and fonts are asked for with
+  `REB_CAPTURE_RESPONSE_MEDIA=1`, **Capture media and fonts** or
+  `response_media`.
   A body is charged when it ends, once its digest is known: identical bytes
   are stored once by SHA-256 and charge nothing (the repeat stream is aborted),
-  each snapshot is charged, and a receiver refusal refunds them. The launcher grows a content session's receiver store
+  each snapshot is charged within its [shares](#partial-bodies), and a receiver
+  refusal refunds them. The launcher grows a content session's receiver store
   by both budgets.
 - Every refusal is a named state. The session summary counts states 2 and 9 to
-  12 under `request_content_not_retained`, category `response_body`.
+  12 under `request_content_not_retained`, category `response_body`; state 12
+  also carries the budget in force (`budget_mib`) and the unique
+  `response_body` bytes retained (`retained_bytes`), and
+  `get_session_context` reports the session's limits as
+  `capture_options.content_limits`.
 
 ### Bodies the proxy never sees
 
-Service-worker and memory-cache answers and requests that failed before a
-response have no browser `response_started`, so they have no `response_body`
-record. Traffic says the proxy recorded no response for them; it never shows
-an empty body.
+Some requests have no browser `response_started`, so they have no
+`response_body` record. Each request instead has one body case, which Traffic's
+`responseBodyCase` and the request index decide alike
+([request index v1](request-index-v1.md)): the state of the newest
+`response_body` record of its final `response_started`, or `malformed`, else in
+this order:
+
+| Case | The request |
+| --- | --- |
+| `source_artifact` | A script or Wasm response: kinds 1 and 2 are its body |
+| `no_record` | Has a response but no body record: a metadata session, a body still arriving, or a record outside what was read |
+| `memory_cache` | Is a `memory_cache_reuse`: Blink answered from a resource it held and made no request |
+| `service_worker` | Ended with a renderer completion flagged `from_service_worker`: the worker answered in the renderer |
+| `failed_before_response`, `cancelled_before_response` | Failed before any response, with `ERR_ABORTED` for the second, after a redirect or not |
+| `interrupted` | The proxy's observation ended first (`proxy_destroyed`, `redirect_handoff`) |
+| `end_lost` | A `service_worker_end_lost` gap names it |
+| `pending` | Has no response and no end yet, after a redirect or not |
+| `redirected` | Was redirected, then ended with no other response |
+| `renderer_answered` | Was finished by the renderer without a URL loader (`data:`, `blob:` and other local schemes) |
+| `no_response` | Ended with no response record otherwise |
+
+A redirect does not decide the case: a request that fails, is cancelled, ends
+its observation or is still open after a redirect is that, so "every response
+was a redirect" is said only of one that then ended. A newest record that names
+no bytes (a refusal or a malformed record) does not hide the newest retained
+`partial` of the same response, which the receiver keeps: the row's
+`response_body.earlier_snapshot` names it, and Response and Preview open it
+under "Earlier snapshot". The loaded records decide only while they hold the
+row's final `response_started` and its body record; otherwise Traffic takes the
+index's answer, because a live row's `response_started` can leave the retained
+window while its later records stay.
+
+The Response and Preview tabs say which case applies, and never show an
+absent body as empty. `get_requests` gives every row its case as
+`response_body`, and `get_session_summary` counts the cases in
+`response_bodies`, with a `response_bodies_not_observed` check when service
+workers, the memory cache or the renderer answered some.
+
+Where those bytes are retained under another request, Traffic shows or links
+them instead of nothing:
+
+- A version 2 `memory_cache_reuse` names the request whose response Blink
+  reused ([memory-cache reuse](#memory-cache-reuse)). A renderer request ID
+  names a row only within its process and session, and a process ID can be
+  reused within a session, so the named row is the source only when it was
+  requested from the reuse's host (a 120-byte reuse host as a prefix) and
+  started before the reuse; otherwise `memory_cache_source.found` is false
+  with `reason` `host_differs` or `started_after`, and `not_recorded` when no
+  such row exists. A found source's `response_body` is shown in Response and
+  Preview, labelled as the reused request's, with a control that opens it, and
+  with its state: complete, cut at 16 MiB, a snapshot with how much had
+  arrived and when relative to the reuse, stopped mid-body, or not retained.
+  For a `multipart/x-mixed-replace` source Blink holds the last part while the
+  retained body has every part, which the view says.
+- A service worker answer has no digest of its own to match. Traffic lists the
+  requests the service worker itself made (`request_started` flag 4) for the
+  same host, path and query that started while the page's request was open,
+  read through `get_requests` with that time range, and links each with its
+  body case. The records do not say whether the worker answered with those
+  bytes, so they are linked, never shown as the page's body. When none is
+  found, Traffic says what it searched (that time range of the index, or the
+  loaded rows when the index could not be read) and when the search stopped at
+  its 500-row page; a row without a path (a metadata session records the host
+  alone) is not searched. A worker that fetched before the page's request
+  opened, fetched another URL, read Cache Storage or built its response leaves
+  no match, so no match is never a claim that the bytes are nowhere.
+- A `shared` record already names the earlier artifact with the same digest.
+
+#### Service-worker bodies are not retained for the page's request
+
+At the pin no response a service worker sends a page passes through
+`BraveProxyingURLLoaderFactory`, which wraps only the network factories
+`ContentBrowserClient::WillCreateURLLoaderFactory` hands it:
+
+- A controlled page's subresource request goes to
+  `content::ServiceWorkerSubresourceLoader` in the page's renderer. It
+  dispatches the fetch event over `blink.mojom.ControllerServiceWorker` and
+  sends the worker's response to the page's `URLLoaderClient` from the stream
+  or blob the worker's renderer gave it (`StartResponse`); the browser sees
+  neither.
+- A controlled navigation is answered by
+  `content::ServiceWorkerMainResourceLoader`, which the navigation's
+  interceptor chain runs instead of the network factory, so the proxied
+  network loader is never created for it.
+- A fallback, a race network request, a synthetic network request and a
+  navigation preload do reach a proxied factory. A subresource fallback uses
+  the page's own network factory. For a main resource,
+  `ServiceWorkerClient::CreateNetworkURLLoaderFactory` passes the factory for
+  each of `kNavigationPreload`, `kRaceNetworkRequest` and
+  `kSyntheticNetworkRequest` through `WillCreateURLLoaderFactory` as
+  `kNavigation`. Those records are the network attempt's
+  ([service worker ends](#service-worker-ends-without-a-response)).
+- A navigation the worker answers from `event.preloadResponse` therefore shows
+  as its preload request's row: a browser request that
+  `ServiceWorkerFetchDispatcher::MaybeStartNavigationPreload` gives resource
+  type `kNavigationPreloadMainFrame` or `kNavigationPreloadSubFrame` and the
+  `Service-Worker-Navigation-Preload` header, whose body case is that of any
+  proxied response and whose body is retained under that row. The navigation
+  itself has no row of its own, and the records do not say whether the worker
+  answered with those bytes unchanged.
+
+Retaining those bytes would mean a second tee in one of those loaders, one in
+the renderer, which may not open harness sockets or send artifacts, and one in
+a browser loader the proxy does not own. Both are second capture paths, which
+#428 rules out. When the worker took the bytes from its own `fetch`, that
+request passes through the proxy and its body is retained under the worker's
+row, which Traffic links as above.
 
 ### Agent access
 
@@ -1081,10 +1316,14 @@ binary is refused and oversized JSON returns a structural summary.
   `response_started` in the Preview and Response tabs (order above). Response
   shows the state, codings, lengths and digest, then the bytes as
   syntax-colored text with pretty print, wrap, find, copy and hex (always hex
-  for binary). Preview shows a bounded
+  for binary), hex in 256 KiB windows paged to the end of the retained body,
+  reading the next 2 MiB range when a window passes the bytes loaded. A
+  partial record says how many bytes had arrived and when, and whether the
+  body was sealed at the 16 MiB limit. Preview shows a bounded
   JSON tree, a raster image whose signature matches its bytes, plain text, or
   markup as source. HTML and SVG are never rendered. Reads are ranged 2 MiB at a
-  time and rechecked by size and SHA-256.
+  time and rechecked by size and SHA-256. Both tabs name the body case and its
+  links ([bodies the proxy never sees](#bodies-the-proxy-never-sees)).
 
 ### Validation
 
@@ -1094,7 +1333,8 @@ brotli and service-worker JSON, a fetched PNG, a chunked stream partial then
 captured, an aborted prefix, 304, a redirect, a cancelled body, a skipped font,
 digest dedupe, budget exhaustion, receiver refusal refund, 50 parallel bodies,
 the full pool, 16 MiB truncation, a missing completion, coding order, the
-capture-end partial, media opt-in, metadata-only sessions and tee refusal.
+capture-end partial, media opt-in, metadata-only sessions and tee refusal, and
+the [partial body schedule](#partial-bodies).
 `make native-network-capture-check` covers the redirect and unavailable records.
 `tests/network_request_test.cpp` checks layout parity and every valid and
 malformed record. `tools/check-traffic-response-ui.mjs` and
@@ -1227,9 +1467,91 @@ ID the ID `reb-<request_id as 16 hex digits>`, and Chromium patch
 `0025-forward-native-network-headers.patch` forwards the two notifications to
 the `network_headers_hook` component before DevTools dispatch. The ID changes
 no request bytes. It does make the network service send SSL info and
-transfer-size updates to the loader client, as with DevTools open. Requests
-whose factory has no observer get no `network` block, and the UI shows their
-provisional headers as such. Unknown IDs, such as CORS preflights, are ignored.
+transfer-size updates to the loader client, as with DevTools open. Unknown IDs,
+such as CORS preflights, are ignored.
+
+A request whose factory has no observer gets no `network` block and no cookie
+list. At the pin these are the factories the proxy sees, and the observer each
+gets:
+
+| Factory | Where Chromium builds its observer | Observer at the pin | With patch 0058 |
+| --- | --- | --- | --- |
+| Navigation | `NavigationRequest` passes `NetworkServiceDevToolsObserver::MakeSelfOwned(frame_tree_node_)` as the request's `TrustedParams::devtools_observer` | Yes | Unchanged |
+| Document subresources, isolated worlds, keepalive and `fetchLater` | `URLLoaderFactoryParamsHelper::CreateForFrame` and `CreateForIsolatedWorld` (the frame tree node); `KeepAliveURLLoaderService` binds the frame's `subresource_proxying_factory_bundle` | Yes | Unchanged |
+| Dedicated worker subresources | `DedicatedWorkerHost` uses `CreateForFrame` of its ancestor frame | Yes | Unchanged |
+| Service worker subresources and imported scripts | `EmbeddedWorkerInstance::CreateFactoryBundle`: `MakeSelfOwned(devtools_worker_token)` | Yes | Unchanged |
+| Speculation-rules prefetch from a live document | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch`, per request | Yes | Unchanged |
+| Dedicated and shared worker main scripts | `WorkerScriptFetcher::CreateScriptLoader`, only when `RenderFrameDevToolsAgentHost::GetFor` finds a host for the ancestor frame, so only while DevTools is attached to it | No | Not changed (below) |
+| Shared worker subresources | `SharedWorkerHost::CreateNetworkFactoryParamsForSubresources` passes `mojo::NullRemote()` | No | Not changed (below) |
+| Service worker main script and update check | `ServiceWorkerContextWrapper::GetLoaderFactoryForBrowserInitiatedRequest`: `StoragePartitionImpl::CreateURLLoaderFactoryParams` sets none | No | Not changed (below) |
+| Early-hints preloads | `URLLoaderFactoryParamsHelper::CreateForEarlyHintsPreload` passes `mojo::NullRemote()` | No | Agentless observer |
+| Browser-initiated prefetch, or one whose initiating document is gone | `MaybeMakeSelfOwnedNetworkServiceDevToolsObserverForPrefetch` returns `mojo::NullRemote()` | No | Not changed (below) |
+| Downloads | `CreatePendingSharedURLLoaderFactory` wraps the storage partition's browser-process factory, whose params set none | No | Not changed (below) |
+| CORS preflights | The network service's `PreflightController`, with `credentials_mode = kOmit`: it sends no cookie and stores none | Reported through `OnCorsPreflightRequest`, not hooked | No Traffic row |
+
+Capture never changes what a page or a real DevTools session observes, and an
+observer is observable: with any observer and a `devtools_request_id`,
+`URLLoader::DispatchOnRawRequest` sets `emitted_devtools_raw_request_`, the
+response head carries it as `emitted_extra_info`, Blink copies it
+(`WebURLResponse`) and `InspectorNetworkAgent` reports it as `hasExtraInfo` on
+`Network.responseReceived` and redirects. An agentless observer would make
+that `true` with no `*ExtraInfo` event ever following, and a CDP client that
+waits for them would stall. So a factory gets one only where no DevTools agent
+can see its response heads:
+
+- **Early-hints preloads: built.** Content gives preloads no DevTools
+  instrumentation (`TODO(crbug.com/40188470)` in
+  `NavigationRequest::CreateNavigationEarlyHintsManagerParams`) and
+  `NavigationEarlyHintsManager::MaybePreloadHintedResource` sets no
+  `devtools_request_id`; the request's only one is the Brave proxy's `reb-`
+  ID, which no agent knows, and without it the observer would never be
+  called.
+  The head goes to the throttles and `PreloadURLLoaderClient`, whose
+  `OnReceiveResponse` reads `network_accessed` and `was_fetched_via_cache` and
+  whose `OnReceiveRedirect` ignores it; the `PreloadedResource` it reports keeps
+  no head. The page's later use of the cached resource is another request,
+  whose head the network service builds for that loader.
+- **Shared worker subresources: not built.** `WorkerFetchContext` gives a
+  worker request a DevTools ID whenever the worker's network agent is on, and
+  that agent reports `hasExtraInfo` from the head.
+- **Worker main scripts, service worker main scripts and update checks: not
+  built.** DevTools can attach to the worker target alone, without the frame
+  host that gives the main script its observer, and the head reaches the
+  worker's own reporting.
+- **Browser-initiated prefetches: not built.** A prefetch can be served to a
+  navigation, which forwards the head's `emitted_extra_info` to the frame's
+  DevTools.
+- **Downloads: not built.** They load through the storage partition's single
+  browser-process factory, which every browser-internal fetch of every
+  profile shares and which is created once.
+- **A service worker script fetched through a header client** (an extension's
+  `webRequest` with `extraHeaders`, or DevTools' Fetch interception) builds its
+  params inside `NavigationURLLoaderImpl::CreateURLLoaderFactoryWithHeaderClient`.
+
+A request of a kind not built keeps its provisional headers, reads
+`not_reported` and is counted as such.
+`tools/check-header-observer-patch.py` (`make lint`) refuses an agentless
+observer in any other function, or one without the gate.
+
+Chromium patch `0058-observe-early-hints-preload-headers.patch` gives the
+early-hints factory `NetworkServiceDevToolsObserver::MakeSelfOwned(std::string())`.
+Every method of that class resolves its DevTools agent from its ID or frame
+tree node and returns when there is none, and the empty ID names no agent, so
+only the hook (patch 0025, before that lookup) sees the raw notifications. It
+is created on the UI thread only while `reb::NativeNetworkHeadersObserved()`
+holds: a content session is current, its Network category is on and its
+expiry has not passed. Otherwise the factory is built exactly as stock. The
+factory belongs to the navigation's `NavigationEarlyHintsManager`;
+`RenderFrameHostImpl` takes the manager at commit
+(`early_hints_manager_ = navigation_request->TakeEarlyHintsManager()`), so the
+factory and its observer live as long as that document, or end with a
+navigation that never commits. Only preloads use the factory, so nothing is
+observed after they complete, and a preload still running when the session
+ends reaches a hook that forwards nothing.
+
+Every request with a provisional block and no `network` block says why on its
+Headers and Cookies tabs and is counted in the session summary (see
+[missing final blocks](#missing-final-blocks)).
 
 #### Hop attribution
 
@@ -1424,15 +1746,15 @@ its own requests and the isolate key of its [stack scope](#stack-scope).
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `2`; readers also accept `1` |
+| 0 | 2 | payload version, `3`; readers also accept `1` and `2` |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | API: 1 `document.cookie` set, 2 `document.cookie` get, 3 `cookieStore.set`, 4 `cookieStore.get`, 5 `cookieStore.getAll`, 6 `cookieStore.delete` |
 | 5 | 1 | flags |
-| 6 | 1 | version 2: the stack thread of the calling isolate, 1 to 4 as in the [stack scope](#stack-scope), or 0 when the thread was never named; version 1: zero |
+| 6 | 1 | versions 2 and 3: the stack thread of the calling isolate, 1 to 4 as in the [stack scope](#stack-scope), or 0 when the thread was never named; version 1: zero |
 | 7 | 1 | reserved, zero |
 | 8 | 4 | count: 1 for a write; for a read, reads since this key's previous record |
 | 12 | 4 | name length in UTF-8 bytes |
-| 16 | 4 | value length in UTF-8 bytes; 0 for a read |
+| 16 | 4 | value length in UTF-8 bytes; 0 for a read, except a version 3 read record (flag bit 4), where it counts the names those reads returned that no name record counts |
 | 20 | 4 | `document.cookie` string length, set or returned; 0 for the Cookie Store API |
 | 24 | 16 | innermost script frame, in the frame layout of `request_initiator_stack` |
 | 40 | 32 | stack digest, the `request_initiator_stack` digest of this call's stack, or zero |
@@ -1441,19 +1763,24 @@ its own requests and the isolate key of its [stack scope](#stack-scope).
 
 Flags: bit 0 the name is longer than 24 bytes; bit 1 a script frame was
 recorded; bit 2 a stack digest was recorded; bit 3 a read recorded alone
-because the aggregation table was full.
+because the aggregation table was full; bit 4, version 3 only, the read record
+of a `document.cookie` read.
 
 Rules: API 1 to 6; writes (1, 3, 6) have count 1 and a nonzero value digest,
-reads have value length 0 and a zero digest; count is nonzero; bit 0 if and
-only if the name is longer than 24 bytes, and name bytes past the name are
-zero; for API 1 the string length is at least name plus value length, and for
-3 to 6 it is 0; bit 1 if and only if the frame's kind is 1 or 2 with a nonzero
-script ID, its combinator 0 and only frame flag bits 0 and 1, and without bit
-1 the frame is zero; bit 2 if and
+reads have a zero digest and value length 0, except a version 3 read record;
+count is nonzero; bit 0 if and only if the name is longer than 24 bytes, and
+name bytes past the name are zero; for API 1 the string length is at least
+name plus value length, and for 3 to 6 it is 0; bit 1 if and only if the
+frame's kind is 1 or 2 with a nonzero script ID, its combinator 0 and only
+frame flag bits 0 and 1, and without bit 1 the frame is zero; bit 2 if and
 only if the stack digest is nonzero, and only with bit 1; bit 3 only for a
-read; reserved bytes are zero. Version 2: byte 6 is 0 to 4; with 0, bits 1
-and 2 are clear, since no frame could be read in a known isolate; with 2 to 4,
-`frame_id` is nonzero.
+read; reserved bytes are zero. Versions 2 and 3: byte 6 is 0 to 4; with 0,
+bits 1 and 2 are clear, since no frame could be read in a known isolate; with
+2 to 4, `frame_id` is nonzero. Version 3: bit 4 only with API 2 and a name
+length of 0; an API 2 record without bit 4 is a name record, which never has
+bit 3 and whose string length is at least its name length. Versions 1 and 2
+have no bit 4: their API 2 records are whole reads with no name, which is why
+version 3 exists.
 
 The script frame and the stack are read in the isolate byte 6 names, with the
 worker's context ID as its key: script IDs are unique only per isolate, so a
@@ -1478,11 +1805,41 @@ sequence is reserved before the walk, so the stack artifact's
 `creator_event_id` and the new `script_identity` records' parent are the
 `script_cookie` record. Reads stay one-frame.
 
+A `document.cookie` read records each cookie name the returned string holds,
+so a cookie's provenance finds the scripts that read it. The sink splits the
+string as the page would: at `;`, then at the first `=`, whitespace trimmed;
+an entry with no `=` is the empty name, as `CanonicalCookie::BuildCookieLine`
+writes a nameless cookie as its bare value, and an empty entry is no cookie. A
+name the jar holds twice (another path or domain) counts once per read. Each
+read is one read record (bit 4, no name) after one name record per name:
+names only, never a value or a value digest, since a read is frequent and its
+values are already in the request's sent cookie list. A read parses at most
+360 names, the most Chromium returns to one read at the pin: 180 cookies per
+eTLD+1 (`CookieMonster::kDomainMaxCookies`) and 180 partitioned ones
+(`kPerPartitionDomainMaxCookies`). Every name past them, and every name the
+table below cannot hold, is counted at offset 16 of the read record, so an
+absent name record is never silent.
+
 Reads are frequent, so each renderer aggregates them per frame, thread, API,
-script frame and name in a 256-entry table per configuration. A key records its 1st,
-2nd, 4th, 8th and later power-of-two reads, each with the reads since the
-previous record, and its remainder when the configuration ends. A new key
-while the table is full is recorded alone with bit 3.
+script frame, name and read record in a 4,096-key table per configuration:
+one script position reading a jar of 100 cookies uses 101 keys. A key records
+its 1st, 2nd, 4th, 8th and later power-of-two reads, each with the reads since
+the previous record, and its remainder when the configuration ends. A read
+that had unrecorded names is recorded at once and alone: its read record has
+count 1 and that read's count of them, and earlier reads still waiting for a
+power of two keep waiting. So a name no record counts never waits in the
+renderer, when no read record counts unrecorded names every name a read held
+has its name record, and the counts of read records with unrecorded names are
+exactly the reads that had them. A new read record or Cookie
+Store read while the table is full is recorded alone with bit 3; a new name
+then is counted on its read record instead. The table is open-addressed at
+most half full, so a lookup is a hash and a few probes; it is allocated when a
+content-capture configuration starts, on the transport sequence (336 KiB),
+and freed when it ends, so the sink never allocates on a read and a
+metadata-only session holds none. Blink hands the sink the jar through
+`blink::StringUtf8Adaptor` (patch 0028): an 8-bit ASCII jar is read in place,
+and any other jar is converted to UTF-8 once per read, which allocates that
+string while content capture is on.
 
 #### Cookie bounds
 
@@ -1491,9 +1848,14 @@ while the table is full is recorded alone with bit 3.
 - A sent and a received list per hop, at most 2 MiB each, sharing the header
   table and budget.
 - Script cookie records: one per write, at most 2 + log2(reads) per read key,
-  and one per read past the table; each is one 320-byte record, one SHA-256 of
+  one per read past the table, and one read record per read with unrecorded
+  names; each is one 320-byte record, one SHA-256 of
   the value and a one-frame stack capture. With request stacks on, a write
   walks its stack instead, inside the request stack bounds.
+- A `document.cookie` read: one pass over the returned string, at most 360
+  table lookups and at most 361 records (its first read). The configuration
+  end records at most 4,096 remainders into the renderer's 8,192-record ring;
+  a full ring counts them as drops, as for any record.
 
 #### Cookie agent access and UI
 
@@ -1513,7 +1875,23 @@ most 64 distinct positions per answer, the rest counted in
 `stacks_unresolved`.
 Cookie values are withheld as `value_withheld: true` with their byte length
 and SHA-256, like credential headers; a script write links to a sent cookie
-when their value digests are equal.
+when their value digests are equal. A `document.cookie` read joins a name by
+its version 3 name record. `read_coverage` counts the reads that may hold the
+name without naming it: `whole_jar_reads` (version 1 and 2 reads, recorded
+before names were), `reads_with_unrecorded_names` with their
+`unrecorded_names`, and `unnamed_store_reads` (`cookieStore.get` or `getAll`
+with no name, which read every cookie they can); and `records_dropped`, the
+records full queues dropped, since a lost record may have named it. A drop is
+a gap record of the session of any category or process, read at or after the
+oldest record provenance read, whose payload is not a named reason (an
+identifier category of at most 32 bytes and reason of at most 128, payload
+not truncated): it weighs its decimal count, or 1. Any category, because a
+renderer's drop gap takes the category, time and process of the last record
+the host drained before it (`MakeNativeProbeGapEvent`), so a flood of canvas
+records that hides a `script_cookie` record writes a `canvas` gap. `complete`
+is true only when all are zero, so an absent read is proof only then.
+`reads_with_unrecorded_names` counts exactly the reads that had unrecorded
+names, since each such read is its own record of count 1.
 
 Origin Trace's **Cookies** tab shows Request cookies, with "Show filtered out
 request cookies" listing excluded ones and each reason, and Response cookies
@@ -1524,8 +1902,9 @@ provenance. Values are inserted as text after a size and SHA-256 check.
 
 ### Bounds and hot path
 
-- Disabled or metadata-only: unchanged. The proxy adds no ID, and the hook
-  costs one atomic load per DevTools raw notification.
+- Disabled or metadata-only: unchanged. The proxy adds no ID, the hook
+  costs one atomic load per DevTools raw notification, and an early-hints
+  factory costs one atomic load and is built as stock.
 - 320 KiB per block: Chromium's 256 KiB response header bound
   (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`) plus the
   byte `: ` normalization can add to a line of at least 4 bytes. Request blocks
@@ -1557,6 +1936,60 @@ their byte length: like request bodies, they stay in the binary artifact, which
 MCP never inlines. Withholding goes by name, so another value, such as a
 `Location` query, is returned as captured.
 
+### Missing final blocks
+
+A content session records a `browser` request block for every hop, so a hop
+with one and no `network` block is a request the network service did not
+report. Its reason comes from the request's own browser records (those with a
+browser context), decided in this order:
+
+| Reason | When | Meaning |
+| --- | --- | --- |
+| `in_progress` | The final hop, before `request_completed` or `request_failed` | Not an outcome yet; never counted |
+| `download` | `request_started` has loader kind 2 | Downloads use the browser-process factory, which has no observer ([binding](#network-service-binding-at-the-pinned-chromium)) |
+| `service_worker` | The final hop's `response_started` has flag 4 | A service worker answered; nothing reached the network |
+| `from_cache` | The final hop's `response_started` has flag 2 | The HTTP cache answered without sending a request, so there are no sent headers or cookies; DevTools shows provisional headers too |
+| `failed` | The final hop ended with `request_failed` and no response | It failed before the network service reported what it sent |
+| `redirect_not_sent` | An earlier hop, while a later hop of the request has a `network` block | The factory observes and tracks the request, so nothing was sent for this hop: an internal redirect, such as an HSTS upgrade, or one the HTTP cache answered |
+| `not_reported` | Anything else | No observer on its factory, or the block arrived for a request the sink no longer tracked (the unattributed count) |
+| `record_dropped` | In place of `redirect_not_sent`, `not_reported` or `no_raw_response`, when a drop (as for `read_coverage` above) of the session falls between the request's first record and one second after its last, or after its first while it is open | A full queue dropped records while it ran, so the block may have been sent and lost. The second covers the browser writer, which reports drops on its next wake, at most 250 ms later, and then sends its batch. A reason drawn from a record that is there (cache, service worker, download, failure, still open) stands |
+
+`get_request_headers` gives each hop `network_block_missing` and
+`get_request_cookies` gives each hop `sent_missing` (the same reasons, a later
+hop's sent list standing for its network block) and, for a hop with a sent
+list but no received one, `received_missing`: `in_progress`, `failed` (before
+a response), `no_raw_response`, since the received list comes with the
+response headers and what was sent was reported, or `record_dropped` in its
+place under the rule above. The backend reads the session's gap records of
+every category beside the request's own, from a tally it keeps per store: the
+first read scans the newest 64 MiB for gaps, a later one only the bytes
+appended since and none while the store is unchanged, and a store that shrank,
+was replaced or was cleared and written again (the bytes before the last
+boundary changed, as the request index checks) is scanned again. So a Headers,
+Cookies or provenance read costs its own records, not a 64 MiB scan.
+Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
+and the Cookies tab lists each such hop with it.
+
+`get_session_summary` counts, over the newest 64 MiB of events:
+
+- every header block and cookie list in states 4 to 8, as
+  `request_content_not_retained` with category `request_headers`,
+  `response_headers` or `cookie_list` and the state as its reason;
+- the unattributed blocks and lists, the newest count each producer carried,
+  as `network_headers_unattributed`;
+- the requests whose final hop ended without a `network` block, one
+  `final_headers_missing` check per reason: `info` for `download`,
+  `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`
+  and `record_dropped` (a drop of any category while the request ran).
+  It follows at most 131,072 browser requests; header records of later ones
+  are counted as `final_headers_untracked`. A request with no header record
+  (any request of a metadata-only session) has no final block to miss and is
+  never counted there.
+
+The Traffic footer shows the same counts for the loaded rows as one item,
+"N header gaps", whose breakdown lists each count with its reason, so the
+footer stays one item however many reasons there are.
+
 ### Consumers
 
 - The broker accepts types 30 and 31 only when `IsValidEvent` does. The
@@ -1565,8 +1998,9 @@ MCP never inlines. Withholding goes by name, so another value, such as a
 - Origin Trace's **Headers** tab shows General (URL, method, status, remote
   address, referrer policy), Response headers and Request headers per hop. A
   hop with only a `browser` request block reads "Provisional headers are
-  shown". Each section collapses and has a Raw view and copy actions. Values
-  are inserted as text after a size and SHA-256 check.
+  shown" with its [reason](#missing-final-blocks). Each section collapses and
+  has a Raw view and copy actions. Values are inserted as text after a size
+  and SHA-256 check.
 
 ### Validation
 
@@ -1577,9 +2011,21 @@ out-of-order raw notifications, early hints, pseudo-headers, sharing, a
 It also drives sent and received cookie lists with blocked cookies, an
 unparsed `Set-Cookie`, sharing and late lists. `make native-probe-admission-check`
 drives the renderer cookie sink: disabled, metadata-only, writes, read
-aggregation, a full table and the configuration-end remainder.
+aggregation, a full table and the configuration-end remainder, and per-name
+reads: the page's split, a name held twice, the empty jar, the 360-name bound,
+a table that fills during a read, a read with unrecorded names recorded at once
+(also past its powers of two), and that the sink allocates nothing on a read. The capture check also asserts that
+`NativeNetworkHeadersObserved`, the gate of patch 0058, holds only for a
+current content session with the Network category before its expiry.
+`tools/check-header-observer-patch.py` refuses an agentless observer outside
+the early-hints factory or without that gate.
 `make native-tests` and `make network-request-wire-check` compare the C++
-verdicts with the Python validator and the shipped decoders.
+verdicts with the Python validator and the shipped decoders. The backend's
+`request_headers`, `request_cookies` and `session_summary` tests and
+`tools/check-traffic-headers-ui.mjs`, `check-traffic-cookies-ui.mjs` and
+`check-native-only-ui.mjs` check each missing-block reason, the per-name read
+coverage, the refusal counts and the footer. Patch 0058 was replayed on the
+pinned sources; it has not been compiled.
 
 ### Acceptance
 
@@ -1596,6 +2042,12 @@ Still required before declaring this browser-ready:
    SameSite and Secure variants, compare the sent, received and blocked
    cookies with what the server saw, and link the JavaScript write to its
    script position.
+5. On the same fixture, read `document.cookie` from two script positions and
+   confirm each cookie's provenance lists both reads with their counts.
+6. Serve a 103 with a cookie-carrying `Link` preload and confirm the preload
+   has a `network` block and both cookie lists. With DevTools open on the
+   page, and on a shared worker that fetches a subresource, confirm
+   `hasExtraInfo` and the `*ExtraInfo` events match a build without patch 0058.
 
 ## Request initiator stacks
 

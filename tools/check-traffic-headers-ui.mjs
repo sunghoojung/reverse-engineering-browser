@@ -32,7 +32,8 @@ const context = createContext({
     return blobs.has(id) ? new Response(blobs.get(id)) : new Response('', {status: 404});
   }
 });
-runInContext(`${source};globalThis.api={trafficHeaderLines, trafficHeaderHops, renderTrafficHeaders};`, context);
+runInContext(`${source};globalThis.api={trafficHeaderLines, trafficHeaderHops, renderTrafficHeaders,
+  trafficHeaderCoverage, trafficHeaderCoverageNotice, trafficHeaderGapCount};`, context);
 const {api} = context;
 const panel = document.getElementById('panel');
 const sha = text => createHash('sha256').update(text).digest('hex');
@@ -115,6 +116,96 @@ await settle();
 assert.equal(renders, before, 'an unchanged view does not reread or rerender');
 assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-Cookie: a=b\r\n', 'Raw survives a refresh');
 
+// A hop without the headers the network sent says why, from the row's
+// browser records ("Missing final blocks"); renderer records do not count.
+{
+  const browser = (type, extra = {}) => ({category: 'network', type, flags: 0, browser_context_id_high: '5',
+    browser_context_id_low: '6', ...extra});
+  const row = (events, extra = []) => ({id: `m${next}`, origin: 'live', method: 'GET', path: 'https://echo.test/m',
+    status: 200, hostOnly: false, events, headerBlocks: [block('request', 'browser', 'Accept: */*\r\n'), ...extra]});
+  const cases = [
+    [[browser('request_started'), browser('response_started', {flags: 2}), browser('request_completed')], /The HTTP cache answered it without sending a request/],
+    [[browser('request_started'), browser('request_failed')], /It failed before the network stack reported the headers it sent/],
+    [[browser('request_started', {loader_kind: 2}), browser('response_started'), browser('request_completed')], /Downloads load through the browser's own factory/],
+    [[browser('request_started'), browser('response_started', {flags: 4}), browser('request_completed')], /A service worker answered it/],
+    // A service worker that answered from its cache answered without the network either.
+    [[browser('request_started'), browser('response_started', {flags: 6}), browser('request_completed')], /A service worker answered it/],
+    [[browser('request_started'), browser('response_started'), browser('request_completed')], /its factory had no DevTools observer/],
+    [[browser('request_started'), {category: 'network', type: 'request_completed', flags: 0, browser_context_id_high: '0', browser_context_id_low: '0'}],
+      /The request has not ended/]];
+  const rows = [];
+  for (const [events, expected] of cases) {
+    const missing = row(events);
+    rows.push(missing);
+    const view = document.createElement('div');
+    api.renderTrafficHeaders(view, missing, () => {});
+    await settle();
+    const section = [...view.querySelectorAll('details')].find(node => node.dataset.section === 'request-0');
+    assert.match(section.textContent, /Provisional headers are shown/);
+    assert.match(section.textContent, expected);
+  }
+  // A drop gap of the session while the request ran, of any category, makes
+  // a reason drawn from an absence unsure; a cached answer stands. Past the
+  // report slack after an ended request a drop does not count.
+  {
+    const timed = (events, extra = []) => Object.assign(row(events.map(event => ({...event, session_id: '7'})), extra),
+      {firstTimestamp: 10n, lastTimestamp: 20n});
+    const gapAt = time => ({type: 'gap', category: 'canvas', session_id: '7', monotonic_time_ns: String(time),
+      payload: Buffer.from('2').toString('hex')});
+    const reasonOf = async (request, gaps) => {
+      context.state.events = gaps;
+      const view = document.createElement('div');
+      api.renderTrafficHeaders(view, request, () => {});
+      await settle();
+      context.state.events = [];
+      return [...view.querySelectorAll('details')].find(node => node.dataset.section === 'request-0').textContent;
+    };
+    const unexplained = timed([browser('request_started'), browser('response_started'), browser('request_completed')]);
+    assert.match(await reasonOf(unexplained, [gapAt(15)]), /A full queue dropped records while this request ran/);
+    assert.match(await reasonOf(unexplained, [gapAt(20 + 2000000000)]), /its factory had no DevTools observer/);
+    const cachedRow = timed([browser('request_started'), browser('response_started', {flags: 2}), browser('request_completed')]);
+    assert.match(await reasonOf(cachedRow, [gapAt(15)]), /The HTTP cache answered it/);
+    const coverage = api.trafficHeaderCoverage([unexplained], [gapAt(15)]);
+    assert.deepEqual(Object.fromEntries(coverage.missing), {record_dropped: 1});
+  }
+  // An earlier hop without its block is never blamed on the final response.
+  const redirected = row([browser('request_started'), browser('request_redirected'), browser('response_started', {flags: 2}),
+    browser('request_completed')], [block('request', 'browser', 'Accept: */*\r\n', {hop: 1})]);
+  const view = document.createElement('div');
+  api.renderTrafficHeaders(view, redirected, () => {});
+  await settle();
+  const byHop = hop => [...view.querySelectorAll('details')].find(node => node.dataset.section === `request-${hop}`).textContent;
+  assert.match(byHop(1), /The HTTP cache answered it/);
+  assert.match(byHop(0), /its factory had no DevTools observer/);
+  // When a later hop was reported, an earlier hop without a block sent nothing:
+  // an internal or cached redirect, never a missing observer.
+  const reported = row([browser('request_started'), browser('request_redirected'), browser('response_started'),
+    browser('request_completed')], [block('request', 'browser', 'Accept: */*\r\n', {hop: 1}),
+    block('request', 'network', ':method: GET\r\n', {hop: 1})]);
+  const reportedView = document.createElement('div');
+  api.renderTrafficHeaders(reportedView, reported, () => {});
+  await settle();
+  const hopZero = [...reportedView.querySelectorAll('details')].find(node => node.dataset.section === 'request-0').textContent;
+  assert.match(hopZero, /Nothing was sent for this redirect hop: it was an internal redirect, such as an HSTS upgrade/);
+  assert.doesNotMatch(hopZero, /DevTools observer/);
+  // The footer counts each reason once per request, and what was not retained.
+  const sent = row([browser('request_started'), browser('request_completed')],
+    [block('request', 'network', 'cookie: a=1\r\n')]);
+  const refused = row([browser('request_started'), browser('request_completed')], [
+    block('request', 'network', 'a: b\r\n', {state: 'not_captured_session_budget', unattributedBlocks: 2}),
+    block('response', 'browser', 'a: b\r\n', {state: 'not_captured_block_limit'})]);
+  refused.cookieLists = [{direction: 'sent', state: 'not_captured_transfer_refused', hop: 0, unattributedLists: 1}];
+  const coverage = api.trafficHeaderCoverage([...rows, redirected, sent, refused]);
+  assert.deepEqual(Object.fromEntries(coverage.missing), {from_cache: 2, failed: 1, download: 1, service_worker: 2, not_reported: 1});
+  assert.equal(api.trafficHeaderCoverageNotice(coverage),
+    '2 header blocks not retained (1 session budget, 1 size limit) · 1 cookie list not retained (queue refused) · ' +
+    '3 late header records on no row · 7 requests without final headers (2 HTTP cache, 1 failed, 1 download, 2 service worker, 1 not reported)');
+  assert.equal(api.trafficHeaderCoverageNotice(api.trafficHeaderCoverage([sent])), '', 'a complete row adds nothing');
+  // The footer shows one count for all of them.
+  assert.equal(api.trafficHeaderGapCount(coverage), 3 + 3 + 7);
+  assert.equal(api.trafficHeaderGapCount(api.trafficHeaderCoverage([sent])), 0);
+}
+
 // Integrity failure, refusal and every not-retained state read as sentences.
 const wrong = block('request', 'network', 'a: b\r\n');
 blobs.set(wrong.artifactId, 'a: c\r\n');
@@ -142,5 +233,5 @@ assert.match(panel.textContent, /unknown rather than missing/);
 assert.doesNotMatch(panel.textContent, /No header record was retained/);
 api.renderTrafficHeaders(panel, {id: 'c', origin: 'live', method: 'GET', path: 'https://echo.test/a', status: 200, hostOnly: false, headerBlocks: []}, () => {});
 assert.match(panel.textContent, /No header record was retained/, 'A complete read may still state absence');
-console.log('PASS Traffic Headers tab: hops newest first, provisional notice, size and SHA-256 checked reads, raw and copy, ' +
+console.log('PASS Traffic Headers tab: hops newest first, provisional notice with why each hop lacks the sent headers, footer coverage counts, size and SHA-256 checked reads, raw and copy, ' +
   'text-only values, refusal, integrity and not-retained states, metadata-only and legacy rows (DOM model; not rendered QA)');

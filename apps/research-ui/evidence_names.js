@@ -2,13 +2,15 @@
  * never evidence: it is kept in one non-executable JSON scratchpad in the local
  * Analyst library and never replaces, hides or edits a captured value. Lookups
  * use exact identities only; a label, URL or file name never selects an item.
- * Contract: docs/product/evidence-names-v1.md. */
+ * Wasm functions are keyed by module SHA-256 and function index, so a name
+ * follows identical module bytes across sessions.
+ * Contract: docs/product/evidence-names-v1.md, protocol/wasm-function-names-v1.md. */
 (function () {
   'use strict';
   const KIND = 'reb-evidence-names', SUFFIX = '.reb-names.json', FILE_NAME = 'Evidence names.reb-names.json';
   // One Analyst file holds at most 32 KiB, so the byte bound usually binds
   // before the count bound. Both refuse explicitly; nothing is truncated.
-  const LIMITS = Object.freeze({names: 500, characters: 80, bytes: 32768, programs: 64});
+  const LIMITS = Object.freeze({names: 500, characters: 80, bytes: 32768, programs: 64, modules: 64});
   const encoder = new TextEncoder();
   // Plain single-line text. Direction overrides and invisible marks are refused
   // because a name sits beside raw identifiers and must not reorder or mimic them.
@@ -16,8 +18,12 @@
   const FIELDS = Object.freeze({
     'captured-request': ['origin', 'session', 'process', 'sequence', 'request'],
     'captured-artifact': ['session', 'artifact', 'sha256', 'bytes'],
-    'vm-handler': ['finding', 'session', 'artifact', 'sha256', 'bytes', 'handler', 'start', 'end']
+    'vm-handler': ['finding', 'session', 'artifact', 'sha256', 'bytes', 'handler', 'start', 'end'],
+    'wasm-function': ['sha256', 'function']
   });
+  const WASM_FUNCTION = ['function'];
+  const DOCUMENT_V1 = ['document_kind', 'contract_version', 'scope', 'requests', 'artifacts', 'vm_programs'];
+  const DOCUMENT_V2 = [...DOCUMENT_V1, 'wasm_modules'];
   const PROGRAM = ['finding', 'session', 'artifact', 'sha256', 'bytes'];
   const HANDLER = ['handler', 'start', 'end'];
   const exact = (value, fields) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
@@ -42,9 +48,12 @@
     if (FORBIDDEN.test(value) || !wellFormed(value)) return {error: 'Names are plain single-line text without control, invisible or direction-override characters.'};
     return {name: value};
   }
+  const functionIndex = value => Number.isInteger(value) && value >= 0 && value <= 4294967295;
   function validIdentity(identity) {
     const fields = FIELDS[identity?.type];
-    if (!fields || !exact(identity, ['type', ...fields]) || !decimal(identity.session)) return false;
+    if (!fields || !exact(identity, ['type', ...fields])) return false;
+    if (identity.type === 'wasm-function') return hash(identity.sha256) && functionIndex(identity.function);
+    if (!decimal(identity.session)) return false;
     if (identity.type === 'captured-request') return ['live', 'demo'].includes(identity.origin) &&
       decimal(identity.process, 4294967295n) && decimal(identity.sequence) && decimal(identity.request);
     if (!decimal(identity.artifact) || !hash(identity.sha256) || !offset(identity.bytes)) return false;
@@ -61,6 +70,15 @@
   const requestOf = entry => ({type: 'captured-request', ...pick(entry, FIELDS['captured-request'])});
   const artifactOf = entry => ({type: 'captured-artifact', ...pick(entry, FIELDS['captured-artifact'])});
   const handlerOf = (program, entry) => ({type: 'vm-handler', ...pick(program, PROGRAM), ...pick(entry, HANDLER)});
+  const wasmOf = (module, entry) => ({type: 'wasm-function', sha256: module.sha256, function: entry.function});
+  // A Wasm function is one index of one module's exact bytes: the full index
+  // space, imports included, as every Wasm read numbers it.
+  function wasmFunctionIdentity(sha256, index) {
+    const identity = {type: 'wasm-function', sha256, function: index};
+    return validIdentity(identity) ? identity : null;
+  }
+  // The key the backend reads use too (wasm_names.rs `key`).
+  const wasmFunctionKey = (sha256, index) => wasmFunctionIdentity(sha256, index) ? `wasm-function:${sha256}:${index}` : null;
 
   // Identities are the investigation navigation's own fields. Requests add the
   // capture origin: they carry no content hash, so deterministic demo
@@ -88,10 +106,14 @@
     return validIdentity(identity) ? identity : null;
   }
 
+  // Version 2 adds Wasm function names. Version 1 stays readable and is still
+  // written while no Wasm name exists, so earlier builds keep reading it.
   function validate(doc) {
-    if (!exact(doc, ['document_kind', 'contract_version', 'scope', 'requests', 'artifacts', 'vm_programs']) ||
-        doc.document_kind !== KIND || doc.contract_version !== 1 || doc.scope !== 'local-analyst-library' ||
+    const fields = doc?.contract_version === 2 ? DOCUMENT_V2 : doc?.contract_version === 1 ? DOCUMENT_V1 : null;
+    if (!fields || !exact(doc, fields) || doc.document_kind !== KIND || doc.scope !== 'local-analyst-library' ||
         ![doc.requests, doc.artifacts, doc.vm_programs].every(Array.isArray) || doc.vm_programs.length > LIMITS.programs) return false;
+    const modules = doc.contract_version === 2 ? doc.wasm_modules : [];
+    if (!Array.isArray(modules) || modules.length > LIMITS.modules) return false;
     const keys = new Set(), programs = new Set();
     const admit = (identity, name) => {
       const key = keyOf(identity);
@@ -107,14 +129,29 @@
       programs.add(key);
       for (const entry of program.handlers) if (!exact(entry, [...HANDLER, 'name']) || !admit(handlerOf(program, entry), entry.name)) return false;
     }
+    const seen = new Set();
+    for (const module of modules) {
+      if (!exact(module, ['sha256', 'functions']) || !hash(module.sha256) || seen.has(module.sha256) ||
+          !Array.isArray(module.functions) || !module.functions.length) return false;
+      seen.add(module.sha256);
+      for (const entry of module.functions) if (!exact(entry, [...WASM_FUNCTION, 'name']) || !admit(wasmOf(module, entry), entry.name)) return false;
+    }
     return encoder.encode(JSON.stringify(doc)).length <= LIMITS.bytes;
   }
+  const modulesOf = doc => doc.wasm_modules ?? [];
   function count(doc) {
-    return doc.requests.length + doc.artifacts.length + doc.vm_programs.reduce((sum, program) => sum + program.handlers.length, 0);
+    return doc.requests.length + doc.artifacts.length + doc.vm_programs.reduce((sum, program) => sum + program.handlers.length, 0) +
+      modulesOf(doc).reduce((sum, module) => sum + module.functions.length, 0);
+  }
+  // The stored form: version 1 without Wasm names, version 2 with them.
+  function serialize(doc) {
+    const {wasm_modules: modules = [], ...rest} = doc;
+    return modules.length ? {...rest, contract_version: 2, wasm_modules: modules} : {...rest, contract_version: 1};
   }
   function boundsMessage(doc) {
     if (count(doc) > LIMITS.names) return `The names document holds at most ${LIMITS.names} names. Clear a name first; nothing was saved.`;
     if (doc.vm_programs.length > LIMITS.programs) return `Names cover at most ${LIMITS.programs} VM programs. Clear one first; nothing was saved.`;
+    if (modulesOf(doc).length > LIMITS.modules) return `Names cover at most ${LIMITS.modules} Wasm modules. Clear one first; nothing was saved.`;
     return `The names document is limited to ${LIMITS.bytes / 1024} KiB, the Analyst file limit. Clear or shorten a name first; nothing was saved.`;
   }
   function index(doc) {
@@ -123,6 +160,7 @@
     for (const entry of doc.requests) names.set(keyOf(requestOf(entry)), entry.name);
     for (const entry of doc.artifacts) names.set(keyOf(artifactOf(entry)), entry.name);
     for (const program of doc.vm_programs) for (const entry of program.handlers) names.set(keyOf(handlerOf(program, entry)), entry.name);
+    for (const module of modulesOf(doc)) for (const entry of module.functions) names.set(keyOf(wasmOf(module, entry)), entry.name);
     return names;
   }
   // Set, replace or clear exactly one identity. Other names keep their order.
@@ -137,7 +175,13 @@
     };
     if (identity.type === 'captured-request') update(next.requests, requestOf, pick(identity, FIELDS['captured-request']));
     else if (identity.type === 'captured-artifact') update(next.artifacts, artifactOf, pick(identity, FIELDS['captured-artifact']));
-    else {
+    else if (identity.type === 'wasm-function') {
+      const modules = next.wasm_modules ?? [];
+      let module = modules.find(value => value.sha256 === identity.sha256);
+      if (!module && name) {module = {sha256: identity.sha256, functions: []}; modules.push(module);}
+      if (module) update(module.functions, entry => wasmOf(module, entry), {function: identity.function});
+      next.wasm_modules = modules.filter(value => value.functions.length);
+    } else {
       const programKey = JSON.stringify(PROGRAM.map(field => identity[field]));
       let program = next.vm_programs.find(value => JSON.stringify(PROGRAM.map(field => value[field])) === programKey);
       if (!program && name) {program = {...pick(identity, PROGRAM), handlers: []}; next.vm_programs.push(program);}
@@ -147,8 +191,28 @@
     return next;
   }
   const strictParse = (source, maximum) => RebInvestigationNotebook.strictParse(source, maximum);
+  // Every number in a names document is an integer written as one. JSON.parse
+  // would read 1.0 or 2e0 as an integer, which the backend's strict parser
+  // refuses, so such a document is refused here too and both sides agree.
+  function integerLiterals(source) {
+    let inString = false;
+    for (let at = 0; at < source.length; at++) {
+      const character = source[at];
+      if (inString) {
+        if (character === '\\') at++;
+        else if (character === '"') inString = false;
+      } else if (character === '"') inString = true;
+      else if (character === '-' || (character >= '0' && character <= '9')) {
+        let end = at;
+        while (end < source.length && /[0-9.eE+-]/.test(source[end])) end++;
+        if (/[.eE]/.test(source.slice(at, end))) return false;
+        at = end - 1;
+      }
+    }
+    return true;
+  }
   function readDocument(file) {
-    if (file?.kind !== 'scratchpad' || file.language !== 'json') return null;
+    if (file?.kind !== 'scratchpad' || file.language !== 'json' || typeof file.content !== 'string' || !integerLiterals(file.content)) return null;
     try {const doc = strictParse(file.content, LIMITS.bytes * 4); return validate(doc) ? doc : null;} catch {return null;}
   }
   // A suffix only makes a malformed document discoverable; ordinary JSON files
@@ -195,7 +259,11 @@
       if (!validateLibrary(value)) throw new Error('The local library response is malformed.');
       return value;
     }
-    const read = signal => fetcher('/api/local-analyst', {cache: 'no-store', signal}).then(response => documentOf(response, signal));
+    // The library ETag lets the 2 s poll ask only whether anything changed;
+    // the backend answers an unchanged file with 304 from one stat.
+    let etag = null, polling = false;
+    const remember = response => {etag = response.ok ? response.headers?.get?.('etag') ?? null : etag; return response;};
+    const read = signal => fetcher('/api/local-analyst', {cache: 'no-store', signal}).then(remember).then(response => documentOf(response, signal));
     async function load() {
       if (model.busy) return false;
       model.busy = true; if (!model.library) model.status = 'loading'; changed();
@@ -225,7 +293,7 @@
         if (current !== base) return {ok: false, conflict: true, current, message: current
           ? `The saved name changed to “${current}” elsewhere. Press Enter again to replace it, or Escape to keep it.`
           : 'The saved name was cleared elsewhere. Press Enter again to save yours, or Escape to keep it cleared.'};
-        const candidate = apply(model.document, identity, normalized.name);
+        const candidate = serialize(apply(model.document, identity, normalized.name));
         if (!validate(candidate)) return {ok: false, message: boundsMessage(candidate)};
         const content = JSON.stringify(candidate), old = model.file;
         const files = library.files.filter(file => file.id !== old?.id).map(projection);
@@ -256,6 +324,22 @@
           : `The save could not be confirmed. ${error.message} Press Enter to check: the library is reread first and nothing is written twice.`};
       } finally {model.busy = false; changed();}
     }
+    // Names saved elsewhere (an agent's set_wasm_function_name, another
+    // window) appear without a reload: one conditional read per tick, adopted
+    // only when its generation is newer. A poll never blocks or retries a save.
+    async function poll() {
+      if (polling || model.busy || !etag || !model.library) return false;
+      polling = true;
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeout);
+      try {
+        const response = await fetcher('/api/local-analyst', {cache: 'no-store', signal: controller.signal, headers: {'If-None-Match': etag}});
+        if (response.status === 304) return false;
+        const library = await documentOf(remember(response), controller.signal);
+        return observe(library);
+      } catch {
+        return false;
+      } finally {clearTimeout(timer); polling = false;}
+    }
     // The Analyst editor admits newer library generations; names follow them
     // without a request. An older or equal generation is ignored.
     function observe(library) {
@@ -265,7 +349,7 @@
     const nameOf = identity => {const key = keyOf(identity); return key ? names.get(key) ?? null : null;};
     const has = type => [...names.keys()].some(key => key.startsWith(`["${type}"`));
     const cancel = () => active?.abort();
-    return {model, load, rename, observe, nameOf, has, cancel, entries: () => [...names]};
+    return {model, load, rename, observe, poll, nameOf, has, cancel, entries: () => [...names]};
   }
 
   // Resolve names for a set of retained records. A record whose identity is
@@ -287,7 +371,7 @@
     return {identity, name: record => {const exact = identity(record); return exact ? nameOf(exact) : null;}};
   }
 
-  const KIND_LABELS = {'captured-request': 'request', 'captured-artifact': 'source', 'vm-handler': 'handler'};
+  const KIND_LABELS = {'captured-request': 'request', 'captured-artifact': 'source', 'vm-handler': 'handler', 'wasm-function': 'Wasm function'};
   let mounted = null;
   // kinds: {request|artifact|handler: {records(scope), identity(record, scope),
   // unique?(record), version?(scope)}} are the caller's retained records, its
@@ -399,6 +483,7 @@
     globalThis.addEventListener?.('pagehide', () => {close(false); store.cancel();});
     const controller = {
       model: store.model, load: () => supported ? store.load() : Promise.resolve(false), observe: store.observe,
+      poll: () => supported ? store.poll() : Promise.resolve(false),
       nameOf: store.nameOf, has: store.has, identityFor, nameFor, begin, close, editing: () => editor?.target.identity ?? null,
       // Handing the provider to a palette transfers registration to it.
       paletteProvider: () => {registered = true; return provider;}, registerPalette: register
@@ -410,8 +495,11 @@
   // Renderers reach the mounted controller through these module functions, so a
   // view rendered before mounting (or without it) simply shows no names.
   globalThis.RebEvidenceNames = Object.freeze({KIND, SUFFIX, FILE_NAME, LIMITS, empty, validName, normalizeName, validIdentity, keyOf,
-    requestIdentity, artifactIdentity, handlerIdentity, validate, index, apply, readDocument, locate, createStore, resolver, mount,
+    requestIdentity, artifactIdentity, handlerIdentity, wasmFunctionIdentity, wasmFunctionKey, validate, serialize, index, apply,
+    readDocument, locate, createStore, resolver, mount,
     controller: () => mounted,
+    // For views of one Wasm module: the name of one function index, or null.
+    wasmFunctionName: (sha256, index) => {const identity = wasmFunctionIdentity(sha256, index); return identity ? mounted?.nameOf(identity) ?? null : null;},
     nameFor: (kind, record, scope) => mounted?.nameFor(kind, record, scope) ?? null,
     identityFor: (kind, record, scope) => mounted?.identityFor(kind, record, scope) ?? null,
     observeLibrary: library => mounted?.observe(library) ?? false,

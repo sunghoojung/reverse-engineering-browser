@@ -305,3 +305,9 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 @container flow-stage (max-height: 380px) {
   .flow-graph-minimap { display: none; }
 }
+/* The Wasm function rename editor floats over the top of the stage, above the
+   heading, so opening it never moves the drawing. */
+.flow-graph-name-host { position: absolute; z-index: 9; top: 8px; left: 8px; right: 8px; max-width: 520px; }
+.flow-graph-name-host:empty { display: none; }
+.flow-graph-name-host .evidence-name-editor { border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 22px var(--shadow); }
+.flow-graph-inspector .researcher-name { white-space: normal; overflow-wrap: anywhere; }

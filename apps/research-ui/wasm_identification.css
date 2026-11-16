@@ -1,0 +1,27 @@
+/* Library identification summary above the Sources Inspect listing. It is a
+ * full-width toolbar row like the limit notice, three short lines tall, and
+ * its details scroll inside a bounded region instead of pushing the code away. */
+.wasm-identification { flex: 1 0 100%; box-sizing: border-box; display: grid; gap: 2px; padding: 4px 8px; border-left: 2px solid var(--accent); background: var(--panel); color: var(--text); font: 11px/1.45 var(--sans); min-width: 0; }
+.wasm-identification[hidden] { display: none; }
+/* The block graph needs the height; its Functions menu carries the badges. */
+.sources-editor[data-graph] .wasm-identification { display: none; }
+.wasm-id-row { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.wasm-id-key { flex: 0 0 64px; color: var(--muted); }
+.wasm-id-values { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; flex: 1 1 0; }
+.wasm-id-chip, .wasm-id-toggle { max-width: 100%; min-height: 20px; padding: 0 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2); color: var(--text); font: 11px var(--sans); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wasm-id-chip:hover, .wasm-id-toggle:hover { background: var(--panel-3); }
+.wasm-id-chip:focus-visible, .wasm-id-toggle:focus-visible, .wasm-id-details:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wasm-id-chip[data-confidence="low"] { color: var(--muted); }
+.wasm-id-chip[data-match="partial"] { border-style: dashed; }
+.wasm-id-count { color: var(--text); }
+.wasm-id-partial { padding: 0 4px; border-radius: 3px; color: var(--amber); border: 1px solid var(--amber); }
+.wasm-id-none, .wasm-id-state, .wasm-id-more, .wasm-id-notice { margin: 0; color: var(--muted); }
+.wasm-id-details { max-height: min(220px, 26vh); overflow: auto; margin-top: 2px; padding: 4px 0; border-top: 1px solid var(--line-soft); }
+.wasm-id-group { margin: 4px 0 2px; font: 600 11px var(--sans); color: var(--muted); }
+.wasm-id-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 22px; min-width: 0; }
+.wasm-id-label { min-width: 0; overflow-wrap: anywhere; }
+.wasm-id-fn { flex: 0 0 auto; font: 11px var(--mono); color: var(--muted); }
+.wasm-id-badge, .block-graph-fn-badge { flex: 0 0 auto; padding: 0 4px; border-radius: 3px; background: var(--accent-soft); color: var(--text); font: 10px var(--sans); }
+.wasm-id-notice { margin-top: 4px; }
+/* In the Functions menu the badge sits at the right, beside the size. */
+.block-graph-fn-badge { margin-left: auto; }

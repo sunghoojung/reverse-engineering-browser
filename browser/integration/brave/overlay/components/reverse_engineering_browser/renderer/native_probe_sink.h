@@ -101,6 +101,10 @@ struct NativeMemoryCacheReuse final {
   bool static_data = false;
   std::int32_t status_code = 0;
   std::int64_t decoded_body_length = 0;
+  // ResourceResponse::RequestId() of the reused resource: the GenerateRequestId
+  // value of this renderer's request that loaded it, which its
+  // request_initiated record carries. 0 when no request set one.
+  std::int32_t source_request_id = 0;
 };
 
 // Trusted native detector output only. Registration is not exposed to page JS.

@@ -42,6 +42,17 @@ pub struct Options {
     /// Brave. They grant and enable nothing here.
     #[arg(long, requires = "socket")]
     pub session_request_content: bool,
+    /// The content session's budgets in MiB and whether it keeps element
+    /// media, as the launcher passed them to Brave. They mean nothing without
+    /// request content, so each requires it.
+    #[arg(long, requires = "session_request_content", value_parser = clap::value_parser!(u32).range(1..=4096))]
+    pub session_request_content_budget_mib: Option<u32>,
+    #[arg(long, requires = "session_request_content", value_parser = clap::value_parser!(u32).range(1..=16384))]
+    pub session_response_body_budget_mib: Option<u32>,
+    /// `1` when the content session keeps element media, `0` when it does
+    /// not. Unnamed, the session context reports the choice as unknown.
+    #[arg(long, requires = "session_request_content", value_parser = ["0", "1"])]
+    pub session_response_media: Option<String>,
     #[arg(long, requires = "socket")]
     pub session_canvas_images: bool,
     #[arg(long, requires = "socket")]

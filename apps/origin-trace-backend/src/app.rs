@@ -18,8 +18,8 @@ use crate::{
     owned_vm_debugger::OwnedVmDebugger,
     request_cookies, request_headers,
     request_index::{self, RequestIndex},
-    session_context, session_summary, source_facts, source_format, validation, vm, wasm,
-    wasm_graph,
+    session_context, session_summary, source_facts, source_format, validation, vm, wasm, wasm_diff,
+    wasm_graph, wasm_identification, wasm_pseudocode, wasm_value_flow,
     workspace::{Kind, Store},
 };
 use axum::{
@@ -39,11 +39,15 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 71] = [
+const UI_ASSETS: [&str; 82] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
+    "wasm_readable.js",
+    "wasm_readable.css",
     "block_graph_layout.js",
+    "wasm_diff_view.css",
+    "wasm_diff_view.js",
     "graph_layout_client.js",
     "flow_graph.css",
     "flow_graph.js",
@@ -54,6 +58,8 @@ const UI_ASSETS: [&str; 71] = [
     "app.css",
     "entropy_map.css",
     "entropy_map.js",
+    "wasm_identification.css",
+    "wasm_identification.js",
     "agent_panel.css",
     "agent_panel.js",
     "session_panel.css",
@@ -75,6 +81,7 @@ const UI_ASSETS: [&str; 71] = [
     "investigation_navigation.js",
     "investigation_notebook.js",
     "evidence_names.js",
+    "wasm_function_names.js",
     "invocation_sites.js",
     "request_stack.js",
     "debugger_pause.js",
@@ -109,6 +116,10 @@ const UI_ASSETS: [&str; 71] = [
     "native_console_completion.js",
     "xrefs_view.js",
     "xrefs_view.css",
+    "wasm_runner.js",
+    "wasm_runner.css",
+    "value_flow_view.js",
+    "value_flow_view.css",
     "debugger_sidebar.js",
     "debugger_sidebar.css",
 ];
@@ -170,6 +181,8 @@ pub struct App {
     native_debugger_pause: NativeDebuggerPause,
     owned_vm_debugger: OwnedVmDebugger,
     vm_experiments: crate::vm_experiment::Experiments,
+    /// Offline runs of captured Wasm functions; derived records only.
+    wasm_runs: crate::wasm_run::Runs,
     /// The live capture lifecycle; `capture` serializes stop and clear.
     lifecycle: Capture,
     capture: Mutex<()>,
@@ -178,11 +191,19 @@ pub struct App {
     analysis: Mutex<Option<VmDocumentsCache>>,
     /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
+    /// The store's drop gaps, extended only over appended bytes.
+    gaps: Arc<crate::gap_tally::GapTally>,
     /// The last flow graph and the store snapshot it describes.
     flow_graph: Arc<crate::flow_graph::Cache>,
+    /// Researcher Wasm function names, reread only when the library changes.
+    wasm_names: Arc<crate::wasm_names::Cache>,
+    /// The Analyst library's last ETag and the file state it was computed
+    /// from, so the UI's 2 s names poll costs one `stat` while nothing changed.
+    analyst_etag: Arc<std::sync::Mutex<Option<(crate::wasm_names::Fingerprint, String)>>>,
     events: Arc<Mutex<event_window::EventWindowCache>>,
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
+    observation_sites: Arc<std::sync::Mutex<crate::request_stack::ObservationSites>>,
     artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
@@ -274,10 +295,12 @@ impl App {
                     "build/reb-native-vm-fixture",
                 ),
             ),
+            wasm_runs: crate::wasm_run::Runs::new(options.artifacts.clone()),
             live_browser: LiveBrowser::new(&options),
             lifecycle: Capture::new(&options),
             requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
             initiator_frames: Arc::default(),
+            observation_sites: Arc::default(),
             invocation_sites,
             invocation_session,
             text_digests: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -287,7 +310,10 @@ impl App {
             package_io: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
+            gaps: Arc::default(),
             flow_graph: Arc::default(),
+            wasm_names: Arc::default(),
+            analyst_etag: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
             artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
@@ -447,21 +473,97 @@ impl App {
         }
         let id = q.required("artifact_id")?.to_owned();
         let root = self.options.artifacts.clone();
+        let names = self.names_reader();
         let document = if path == "/api/wasm/functions" {
             if q.one("function")?.is_some() {
                 return Err(Error::bad("The WASM function list takes only artifact_id"));
             }
-            self.blocking(move || wasm_graph::function_index(&root, &id))
+            self.blocking(move || wasm_graph::function_index_named(&root, &id, Some(&names())))
                 .await?
         } else {
             let function = q
                 .required("function")?
                 .parse::<u32>()
                 .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
-            self.blocking(move || wasm_graph::function_graph(&root, &id, function))
-                .await?
+            self.blocking(move || {
+                wasm_graph::function_graph_named(&root, &id, function, Some(&names()))
+            })
+            .await?
         };
         Ok(([("content-type", "application/json")], document).into_response())
+    }
+    /// Reads the researcher Wasm names on a blocking thread: one `stat` while
+    /// the library is unchanged, a bounded reread when it changed.
+    fn names_reader(&self) -> impl Fn() -> Arc<crate::wasm_names::Names> + Send + 'static {
+        let (cache, store) = (self.wasm_names.clone(), self.workspace.clone());
+        move || cache.get(&store)
+    }
+    /// The readable lift is built as text, like the graph documents, and
+    /// recomputed per window so nothing retains a whole function's lines.
+    async fn wasm_pseudocode_route(&self, raw_query: &str) -> Result<Response> {
+        let q = Query::new(raw_query);
+        if q.0.keys().any(|key| {
+            !["artifact_id", "function", "line_offset", "line_limit"].contains(&key.as_str())
+        }) {
+            return Err(Error::bad(
+                "The WASM readable view takes artifact_id and function with optional line_offset and line_limit",
+            ));
+        }
+        let id = q.required("artifact_id")?.to_owned();
+        let function = q
+            .required("function")?
+            .parse::<u32>()
+            .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
+        let offset = q.number("line_offset", Some("0"), 32, false)? as usize;
+        let default = wasm_pseudocode::DEFAULT_LINE_LIMIT.to_string();
+        let limit = q.number("line_limit", Some(&default), 32, true)? as usize;
+        let root = self.options.artifacts.clone();
+        let names = self.names_reader();
+        let document = self
+            .blocking(move || {
+                wasm_pseudocode::pseudocode_named(
+                    &root,
+                    &id,
+                    function,
+                    offset,
+                    limit,
+                    Some(&names()),
+                )
+            })
+            .await?;
+        Ok(([("content-type", "application/json")], document).into_response())
+    }
+    /// Two artifact IDs and an optional page. A misspelled parameter fails
+    /// instead of returning an unfiltered table the caller reads as filtered.
+    async fn wasm_diff_route(&self, raw_query: &str) -> Result<Response> {
+        // The deadline counts from arrival, including the wait for a reader.
+        let started = std::time::Instant::now();
+        let q = Query::new(raw_query);
+        if q.0.keys().any(|key| {
+            ![
+                "artifact_id",
+                "compare_artifact_id",
+                "status",
+                "row_offset",
+                "row_limit",
+            ]
+            .contains(&key.as_str())
+        }) {
+            return Err(Error::bad(
+                "The WASM module diff takes artifact_id and compare_artifact_id with optional status, row_offset and row_limit",
+            ));
+        }
+        let a = q.required("artifact_id")?.to_owned();
+        let b = q.required("compare_artifact_id")?.to_owned();
+        let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
+        let default = wasm_diff::PAGE_DEFAULT_ROWS.to_string();
+        let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+        let page = wasm_diff::Page::new(offset, limit, q.one("status")?)?;
+        let root = self.options.artifacts.clone();
+        let document = self
+            .blocking(move || wasm_diff::diff(&root, &a, &b, &page, started))
+            .await?;
+        Ok(axum::Json(document).into_response())
     }
     async fn receiver_connected(&self) -> bool {
         socket_connected(self.options.artifact_socket.as_deref()).await
@@ -476,6 +578,44 @@ impl App {
         }
         if path == "/api/wasm/functions" || path == "/api/wasm/graph" {
             return self.wasm_graph_route(path, raw_query).await;
+        }
+        if path == "/api/wasm/runs" {
+            let q = Query::new(raw_query);
+            q.only(&["artifact_id", "limit"], &[])?;
+            let artifact = match q.one("artifact_id")? {
+                Some(id) => {
+                    validation::canonical(&json!(id), 64, true, "Artifact ID")?;
+                    Some(id.to_owned())
+                }
+                None => None,
+            };
+            let limit = q.number("limit", Some("1"), 64, true)?;
+            if limit > 64 {
+                return Err(Error::bad("limit must be between 1 and 64"));
+            }
+            let root = self.options.artifacts.clone();
+            let value = self
+                .blocking(move || crate::wasm_run::list(&root, artifact.as_deref(), limit as usize))
+                .await?;
+            return Ok(axum::Json(value).into_response());
+        }
+        if path == "/api/wasm/pseudocode" {
+            return self.wasm_pseudocode_route(raw_query).await;
+        }
+        if path == "/api/wasm/diff" {
+            return self.wasm_diff_route(raw_query).await;
+        }
+        if path == "/api/wasm/value-flow" {
+            let request = wasm_value_flow::parse_query(raw_query)?;
+            let id = request
+                .artifact_id
+                .clone()
+                .ok_or_else(|| Error::bad("artifact_id is required"))?;
+            let root = self.options.artifacts.clone();
+            let document = self
+                .blocking(move || wasm_value_flow::value_flow(&root, &id, &request))
+                .await?;
+            return Ok(axum::Json(document).into_response());
         }
         let q = Query::new(raw_query);
         let mut etag = None;
@@ -594,14 +734,36 @@ impl App {
                     None
                 };
                 let root = self.options.artifacts.clone();
+                let names = self.names_reader();
                 self.blocking(move || {
                     let mut document = wasm::load(&root, &id, sections.as_ref())?;
                     if let Some((offset, limit)) = window {
                         wasm::window(&mut document, offset, limit)?;
                     }
+                    crate::wasm_names::annotate_inspection(&mut document, &names());
                     Ok(document)
                 })
                 .await?
+            }
+            "/api/wasm/identification" => {
+                if q.0
+                    .keys()
+                    .any(|key| !["artifact_id", "row_offset", "row_limit"].contains(&key.as_str()))
+                {
+                    return Err(Error::bad(
+                        "WASM identification takes artifact_id with optional row_offset and row_limit",
+                    ));
+                }
+                let id = q.required("artifact_id")?.to_owned();
+                let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
+                let default = wasm_identification::SUGGESTION_PAGE.to_string();
+                let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+                if limit > wasm_identification::SUGGESTION_PAGE {
+                    return Err(Error::bad("row_limit is at most 1024"));
+                }
+                let root = self.options.artifacts.clone();
+                self.blocking(move || wasm_identification::load(&root, &id, offset, limit))
+                    .await?
             }
             "/api/artifact-map" => {
                 if q.0.keys().any(|key| key != "artifact_id") {
@@ -618,11 +780,24 @@ impl App {
                     .await?
             }
             "/api/api-collection" | "/api/local-analyst" => {
-                let store = if path.ends_with("api-collection") {
-                    self.collection.clone()
-                } else {
+                let analyst = path.ends_with("local-analyst");
+                let store = if analyst {
                     self.workspace.clone()
+                } else {
+                    self.collection.clone()
                 };
+                // An unchanged library file answers its last ETag without a
+                // read. The state is taken before the read below, so a write
+                // racing that read leaves a stale state and the next poll reads.
+                let before = analyst.then(|| crate::wasm_names::fingerprint(&store.path));
+                if let Some(state) = before
+                    && let Some((cached, tag)) = self.analyst_etag.lock().unwrap().as_ref()
+                    && *cached == state
+                    && state.is_some()
+                    && matches_etag(headers, Some(tag))
+                {
+                    return Ok(not_modified(tag));
+                }
                 // These documents are at most 1–2 MiB. Do not wait behind VM
                 // analysis or Wasm inspection, which hold the shared reader permits.
                 let (value, digest) = tokio::task::spawn_blocking(move || {
@@ -646,6 +821,9 @@ impl App {
                     },
                     value["generation"]
                 ));
+                if let (Some(state), Some(tag)) = (before, etag.as_ref()) {
+                    *self.analyst_etag.lock().unwrap() = Some((state, tag.clone()));
+                }
                 value
             }
             "/api/local-analyst/runner" => self.analyst.state(),
@@ -801,16 +979,21 @@ impl App {
                     self.options.artifacts.clone(),
                     self.requests.clone(),
                 );
-                self.blocking(move || match name {
-                    "navigation_sequence" => crate::request_stack::navigation_document(
-                        &store, &artifacts, &requests, session, process, value,
-                    ),
-                    "observation_sequence" => crate::request_stack::observation_document(
-                        &store, &artifacts, &requests, session, process, value,
-                    ),
-                    _ => crate::request_stack::document(
-                        &store, &artifacts, &requests, session, process, value,
-                    ),
+                let names = self.names_reader();
+                self.blocking(move || {
+                    let mut document = match name {
+                        "navigation_sequence" => crate::request_stack::navigation_document(
+                            &store, &artifacts, &requests, session, process, value,
+                        ),
+                        "observation_sequence" => crate::request_stack::observation_document(
+                            &store, &artifacts, &requests, session, process, value,
+                        ),
+                        _ => crate::request_stack::document(
+                            &store, &artifacts, &requests, session, process, value,
+                        ),
+                    }?;
+                    crate::wasm_names::annotate_request_stack(&mut document, &names());
+                    Ok(document)
                 })
                 .await?
             }
@@ -1002,22 +1185,44 @@ impl App {
                     self.receiver_connected().await,
                     capture.state.as_str(),
                 );
-                etag = Some(event_window::etag(
+                // The store's tag is taken before the request index reads it.
+                let before = event_window::etag(
                     &self.options.store,
-                    &format!(
-                        "summary:{state:?}:{}",
-                        evidence::resource_etag(&self.options.artifacts.join("manifest.jsonl"), "")
+                    &session_summary::etag_key(
+                        &format!("{state:?}"),
+                        &evidence::resource_etag(
+                            &self.options.artifacts.join("manifest.jsonl"),
+                            "",
+                        ),
                     ),
-                ));
+                );
+                // Per request, so they come from the request index's rows. The
+                // index is held only for its counts, and a failure leaves the
+                // rest of the summary standing.
+                let index = self.requests.clone().lock_owned().await;
+                let (counts, progress) = self
+                    .blocking(move || {
+                        let mut index = index;
+                        let counts = index.response_bodies().map_err(|error| error.message);
+                        Ok((counts, index.progress_marker()))
+                    })
+                    .await?;
+                // The counts can be mid-store on an unchanged file, so the tag
+                // names the progress they were read at. An answer without them
+                // is not tagged, so a revalidation reads the index again.
+                etag = counts
+                    .is_ok()
+                    .then(|| session_summary::etag(&before, &progress));
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
                 let store = self.options.store.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
+                let content_limits = session_context::content_limits(&self.options);
                 let mut summary = self
                     .blocking(move || {
-                        session_summary::build(
+                        let mut summary = session_summary::build(
                             &store,
                             &artifacts,
                             &session_summary::CaptureState {
@@ -1027,8 +1232,11 @@ impl App {
                                 capture_stopped: state.2,
                                 artifact_receiver_configured: state.3,
                                 artifact_receiver_connected: state.4,
+                                content_limits,
                             },
-                        )
+                        )?;
+                        session_summary::add_response_bodies(&mut summary, counts);
+                        Ok(summary)
                     })
                     .await?;
                 summary["capture_state"] = json!(state.5);
@@ -1105,6 +1313,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
                     let range =
@@ -1115,8 +1324,10 @@ impl App {
                         event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let drops = gaps.drops(&options.store, &session)?;
                     let mut document = request_headers::build(
                         &detail.records,
+                        &drops,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1147,6 +1358,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
                     let range =
@@ -1157,8 +1369,10 @@ impl App {
                         event_query::read_request_records(&options.store, range, 1024, &filter)?;
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
+                    let drops = gaps.drops(&options.store, &session)?;
                     let mut document = request_cookies::build(
                         &detail.records,
+                        &drops,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1192,6 +1406,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
                     // A cookie spans the session, so no one request's bytes bound it.
@@ -1221,8 +1436,10 @@ impl App {
                                 )
                             })
                     };
+                    let drops = gaps.drops(&options.store, &session)?;
                     let mut document = request_cookies::provenance(
                         &detail.records,
+                        &drops,
                         &artifacts,
                         &options.artifacts,
                         &session,
@@ -1328,8 +1545,12 @@ impl App {
                 // A client that moved on leaves no scan running.
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                let names = self.names_reader();
                 let graph = self
-                    .blocking(move || crate::flow_graph::run(&stores, session, &cache, &cancel))
+                    .blocking(move || {
+                        let graph = crate::flow_graph::run(&stores, session, &cache, &cancel)?;
+                        crate::wasm_names::annotate_flow_graph_bytes(graph, &names())
+                    })
                     .await?;
                 return Ok(bytes_response(graph, "application/json"));
             }
@@ -1362,8 +1583,12 @@ impl App {
                 // leaves no read running.
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                let names = self.names_reader();
                 self.blocking(move || {
-                    crate::xrefs::run(&query, &stores, &cursors, handler, &cancel)
+                    let mut document =
+                        crate::xrefs::run(&query, &stores, &cursors, handler, &cancel)?;
+                    crate::wasm_names::annotate_xrefs(&mut document, &names());
+                    Ok(document)
                 })
                 .await?
             }
@@ -1529,7 +1754,10 @@ impl App {
         let filter = event_query::event_filter(q)?;
         let cursor = event_query::cursor(q)?;
         let capture = self.capture_view();
-        let etag = event_window::etag(
+        let may_hold_sites = filter.may_hold_sites();
+        // The store's tag digests its whole contents, so it is computed once;
+        // what the page's sites depend on is folded into it.
+        let base = event_window::etag(
             &self.options.store,
             &format!(
                 "query:{}-{}-{limit}:{cursor:?}:{}",
@@ -1538,11 +1766,28 @@ impl App {
                 filter.echo()
             ),
         );
+        let tag = |sources: &str| {
+            if sources.is_empty() {
+                base.clone()
+            } else {
+                format!(
+                    "\"{}\"",
+                    hex::encode(sha2::Sha256::digest(format!("{base}{sources}")))
+                )
+            }
+        };
+        let etag = tag(&self.sites_tag(may_hold_sites));
         if matches_etag(headers, Some(&etag)) {
             return Ok(not_modified(&etag));
         }
-        let path = self.options.store.clone();
-        let (page, tally, filter) = self
+        let (path, artifacts, requests, sites) = (
+            self.options.store.clone(),
+            self.options.artifacts.clone(),
+            self.requests.clone(),
+            self.observation_sites.clone(),
+        );
+        let newest_first = !matches!(cursor, event_query::Cursor::After(_));
+        let mut document = self
             .blocking(move || {
                 let mut tally = event_query::Tally::default();
                 let page = event_query::read_page(
@@ -1553,16 +1798,65 @@ impl App {
                     event_query::DAMAGED_LINE_BYTES,
                     event_query::event_visitor(&filter, &mut tally),
                 )?;
-                Ok((page, tally, filter))
+                let mut document =
+                    event_query::events_document(&page, &tally, &filter, cursor, limit);
+                observation_sites(
+                    &path,
+                    &artifacts,
+                    &requests,
+                    &sites,
+                    &mut document,
+                    newest_first,
+                );
+                Ok(document)
             })
             .await?;
-        let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
+        // The tag of the state before the read: whatever landed while the
+        // page was read makes the next read's tag differ, so it is never
+        // called unchanged. A read that resolved sites costs one more full
+        // answer. A page still holding a deferred site gets a tag no later
+        // read matches, since reading it again is its recourse.
+        let deferred = document["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| {
+                event["debugger_observation"]["site"]["resolution"]["status"] == "deferred"
+            })
+        });
+        let etag = if deferred {
+            tag(&format!(":deferred-{}", unique_token()))
+        } else {
+            etag
+        };
         self.event_state(&mut document, capture);
         let mut response = axum::Json(document).into_response();
         response
             .headers_mut()
             .insert("etag", HeaderValue::from_str(&etag).unwrap());
         Ok(response)
+    }
+    /// What a page's sites depend on besides the store, for its tag: the
+    /// artifacts retained, the script identities indexed and what was resolved
+    /// since. The index's position is read without waiting or refreshing;
+    /// while the index is busy the tag is one no client holds, so the page is
+    /// read again rather than called unchanged.
+    fn sites_tag(&self, may_hold_sites: bool) -> String {
+        if !may_hold_sites {
+            return String::new();
+        }
+        // The manifest's identity as well as its length: a replaced manifest
+        // of the same length can name other artifacts for the same scripts.
+        let manifest = crate::request_stack::manifest_tag(&self.options.artifacts);
+        let generation = self
+            .observation_sites
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation();
+        let index = match self.requests.try_lock() {
+            Ok(index) => index
+                .position()
+                .map_or_else(|| "none".to_owned(), |(epoch, at)| format!("{epoch}-{at}")),
+            Err(_) => format!("busy-{}", unique_token()),
+        };
+        format!(":sites-{manifest}-{index}-{generation}")
     }
     /// Returns as soon as a record after the cursor matches, or when the
     /// timeout passes. Without `after`, only records written after the call
@@ -1578,7 +1872,7 @@ impl App {
             event_query::Cursor::After(offset) => Some(offset),
             event_query::Cursor::Tail => None,
         };
-        let _waiter = self
+        let waiter = self
             .event_waiters
             .clone()
             .try_acquire_owned()
@@ -1649,13 +1943,31 @@ impl App {
             scan_start: origin,
             ..last
         };
+        // How long the wait itself took, before any site of what it found is
+        // resolved; the waiting slot is free from here on.
+        let waited = began.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        drop(waiter);
         let cursor = event_query::Cursor::After(origin);
         let mut document = event_query::events_document(&page, &tally, &filter, cursor, limit);
+        if !timed_out {
+            let (store, artifacts, requests, sites) = (
+                self.options.store.clone(),
+                self.options.artifacts.clone(),
+                self.requests.clone(),
+                self.observation_sites.clone(),
+            );
+            document = self
+                .blocking(move || {
+                    observation_sites(&store, &artifacts, &requests, &sites, &mut document, false);
+                    Ok(document)
+                })
+                .await?;
+        }
         self.event_state(&mut document, self.capture_view());
         document["wait"] = json!({
             "timed_out": timed_out,
             "timeout_ms": timeout,
-            "waited_ms": began.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            "waited_ms": waited,
         });
         Ok(axum::Json(document).into_response())
     }
@@ -1836,6 +2148,12 @@ impl App {
                     let workspace = self.blocking(move || store.load()).await?;
                     self.analyst.run(value, &workspace).await
                 }
+                "set_wasm_function_name" => {
+                    let store = self.workspace.clone();
+                    let value = value.clone();
+                    self.blocking(move || crate::wasm_names::set_function_name(&store, &value))
+                        .await
+                }
                 "cancel_local_analyst_script" => {
                     validation::fields(value, &["action", "run_id"], "Analyst cancellation")?;
                     let cancelled = self.analyst.cancel(&value["run_id"])?;
@@ -1911,8 +2229,15 @@ impl App {
                 self.options.signal_store.clone(),
             ];
             let mut index = self.requests.clone().lock_owned().await;
+            let (gaps, sites) = (self.gaps.clone(), self.observation_sites.clone());
             self.blocking(move || {
                 index.discard()?;
+                gaps.reset();
+                // Kept observation sites belong to the evidence being cleared.
+                sites
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear();
                 evidence::clear_stores(&paths)
             })
             .await?;
@@ -2100,6 +2425,14 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
+            // Typed parse with unknown and duplicate keys refused.
+            if path == "/api/wasm/runs" {
+                return app
+                    .wasm_runs
+                    .run(&bytes)
+                    .await
+                    .map(|value| axum::Json(value).into_response());
+            }
             // Typed parse of up to 8 MiB of numbers, never a generic JSON tree.
             if path == "/api/graph-layout" {
                 return crate::graph_layout::route(bytes.to_vec())
@@ -2188,6 +2521,44 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
     );
     response
 }
+/// A token no earlier tag contains.
+fn unique_token() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos())
+}
+
+/// Decodes the debugger observations of a filtered or waiting event page and
+/// resolves their own frames (protocol/native-debugger-observation-v1.md),
+/// newest first on a backward page. A page without one reads nothing more.
+fn observation_sites(
+    store: &Path,
+    artifacts: &Path,
+    requests: &Mutex<RequestIndex>,
+    sites: &std::sync::Mutex<crate::request_stack::ObservationSites>,
+    document: &mut Value,
+    newest_first: bool,
+) {
+    let Some(events) = document["events"].as_array_mut() else {
+        return;
+    };
+    let observed = events.iter().any(|event| {
+        event["type"]
+            .as_str()
+            .is_some_and(|kind| crate::debugger_observation::TYPES.contains(&kind))
+    });
+    if observed {
+        crate::request_stack::ObservationSites::annotate(
+            sites,
+            store,
+            artifacts,
+            requests,
+            events,
+            newest_first,
+        );
+    }
+}
+
 /// `get_native_debugger` filters: one observation type, one native frame
 /// named by all three identities, and a backward byte cursor.
 fn native_debugger_query(q: &Query) -> Result<crate::debugger_observation::Query> {
@@ -2469,6 +2840,58 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(result, "streamed");
+    }
+
+    #[tokio::test]
+    async fn wasm_diff_deadline_counts_from_arrival_not_from_the_reader_permit() {
+        // A request that waits for a reader past the deadline gets a partial
+        // answer as soon as it runs: the deadline counts from arrival.
+        let root = tempfile::tempdir().unwrap();
+        let artifacts = root.path().join("artifacts");
+        std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/fixtures/wasm-module-diff");
+        let mut manifest = String::new();
+        for (id, name) in [("1", "build-a"), ("2", "build-b")] {
+            let bytes = std::fs::read(fixtures.join(format!("{name}.wasm"))).unwrap();
+            let hash = hex::encode(sha2::Sha256::digest(&bytes));
+            std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+            manifest.push_str(&format!(
+                "{}\n",
+                json!({"protocol_version":1,"artifact_id":id,"session_id":"1","navigation_id":"1",
+                    "frame_id":"1","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm",
+                    "url":format!("fixture://{name}.wasm"),"mime_type":"application/wasm",
+                    "byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+                    "content_path":format!("blobs/{hash}.bin")})
+            ));
+        }
+        std::fs::write(artifacts.join("manifest.jsonl"), manifest).unwrap();
+        let mut options = Options::parse_from(["origin-trace-backend"]);
+        options.store = root.path().join("events.jsonl");
+        options.trace_store = root.path().join("trace.jsonl");
+        options.signal_store = root.path().join("signals.jsonl");
+        options.artifacts = artifacts;
+        options.api_collection = root.path().join("collection.json");
+        options.local_analyst = root.path().join("analyst.json");
+        let app = App::new(options, 0).await;
+        let held = app.io.clone().acquire_many_owned(4).await.unwrap();
+        let request = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.wasm_diff_route("artifact_id=1&compare_artifact_id=2")
+                    .await
+            })
+        };
+        tokio::time::sleep(wasm_diff::DEADLINE + Duration::from_millis(200)).await;
+        drop(held);
+        let response = request.await.unwrap().unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "partial", "{}", body["omissions"]);
+        assert!(body["omissions"].to_string().contains("deadline"));
+        app.stop().await;
     }
 
     #[tokio::test]

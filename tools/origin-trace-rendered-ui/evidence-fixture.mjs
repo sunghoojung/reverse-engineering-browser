@@ -29,6 +29,12 @@ export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">
 export const METADATA_BODY_HOST = 'api.metadata.test';
 // A content-session response body (native-network-v3.md) whose JSON carries markup.
 export const RESPONSE_BODY_HOST = 'api.response.test';
+// A content-session POST, recorded as real capture records it: its target's
+// first 116 bytes, the rest refused by the request content budget, and its
+// body and response refused by their budgets (native-network-v2.md target
+// retention 4 and body state 10, v3 response state 12).
+export const BUDGET_HOST = 'api.budget.test';
+export const BUDGET_TARGET = `/collect/batch?session=fixture&events=${'e'.repeat(160)}`;
 // Rows only the renderer finishes (protocol/native-network-v3.md).
 export const MEMORY_CACHE_HOST = 'cdn.memory.test';
 export const MEMORY_CACHE_TARGET = '/sprite.png?v=3';
@@ -38,8 +44,23 @@ export const SERVICE_WORKER_LOST_HOST = 'api.lost.test';
 const FIXTURE_TAB_ID = 1;
 // A service worker's install-time fetch, linked to the tab that registered it.
 export const REGISTRANT_HOST = 'sw.install.test';
+// Body cases (protocol/native-network-v3.md "Bodies the proxy never sees"): a
+// retained response and the memory-cache reuse naming it, a service worker's
+// answer and its own fetch of the same URL, a partial stream and a binary body
+// past one hex window, in renderer stream BODY_CASE_PROCESS.
+export const BODY_CASE_PROCESS = 4949;
+export const REUSED_HOST = 'cdn.reused.test';
+export const REUSED_MARKER = '<img src=x onerror="window.__rebInjected=10">';
+export const REUSED_TARGET = '/sprite.json?v=1';
+export const WORKER_ANSWER_HOST = 'feed.worker.test';
+export const PARTIAL_HOST = 'events.partial.test';
+export const HEX_BODY_HOST = 'blob.hex.test';
+export const HEX_BODY_BYTES = 600 * 1024;
 export const RESPONSE_BODY_MARKER = '<img src=x onerror="window.__rebInjected=9">';
 export const HEADER_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=7">';
+// A content-session request the HTTP cache answered: provisional headers
+// only, with the reason ("Missing final blocks" in native-network-v3.md).
+export const CACHED_HEADERS_HOST = 'cdn.cached.test';
 export const COOKIE_VALUE_MARKER = '<img src=x onerror="window.__rebInjected=8">';
 // A retained glue script for Track calls: the real window.hsw binder, decoys
 // in a string and a comment that must never match, and two definitions of
@@ -97,6 +118,25 @@ async function artifact(root, fields, bytes) {
     byte_size: bytes.length, sha256: hash, content_path: `blobs/${hash}.bin`};
 }
 
+// Run offline (test42): add(a, b) returns a + b, and stamp(a, b) adds a clock
+// read from the import env.now, so it traps until that import is stubbed. The
+// export names are markup, which must stay text. Built by hand like the module
+// below; tools/fixtures/wasm-runs/ holds the .wat fixtures the Rust tests use.
+export const RUN_OFFLINE_ARTIFACT_ID = '450';
+function offlineRunnerWasm() {
+  const text = value => [...Buffer.from(value, 'utf8')];
+  const name = value => [text(value).length, ...text(value)];
+  const section = (id, data) => [id, data.length, ...data];
+  const add = [0x00, 0x20, 0, 0x20, 1, 0x6a, 0x0b];
+  const stamp = [0x00, 0x20, 0, 0x10, 0, 0xaa, 0x6a, 0x0b];
+  return Buffer.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+    ...section(1, [2, 0x60, 2, 0x7f, 0x7f, 1, 0x7f, 0x60, 0, 1, 0x7c]),
+    ...section(2, [1, ...name('env'), ...name('now'), 0x00, 1]),
+    ...section(3, [2, 0, 0]),
+    ...section(7, [2, ...name('add'), 0x00, 1, ...name('stamp<b>'), 0x00, 2]),
+    ...section(10, [2, add.length, ...add, stamp.length, ...stamp])]);
+}
+
 // A flattened dispatcher: a loop around a br_table with one block per arm, each
 // arm branching back to the loop. Built here so the fixture needs no wat tool.
 function dispatcherWasm(arms) {
@@ -111,6 +151,45 @@ function dispatcherWasm(arms) {
   body.push(0x0b, 0x41, 0, 0x0f, 0x0b, 0x41, 1, 0x0b);
   return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...section(1, [1, 0x60, 1, 0x7f, 1, 0x7f]), ...section(3, [1, 0]),
     ...section(7, [1, 8, ...Buffer.from('dispatch'), 0, 0]), ...section(10, [1, ...leb(body.length), ...body])]);
+}
+
+// test39: an import (func 0), an unexported helper (func 1) and an export
+// (func 2) that calls it, so a name shows on a header and on a call row.
+export const NAMED_WASM_ARTIFACT_ID = '420';
+function namedFunctionsWasm() {
+  const leb = n => { const out = []; do { let b = n & 127; n >>>= 7; out.push(n ? b | 128 : b); } while (n); return out; };
+  const section = (id, data) => [id, ...leb(data.length), ...data];
+  const text = value => [value.length, ...Buffer.from(value)];
+  return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, ...section(1, [1, 0x60, 0, 0]),
+    ...section(2, [1, ...text('env'), ...text('log'), 0, 0]), ...section(3, [2, 0, 0]),
+    ...section(7, [1, ...text('run'), 0, 2]), ...section(10, [2, 2, 0, 0x0b, 4, 0, 0x10, 1, 0x0b])]);
+}
+
+// One function for the Readable view: a loop that loads, adds and calls an
+// import, then code after a return that the lift keeps raw. The import's name
+// is markup so the view can be checked to insert captured names as text.
+function readableWasm() {
+  const leb = n => { const out = []; do { let b = n & 127; n >>>= 7; out.push(n ? b | 128 : b); } while (n); return out; };
+  const text = value => [...leb(Buffer.byteLength(value)), ...Buffer.from(value)];
+  const section = (id, data) => [id, ...leb(data.length), ...data];
+  const body = [1, 1, 0x7f,
+    0x03, 0x40,
+    0x20, 0, 0x28, 2, 8, 0x41, 1, 0x6a, 0x21, 1,
+    0x20, 1, 0x10, 0,
+    0x20, 1, 0x20, 0, 0x48, 0x0d, 0,
+    0x0b,
+    0x20, 1, 0x0f,
+    0x41, 7,
+    0x0b];
+  const names = [1, ...leb(1 + text('<img src=x onerror=alert(1)>').length + 1), 1, 0, ...text('<img src=x onerror=alert(1)>')];
+  return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+    ...section(1, [2, 0x60, 1, 0x7f, 0, 0x60, 1, 0x7f, 1, 0x7f]),
+    ...section(2, [1, ...text('env'), ...text('log'), 0, 0]),
+    ...section(3, [1, 1]),
+    ...section(5, [1, 0, 1]),
+    ...section(7, [1, ...text('readable_run'), 0, 1]),
+    ...section(10, [1, ...leb(body.length), ...body]),
+    ...section(0, [...text('name'), ...names])]);
 }
 
 function jsonLines(text) {
@@ -205,12 +284,12 @@ function requestBodyPayload({state, content, bytes, contentType = 'application/j
 }
 
 // protocol/native-network-v3.md: one header record per block.
-function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0}) {
+function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0, state = 1}) {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
   payload.writeUInt16LE(128, 2);
   payload[4] = source;
-  payload[5] = 1;
+  payload[5] = state;
   payload[6] = policy;
   payload.writeUInt32LE(block.toString().split('\r\n').length - 1, 8);
   payload.writeUInt32LE(block.length, 12);
@@ -290,6 +369,32 @@ function responseBodyPayload(bytes, contentType = 'application/json') {
   payload.writeBigUInt64LE(BigInt(bytes.length), 16);
   createHash('sha256').update(bytes).digest().copy(payload, 32);
   payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+// A response_body record refused by the session's response body budget:
+// no artifact, no captured bytes and no digest.
+function budgetResponsePayload(length, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 12;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+// A version 2 request_target whose bytes past the prefix were not retained.
+function requestTargetPayloadV2(target, retention) {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(2, 0);
+  payload.writeUInt16LE(128, 2);
+  payload.writeUInt32LE(Buffer.byteLength(target), 4);
+  payload[8] = 2;
+  payload[9] = retention;
+  payload.write(target.slice(0, 116), 12, 'utf8');
   return payload.toString('hex');
 }
 
@@ -374,6 +479,24 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   row(responding, 'request_completed', hex('completed'), {status_code: 200});
   row({...responding, category: 'artifact'}, 'artifact_captured', hex('accepted'),
     {artifact_id: '325', parent_event_id: responded.sequence_number});
+  // Answered by the HTTP cache: its provisional block, refused by the session
+  // budget, is all there is, and the Headers tab and footer say why.
+  const browserContext = template.browser_context_id_high !== '0' || template.browser_context_id_low !== '0'
+    ? {} : {browser_context_id_high: '5', browser_context_id_low: '6'};
+  const cached = {request_id: '3003', ...browserContext};
+  const cachedStart = row(cached, 'request_started', hex(`GET ${CACHED_HEADERS_HOST}`), {resource_type: 2});
+  row(cached, 'request_headers', headerBlockPayload({source: 1, block: Buffer.from('accept: text/css\r\n'), policy: 2, state: 7}),
+    {parent_event_id: cachedStart.sequence_number});
+  row(cached, 'response_started', hex('text/css'), {status_code: 200, flags: 2});
+  row(cached, 'request_completed', hex('completed'), {status_code: 200});
+  const refused = {request_id: '3004'};
+  const refusedStart = row(refused, 'request_started', hex(`POST ${BUDGET_HOST}`), {resource_type: 13});
+  row(refused, 'request_target', requestTargetPayloadV2(BUDGET_TARGET, 4), {parent_event_id: refusedStart.sequence_number});
+  row(refused, 'request_body', requestBodyPayload({state: 10, content: true, bytes: Buffer.from('{"events":[1,2,3]}')}),
+    {parent_event_id: refusedStart.sequence_number});
+  const refusedResponse = row(refused, 'response_started', hex('application/json'), {status_code: 200});
+  row(refused, 'response_body', budgetResponsePayload(2048), {parent_event_id: refusedResponse.sequence_number});
+  row(refused, 'request_completed', hex('completed'), {status_code: 200});
   const responseArtifact = await artifact(artifactsRoot, {artifact_id: '325', session_id: template.session_id, navigation_id: '0',
     frame_id: template.frame_id, creator_event_id: responded.sequence_number, execution_context_id: '0',
     capture_origin: 'network_response', kind: 'response_body', mime_type: 'application/json', sensitive: true,
@@ -559,6 +682,106 @@ function rendererAnsweredRequests(template, events) {
   return [reused, target, start, startTarget, failed, lostStart, lostTarget, lost];
 }
 
+function responseBodyRecord(state, length, captured, digest, partial = 0, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(1, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = state;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.writeBigUInt64LE(BigInt(captured), 16);
+  payload.writeUInt16LE(partial, 28);
+  if (digest) digest.copy(payload, 32);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+// Artifact IDs 370 to 373; every other fixture ID is distinct from them.
+async function bodyCaseRequests(template, firstSequence, firstTime, artifactsRoot) {
+  const renderer = BODY_CASE_PROCESS, workerRenderer = BODY_CASE_PROCESS + 1;
+  let browserSequence = firstSequence, rendererSequence = 0, time = BigInt(firstTime);
+  const events = [], artifacts = [];
+  const base = {...template, navigation_id: '0', artifact_id: '0', parent_event_id: '0', status_code: 0, error_code: 0,
+    encoded_data_length: '0', decoded_body_length: '0', resource_type: 0, flags: 0, payload_truncated: false, tab_id: FIXTURE_TAB_ID};
+  const record = (fields, type, payload, extra = {}) => {
+    time += 1000n;
+    const event = {...base, ...fields, monotonic_time_ns: String(time), type, payload_size: payload.length / 2, payload, ...extra};
+    events.push(event);
+    return event;
+  };
+  const browser = (request, type, payload, extra = {}) => record({sequence_number: String(browserSequence++), request_id: request,
+    browser_context_id_high: '5', browser_context_id_low: '6'}, type, payload, extra);
+  const rendered = (request, type, payload, extra = {}) => {
+    rendererSequence += 1;
+    const event = record({process_id: renderer, thread_id: renderer, sequence_number: String(rendererSequence), request_id: request,
+      browser_context_id_high: '0', browser_context_id_low: '0', initiator_process_id: 0, initiator_request_id: 0}, type, payload, extra);
+    delete event.scheme_class;
+    delete event.loader_kind;
+    return Object.assign(event, extra);
+  };
+  const retain = async (id, creator, bytes, mime, url) => {
+    const stored = await artifact(artifactsRoot, {artifact_id: id, session_id: template.session_id, navigation_id: '0',
+      frame_id: template.frame_id, creator_event_id: creator.sequence_number, execution_context_id: '0',
+      capture_origin: 'network_response', kind: 'response_body', mime_type: mime, sensitive: true, url}, bytes);
+    artifacts.push(stored);
+    return createHash('sha256').update(bytes).digest();
+  };
+  // A body a later reuse names, then the reuse (payload version 2, bit 2).
+  const sprite = Buffer.from(JSON.stringify({sprite: 'cache', note: REUSED_MARKER}));
+  const owner = {initiator_process_id: renderer, initiator_request_id: 61};
+  rendered('61', 'request_initiated', hex(`GET ${REUSED_HOST}`), {scheme_class: 2, loader_kind: 16});
+  browser('3100', 'request_started', hex(`GET ${REUSED_HOST}`), {...owner, resource_type: 13});
+  const loaded = browser('3100', 'response_started', hex('application/json'), {...owner, status_code: 200});
+  const spriteDigest = await retain('370', loaded, sprite, 'application/json', `https://${REUSED_HOST}/sprite.json`);
+  browser('3100', 'response_body', responseBodyRecord(1, sprite.length, sprite.length, spriteDigest),
+    {...owner, parent_event_id: loaded.sequence_number, artifact_id: '370'});
+  browser('3100', 'request_completed', hex('completed'), {...owner, status_code: 200, decoded_body_length: String(sprite.length)});
+  const reuse = Buffer.alloc(128);
+  reuse.writeUInt16LE(2, 0);
+  reuse.writeUInt16LE(128, 2);
+  reuse[4] = 5;
+  reuse[5] = 4;
+  reuse[6] = REUSED_HOST.length;
+  reuse.write(REUSED_HOST, 8, 'ascii');
+  const reused = rendered('62', 'memory_cache_reuse', reuse.toString('hex'), {scheme_class: 2, loader_kind: 16, status_code: 200,
+    decoded_body_length: String(sprite.length), initiator_process_id: renderer, initiator_request_id: 61});
+  rendered('62', 'request_target', requestTargetPayload(REUSED_TARGET), {parent_event_id: reused.sequence_number});
+  // The page's request its service worker answered, and the worker's own fetch
+  // of the same URL while the page's request was open.
+  const page = rendered('63', 'request_initiated', hex(`GET ${WORKER_ANSWER_HOST}`), {scheme_class: 2, loader_kind: 16});
+  rendered('63', 'request_target', requestTargetPayload('/feed?x=1'), {parent_event_id: page.sequence_number});
+  // The worker controls the fixture tab's page, so its fetch has that tab.
+  const worker = {initiator_process_id: workerRenderer, initiator_request_id: 7, tab_id: FIXTURE_TAB_ID};
+  const fetched = browser('3101', 'request_started', hex(`GET ${WORKER_ANSWER_HOST}`), {...worker, flags: 4, resource_type: 13});
+  browser('3101', 'request_target', requestTargetPayload('/feed?x=1'), {...worker, parent_event_id: fetched.sequence_number});
+  const feed = Buffer.from('{"feed":[1,2,3]}');
+  const feedStarted = browser('3101', 'response_started', hex('application/json'), {...worker, status_code: 200});
+  const feedDigest = await retain('371', feedStarted, feed, 'application/json', `https://${WORKER_ANSWER_HOST}/feed?x=1`);
+  browser('3101', 'response_body', responseBodyRecord(1, feed.length, feed.length, feedDigest),
+    {...worker, parent_event_id: feedStarted.sequence_number, artifact_id: '371'});
+  browser('3101', 'request_completed', hex('completed'), {...worker, status_code: 200});
+  rendered('63', 'request_completed', hex('completed'), {scheme_class: 2, status_code: 200, flags: 4,
+    decoded_body_length: String(feed.length)});
+  // An event stream still open: its second snapshot.
+  const stream = Buffer.from('data: one\n\n'.repeat(100));
+  browser('3102', 'request_started', hex(`GET ${PARTIAL_HOST}`), {resource_type: 13});
+  const opened = browser('3102', 'response_started', hex('text/event-stream'), {status_code: 200});
+  const streamDigest = await retain('372', opened, stream, 'text/event-stream', `https://${PARTIAL_HOST}/events`);
+  browser('3102', 'response_body', responseBodyRecord(3, stream.length, stream.length, streamDigest, 2, 'text/event-stream'),
+    {parent_event_id: opened.sequence_number, artifact_id: '372'});
+  // A binary body longer than one 256 KiB hex window.
+  const blob = Buffer.alloc(HEX_BODY_BYTES);
+  for (let offset = 0; offset < blob.length; offset += 1) blob[offset] = (offset * 13 + 1) & 0xff;
+  browser('3103', 'request_started', hex(`GET ${HEX_BODY_HOST}`), {resource_type: 13});
+  const binary = browser('3103', 'response_started', hex('application/octet-stream'), {status_code: 200});
+  const blobDigest = await retain('373', binary, blob, 'application/octet-stream', `https://${HEX_BODY_HOST}/blob.bin`);
+  browser('3103', 'response_body', responseBodyRecord(1, blob.length, blob.length, blobDigest, 0, 'application/octet-stream'),
+    {parent_event_id: binary.sequence_number, artifact_id: '373'});
+  browser('3103', 'request_completed', hex('completed'), {status_code: 200, decoded_body_length: String(blob.length)});
+  return {events, artifacts};
+}
+
 // A renderer-only service-worker request linked to the fixture tab as its
 // registrant (request_tab_link kind 5), and two requests of a service worker no
 // page used, counted as class 68 (protocol/native-network-v3.md).
@@ -715,7 +938,11 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
     workerStack.events.at(-1).monotonic_time_ns);
   const answered = rendererAnsweredRequests(network,
     [...demoEvents, ...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant]);
-  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant, ...answered];
+  const lastRegistrant = registrant.filter(event => event.process_id === network.process_id).at(-1);
+  const bodyCases = await bodyCaseRequests(network, Number(lastRegistrant.sequence_number) + 1, answered.at(-1).monotonic_time_ns, artifacts);
+  assert(![...demoEvents, ...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant, ...answered]
+    .some(event => event.process_id === BODY_CASE_PROCESS), 'the body case renderer stream must be its own');
+  const requests = [...scrolled, ...adjacent, ...withBodies.events, ...workerStack.events, ...registrant, ...answered, ...bodyCases.events];
   const lines = Array.from({length: SOURCE_LINE_COUNT}, (_, index) => index === 2
     ? `// ${HOSTILE_SOURCE_MARKER}` : `const retainedLine${index} = ${index}; // long line ${'x'.repeat(index % 7 === 0 ? 180 : 12)}`);
   const source = await artifact(artifacts, {artifact_id: '303', session_id: '1', navigation_id: '100', frame_id: '200',
@@ -743,6 +970,33 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const graphWasm = await artifact(artifacts, {artifact_id: '340', session_id: '1', navigation_id: '100', frame_id: '200',
     capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://graph-dispatcher.wasm'},
   dispatcherWasm(32));
+  const namedWasm = await artifact(artifacts, {artifact_id: NAMED_WASM_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://named-functions.wasm'},
+  namedFunctionsWasm());
+  const offlineRunner = await artifact(artifacts, {artifact_id: RUN_OFFLINE_ARTIFACT_ID, session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'wasm', mime_type: 'application/wasm', url: 'https://fixture.invalid/offline-runner.wasm'},
+  offlineRunnerWasm());
+  // A synthetic Rust and wasm-bindgen shaped module for library
+  // identification (test38), built from its checked-in .wat source.
+  const identified = await artifact(artifacts, {artifact_id: '410', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'network_response', kind: 'wasm', mime_type: 'application/wasm', url: 'https://fixture.invalid/identified-module.wasm'},
+  await readFile(new URL('../fixtures/wasm-identification/rust-wasm-bindgen.wasm', import.meta.url)));
+  const readable = await artifact(artifacts, {artifact_id: '400', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://readable-loop.wasm'},
+  readableWasm());
+  // Two builds of one synthetic program for Compare with (test40); the bytes
+  // are the checked-in tools/fixtures/wasm-module-diff builds.
+  const diffFixtures = new URL('../fixtures/wasm-module-diff/', import.meta.url);
+  const diffBuilds = [];
+  for (const [id, name] of [['430', 'build-a'], ['431', 'build-b']]) {
+    diffBuilds.push(await artifact(artifacts, {artifact_id: id, session_id: '1', navigation_id: '100', frame_id: '200',
+      capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: `fixture://diff-${name}.wasm`},
+    await readFile(new URL(`${name}.wasm`, diffFixtures))));
+  }
+  // The repository-owned value-flow module (tools/fixtures/wasm-value-flow), traced by test41.
+  const valueFlowWasm = await artifact(artifacts, {artifact_id: '440', session_id: '1', navigation_id: '100', frame_id: '200',
+    capture_origin: 'webassembly_compile', kind: 'wasm', mime_type: 'application/wasm', url: 'fixture://value-flow.wasm'},
+  await readFile(new URL('../fixtures/wasm-value-flow/value-flow.wasm', import.meta.url)));
   const guest = await goldenEvidence(artifacts, guestStore);
   const physical = await goldenEvidence(artifacts, dispatchStore);
   assert(guest.events.some(event => event.type === 'wasm_guest_dispatch'), 'guest golden store holds a guest sample');
@@ -752,7 +1006,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, ...withBodies.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

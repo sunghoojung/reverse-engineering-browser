@@ -84,6 +84,7 @@ pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> 
     json!({
         "source": if live { "launcher" } else { "not_live" },
         "request_content": live && options.session_request_content,
+        "content_limits": content_limits(options),
         "canvas_images": live && options.session_canvas_images,
         "request_stacks": live && options.session_request_stacks,
         "document_start": if live && options.session_document_start {
@@ -96,6 +97,25 @@ pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> 
             "count": invocation["count"],
             "digests": invocation["digests"],
         },
+    })
+}
+
+/// Version 1 of the content session's limits: its two budgets in MiB and
+/// whether it keeps element media, named as the start options are. Null when
+/// the session retains no request content, or is not live. A launcher from
+/// before the limits were labeled names none of them, so a value it did not
+/// name is null rather than a guessed default.
+pub fn content_limits(options: &crate::config::Options) -> Value {
+    if options.capture_mode() != crate::config::CaptureMode::Live
+        || !options.session_request_content
+    {
+        return Value::Null;
+    }
+    json!({
+        "version": 1,
+        "request_content_budget_mib": options.session_request_content_budget_mib,
+        "response_body_budget_mib": options.session_response_body_budget_mib,
+        "response_media": options.session_response_media.as_deref().map(|media| media == "1"),
     })
 }
 
@@ -207,6 +227,72 @@ mod tests {
     fn record(id: usize) -> Value {
         json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"9","navigation_id":"0","frame_id":"0","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://user:secret_canary@owned.example/private_secret?token=secret_canary#secret_canary","mime_type":"application/wasm","byte_size":8,"sha256":"a".repeat(64),"sensitive":false,"content_path":format!("blobs/{}.bin", "a".repeat(64))})
     }
+    #[test]
+    fn content_limits_label_only_a_live_content_session() {
+        use clap::Parser;
+        let parse = |arguments: &[&str]| {
+            crate::config::Options::try_parse_from(
+                ["origin-trace-backend"].iter().chain(arguments).copied(),
+            )
+        };
+        let live = ["--socket", "/tmp/broker.sock"];
+        let content = [&live[..], &["--session-request-content"]].concat();
+        let limits = |arguments: &[&str]| {
+            content_limits(&parse(&[&content[..], arguments].concat()).unwrap())
+        };
+        assert_eq!(
+            limits(&[
+                "--session-request-content-budget-mib",
+                "256",
+                "--session-response-body-budget-mib",
+                "512",
+                "--session-response-media",
+                "0"
+            ]),
+            json!({"version":1,"request_content_budget_mib":256,"response_body_budget_mib":512,"response_media":false})
+        );
+        assert_eq!(
+            limits(&[
+                "--session-request-content-budget-mib",
+                "4096",
+                "--session-response-body-budget-mib",
+                "16384",
+                "--session-response-media",
+                "1"
+            ]),
+            json!({"version":1,"request_content_budget_mib":4096,"response_body_budget_mib":16384,"response_media":true})
+        );
+        // A launcher that names no limit reports none, never a guessed default.
+        assert_eq!(
+            limits(&[]),
+            json!({"version":1,"request_content_budget_mib":null,"response_body_budget_mib":null,"response_media":null})
+        );
+        // A metadata session and a backend that is not live carry no limits.
+        assert!(content_limits(&parse(&live).unwrap()).is_null());
+        assert!(content_limits(&parse(&[]).unwrap()).is_null());
+        // The labels mean nothing without request content, and keep the
+        // launcher's bounds.
+        for arguments in [
+            &[&live[..], &["--session-request-content-budget-mib", "64"]].concat(),
+            &[&live[..], &["--session-response-media", "1"]].concat(),
+            &[&content[..], &["--session-response-media"]].concat(),
+            &[&content[..], &["--session-response-media", "yes"]].concat(),
+            &[
+                &content[..],
+                &["--session-request-content-budget-mib", "4097"],
+            ]
+            .concat(),
+            &[&content[..], &["--session-request-content-budget-mib", "0"]].concat(),
+            &[
+                &content[..],
+                &["--session-response-body-budget-mib", "16385"],
+            ]
+            .concat(),
+        ] {
+            assert!(parse(arguments).is_err(), "{arguments:?}");
+        }
+    }
+
     #[test]
     fn retired_debugger_fields_are_fixed_and_admission_stays_explicit() {
         let summary = retired_debugger("12:34");

@@ -343,8 +343,10 @@ struct Expectations: Decodable {
   let metadataBodyHost: String
   let responseBodyHost: String
   let responseBodyMarker: String
+  let budgetHost: String
   let headerValueMarker: String
   let cookieValueMarker: String
+  let cachedHeadersHost: String
   let invocationArtifactId: String
   let minifiedArtifactId: String
   let memoryCacheHost: String
@@ -358,6 +360,13 @@ struct Expectations: Decodable {
   let debuggerProcess: Int
   let debuggerFrame: String
   let debuggerArtifactId: String
+  let bodyCaseProcess: Int
+  let reusedHost: String
+  let reusedMarker: String
+  let workerAnswerHost: String
+  let partialHost: String
+  let hexBodyHost: String
+  let hexBodyBytes: Int
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -408,13 +417,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // The same state in the light theme, set the way the theme toggle sets it,
   // without a click that could close an overlaid sidebar.
   @MainActor
-  private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String) async throws {
+  private func lightScreenshot(_ ui: Harness, _ name: String, _ size: String, scope: String = "#debugger-sidebar") async throws {
     _ = try await ui.value("""
       (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
         document.documentElement.dataset.theme = 'light';
         await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
       """)
-    try await assertLayout(ui, "#debugger-sidebar", "\(size) \(name) light")
+    try await assertLayout(ui, scope, "\(size) \(name) light")
     try await ui.screenshot("\(name)-light-\(size)")
     _ = try await ui.value("""
       (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
@@ -434,6 +443,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
     // Every workspace, Flow, Analyst and Tools included, is a direct sidebar entry.
     try await ui.click(".primary-nav .nav-button[data-screen='\(screen)']")
     try await ui.waitUntil("!document.querySelector('#screen-\(screen)').hidden", "\(screen) screen did not open")
+  }
+
+  // A Sources toolbar command that did not fit the row sits in More; open
+  // More first, as a researcher would, then choose it.
+  @MainActor
+  private func clickSourceTool(_ ui: Harness, _ selector: String) async throws {
+    let moved = try await ui.value("document.querySelector('.source-more-menu').contains(document.querySelector(\(String(reflecting: selector))))") as? Bool
+    if moved == true { try await ui.click("#source-more > summary") }
+    try await ui.click(selector)
   }
 
   @MainActor
@@ -1819,9 +1837,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // The lost-end gap names its row without a request ID, so the row's
       // store read lacks it; the inspector keeps what the index row says.
+      // The newest window keeps no gap records, so a row chosen before the
+      // request index answers reads Pending, not yet checked against the
+      // index, until that answer reaches it.
       try await ui.click("#screen-traffic .request-row", containing: expected.serviceWorkerLostHost)
-      try await ui.waitUntil("document.querySelector('#exchange-inspector').innerText.includes('\(expected.serviceWorkerLostHost)')",
-        "the lost-end row did not open")
+      try await ui.waitUntil("""
+        (() => { const text = document.querySelector('#exchange-inspector').innerText;
+          return text.includes('\(expected.serviceWorkerLostHost)') && !text.includes('not yet checked against the request index'); })()
+        """, "\(size.name): the lost-end row did not open, or the request index never answered for it")
       let lost = try await ui.json(selected)
       let lostLabel = lost["label"] as? String ?? ""
       XCTAssertTrue(lostLabel.contains("End lost") && !lostLabel.contains("Pending") && !lostLabel.contains("No loader"),
@@ -1834,6 +1857,99 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let strip = try await ui.value("document.querySelector('#selected-status').textContent") as? String ?? ""
       XCTAssertEqual(strip, "end lost", "\(size.name): the selected strip agrees")
       try await ui.screenshot("traffic-service-worker-lost-\(size.name)")
+    }
+  }
+
+  // protocol/native-network-v3.md "Bodies the proxy never sees": a memory-cache
+  // reuse shows the retained bytes of the request it names and opens it, a
+  // service worker's answer names the worker's own fetch of the same URL, a
+  // stream still arriving says how much had arrived, and hex pages by range.
+  @MainActor
+  func test34ResponseBodyCases() async throws {
+    let expected = try Expectations.load()
+    let panel = "document.querySelector('#response-inspector').innerText"
+    let code = "(document.querySelector('#response-inspector .traffic-response-code')?.innerText ?? '')"
+    let row = { (request: Int) in "#screen-traffic .request-row[data-request-id$=\":R\(expected.bodyCaseProcess):\(request)\"]" }
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      // Rows mount as they scroll, so each is revealed by its path first. A
+      // row shows its name (REUSED_TARGET without the slash) above its host.
+      try await ui.click("#screen-traffic .request-row", containing: "sprite.json?v=1")
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      let selectedReuse = try await ui.value("document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.dataset.requestId ?? ''") as? String ?? ""
+      XCTAssertTrue(selectedReuse.hasSuffix(":R\(expected.bodyCaseProcess):62"), "\(size.name): the reuse row is selected: \(selectedReuse)")
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("document.querySelector('#response-inspector .traffic-response-code') !== null",
+        "\(size.name): the reused request's bytes did not load")
+      let reused = try await ui.json("""
+        ({text: document.querySelector('#response-inspector .traffic-response-code').innerText,
+          panel: document.querySelector('#response-inspector').innerText,
+          state: document.querySelector('#response-inspector').dataset.state,
+          open: document.querySelector('#response-inspector .traffic-response-open')?.textContent ?? ''})
+        """)
+      XCTAssertEqual(reused["state"] as? String, "memory_cache", "\(size.name): the reuse's body case")
+      let reusedPanel = reused["panel"] as? String ?? ""
+      for phrase in ["Reused from the memory cache", "That request's retained body is shown here", "Artifact (reused request)"] {
+        XCTAssertTrue(reusedPanel.contains(phrase), "\(size.name): the reuse names \(phrase): \(reusedPanel)")
+      }
+      let escaped = expected.reusedMarker.replacingOccurrences(of: "\"", with: "\\\"")
+      XCTAssertTrue((reused["text"] as? String ?? "").contains(escaped), "\(size.name): the reused bytes are literal text")
+      XCTAssertTrue((reused["open"] as? String ?? "").hasPrefix("Open the request it reused"), "\(size.name): \(reused)")
+      try await assertInert(ui, "\(size.name) reused response")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) reused response")
+      try await ui.screenshot("traffic-response-memory-cache-\(size.name)")
+      // The link selects the request whose response Blink reused.
+      try await ui.click("#response-inspector .traffic-response-open")
+      try await ui.waitUntil("(document.querySelector('#screen-traffic .request-row[aria-selected=\"true\"]')?.dataset.requestId ?? '').endsWith(':R\(expected.bodyCaseProcess):61')",
+        "\(size.name): the reuse did not open its source request")
+
+      // A service worker's answer: no body for the page's request, and the
+      // worker's own request for the same URL while it was open.
+      _ = try await ui.reveal("#screen-traffic .request-row", containing: expected.workerAnswerHost)
+      try await ui.click(row(63))
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("\(panel).includes('requested this URL while this request was open')",
+        "\(size.name): the worker's own fetch was not found")
+      let answered = try await ui.value(panel) as? String ?? ""
+      XCTAssertTrue(answered.contains("Served by a service worker") && answered.contains("The records do not say whether it answered with those bytes"),
+        "\(size.name): \(answered)")
+      let workerLink = try await ui.value("document.querySelector('#response-inspector .traffic-response-open')?.textContent ?? ''") as? String ?? ""
+      XCTAssertTrue(workerLink.contains("Open the worker's request (retained in full)"), "\(size.name): \(workerLink)")
+      let shownCode = try await ui.value("document.querySelectorAll('#response-inspector .traffic-response-code').length") as? Int
+      XCTAssertEqual(shownCode, 0, "\(size.name): the worker's bytes are not shown as the page's")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) service worker answer")
+      try await ui.screenshot("traffic-response-service-worker-\(size.name)")
+
+      // A stream still arriving says how much had arrived at its snapshot.
+      try await ui.click("#screen-traffic .request-row", containing: expected.partialHost)
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("\(panel).includes('Still arriving: 1,100 bytes had arrived')", "\(size.name): the partial body is not said")
+      let partial = try await ui.value(panel) as? String ?? ""
+      XCTAssertTrue(partial.contains("at snapshot 2") && partial.contains("The record of the ended body replaces it"), "\(size.name): \(partial)")
+      try await ui.screenshot("traffic-response-partial-\(size.name)")
+
+      // Hex pages by range to the end of the body, one 256 KiB window at a time.
+      try await ui.click("#screen-traffic .request-row", containing: expected.hexBodyHost)
+      try await ui.click("#inspector-tab-response")
+      try await ui.waitUntil("\(code).startsWith('00000000')", "\(size.name): the binary body did not open as hex")
+      let first = try await ui.value(panel) as? String ?? ""
+      XCTAssertTrue(first.contains("Hex shows bytes 0 to 262,143 of 614,400 bytes"), "\(size.name): \(first.prefix(400))")
+      try await ui.click("#response-inspector [data-control='hex-next']")
+      try await ui.waitUntil("\(code).startsWith('00040000')", "\(size.name): Next did not show the second window")
+      try await ui.click("#response-inspector [data-control='hex-next']")
+      try await ui.waitUntil("\(panel).includes('Hex shows bytes 524,288 to 614,399 of 614,400 bytes')",
+        "\(size.name): the last window does not end the body")
+      let stopped = try await ui.value("document.querySelector('#response-inspector [data-control=\"hex-next\"]').getAttribute('aria-disabled')") as? String
+      XCTAssertEqual(stopped, "true", "\(size.name): Next stops at the end of the body")
+      // The keyboard steps back.
+      _ = try await ui.value("(document.querySelector('#response-inspector [data-control=\"hex-previous\"]').focus(), true)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("\(code).startsWith('00040000')", "\(size.name): Return on Previous did not step back")
+      try await assertInert(ui, "\(size.name) hex window")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) hex window")
+      try await ui.screenshot("traffic-response-hex-\(size.name)")
+      try await ui.click("#inspector-tab-general")
     }
   }
 
@@ -2653,6 +2769,415 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Run offline: the dialog names the local sandbox above every field, sends
+  // nothing before the confirmation, and shows a stubbed import's trap, then a
+  // return, with captured export names kept as text.
+  @MainActor
+  func test42RunOfflineInSources() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "offline-runner.wasm")
+      try await ui.waitUntil("document.querySelector('#source-run-offline')?.hidden === false", "Run offline is offered for a captured WASM artifact")
+      try await ui.click("#source-more > summary")
+      try await ui.click("#source-run-offline")
+      try await ui.waitUntil("document.querySelector('.wasm-run-dialog')?.open === true && document.querySelectorAll('.wasm-run-dialog option').length === 2", "the dialog lists the module's two functions")
+      let opened = try await ui.json("""
+        (() => { const d = document.querySelector('.wasm-run-dialog'), run = [...d.querySelectorAll('button')].find(b => b.textContent === 'Run');
+          return {banner: d.querySelector('.wasm-run-banner').textContent, first: d.querySelector('.wasm-run-banner') === d.querySelector('form').children[1],
+            options: [...d.querySelectorAll('option')].map(o => o.textContent), runDisabled: run.disabled}; })()
+        """)
+      XCTAssertTrue((opened["banner"] as? String ?? "").contains("local sandbox"), "\(size.name): the sandbox is named: \(opened)")
+      XCTAssertEqual(opened["first"] as? Bool, true, "\(size.name): the banner sits above every field")
+      XCTAssertEqual(opened["options"] as? [String], ["add (func 1)", "stamp<b> (func 2)"], "\(size.name): export names stay text")
+      XCTAssertEqual(opened["runDisabled"] as? Bool, true, "\(size.name): Run waits for the confirmation")
+      try await assertLayout(ui, ".wasm-run-dialog", "\(size.name) run offline dialog")
+      try await ui.screenshot("run-offline-dialog-\(size.name)")
+      try await runOfflineLightScreenshot(ui, "run-offline-dialog-light-\(size.name)")
+      _ = try await ui.value("""
+        (() => { const d = document.querySelector('.wasm-run-dialog'); d.querySelector('select').value = '2';
+          const args = [...d.querySelectorAll('.wasm-run-field')].find(f => f.querySelector('.wasm-run-label').textContent === 'Arguments').querySelector('input');
+          args.value = 'i32 1, i32 2'; return true; })()
+        """)
+      try await ui.click(".wasm-run-confirm input")
+      try await ui.click(".wasm-run-actions button", containing: "Run")
+      try await ui.waitUntil("(document.querySelector('.wasm-run-outcome')?.textContent ?? '').includes('Import trapped')", timeout: 30, "an unstubbed import traps")
+      let trapped = try await ui.value("document.querySelector('.wasm-run-output').textContent") as? String ?? ""
+      XCTAssertTrue(trapped.contains("env.now (func 0)") && trapped.contains("trapped (no stub value)"), "\(size.name): the import call is recorded: \(trapped)")
+      try await assertRunResultVisible(ui, "\(size.name) import trap")
+      _ = try await ui.value("""
+        (() => { const d = document.querySelector('.wasm-run-dialog');
+          d.querySelector('textarea').value = '[{"module":"env","field":"now","results":[{"type":"f64","value":"1000"}]}]'; return true; })()
+        """)
+      try await ui.click(".wasm-run-actions button", containing: "Run")
+      try await ui.waitUntil("(document.querySelector('.wasm-run-outcome')?.textContent ?? '').startsWith('Returned')", timeout: 30, "the stubbed run returns")
+      let returned = try await ui.value("document.querySelector('.wasm-run-output').textContent") as? String ?? ""
+      XCTAssertTrue(returned.contains("i32 1001"), "\(size.name): the result is shown: \(returned)")
+      try await assertLayout(ui, ".wasm-run-dialog", "\(size.name) run offline result")
+      try await assertInert(ui, "\(size.name) run offline result")
+      try await assertRunResultVisible(ui, "\(size.name) stubbed return")
+      try await ui.screenshot("run-offline-result-\(size.name)")
+      try await runOfflineLightScreenshot(ui, "run-offline-result-light-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('.wasm-run-dialog')?.open === false", "Escape closes the dialog")
+    }
+  }
+
+  // The outcome line after Run is inside the dialog's visible frame and is the
+  // topmost element at its own position: the result follows the fields, so it
+  // starts below the visible area until the dialog scrolls it into view.
+  @MainActor
+  private func assertRunResultVisible(_ ui: Harness, _ context: String,
+                                      file: StaticString = #filePath, line: UInt = #line) async throws {
+    let seen = try await ui.json("""
+      (() => { const d = document.querySelector('.wasm-run-dialog'), o = d.querySelector('.wasm-run-outcome');
+        const box = o.getBoundingClientRect(), frame = d.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + Math.min(box.width / 2, 40), box.top + box.height / 2);
+        return {inside: box.height > 0 && box.top >= frame.top && box.bottom <= frame.bottom
+            && box.left >= frame.left && box.right <= frame.right,
+          hit: Boolean(hit && o.contains(hit)), top: box.top, bottom: box.bottom, frameTop: frame.top, frameBottom: frame.bottom}; })()
+      """)
+    XCTAssertEqual(seen["inside"] as? Bool, true, "\(context): the outcome is inside the dialog's visible frame: \(seen)", file: file, line: line)
+    XCTAssertEqual(seen["hit"] as? Bool, true, "\(context): the outcome is not covered: \(seen)", file: file, line: line)
+  }
+
+  // The same dialog in the light theme, set the way the theme toggle sets it.
+  @MainActor
+  private func runOfflineLightScreenshot(_ ui: Harness, _ name: String) async throws {
+    _ = try await ui.value("""
+      (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
+        document.documentElement.dataset.theme = 'light';
+        await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+      """)
+    try await ui.screenshot(name)
+    _ = try await ui.value("""
+      (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+        else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+      """)
+  }
+
+  // Library identification in Inspect: the toolchain line, constant matches
+  // and the labeled count of the synthetic Rust and wasm-bindgen module (410),
+  // Details by keyboard, a constant chip revealing its data segment row, and
+  // the badges in the Graph's Functions menu.
+  @MainActor
+  func test38WasmLibraryIdentification() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem]", containing: "identified-module")
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the identified module")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("(document.querySelector('#wasm-identification')?.innerText ?? '').includes('wasm-bindgen')", timeout: 30, "the identification summary did not load")
+      let summary = try await ui.value("document.querySelector('#wasm-identification').innerText") as? String ?? ""
+      for expected in ["Rust · high", "SHA-256 round constants 64/64", "Base64 alphabet 64/64", "8 of 9 functions labeled"] {
+        XCTAssertTrue(summary.contains(expected), "\(size.name): the summary names \(expected): \(summary)")
+      }
+      let placement = try await ui.json("(() => { const panel = document.querySelector('#wasm-identification').getBoundingClientRect(), code = document.querySelector('#source-code-wrap').getBoundingClientRect(); return {above: panel.bottom <= code.top + 1, height: panel.height, codeHeight: code.height}; })()")
+      XCTAssertEqual(placement["above"] as? Bool, true, "\(size.name): the summary sits above the listing: \(placement)")
+      XCTAssertLessThanOrEqual(placement["height"] as? Double ?? 999, 140, "\(size.name): the summary stays compact: \(placement)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification")
+      try await assertInert(ui, "\(size.name) wasm identification")
+      try await ui.screenshot("wasm-identification-\(size.name)")
+      _ = try await ui.value("(document.querySelector('#wasm-identification .wasm-id-toggle').focus(), 1)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("document.querySelector('#wasm-identification .wasm-id-details') !== null", "Enter did not open the identification details")
+      let details = try await ui.value("document.querySelector('#wasm-identification .wasm-id-details').innerText") as? String ?? ""
+      XCTAssertTrue(details.contains("JS glue: fetch"), "\(size.name): the fetch glue import is labeled: \(details)")
+      XCTAssertTrue(details.contains("named by func 2"), "\(size.name): the table names the function that reads it: \(details)")
+      let focused = try await ui.value("document.activeElement?.classList.contains('wasm-id-toggle')") as? Bool
+      XCTAssertEqual(focused, true, "\(size.name): focus stays on the Details toggle")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification details")
+      try await ui.screenshot("wasm-identification-details-\(size.name)")
+      try await ui.click("#wasm-identification .wasm-id-chip[data-byte-offset=\"332\"]")
+      try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('hex 982f8a42')", "the constant chip did not reveal its data segment")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+      try await Task.sleep(nanoseconds: 600_000_000)
+      try await ui.screenshot("wasm-identification-light-\(size.name)")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+      try await ui.click("#source-graph")
+      // The largest function in this module is one block: "1 block".
+      try await ui.waitUntil("/\\d+ blocks?\\b/.test(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '')", timeout: 30, "the block graph did not finish laying out")
+      let hidden = try await ui.value("getComputedStyle(document.querySelector('#wasm-identification')).display") as? String
+      XCTAssertEqual(hidden, "none", "\(size.name): the graph keeps the height")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) wasm identification graph")
+      try await ui.click("#source-graph-host .block-graph-tool", containing: "Functions")
+      try await ui.waitUntil("document.querySelector('.block-graph-fn-badge') !== null", "the Functions menu shows no identification badge")
+      let badges = try await ui.value("[...document.querySelectorAll('.block-graph-fn-row')].map(row => row.innerText).join(' | ')") as? String ?? ""
+      XCTAssertTrue(badges.contains("alloc"), "\(size.name): the allocator export carries a badge: \(badges)")
+      // The menu is a popup over the graph by design, so its own layout is
+      // checked: rows, badges and sizes whole and inside the window.
+      try await assertLayout(ui, ".block-graph-fn-menu", "\(size.name) wasm identification badges")
+      try await assertFullyVisible(ui, ".block-graph-fn-menu", "\(size.name) functions menu")
+      try await ui.screenshot("wasm-identification-badges-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.click("#source-graph")
+    }
+  }
+
+  // The Readable view of a captured Wasm function: folded lines with their
+  // byte offsets, a counted raw line, a markup-shaped module name inserted as
+  // text, and line selection by pointer and keyboard revealing the bytes.
+  @MainActor
+  func test37WasmReadableView() async throws {
+    // Markup the inertness probe counts (img[src="x"]) if it became DOM.
+    let researcherName = "decode_frame<img src=x>"
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"400\"]")
+      // A researcher name for readable_run (func 1), saved as test39 saves
+      // one: the pencil on its Inspect header row, then Enter. Inspect then
+      // closes so Readable opens beside the view it opened beside before.
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "\(size.name): Inspect is offered for the module")
+      try await clickSourceTool(ui, "#source-wasm")
+      let header = ".source-line[data-wasm-function='1']:not([data-wasm-target]):not([data-wasm-body])"
+      try await ui.waitUntil("document.querySelector(\"\(header) .wasm-function-rename\") !== null", timeout: 30, "\(size.name): readable_run's header row has a rename control")
+      try await ui.click("\(header) .wasm-function-rename")
+      try await ui.waitUntil("document.activeElement === document.querySelector('#source-name-host input')", "\(size.name): the editor took focus")
+      // Select-all then type: the name may already exist from the other size.
+      try await ui.key(0, "a", modifiers: [.command])
+      try await ui.type(researcherName)
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("""
+        (document.querySelector("\(header) .wasm-function-name")?.textContent === \(String(reflecting: researcherName))) &&
+          document.querySelector('#source-name-host form') === null
+        """, timeout: 15, "\(size.name): the header did not show the saved name")
+      try await clickSourceTool(ui, "#source-wasm")
+      try await ui.waitUntil("document.querySelector('#source-wasm').getAttribute('aria-pressed') === 'false'", "\(size.name): Inspect did not close")
+      try await ui.waitUntil("!document.querySelector('#source-readable').hidden", "Readable is offered for a captured WASM artifact")
+      try await clickSourceTool(ui, "#source-readable")
+      try await ui.waitUntil("(document.querySelector('#source-readable-host .wasm-readable-lines')?.textContent ?? '').includes('loop L1 {')", timeout: 30, "the readable lines did not load")
+      let view = try await ui.json("""
+        (() => { const host = document.querySelector('#source-readable-host'), rows = [...host.querySelectorAll('.wasm-readable-line')];
+          const text = rows.map(row => row.querySelector('.wasm-readable-text').textContent.trim());
+          const title = host.querySelector('.wasm-readable-title'), analyst = host.querySelector('.wasm-readable-analyst');
+          return {title: title.textContent, stats: host.querySelector('.wasm-readable-stats').textContent,
+            text, raw: host.querySelectorAll('.wasm-readable-raw').length, offsets: rows.map(row => row.querySelector('.wasm-readable-offset').textContent),
+            analyst: analyst && !analyst.hidden && analyst.getClientRects().length > 0 ? analyst.textContent : null,
+            analystElements: analyst?.childElementCount ?? -1, besideTitle: title.nextElementSibling === analyst,
+            height: host.getBoundingClientRect().height, pressed: document.querySelector('#source-readable').getAttribute('aria-pressed')}; })()
+        """)
+      let text = view["text"] as? [String] ?? []
+      let title = view["title"] as? String ?? ""
+      XCTAssertTrue(title.contains("readable_run"), "\(size.name): the export names the function: \(view)")
+      XCTAssertFalse(title.contains("decode_frame"), "\(size.name): the researcher name never replaces the module's: \(view)")
+      XCTAssertEqual(view["analyst"] as? String, researcherName, "\(size.name): the researcher name shows, as text: \(view)")
+      XCTAssertEqual(view["analystElements"] as? Int, 0, "\(size.name): the researcher name's markup stays text: \(view)")
+      XCTAssertEqual(view["besideTitle"] as? Bool, true, "\(size.name): the researcher name sits beside the module's: \(view)")
+      XCTAssertFalse(text.contains { $0.contains("decode_frame") }, "\(size.name): the listing keeps the module's names: \(text)")
+      XCTAssertTrue(text.contains("l1 = i32.load(p0, offset 8) + 1"), "\(size.name): the load folds into one line: \(text)")
+      XCTAssertTrue(text.contains("br_if L1 (l1 < p0)"), "\(size.name): the loop branch reads with its condition: \(text)")
+      XCTAssertTrue(text.contains("\"<img src=x onerror=alert(1)>\"(l1)"), "\(size.name): the module's name is quoted text: \(text)")
+      XCTAssertEqual(view["raw"] as? Int, 1, "\(size.name): the code after return is one raw line: \(view)")
+      XCTAssertTrue((view["stats"] as? String ?? "").contains("1 raw"), "\(size.name): the header counts the raw line: \(view)")
+      XCTAssertFalse((view["offsets"] as? [String] ?? []).isEmpty, "\(size.name): lines show their byte offsets")
+      XCTAssertEqual(view["pressed"] as? String, "true", "\(size.name): the Readable control shows it is on")
+      XCTAssertGreaterThanOrEqual(view["height"] as? Double ?? 0, 160, "\(size.name): the readable view gets most of the height: \(view)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) readable view")
+      try await assertInert(ui, "\(size.name) readable view")
+      try await ui.screenshot("wasm-readable-\(size.name)")
+      // Choosing a line reveals its first byte in the linear view.
+      try await ui.click("#source-readable-host .wasm-readable-line", containing: "br_if L1")
+      try await ui.waitUntil("document.querySelector('#source-code [data-graph-reveal]') !== null", "choosing a line reveals its bytes")
+      let chosen = try await ui.value("document.querySelector('#source-readable-host [aria-selected=true] .wasm-readable-text').textContent.trim()") as? String
+      XCTAssertEqual(chosen, "br_if L1 (l1 < p0)", "\(size.name): the chosen line is selected")
+      _ = try await ui.value("(document.querySelectorAll('#source-code [data-graph-reveal]').forEach(row => row.removeAttribute('data-graph-reveal')), document.querySelector('#source-readable-host .wasm-readable-lines').focus(), 1)")
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      try await ui.waitUntil("(document.querySelector('#source-readable-host [aria-selected=true]')?.textContent ?? '').includes('}')", "the down arrow moves the selection")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("document.querySelector('#source-code [data-graph-reveal]') !== null", "Enter reveals the selected line's bytes")
+      let focus = try await ui.value("getComputedStyle(document.activeElement).outlineStyle") as? String
+      XCTAssertNotEqual(focus, "none", "\(size.name): the focused list shows its focus")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+      try await Task.sleep(nanoseconds: 600_000_000)
+      try await ui.screenshot("wasm-readable-light-\(size.name)")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+      // Graph replaces Readable in the same split.
+      try await clickSourceTool(ui, "#source-graph")
+      try await ui.waitUntil("document.querySelector('#source-readable-host').hidden", "opening Graph closes Readable")
+      try await clickSourceTool(ui, "#source-graph")
+    }
+  }
+
+  // Compare with: two synthetic builds (artifacts 430 and 431) match in a
+  // table with each status, the tied stubs stay ambiguous, and a function on
+  // either side opens Graph on its own module.
+  @MainActor
+  func test40WasmModuleDiff() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"430\"]")
+      try await ui.waitUntil("!document.querySelector('#source-wasm-diff').hidden", "Compare with is offered for a captured WASM artifact")
+      try await ui.click("#source-more summary")
+      try await ui.click("#source-wasm-diff", containing: "Compare with")
+      try await ui.waitUntil("!document.querySelector('#source-diff-view').hidden && document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", timeout: 30, "the module comparison did not load")
+      let table = try await ui.json("""
+        (() => { const view = document.querySelector('#source-diff-view');
+          return {picker: view.querySelector('.wasm-diff-picker').selectedOptions[0]?.textContent ?? '',
+            summary: view.querySelector('.wasm-diff-summary').textContent,
+            statuses: [...view.querySelectorAll('.wasm-diff-row')].map(row => row.dataset.status),
+            ambiguous: [...view.querySelectorAll('.wasm-diff-row[data-status="ambiguous"] .wasm-diff-tie')].map(cell => cell.textContent),
+            methods: [...view.querySelectorAll('.wasm-diff-method')].map(cell => cell.textContent),
+            split: document.querySelector('#source-view-split').hidden}; })()
+        """)
+      XCTAssertTrue((table["picker"] as? String ?? "").hasPrefix("#431 "), "\(size.name): B is chosen for its similar URL: \(table)")
+      XCTAssertEqual(table["statuses"] as? [String] ?? [],
+        ["changed", "changed", "added", "added", "removed", "ambiguous", "ambiguous", "ambiguous", "ambiguous", "renumbered", "renumbered", "identical", "identical"], "\(size.name): \(table)")
+      XCTAssertEqual(table["ambiguous"] as? [String] ?? [], ["tie 1 · 2 in B", "tie 1 · 2 in B", "tie 1 · 2 in A", "tie 1 · 2 in A"], "\(size.name): each tied stub is a row of the one tie: \(table)")
+      XCTAssertTrue((table["methods"] as? [String] ?? []).contains("structure"), "\(size.name): \(table)")
+      XCTAssertTrue((table["summary"] as? String ?? "").contains("2 changed"), "\(size.name): \(table)")
+      XCTAssertEqual(table["split"] as? Bool, true, "\(size.name): the table replaces the code view")
+      try await assertLayout(ui, "#source-diff-view", "\(size.name) module diff")
+      try await assertInert(ui, "\(size.name) module diff")
+      try await ui.screenshot("wasm-module-diff-\(size.name)")
+      try await diffLightScreenshot(ui, "wasm-module-diff", size.name, layout: "#source-diff-view")
+
+      try await ui.click("#source-diff-view .wasm-diff-filter", containing: "Changed")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 2", "the Changed filter did not narrow the rows")
+      try await ui.click("#source-diff-view .wasm-diff-filter", containing: "All")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", "All did not restore the rows")
+
+      // A's run export opens in Graph on A; B's digest opens in Graph on B.
+      // Each target must be the element a click at its center reaches: the
+      // sticky header once covered a row scrolled to the top edge.
+      try await assertHitTestable(ui, "#source-diff-view .wasm-diff-fn", "run · func 4", "\(size.name) A jump")
+      try await ui.click("#source-diff-view .wasm-diff-fn", containing: "run · func 4")
+      try await ui.waitUntil("document.querySelector('#source-diff-view').hidden && (document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('run')", timeout: 30, "A's function did not open in Graph")
+      let first = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
+      XCTAssertTrue(first.contains("diff-build-a"), "\(size.name): A's function opens on A: \(first)")
+      try await ui.click("#source-more summary")
+      try await ui.click("#source-wasm-diff", containing: "Compare with")
+      try await ui.waitUntil("document.querySelectorAll('#source-diff-view .wasm-diff-row').length === 13", timeout: 30, "the comparison did not reopen")
+      let top = try await ui.value("document.querySelector('#source-diff-view .wasm-diff-body').scrollTop") as? Double
+      XCTAssertEqual(top, 0, "\(size.name): the reopened table starts at the top")
+      try await assertHitTestable(ui, "#source-diff-view .wasm-diff-fn", "digest · func 8", "\(size.name) B jump")
+      try await ui.click("#source-diff-view .wasm-diff-fn", containing: "digest · func 8")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '').includes('digest')", timeout: 30, "B's function did not open in Graph")
+      let second = try await ui.value("document.querySelector('#source-location').textContent") as? String ?? ""
+      XCTAssertTrue(second.contains("diff-build-b"), "\(size.name): B's function opens on B: \(second)")
+      try await ui.screenshot("wasm-module-diff-jump-\(size.name)")
+      try await diffLightScreenshot(ui, "wasm-module-diff-jump", size.name, layout: nil)
+      try await ui.click("#source-graph")
+    }
+  }
+
+  /// Reveals the first `selector` element containing `text` the way a click
+  /// does, then checks that the point at its center hits it, not something
+  /// drawn over it.
+  @MainActor
+  private func assertHitTestable(_ ui: Harness, _ selector: String, _ text: String, _ context: String,
+                                 file: StaticString = #filePath, line: UInt = #line) async throws {
+    _ = try await ui.reveal(selector, containing: text)
+    let probe = try await ui.json("""
+      (() => { const target = [...document.querySelectorAll(\(String(reflecting: selector)))].find(node => node.textContent.includes(\(String(reflecting: text))));
+        const box = target.getBoundingClientRect();
+        const hit = document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
+        return {hit: !!hit && (hit === target || target.contains(hit)), at: hit ? (hit.className || hit.tagName) : null}; })()
+      """)
+    XCTAssertEqual(probe["hit"] as? Bool, true, "\(context): the click target is covered: \(probe)", file: file, line: line)
+  }
+
+  /// The same state in the light theme, set the way the theme toggle sets it.
+  @MainActor
+  private func diffLightScreenshot(_ ui: Harness, _ name: String, _ size: String, layout: String?) async throws {
+    _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+    try await Task.sleep(nanoseconds: 600_000_000)
+    if let layout { try await assertLayout(ui, layout, "\(size) \(name) light") }
+    try await ui.screenshot("\(name)-light-\(size)")
+    _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+    try await Task.sleep(nanoseconds: 300_000_000)
+  }
+
+  // Trace value on the value-flow fixture (artifact 440): select the import
+  // call row in Inspect, trace it, read the slice, reveal a load by keyboard,
+  // and see the slice marked in the listing. Captured text stays inert.
+  @MainActor
+  func test41TraceValueInInspect() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"440\"]", containing: "webassembly compile")
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the value-flow module")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("(state.sourceEditorView?.view?.wasmRows ?? []).some(row => row.byte_offset === 0xd0)", timeout: 30, "the inspection rows did not load")
+      try await ui.waitUntil("!document.querySelector('#value-flow').hidden", "the Trace value panel follows Inspect")
+      let idle = try await ui.value("document.querySelector('#value-flow-run').disabled") as? Bool
+      XCTAssertEqual(idle, true, "\(size.name): nothing to trace before a row is chosen")
+      // Bring the import call row into view, then pick it with the pointer.
+      _ = try await ui.value("""
+        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0xd0);
+          moveSourceWindow(line, 0, {focus: false});
+          const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testTarget = '1'; return line; })()
+        """)
+      try await ui.click("#source-code [data-test-target] .source-text")
+      try await ui.waitUntil("document.querySelector('#value-flow-target').textContent.includes('0xd0')", "the selected row became the trace target")
+      try await ui.click("#value-flow-run")
+      try await ui.waitUntil("document.querySelectorAll('#value-flow-list .value-flow-row').length > 10", timeout: 30, "the slice did not load")
+      let status = try await ui.value("document.querySelector('#value-flow-status').textContent") as? String ?? ""
+      XCTAssertTrue(status.contains("3 joins") && status.contains("not observed"), "\(size.name): the status names joins and static evidence: \(status)")
+      let slice = try await ui.json("""
+        (() => { const rows = [...document.querySelectorAll('#value-flow-list .value-flow-row')];
+          const kind = rows[0]?.querySelector('.value-flow-kind');
+          return {seed: rows[0]?.innerText ?? '', seedKindWhole: Boolean(kind) && kind.getBoundingClientRect().width > 0 && kind.scrollWidth <= kind.clientWidth + 1,
+            sources: rows.filter(row => row.classList.contains('is-source')).length,
+            joins: document.querySelectorAll('#value-flow-list .value-flow-join').length,
+            marked: document.querySelectorAll('#source-code .source-line[data-value-flow]').length,
+            seedMarked: document.querySelectorAll('#source-code .source-line[data-value-flow="seed"]').length}; })()
+        """)
+      XCTAssertTrue((slice["seed"] as? String ?? "").contains("env.send"), "\(size.name): the seed is the JavaScript crossing: \(slice)")
+      XCTAssertEqual(slice["seedKindWhole"] as? Bool, true, "\(size.name): the import name is visible, not cut, at this window size: \(slice)")
+      XCTAssertGreaterThanOrEqual(slice["sources"] as? Int ?? 0, 5, "\(size.name): sources are listed: \(slice)")
+      XCTAssertEqual(slice["joins"] as? Int, 3, "\(size.name): every join lists its incoming edges: \(slice)")
+      XCTAssertGreaterThan(slice["marked"] as? Int ?? 0, 3, "\(size.name): the slice is marked in the listing: \(slice)")
+      XCTAssertEqual(slice["seedMarked"] as? Int, 1, "\(size.name): the seed row is marked: \(slice)")
+      let panel = try await ui.json("""
+        (() => { const panel = document.querySelector('#value-flow').getBoundingClientRect(), wrap = document.querySelector('#source-code-wrap').getBoundingClientRect();
+          return {panel: panel.height, listing: wrap.height, below: panel.top >= wrap.bottom - 1}; })()
+        """)
+      XCTAssertGreaterThanOrEqual(panel["listing"] as? Double ?? 0, 90, "\(size.name): the listing keeps its rows beside the panel: \(panel)")
+      XCTAssertEqual(panel["below"] as? Bool, true, "\(size.name): the panel sits under the listing: \(panel)")
+      try await assertLayout(ui, "#value-flow", "\(size.name) trace value")
+      try await assertInert(ui, "\(size.name) trace value")
+      try await ui.screenshot("trace-value-\(size.name)")
+      // Keyboard: the first link, arrows through the list, Enter reveals a load row.
+      _ = try await ui.value("document.querySelector('#value-flow-list .value-flow-link').focus()")
+      for _ in 0..<40 {
+        let focused = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
+        if focused.hasPrefix("0x7e") { break }
+        try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      }
+      let reached = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
+      XCTAssertTrue(reached.hasPrefix("0x7e"), "\(size.name): arrow keys reach the load: \(reached)")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasmRows[Number(line.dataset.localLine)].byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
+      try await ui.waitUntil("document.activeElement.closest('.source-line').dataset.valueFlow === 'source'", "the revealed load is marked as a source")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
+      try await Task.sleep(nanoseconds: 600_000_000)
+      try await ui.screenshot("trace-value-light-\(size.name)")
+      _ = try await ui.value("(document.documentElement.dataset.theme = 'dark', 1)")
+      // Graph owns the pane while it is open: the panel hides and the graph
+      // keeps its height; closing it brings back the same trace.
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("document.querySelector('#value-flow').hidden && document.querySelector('#source-graph-host').getBoundingClientRect().height > 120", timeout: 30, "Graph hides the panel and keeps its height")
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("!document.querySelector('#value-flow').hidden && document.querySelectorAll('#value-flow-list .value-flow-row').length > 10", "closing Graph restores the trace")
+      try await ui.click("#value-flow-clear")
+      try await ui.waitUntil("document.querySelectorAll('#source-code .source-line[data-value-flow]').length === 0", "Clear removes the marks")
+      // A store row offers its two operands before any trace.
+      _ = try await ui.value("""
+        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0x89);
+          moveSourceWindow(line, 0, {focus: false});
+          const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testStore = '1'; return line; })()
+        """)
+      try await ui.click("#source-code [data-test-store] .source-text")
+      try await ui.waitUntil("document.querySelector('#value-flow-operand').options.length === 3", "the store row offers operands 0 and 1")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("document.querySelector('#value-flow').hidden", "Hex hides the Trace value panel")
+    }
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor
@@ -3059,7 +3584,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-tree [role=treeitem]", containing: "map-module")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('00000000')", "the fixture module did not open as hex")
       let idleRSS = webContentResidentKilobytes(ui)
-      try await ui.click("#source-map")
+      try await clickSourceTool(ui, "#source-map")
       try await ui.waitUntil("!document.querySelector('.map-body').hidden && document.querySelector('.map-canvas').width > 0", timeout: 90, "the map did not load")
       let side = try await ui.value("document.querySelector('.map-canvas').width") as? Int ?? 0
       let openRSS = webContentResidentKilobytes(ui)
@@ -3228,7 +3753,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await openStartPanel(ui)
         try await ui.activate()
         let opened = try await ui.json(
-          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
+          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not(#session-panel-media)').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
         XCTAssertEqual(opened["mode"] as? String, plan.from, "\(name): the panel opens with this run's last mode: \(opened)")
         XCTAssertEqual(opened["checkboxes"] as? Int, 0, "\(name): the panel has no Keychain checkbox: \(opened)")
         XCTAssertEqual(opened["keychain"] as? Bool, false, "\(name): the panel says nothing about the Keychain: \(opened)")
@@ -3255,7 +3780,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if stops.last?.hasPrefix("session-panel-mode-") == true { break }
         }
         print("RENDERED_UI_START_PANEL_FOCUS \(name) \(stops)")
-        XCTAssertEqual(stops, ["session-panel-offline", "session-panel-mode-\(plan.from)"],
+        // Content's limits sit between the mode and the actions; Metadata has none.
+        let limits = ["session-panel-media", "session-panel-response-budget", "session-panel-request-budget"]
+        XCTAssertEqual(stops, ["session-panel-offline"] + (plan.from == "content" ? limits : []) + ["session-panel-mode-\(plan.from)"],
           "\(name): the panel's controls in reverse order")
         try await ui.screenshot("start-panel-focus-\(name)")
         // Arrow keys choose within the mode group.
@@ -3263,8 +3790,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let moved = try await ui.json(
           "({focus: document.activeElement?.id, text: document.querySelector('#session-panel').innerText})")
         XCTAssertEqual(moved["focus"] as? String, "session-panel-mode-\(plan.to)", "\(name): the arrow moved the choice: \(moved)")
-        try await ui.tab()
-        try await ui.tab()
+        for _ in 0..<(plan.to == "content" ? 5 : 2) { try await ui.tab() }
         let start = try await focus()
         XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): Tab returns to Start Session: \(start)")
         try await ui.screenshot("start-panel-chosen-\(name)")
@@ -3306,6 +3832,330 @@ final class OriginTraceRenderedUITests: XCTestCase {
       throw error
     }
     try await returnToHarness(ui, harnessURL)
+  }
+
+  // The start panel's Content limits (#428, #436): only for Content, with the
+  // launcher's bounds and defaults. An out-of-bounds value is named at its
+  // field and starts nothing; native refuses one the page did not check; a
+  // raised budget and media capture reach the start, whose failure (the named
+  // Brave does not exist) names them, and they hold for the run. Keyboard
+  // entry, focus rings, both window sizes and both themes. Traffic then names
+  // each used budget, its size, what it kept and the control in its footer,
+  // and the Payload and Response tabs name the control for the next session.
+  @MainActor
+  func test36StartPanelContentLimits() async throws {
+    let ui = try await prepare(windowSizes[0])
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let expected = try Expectations.load()
+    try await clearSavedSites(ui)
+    let focus = { try await ui.json("__rebUiProbe.focusState()") }
+    let fields = """
+      ({request: document.querySelector('#session-panel-request-budget')?.value ?? null,
+        response: document.querySelector('#session-panel-response-budget')?.value ?? null,
+        media: document.querySelector('#session-panel-media')?.checked ?? null,
+        state: document.querySelector('#session-panel')?.dataset.state,
+        error: document.querySelector('#session-panel-request-budget-error')?.textContent ?? null,
+        invalid: document.querySelector('#session-panel-request-budget')?.getAttribute('aria-invalid') ?? null})
+      """
+    // Both themes, set the way the theme toggle sets it.
+    let theme = { (light: Bool) in
+      _ = try await ui.value(light ? """
+        (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        """ : """
+        (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+        """)
+    }
+    // Replaces the focused field's text, as a triple click would.
+    let selectAll = { _ = try await ui.value("(document.activeElement.select(), true)") }
+    do {
+      for (index, size) in windowSizes.enumerated() {
+        let name = size.name
+        try await ui.resize(width: size.width, height: size.height)
+        try await openStartPanel(ui)
+        try await ui.activate()
+        if try await ui.value("document.querySelector('#session-panel-mode-content').checked") as? Bool != true {
+          try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+        }
+        // Normal opens with the defaults; narrow with what normal started, held for the run.
+        let opened = try await ui.json(fields)
+        XCTAssertEqual(opened["request"] as? String, index == 0 ? "256" : "1024", "\(name): request content budget: \(opened)")
+        XCTAssertEqual(opened["response"] as? String, "512", "\(name): response body budget: \(opened)")
+        XCTAssertEqual(opened["media"] as? Bool, index == 1, "\(name): media and fonts: \(opened)")
+        let text = try await panelText(ui)
+        for phrase in ["Content limits", "Request content budget", "Response body budget", "Capture media and fonts",
+                       "1 to 4,096 MiB; default 256 MiB.", "1 to 16,384 MiB; default 512 MiB.",
+                       "They count against the response body budget.", "Both budgets stay on this Mac with the session"] {
+          XCTAssertTrue(text.contains(phrase), "\(name): the limits say \(phrase): \(text)")
+        }
+        XCTAssertNil(text.range(of: "keychain", options: .caseInsensitive), "\(name): no Keychain choice: \(text)")
+        try await assertStartPanelFits(ui, "\(name) start panel limits")
+        _ = try await ui.reveal("#session-panel .session-panel-limits", block: "start")
+        try await assertLayout(ui, "#session-panel", "\(name) start panel limits revealed")
+        try await ui.screenshot("start-panel-limits-\(name)")
+        try await theme(true)
+        try await assertLayout(ui, "#session-panel", "\(name) start panel limits light")
+        try await ui.screenshot("start-panel-limits-light-\(name)")
+        try await theme(false)
+
+        // Keyboard: each limit is a stop with a visible ring.
+        _ = try await ui.value("(document.querySelector('#session-panel-start').focus(), true)")
+        for expectedStop in ["session-panel-offline", "session-panel-media", "session-panel-response-budget", "session-panel-request-budget"] {
+          try await ui.tab(shift: true)
+          let stop = try await focus()
+          XCTAssertEqual(stop["id"] as? String, expectedStop, "\(name): \(stop)")
+          XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
+          XCTAssertEqual(stop["inViewport"] as? Bool, true, "\(name): \(stop)")
+          let ring = try await ui.value("""
+            (() => { const shown = getComputedStyle(document.activeElement);
+              return shown.outlineStyle !== 'none' && parseFloat(shown.outlineWidth) > 0; })()
+            """) as? Bool
+          XCTAssertEqual(ring, true, "\(name): a focus ring shows around \(expectedStop)")
+        }
+        try await ui.screenshot("start-panel-limit-focus-\(name)")
+
+        // Out of bounds, typed and sent with Return: named at the field, nothing starts.
+        try await selectAll()
+        try await ui.type("5000")
+        try await ui.key(36, "\r")
+        try await ui.waitUntil("document.querySelector('#session-panel-request-budget-error') !== null", "\(name): the refusal was not named")
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        let refused = try await ui.json(fields)
+        XCTAssertEqual(refused["state"] as? String, "choose", "\(name): an out-of-bounds budget starts nothing: \(refused)")
+        XCTAssertEqual(refused["error"] as? String, "Request content budget must be a whole number from 1 to 4096 MiB.", "\(name): \(refused)")
+        XCTAssertEqual(refused["invalid"] as? String, "true", "\(name): \(refused)")
+        let refusedFocus = try await focus()
+        XCTAssertEqual(refusedFocus["id"] as? String, "session-panel-request-budget", "\(name): focus stays on the field: \(refusedFocus)")
+        try await assertLayout(ui, "#session-panel", "\(name) refused budget")
+        try await ui.screenshot("start-panel-limit-refused-\(name)")
+        // Native checks what the page sends, as the agent path checks its options.
+        let native = try await ui.json("""
+          (async () => { const ask = body => webkit.messageHandlers.rebSession.postMessage({op: 'start', ...body}).then(() => 'accepted', error => error.message);
+            return {over: await ask({mode: 'content', request_content_budget_mib: 5000, response_body_budget_mib: 512, response_media: false}),
+              fraction: await ask({mode: 'content', request_content_budget_mib: 256, response_body_budget_mib: 12.5, response_media: false}),
+              metadata: await ask({mode: 'metadata', response_media: true}),
+              missing: await ask({mode: 'content'})}; })()
+          """)
+        XCTAssertEqual(native["over"] as? String, "Request content budget must be a whole number from 1 to 4096 MiB.", "\(name): \(native)")
+        XCTAssertEqual(native["fraction"] as? String, "Response body budget must be a whole number from 1 to 16384 MiB.", "\(name): \(native)")
+        XCTAssertEqual(native["metadata"] as? String, "Budgets and media capture apply only to a Content session.", "\(name): \(native)")
+        XCTAssertEqual(native["missing"] as? String,
+          "A Content session needs a request content budget, a response body budget and the media choice.", "\(name): \(native)")
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let stillOpen = try await ui.json(fields)
+        XCTAssertEqual(stillOpen["state"] as? String, "choose", "\(name): a refused start launches nothing: \(stillOpen)")
+
+        if index == 0 {
+          // A raised budget and media capture, from the keyboard.
+          _ = try await ui.value("(document.querySelector('#session-panel-request-budget').focus(), true)")
+          try await selectAll()
+          try await ui.type("1024")
+          let fixed = try await ui.json(fields)
+          XCTAssertNil(fixed["error"] as? String, "\(name): a fixed value clears its error: \(fixed)")
+          try await ui.tab()
+          try await ui.tab()
+          try await ui.key(49, " ")
+          let raised = try await ui.json(fields)
+          XCTAssertEqual(raised["media"] as? Bool, true, "\(name): Space checks media and fonts: \(raised)")
+          try await ui.tab()
+          try await ui.tab()
+          let start = try await focus()
+          XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): \(start)")
+          try await ui.key(36, "\r")
+          try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
+          let failure = try await panelText(ui)
+          XCTAssertTrue(failure.contains("Retry starts a new session with the same capture mode: Content (default). "
+            + "Same limits: request content budget 1,024 MiB, response body budget 512 MiB, media and fonts kept."),
+            "\(name): native started with the limits chosen in the panel: \(failure)")
+          try await assertStartPanelFits(ui, "\(name) start failure with limits")
+          try await ui.screenshot("start-panel-limits-failure-\(name)")
+        } else {
+          // Metadata keeps no content: no limits shown, none named by its start.
+          _ = try await ui.value("(document.querySelector('#session-panel-request-budget').focus(), true)")
+          try await selectAll()
+          try await ui.type("1024")
+          try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
+          let metadata = try await ui.json(fields)
+          XCTAssertNil(metadata["request"] as? String, "\(name): Metadata shows no request content budget: \(metadata)")
+          XCTAssertNil(metadata["media"] as? Bool, "\(name): Metadata shows no media choice: \(metadata)")
+          let metadataText = try await panelText(ui)
+          XCTAssertFalse(metadataText.contains("Content limits"), "\(name): \(metadataText)")
+          try await assertStartPanelFits(ui, "\(name) metadata start panel")
+          try await ui.screenshot("start-panel-limits-metadata-\(name)")
+          try await ui.click("#session-panel-start")
+          try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
+          let failure = try await panelText(ui)
+          XCTAssertTrue(failure.contains("the same capture mode: Metadata only."), "\(name): \(failure)")
+          XCTAssertFalse(failure.contains("Same limits"), "\(name): a Metadata start names no limits: \(failure)")
+        }
+        try await ui.click("#session-panel-offline")
+        try await ui.waitUntil("document.querySelector('#session-panel').hidden", "\(name): Continue Offline did not close the panel")
+      }
+    } catch {
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+
+    // Traffic: the fixture's budget row, a POST whose target, body and
+    // response met their budgets. This backend is not live, so the session
+    // context names no size, and neither does anything drawn; the counts are
+    // the summary's (two request records, one response), not the loaded rows'.
+    for size in windowSizes {
+      let traffic = try await prepare(size)
+      try await show(traffic, "traffic")
+      let line = "document.querySelector('#request-budget-text')"
+      try await traffic.waitUntil("!document.querySelector('#request-budget').hidden && \(line).textContent.includes(' kept:')",
+        "\(size.name): the footer did not name the used budgets")
+      let unsized = try await traffic.value("\(line).textContent") as? String ?? ""
+      // The bytes kept depend on the fixture's other artifacts, in KiB below 0.1 MiB.
+      let kept = #"(?:\d+ KiB|\d+\.\d MiB)"#
+      let pattern = #"^Request content budget used, "# + kept + #" kept: 2 request bodies or URLs not kept · "#
+        + #"Response body budget used, "# + kept + #" kept: 1 response body not kept · Raise them in New Live Session… for the next session\.$"#
+      XCTAssertNotNil(unsized.range(of: pattern, options: .regularExpression), "\(size.name): footer: \(unsized)")
+      let context = try await traffic.json("({read: state.sessionContentLimitsRead, limits: state.sessionContentLimits})")
+      XCTAssertEqual(context["read"] as? String, "answered", "\(size.name): the session context was read: \(context)")
+      XCTAssertTrue(context["limits"] is NSNull, "\(size.name): a backend that is not live names no limits: \(context)")
+      // A live session's context names the sizes, and everything drawn follows it.
+      _ = try await traffic.value("""
+        (() => { window.__rebContextFetch ??= window.fetch;
+          window.fetch = (input, init) => String(input).startsWith('/api/session/context')
+            ? Promise.resolve(new Response(JSON.stringify({capture_options: {content_limits: {version: 1, request_content_budget_mib: 64,
+                response_body_budget_mib: 128, response_media: false}}}), {status: 200, headers: {'Content-Type': 'application/json'}}))
+            : window.__rebContextFetch(input, init);
+          state.sessionContentLimitsRead = null; refreshSessionContentLimits(); return true; })()
+        """)
+      try await traffic.waitUntil("\(line).textContent.startsWith('Request content budget (64 MiB) used')", "\(size.name): the footer did not take the context's sizes")
+      let sized = try await traffic.value("\(line).textContent") as? String ?? ""
+      XCTAssertTrue(sized.contains(" · Response body budget (128 MiB) used, "), "\(size.name): footer: \(sized)")
+      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer")
+      try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget footer")
+      try await traffic.screenshot("traffic-budget-footer-\(size.name)")
+      try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
+      try await traffic.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): request detail did not open")
+      // General: the Request URL row says why the rest of the target is missing.
+      try await traffic.click("#inspector-tab-general")
+      try await traffic.waitUntil("(document.querySelector('#exchange-inspector')?.innerText ?? '').includes('the full target was not retained')",
+        "\(size.name): the Request URL row did not say why")
+      let general = try await traffic.value("document.querySelector('#exchange-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(general.contains("the full target was not retained: this session had used its 64 MiB request content budget. "
+        + "Raise Request content budget in New Live Session… for the next session)"), "\(size.name): Request URL: \(general)")
+      try await traffic.click("#inspector-tab-payload")
+      try await traffic.waitUntil("(document.querySelector('#payload-inspector')?.innerText ?? '').includes('Not captured')", "\(size.name): Payload did not say why")
+      let payload = try await traffic.value("document.querySelector('#payload-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(payload.contains("Not captured: this session had used its 64 MiB request content budget. Raise Request content budget in New Live Session… for the next session."),
+        "\(size.name): Payload: \(payload)")
+      XCTAssertFalse(payload.contains("recorded only in content capture sessions"), "\(size.name): a content session's row: \(payload)")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget payload")
+      try await traffic.screenshot("traffic-budget-payload-\(size.name)")
+      try await traffic.click("#inspector-tab-response")
+      try await traffic.waitUntil("(document.querySelector('#response-inspector')?.innerText ?? '').includes('Not retained')", "\(size.name): Response did not say why")
+      let response = try await traffic.value("document.querySelector('#response-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(response.contains("Not retained: this session had used its response body budget. Raise Response body budget in New Live Session… for the next session."),
+        "\(size.name): Response: \(response)")
+      XCTAssertFalse((general + payload + response + sized).contains("REB_"), "\(size.name): no environment variable is the remedy")
+      try await assertInert(traffic, "\(size.name) budget row")
+      try await assertLayout(traffic, "#screen-traffic .detail-pane", "\(size.name) budget response")
+      try await traffic.screenshot("traffic-budget-used-\(size.name)")
+      if size.name == "normal" {
+        // Side by side, the whole line stays beside the open request.
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget footer with a request open")
+      } else {
+        // The short stacked inspector: a one-line button that cannot clip, and
+        // the whole sentence from the keyboard.
+        let stacked = try await traffic.json("""
+          ({toggle: getComputedStyle(document.querySelector('#request-budget-toggle')).display, text: getComputedStyle(\(line)).display,
+            label: document.querySelector('#request-budget-toggle').textContent, expanded: document.querySelector('#request-budget-toggle').getAttribute('aria-expanded')})
+          """)
+        XCTAssertNotEqual(stacked["toggle"] as? String, "none", "\(size.name): the budget button shows: \(stacked)")
+        XCTAssertEqual(stacked["text"] as? String, "none", "\(size.name): the sentence waits behind the button: \(stacked)")
+        XCTAssertEqual(stacked["label"] as? String, "Budgets used", "\(size.name): \(stacked)")
+        XCTAssertEqual(stacked["expanded"] as? String, "false", "\(size.name): \(stacked)")
+        try await assertFullyVisible(traffic, "#request-budget-toggle", "\(size.name) budget button")
+        try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget button")
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("document.querySelector('#request-budget-toggle').getAttribute('aria-expanded') === 'true'",
+          "\(size.name): Return did not open the sentence")
+        let opened = try await traffic.json("({display: getComputedStyle(\(line)).display, focus: document.activeElement?.id})")
+        XCTAssertNotEqual(opened["display"] as? String, "none", "\(size.name): \(opened)")
+        XCTAssertEqual(opened["focus"] as? String, "request-budget-toggle", "\(size.name): \(opened)")
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence")
+        try await traffic.screenshot("traffic-budget-sentence-\(size.name)")
+        try await traffic.key(53, "\u{1B}")
+        try await traffic.waitUntil("document.querySelector('#request-budget-toggle').getAttribute('aria-expanded') === 'false'",
+          "\(size.name): Escape did not close the sentence")
+        let closed = try await traffic.value("document.activeElement?.id") as? String
+        XCTAssertEqual(closed, "request-budget-toggle", "\(size.name): Escape keeps focus on the button")
+        let expanded = "document.querySelector('#request-budget-toggle').getAttribute('aria-expanded')"
+        // Space opens it too; focus leaving the notice closes it.
+        try await traffic.key(49, " ")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Space did not open the sentence")
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence after Space")
+        try await traffic.tab()
+        try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): focus leaving did not close the sentence")
+        // A press anywhere else closes it.
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Return did not open the sentence again")
+        try await traffic.click("#request-window-status")
+        try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): a press elsewhere did not close the sentence")
+        // Closing the request closes it, and a request opened again starts closed.
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): Return did not open the sentence a third time")
+        try await traffic.click("#request-detail-close")
+        try await traffic.waitUntil("document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): the request did not close")
+        try await traffic.click("#screen-traffic .request-row", containing: expected.budgetHost)
+        try await traffic.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "\(size.name): the request did not reopen")
+        let reopened = try await traffic.json("({expanded: \(expanded), text: getComputedStyle(\(line)).display})")
+        XCTAssertEqual(reopened["expanded"] as? String, "false", "\(size.name): the sentence does not reappear unasked: \(reopened)")
+        XCTAssertEqual(reopened["text"] as? String, "none", "\(size.name): \(reopened)")
+        // Beside the footer's header gaps item: its breakdown opens in the
+        // footer and the budget sentence above it, never over each other, and
+        // each Escape closes only its own.
+        let gapsOpen = "document.querySelector('#request-header-gaps').getAttribute('aria-expanded')"
+        try await traffic.waitUntil("!document.querySelector('#request-header-gaps').hidden", "\(size.name): the header gaps item did not show")
+        try await assertFullyVisible(traffic, "#request-header-gaps", "\(size.name) header gaps beside the budget button")
+        try await traffic.click("#request-header-gaps")
+        try await traffic.waitUntil("\(gapsOpen) === 'true'", "\(size.name): the header gaps breakdown did not open")
+        _ = try await traffic.value("(document.querySelector('#request-budget-toggle').focus(), true)")
+        try await traffic.key(36, "\r")
+        try await traffic.waitUntil("\(expanded) === 'true'", "\(size.name): the sentence did not open beside the breakdown")
+        let both = try await traffic.json("""
+          (() => { const a = document.querySelector('#request-budget-text').getBoundingClientRect(),
+            b = document.querySelector('#request-header-gaps-detail').getBoundingClientRect();
+            return {overlap: a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom, gaps: \(gapsOpen)}; })()
+          """)
+        XCTAssertEqual(both["overlap"] as? Bool, false, "\(size.name): the sentence and the breakdown overlap: \(both)")
+        XCTAssertEqual(both["gaps"] as? String, "true", "\(size.name): \(both)")
+        try await assertFullyVisible(traffic, "#request-budget-text", "\(size.name) budget sentence beside the breakdown")
+        try await traffic.screenshot("traffic-budget-sentence-gaps-\(size.name)")
+        try await traffic.key(53, "\u{1B}")
+        try await traffic.waitUntil("\(expanded) === 'false'", "\(size.name): Escape did not close the sentence beside the breakdown")
+        let gapsAfterBudgetEscape = try await traffic.value(gapsOpen) as? String
+        XCTAssertEqual(gapsAfterBudgetEscape, "true", "\(size.name): the budget's Escape leaves the breakdown open")
+        _ = try await traffic.value("(document.querySelector('#request-header-gaps').focus(), true)")
+        try await traffic.key(53, "\u{1B}")
+        try await traffic.waitUntil("\(gapsOpen) === 'false'", "\(size.name): Escape did not close the breakdown")
+        let budgetAfterGapsEscape = try await traffic.value(expanded) as? String
+        XCTAssertEqual(budgetAfterGapsEscape, "false", "\(size.name): \(budgetAfterGapsEscape ?? "")")
+        let request = try await traffic.value("!document.querySelector('#screen-traffic .detail-pane').hidden") as? Bool
+        XCTAssertEqual(request, true, "\(size.name): neither Escape closed the request")
+      }
+      _ = try await traffic.value("""
+        (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null; document.documentElement.dataset.theme = 'light';
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        """)
+      try await assertLayout(traffic, "#screen-traffic .request-window", "\(size.name) budget footer light")
+      try await traffic.screenshot("traffic-budget-used-light-\(size.name)")
+      _ = try await traffic.value("""
+        (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme;
+          window.fetch = window.__rebContextFetch; delete window.__rebContextFetch; return true; })()
+        """)
+    }
   }
 
   // Runs only in the driver's launch pass, where the app starts as a
@@ -3443,6 +4293,374 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """, "\(size.name): the pausing sections did not come into view")
       try await ui.screenshot("debugger-pausing-sections-\(size.name)")
       try await lightScreenshot(ui, "debugger-pausing-sections", size.name)
+    }
+  }
+
+  // A Wasm function renamed once shows everywhere it appears: the Inspect
+  // header and the call row that targets it, the Graph function list and
+  // title. The captured identity stays visible beside it.
+  @MainActor
+  func test39WasmFunctionNames() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"420\"]")
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "\(size.name): Inspect is offered for the module")
+      try await ui.click("#source-wasm")
+      let header = ".source-line[data-wasm-function='1']:not([data-wasm-target]):not([data-wasm-body])"
+      try await ui.waitUntil("document.querySelector(\"\(header) .wasm-function-rename\") !== null", "\(size.name): the helper's header row has a rename control")
+      try await ui.click("\(header) .wasm-function-rename")
+      try await ui.waitUntil("document.activeElement === document.querySelector('#source-name-host input')", "\(size.name): the editor took focus")
+      // Select-all then type: the name may already exist from the other size.
+      try await ui.key(0, "a", modifiers: [.command])
+      try await ui.type("encode_payload")
+      try await ui.key(36, "\r")
+      try await ui.waitUntil("""
+        (document.querySelector("\(header) .wasm-function-name")?.textContent === 'encode_payload') &&
+          document.querySelector('#source-name-host form') === null
+        """, timeout: 15, "\(size.name): the header did not show the saved name")
+      let listing = try await ui.json("""
+        (() => { const call = document.querySelector(".source-line[data-wasm-target][data-wasm-function='1']");
+          const row = document.querySelector("\(header)");
+          return {captured: row.querySelector('.source-text').textContent, call: call?.querySelector('.wasm-function-target')?.textContent ?? null,
+            italic: getComputedStyle(row.querySelector('.wasm-function-name')).fontStyle, focus: document.activeElement?.className ?? ''}; })()
+        """)
+      XCTAssertTrue((listing["captured"] as? String ?? "").contains("func 1"), "\(size.name): the captured header stays: \(listing)")
+      XCTAssertEqual(listing["call"] as? String, "encode_payload", "\(size.name): the call row names its callee: \(listing)")
+      XCTAssertEqual(listing["italic"] as? String, "italic", "\(size.name): a name reads as a researcher name: \(listing)")
+      // F2 after a click on the call row names its callee: rows take no
+      // focus, so the code view resolves the row under the cursor.
+      try await ui.click(".source-line[data-wasm-target][data-wasm-function='1'] .source-text")
+      try await ui.key(120, "\u{F705}", modifiers: [.function])
+      try await ui.waitUntil("document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for func 1'",
+        "\(size.name): F2 on the call row did not open the callee's editor")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in Inspect")
+      try await assertInert(ui, "\(size.name) Wasm names in Inspect")
+      try await ui.screenshot("wasm-names-inspect-\(size.name)")
+      // The Graph opens the largest body (func 2); the list shows both names.
+      try await ui.click("#source-graph")
+      try await ui.waitUntil("(document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('block')", timeout: 30, "\(size.name): the graph did not lay out")
+      try await ui.click("#source-graph-host .block-graph-fn-wrap button[aria-haspopup]")
+      try await ui.waitUntil("document.querySelectorAll('#source-graph-host .block-graph-fn-row').length === 2", "\(size.name): the function list did not open")
+      let list = try await ui.json("""
+        ({rows: [...document.querySelectorAll('#source-graph-host .block-graph-fn-row')].map(row => ({name: row.querySelector('.block-graph-fn-name').textContent,
+          analyst: row.querySelector('.block-graph-fn-analyst')?.textContent ?? null}))})
+        """)
+      let rows = list["rows"] as? [[String: Any]] ?? []
+      XCTAssertEqual(rows.first?["analyst"] as? String, "encode_payload", "\(size.name): the list shows the name beside func 1: \(rows)")
+      XCTAssertEqual(rows.first?["name"] as? String, "func 1", "\(size.name): the captured identity stays: \(rows)")
+      // The open popover covers the graph by design, so only the popover
+      // itself is checked while it is open; the host is checked once it closes.
+      try await assertLayout(ui, "#source-graph-host .block-graph-fn-menu", "\(size.name) Wasm names in the function list")
+      let menu = try await ui.json("""
+        (() => { const box = document.querySelector('#source-graph-host .block-graph-fn-menu').getBoundingClientRect();
+          return {inside: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight}; })()
+        """)
+      XCTAssertEqual(menu["inside"] as? Bool, true, "\(size.name): the function list stays in the window: \(menu)")
+      try await ui.screenshot("wasm-names-function-list-\(size.name)")
+      try await ui.click("#source-graph-host .block-graph-fn-row", containing: "func 1")
+      try await ui.waitUntil("""
+        document.querySelector('#source-graph-host .block-graph-analyst-name')?.textContent === 'encode_payload' &&
+          document.querySelector('#source-graph-host .block-graph-fn-menu') === null
+        """, "\(size.name): the Graph title did not show the name")
+      try await assertLayout(ui, "#source-graph-host", "\(size.name) Wasm names in the Graph")
+      // The Graph moves to func 2 while the last clicked Inspect row is the
+      // call into func 1: F2 on the graph names the function it draws,
+      // wherever the click left focus inside the editor; Escape closes it.
+      try await ui.click("#source-graph-host button[aria-label='Next function']")
+      try await ui.waitUntil("""
+        (document.querySelector('#source-graph-host .block-graph-title')?.textContent ?? '') === 'run' &&
+          (document.querySelector('#source-graph-host .block-graph-stats')?.textContent ?? '').includes('block')
+        """, timeout: 30, "\(size.name): the Graph did not move to func 2")
+      try await ui.click("#source-graph-host .block-graph-canvas")
+      // Where focus sits when F2 is pressed, so a failure names the element
+      // that took the key.
+      let focusAtF2 = try await ui.json("""
+        (() => { const a = document.activeElement, box = document.querySelector('#source-graph-host .block-graph-canvas').getBoundingClientRect();
+          const at = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          const name = e => e ? `${e.tagName.toLowerCase()}#${e.id}.${String(e.className)}` : null;
+          return {active: name(a), label: a?.getAttribute?.('aria-label') ?? null, function: a?.dataset?.wasmFunction ?? null,
+            rects: a?.getClientRects?.().length ?? 0, insideHidden: Boolean(a?.closest?.('[hidden]')), atClickPoint: name(at),
+            graphFunction: document.querySelector('#source-graph-host').dataset.wasmFunction ?? null}; })()
+        """)
+      try await ui.key(120, "\u{F705}", modifiers: [.function])
+      try await ui.waitUntil("""
+        document.querySelector('#source-name-host input')?.getAttribute('aria-label') === 'Researcher name for run (func 2)' &&
+          document.querySelector('#source-name-host input')?.value === ''
+        """, "\(size.name): F2 did not open the editor for the Graph's function; focus at F2: \(focusAtF2)")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("document.querySelector('#source-name-host form') === null", "\(size.name): Escape did not close the editor")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) Wasm names in the Graph")
+      try await ui.screenshot("wasm-names-graph-\(size.name)")
+      try await lightScreenshot(ui, "wasm-names-graph", size.name, scope: "#screen-sources")
+      try await ui.click("#source-graph")
+    }
+  }
+
+  // "Missing final blocks" in protocol/native-network-v3.md: a content-session
+  // request the HTTP cache answered has only provisional headers. The Headers
+  // and Cookies tabs say why, and the Traffic footer counts it with the
+  // header block the session budget refused.
+  @MainActor
+  func test35MissingFinalHeaders() async throws {
+    let expected = try Expectations.load()
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      // The header and cookie gaps are one footer item: the footer is as
+      // tall as without it and nothing in it is cut off, and its breakdown
+      // opens with Space and closes with Escape.
+      try await ui.waitUntil("document.querySelector('#request-header-gaps')?.hidden === false",
+        "\(size.name): the footer did not show its header gaps")
+      let footer = try await ui.json("""
+        (() => { const bar = document.querySelector('#screen-traffic .request-window');
+          const pane = bar.closest('.request-pane');
+          const gaps = document.querySelector('#request-header-gaps');
+          const height = bar.getBoundingClientRect().height;
+          gaps.hidden = true;
+          const without = bar.getBoundingClientRect().height;
+          gaps.hidden = false;
+          const box = bar.getBoundingClientRect(), view = pane.getBoundingClientRect();
+          return {label: gaps.textContent, status: document.querySelector('#request-window-status').textContent,
+            grows: height - without, cut: box.bottom > view.bottom + 1 || box.top < view.top - 1}; })()
+        """)
+      XCTAssertEqual(footer["label"] as? String, "2 header gaps", "\(size.name): \(footer)")
+      XCTAssertEqual((footer["grows"] as? NSNumber)?.doubleValue ?? -1, 0,
+        "\(size.name): the gaps item adds no footer line: \(footer)")
+      XCTAssertEqual(footer["cut"] as? Bool, false, "\(size.name): the footer is not cut off: \(footer)")
+      XCTAssertFalse((footer["status"] as? String ?? "").contains("not retained"),
+        "\(size.name): the reasons are in the breakdown, not the status: \(footer)")
+      try await assertLayout(ui, "#screen-traffic .request-window", "\(size.name) header gaps item")
+      _ = try await ui.value("document.querySelector('#request-header-gaps').focus()")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('#request-header-gaps-detail')?.hidden === false",
+        "\(size.name): Space did not open the header gaps")
+      let breakdown = try await ui.json("""
+        ({expanded: document.querySelector('#request-header-gaps').getAttribute('aria-expanded'),
+          items: [...document.querySelectorAll('#request-header-gaps-detail li')].map(item => item.textContent)})
+        """)
+      XCTAssertEqual(breakdown["expanded"] as? String, "true", "\(size.name): \(breakdown)")
+      XCTAssertEqual(breakdown["items"] as? [String] ?? [],
+        ["1 header block not retained (session budget)", "1 request without final headers (HTTP cache)"],
+        "\(size.name): the breakdown names each gap and why: \(breakdown)")
+      try await ui.screenshot("traffic-header-gaps-\(size.name)")
+      try await ui.key(53, "\u{1b}")
+      try await ui.waitUntil("""
+        document.querySelector('#request-header-gaps-detail')?.hidden === true &&
+          document.activeElement === document.querySelector('#request-header-gaps')
+        """, "\(size.name): Escape did not close the header gaps and return focus")
+      try await ui.click("#screen-traffic .request-row", containing: expected.cachedHeadersHost)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden", "request detail did not open")
+      try await ui.click("#inspector-tab-headers")
+      try await ui.waitUntil(
+        "(document.querySelector('#headers-inspector')?.innerText ?? '').includes('Provisional headers are shown')",
+        "\(size.name): the provisional notice did not render")
+      let headers = try await ui.value("document.querySelector('#headers-inspector').innerText") as? String ?? ""
+      XCTAssertTrue(headers.contains("The HTTP cache answered it without sending a request"),
+        "\(size.name): the Headers tab says why the sent headers are missing: \(headers)")
+      XCTAssertTrue(headers.contains("already retained 64 MiB of header blocks"),
+        "\(size.name): the refused block reads as not retained: \(headers)")
+      try await assertInert(ui, "\(size.name) missing final headers")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) missing final headers")
+      try await ui.screenshot("traffic-missing-final-headers-\(size.name)")
+      try await ui.click("#inspector-tab-cookies")
+      try await ui.waitUntil("document.querySelector('#cookies-inspector .traffic-cookie-missing') !== null",
+        "\(size.name): the Cookies tab did not list the hop without a list")
+      let cookies = try await ui.json("""
+        ({text: document.querySelector('#cookies-inspector').innerText,
+          reasons: [...document.querySelectorAll('#cookies-inspector .traffic-cookie-missing')].map(node => node.dataset.reason)})
+        """)
+      XCTAssertEqual(cookies["reasons"] as? [String] ?? [], ["from_cache"], "\(size.name): \(cookies)")
+      let cookieText = cookies["text"] as? String ?? ""
+      XCTAssertTrue(cookieText.contains("reported no cookie list for this hop") && cookieText.contains("The HTTP cache answered it"),
+        "\(size.name): the Cookies tab says why: \(cookieText)")
+      XCTAssertFalse(cookieText.contains("No cookie list was retained"), "\(size.name): the reason replaces the bare absence")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) missing final cookies")
+      try await ui.screenshot("traffic-missing-final-cookies-\(size.name)")
+      try await ui.click("#inspector-tab-general")
+    }
+  }
+
+  // #434 phase 1: a request a watch rule matched is marked on its Traffic row
+  // and in General with its rule, and Show in debugger opens its observation
+  // in the Sources debugger sidebar, chosen and focused. Where rules are armed
+  // the sidebar says what they cannot observe.
+  @MainActor
+  func test33WatchedRequestInTrafficAndDebugger() async throws {
+    let expected = try Expectations.load()
+    let host = "watch.debugger.test"
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "traffic")
+      _ = try await ui.value("""
+        (() => { const filter = document.querySelector('#request-filter'); filter.value = '\(host)';
+          filter.dispatchEvent(new Event('input', {bubbles: true})); return true; })()
+        """)
+      try await ui.waitUntil("""
+        [...document.querySelectorAll('#screen-traffic .request-row')].some(row => row.innerText.includes('\(host)') && row.querySelector('.request-watched'))
+        """, "\(size.name): the watched request is not marked on its row")
+      let row = try await ui.json("""
+        (() => { const row = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'));
+          const chip = row.querySelector('.request-watched'), name = row.querySelector('.request-name');
+          const a = chip.getBoundingClientRect(), b = name.getBoundingClientRect();
+          return {chip: chip.innerText, title: chip.title, label: row.getAttribute('aria-label'),
+            inside: a.left >= b.left - 0.5 && a.right <= b.right + 0.5 && a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5 && a.width > 0,
+            // The name the chip leads stays on the row's one line, not wrapped out of it.
+            named: (() => { const resource = name.querySelector('.request-resource').getBoundingClientRect();
+              return resource.width > 0 && resource.top < b.bottom && resource.bottom > b.top && Math.abs(resource.top - a.top) < 4; })(),
+            clipped: chip.scrollWidth > chip.clientWidth + 1,
+            others: [...document.querySelectorAll('#screen-traffic .request-row')].filter(node => node !== row && node.querySelector('.request-watched')).length}; })()
+        """)
+      print("RENDERED_UI_WATCHED_ROW \(size.name) \(row)")
+      XCTAssertEqual(row["chip"] as? String, "Watched", "\(size.name): \(row)")
+      XCTAssertEqual(row["inside"] as? Bool, true, "\(size.name): the chip sits inside the Name cell: \(row)")
+      XCTAssertEqual(row["clipped"] as? Bool, false, "\(size.name): the chip is not clipped: \(row)")
+      XCTAssertEqual(row["named"] as? Bool, true, "\(size.name): the request's name stays visible beside the chip: \(row)")
+      XCTAssertEqual(row["others"] as? Int, 0, "\(size.name): only the watched row is marked: \(row)")
+      XCTAssertTrue((row["label"] as? String ?? "").contains("Request watch rule 1 matched, method too"), "\(size.name): \(row)")
+      XCTAssertTrue((row["title"] as? String ?? "").contains("Request watch rule 1 matched"), "\(size.name): \(row)")
+      // The color system: the chip is a network record, so the network kind's
+      // color in both themes, never foam, the script kind and ready state.
+      for theme in ["dark", "light"] {
+        let colors = try await ui.json("""
+          (async () => {
+            const root = document.documentElement, before = root.dataset.theme ?? null;
+            root.dataset.theme = '\(theme)';
+            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const color = token => { const probe = document.createElement('span'); probe.style.color = `var(${token})`;
+              document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; };
+            const chip = [...document.querySelectorAll('#screen-traffic .request-row')].find(node => node.innerText.includes('\(host)'))
+              .querySelector('.request-watched');
+            const result = {chip: getComputedStyle(chip).color, request: color('--kind-request'), script: color('--kind-script')};
+            if (before === null) delete root.dataset.theme; else root.dataset.theme = before;
+            return result; })()
+          """)
+        XCTAssertEqual(colors["chip"] as? String, colors["request"] as? String, "\(size.name) \(theme): the chip takes --kind-request: \(colors)")
+        XCTAssertNotEqual(colors["chip"] as? String, colors["script"] as? String, "\(size.name) \(theme): never the script kind: \(colors)")
+      }
+      _ = try await ui.value("""
+        (async () => { window.__rebDarkTheme = document.documentElement.dataset.theme ?? null;
+          document.documentElement.dataset.theme = 'light';
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))); return true; })()
+        """)
+      try await assertLayout(ui, "#screen-traffic", "\(size.name) watched row light")
+      try await ui.screenshot("traffic-watched-row-light-\(size.name)")
+      _ = try await ui.value("""
+        (() => { if (window.__rebDarkTheme === null) delete document.documentElement.dataset.theme;
+          else document.documentElement.dataset.theme = window.__rebDarkTheme; delete window.__rebDarkTheme; return true; })()
+        """)
+
+      try await ui.click("#screen-traffic .request-row", containing: host)
+      try await ui.waitUntil("!document.querySelector('#screen-traffic .detail-pane').hidden && Boolean(document.querySelector('#exchange-inspector .traffic-watch'))",
+        "\(size.name): General did not show the debugger watch")
+      let general = try await ui.json("""
+        (() => { const section = document.querySelector('#exchange-inspector .traffic-watch');
+          return {text: section.innerText.replace(/\\s+/g, ' '), record: section.querySelector('.traffic-watch-record').innerText,
+            selected: state.selectedRequestId}; })()
+        """)
+      print("RENDERED_UI_WATCHED_GENERAL \(size.name) \(general)")
+      let text = general["text"] as? String ?? ""
+      XCTAssertTrue(text.contains("Debugger watch") && text.contains("Request watch rule 1 matched, method too"), "\(size.name): \(general)")
+      let record = general["record"] as? String ?? ""
+      XCTAssertTrue(record.contains("renderer \(expected.debuggerProcess) · frame \(expected.debuggerFrame)"), "\(size.name): \(general)")
+      XCTAssertTrue((general["selected"] as? String ?? "").hasSuffix(":R\(expected.debuggerProcess):5100"), "\(size.name): \(general)")
+      let sequence = record.split(separator: "#").last?.split(separator: " ").first.map(String.init) ?? ""
+      XCTAssertFalse(sequence.isEmpty, "\(size.name): the record names its sequence: \(record)")
+      try await assertInert(ui, "\(size.name) watched request")
+      try await assertLayout(ui, "#screen-traffic .detail-pane", "\(size.name) watched request general")
+      try await ui.screenshot("traffic-watched-request-\(size.name)")
+
+      // Pressed from the keyboard, so the list it moves focus to must show it.
+      _ = try await ui.value("(() => { const open = document.querySelector('.traffic-watch-open'); open.scrollIntoView({block: 'nearest'}); open.focus(); return true; })()")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("""
+        (() => { const chosen = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]');
+          return !document.querySelector('#screen-sources').hidden && !document.querySelector('#debugger-sidebar').hidden &&
+            chosen?.dataset.key.endsWith(':\(expected.debuggerProcess):\(sequence)') && document.activeElement?.id === 'debugger-observations'; })()
+        """, "\(size.name): Show in debugger did not choose the observation with focus on its list")
+      // Before any key, as the reveal left it: the chosen row is whole inside
+      // its list and the pane in both themes, the narrow window included.
+      for theme in ["dark", "light"] {
+        let revealed = try await ui.json("""
+          (async () => {
+            const root = document.documentElement;
+            window.__rebRevealTheme = root.dataset.theme ?? null;
+            root.dataset.theme = '\(theme)';
+            await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+            const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+            const list = document.querySelector('#debugger-observations').getBoundingClientRect();
+            const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
+            return {rowTop: row?.top ?? null, rowBottom: row?.bottom ?? null, paneTop: pane.top, paneBottom: pane.bottom,
+              listTop: list.top, listBottom: list.bottom,
+              rowInPane: Boolean(row) && row.top >= pane.top - 0.5 && row.bottom <= pane.bottom + 0.5,
+              rowInList: Boolean(row) && row.top >= list.top - 0.5 && row.bottom <= list.bottom + 0.5}; })()
+          """)
+        print("RENDERED_UI_WATCHED_REVEALED \(size.name) \(theme) \(revealed)")
+        XCTAssertEqual(revealed["rowInPane"] as? Bool, true, "\(size.name) \(theme): the revealed row's top and bottom are inside the pane: \(revealed)")
+        XCTAssertEqual(revealed["rowInList"] as? Bool, true, "\(size.name) \(theme): the revealed row is not clipped by its list: \(revealed)")
+        try await ui.screenshot("debugger-revealed-row-\(theme)-\(size.name)")
+        _ = try await ui.value("""
+          (() => { if (window.__rebRevealTheme === null) delete document.documentElement.dataset.theme;
+            else document.documentElement.dataset.theme = window.__rebRevealTheme; delete window.__rebRevealTheme; return true; })()
+          """)
+      }
+      // WebKit draws focus a script moved only after the next key press; the
+      // arrow keeps the one Requests row active and must show the list's focus.
+      try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
+      // Measured once its actions appeared: the arrow leaves the one row
+      // active, so nothing scrolls the row out from under the pane's edge.
+      try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar .debugger-detail .debugger-detail-actions'))",
+        "\(size.name): the chosen record's actions did not appear")
+      _ = try await ui.value("new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))")
+      let shown = try await ui.json("""
+        (() => { const detail = document.querySelector('#debugger-sidebar .debugger-detail'), box = detail.getBoundingClientRect();
+          const pane = document.querySelector('#debugger-sidebar .debugger-sidebar-sections').getBoundingClientRect();
+          const list = document.querySelector('#debugger-observations').getBoundingClientRect();
+          const row = document.querySelector('#debugger-observations .debugger-list-row[aria-selected="true"]')?.getBoundingClientRect();
+          return {kind: document.querySelector('.debugger-kind[aria-pressed="true"]')?.dataset.kind ?? '',
+            detail: detail.innerText.replace(/\\s+/g, ' '), inView: !detail.hidden && box.top < pane.bottom - 24 && box.bottom > pane.top,
+            // The focused list and its chosen row are on screen, inside the pane.
+            listInPane: list.top >= pane.top - 0.5 && list.top < pane.bottom - 20,
+            rowInPane: Boolean(row) && row.top >= pane.top - 0.5 && row.bottom <= pane.bottom + 0.5,
+            focus: __rebUiProbe.focusState()}; })()
+        """)
+      print("RENDERED_UI_WATCHED_SHOWN \(size.name) \(shown)")
+      XCTAssertEqual(shown["kind"] as? String, "request_watch_match", "\(size.name): the Requests kind is listed: \(shown)")
+      XCTAssertEqual(shown["inView"] as? Bool, true, "\(size.name): its details are in view: \(shown)")
+      XCTAssertTrue((shown["detail"] as? String ?? "").contains("request 5100"), "\(size.name): \(shown)")
+      let focus = shown["focus"] as? [String: Any] ?? [:]
+      XCTAssertEqual(focus["id"] as? String, "debugger-observations", "\(size.name): focus stays on the list: \(shown)")
+      XCTAssertEqual(focus["inViewport"] as? Bool, true, "\(size.name): the focused list is in the viewport: \(shown)")
+      XCTAssertEqual(shown["listInPane"] as? Bool, true, "\(size.name): the focused list is inside the sidebar pane: \(shown)")
+      XCTAssertEqual(shown["rowInPane"] as? Bool, true, "\(size.name): the chosen row is inside the sidebar pane: \(shown)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): the list shows its focus once a key is pressed: \(shown)")
+      let active = try await ui.value("document.querySelector('#debugger-observations .debugger-list-row[data-active=\"true\"]')?.dataset.key ?? ''") as? String ?? ""
+      XCTAssertTrue(active.hasSuffix(":\(expected.debuggerProcess):\(sequence)"), "\(size.name): the chosen record is the active row: \(active)")
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) shown observation")
+      try await ui.screenshot("debugger-shown-observation-\(size.name)")
+      try await lightScreenshot(ui, "debugger-shown-observation", size.name)
+
+      // Arming: a live Console document draws the form, which states what a rule cannot observe.
+      _ = try await ui.value("""
+        (() => { window.__rebConsole = window.RebNativeConsole;
+          window.RebNativeConsole = {liveDocument: () => ({session_id: '5', target_id: '21', label: 'top #21'}), watch: async () => ({status: 'ok'})};
+          return true; })()
+        """)
+      try await ui.waitUntil("Boolean(document.querySelector('#debugger-sidebar .debugger-watch-limits'))", timeout: 8,
+        "\(size.name): the arming form did not render")
+      let limits = try await ui.value("""
+        (() => { const note = document.querySelector('#debugger-sidebar .debugger-watch-limits');
+          note.scrollIntoView({block: 'center'}); return note.innerText; })()
+        """) as? String ?? ""
+      for said in ["only this document's main thread", "workers, other frames or same-process iframes", "navigation clears the rules",
+                   "cannot be armed ahead of a page load"] {
+        XCTAssertTrue(limits.contains(said), "\(size.name): the form says \(said): \(limits)")
+      }
+      try await assertLayout(ui, "#debugger-sidebar", "\(size.name) watch limits")
+      try await ui.screenshot("debugger-watch-limits-\(size.name)")
+      _ = try await ui.value("(() => { window.RebNativeConsole = window.__rebConsole; delete window.__rebConsole; return true; })()")
     }
   }
 }

@@ -43,7 +43,9 @@ static_assert(static_cast<std::uint8_t>(reb::ExclusionClass::kNonOrdinaryPageReu
 static_assert(reb::kMemoryCacheReusePayloadSize == reb::kNativeMemoryCacheReusePayloadSize &&
               reb::kMemoryCacheReuseHostSize == reb::kNativeMemoryCacheReuseHostSize &&
               reb::kMemoryCacheReuseStaticData == reb::kNativeMemoryCacheReuseStaticData &&
-              reb::kMemoryCacheReuseHostTruncated == reb::kNativeMemoryCacheReuseHostTruncated);
+              reb::kMemoryCacheReuseHostTruncated == reb::kNativeMemoryCacheReuseHostTruncated &&
+              reb::kMemoryCacheReuseSourceNamed == reb::kNativeMemoryCacheReuseSourceNamed &&
+              reb::kMemoryCacheReusePayloadVersion == reb::kNativeMemoryCacheReusePayloadVersion);
 static_assert(offsetof(reb::EventHeader, scheme_class) ==
               offsetof(reb::NativeProbeHeader, scheme_class));
 static_assert(sizeof(reb::EventHeader) == sizeof(reb::NativeProbeHeader));
@@ -173,7 +175,8 @@ void Exclusions() {
 reb::EventRecord Reuse(const std::uint8_t resource_type,
                        const bool static_data,
                        const std::string_view host,
-                       const std::uint8_t scheme_class = 2) {
+                       const std::uint8_t scheme_class = 2,
+                       const std::uint32_t source = 0) {
   reb::NativeProbeEvent event;
   event.header.category = reb::NativeProbeCategory::kNetwork;
   event.header.type = reb::NativeProbeType::kMemoryCacheReuse;
@@ -188,8 +191,13 @@ reb::EventRecord Reuse(const std::uint8_t resource_type,
   event.header.decoded_body_length = 5120;
   event.header.scheme_class = scheme_class;
   event.header.loader_kind = 16;
+  if (source != 0) {
+    event.header.initiator_process_id = event.header.process_id;
+    event.header.initiator_request_id = source;
+  }
   event.header.payload_size = reb::kNativeMemoryCacheReusePayloadSize;
-  event.inline_payload = reb::EncodeNativeMemoryCacheReusePayload(resource_type, static_data, host);
+  event.inline_payload =
+      reb::EncodeNativeMemoryCacheReusePayload(resource_type, static_data, host, source != 0);
   return std::bit_cast<reb::EventRecord>(event);
 }
 
@@ -220,8 +228,31 @@ void MemoryCacheReuses() {
   event.header.loader_kind = 0;
   Case("memory-cache without a loader kind", event, false);
   event = Reuse(1, false, "example.test");
-  event.inline_payload[5] = std::byte{4};
+  event.inline_payload[5] = std::byte{8};
   Case("memory-cache unknown flag", event, false);
+  // Version 2 names the renderer request whose response Blink reused.
+  Case("memory-cache naming its source request", Reuse(3, false, "cdn.example.test", 2, 41), true);
+  event = Reuse(3, false, "cdn.example.test", 2, 41);
+  event.header.initiator_process_id = 8;
+  Case("memory-cache source in another process", event, false);
+  event = Reuse(3, false, "cdn.example.test", 2, 41);
+  event.header.initiator_request_id = 0;
+  Case("memory-cache source without a request", event, false);
+  event = Reuse(3, false, "cdn.example.test");
+  event.inline_payload[5] = std::byte{4};
+  Case("memory-cache source flag without initiator fields", event, false);
+  event = Reuse(1, true, "", 5);
+  event.inline_payload[5] = std::byte{5};
+  event.header.initiator_process_id = event.header.process_id;
+  event.header.initiator_request_id = 41;
+  Case("memory-cache static data naming a source", event, false);
+  // Version 1, from before the source was named, stays valid without it.
+  event = Reuse(1, false, "example.test");
+  event.inline_payload[0] = std::byte{1};
+  Case("memory-cache payload version 1", event, true);
+  event = Reuse(3, false, "cdn.example.test", 2, 41);
+  event.inline_payload[0] = std::byte{1};
+  Case("memory-cache version 1 naming a source", event, false);
   event = Reuse(1, false, "example.test");
   event.inline_payload[5] = std::byte{2};
   Case("memory-cache truncated short host", event, false);
@@ -238,8 +269,10 @@ void MemoryCacheReuses() {
   event.inline_payload[6] = std::byte{121};
   Case("memory-cache host length above 120", event, false);
   event = Reuse(1, false, "example.test");
-  event.inline_payload[0] = std::byte{2};
-  Case("memory-cache payload version 2", event, false);
+  event.inline_payload[0] = std::byte{3};
+  Case("memory-cache payload version 3", event, false);
+  event.inline_payload[0] = std::byte{0};
+  Case("memory-cache payload version 0", event, false);
   event = Reuse(1, false, "example.test");
   event.header.payload_size = 127;
   Case("memory-cache short payload", event, false);

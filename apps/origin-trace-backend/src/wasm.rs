@@ -187,7 +187,7 @@ impl Rows {
 
 macro_rules! operator_names {
     ($(@$proposal:ident $op:ident $({ $($field:ident: $ty:ty),* })? => $visit:ident ($($ann:tt)*))*) => {
-        fn operator_name(op: &Operator<'_>) -> &'static str {
+        pub(crate) fn operator_name(op: &Operator<'_>) -> &'static str {
             match op { $(Operator::$op $( { $($field: _),* } )? => stringify!($visit),)* _ => "visit_unknown" }
         }
     };
@@ -221,7 +221,7 @@ pub(crate) fn mnemonic(op: &Operator<'_>) -> String {
     mnemonic
 }
 
-fn instruction(op: &Operator<'_>) -> String {
+pub(crate) fn instruction(op: &Operator<'_>) -> String {
     let mnemonic = mnemonic(op);
     if let Operator::BrTable { targets } = op {
         // Large branch tables keep exact instruction ranges and a bounded preview.
@@ -553,6 +553,16 @@ pub fn inspect(bytes: &[u8], sections: Option<&BTreeSet<u8>>) -> Result<Value> {
                         Some(index),
                         instruction(&op),
                     );
+                    // A direct callee or function reference is structure, like
+                    // `function_index`, so a read that omits row text still
+                    // names it (and a researcher name joins to it).
+                    if let Operator::Call { function_index }
+                    | Operator::ReturnCall { function_index }
+                    | Operator::RefFunc { function_index } = op
+                        && let Some(row) = rows.values.last_mut()
+                    {
+                        row["target_function_index"] = json!(function_index);
+                    }
                 }
                 reader.finish().map_err(bad)?;
             }

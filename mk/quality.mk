@@ -39,7 +39,7 @@ else
 $(error REB_RUST_TEST_RUNNER must be cargo or nextest, not $(REB_RUST_TEST_RUNNER))
 endif
 
-check: native-wasm-golden-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-tab-registry-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
+check: native-wasm-golden-check wasm-readable-values-check native-js-golden-check network-request-wire-check request-index-check request-stack-wire-check debugger-observation-wire-check network-scope-wire-check tab-link-wire-check dispatch-shape-check all heap-snapshot-check native-artifact-capture-check native-request-identity-check wire-decoder-check magic-decoder-check native-vm-recorder-check owned-vm-helper-check native-probe-compile native-probe-admission-check native-network-capture-check native-tab-registry-check native-proxy-policy-check native-build-test native-tests workspace-check deob-benchmark vm-lab-check native-only-check
 	$(RUST_SUITE) apps/origin-trace-backend/Cargo.toml
 	$(if $(RUST_DOCTESTS),$(RUST_DOCTESTS) apps/origin-trace-backend/Cargo.toml)
 	$(RUST_SUITE) apps/deobfuscator-worker/Cargo.toml
@@ -63,9 +63,35 @@ dispatch-shape-check:
 		printf '%s\n' "$$output" | grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' || \
 		{ echo "Dispatch shape fixture tests did not run and pass" >&2; exit 1; }
 
+# Value-level check of the readable Wasm lift: an ignored Rust test writes
+# generated i32 modules with their lifted listings, and V8 runs each module
+# while the script interprets its listing with the same logging, throwing
+# imports. Static order checks cannot see a listing that reads a different
+# value; this catches one in about 15 seconds.
+WASM_READABLE_VALUES := $(abspath $(BUILD_DIR)/wasm-readable-values.jsonl)
+.PHONY: wasm-readable-values-check
+wasm-readable-values-check:
+	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
+	mkdir -p "$(dir $(WASM_READABLE_VALUES))"
+	$(call ignored-rust-test,--lib,wasm_pseudocode::tests::write_value_corpus,REB_WASM_READABLE_VALUES_OUTPUT="$(WASM_READABLE_VALUES)")
+	node tools/check-wasm-readable-values.mjs "$(WASM_READABLE_VALUES)"
+
 # Rebuild the checked-in .wasm fixtures after editing a .wat source.
 dispatch-shape-fixtures:
 	$(call ignored-rust-test,--lib,vm::dispatch_shape_tests::write_dispatch_shape_fixtures,)
+
+# Wasm identification fixtures (tools/fixtures/wasm-identification): the
+# backend tests fail when a checked-in .wasm differs from its .wat source, and
+# this target rebuilds them with the same pinned assembler.
+.PHONY: wasm-identification-fixtures
+wasm-identification-fixtures:
+	$(call ignored-rust-test,--lib,wasm_identification::tests::write_identification_fixtures,)
+
+# Rebuild the module diff builds after editing their .wat sources. make check
+# fails while a checked-in build differs from its source.
+.PHONY: wasm-diff-fixtures
+wasm-diff-fixtures:
+	$(call ignored-rust-test,--lib,wasm_diff::tests::write_wasm_diff_fixtures,)
 
 # The actual C++ native Wasm encoders feed the Rust workspace builder, the
 # shipped viewer and the Python validator. The Rust tests also export the exact
@@ -137,14 +163,20 @@ $(UI_STARTUP_DEPS): tools/ui-startup-deps/package-lock.json
 native-only-check: $(UI_STARTUP_DEPS)
 	node tools/check-native-only-ui.mjs
 	node tools/check-debugger-sidebar.mjs
+	node tools/check-wasm-diff-ui.mjs
 	node tools/check-traffic-payload-ui.mjs
 	node tools/check-traffic-response-ui.mjs
+	node tools/check-wasm-readable-ui.mjs
 	node tools/check-traffic-headers-ui.mjs
 	node tools/check-traffic-cookies-ui.mjs
+	node tools/check-wasm-function-names.mjs
 	node tools/check-agent-panel.mjs
 	node tools/check-session-panel.mjs
 	node tools/check-source-search.mjs
 	node tools/check-invocation-sites-ui.mjs
+	node tools/check-wasm-runner-ui.mjs
+	node tools/check-wasm-identification-ui.mjs
+	node tools/check-value-flow-ui.mjs
 	node tools/check-debugger-pause-ui.mjs
 	node tools/check-native-only-startup.cjs
 	node tools/check-native-only-launch.mjs
@@ -267,6 +299,7 @@ python-check: vm-lab-check
 	python3 tools/write-brave-provenance-test.py
 	python3 tools/check-integrated-brave-state-test.py
 	python3 tools/check-cookie-import-terminal.py
+	python3 tools/check-header-observer-patch.py
 	python3 tools/ci-scope-test.py
 	python3 -m compileall -q tools
 	$(RUFF) check tools

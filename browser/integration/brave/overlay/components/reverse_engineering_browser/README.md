@@ -132,7 +132,10 @@ recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
 `ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
 `memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
 with the rest counted in the queue (version 4) as class 70 and those of pages
-that are not ordinary as class 71.
+that are not ordinary as class 71. Chromium patch
+`0062-name-memory-cache-reuse-sources` passes the reused resource's
+`ResourceResponse::RequestId()`, the renderer request that loaded it, which the
+record (payload version 2) names through its initiator fields.
 See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch
@@ -182,12 +185,19 @@ patch `0025-forward-native-network-headers` forwards content's DevToolsObserver
 calls to the `network_headers_hook` component before DevTools dispatch. The
 same calls carry the sent and received cookie lists with each cookie's
 inclusion status; the sink records one `cookie_list` per hop and direction.
+Chromium patch `0058-observe-early-hints-preload-headers` asks the hook's
+`NativeNetworkHeadersObserved` (a current content session with the Network
+category, before its expiry) before giving the early-hints preload factory an
+agentless observer, so that factory is built unchanged outside such a session.
 Header blocks and cookie lists take shares of the same in-flight pool. In the
 renderer, `renderer/native_script_cookie_sink.h` records `document.cookie` and
 Cookie Store API calls from Chromium patch `0028-record-script-cookie-access`,
 enabled only by the content gate `NativeProbeClient::Configure` carries, with
-the innermost script frame from `renderer/native_script_position.h`; reads are
-aggregated per key.
+the innermost script frame from `renderer/native_script_position.h`. A
+`document.cookie` read records each cookie name the returned string holds, at
+most 360 per read with the rest counted, and reads aggregate per frame, script
+position and name in a 4,096-key table allocated only for a content-capture
+configuration.
 
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process

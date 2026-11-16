@@ -243,8 +243,12 @@ enum AgentToolGate {
   // they are listed only with Full access.
   static let fullOnlyReads: Set<String> = ["get_health", "get_api_collection", "get_analyst_workspace"]
   // Captured content, and starting sessions: Full access only. The server
-  // lists them only at --permission full, too.
-  static let fullOnly: Set<String> = ["get_artifact_text", "search_artifact_text", "start_live_session", "session_action"]
+  // lists them only at --permission full, too. Running captured code is a
+  // content read: a run's outcome, fuel, import calls and timing disclose
+  // values the code computed.
+  static let fullOnly: Set<String> = [
+    "get_artifact_text", "search_artifact_text", "run_wasm_function", "get_wasm_runs", "start_live_session", "session_action",
+  ]
   static let sensitiveStartOptions = ["canvas_images", "request_content", "response_media", "js_invocation_digests", "confirm_sensitive_capture"]
 
   // Whether a tool the server listed is offered to the model at this level.

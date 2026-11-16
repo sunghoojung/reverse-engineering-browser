@@ -94,6 +94,55 @@ for (const [options, pattern] of [
 }
 console.log('PASS native Wasm launch is explicit opt-in, category-gated, and composes with quiet mode');
 
+// The session context's labels: a content session names its limits, which
+// the start panel, the start options or the environment chose; a metadata
+// session names none of them.
+{
+  const labels = section('# Labels for the session context; they enable nothing in the backend.', '# The session header says');
+  const run = variables => {
+    const result = spawnSync(shell, ['-c', `set -eu; ui_arguments=(); capture_canvas_images=0; console_document_start=0; request_stacks_state=off; ${variables}; ${labels}
+printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trimEnd().split('\n').filter(Boolean);
+  };
+  assert.deepEqual(run('capture_request_content=1; request_content_budget_mib=256; response_body_budget_mib=512; capture_response_media=0'),
+    ['--session-request-content', '--session-request-content-budget-mib', '256', '--session-response-body-budget-mib', '512',
+      '--session-response-media', '0']);
+  assert.deepEqual(run('capture_request_content=1; request_content_budget_mib=4096; response_body_budget_mib=16384; capture_response_media=1'),
+    ['--session-request-content', '--session-request-content-budget-mib', '4096', '--session-response-body-budget-mib', '16384',
+      '--session-response-media', '1']);
+  assert.deepEqual(run('capture_request_content=0; request_content_budget_mib=4096; response_body_budget_mib=16384; capture_response_media=0'), [],
+    'a metadata session names no limit');
+  // The launcher refuses a value the backend label would refuse, before anything starts.
+  for (const [options, message] of [
+    [{REB_REQUEST_CONTENT_BUDGET_MIB:'4097'}, /REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096/],
+    [{REB_REQUEST_CONTENT_BUDGET_MIB:'0'}, /REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096/],
+    [{REB_RESPONSE_BODY_BUDGET_MIB:'16385'}, /REB_RESPONSE_BODY_BUDGET_MIB must be an integer from 1 to 16384/],
+    [{REB_RESPONSE_BODY_BUDGET_MIB:'1.5'}, /REB_RESPONSE_BODY_BUDGET_MIB must be an integer from 1 to 16384/],
+    [{REB_CAPTURE_RESPONSE_MEDIA:'yes'}, /REB_CAPTURE_RESPONSE_MEDIA must be 0 or 1/],
+    [{REB_CAPTURE_RESPONSE_MEDIA:'1', REB_CAPTURE_REQUEST_CONTENT:'0'}, /REB_CAPTURE_RESPONSE_MEDIA requires REB_CAPTURE_REQUEST_CONTENT=1/],
+  ]) {
+    const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,
+      REB_NATIVE_WASM_DISPATCH:'0', REB_NATIVE_WASM_CALL_INDIRECT:'0', ...options}, encoding:'utf8'});
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, message);
+  }
+  // The documents say what the launcher and the start panel actually do.
+  const safety = (await read('SAFETY.md')).replace(/\s+/g, ' ');
+  for (const phrase of ["`REB_REQUEST_CONTENT_BUDGET_MIB` or the start panel's **Request content budget** sets another, from 1 MiB to 4 GiB",
+    "`REB_CAPTURE_RESPONSE_MEDIA=1` or the start panel's **Capture media and fonts**",
+    "the panel's **Response body budget** sets that budget, from 1 MiB to 16 GiB"]) {
+    assert(safety.includes(phrase), `SAFETY.md says: ${phrase}`);
+  }
+  const v2 = (await read('protocol/native-network-v2.md')).replace(/\s+/g, ' ');
+  assert(!v2.includes('65,536 artifacts'), 'native network v2 no longer states a fixed artifact count');
+  assert(v2.includes('the launcher sizes the receiver\'s store at 256 MiB plus the request content budget plus the response body budget, '
+    + 'allows one artifact per 4 KiB of that store'), 'native network v2 states the launcher\'s receiver sizing');
+  assert.match(launch, /artifact_store_mib=\$\(\(256 \+ request_content_budget_mib \+ response_body_budget_mib\)\)/);
+  assert.match(launch, /artifact_item_limit=\$\(\(artifact_store_bytes \/ 4096\)\)/);
+  console.log('PASS content session limits: the launcher refuses out-of-bounds budgets and labels a content session\'s limits for the session context, a metadata session none; SAFETY.md and native network v2 say what the panel and the launcher do');
+}
+
 const adapterDirectory = await mkdtemp(join(tmpdir(), 'reb-native-adapter-'));
 try {
   const adapterPath = join(adapterDirectory, 'adapter with spaces.json');

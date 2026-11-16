@@ -81,10 +81,10 @@
       // Children of a lifecycle record (protocol/native-network-v2.md and v3).
       // They describe a request; they never advance its lifecycle rank.
       const networkRequestDetailTypes = new Set(['request_target', 'request_body', 'response_body', 'request_headers',
-        'response_headers', 'cookie_list', 'request_initiator_stack', 'navigation_initiator_link']);
+        'response_headers', 'cookie_list', 'request_initiator_stack', 'navigation_initiator_link', 'request_watch_match']);
       // Session-level network records the backend keeps in its network window.
       const networkContextTypes = new Set(['capture_exclusion', 'tab_set', 'request_tab_link',
-        'request_extension_link', 'request_watch_match']);
+        'request_extension_link']);
       const networkRequestArtifactKinds = new Set(['request_body', 'request_target', 'request_headers', 'response_headers',
         'cookie_list']);
       const artifactKinds = new Set([
@@ -721,8 +721,10 @@
         const contentType = String.fromCharCode(...typeBytes.slice(0, Math.min(typeLength, 64)));
         const has = bit => (flags & bit) !== 0;
         const typePresent = has(0x40);
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
-            stateCode < 1 || stateCode > 12 || (flags & ~0x7f) !== 0 || typeLength > 64 ||
+        // Version 2 adds bit 7, snapshots withheld by a byte bound.
+        const version = view.getUint16(0, true);
+        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || view.getUint16(30, true) !== 0 ||
+            stateCode < 1 || stateCode > 12 || (flags & ~(version === 2 ? 0xff : 0x7f)) !== 0 || typeLength > 64 ||
             typePresent !== (typeLength !== 0) || typeBytes.slice(typeLength).some(byte => byte !== 0) ||
             (typePresent && !requestTokenCharacters.test(contentType)) || codingCount > 4 ||
             (has(0x10) && codingCount !== 4) ||
@@ -740,13 +742,13 @@
         if (!valid) return null;
         return {
           state: responseBodyStates[stateCode], shared: has(1), fromCache: has(2), serviceWorker: has(4),
-          stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20),
+          stillEncoded: has(8), codingsOmitted: has(0x10), completionUnobserved: has(0x20), snapshotsWithheld: has(0x80),
           contentType: typePresent ? contentType : null,
           codings: codings.slice(0, codingCount).map(coding => responseCodings.get(coding)),
           bodyLength: String(bodyLength), capturedLength: String(captured), partialIndex,
           sha256: retained ? Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') : null,
           artifactId: event.artifact_id, sequenceNumber: event.sequence_number, parentEventId: event.parent_event_id,
-          sessionId: event.session_id, processId: event.process_id
+          sessionId: event.session_id, processId: event.process_id, monotonicTimeNs: event.monotonic_time_ns
         };
       }
 
@@ -857,13 +859,18 @@
         // Version 2 byte 6 names the isolate: 0 none (no frame or stack), 1 the
         // document, 2 to 4 a worker, whose context ID is the record's frame_id.
         const version = view.getUint16(0, true), thread = bytes[6];
-        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || api < 1 || api > 6 ||
-            (flags & ~0x0f) !== 0 || bytes[7] !== 0 || count === 0 ||
+        if (![1, 2, 3].includes(version) || view.getUint16(2, true) !== 128 || api < 1 || api > 6 ||
+            (flags & ~(version === 3 ? 0x1f : 0x0f)) !== 0 || bytes[7] !== 0 || count === 0 ||
             (version === 1 ? thread !== 0 : thread > 4 || (thread === 0 && (flags & 6) !== 0)) ||
             (thread >= 2 && !isCanonicalInteger(event.frame_id, 1n, uint64Max))) return null;
+        // Version 3: a document.cookie read is a nameless read record (bit 4),
+        // whose offset 16 counts unrecorded names, or one name it returned.
+        const readRecord = Boolean(flags & 16);
+        if (readRecord ? api !== 2 || nameLength !== 0
+          : version === 3 && api === 2 && ((flags & 8) !== 0 || stringLength < nameLength)) return null;
         const write = [1, 3, 6].includes(api), truncated = nameLength > 24;
         if (truncated !== Boolean(flags & 1) || (!truncated && !zero(prefix.slice(nameLength)))) return null;
-        if (write ? count !== 1 || zero(value) || (flags & 8) : valueLength !== 0 || !zero(value)) return null;
+        if (write ? count !== 1 || zero(value) || (flags & 8) : (valueLength !== 0 && !readRecord) || !zero(value)) return null;
         if (api === 1 ? stringLength < nameLength + valueLength : api !== 2 && stringLength !== 0) return null;
         const recorded = Boolean(flags & 2), stacked = Boolean(flags & 4);
         const framed = [1, 2].includes(frame.kind) && frame.scriptId !== 0 && frame.combinator === 0 && (frame.flags & ~3) === 0;
@@ -874,7 +881,11 @@
           api: scriptCookieApis[api], write, count, nameLength, nameTruncated: truncated,
           namePrefix: new TextDecoder('utf-8', {fatal: false}).decode(prefix.slice(0, Math.min(nameLength, 24))),
           namePrefixHex: hex(prefix.slice(0, Math.min(nameLength, 24))),
-          valueLength, stringLength, frame: recorded ? frame : null, stackDigest: stacked ? hex(stack) : null,
+          valueLength: readRecord ? 0 : valueLength, stringLength, frame: recorded ? frame : null,
+          stackDigest: stacked ? hex(stack) : null,
+          // A version 1 or 2 document.cookie get is the whole read, with no name.
+          readRecord: api === 2 && (version < 3 || readRecord), unrecordedNames: readRecord ? valueLength : 0,
+          wholeJar: api === 2 && version < 3,
           valueSha256: write ? hex(value) : null, tableFull: Boolean(flags & 8), frameId: event.frame_id,
           thread: version === 1 ? 'document' : (['', 'document', 'dedicated_worker', 'shared_worker', 'service_worker'][thread] || null),
           sessionId: event.session_id, processId: event.process_id, sequenceNumber: event.sequence_number,
@@ -886,6 +897,22 @@
       function requestChildOf(details, parent, type) {
         return parent ? details.find(event => event.type === type && event.parent_event_id === parent.sequence_number &&
           event.session_id === parent.session_id && event.process_id === parent.process_id) ?? null : null;
+      }
+
+      // The first request_watch_match of a request (protocol/native-debugger-observation-v1.md),
+      // as the request index's watch names it. The rule is the backend decoder's
+      // debugger_observation beside the record; one the core refuses names no rule.
+      function requestWatchMatch(details) {
+        const match = details.filter(event => event.type === 'request_watch_match')
+          .reduce((first, event) => !first || BigInt(event.sequence_number) < BigInt(first.sequence_number) ? event : first, null);
+        if (!match) return null;
+        // ruleRead: a decode came with the record (a store read); the polling
+        // window carries none, so its rule is then not read here, not absent.
+        const decoded = match.debugger_observation?.status === 'decoded' ? match.debugger_observation.detail : null;
+        return {sessionId: match.session_id, processId: match.process_id, sequenceNumber: match.sequence_number, frameId: match.frame_id,
+          rule: Number.isInteger(decoded?.rule) ? decoded.rule : null,
+          methodMatched: typeof decoded?.method_matched === 'boolean' ? decoded.method_matched : null,
+          ruleRead: match.debugger_observation !== undefined};
       }
 
       function attachRequestDetails(requests, events, browserRequestKeys) {
@@ -903,11 +930,23 @@
           const newest = (latest, event) => !latest || BigInt(event.sequence_number) > BigInt(latest.sequence_number) ? event : latest;
           const response = request.events.filter(event => event.type === 'response_started').reduce(newest, null);
           request.responseStarted = response ? {sequenceNumber: response.sequence_number, sessionId: response.session_id,
-            processId: response.process_id} : null;
+            processId: response.process_id, monotonicTimeNs: response.monotonic_time_ns} : null;
+          request.redirected = request.events.some(event => event.type === 'request_redirected');
           const responseBody = response ? request.details.filter(event => event.type === 'response_body' &&
             event.parent_event_id === response.sequence_number && event.session_id === response.session_id &&
             event.process_id === response.process_id).reduce(newest, null) : null;
           request.responseBody = responseBody ? decodeResponseBodyRecord(responseBody) ?? {malformed: true} : null;
+          // A refusal, or any newest record without bytes, does not hide the
+          // snapshots of the same response, newest first: Traffic shows the
+          // newest one the receiver did not refuse.
+          const snapshots = response && request.responseBody && (request.responseBody.malformed || request.responseBody.artifactId === '0')
+            ? request.details.filter(event => event.type === 'response_body' && event.parent_event_id === response.sequence_number &&
+              event.session_id === response.session_id && event.process_id === response.process_id)
+              .map(event => decodeResponseBodyRecord(event)).filter(item => item?.state === 'partial' && item.capturedLength !== '0')
+              .sort((left, right) => BigInt(right.sequenceNumber) > BigInt(left.sequenceNumber) ? 1 : BigInt(right.sequenceNumber) < BigInt(left.sequenceNumber) ? -1 : 0)
+            : [];
+          request.responseBodyEarlier = snapshots[0] ?? null;
+          request.responseBodySnapshots = snapshots;
           request.redirectedBody = request.events.some(event => event.type === 'request_redirected' &&
             requestChildOf(request.details, event, 'response_body'));
           // Header blocks join an exact lifecycle parent of this request.
@@ -956,7 +995,7 @@
         if (event?.type !== 'memory_cache_reuse' || event.protocol_version !== 3 || event.category !== 'network' ||
             event.flags !== 0 || event.payload_size !== 128 || typeof event.payload !== 'string' ||
             !/^[0-9a-f]{256}$/i.test(event.payload) || !(event.status_code >= 0) || event.error_code !== 0 ||
-            event.resource_type !== 0 || event.initiator_request_id !== 0 || event.initiator_process_id !== 0 ||
+            event.resource_type !== 0 ||
             !(event.process_id > 0) || !(event.scheme_class > 0) || !(event.loader_kind >= 16 && event.loader_kind <= 22) ||
             ['navigation_id', 'artifact_id', 'parent_event_id', 'encoded_data_length'].some(key => event[key] !== '0') ||
             ['browser_context_id_high', 'browser_context_id_low'].some(key => (event[key] ?? '0') !== '0') ||
@@ -964,12 +1003,19 @@
             ['session_id', 'sequence_number'].some(key => typeof event[key] !== 'string' || event[key] === '0')) return null;
         const bytes = Uint8Array.from(event.payload.match(/../g), byte => Number.parseInt(byte, 16));
         const [resourceType, flags, length] = [bytes[4], bytes[5], bytes[6]];
-        if (bytes[0] !== 1 || bytes[1] !== 0 || bytes[2] !== 128 || bytes[3] !== 0 || resourceType < 1 || resourceType > 15 ||
-            (flags & ~3) !== 0 || length > 120 || bytes[7] !== 0 || ((flags & 2) !== 0 && length !== 120) ||
+        // Version 2 bit 2: the initiator fields name the renderer request whose
+        // response Blink reused, in the same process; static data has none.
+        const named = (flags & 4) !== 0;
+        if (![1, 2].includes(bytes[0]) || bytes[1] !== 0 || bytes[2] !== 128 || bytes[3] !== 0 || resourceType < 1 || resourceType > 15 ||
+            (flags & ~(bytes[0] === 2 ? 7 : 3)) !== 0 || (named && (flags & 1) !== 0) ||
+            (named ? event.initiator_process_id !== event.process_id || !(event.initiator_request_id > 0)
+              : event.initiator_request_id !== 0 || event.initiator_process_id !== 0) ||
+            length > 120 || bytes[7] !== 0 || ((flags & 2) !== 0 && length !== 120) ||
             bytes.slice(8, 8 + length).some(byte => byte < 0x21 || byte > 0x7e) ||
             bytes.slice(8 + length).some(byte => byte !== 0)) return null;
         return {resourceType, staticData: (flags & 1) !== 0, hostTruncated: (flags & 2) !== 0,
-          host: String.fromCharCode(...bytes.slice(8, 8 + length))};
+          host: String.fromCharCode(...bytes.slice(8, 8 + length)),
+          source: named ? correlatedRendererIdentity(event) : null};
       }
 
       // Native JavaScript invocation records, protocol/native-js-invocation-v1.md:
@@ -1443,7 +1489,8 @@
         const session = integerText(event, 'session_id');
         const requestId = integerText(event, 'request_id');
         if (requestId === '0') return null;
-        return event.initiator_process_id > 0
+        // A reuse's initiator fields name its source row, not a loader of its own.
+        return event.initiator_process_id > 0 && event.type !== 'memory_cache_reuse'
           ? `S${session}:R${event.initiator_process_id}:B${requestId}`
           : `S${session}:P${event.process_id}:F${integerText(event, 'frame_id')}:B${requestId}`;
       }
@@ -1688,6 +1735,9 @@
             memoryCache: Boolean(previous?.memoryCache) || event.type === 'memory_cache_reuse',
             staticData: Boolean(previous?.staticData) || Boolean(event.type === 'memory_cache_reuse' &&
               decodeMemoryCacheReuse(event)?.staticData),
+            // The row of the request whose response a version 2 reuse names.
+            memoryCacheSource: (event.type === 'memory_cache_reuse' ? decodeMemoryCacheReuse(event)?.source : null) ??
+              previous?.memoryCacheSource ?? null,
             mimeType: response ? response.mimeType : previous?.mimeType ?? null,
             protocol: response ? response.protocol : previous?.protocol ?? null,
             responseTimestamp: previous?.responseTimestamp ?? (response ? timestamp : null),
@@ -1723,6 +1773,7 @@
           if (row.rank < 5 && !row.failed && !row.interrupted) row.status = 'incomplete';
         }
         attachRequestDetails(rows, events, browserRequestKeys);
+        for (const row of rows) row.watch = requestWatchMatch(row.details);
         // A walked initiator stack tells script starts from parser starts (protocol/native-network-v3.md).
         for (const row of rows) {
           // A navigation script started names its renderer stack.

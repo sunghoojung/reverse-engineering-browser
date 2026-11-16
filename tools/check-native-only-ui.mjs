@@ -203,6 +203,36 @@ for (const tab of ['response', 'preview']) {
   assert.match(panel.textContent, /recorded no response for this request/);
   assert.doesNotMatch(panel.textContent, /cdp-body-needle|cdp-header-needle/);
 }
+// A row with native records names its exact body case in both tabs: a
+// service worker's answer and a memory-cache reuse never read as a missing
+// or empty body (protocol/native-network-v3.md "Bodies the proxy never sees").
+for (const [fields, pattern] of [[`fromServiceWorker: true`, /Served by a service worker/],
+  [`memoryCache: true`, /Reused from the memory cache/]]) {
+  for (const tab of ['response', 'preview']) {
+    runInContext(`state.requests = [{id: 'native', path: 'cdn.invalid', method: 'GET', status: 200, type: 'img', origin: 'live',
+      hostOnly: true, tabId: '0', events: [{}], rank: 5, operation: 'request_completed', time: 1, ${fields}}];
+      state.selectedRequestId = 'native'; state.inspectorTab = ${JSON.stringify(tab)}; renderInspector();`, context);
+    const panel = document.getElementById('response-inspector');
+    assert.match(panel.textContent, pattern, `${tab}: ${pattern}`);
+    assert.doesNotMatch(panel.textContent, /Empty body|recorded no response/, `${tab} names the case`);
+  }
+}
+// A memory-cache reuse names the request whose response Blink reused through
+// its initiator fields; Initiator shows the reuse's own renderer request and
+// names the source apart, never as its initiator.
+runInContext(`state.requests = [{id: 'S1:R61:21', path: 'cdn.invalid', method: 'GET', status: 200, type: 'img', origin: 'live',
+  hostOnly: true, tabId: '0', rank: 5, memoryCache: true, memoryCacheSource: 'S1:R61:20', operation: 'memory_cache_reuse', time: 1,
+  events: [{protocol_version: 3, type: 'memory_cache_reuse', category: 'network', session_id: '1', process_id: 61, request_id: '21',
+    frame_id: '7', sequence_number: '5', initiator_process_id: 61, initiator_request_id: 20}]}];
+  state.selectedRequestId = 'S1:R61:21'; state.inspectorTab = 'initiator'; renderInspector();`, context);
+const initiatorRows = Object.fromEntries([...document.querySelectorAll('#screen-traffic .field-row')]
+  .map(row => [row.querySelector('.field-key').textContent, row.querySelector('.field-value').textContent]));
+assert.equal(initiatorRows['Renderer request'], '21', 'a reuse shows its own renderer request, not its source');
+assert.match(initiatorRows['Reused response of'] ?? '', /^S1:R61:20: Blink reused this request's response; it did not start this load$/);
+// Hex is paged by range, never cut at a fixed read.
+const responseSource = sources.find(([file]) => file === 'traffic_response.js')[1];
+assert(!/subarray\(0, TRAFFIC_RESPONSE_HEX_BYTES\)/.test(responseSource), 'Response hex is paged, not a fixed first read');
+assert(/function hexPager/.test(responseSource), 'Response hex has a range pager');
 // The Headers tab reads native header records only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'headers'; renderInspector();`, context);
 const headersPanel = document.getElementById('headers-inspector');
@@ -216,6 +246,41 @@ assert.equal(cookiesPanel.hidden, false);
 assert.equal(headersPanel.hidden, true);
 assert.match(cookiesPanel.textContent, /This row has no native cookie record/);
 assert.doesNotMatch(cookiesPanel.textContent, /cdp-header-needle/);
+// The Traffic footer names header blocks and cookie lists not retained, late
+// blocks and requests without final headers, each with its reason.
+runInContext(`state.headerCoverage = trafficHeaderCoverage([{headerBlocks: [
+  {kind: 'request', source: 'browser', state: 'captured', hop: 0},
+  {kind: 'response', source: 'browser', state: 'not_captured_session_budget', hop: 0, unattributedBlocks: 1}],
+  events: [{category: 'network', type: 'response_started', flags: 2, browser_context_id_high: '1', browser_context_id_low: '2'},
+    {category: 'network', type: 'request_completed', flags: 0, browser_context_id_high: '1', browser_context_id_low: '2'}]}]);
+  renderTrafficWindowStatus(1, 1, false);`, context);
+// One footer item, whatever the number of reasons: a button whose breakdown
+// opens below it and closes with Escape, returning focus to the button.
+assert.doesNotMatch(document.getElementById('request-window-status').textContent, /not retained|final headers|header gap/);
+const gapsButton = document.getElementById('request-header-gaps');
+const gapsDetail = document.getElementById('request-header-gaps-detail');
+assert.equal(gapsButton.hidden, false);
+assert.equal(gapsButton.textContent, '3 header gaps');
+assert.equal(gapsButton.getAttribute('aria-controls'), 'request-header-gaps-detail');
+assert.equal(gapsButton.getAttribute('aria-expanded'), 'false');
+assert.equal(gapsDetail.hidden, true);
+gapsButton.dispatchEvent(new window.Event('click'));
+assert.equal(gapsButton.getAttribute('aria-expanded'), 'true');
+assert.equal(gapsDetail.hidden, false);
+assert.deepEqual([...gapsDetail.querySelectorAll('li')].map(item => item.textContent),
+  ['1 header block not retained (session budget)', '1 late header record on no row', '1 request without final headers (HTTP cache)']);
+{
+  let focused = null;
+  const focus = window.HTMLElement.prototype.focus;
+  window.HTMLElement.prototype.focus = function focusTracked() { focused = this; };
+  gapsDetail.dispatchEvent(Object.assign(new window.Event('keydown', {bubbles: true}), {key: 'Escape'}));
+  window.HTMLElement.prototype.focus = focus;
+  assert.equal(gapsDetail.hidden, true, 'Escape closes the breakdown');
+  assert.equal(gapsButton.getAttribute('aria-expanded'), 'false');
+  assert.equal(focused, gapsButton, 'Escape returns focus to the button');
+}
+runInContext('state.headerCoverage = null; renderTrafficWindowStatus(1, 1, false);', context);
+assert.equal(gapsButton.hidden, true, 'no gap, no button');
 // Payload reads the native body record and target only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'payload'; renderInspector();`, context);
 const payload = document.getElementById('payload-inspector');
@@ -268,7 +333,72 @@ shell('live', true, true);
 assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
 assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies and Canvas images/);
+assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session context that names no limits names no budget');
+// The stacked footer's budget sentence closes when focus leaves it, on a press
+// anywhere else and when the request detail closes or changes, so it never
+// stays over the ledger's rows unasked.
+{
+  const notice = document.getElementById('request-budget');
+  const toggle = document.getElementById('request-budget-toggle');
+  const open = () => { runInContext('toggleTrafficBudget(true)', context); assert.equal(notice.dataset.expanded, 'true'); };
+  open();
+  const leave = new window.Event('focusout');
+  leave.relatedTarget = document.getElementById('request-order');
+  notice.dispatchEvent(leave);
+  assert.equal(notice.dataset.expanded, 'false', 'focus leaving the notice closes the sentence');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  open();
+  const inside = new window.Event('focusout');
+  inside.relatedTarget = document.getElementById('request-budget-text');
+  notice.dispatchEvent(inside);
+  assert.equal(notice.dataset.expanded, 'true', 'focus moving inside the notice keeps it open');
+  document.getElementById('request-rows').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  assert.equal(notice.dataset.expanded, 'false', 'a press elsewhere closes the sentence');
+  open();
+  document.getElementById('request-budget-text').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  assert.equal(notice.dataset.expanded, 'true', 'a press on the sentence keeps it open');
+  runInContext(`state.trafficDetailOpen = true; renderInspector();`, context);
+  open();
+  runInContext(`state.trafficDetailOpen = false; renderInspector();`, context);
+  assert.equal(notice.dataset.expanded, 'false', 'closing the request closes the sentence');
+  runInContext(`state.trafficDetailOpen = true; renderInspector();`, context);
+  assert.equal(notice.dataset.expanded, 'false', 'a request opened again starts with it closed');
+  // Beside the footer's header gaps breakdown, each Escape closes only its own.
+  const gaps = document.getElementById('request-header-gaps');
+  const gapsDetail = document.getElementById('request-header-gaps-detail');
+  const escape = target => { const key = new window.Event('keydown', {bubbles: true}); key.key = 'Escape'; target.dispatchEvent(key); };
+  const gapsOpen = () => gaps.getAttribute('aria-expanded') === 'true';
+  runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
+  open();
+  escape(toggle);
+  assert.equal(notice.dataset.expanded, 'false', 'Escape on the budget button closes the sentence');
+  assert.equal(gapsOpen(), true, 'and leaves the header gaps breakdown open');
+  open();
+  escape(gaps);
+  assert.equal(gapsOpen(), false, 'Escape on the header gaps button closes its breakdown');
+  assert.equal(notice.dataset.expanded, 'true', 'and leaves the budget sentence open');
+  runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
+  escape(gapsDetail);
+  assert.equal(gapsOpen(), false, 'Escape inside the breakdown closes it');
+  assert.equal(notice.dataset.expanded, 'true', 'and not the budget sentence');
+  gaps.dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  assert.equal(notice.dataset.expanded, 'false', 'pressing the header gaps button closes the budget sentence');
+}
+// The session context is the only source of a budget's size; the workspace
+// address carries none, and nothing says it does.
+for (const [file, source] of sources.filter(([file]) => ['app.js', 'app_state.js', 'traffic_view.js'].includes(file))) {
+  assert.doesNotMatch(source, /budget_mib=|address\b[^\n]*(?:budget|limit)|(?:budget|limit)[^\n]*\baddress\b/i, `${file} takes no budget from the address`);
+}
+runInContext(`state.sessionContentLimits = {request_content_budget_mib: 1024, response_body_budget_mib: 2048, response_media: true}`, context);
+shell('live', true, true);
+assert.match(contentLabel.getAttribute('title'), /kept locally\. Budgets: 1,024 MiB of request content and 2,048 MiB of response bodies; media and fonts kept\. Each Traffic row/);
+runInContext(`state.sessionContentLimits = {request_content_budget_mib: 64, response_body_budget_mib: 128, response_media: null}`, context);
+shell('live', true, true);
+assert.match(contentLabel.getAttribute('title'), /Budgets: 64 MiB of request content and 128 MiB of response bodies\. Each Traffic row/,
+  'an unreported media choice is not guessed');
 shell('live', false, true);
+assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session without request content names no budget');
+runInContext('state.sessionContentLimits = null', context);
 assert.equal(contentLabel.hidden, false);
 assert.match(contentLabel.getAttribute('aria-label'), /^Content capture: Canvas images$/);
 shell('live', false, false);
@@ -490,6 +620,10 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.deepEqual(context.__watchCalls.map(text => JSON.parse(text)), [{requests: [{method: 'POST', url_contains: '/api/x'}, {url_contains: '/collect'}],
     events: ['click', 'submit'], timers: true, csp: false, exceptions: 'uncaught', dom: []}]);
   assert.match(form.querySelector('.debugger-watch-result').textContent, /Armed on document 22/);
+  // Where a rule is armed, what it cannot observe is said (protocol/native-debugger-observation-v1.md).
+  for (const limit of [/only this document's main thread/, /not its workers, other frames or same-process iframes/, /navigation clears the rules/i, /cannot be armed ahead of a page load/]) {
+    assert.match(form.querySelector('.debugger-watch-limits').textContent, limit);
+  }
   form.querySelector('input[type="text"]').value = 'x'.repeat(28);
   form.dispatchEvent(new window.Event('submit', {cancelable: true}));
   await settle();
@@ -544,6 +678,43 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(sidebar.querySelector('[data-debugger-section="later"]'), null, 'a removed section leaves');
   assert.doesNotMatch(sidebar.querySelector(nativeAvailability).textContent, /Paused frames/,
     'a removed native section is no longer named');
+  // A request a watch rule matched is marked on its Traffic row and in General
+  // with its rule, captured text stays text, and Show in debugger opens its
+  // observation: Sources, the Requests kind, the record chosen, and an
+  // observed-frame scope that would hide it cleared.
+  runInContext(`showScreen('traffic'); state.requests = [{id: 'watched', path: '<img id=watch-injected src=x>', method: 'POST', status: 200, type: 'xhr',
+    origin: 'live', hostOnly: true, tabId: '0', events: [], details: [], operation: 'request_completed', time: 1,
+    watch: {sessionId: '1', processId: 42, sequenceNumber: '4995', frameId: '7101', rule: 0, methodMatched: true}},
+    {id: 'plain', path: 'plain.invalid', method: 'GET', status: 200, type: 'xhr', origin: 'live', hostOnly: true, tabId: '0', events: [], details: [],
+    operation: 'request_completed', time: 1, watch: null}];
+    state.selectedRequestId = 'watched'; state.trafficDetailOpen = true; state.inspectorTab = 'general'; renderRequests(); renderInspector();`, context);
+  const watchedRow = document.querySelector('#request-rows .request-row[data-request-id="watched"]');
+  assert.equal(watchedRow.querySelector('.request-watched')?.textContent, 'Watched', 'the watched row carries its mark');
+  // The color system (README, Interface styling): the chip is a network record,
+  // so the network kind's color, and an unavailable debugger the failed color.
+  const rule = selector => css.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`))?.[1] ?? '';
+  assert.match(rule('.request-name > .request-watched'), /color: var\(--kind-request\)/, 'the Watched chip takes the network kind color');
+  assert.doesNotMatch(rule('.request-name > .request-watched'), /--cyan|--rp-foam|--kind-script|--state-ok/, 'never foam, the script kind and ready state');
+  assert.match(rule('#screen-traffic .traffic-watch-status'), /color: var\(--state-danger\)/, 'an unavailable debugger reads as unavailable');
+  assert.match(watchedRow.getAttribute('aria-label'), /Request watch rule 1 matched, method too/);
+  assert.equal(document.querySelector('#request-rows .request-row[data-request-id="plain"] .request-watched'), null, 'only the watched row');
+  assert.equal(document.querySelector('#watch-injected'), null, 'captured paths never become elements');
+  const watchSection = document.querySelector('#exchange-inspector .traffic-watch');
+  assert.match(watchSection.textContent, /Request watch rule 1 matched, method too/);
+  assert.match(watchSection.textContent, /request_watch_match #4995 · renderer 42 · frame 7101/);
+  const readsBeforeShow = context.__debuggerRequests.length;
+  watchSection.querySelector('.traffic-watch-open').click();
+  await settle();
+  assert.equal(document.querySelector('#screen-sources').hidden, false, 'Show in debugger opens Sources');
+  assert.equal(sidebar.hidden, false);
+  const shownRead = context.__debuggerRequests.slice(readsBeforeShow).find(url => url.startsWith('/api/native-debugger'));
+  assert.match(shownRead, /^\/api\/native-debugger\?limit=128&type=request_watch_match$/, `the frame 200 scope is cleared: ${shownRead}`);
+  assert.equal(sidebar.querySelector('#debugger-observations [aria-selected="true"]')?.dataset.key, '1:42:4995', 'the observation is chosen');
+  assert.match(sidebar.querySelector('.debugger-detail').textContent, /sequence 4995/);
+  runInContext(`showScreen('traffic'); state.requests = state.requests.map(request => ({...request, watch: null})); renderRequests(); renderInspector();`, context);
+  assert.equal(document.querySelector('#exchange-inspector .traffic-watch'), null, 'a row without a match has no watch section');
+  runInContext(`showScreen('sources')`, context);
+  await settle();
   // Closing stops every read and releases rows and the tree scope.
   toggle.click();
   await settle();
@@ -645,8 +816,8 @@ assert.equal(mapViewKind(), 'Derived', 'the new selection keeps the evidence sta
 assert.equal(mapRoot.hidden, true, 'the retired map is hidden');
 assert.equal(mapRoot.querySelector('.map-facts').children.length, 0, 'the retired summary is released');
 
-// Sources Graph: Inspect, Graph and Map sit together, and Graph and Map exclude each other.
-assert.match(html, /id="source-wasm"[^>]*>Inspect<\/button>\s*<button id="source-graph"[^>]*>Graph<\/button>\s*<button id="source-map"/, 'Inspect, Graph and Map are adjacent in that order');
+// Sources Graph: Inspect, Graph, Readable and Map sit together, and the three views exclude each other.
+assert.match(html, /id="source-wasm"[^>]*>Inspect<\/button>\s*<button id="source-graph"[^>]*>Graph<\/button>\s*<button id="source-readable"[^>]*>Readable<\/button>\s*<button id="source-map"/, 'Inspect, Graph, Readable and Map are adjacent in that order');
 for (const [path, assets] of [['scripts/build-research-app.sh', ['block_graph.js', 'block_graph_layout.js', 'block_graph.css']], ['apps/origin-trace-backend/src/app.rs', ['"block_graph.js"', '"block_graph_layout.js"', '"block_graph.css"']],
   ['apps/research-ui/macos/OriginTraceApp.swift', ['/block_graph.js', '/block_graph_layout.js', '/block_graph.css']]]) {
   const text = await readFile(join(root, path), 'utf8');
@@ -681,4 +852,4 @@ assert.equal(graphFixture('codeWrap').hidden, false, 'the linear view returns wi
 assert.deepEqual(forbidden, [], 'startup/navigation must not attempt CDP transport');
 assert.deepEqual(asyncErrors, [], 'all asynchronous startup failures must be handled');
 release();
-console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, no exchange/search/compare, one shared code view, mounted Traffic rows bounded by the view, guest bytecode hex (offline DOM model; no rendered layout claimed)`);
+console.log(`PASS native-only behavior: ${screens.length} screens rendered from shipped scripts without removed state reads or CDP controls; Traffic General plus native Headers, Payload, Preview, Response and Cookies, header coverage in the footer, no exchange/search/compare, one shared code view, mounted Traffic rows bounded by the view, guest bytecode hex (offline DOM model; no rendered layout claimed)`);

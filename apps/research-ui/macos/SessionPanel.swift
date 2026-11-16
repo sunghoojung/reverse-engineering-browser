@@ -7,6 +7,8 @@ import WebKit
 // invocation sites the next capture arms. As with the agent bridge, only the
 // exact main document the app loaded can ask. The page has no Keychain
 // choice: a session it starts or retries always uses the isolated profile.
+// A Content start also names its content limits (ContentLimits), checked here
+// as the agent path checks them; a Metadata start names none.
 //
 // Site labels and source URLs reach the page only to be drawn as text, as the
 // backend's saved-site route already serves them to the live workspace. The
@@ -16,16 +18,20 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   static let handlerName = "rebSession"
 
   // What the panel shows. Choose and Failed are open decisions: until one is
-  // answered nothing starts a session behind it.
+  // answered nothing starts a session behind it. Choose offers `limits` for a
+  // Content session. Starting and Failed carry the session's resolved content
+  // switches and name its mode and the limits the panel chose, or none for
+  // limits taken from the environment; a Retry starts from that same value.
   enum Content: Equatable {
     case hidden
-    case choose(mode: LiveCaptureMode)
-    case starting(mode: LiveCaptureMode)
-    case failed(LiveSessionCoordinator.Failure, mode: LiveCaptureMode)
+    case choose(mode: LiveCaptureMode, limits: ContentLimits)
+    case starting(LiveCaptureContent)
+    case failed(LiveSessionCoordinator.Failure, LiveCaptureContent)
   }
 
   enum Choice {
-    case start(LiveCaptureMode)
+    // The limits are present exactly for a Content start.
+    case start(LiveCaptureMode, ContentLimits?)
     case retry
     case offline
   }
@@ -37,6 +43,12 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       if case .choose = content, !isChoosing(oldValue) { reloadSites() }
       publish()
     }
+  }
+
+  // One short line beside the mode control saying why it is preselected, or
+  // nil. Drawn as text.
+  var modeNote: String? {
+    didSet { if modeNote != oldValue, isChoosing(content) { publish() } }
   }
 
   var decisionOpen: Bool {
@@ -130,14 +142,12 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       return (state(), nil)
     case "start":
       guard case .choose = content else { throw SessionPanelRefusal("This start choice is no longer open.") }
-      // The mode is the only choice; a page cannot add a Keychain or any other switch.
-      guard Set(body.keys).isSubset(of: ["op", "mode"]) else {
-        throw SessionPanelRefusal("The start panel offers only the capture mode.")
+      // The mode and, for Content only, its limits, checked as the agent path
+      // checks them (LivePanelStart.parse).
+      switch LivePanelStart.parse(body) {
+      case .success(let start): return accept(.start(start.mode, start.limits))
+      case .failure(let refusal): throw SessionPanelRefusal(refusal.message)
       }
-      guard let raw = body["mode"] as? String, let mode = LiveCaptureMode(rawValue: raw) else {
-        throw SessionPanelRefusal("Choose Content or Metadata only.")
-      }
-      return accept(.start(mode))
     case "retry":
       guard case .failed = content else { throw SessionPanelRefusal("There is no failed session to retry.") }
       return accept(.retry)
@@ -205,18 +215,24 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
     switch content {
     case .hidden:
       return ["panel": "hidden"]
-    case .starting(let mode):
-      return ["panel": "starting", "mode": mode.rawValue, "modes": modes]
-    case .choose(let mode):
-      return ["panel": "choose", "mode": mode.rawValue, "modes": modes, "sites": siteState()]
-    case .failed(let failure, let mode):
-      return [
-        "panel": "failed", "mode": mode.rawValue, "modes": modes,
+    case .starting(let session):
+      var value: [String: Any] = ["panel": "starting", "mode": session.mode.rawValue, "modes": modes]
+      if let limits = session.limits { value["limits"] = limits.panelState }
+      return value
+    case .choose(let mode, let limits):
+      var value: [String: Any] = ["panel": "choose", "mode": mode.rawValue, "modes": modes, "sites": siteState(), "limits": limits.panelState]
+      if let modeNote { value["modeNote"] = modeNote }
+      return value
+    case .failed(let failure, let session):
+      var value: [String: Any] = [
+        "panel": "failed", "mode": session.mode.rawValue, "modes": modes,
         "failure": [
           "title": failure.afterStartup ? "Live session ended" : "Live session unavailable",
           "message": failure.message, "afterStartup": failure.afterStartup,
         ],
       ]
+      if let limits = session.limits { value["limits"] = limits.panelState }
+      return value
     }
   }
 

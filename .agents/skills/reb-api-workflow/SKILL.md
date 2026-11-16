@@ -32,6 +32,7 @@ Tool names are OpenAPI operation IDs. The same names work with
 | Which requests did the session make? | `get_requests` with `q` (Traffic tokens such as `domain:`, `status-code:`, `larger-than:`), `type`, `tab_id`, `domain`, `failed`, `third_party` or `from_ns`/`to_ns`; rows carry sizes, MIME type and initiator class; a row's `members` and `first_offset` read its records with `get_events` |
 | Which scripts and Wasm modules were stored, with digests? | `get_artifacts` with `kind`, `frame_id`, `host`, `sha256` |
 | What does a stored Wasm module contain? | `inspect_wasm` with `artifact_id` and `sections`; page rows with `row_offset` and `row_limit` |
+| Where does a value inside a Wasm function come from, and where does it go? | `get_wasm_value_flow` with `function` and `offset` (plus `operand`) or `local`, and `direction`; instruction text needs `--permission full` |
 | Read a script, body or module as text, in pages | `get_artifact_text` with `offset` and `encoding` (needs `--permission full` or `--allow-content`: it returns captured content) |
 | Find a literal in every retained file | `search_artifact_text` with `q` (needs `--permission full` or `--allow-content`) |
 | Wait until the browser produces something | `wait_for_events` |

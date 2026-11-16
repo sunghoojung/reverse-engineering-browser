@@ -280,7 +280,12 @@ Each section is a collapsible pane:
   document. Arming replaces the set and keeps the DOM rules the Console armed
   on the same document. A refused set leaves nothing armed, and nothing is
   retried. Without a live connection the section says how to get one and
-  shows no form.
+  shows no form. The form and the armed set say what a rule cannot observe,
+  because a wait for it would then find nothing with nothing missing: only
+  the armed document's main thread records, never its workers, other frames
+  or same-process iframes; its navigation clears the rules; and they cannot
+  be armed ahead of a page load, so what a page does while it loads is not
+  observed.
 - **Observations**: the newest records, 128 at a time and up to 4,096 with
   **Show older records**, filtered by kind. A note says how much of the store
   the rows were read from: the whole store, or its newest bytes and why the
@@ -308,6 +313,18 @@ Each section is a collapsible pane:
   nor their note. Malformed
   records, a renderer's `debugger_observation_budget` gap and store sequence
   gaps are stated above the list, which is as tall as its rows up to a cap.
+  Traffic's **Show in debugger** on a watched request calls
+  `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
+  kind, clears an observed-frame scope that would hide the record, and once a
+  read made after the ask holds it, chooses that row, scrolls the list to the
+  top of the pane with its details below and moves focus to the list. A record
+  that read does not hold is named above the list and stays asked for:
+  **Show older records** reads older pages, and the record is chosen when its
+  page arrives. Like a Traffic lookup, the ask ends when the researcher moves
+  on: another row, a kind or thread, **Show newest**, closing the sidebar,
+  leaving Sources or a replaced store. Focus moves to the list only if it is
+  still where it was when asked; a file, Find or the Watch form picked
+  meanwhile keeps it, and the record is still chosen.
 - **Pausing**: one statement of the availability `get_native_debugger` reports.
   Today it is unsupported, so the sidebar offers no control to stop, step or
   inspect a paused frame. When sections registered with `native: 'pausing'`
@@ -441,6 +458,20 @@ or the handler's finding, source artifact, listing key and source range), so an
 item that merely shares a URL, file name or handler label never inherits a name,
 and replaced or ambiguous evidence shows none.
 
+Wasm functions are named by module SHA-256 and function index (imports
+included), so a name follows identical module bytes into every session. Rename
+one from **Inspect** (the pencil on a function, import, declaration or start
+row), the **Graph** (**Rename** in its toolbar, or F2 on the graph or on a
+highlighted **Functions** row) or a Flow graph Wasm card (**Rename** in Details,
+or F2 with the card selected). F2 on a call row renames its callee, and on an
+instruction or locals row the function containing it; the module file is still
+renamed from its tree row, its tab or the toolbar. The name
+then follows the Inspect listing (on headers and after call rows), the Graph
+title and function list, Flow cards and Details, Initiator frames and
+cross-reference rows, beside `func N` and any import, export or name-section
+name. Agents read the same names as `analyst_name` in every Wasm tool result.
+See [Wasm function names v1](../../protocol/wasm-function-names-v1.md).
+
 Names survive relaunch in one non-executable `Evidence names.reb-names.json`
 scratchpad in the Analyst library, written through the existing local Analyst
 routes. Each save rereads the library first; a name changed elsewhere since you
@@ -500,7 +531,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -866,6 +897,11 @@ value as `window.tempN`, or release it. `$_` reads the previous result. `copy(va
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
 argument once. Event monitoring is explicit and lasts at most 60 seconds.
+`getEventListeners` also takes `window` and `document`, and an element, `window`
+or `document` result offers **Event listeners** among its value actions. The
+runtime describes `window` and `document` as a plain `Object`, so a plain
+`Object` result offers it too, and the page refuses any other object with its
+own reason. **Monitor events** stays for elements only.
 
 Top-level await and promise controls show resolved/rejected values. Stopping a
 wait releases its handle; it does not cancel previously scheduled page work.
@@ -916,7 +952,9 @@ unless set to `0`).
 The app does not mark the session live until the launcher publishes its loopback
 handshake. A failure shows in the window's **start panel**, at the right edge
 of the workspace, with **Retry**, which starts again with the same capture mode
-without restarting Origin Trace, and **Continue Offline**.
+without restarting Origin Trace, and **Continue Offline**. Retry gives the
+launcher exactly the content switches the failed start had, never a new reading
+of the environment, so the mode and limits the panel names are what it runs.
 Retry is focused, so Return retries.
 Startup allows up to 60 seconds for the bounded broker, receiver, backend and
 browser readiness stages; individual helper failures are reported sooner.
@@ -939,9 +977,48 @@ shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
 opt-out: Traffic stays host-only and no Canvas image is kept. Every mode records
-each request body's length, type and SHA-256. In Content mode,
-`REB_CAPTURE_REQUEST_CONTENT=0` or `REB_CAPTURE_CANVAS_IMAGES=0` turns either
-off.
+each request body's length, type and SHA-256. An inherited
+`REB_CAPTURE_REQUEST_CONTENT=0` selects Metadata only for the automatic launch
+and preselects it in the start panel, which says so beside the mode, so
+pressing Start keeps no request content; choosing Content there captures it.
+`REB_CAPTURE_CANVAS_IMAGES=0` turns Canvas images off. Once the start panel has
+chosen a mode, that mode decides request content for the rest of the run, over
+an inherited `REB_CAPTURE_REQUEST_CONTENT`. Metadata only, from the panel or
+`REB_AUTOMATIC_CAPTURE_MODE`, decides every content-derived switch: the
+launcher gets `REB_CAPTURE_REQUEST_CONTENT=0`, `REB_CAPTURE_CANVAS_IMAGES=0`
+and `REB_NATIVE_JS_INVOCATION_DIGESTS=0` whatever the environment holds
+([`LiveCaptureContent`](macos/LiveSessionCoordinator.swift)).
+
+With Content chosen, the panel also shows the session's **Content limits**:
+
+| Control | Range and default | What it means |
+| --- | --- | --- |
+| **Request content budget** | 1 to 4,096 MiB, default 256 | How much of the request bodies and full URLs the session keeps, counting identical content once |
+| **Response body budget** | 1 to 16,384 MiB, default 512 | How much of the response bodies the session keeps, counting identical bodies once |
+| **Capture media and fonts** | Off by default | Also keep the images, audio, video and fonts that pages load; they count against the response body budget |
+
+Past a budget the browser still lists each later body or URL and names it as
+not kept, never silently. The budgets stay on this Mac with the session, and
+the launcher grows the session's artifact store by both, so a raised budget can
+use that much more disk. A value outside its range, or not a whole number, is
+named at its field with the rule, and nothing starts. The native side checks a
+Content start again ([`ContentLimits`](macos/LiveSessionCoordinator.swift)) with
+the rules the agent path applies to `request_content_budget_mib`,
+`response_body_budget_mib` and `response_media`, and passes the values to the
+launcher as `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB`
+and `REB_CAPTURE_RESPONSE_MEDIA`, replacing any inherited value. The panel
+first shows those variables when the launcher would accept them, else the
+defaults; the limits it starts with hold for later Content sessions in the same
+app run, including Retry and a Dock reopen, as the mode does. Until the panel
+starts a Content session, the automatic launch takes the variables as they are.
+**Metadata only** keeps no content, so the panel shows none of the limits, and
+a session that keeps no request content, whatever started it, is given none of
+the three variables, inherited ones included, as the agent path removes them.
+The starting and failed panels name the limits the session runs with, and
+only for a session that keeps request content; the launch log's `Request content capture` and
+`Response body capture` lines record them, and `get_session_context` reports
+them as `capture_options.content_limits`, so a researcher or an agent can tell
+which budgets the session ran with.
 
 The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
@@ -960,7 +1037,7 @@ file and stay off until one is supplied. JavaScript invocation capture arms the
 functions saved with [Track calls](#track-calls-to-a-function); an explicit
 `REB_NATIVE_JS_INVOCATION_SITES` replaces that set, and an empty value turns it
 off. With saved sites, Content mode also records their settled-value digests
-(sensitive capture) and Metadata mode does not; an explicit
+(sensitive capture) and Metadata mode does not; in Content mode an explicit
 `REB_NATIVE_JS_INVOCATION_DIGESTS` wins. A request
 trace shows `issued_during_invocation`, `invocation_settlement` and
 `invocation_value_flow` steps, and VM Lab rows name the JavaScript invocation a
@@ -1239,22 +1316,46 @@ blocks ([native network v3](../../protocol/native-network-v3.md)). Response
 digest, then its bytes in the shared code view with pretty print (the Oxc
 layout for JavaScript and JSON, else the in-page one with the reason), raw
 ranges of laid-out tokens, wrap, find, copy and hex, read 2 MiB at a time and
-rechecked by SHA-256. Preview reads every remaining range itself. Text that is
+rechecked by SHA-256. Hex shows 256 KiB at a time with **Previous** and
+**Next**, paged to the end of the retained body; a window past the loaded
+bytes reads the next range itself, and Copy copies the window shown. A body
+still arriving says how many bytes had arrived, when, and whether it was sealed
+at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Preview reads every remaining range itself. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
 same JSON tree as Payload, opening 100 children or ranges at a time, a raster image whose signature matches its bytes, or text;
 HTML and SVG stay source and are never rendered. Script and Wasm responses show
-their Sources artifact in any session. A request with no body record says why:
-metadata-only session, redirect, or never seen by the browser proxy (service
-worker, memory cache).
+their Sources artifact in any session. A request with no body record names its
+exact case, which the request index decides alike (`responseBodyCase`): reused
+from the memory cache, served by a service worker, answered in the renderer,
+redirected, failed or cancelled before any response, a metadata-only session,
+still pending, and the rest
+([bodies the proxy never sees](../../protocol/native-network-v3.md#bodies-the-proxy-never-sees)).
+A memory-cache reuse that names the request whose response it reused shows
+that request's retained bytes, labelled as the reused request's, with
+**Open the request it reused** and the source's state (complete, cut at
+16 MiB, a snapshot and when it was recorded, stopped, or not retained); a
+named row on another host or started after the reuse is not its source, and
+one not recorded says so. A service worker's answer lists the worker's own
+requests for the same URL made while it was open, from the request index, each
+with **Open the worker's request** and its body case; the records do not say
+whether the worker answered with those bytes, so they are never shown as the
+page's, and no match says what was searched. A refused end shows the newest
+retained snapshot of the same response under **Earlier snapshot**. When the
+loaded records lack a row's final response or body record, the request index's
+answer decides.
 `tools/check-traffic-response-ui.mjs` covers both tabs in a DOM model.
 **Headers** shows General (URL, method, status, remote address, referrer
 policy), then response and request headers per redirect hop, newest first.
 Each section collapses and has **Raw** and **Copy all**; each header has
 **Copy**. A hop the network stack never reported reads "Provisional headers
-are shown". Blocks load after a size and SHA-256 check and are inserted as
-text. **Cookies** shows each hop's Response cookies (every attribute and the
+are shown" and says why: the request is still in progress, the HTTP cache or
+a service worker answered it, it is a download, it failed first, or the
+network stack reported nothing for it ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
+The Cookies tab lists such a hop with the same reason, and a hop with sent
+cookies but no response list with its own. Blocks load after a size and
+SHA-256 check and are inserted as text. **Cookies** shows each hop's Response cookies (every attribute and the
 reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
 request cookies** for excluded ones and their reasons. Columns sort, values
 truncate with the full value as a tooltip, and each row has **Copy**. A name
@@ -1262,7 +1363,11 @@ opens its provenance: the responses that set it, the `document.cookie` and
 Cookie Store calls that used it with their script position (file, line and
 function from `get_cookie_provenance`, with **Show in Sources**, when the
 script's source was retained), and the requests that sent it, linked by value
-digest to the script write. Loaded requests are read first, then the store's
+digest to the script write. A `document.cookie` read is listed under each
+cookie name it returned, with how many reads that script position made; a read
+recorded before reads named cookies, or with names past the 360-name bound or
+a full table, is counted in a note, since it may hold the name without naming
+it. Loaded requests are read first, then the store's
 answer adds what the newest retained records hold beyond them. An empty group
 reads "Not in the scanned range" unless that answer covered the whole session. Traffic has no
 comparison or content-search views; General states the capture coverage.
@@ -1353,8 +1458,8 @@ failures. See [API Collection v1](../../docs/product/api-collection-v1.md) for
 the stored template contract.
 
 The dark theme uses [Rosé Pine Moon](https://rosepinetheme.com/palette/), with
-slightly brighter secondary labels for legibility. Appearance switches to the
-existing light theme.
+slightly brighter secondary labels for legibility. Appearance switches to Rosé
+Pine Dawn, the light variant the code views already use.
 
 Fingerprinting starts with an Overview of active surfaces and captured Canvas
 output. **Show inactive surfaces** reveals the rest of the supported families.
@@ -1439,12 +1544,32 @@ The columns are Name, Status, Type, Method, Initiator, Size, Time and Waterfall;
 Protocol is available from the header menu.
 
 - **Name** is the last path segment and the query, with the host as a muted
-  sublabel only when the path was captured. The full URL is the tooltip.
+  sublabel only when the path was captured. The full URL is the tooltip. A
+  request a debugger watch rule matched carries a **Watched** chip in the
+  network kind's color (the match is a network record), whose tooltip names
+  the rule, or says the rule is not read here when no decode came with the
+  record and the request index has not answered for the row. General then has a **Debugger watch** section: the
+  rule (its place in the set armed when it matched; Watch rules shows the set
+  armed now), the `request_watch_match` record's sequence, renderer and frame,
+  and **Show in debugger**, which opens Sources with the debugger sidebar on
+  that observation (`RebDebuggerSidebar.showObservation`). The request index
+  row's `watch` names the match, so the mark survives every path that builds
+  a row: the newest window, a row selected whole from it, a row read from the
+  store and each later poll. The rule comes from the backend's decode beside
+  the record in a row's store read, and from the index row otherwise: the
+  polling window carries no decode.
 - **Status** colors 3xx, 4xx and 5xx apart. Failed names its net error,
   Pending has no response yet, and No loader means only the renderer recorded
   the request. End lost means the request's service worker ended it but the
   renderer had reused the slot holding its start, so its outcome is unknown
-  (a `service_worker_end_lost` gap). Finished is a memory-cache reuse whose
+  (a `service_worker_end_lost` gap). That gap names its row without a request
+  ID and the network window keeps no gap records, so only the request index
+  knows End lost, as it alone knows a store copy's tabs and every row's body
+  answer. Each index answer, first or later, copies those facts onto the rows
+  kept for selection, and the strip and inspector follow it as the table does.
+  A row selected before any index answer has held it reads `Pending · not yet
+  checked against the request index` on General, with the same note as the
+  strip's tooltip, until one does. Finished is a memory-cache reuse whose
   resource carried no HTTP status, such as an MHTML archive resource; it
   completed. Once `response_started` arrives the row
   shows that HTTP code, and until a terminal record follows, Time reads a dash
@@ -1483,6 +1608,35 @@ selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
 
+When a content session's budget runs out, the browser lists each later body or
+URL and names it as not kept. The footer then adds a line naming each used
+budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
+response bodies not kept · Raise it in New Live Session… for the next session.`
+
+- The counts are the whole session's, from `get_session_summary`'s budget
+  checks, like the `N / M requests` beside them. Traffic reads the summary once
+  in every session, a stored one included, so a budget met outside the loaded
+  rows still shows, and again at most every 30 s while it shows in a content
+  session or while a budget shows as used.
+- A count is exact only while nothing has arrived since the summary was read:
+  it records the event poll's tag then, and in a live session a later change
+  of that tag makes it `at least N` until the next read. So do a failed re-read
+  (which keeps the last figure), a summary whose scan stopped at its 64 MiB
+  bound, and the loaded rows before the first read answers.
+- The size is the session context's `capture_options.content_limits`
+  (`get_session_context`), read once after the first valid poll; a session that
+  is not live, or keeps no content, names the budget without a size. The bytes
+  kept are the unique bytes of that budget's artifacts, from the summary.
+- The Payload tab and the Request URL row name the request content budget the
+  same way, and the Response tab names **Response body budget** and **Capture
+  media and fonts**; each remedy applies to the next session.
+- In the short stacked layout (at most 1,100 by 650 px) with a request open, the
+  line becomes a one-line **Budgets used** button (or the one budget's name)
+  beside the footer's own, so the ledger keeps its rows. Return or Space opens
+  the whole sentence above the footer; Escape, focus leaving it, a press
+  anywhere else or closing the request closes it, so it never stays over the
+  rows unasked.
+
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
 `*` wildcards), `method:`, `status-code:`, `larger-than:` (transferred bytes; `k`
@@ -1508,6 +1662,7 @@ capture, fetch anything or change a row.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `wasm_identification.js`, `wasm_identification.css` | The Inspect identification summary, its Details list and the Functions menu badges, all read from `get_wasm_identification` |
 | `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
 | `session_panel.js`, `session_panel.css` | The live session start panel: start choices, startup, failure with Retry; the decision itself is native (`macos/SessionPanel.swift`) |
@@ -1525,9 +1680,12 @@ capture, fetch anything or change a row.
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
+| `wasm_function_names.js` | Wasm function names in Inspect, the Graph and its function list, Flow cards, Initiator frames and cross-references: inert name spans, the F2 and Rename entry points, and in-place refresh after a rename |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
+| `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
+| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one bounded value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
@@ -1553,7 +1711,15 @@ covers `chrome:`, `devtools:` and other internal schemes
 ([native network v3](../../protocol/native-network-v3.md)), and the footer
 reports what capture excluded, including memory-cache reuses past a renderer's
 budget ("N memory-cache reuses not recorded") and, apart, those in SVG images
-or popups that no tab owns. Sources reads retained artifact bytes only. A failed
+or popups that no tab owns. Header and cookie gaps of the loaded rows are one
+footer button, **N header gaps**, so the footer keeps its size: it opens a
+breakdown below it (Space or Return; Escape closes it and returns focus) of
+header blocks and cookie lists not retained (with each reason: size limit,
+session budget, queue, channel or URL), network blocks that arrived after
+their request ended ("late header records on no row"), and requests that
+ended with only provisional headers, by reason (HTTP cache, service worker,
+download, failed, not reported); `get_session_summary` has the same counts
+over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried
@@ -1646,16 +1812,34 @@ browser capture.
 
 ### Interface styling
 
-The shared shell keeps the existing Rosé Pine Moon tokens, thin pane dividers,
-and semantic selection accents; Appearance retains the existing light theme.
+The shared shell uses Rosé Pine Moon, or Rosé Pine Dawn under Appearance, with
+thin pane dividers and semantic selection accents. Dawn's accents are too faint
+for text on its own base, so the light theme darkens each one, keeping its hue,
+to at least 4.6:1 on every panel.
+
+Every color keeps one meaning on every screen. The tokens sit at the top of
+`app.css` and the rules that apply them in its closing color system block:
+
+| Meaning | Colors | Where |
+| --- | --- | --- |
+| Resource and evidence kind | scripts foam, WebAssembly and VM iris, dynamic code gold, requests and network records rose, documents pine, sockets gold; styles, images, fonts and media neutral | Traffic row markers, Type and waterfall bars, the Watched chip (a `request_watch_match` network record); Sources file icons; Evidence categories; the Flow graph cards |
+| HTTP verb | POST, PUT and PATCH gold, DELETE love, GET, HEAD and OPTIONS neutral | Traffic Method and the selected request |
+| Status | 2xx plain text, 3xx iris, 4xx gold, 5xx and failures love | Traffic Status and the selected request |
+| State | ready foam, busy or limited gold, failed or unavailable love | session and availability tags, notices (as a faint wash), the status bar's loss and sampling counts |
+| Fingerprint family | Canvas rose, WebGL iris, Web Audio gold, device and layout foam, Storage pine, WebRTC love, Permissions and Runtime neutral | Overview cards, Activity filters and rows, Evidence categories |
+| Evidence class | observed foam, inferred iris, correlated pine, heuristic rose, unknown gold, contradicted love | VM handler listings |
+
+The kind colors follow the Flow graph, so a script is foam wherever it
+appears. Rows that need no attention stay neutral: a successful GET reads as
+plain text, and color marks what to look at.
+
 Traffic uses independently scrolling ledger and inspector panes. Compact
 resource filters stay visible below search and wrap within narrow windows. Selected-field actions sit beside the evidence on wide windows
 and below it on narrow windows. Session
 counts come from loaded requests, and sample evidence stays visibly labeled.
-Keep labels at least 10 px and reserve stronger color for selection, connection
-state, errors, and evidence confidence. Sources file icons are the one chrome
-tint: JavaScript, WebAssembly, JSON, source map and HTML icons take their code
-color at low strength, while folders, origins and frames stay neutral. Code is the exception: Sources and the
+Keep labels at least 10 px. Sources file icons take their kind color at low
+strength (JavaScript foam, WebAssembly iris, JSON rose, HTML pine, the dynamic
+group gold) while folders, origins, frames and source maps stay neutral. Code is the exception: Sources and the
 Native Console color code like the Rosé Pine Moon VS Code theme (Rosé Pine
 Dawn in light mode), with the colors and styles VS Code renders for each token
 (there, `JSON` is an italic variable and `stringify(` a plain function call), its
@@ -1900,11 +2084,13 @@ version or intrinsic assumption cannot restore a stale representation window.
 Ordinary evidence refresh leaves Find and the current window in place; explicit
 original-source pivots choose their own retained location.
 
-The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**
-and **Graph** for a Wasm module, **Map**, **Debugger** and **More**, which holds Go to line,
-Rename, Decode range, Facts, Track calls, Static cleanup and Details. The row
+The editor toolbar is one row: the URL, **Open file**, Find (Cmd+F), **Inspect**,
+**Graph** and **Readable** for a Wasm module, **Map**, **Debugger** and **More**, which holds
+Compare with (for a Wasm module), Go to line,
+Rename, Decode range, Facts, Track calls, Static cleanup, **Run offline…** (for
+a Wasm module) and Details. The row
 never wraps at any width: the URL shortens first (its tooltip keeps it whole),
-then Find, and when the commands still do not fit, Debugger, Map, Graph and
+then Find, and when the commands still do not fit, Debugger, Map, Readable, Graph and
 Inspect move in that order to the top of More and return once there is room. Find's coverage
 sentence is its tooltip. The status bar shows the
 caret line and column, with the original location in a pretty-printed or derived
@@ -2170,6 +2356,54 @@ for examples, locality checks, and known gaps. The CLI does not start or control
 an installed native app session, and the native custom-scheme interface is not
 itself an HTTP server.
 
+## Readable function view
+
+**Readable** on a captured WASM artifact shows one function as folded
+expressions above the linear disassembly and hex, in the split Graph uses;
+opening Graph or Map closes it. Each line shows its first byte offset, and its
+tooltip lists every byte range it covers. Choosing a line, or Enter on the
+selected one, reveals that byte in the linear view. Arrow keys, Page Up and
+Page Down, Home and End move the selection, and moving past either end of the
+400-line window reads the neighbouring window; **Earlier lines** and **Later
+lines** do the same. A line the lift did not fold keeps its disassembly text
+and a **raw** chip, and the header counts lines, instructions, raw lines and
+temporaries. The function index field and the previous and next controls
+choose the function; Readable opens on the function Graph last showed, or the
+largest. A researcher's name for the function shows beside the title, from
+the same names as Inspect and Graph; the listing keeps the module's names.
+Lifted text and names are inserted as text. The contract is
+[WASM pseudocode](../../protocol/wasm-pseudocode-v1.md).
+
+## Module comparison
+
+**Compare with…** in **More**, shown for a captured WebAssembly module,
+replaces the code view with a function match table between this module (A)
+and another captured module (B) chosen in the header, read from
+[`/api/wasm/diff`](../../protocol/wasm-module-diff-v1.md). B starts as the
+module whose URL is most like A's, skipping a re-capture with A's own bytes;
+choosing another module drops any slower read still running, so a late answer
+never lands over the chosen pair. The summary counts
+every status; the filter chips (All, Changed, Added, Removed, Ambiguous,
+Unchanged, and Unclassified when a limit stopped matching) narrow the rows,
+and **Show more rows** reads the next page of 200. A newly chosen module or
+filter starts the table at the top; Show more keeps the place. Rows scrolled
+into view, by a click target or by Tab, stop below the sticky header. Each row shows its status,
+each side's function as `name · func N` (the index alone when unnamed), the
+method and the score. Each member of a tie is its own ambiguous row, and its
+empty side names the tie and how many functions of the other module are in it
+(`tie 1 · 2 in B`); no pair is chosen. Selecting a function opens **Graph** on that function in its own module
+and records the step, so Back returns. Imports have no body and are not
+links. Omissions from a partial comparison are listed above the table,
+including that its pages can repeat or skip rows (Show more says so too), and
+a partial table is never kept, so reopening or choosing the pair again
+compares again. An error keeps **Retry comparison**; omissions of an earlier pair are cleared
+first. Graph, Map and Inspect close the table, and Escape or **Close** returns
+focus to **More**. Reopening it on either module of the last pair selects the
+other. In the stored window (`reb://`) each page runs the comparison again in
+a new helper process, within the same bound. Captured
+names are inserted as text. `wasm_diff_view.js` and `wasm_diff_view.css` own
+the view.
+
 ## Basic-block graphs
 
 **Graph** on a captured WASM artifact draws one function at a time as basic
@@ -2236,6 +2470,40 @@ closes, and laid-out graphs stay in a
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
 A byte budget cuts row text before structure and labels what it cut.
+
+## Trace value
+
+In **Inspect**, select an instruction row (click it or Tab to its offset) and
+use the **Trace value** panel under the listing: pick **Whole instruction** or
+one operand, a direction, then **Trace value**. Instructions with a fixed
+stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
+operands as soon as the row is chosen; calls and branches list theirs after
+the first trace, from its `operand_count`. The panel reads one
+[`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
+`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and a
+ten-second timeout, aborts a superseded read, and keeps the last slice when a
+read fails. Rows are ordered seed, backward, forward, then by distance, and show
+offset, role, kind and the instruction as inert text; a join row lists its
+incoming edges. Arrow keys, Home and End move through the rows; Enter or a click
+reveals that offset in Inspect and focuses its gutter. Offsets with no retained
+Inspect row stay disabled. The slice's mounted rows carry `data-value-flow`
+(seed, source, sink or step), reapplied as the listing remounts. **×** clears
+the trace; Hex or another module hides the panel and drops it. While the block
+graph is open the panel and its marks are hidden, since the graph owns that
+pane, and closing the graph brings the same trace back. Graph blocks are not a
+seed. Each row keeps the identifying part of its kind first (the import name,
+the local or the join kind), so it stays readable at the minimum window. A node
+that is both ends of the slice (a call whose result returns to its own
+argument around a loop) reads **source · sink**, and a loop join left open by
+a simulation stop says it is incomplete. The header always names the trace
+shown; choosing another row, or revealing one from the list, names that row on
+the button instead (**Trace 0x7e**) until it is traced. The panel's controls
+stay on one row at every width: in a narrow panel the field names and then the
+title give way, and the selects keep their accessible names. Beside the
+identification summary and its Details at the minimum window, the listing
+keeps six rows when there is room and otherwise what is left above the
+panel's header, down to two; with less room the Inspect area scrolls.
+`tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
 
 ## Flow workspace
 
@@ -2778,6 +3046,38 @@ headings and omission messages are excluded; partial coverage stays visible. Fai
 provide **Retry inspection**. Partial coverage and display limits are explicit.
 The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
 the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
+
+**More > Run offline…** on a captured Wasm module opens a dialog that runs one
+function in the backend's local sandbox: the `wasmi` interpreter, offline, with
+every import stubbed. Its banner says so above every field, and nothing runs
+until **I confirm this captured function runs offline in the local sandbox** is
+checked and **Run** is pressed. Choose the function (named and exported
+functions first), give arguments as `i32 7, i32 5`, import stubs as JSON (an
+import without a stub traps when called, so supply every clock or random
+source), memory writes and reads as `offset:hex` and `offset:length`, and
+optional fuel, deadline, memory and call-depth limits. The result shows the
+outcome and phase (a trap names its kind; every limit is its own outcome), the
+results, fuel used, every recorded import call with its arguments, and the
+memory reads. Captured names, values and bytes are text, never markup. Each run
+is stored as a derived experiment record, not evidence. The stored-evidence
+window cannot run code and says so. See [WASM run v1](../../protocol/wasm-run-v1.md).
+
+**Inspect** also shows a library identification summary above the listing: a
+**Toolchain** line (for example Rust, wasm-bindgen, Emscripten or WASI, each with
+its confidence), **Constants** (known SHA, MD5, AES, CRC, ChaCha, Base64 and hash
+tables or magic values, each with matched and total elements; a partial match
+has a dashed outline) and the count of labeled functions. Every chip reveals the
+byte its evidence rests on. **Details** lists each conclusion's evidence, the
+functions that name a matched table, and the first 200 function label
+suggestions with their category badges. A constant with no listed reference
+says so without concluding the table is unused. The summary steps aside while
+**Graph** is open; the Graph's **Functions** menu badges labeled functions from
+the report's first page of suggestions (the menu's count says when that page is
+not all of them) and its filter matches their labels. Reports are requested only when Inspect or Graph opens,
+cached for four modules, and shown as inert text; a failed read offers **Retry
+identification** and keeps any earlier report. Labels are suggestions, never
+captured or researcher names, and nothing is concluded from absence. See
+[WASM Identification v1](../../protocol/wasm-identification-v1.md).
 
 **Map** in the Sources toolbar shows one picture of the whole selected artifact:
 a captured script, a Wasm module or a VM bytecode image. **Open map** on a VM

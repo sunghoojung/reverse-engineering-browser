@@ -95,10 +95,11 @@ enum Action {
         /// long strings do not. For clients that forward results to a provider.
         #[arg(long)]
         omit_content: bool,
-        /// Also list the content reads (get_artifact_text, search_artifact_text)
-        /// and lay out request and response bodies with get_source_format. Their
-        /// results are captured content that goes to the model provider. Not
-        /// authorization.
+        /// Also list the content reads (get_artifact_text, search_artifact_text,
+        /// and the offline Wasm runs run_wasm_function and get_wasm_runs, which
+        /// also need --allow-effects to run) and lay out request and response
+        /// bodies with get_source_format. Their results are captured content
+        /// that goes to the model provider. Not authorization.
         #[arg(long, conflicts_with = "omit_content")]
         allow_content: bool,
         /// One ordered level in place of the individual flags: read-only, ask,
@@ -1449,6 +1450,11 @@ mod tests {
             "inspect_wasm",
             "get_wasm_functions",
             "get_wasm_function_graph",
+            "get_wasm_runs",
+            "get_wasm_identification",
+            "get_wasm_pseudocode",
+            "get_wasm_module_diff",
+            "get_wasm_value_flow",
             "validate_evidence_package",
             "export_evidence_package",
             "compare_evidence_packages",
@@ -1465,6 +1471,7 @@ mod tests {
             "get_native_console",
             "get_live_wasm",
             "live_wasm_action",
+            "run_wasm_function",
             "get_vm_analysis",
             "get_source_facts",
             "get_deobfuscation",

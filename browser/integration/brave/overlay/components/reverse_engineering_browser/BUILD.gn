@@ -10,6 +10,7 @@ import("//testing/test.gni")
 mojom("mojom") {
   sources = [
     "common/native_console.mojom",
+    "common/native_debugger_pause.mojom",
     "common/native_probe_transport.mojom",
     "common/native_worker_transport.mojom",
   ]
@@ -30,6 +31,13 @@ source_set("console_protocol") {
     "common/native_console_document_start.h",
     "common/native_console_protocol.h",
   ]
+}
+
+# Wire records, bounds and routing rules of the pausing debugger, shared by
+# the renderer agent and the browser socket host so neither can drift.
+# tests/debugger_pause_wire_test.cpp compiles this header on the host.
+source_set("debugger_pause_protocol") {
+  sources = [ "common/native_debugger_pause.h" ]
 }
 
 source_set("worker_metadata") {
@@ -190,6 +198,10 @@ static_library("renderer") {
     "renderer/native_console_document_start.h",
     "renderer/native_console_runtime.cc",
     "renderer/native_console_runtime.h",
+    "renderer/native_debugger_pause_agent.cc",
+    "renderer/native_debugger_pause_agent.h",
+    "renderer/native_debugger_pause_session.cc",
+    "renderer/native_debugger_pause_session.h",
     "renderer/native_probe_transport.cc",
     "renderer/native_probe_transport.h",
     "renderer/native_script_position.cc",
@@ -198,6 +210,7 @@ static_library("renderer") {
 
   deps = [
     ":console_protocol",
+    ":debugger_pause_protocol",
     ":mojom",
     ":queue",
     ":renderer_sink",
@@ -227,6 +240,8 @@ source_set("browser") {
     "browser/native_console_document_start.h",
     "browser/native_console_session.cc",
     "browser/native_console_session.h",
+    "browser/native_debugger_pause_host.cc",
+    "browser/native_debugger_pause_host.h",
     "browser/native_factory_scope.cc",
     "browser/native_factory_scope.h",
     "browser/native_local_ipc_client.cc",
@@ -283,6 +298,7 @@ source_set("browser") {
 
   deps = [
     ":console_protocol",
+    ":debugger_pause_protocol",
     ":factory_owner_hook",
     ":mojom",
     ":network_headers_hook",

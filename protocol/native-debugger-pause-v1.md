@@ -1,10 +1,11 @@
 # Native debugger pause v1
 
 Status: this contract, the backend half and the interface are implemented and
-tested. No browser implements the peer, and no browser code is part of the
-change that landed this file: the source candidate for a browser half is on
-`t3/pausing-debugger-browser` and does not merge until it has been compiled
-and run live. Until a Brave build serves the peer, `get_native_debugger`
+tested. No Brave build implements the peer. A source candidate for the
+browser half is in the tracked Brave overlay and patches (Brave `0024`,
+Chromium `0050`), merged by maintainer decision before it had been compiled
+or run live, so it is not a verified implementation. Until a Brave build
+serves the peer, `get_native_debugger`
 reports the pausing debugger `unsupported` and every pausing action is
 refused before anything is sent. Browser requirements below is what an
 implementation has to do; it is the authority for both sides, and the
@@ -407,10 +408,10 @@ counts are still returned.
 
 ## Browser requirements
 
-No browser implements this peer. The source candidate for one lives on
-`t3/pausing-debugger-browser`, which does not merge until it has been
-compiled and run live; until then `get_native_debugger` reports the pausing
-debugger `unsupported` and every action is refused before anything is sent.
+No Brave build implements this peer. The source candidate for one is in the
+tracked overlay and patches but has never been compiled or run live; until a
+Brave build serves it, `get_native_debugger` reports the pausing debugger
+`unsupported` and every action is refused before anything is sent.
 This section is what a conforming implementation has to do, so the contract
 can be read without it.
 
@@ -527,8 +528,12 @@ Types 70 to 75 are reserved for this contract and unused in version 1.
 | `tests/debugger_observation_test.cpp` and `make debugger-observation-wire-check` | Event types 66 to 69 against the core record rules, the offline Python validator and the shipped UI poll model, including every clear and end reason and that a record without a frame is refused by the validator and counted invalid by the broker |
 | `tools/check-agent-core.swift` | That a debugger tool result is kept in the in-app agent's transcript without its result body |
 
-A browser half adds its own host harness for the wire header it compiles, on
-the branch that carries it; nothing in this list depends on browser code.
+The browser half's source carries two host checks of its own, both run by
+`make check`: `tests/debugger_pause_wire_test.cpp` checks the wire header it
+compiles, and `make native-debugger-pause-compile` compiles its overlay
+against stand-in declarations of the pinned Chromium, Blink and Mojo types.
+That compile is syntax-only and nothing links or runs, so neither is evidence
+that a Brave build works. Nothing in the table above depends on browser code.
 
 `busy` and `expired` are the two statuses the contract peer cannot reach.
 `busy` would need a command to arrive inside an inspector dispatch, which the

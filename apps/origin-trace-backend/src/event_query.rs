@@ -135,6 +135,10 @@ impl Coverage {
     pub fn scan_end(&self) -> u64 {
         self.scan_end
     }
+    /// The first byte the read covered; older records are outside it.
+    pub fn scan_start(&self) -> u64 {
+        self.scan_start
+    }
     pub fn to_json(self) -> Value {
         json!({
             "scope": self.scope,
@@ -229,6 +233,38 @@ pub fn read_request_records(
     filter: &EventFilter,
 ) -> Result<Detail> {
     read_detail(store, range, limit, filter, SCAN_BYTES, false)
+}
+
+/// The records at byte ranges the request index located, each one whole
+/// line, that `keep` selects, read with one open file instead of a scan; and
+/// how many ranges no longer held a valid record.
+pub fn read_records_at(
+    store: &Path,
+    ranges: &[RecordRange],
+    mut keep: impl FnMut(&Value) -> bool,
+) -> Result<(Vec<Value>, u64)> {
+    if ranges.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    let mut file = evidence::regular_file(store)?;
+    let length = file.metadata()?.len();
+    let (mut records, mut malformed, mut line) = (Vec::new(), 0, Vec::new());
+    for range in ranges {
+        let size = range.end.saturating_sub(range.first);
+        if size == 0 || size > EVENT_RECORD_BYTES as u64 + 1 || range.end > length {
+            malformed += 1;
+            continue;
+        }
+        line.resize(size as usize, 0);
+        file.seek(SeekFrom::Start(range.first))?;
+        file.read_exact(&mut line)?;
+        match stored_event(line.strip_suffix(b"\n").unwrap_or(&line)) {
+            Some(event) if keep(&event) => records.push(event),
+            Some(_) => {}
+            None => malformed += 1,
+        }
+    }
+    Ok((records, malformed))
 }
 
 /// The newest matching record, from the request's range when the index names

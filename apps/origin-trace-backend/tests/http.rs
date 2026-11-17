@@ -11282,6 +11282,66 @@ async fn request_detail_routes_report_what_their_read_covered() {
     assert_eq!(stack["coverage"]["scope"], "request_range");
 }
 
+/// A cookie spans the session: a script write older than provenance's newest
+/// 5,000 records is still listed, found through the request index, and a
+/// write of another name stays out of the answer.
+#[tokio::test]
+async fn cookie_provenance_lists_a_script_write_older_than_its_window() {
+    let server = Server::start().await;
+    let spec = specification();
+    let write = |name: &[u8], value: &[u8]| {
+        let mut out = vec![0u8; 128];
+        (out[0], out[2], out[4], out[8]) = (1, 128, 1, 1);
+        out[12..16].copy_from_slice(&(name.len() as u32).to_le_bytes());
+        out[16..20].copy_from_slice(&(value.len() as u32).to_le_bytes());
+        out[20..24].copy_from_slice(&((name.len() + value.len() + 1) as u32).to_le_bytes());
+        out[72..104].copy_from_slice(&Sha256::digest(value));
+        out[104..104 + name.len()].copy_from_slice(name);
+        out
+    };
+    let mut lines = String::new();
+    let mut sequence = 0u64;
+    let mut push = |kind: &str, request: u64, payload: &[u8]| {
+        sequence += 1;
+        let event = json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":"0","request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false});
+        lines.push_str(&event.to_string());
+        lines.push('\n');
+    };
+    push("script_cookie", 0, &write(b"sid", b"1"));
+    push("script_cookie", 0, &write(b"other", b"2"));
+    for request in 1..=6_000u64 {
+        push("request_started", request, b"GET a.test");
+    }
+    server.file("events.jsonl", lines.as_bytes());
+    let document: Value = server
+        .get("/api/cookie-provenance?session_id=1&name=sid")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_schema(
+        &spec,
+        &json!({"$ref": "#/components/schemas/CookieProvenance"}),
+        &document,
+        "provenance",
+    );
+    assert_eq!(document["coverage"]["limited"], true, "{document}");
+    assert_eq!(document["coverage"]["complete"], false);
+    let script = document["script"].as_array().unwrap();
+    assert_eq!(script.len(), 1, "{document}");
+    assert_eq!(script[0]["api"], "document.cookie set");
+    assert_eq!(script[0]["sequence_number"], "1");
+    assert_eq!(
+        document["script_coverage"],
+        json!({"complete": true, "located_outside_window": 2, "unreadable": 0})
+    );
+}
+
 #[tokio::test]
 async fn request_index_reaches_every_request_of_a_large_session() {
     let server = Server::start().await;

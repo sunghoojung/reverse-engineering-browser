@@ -1631,7 +1631,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "What touched one cookie name in the newest part of a session (\"Cookies\" in protocol/native-network-v3.md): the newest 5000 network records within the last 64 MiB of events and at most 256 distinct retained cookie lists. coverage.complete is false when older records were not read, so an absent entry is unknown: the responses that set it, with attributes and block reasons; the document.cookie and Cookie Store API calls that wrote or read it, with frame, count, script frame and stack digest; and the requests that sent it. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
+        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from the newest 5000 cookie list, request start, redirect, script call and script identity records within the last 64 MiB of events and at most 256 distinct retained cookie lists, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false when older records were not read, so an absent response or request is unknown. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
         "tags": [
           "request-cookies"
         ],
@@ -12177,11 +12177,38 @@
           "stacks_unresolved",
           "read_coverage",
           "malformed_records",
-          "coverage"
+          "coverage",
+          "script_coverage"
         ],
         "properties": {
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
+          },
+          "script_coverage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "complete",
+              "located_outside_window",
+              "unreadable"
+            ],
+            "description": "How script lists every script_cookie record of the session: the request index locates each one, so a call older than coverage's window is read too. An absent call is proof only when complete is true and read_coverage.complete is true.",
+            "properties": {
+              "complete": {
+                "type": "boolean",
+                "description": "The index has caught up with the store, located every script_cookie record (at most 65536), and each one older than the window was read back."
+              },
+              "located_outside_window": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Located records older than coverage.scan_start, read back by byte range; script lists those of them that concern this name."
+              },
+              "unreadable": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Located records whose bytes no longer held a valid record."
+              }
+            }
           },
           "session_id": {
             "$ref": "#/components/schemas/NonzeroUint64String"

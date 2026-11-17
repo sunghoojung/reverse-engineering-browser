@@ -1863,13 +1863,18 @@ string while content capture is on.
 returns each hop's sent and received cookies with every attribute, exclusion
 and warning reason. `get_cookie_provenance`
 (`GET /api/cookie-provenance?session_id=&name=`) lists what touched a cookie
-name in the newest 5,000 network records within the last 64 MiB of events: the
-responses that set it, the script writes and reads with their frame, and the
-requests that sent it. `coverage` says what was read, so an absent entry is not
-proof when `coverage.complete` is false (see
+name: the script writes and reads with their frame anywhere in the session, and
+the responses that set it and the requests that sent it in the newest 5,000
+cookie list, request start, redirect, script call and script identity records
+within the last 64 MiB of events. A cookie is often written once early and sent
+on every later request, so the request index locates every `script_cookie`
+record of the session (at most 65,536) and provenance reads back those older
+than its window by byte range; `script_coverage` says whether that list is
+complete. `coverage` says what the window read, so an absent response or request
+is not proof when `coverage.complete` is false (see
 [request index v1](request-index-v1.md#per-request-detail-reads)). Each
 script call's `stack` resolves like `get_request_stack`: through
-`script_identity` records in the same window to line, column and function name,
+`script_identity` records in the window and the index to line, column and function name,
 with every walked frame when its digest names a retained stack artifact; at
 most 64 distinct positions per answer, the rest counted in
 `stacks_unresolved`.

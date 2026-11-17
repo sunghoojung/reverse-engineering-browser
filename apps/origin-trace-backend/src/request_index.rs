@@ -24,7 +24,7 @@ use std::{
 pub const SIDECAR_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v1";
 /// Sidecar row layout; a sidecar of another layout is rebuilt from byte 0.
-const LAYOUT: u32 = 11;
+const LAYOUT: u32 = 12;
 /// Bounds one call; a larger store reports partial coverage and continues next call.
 const SCAN_BYTES: u64 = 64 * 1024 * 1024;
 const RECORD_BYTES: usize = 4096;
@@ -51,6 +51,8 @@ const MAX_SET_TABS: usize = 256;
 pub type IdentityPayloads = HashMap<(u64, u32), String>;
 /// `script_identity` records kept for the Initiator column's innermost frame.
 const MAX_IDENTITIES: usize = 16_384;
+/// `script_cookie` records located for `get_cookie_provenance`, 16 bytes each.
+const MAX_SCRIPT_COOKIES: usize = 65_536;
 const UNIDENTIFIED: &str = "Unidentified network event";
 /// Records that belong to a row without changing its lifecycle; a selected
 /// row reads them back by member (protocol/native-network-v2.md and v3).
@@ -297,6 +299,12 @@ struct State {
     tab_sets: HashMap<String, (u32, Vec<u64>)>,
     /// `session:process:script_id` to its newest `script_identity` payload.
     identities: HashMap<String, String>,
+    /// Each session's `script_cookie` records by byte range, oldest first: a
+    /// cookie spans the session, so provenance reads its script calls here
+    /// wherever they sit instead of only in its newest window.
+    script_cookies: HashMap<String, Vec<(u64, u64)>>,
+    /// `script_cookie` records past `MAX_SCRIPT_COOKIES`, which no list names.
+    script_cookies_unindexed: u64,
     #[serde(skip)]
     by_id: HashMap<String, u32>,
 }
@@ -321,6 +329,8 @@ impl State {
             keys: HashMap::new(),
             tab_sets: HashMap::new(),
             identities: HashMap::new(),
+            script_cookies: HashMap::new(),
+            script_cookies_unindexed: 0,
             by_id: HashMap::new(),
         }
     }
@@ -1853,6 +1863,19 @@ impl RequestIndex {
                 fold_identity(&event, &mut state.identities);
                 return;
             }
+            if kind == "script_cookie" {
+                let located: usize = state.script_cookies.values().map(Vec::len).sum();
+                if located < MAX_SCRIPT_COOKIES {
+                    state
+                        .script_cookies
+                        .entry(text(&event["session_id"]))
+                        .or_default()
+                        .push((start, end));
+                } else {
+                    state.script_cookies_unindexed += 1;
+                }
+                return;
+            }
             if CHILD_TYPES.contains(&kind) {
                 let id = request_identity(&event, &state.keys);
                 if let Some(&ordinal) = state.by_id.get(&id) {
@@ -2662,6 +2685,29 @@ impl RequestIndex {
         let exhaustive =
             self.caught_up(state.indexed_to) && state.identities.len() < MAX_IDENTITIES;
         Ok((identities, exhaustive))
+    }
+
+    /// Byte ranges of a session's `script_cookie` records, oldest first, and
+    /// whether they are every one the store holds.
+    pub fn script_cookies(&mut self, session: &str) -> Result<(Vec<RecordRange>, bool)> {
+        self.refresh()?;
+        let state = self.state.as_ref().expect("index state");
+        let ranges = state
+            .script_cookies
+            .get(session)
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .map(|&(first, end)| RecordRange {
+                        first,
+                        end,
+                        indexed: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let exhaustive = self.caught_up(state.indexed_to) && state.script_cookies_unindexed == 0;
+        Ok((ranges, exhaustive))
     }
 
     /// Every row's body case, counted for `get_session_summary`, and whether

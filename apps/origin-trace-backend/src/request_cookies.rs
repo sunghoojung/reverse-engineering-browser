@@ -604,6 +604,17 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
     valid.then_some(script)
 }
 
+/// Whether `provenance` reads this `script_cookie` record for `name`: a call
+/// naming it, a nameless read it counts, or a malformed record it reports.
+/// Records of other names change nothing in its answer.
+pub fn script_record_used(event: &Value, name: &str) -> bool {
+    decode_script(event).is_none_or(|script| {
+        script.read_record
+            || names_match(&script, name.as_bytes())
+            || (matches!(script.api, 4 | 5) && script.name_length == 0)
+    })
+}
+
 fn names_match(script: &Script, name: &[u8]) -> bool {
     script.name_length as usize == name.len()
         && script.prefix[..name.len().min(NAME_PREFIX)] == name[..name.len().min(NAME_PREFIX)]

@@ -462,7 +462,9 @@ await assert.rejects(packageUI.evidencePackageReadBytes(new Response(new Readabl
 assert.equal(fragmentedCancelled,true);
 // Real streams close pending reads before their producer's cancellation cleanup
 // settles; a never-settling cancel hook must not defeat limits or UI deadlines.
-const packageWithinDeadline=async promise=>{let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Package reader did not retire within the fixture deadline')),2000);})]);}finally{clearTimeout(timer);}};
+// The deadline only tells a read that never settles from one that does: reading
+// 65536 empty chunks to the chunk limit took up to 4.8 s on a loaded machine.
+const packageWithinDeadline=async promise=>{let timer;try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Package reader did not retire within the fixture deadline')),30000);})]);}finally{clearTimeout(timer);}};
 for(const empty of [false,true]){
   let cancelled=0;
   const response=new Response(new ReadableStream({pull(stream){stream.enqueue(new Uint8Array(empty?0:5));},cancel(){cancelled++;return new Promise(()=>{});}}));
@@ -1295,15 +1297,26 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   let clock = 1000, renders = 0;
   const timers = [], fetches = [];
   const respond = [];
+  // Each content read arms one deadline timer and clears it when it finishes.
+  const armed = new Set();
+  let timerId = 0;
   const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto, URLSearchParams, AbortSignal,
     Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "", isArtifactResponse: body => Array.isArray(body?.artifacts),
-    setTimeout: (fn) => {timers.push(fn); return timers.length;}, clearTimeout: () => {},
+    setTimeout: (fn) => {timers.push(fn); armed.add(++timerId); return timerId;}, clearTimeout: id => {armed.delete(id);},
     fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
     renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestContentViewKey(request);}};
   const body = runInNewContext(trafficSource + "\n" +
     appSection("      const REQUEST_BODY_PAGE_BYTES", "      function renderInspectorMessage(") +
     ";({requestBodyView,requestContentViewKey,refreshSelectedRequestBody,loadMoreRequestBody,requestFullUrl})", context);
-  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  // Settled once every queued reply was requested and every read it started
+  // finished. A fixed delay saw a 3 MiB digest still running on a loaded machine.
+  const settle = async () => {
+    const deadline = Date.now() + 30000;
+    do {
+      assert(Date.now() < deadline, `${respond.length} replies unrequested and ${armed.size} reads unfinished after 30 s`);
+      await new Promise(resolve => setTimeout(resolve, 5));
+    } while (respond.length || armed.size);
+  };
   // The first read times out.
   respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
   assert.equal(body.requestBodyView(request).status, "loading");

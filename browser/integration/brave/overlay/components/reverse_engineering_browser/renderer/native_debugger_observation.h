@@ -54,7 +54,8 @@ struct NativeWatchDomNode final {
   bool removal = false;
 };
 
-struct NativeWatchRules final {
+// Exported: the Console runtime, outside this component, builds the rules.
+struct COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeWatchRules final {
   std::array<NativeWatchRequestRule, kNativeWatchRequestRules> requests{};
   std::size_t request_count = 0;
   std::array<std::array<char, kNativeWatchEventBytes>, kNativeWatchEventRules> events{};

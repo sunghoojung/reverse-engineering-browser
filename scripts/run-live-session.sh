@@ -588,21 +588,29 @@ artifact_receiver_pid=""
 analyzer_pid=""
 ui_pid=""
 brave_pid=""
+# The end of a wall-clock grace of $1 seconds that starts now. A loaded machine
+# stretches every poll, so a count of polls is no bound. /bin/bash 3.2 has only
+# whole-second SECONDS, which ticks on the wall clock: one more tick makes the
+# grace last more than $1 seconds and at most $1 + 1.
+grace_deadline() {
+  echo $((SECONDS + $1 + 1))
+}
+
 # An open native UI can keep HTTP event streams alive during graceful shutdown.
 # Signal every owned child before waiting so one blocked helper cannot postpone
 # shutdown of the others. All children share one bounded grace period.
 stop_processes() {
-  local attempts="$1"
+  local deadline
+  deadline="$(grace_deadline "$1")"
   shift
   local child_pid
-  local attempt
   local pending
   for child_pid in "$@"; do
     if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
       kill -TERM "${child_pid}" 2>/dev/null || true
     fi
   done
-  for ((attempt = 0; attempt < attempts; attempt++)); do
+  while ((SECONDS < deadline)); do
     pending=0
     for child_pid in "$@"; do
       if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
@@ -631,7 +639,7 @@ stop_artifact_receiver() {
   if [[ -z "${artifact_receiver_pid}" ]]; then
     return
   fi
-  stop_processes 100 "${artifact_receiver_pid}"
+  stop_processes 5 "${artifact_receiver_pid}"
   artifact_receiver_pid=""
 }
 
@@ -647,7 +655,7 @@ cleanup() {
       *) unrecorded+=("${job_pid}") ;;
     esac
   done
-  stop_processes 100 "${brave_pid}" "${analyzer_pid}" "${broker_pid}" \
+  stop_processes 5 "${brave_pid}" "${analyzer_pid}" "${broker_pid}" \
     "${artifact_receiver_pid}" "${ui_pid}" ${unrecorded[@]+"${unrecorded[@]}"}
   artifact_receiver_pid=""
   if [[ -S "${socket_path}" ]]; then
@@ -744,7 +752,7 @@ analyze_captured_artifacts() {
     trap - INT TERM
     # Finish the worker's two-second grace before the coordinator's shared
     # five-second deadline can kill this shell and orphan its active worker.
-    stop_processes 40 "${worker_pid}"
+    stop_processes 2 "${worker_pid}"
     exit 0
   }
   trap stop_analyzer_worker INT TERM
@@ -1068,7 +1076,8 @@ else
   # to a Brave already running with the same profile, would leave the broker
   # waiting for the whole capture duration. A connected broker drains well
   # within this bound; one still waiting is asked to stop.
-  for _ in {1..200}; do
+  broker_drain_deadline="$(grace_deadline 10)"
+  while ((SECONDS < broker_drain_deadline)); do
     if ! kill -0 "${broker_pid}" 2>/dev/null; then
       break
     fi

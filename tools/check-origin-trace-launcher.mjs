@@ -285,7 +285,7 @@ setInterval(() => {}, 1000);
     {name: "responsive-browser-exit", stubborn: [], signal: "browser", code: 1},
     {name: "shared-grace-and-analyzer-worker", stubborn: ["broker", "ui", "analyzer"], signal: "browser", code: 1},
     {name: "coordinator-cancellation", stubborn: [], signal: "coordinator", code: 143},
-    {name: "browser-exits-without-connecting", stubborn: [], signal: null, code: 1, embedded: 0, bound: 16000},
+    {name: "browser-exits-without-connecting", stubborn: [], signal: null, code: 1, embedded: 0, longest: 12500},
   ]) {
     const embedded = scenario.embedded ?? 1;
     const directory = join(temporary, scenario.name);
@@ -346,7 +346,11 @@ ${monitor}`);
       }
       const started = Date.now();
       if (scenario.signal) process.kill(scenario.signal === "browser" ? pids.browser : child.pid, "SIGTERM");
-      const bound = scenario.bound ?? 8000;
+      // The launcher waits on the wall clock: its owner poll notices a stopped
+      // browser within a second and the shared grace ends within 6 seconds;
+      // without a connection, the broker drain ends within 11 more. The slack
+      // covers process startup and exit on a loaded machine.
+      const bound = (scenario.longest ?? 7000) + 5000;
       const result = await Promise.race([
         exit,
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${scenario.name} survived ${bound / 1000}-second shutdown bound\n${output}`)), bound); }),
@@ -373,6 +377,8 @@ ${monitor}`);
       for (const [role, pid] of Object.entries(pids)) assert.equal(alive(pid), false, `${scenario.name} orphaned ${role} ${pid}\n${output}`);
       if (scenario.stubborn.length) {
         for (const role of scenario.stubborn) assert.match(output, new RegExp(`forcing owned child ${pids[role]} to stop`));
+        // The shared grace is wall-clock time, so stubborn helpers get all of it.
+        assert(elapsed >= 5000, `${scenario.name} forced helpers after ${elapsed}ms, before the 5-second grace`);
         const times = await Promise.all(["broker", "receiver", "ui", "analyzer"].map(async role => Number(await readFile(join(directory, `${role}.term`), "utf8"))));
         assert(Math.max(...times) - Math.min(...times) < 1500, `Helpers were not signaled together: ${times}`);
       }

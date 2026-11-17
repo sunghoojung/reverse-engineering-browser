@@ -2688,13 +2688,16 @@ var(--panel);
 .decoder-field-origin p { margin: 0 0 10px; overflow-wrap: anywhere; font: 11px/1.6 var(--sans); color: var(--muted); }
 .decoder-field-origin p:last-child { margin: 10px 0 0; }
 
-/* The hit target straddles an existing border; panes retain all available space. */
+/* The hit target straddles an existing border; panes retain all available space.
+   It reaches this far into each pane (pane_layout.js reads it), so a pane edge
+   that holds controls or scrolling rows keeps that reach clear (block_graph.css). */
+:root { --pane-divider-reach: 4px; }
 .pane-divider { position: fixed; z-index: 5; touch-action: none; outline: none; }
 .pane-divider[data-axis="x"] { cursor: col-resize; }
 .pane-divider[data-axis="y"] { cursor: row-resize; }
 .pane-divider::after { content: ''; position: absolute; background: var(--line); transition: background .12s; }
-.pane-divider[data-axis="x"]::after { inset: 0 3px; }
-.pane-divider[data-axis="y"]::after { inset: 3px 0; }
+.pane-divider[data-axis="x"]::after { inset: 0 calc(var(--pane-divider-reach) - 1px); }
+.pane-divider[data-axis="y"]::after { inset: calc(var(--pane-divider-reach) - 1px) 0; }
 .pane-divider:hover::after, .pane-divider:focus-visible::after { background: var(--accent); }
 .pane-divider:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
 body.resizing-panes-x, body.resizing-panes-x * { cursor: col-resize !important; user-select: none !important; }

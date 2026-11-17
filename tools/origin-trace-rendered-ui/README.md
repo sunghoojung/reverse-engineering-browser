@@ -206,7 +206,15 @@ toolchain, the complete SHA-256 and Base64 tables and the labeled count above
 the listing without clipping; Enter on Details must list the fetch glue label
 and the function that reads the SHA-256 table, a constant chip must reveal its
 data segment row, and the Graph's Functions menu must show category badges
-while the summary steps aside for the graph.
+while the summary steps aside for the graph. With **Linear** shown (pressed at
+narrow, where it starts hidden), no control may meet the graph and linear
+divider while the linear view sweeps one row height of scroll offsets, so a
+row's sliver cannot pass under it at whatever offset the display height leaves.
+Space on the footer's **Key** opens the whole edge key and Escape returns a
+visible focus ring to Key. A native pointer drag then takes the divider to the
+graph's minimum, where the Functions menu must open whole, and to the linear
+view's minimum, repeating the sweep at each, and Home on the divider forgets
+the drag.
 
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that the session budget
@@ -378,15 +386,18 @@ rest, and controls revealed by product navigation are checked without
 test-driven scrolling.
 
 To reproduce smaller CI displays locally, cap all requested heights without
-changing the display resolution:
+changing the display resolution. The `macos-latest` runner currently clamps
+every 790-high request to 677:
 
 ```sh
-REB_RENDERED_UI_MAX_HEIGHT=679 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make rendered-ui-check
+REB_RENDERED_UI_MAX_HEIGHT=677 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make rendered-ui-check
 ```
 
 The limit must be an integer of at least 560 CSS pixels. Normal and narrow-tall
-cases then request heights of 679; the 560-high cases stay unchanged. Use 686 to
-reproduce the other observed CI display size. Screenshot names keep their case
+cases then request heights of 677; the 560-high cases stay unchanged. Use 679 or
+686 to reproduce the earlier observed CI display sizes. A display that fits the
+full 790 changes where scrolled content comes to rest, so a layout check that
+depends on a scroll offset sweeps the offsets rather than trusting one. Screenshot names keep their case
 names; their pixel dimensions and the viewport log show the actual size.
 
 Environment passed to the hosted bundle through the `.xctestrun`:

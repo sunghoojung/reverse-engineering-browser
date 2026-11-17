@@ -107,7 +107,7 @@ async function checkConsolePaneScroll(root) {
     localStorage:{getItem:()=>JSON.stringify({'native-console':.33}),setItem(){}},isPlainObject:value=>!!value&&typeof value==='object',
     requestAnimationFrame:enqueue,cancelAnimationFrame:cancel,setTimeout:enqueue,clearTimeout:cancel,
     MutationObserver:class{constructor(fn){mutations.push(fn);}observe(){}},ResizeObserver:class{observe(){}},
-    getComputedStyle:element=>({display:element===workspace?'grid':'block',overflowX:'visible',overflowY:'visible',getPropertyValue:()=>`${mainSize}px ${total-mainSize}px`})};
+    getComputedStyle:element=>({display:element===workspace?'grid':'block',overflowX:'visible',overflowY:'visible',getPropertyValue:name=>name==='--pane-divider-reach'?'4px':`${mainSize}px ${total-mainSize}px`})};
   runInNewContext(await readFile(join(root,'apps/research-ui/pane_layout.js'),'utf8')+';initializePaneLayout();',context);flush();
   assert(mainSize<reading.contentHeight,'Saved dock must create the short scrollable upper pane');
   const initialWrites=trackWrites;reading.scrollTop=60;innerReading.scrollTop=40;consoleReading.scrollTop=50;

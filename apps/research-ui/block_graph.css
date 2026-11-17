@@ -31,7 +31,16 @@
 #screen-sources .sources-editor[data-graph="true"] .source-view-split { grid-template-rows: minmax(0, 2fr) minmax(72px, 1fr); }
 #screen-sources .sources-editor[data-graph="true"][data-graph-linear-hidden] .source-view-split { grid-template-rows: minmax(0, 1fr); }
 #screen-sources .sources-editor[data-graph="true"][data-graph-linear-hidden] #source-code-wrap { display: none; }
-#screen-sources .sources-editor[data-graph="true"] #source-code-wrap { border-top: 1px solid var(--line); }
+/* The split's divider reaches into both panes, so neither keeps a control
+   there. The graph footer pads the reach and draws the separator line. The
+   linear view's top border is code background just past the reach, so its
+   scrollport starts below the divider, rows never scroll under it, and the
+   first row keeps its place. */
+#screen-sources .sources-editor[data-graph="true"] #source-code-wrap { border-top: calc(1px + var(--pane-divider-reach)) solid var(--code-bg); }
+#screen-sources .sources-editor[data-graph="true"] #source-code { padding-top: 0; }
+#screen-sources .sources-editor[data-graph="true"]:not([data-graph-linear-hidden]) #source-graph-host .block-graph-foot {
+  height: calc(24px + var(--pane-divider-reach)); padding-bottom: calc(var(--pane-divider-reach) - 1px); border-bottom: 1px solid var(--line);
+}
 /* Text-window rows navigate the text view only; the graph has its own controls. */
 #screen-sources .sources-editor[data-graph="true"] :is(#source-window, #source-search-status) { display: none !important; }
 .block-graph[hidden], .block-graph-state[hidden], .block-graph-minimap[hidden] { display: none; }
@@ -78,7 +87,7 @@
 @container block-graph (max-width: 880px) {
   .block-graph-key-toggle { display: inline-block; }
   .block-graph-foot > .block-graph-legend { display: none; }
-  .block-graph-foot[data-key-open] > .block-graph-legend { position: absolute; z-index: 3; right: 8px; bottom: 28px; display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); box-shadow: 0 6px 18px var(--shadow); }
+  .block-graph-foot[data-key-open] > .block-graph-legend { position: absolute; z-index: 3; right: 8px; bottom: calc(100% + 4px); display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); box-shadow: 0 6px 18px var(--shadow); }
 }
 .block-graph-hud { position: absolute; z-index: 1; left: 10px; bottom: 10px; max-width: calc(100% - 190px); display: grid; justify-items: start; gap: 4px; pointer-events: none; }
 .block-graph-hud > span { max-width: 100%; overflow: hidden; padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }

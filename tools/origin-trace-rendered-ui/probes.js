@@ -31,7 +31,11 @@
     for (let node = element.parentElement; node; node = node.parentElement) {
       const style = getComputedStyle(node);
       if (/(hidden|clip|auto|scroll)/.test(style.overflowX + style.overflowY)) {
-        const clip = node.getBoundingClientRect();
+        // Overflow clips at the padding box: content never paints over a
+        // border or a classic scrollbar. Overflow does not apply to inline boxes.
+        const box = node.getBoundingClientRect();
+        const clip = style.display === 'inline' ? box : {left: box.left + node.clientLeft, top: box.top + node.clientTop,
+          right: box.left + node.clientLeft + node.clientWidth, bottom: box.top + node.clientTop + node.clientHeight};
         left = Math.max(left, clip.left); right = Math.min(right, clip.right);
         top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom);
       }
@@ -229,5 +233,26 @@
       scrollTop: node.scrollTop, scrollHeight: node.scrollHeight, clientHeight: node.clientHeight};
   }
 
-  window.__rebUiProbe = {layoutIssues, clippedText, scrollToEnd, focusState, center, inertness, scrollProbe, text, visibleText, count, exists, describe, box};
+  // Controls in scope whose visible part meets the divider's hit target. A
+  // shared edge is touching, not overlapping. layoutIssues tests only centers,
+  // so a control's edge or a scrolled row's sliver could sit under the divider.
+  // The divider straddles its panes' shared edge by design, so focusable panes
+  // themselves are named and skipped; everything inside them is checked.
+  function dividerReach(dividerSelector, rootSelector, paneSelectors = []) {
+    const divider = document.querySelector(dividerSelector), root = document.querySelector(rootSelector) || document.body;
+    if (!divider || divider.hidden) return {shown: false, offenders: []};
+    const panes = new Set(paneSelectors.map(selector => document.querySelector(selector)));
+    const reach = divider.getBoundingClientRect();
+    const offenders = [];
+    for (const control of root.querySelectorAll(CONTROLS)) {
+      if (panes.has(control) || !rendered(control)) continue;
+      const visible = visibleRect(control);
+      const width = Math.min(visible.right, reach.right) - Math.max(visible.left, reach.left);
+      const height = Math.min(visible.bottom, reach.bottom) - Math.max(visible.top, reach.top);
+      if (width > 0.01 && height > 0.01) offenders.push(`${describe(control)} meets ${Math.round(width * 10) / 10}x${Math.round(height * 10) / 10}px`);
+    }
+    return {shown: true, offenders: offenders.slice(0, 20)};
+  }
+
+  window.__rebUiProbe = {layoutIssues, clippedText, scrollToEnd, focusState, center, inertness, scrollProbe, text, visibleText, count, exists, describe, box, dividerReach};
 })();

@@ -84,6 +84,7 @@ HEADERS = (
 TRANSPORT_HEADERS = (
     "build/build_config.h",
     "base/command_line.h",
+    "base/component_export.h",
     "base/containers/span.h",
     "base/files/file_path.h",
     "base/files/file_util.h",

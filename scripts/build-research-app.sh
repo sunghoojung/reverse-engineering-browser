@@ -37,6 +37,12 @@ app_path="${staging_root}/Origin Trace.app"
 contents_path="${app_path}/Contents"
 macos_path="${contents_path}/MacOS"
 resources_path="${contents_path}/Resources"
+info_plist="${repo_root}/apps/research-ui/macos/Info.plist"
+# Swift otherwise targets the build host's release. Every Swift executable,
+# smoke checks included, targets the oldest macOS the bundle declares, as
+# mk/config.mk does for the C++ helpers.
+minimum_macos="$(plutil -extract LSMinimumSystemVersion raw -o - "${info_plist}")"
+swiftc=(xcrun swiftc -target "$(uname -m)-apple-macos${minimum_macos}")
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 stored_event_window_source="${repo_root}/apps/research-ui/macos/StoredEventWindow.swift"
 stored_evidence_backend_source="${repo_root}/apps/research-ui/macos/StoredEvidenceBackend.swift"
@@ -64,7 +70,7 @@ iconset_path="${repo_root}/build/OriginTrace.iconset"
 research_ui_resources="${resources_path}/research-ui"
 
 mkdir -p "${macos_path}" "${resources_path}"
-cp "${repo_root}/apps/research-ui/macos/Info.plist" "${contents_path}/Info.plist"
+cp "${info_plist}" "${contents_path}/Info.plist"
 # Remember a reused local browser output without copying its source or bundle.
 # This optional hint never substitutes for the runtime bundle/executable checks.
 REB_PACKAGE_REPOSITORY="${repo_root}" REB_PACKAGE_RESOURCES="${resources_path}" \
@@ -181,7 +187,7 @@ if [[ "${smoke_checks}" == 0 ]]; then
   echo "Skipping the native smoke checks (REB_APP_SMOKE_CHECKS=0)."
 fi
 
-smoke xcrun swiftc -parse-as-library \
+smoke "${swiftc[@]}" -parse-as-library \
   "${workspace_lease_source}" "${repo_root}/apps/research-ui/macos/NativeWorkspaceLeaseChecks.swift" \
   -o "${repo_root}/build/check-native-workspace-lease"
 smoke "${repo_root}/build/check-native-workspace-lease"
@@ -189,42 +195,42 @@ smoke env REB_WORKSPACE_LEASE_TEST_HELPER="${repo_root}/build/check-native-works
   cargo test --locked --manifest-path "${repo_root}/apps/origin-trace-backend/Cargo.toml" \
   workspace_native_lock_interoperability -- --ignored
 
-smoke xcrun swiftc -parse-as-library \
+smoke "${swiftc[@]}" -parse-as-library \
   "${trace_document_source}" "${repo_root}/tools/check-origin-trace-gaps.swift" \
   -o "${repo_root}/build/check-origin-trace-gaps"
 smoke "${repo_root}/build/check-origin-trace-gaps" \
   "${repo_root}/apps/origin-trace-backend/assets/origin-trace-gap-cases.json" \
   "${repo_root}/apps/origin-trace-backend/assets/origin-trace-invocation-cases.json"
 
-smoke xcrun swiftc -parse-as-library \
+smoke "${swiftc[@]}" -parse-as-library \
   "${live_session_source}" "${repo_root}/tools/check-live-session-failure.swift" \
   -o "${repo_root}/build/check-live-session-failure"
 smoke "${repo_root}/build/check-live-session-failure"
 
-xcrun swiftc -parse-as-library \
+"${swiftc[@]}" -parse-as-library \
   "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${repo_root}/tools/check-agent-core.swift" \
   "${repo_root}/tools/check-agent-subscriptions.swift" "${repo_root}/tools/agent-cli-stand-in.swift" \
   -o "${repo_root}/build/check-agent-core"
 smoke "${repo_root}/build/check-agent-core" "${repo_root}/apps/origin-trace-backend/target/release/reb-api"
 
 smoke node "${repo_root}/tools/check-captured-client-project.mjs"
-smoke xcrun swiftc -parse-as-library -framework Cocoa -framework WebKit \
+smoke "${swiftc[@]}" -parse-as-library -framework Cocoa -framework WebKit \
   "${client_project_export_source}" "${repo_root}/tools/check-client-project-export.swift" \
   -o "${repo_root}/build/check-client-project-export"
 smoke "${repo_root}/build/check-client-project-export" \
   "${repo_root}/build/client-project-qa/authored-example.zip"
 
-smoke xcrun swiftc -parse-as-library \
+smoke "${swiftc[@]}" -parse-as-library \
   "${stored_event_window_source}" "${repo_root}/tools/check-stored-event-window.swift" \
   -o "${repo_root}/build/check-stored-event-window"
 smoke "${repo_root}/build/check-stored-event-window"
 
-smoke xcrun swiftc -parse-as-library \
+smoke "${swiftc[@]}" -parse-as-library \
   "${stored_evidence_backend_source}" "${repo_root}/tools/check-stored-evidence-backend.swift" \
   -o "${repo_root}/build/check-stored-evidence-backend"
 smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"
 
-xcrun swiftc \
+"${swiftc[@]}" \
   -parse-as-library \
   -framework Cocoa \
   -framework WebKit \
@@ -234,13 +240,17 @@ xcrun swiftc \
 
 "${macos_path}/OriginTrace" --check-native-ui-url
 
-xcrun swiftc \
+"${swiftc[@]}" \
   -parse-as-library \
   -framework JavaScriptCore \
   "${analyst_runner_source}" \
   -o "${macos_path}/OriginTraceAnalystRunner"
 
 codesign --force --deep --sign - "${app_path}" >/dev/null
+# macOS opens the app on any release LSMinimumSystemVersion admits, but will
+# not start a helper built for a newer one. Never replace the bundle with one
+# that has such a helper.
+python3 "${repo_root}/tools/check-macos-deployment-target.py" "${app_path}"
 rm -rf "${final_app_path}"
 mv "${app_path}" "${final_app_path}"
 echo "Built ${final_app_path}"

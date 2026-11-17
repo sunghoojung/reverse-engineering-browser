@@ -19,6 +19,16 @@ DEMO_WEB_AUDIO_PAYLOAD_HEX := 4f66666c696e65417564696f436f6e746578742e7374617274
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 DEFAULT_SANITIZERS := undefined
+# Origin Trace.app ships these executables, so they target the oldest macOS
+# its Info.plist admits instead of the build host's release. Native objects
+# depend on that file, and the app build refuses a bundled Mach-O that
+# records a newer minimum.
+MACOS_INFO_PLIST := apps/research-ui/macos/Info.plist
+MACOS_DEPLOYMENT_TARGET := $(shell plutil -extract LSMinimumSystemVersion raw -o - $(MACOS_INFO_PLIST) 2>/dev/null)
+ifeq ($(MACOS_DEPLOYMENT_TARGET),)
+$(error Cannot read LSMinimumSystemVersion from $(MACOS_INFO_PLIST))
+endif
+PLATFORM_FLAGS := -mmacosx-version-min=$(MACOS_DEPLOYMENT_TARGET)
 else
 DEFAULT_SANITIZERS := address,undefined
 endif
@@ -34,8 +44,9 @@ COMMON_CXXFLAGS := \
 	-Wshadow \
 	-Werror \
 	-pthread \
+	$(PLATFORM_FLAGS) \
 	$(EXTRA_CXXFLAGS)
 
 CPPFLAGS := -I$(INCLUDE_DIR)
-LDFLAGS := -pthread $(EXTRA_LDFLAGS)
+LDFLAGS := -pthread $(PLATFORM_FLAGS) $(EXTRA_LDFLAGS)
 ZLIB_LIBS ?= -lz

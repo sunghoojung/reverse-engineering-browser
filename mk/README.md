@@ -37,10 +37,16 @@ Make does not detect changes to command-line flag values in an existing build
 directory. Changes to the native rules or compiler configuration files do
 invalidate native objects. `make sanitize` uses its own clean build directory.
 
+On macOS every native object and executable is built with
+`-mmacosx-version-min` set to `LSMinimumSystemVersion` from
+[apps/research-ui/macos/Info.plist](../apps/research-ui/macos/Info.plist),
+because the app bundle ships them. An edit to that file rebuilds them.
+
 `make native-build-test` runs `scripts/check-native-build.sh`, which builds and
 runs two independent executables in a
 temporary directory, checks that a repeat build does no work, and verifies that
 an artifact header change invalidates its consumer without rebuilding the event
+demo. On macOS it also verifies that an `Info.plist` edit invalidates the
 demo. `make check` includes this regression check, the deobfuscation semantic
 benchmark, and the backend and deobfuscator worker's Rust test suites. It also
 runs the source-facts HTTP/CLI integration test against the built Rust/Oxc worker;

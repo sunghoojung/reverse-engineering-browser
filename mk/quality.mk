@@ -308,6 +308,7 @@ python-check: vm-lab-check
 	python3 tools/check-cookie-import-terminal.py
 	python3 tools/check-header-observer-patch.py
 	python3 tools/check-live-acceptance-test.py
+	python3 tools/check-macos-deployment-target.py --self-test
 	python3 tools/ci-scope-test.py
 	python3 -m compileall -q tools
 	$(RUFF) check tools

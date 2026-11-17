@@ -130,6 +130,15 @@ deob-benchmark: deob-worker-build
 compiled-script-capture-check: origin-trace-backend
 	python3 tools/check-compiled-script-capture.py --reb-api apps/origin-trace-backend/target/debug/reb-api
 
+# Opt-in: needs REB_BRAVE_BINARY set to a Brave built from this tree. Runs the
+# paired-release live acceptance; LIVE_ACCEPTANCE_SESSION picks one session kind
+# (content, budget, metadata or no-stacks) instead of all four. Its sessions
+# start the same launcher as make live, so it needs the same builds.
+.PHONY: live-acceptance-check
+live-acceptance-check: app-build broker artifact-receiver origin-trace-backend
+	python3 tools/check-live-acceptance.py --reb-api apps/origin-trace-backend/target/debug/reb-api \
+		--session $(or $(LIVE_ACCEPTANCE_SESSION),all)
+
 .PHONY: native-request-identity-check
 native-request-identity-check: broker
 	python3 tools/check-native-request-identity.py --broker $(BROKER_BINARY)

@@ -116,7 +116,8 @@ std::uint64_t FrameId(const blink::WebLocalFrame* frame) {
   if (!frame) {
     return 0;
   }
-  const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
+  // GetLocalFrameToken() returns by value; a reference into it would dangle.
+  const base::UnguessableToken token = frame->GetLocalFrameToken().value();
   return NativeFrameIdOf(token.GetHighForSerialization(), token.GetLowForSerialization());
 }
 // A Console command's own throw is not a page exception.
@@ -668,7 +669,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     result = Watch(isolate, frame, *parsed);
   else if (*operation == "unwatch") {
     Unwatch();
-    result.Set("status", "ok").Set("text", "Watch rules disarmed");
+    result = base::DictValue().Set("status", "ok").Set("text", "Watch rules disarmed");
   } else if (*operation == "evaluate") {
     const auto* source = parsed->FindString("source");
     if (!source || source->empty() || source->size() > 8192 ||

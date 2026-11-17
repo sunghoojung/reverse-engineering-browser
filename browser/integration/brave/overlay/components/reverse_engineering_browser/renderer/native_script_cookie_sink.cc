@@ -77,6 +77,7 @@ NativeScriptCookieSink& NativeScriptCookieSink::Get() {
 }
 
 NativeScriptCookieSink::NativeScriptCookieSink() noexcept = default;
+NativeScriptCookieSink::~NativeScriptCookieSink() = default;
 
 void NativeScriptCookieSink::Configure(const bool capture_content,
                                        const FrameProvider provider) noexcept {

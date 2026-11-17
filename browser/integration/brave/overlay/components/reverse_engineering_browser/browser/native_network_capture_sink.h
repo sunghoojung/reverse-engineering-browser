@@ -134,11 +134,13 @@ class NativeNetworkCaptureSink final {
                               const network::URLLoaderCompletionStatus& status,
                               std::string_view disposition = {}) noexcept;
   // The network_headers_hook observer while a content session is active:
-  // header blocks and the sent and received cookie lists of each hop.
+  // the request and response blocks the network stack reported and the sent
+  // and received cookie lists of each hop.
   void RecordNetworkHeaders(NativeNetworkHeadersKind kind,
                             std::string_view devtools_request_id,
                             const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
-                            NativeNetworkCookies cookies = {}) noexcept;
+                            NativeNetworkCookies cookies = {},
+                            std::int32_t response_code = 0) noexcept;
   // Keeps a navigation's renderer stack by DevTools ID until its request starts.
   bool NoteNavigationInitiator(std::string_view devtools_request_id,
                                std::uint32_t renderer_process_id,
@@ -147,6 +149,7 @@ class NativeNetworkCaptureSink final {
  private:
   friend class base::NoDestructor<NativeNetworkCaptureSink>;
   NativeNetworkCaptureSink();
+  ~NativeNetworkCaptureSink();
 
   void EmitRequestTarget(NativeProbeEmitter emitter,
                          const NativeProbeHeader& parent,

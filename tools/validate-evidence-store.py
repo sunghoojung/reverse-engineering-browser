@@ -622,8 +622,8 @@ def valid_header_block(event: dict, payload: bytes) -> bool:
     if event["type"] == "response_headers":
         if policy != 0:
             return False
-        if source == 1:
-            if status > 999 or 0 < status < 100:
+        if source in (1, 2):
+            if status > 999 or 0 < status < 100 or (source == 2 and addressed):
                 return False
         elif source != 3 or status != 103 or addressed:
             return False

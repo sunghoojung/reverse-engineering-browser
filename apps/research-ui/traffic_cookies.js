@@ -180,7 +180,9 @@ function trafficCookieProvenanceRead(sessionId, name, rerender, storeRevision = 
       entry = {status: 'ready', frames, setBy: answer.set_by ?? [], sentWith: answer.sent_with ?? [], script: answer.script ?? [],
         unread: answer.lists_unread ?? 0, malformed: Array.isArray(malformed) ? malformed.length : Number(malformed) || 0,
         stacksUnresolved: answer.stacks_unresolved ?? 0, readCoverage: answer.read_coverage ?? null,
-        complete: answer.coverage?.complete === true && !answer.lists_unread, storeRevision, readAt: Date.now()};
+        complete: answer.coverage?.complete === true && !answer.lists_unread,
+        // Script calls are located across the session, apart from the newest-record window.
+        scriptComplete: answer.script_coverage?.complete === true, storeRevision, readAt: Date.now()};
     } catch {
       entry = previous ? {...previous, readAt: Date.now()} : {status: 'error', failedAt: Date.now()};
     }
@@ -410,9 +412,9 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   const sessionId = scripts.find(record => record.frame)?.sessionId ?? selectedSession;
   const read = sessionId ? trafficCookieProvenanceRead(sessionId, name, rerender, storeRevision) : {status: 'unavailable'};
   const answered = read.status === 'ready';
-  const unknownAbsence = what => !answered ? `Not in the loaded requests; ${read.status === 'error' ? 'the store could not be asked' : read.status === 'loading' ? 'asking the store' : 'the store cannot be asked here'}.`
-    : read.complete ? what
-      : 'Not in the scanned range: the backend reads the newest retained network records, so older records were not read.';
+  const outsideWindow = 'Not in the scanned range: the backend reads the newest retained network records, so older records were not read.';
+  const unknownAbsence = (what, complete = read.complete, unread = outsideWindow) => !answered ? `Not in the loaded requests; ${read.status === 'error' ? 'the store could not be asked' : read.status === 'loading' ? 'asking the store' : 'the store cannot be asked here'}.`
+    : complete ? what : unread;
   const backendWhere = item => `request ${item.request_id}${item.hop ? ` · hop ${item.hop}` : ''}`;
   const seen = new Set([...setBy, ...sentWith].map(({list}) => list.sequenceNumber));
   const beyond = items => (answered ? items : []).filter(item => !seen.has(item.sequence_number));
@@ -462,8 +464,9 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
   }).concat(beyondScripts(read, scripts).map(call => entry(`${call.api}${call.count > 1 ? ` × ${call.count}` : ''} ${trafficCookieCallPlace(call.thread, call.frame_id)}` +
     `${call.script_frame ? `, script ${call.script_frame.script_id} at character ${call.script_frame.position}` : ', no script position'}` +
     `${call.stack_digest ? `, stack ${call.stack_digest.slice(0, 12)}` : ''}${call.name_prefix_only ? ' (name matched by its first 24 bytes)' : ''}`))),
-  unnamedNote && answered && read.complete ? 'No recorded document.cookie or Cookie Store call named it.'
-    : unknownAbsence('No recorded document.cookie or Cookie Store call used this name.'));
+  unnamedNote && answered && read.scriptComplete ? 'No recorded document.cookie or Cookie Store call named it.'
+    : unknownAbsence('No recorded document.cookie or Cookie Store call used this name.', read.scriptComplete,
+      'Not among the script calls the store located, which are not yet every call of this session.'));
   const writes = new Map(scripts.filter(record => record.write).map(record => [record.valueSha256, record]));
   group('Sent with requests', sentWith.map(({request, list, cookie}) => {
     const write = cookie.valueSha256 ? writes.get(cookie.valueSha256) : null;
@@ -480,7 +483,7 @@ function trafficCookieProvenance(name, {requests = [], events = [], selectReques
     .filter(Boolean);
   if (notes.length) section.append(trafficNode('p', 'traffic-headers-note', notes.join(' ')));
   return {section, key: JSON.stringify([name, setBy.length, sentWith.length, scripts.length, loading, unread, frames?.size ?? null, read.status,
-    read.setBy?.length, read.sentWith?.length, read.script?.length, read.complete, read.unread, unnamedNote])};
+    read.setBy?.length, read.sentWith?.length, read.script?.length, read.complete, read.scriptComplete, read.unread, unnamedNote])};
 }
 
 // Where a script cookie call ran: a worker's record names the worker by its
@@ -513,10 +516,11 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
     container.dataset.renderKey = '';
     return;
   }
+  // The panel opens at the top of the tab, so focus moves there and brings it into view.
   const onProvenance = (name, openerKey = null) => {
     trafficCookieOptions.provenance = name;
     trafficCookieOptions.opener = openerKey;
-    trafficCookieOptions.focusKey = openerKey;
+    trafficCookieOptions.focusKey = 'provenance-close';
     container.dataset.renderKey = '';
     rerender?.();
   };

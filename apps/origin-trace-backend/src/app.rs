@@ -1391,8 +1391,11 @@ impl App {
                 if name.len() > 4096 {
                     return Err(Error::bad("name is longer than 4096 bytes"));
                 }
+                // Only the records provenance reads, so its window spans more of
+                // the session than every network record would.
                 let filter = event_query::event_filter(&Query::new(&format!(
-                    "session_id={session}&category=network"
+                    "session_id={session}&category=network&type=cookie_list,request_started,\
+                     request_redirected,script_cookie,script_identity"
                 )))?;
                 let options = self.options.clone();
                 let progress = self.requests.lock().await.progress_marker();
@@ -1410,8 +1413,28 @@ impl App {
                 let requests = self.requests.clone();
                 self.blocking(move || {
                     // A cookie spans the session, so no one request's bytes bound it.
-                    let detail =
+                    let mut detail =
                         event_query::read_request_records(&options.store, None, 5000, &filter)?;
+                    // Its script calls are read wherever they sit: the index
+                    // locates every script_cookie record, and those older than
+                    // the window join it when they concern this name.
+                    let (located, exhaustive) =
+                        requests.blocking_lock().script_cookies(&session)?;
+                    let older: Vec<_> = located
+                        .into_iter()
+                        .filter(|range| range.end <= detail.coverage.scan_start())
+                        .collect();
+                    let (earlier, unreadable) =
+                        event_query::read_records_at(&options.store, &older, |event| {
+                            filter.matches(event)
+                                && request_cookies::script_record_used(event, &name)
+                        })?;
+                    let script_coverage = json!({
+                        "complete": exhaustive && unreadable == 0,
+                        "located_outside_window": older.len(),
+                        "unreadable": unreadable,
+                    });
+                    detail.records.splice(0..0, earlier);
                     // Script writes resolve through this session's stacks and sources.
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |a| {
@@ -1447,6 +1470,7 @@ impl App {
                         &identities,
                     );
                     document["coverage"] = detail.coverage.to_json();
+                    document["script_coverage"] = script_coverage;
                     Ok(document)
                 })
                 .await?

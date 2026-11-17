@@ -8,6 +8,9 @@ module reb.mojom;
 import "mojo/public/mojom/base/shared_memory.mojom";
 import "mojo/public/mojom/base/big_buffer.mojom";
 
+// One renderer process's capture configuration. The browser binds it on the
+// process's IPC channel at launch, so a configuration it sends before a
+// navigation commit is applied before that document runs any script.
 interface NativeProbeClient {
   Configure(uint64 session_id,
             uint64 category_mask,
@@ -53,7 +56,6 @@ interface NativeProbeClient {
 // Process-wide renderer connection. Event records travel through the shared
 // queue. Mojo carries lifecycle changes and one coalesced wake-up per batch.
 interface NativeProbeHost {
-  BindClient(pending_remote<NativeProbeClient> client);
   EventsAvailable();
   CaptureWasmDispatch(uint64 capture_epoch,
                       uint64 session_id,

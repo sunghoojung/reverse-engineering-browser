@@ -63,7 +63,6 @@ HEADERS = (
     "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h",
     "base/functional/callback.h",
     "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h",
-    "base/memory/raw_ptr.h",
     "base/memory/raw_ref.h",
     "base/memory/scoped_refptr.h",
     "base/task/thread_pool.h",
@@ -75,7 +74,10 @@ HEADERS = (
     "content/public/browser/render_process_host.h",
     "content/public/browser/web_contents.h",
     "content/public/browser/weak_document_ptr.h",
-    "mojo/public/cpp/bindings/remote.h",
+    "mojo/public/cpp/bindings/associated_remote.h",
+    "mojo/public/cpp/bindings/pending_associated_remote.h",
+    "mojo/public/cpp/bindings/pending_receiver.h",
+    "mojo/public/cpp/bindings/receiver.h",
 )
 
 
@@ -212,6 +214,7 @@ def check_transport(receiver: str) -> None:
             *compiler_flags(),
             f"-I{fixture}",
             f"-I{stubs}",
+            f"-I{ROOT / 'tools/native-test-support'}",
             f"-I{include}",
             str(fixture / "main.cc"),
             str(sources / "browser/native_artifact_socket_client.cc"),

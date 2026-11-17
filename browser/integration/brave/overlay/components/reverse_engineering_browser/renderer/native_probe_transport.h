@@ -21,7 +21,8 @@
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
-#include "mojo/public/cpp/bindings/receiver.h"
+#include "mojo/public/cpp/bindings/associated_receiver.h"
+#include "mojo/public/cpp/bindings/pending_associated_receiver.h"
 #include "mojo/public/cpp/bindings/shared_remote.h"
 
 namespace reb {
@@ -37,6 +38,9 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
 
   // Called once on the renderer main thread after Mojo is available.
   void Connect(mojo::PendingRemote<mojom::NativeProbeHost> pending_host);
+  // Binds the client the browser requested on this process's IPC channel, so
+  // configuration is ordered with that channel's navigation commits.
+  void BindClient(mojo::PendingAssociatedReceiver<mojom::NativeProbeClient> receiver);
 
   // mojom::NativeProbeClient:
   void Configure(std::uint64_t session_id,
@@ -54,10 +58,6 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
   void Disable() override;
-  // Session-start probe for limits V8 can see without a guest execution, such
-  // as jitless. Not cleared by Disable: it reads process flags, not the session.
-  using NativeWasmLimitProbe = void (*)() noexcept;
-  static void SetNativeWasmLimitProbe(NativeWasmLimitProbe probe) noexcept;
   void NativeStackArtifactRefused(std::uint64_t creator_event_id) override;
   void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
                                std::uint64_t module_token,
@@ -105,7 +105,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
 
   mojo::SharedRemote<mojom::NativeProbeHost> host_;
   base::ThreadLocalOwnedPointer<mojo::SharedRemote<mojom::NativeProbeHost>> thread_hosts_;
-  mojo::Receiver<mojom::NativeProbeClient> receiver_{this};
+  mojo::AssociatedReceiver<mojom::NativeProbeClient> receiver_{this};
   // Mappings are retained for process lifetime so Disable cannot unmap a queue
   // after a worker has loaded its pointer but before that worker finishes its
   // non-blocking copy.

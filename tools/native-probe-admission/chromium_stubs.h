@@ -15,6 +15,11 @@
 
 #define COMPONENT_EXPORT(component)
 #define UNSAFE_BUFFERS(...) __VA_ARGS__
+#if defined(__has_cpp_attribute) && __has_cpp_attribute(clang::lifetimebound)
+#define REB_STUB_LIFETIME_BOUND [[clang::lifetimebound]]
+#else
+#define REB_STUB_LIFETIME_BOUND
+#endif
 
 namespace base {
 inline std::atomic<std::int64_t> test_now_ns{100};
@@ -106,8 +111,10 @@ class AutoLock {
   Lock& lock_;
 };
 struct UnguessableToken {
-  std::uint64_t GetHighForSerialization() const { return 1; }
-  std::uint64_t GetLowForSerialization() const { return 2; }
+  std::uint64_t high = 1;
+  std::uint64_t low = 2;
+  std::uint64_t GetHighForSerialization() const { return high; }
+  std::uint64_t GetLowForSerialization() const { return low; }
 };
 }  // namespace base
 
@@ -142,7 +149,6 @@ struct NativeProbeClient {
 struct NativeProbeHost {
   inline static std::atomic<unsigned> notifications{0};
   inline static std::atomic<unsigned> artifacts{0};
-  void BindClient(int) {}
   void EventsAvailable() { ++notifications; }
   template <class... Args>
   void CaptureWasmDispatch(Args&&...) {
@@ -206,9 +212,12 @@ class SharedRemote {
   T* value_ = nullptr;
 };
 template <class T>
-struct Receiver {
-  explicit Receiver(T*) {}
-  int BindNewPipeAndPassRemote() { return 0; }
+struct PendingAssociatedReceiver {};
+template <class T>
+struct AssociatedReceiver {
+  explicit AssociatedReceiver(T*) {}
+  void reset() {}
+  void Bind(PendingAssociatedReceiver<T>) {}
 };
 }  // namespace mojo
 
@@ -219,11 +228,12 @@ inline thread_local void (*test_frame_hook)() = nullptr;
 // Default absence keeps every unrelated case at an unattributed frame. A test
 // opts in to model a caller that runs with an entered script context.
 inline thread_local bool test_frame_present = false;
+// Blink returns the frame token by value and value() refers into it, so a
+// reference kept past the full expression dangles. Chromium leaves value()
+// unannotated; marking it here makes Clang reject that reference (-Wdangling).
 struct FrameToken {
-  const base::UnguessableToken& value() const {
-    static const base::UnguessableToken token;
-    return token;
-  }
+  base::UnguessableToken token;
+  const base::UnguessableToken& value() const REB_STUB_LIFETIME_BOUND { return token; }
 };
 struct WebLocalFrame {
   static WebLocalFrame* FrameForCurrentContext() {

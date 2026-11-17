@@ -1,0 +1,18 @@
+diff --git a/content/browser/gpu/gpu_process_host.cc b/content/browser/gpu/gpu_process_host.cc
+index c3e180a..c4fe3e2 100644
+--- a/content/browser/gpu/gpu_process_host.cc
++++ b/content/browser/gpu/gpu_process_host.cc
+@@ -154,8 +154,12 @@ namespace {
+ #if BUILDFLAG(IS_MAC)
+ // If enabled, the GPU process will not inherit the browser process's TCC
+ // responsibilities (https://crbug.com/507596239).
++// A terminal or Origin Trace starts the research browser, so the GPU process
++// would be its own TCC client. Started from a protected folder such as
++// ~/Documents, it then blocks opening its first library and never runs, which
++// leaves canvas, WebGL and compositing waiting. It keeps its GPU sandbox.
+ BASE_FEATURE(kMacDisclaimGpuTccResponsibility,
+-             base::FEATURE_ENABLED_BY_DEFAULT);
++             base::FEATURE_DISABLED_BY_DEFAULT);
+ #endif
+ 
+ // UMA histogram names.

@@ -109,10 +109,13 @@ static_assert(offsetof(HeaderBlockPayload, reserved1) == 80);
     return false;
   }
   const bool addressed = value.address_family != 0;
+  const bool http_status =
+      value.status_code == 0 || (value.status_code >= 100 && value.status_code <= 999);
   if (response) {
     if (value.referrer_policy != 0 ||
-        (source == HeaderSource::kBrowser
-             ? value.status_code > 999 || (value.status_code != 0 && value.status_code < 100)
+        (source == HeaderSource::kBrowser ? !http_status
+         : source == HeaderSource::kNetwork
+             ? !http_status || addressed
              : source != HeaderSource::kEarlyHints || value.status_code != 103 || addressed)) {
       return false;
     }

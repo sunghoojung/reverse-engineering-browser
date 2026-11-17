@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 025dbb8..c1a3b0e 100644
+index 025dbb8..5c93376 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -39,12 +39,14 @@
@@ -17,7 +17,7 @@ index 025dbb8..c1a3b0e 100644
  #include "base/time/time.h"
  #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
-@@ -784,6 +786,142 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
+@@ -784,6 +786,147 @@ reb::NativeJsInvocationContext CurrentJsInvocation() noexcept {
    return result;
  }
  
@@ -120,10 +120,15 @@ index 025dbb8..c1a3b0e 100644
 +  }
 +  std::span<const std::uint8_t> bytes;
 +  if (module_bytes != nullptr && module_size >= 8 &&
-+      module_size <= reb::kNativeArtifactMaxContentBytes &&
-+      module_bytes[0] == 0 && module_bytes[1] == 'a' &&
-+      module_bytes[2] == 's' && module_bytes[3] == 'm') {
-+    bytes = UNSAFE_BUFFERS(base::span(module_bytes, module_size));
++      module_size <= reb::kNativeArtifactMaxContentBytes) {
++    // V8 hands over the module's pointer and length; every read goes through
++    // the span that pairs them.
++    const base::span<const std::uint8_t> module_span =
++        UNSAFE_BUFFERS(base::span(module_bytes, module_size));
++    if (module_span[0] == 0 && module_span[1] == 'a' &&
++        module_span[2] == 's' && module_span[3] == 'm') {
++      bytes = module_span;
++    }
 +  }
 +  std::uint64_t execution_context_id = 0;
 +  std::uint64_t frame_id = 0;
@@ -160,7 +165,7 @@ index 025dbb8..c1a3b0e 100644
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1782,9 +1920,16 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1782,9 +1925,16 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
        NativeWasmGuestDispatcherFunction);
    reb::NativeProbeSink::Get().SetNativeWasmGuestRuntime(CurrentNativeWasmGuest,
                                                          ResetNativeWasmGuest);

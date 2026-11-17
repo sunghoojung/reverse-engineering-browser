@@ -9,15 +9,22 @@
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
+#include "base/scoped_multi_source_observation.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
+#include "content/public/browser/render_process_host_observer.h"
+
+namespace content {
+class RenderProcessHost;
+}  // namespace content
 
 namespace reb {
 
@@ -26,13 +33,20 @@ class NativeProbeHost;
 // Owns browser-process probe activation and fans one immutable session policy
 // out to every connected renderer. The authenticated socket client starts the
 // session. Without a complete valid policy every probe remains dormant.
-class NativeProbeSession final {
+class NativeProbeSession final : public content::RenderProcessHostObserver {
  public:
   static NativeProbeSession& Get();
 
   NativeProbeSession(const NativeProbeSession&) = delete;
   NativeProbeSession& operator=(const NativeProbeSession&) = delete;
 
+  // Creates the host of an admitted renderer before its process starts. Its
+  // configuration travels on the process's IPC channel, ahead of any
+  // navigation commit, so a new process's first document is captured from
+  // its first script. This relies on frames sharing the process channel,
+  // which holds while MBI mode is off (the default).
+  void RenderProcessWillLaunch(content::RenderProcessHost& process);
+  // The renderer's own connection to the host its launch created.
   void BindHost(int renderer_process_id, mojo::PendingReceiver<mojom::NativeProbeHost> receiver);
 
   [[nodiscard]] bool StartSession(std::uint64_t session_id,
@@ -99,7 +113,12 @@ class NativeProbeSession final {
   friend class base::NoDestructor<NativeProbeSession>;
 
   NativeProbeSession();
-  ~NativeProbeSession();
+  ~NativeProbeSession() override;
+
+  // content::RenderProcessHostObserver:
+  void RenderProcessExited(content::RenderProcessHost* process,
+                           const content::ChildProcessTerminationInfo& info) override;
+  void RenderProcessHostDestroyed(content::RenderProcessHost* process) override;
 
   static void EmitBrowserEvent(const NativeProbeEvent& event) noexcept;
 
@@ -122,6 +141,11 @@ class NativeProbeSession final {
   std::uint64_t webui_renderers_excluded_ = 0;
   std::map<std::uint8_t, std::uint64_t> browser_requests_excluded_;
   std::atomic<std::uint64_t> next_browser_sequence_{1};
+  // Each admitted renderer's host, from its process launch until that process
+  // exits. A relaunch of the same process host replaces it.
+  std::map<int, std::unique_ptr<NativeProbeHost>> launched_hosts_;
+  base::ScopedMultiSourceObservation<content::RenderProcessHost, content::RenderProcessHostObserver>
+      observed_processes_{this};
 };
 
 }  // namespace reb

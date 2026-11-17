@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
 #include "services/network/public/mojom/http_raw_headers.mojom.h"
 
 namespace net {
@@ -33,15 +34,17 @@ enum class NativeNetworkHeadersKind : std::uint8_t {
 // The cookie list of a raw request (sent) or raw response (received), with
 // each cookie's inclusion status; null for other notifications.
 struct NativeNetworkCookies final {
-  const std::vector<net::CookieWithAccessResult>* sent = nullptr;
-  const std::vector<net::CookieAndLineWithAccessResult>* received = nullptr;
+  raw_ptr<const std::vector<net::CookieWithAccessResult>> sent = nullptr;
+  raw_ptr<const std::vector<net::CookieAndLineWithAccessResult>> received = nullptr;
 };
 
+// `response_code` is a raw response's HTTP status, 0 for other notifications.
 using NativeNetworkHeadersObserver =
     void (*)(NativeNetworkHeadersKind kind,
              std::string_view devtools_request_id,
              const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
-             NativeNetworkCookies cookies);
+             NativeNetworkCookies cookies,
+             std::int32_t response_code);
 
 // `expires_at_monotonic_ns` is the session's expiry on the TimeTicks clock.
 COMPONENT_EXPORT(REB_NETWORK_HEADERS_HOOK)
@@ -60,7 +63,8 @@ COMPONENT_EXPORT(REB_NETWORK_HEADERS_HOOK)
 void NotifyNativeNetworkHeaders(NativeNetworkHeadersKind kind,
                                 std::string_view devtools_request_id,
                                 const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
-                                NativeNetworkCookies cookies = {});
+                                NativeNetworkCookies cookies = {},
+                                std::int32_t response_code = 0);
 
 }  // namespace reb
 

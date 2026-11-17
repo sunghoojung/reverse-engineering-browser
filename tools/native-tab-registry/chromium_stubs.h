@@ -92,6 +92,7 @@ class ChildProcessId {
  public:
   ChildProcessId() = default;
   explicit ChildProcessId(int value) : value_(value) {}
+  static ChildProcessId FromUnsafeValue(int value) { return ChildProcessId(value); }
   int GetUnsafeValue() const { return value_; }
 
  private:
@@ -271,7 +272,7 @@ class ChildProcessSecurityPolicy {
     static ChildProcessSecurityPolicy policy;
     return &policy;
   }
-  bool HasWebUIBindings(int) const { return false; }
+  bool HasWebUIBindings(ChildProcessId) const { return false; }
   std::string GetProcessLockScheme(int) const { return "https"; }
 };
 }  // namespace content

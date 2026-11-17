@@ -62,6 +62,7 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
 | Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
 | `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
+| `response_headers` source 2 | `network`: what `OnRawResponse` reported, with `Set-Cookie` | Headers and cookies |
 
 Traffic detail tabs, in order: General, Headers, Payload, Preview, Response,
 Cookies, Initiator, Timing, Signals, Evidence.
@@ -1447,15 +1448,18 @@ retain no header value. The receiver still refuses the sensitive kinds without
 | --- | ---: | --- | --- | --- |
 | `browser` | 1 | `request_headers` | `network::ResourceRequest::headers` and `cors_exempt_headers` at `request_started` | Provisional: no `Cookie`, `Host`, `Referer` or other headers the network stack adds |
 | `network` | 2 | `request_headers` | `network::mojom::DevToolsObserver::OnRawRequest` | The headers the network stack sent, including HTTP/2 and HTTP/3 pseudo-headers |
-| `browser` | 1 | `response_headers` | `URLResponseHead::headers` at `response_started` and every `request_redirected` | Keeps `Set-Cookie`: at the pin `url_loader_util::BuildResponseHead` copies `URLRequest::response_headers()`. Recorded before Brave's own header rewrite |
+| `browser` | 1 | `response_headers` | `URLResponseHead::headers` at `response_started` and every `request_redirected` | What reached the browser, recorded before Brave's own header rewrite. At the pin it has no `Set-Cookie`, `Set-Cookie2` or `Clear-Site-Data`: `HttpResponseHeaders::SerializeForMojoIpc` writes the head with `PERSIST_SANS_COOKIES` whenever it crosses Mojo |
+| `network` | 2 | `response_headers` | `network::mojom::DevToolsObserver::OnRawResponse` | The headers the network stack received, with every `Set-Cookie`; no remote endpoint |
 | `early_hints` | 3 | `response_headers` | `DevToolsObserver::OnEarlyHintsResponse` | One per 103 response |
 
 `TrustedURLLoaderHeaderClient` is not used: it can delay or change requests.
 
 #### Network-service binding at the pinned Chromium
 
-The network service calls `OnRawRequest` and `OnEarlyHintsResponse` only when
-the request carries `devtools_request_id`. `URLLoaderFactory` binds the observer
+The network service calls `OnRawRequest`, `OnRawResponse` and
+`OnEarlyHintsResponse` only when the request carries `devtools_request_id`,
+and `OnRawResponse` only after an `OnRawRequest` for the same request
+(`URLLoader::DispatchOnRawResponse`). `URLLoaderFactory` binds the observer
 per request from `ResourceRequest::TrustedParams::devtools_observer` (navigations)
 or else from the factory's `URLLoaderFactoryParams::devtools_observer`. Content
 creates both as `NetworkServiceDevToolsObserver::MakeSelfOwned`, which does
@@ -1464,15 +1468,16 @@ set `devtools_request_id` only when one is enabled.
 
 So in content sessions the Brave proxy gives each admitted request without an
 ID the ID `reb-<request_id as 16 hex digits>`, and Chromium patch
-`0025-forward-native-network-headers.patch` forwards the two notifications to
-the `network_headers_hook` component before DevTools dispatch. The ID changes
-no request bytes. It does make the network service send SSL info and
-transfer-size updates to the loader client, as with DevTools open. Unknown IDs,
-such as CORS preflights, are ignored.
+`0025-forward-native-network-headers.patch` forwards the three notifications
+to the `network_headers_hook` component before DevTools dispatch, with the raw
+response's `http_status_code`. The ID changes no request bytes. It does make
+the network service send SSL info and transfer-size updates to the loader
+client, as with DevTools open. Unknown IDs, such as CORS preflights, are
+ignored.
 
 A request whose factory has no observer gets no `network` block and no cookie
-list. At the pin these are the factories the proxy sees, and the observer each
-gets:
+list, so its only response blocks are `browser` ones, without cookie headers.
+At the pin these are the factories the proxy sees, and the observer each gets:
 
 | Factory | Where Chromium builds its observer | Observer at the pin | With patch 0058 |
 | --- | --- | --- | --- |
@@ -1564,10 +1569,14 @@ network service emits at most one raw request per hop and marks each response
 head with `emitted_extra_info`. A `network` request block joins the oldest
 finished hop whose head says a raw request was emitted and that has none yet,
 or else the open hop. Its parent is that hop's start record (`request_started`
-or `request_redirected`). Early hints join the open hop. A block for a request
-the sink no longer tracks, including a DevTools-owned ID among the newest 256
-finished, increments the unattributed count carried by every later header
-record.
+or `request_redirected`). A `network` response block joins the hop of the
+request's latest raw request, which arrived before it on the same pipe, with
+that hop's start record as its parent, like the received cookie list. Early
+hints join the open hop. A block for a request the sink no longer tracks,
+including a DevTools-owned ID among the newest 256 finished, increments the
+unattributed count carried by every later header record. A raw response with
+no raw request before it is counted the same way, and also as an unattributed
+cookie list.
 
 ### Records
 
@@ -1611,9 +1620,9 @@ decoder and the backend:
 
 - `request_headers` has source 1 or 2, status 0 and no address. Source 1 has
   referrer policy 1 to 8, source 2 has 0.
-- `response_headers` has source 1 or 3 and referrer policy 0. Source 1 has a
-  status from 100 to 999, or 0 when Chromium parsed none; source 3 has status
-  103 and no address.
+- `response_headers` has source 1, 2 or 3 and referrer policy 0. Sources 1
+  and 2 have a status from 100 to 999, or 0 when Chromium parsed none; source
+  2 has no address; source 3 has status 103 and no address.
 - Family 0 has port and address zero; family 4 has address bytes 4 to 15 zero.
 - Count, length and state 3 are all zero or none is. Otherwise the length is at
   least 5 bytes per header.
@@ -1863,13 +1872,18 @@ string while content capture is on.
 returns each hop's sent and received cookies with every attribute, exclusion
 and warning reason. `get_cookie_provenance`
 (`GET /api/cookie-provenance?session_id=&name=`) lists what touched a cookie
-name in the newest 5,000 network records within the last 64 MiB of events: the
-responses that set it, the script writes and reads with their frame, and the
-requests that sent it. `coverage` says what was read, so an absent entry is not
-proof when `coverage.complete` is false (see
+name: the script writes and reads with their frame anywhere in the session, and
+the responses that set it and the requests that sent it in the newest 5,000
+cookie list, request start, redirect, script call and script identity records
+within the last 64 MiB of events. A cookie is often written once early and sent
+on every later request, so the request index locates every `script_cookie`
+record of the session (at most 65,536) and provenance reads back those older
+than its window by byte range; `script_coverage` says whether that list is
+complete. `coverage` says what the window read, so an absent response or request
+is not proof when `coverage.complete` is false (see
 [request index v1](request-index-v1.md#per-request-detail-reads)). Each
 script call's `stack` resolves like `get_request_stack`: through
-`script_identity` records in the same window to line, column and function name,
+`script_identity` records in the window and the index to line, column and function name,
 with every walked frame when its digest names a retained stack artifact; at
 most 64 distinct positions per answer, the rest counted in
 `stacks_unresolved`.
@@ -1997,17 +2011,20 @@ footer stays one item however many reasons there are.
   becomes a lifecycle record.
 - Origin Trace's **Headers** tab shows General (URL, method, status, remote
   address, referrer policy), Response headers and Request headers per hop. A
-  hop with only a `browser` request block reads "Provisional headers are
-  shown" with its [reason](#missing-final-blocks). Each section collapses and
-  has a Raw view and copy actions. Values are inserted as text after a size
-  and SHA-256 check.
+  hop's Response headers are its `network` block, or else its `browser` block,
+  which says it lacks the cookie headers Chromium removes. A hop with only a
+  `browser` request block reads "Provisional headers are shown" with its
+  [reason](#missing-final-blocks). Each section collapses and has a Raw view
+  and copy actions. Values are inserted as text after a size and SHA-256
+  check.
 
 ### Validation
 
 `make native-network-capture-check` drives the sink: disabled and metadata
-sessions, provisional, network and response blocks over two redirect hops,
-out-of-order raw notifications, early hints, pseudo-headers, sharing, a
-200 KiB block retained whole, the block limit and the session budget.
+sessions, provisional, network and response blocks over two redirect hops, a
+raw response with `Set-Cookie` and its status, out-of-order raw notifications,
+early hints, pseudo-headers, sharing, a 200 KiB block retained whole, the block
+limit and the session budget.
 It also drives sent and received cookie lists with blocked cookies, an
 unparsed `Set-Cookie`, sharing and late lists. `make native-probe-admission-check`
 drives the renderer cookie sink: disabled, metadata-only, writes, read

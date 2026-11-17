@@ -125,9 +125,10 @@ deob-benchmark: deob-worker-build
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	python3 tools/run-deobfuscation-benchmark.py
 
-# Opt-in: needs REB_BRAVE_BINARY set to a Brave built from this tree.
+# Opt-in: needs REB_BRAVE_BINARY set to a Brave built from this tree. Its session
+# starts the same launcher as make live, so it needs the same builds.
 .PHONY: compiled-script-capture-check
-compiled-script-capture-check: origin-trace-backend
+compiled-script-capture-check: app-build broker artifact-receiver origin-trace-backend
 	python3 tools/check-compiled-script-capture.py --reb-api apps/origin-trace-backend/target/debug/reb-api
 
 # Opt-in: needs REB_BRAVE_BINARY set to a Brave built from this tree. Runs the

@@ -100,7 +100,10 @@ bytes the index names for a request (from the first to the last record of each
 row that has it as a member) instead of the newest window, so a request stays
 readable after more than 64 MiB of newer events. Without a row they read the
 newest 64 MiB. `get_cookie_provenance` spans a session and has no byte range; it
-always reads the newest 64 MiB and 5,000 network records.
+reads the newest 64 MiB and 5,000 of the network records it uses, plus every
+`script_cookie` record of the session that the index located before that window.
+The index keeps each one's byte range, at most 65,536 records, and counts the
+rest so the answer's `script_coverage` is not complete.
 
 Each answer carries `coverage`:
 
@@ -127,9 +130,10 @@ The index is kept beside the store as `<store>.requests-v1`, a private (0600)
 JSON file written atomically. The backend writes it itself, every 30 seconds
 when the index changed and at shutdown, after folding new records;
 `get_requests` folds in memory and writes no file. It holds the rows, the
-correlation keys, the indexed byte offset, the store's device and inode, and
-SHA-256 digests of the first and the last 4 KiB before that offset. A sidecar of
-another row layout is discarded and rebuilt.
+correlation keys, the script identities and `script_cookie` byte ranges, the
+indexed byte offset, the store's device and inode, and SHA-256 digests of the
+first and the last 4 KiB before that offset. A sidecar of another row layout is
+discarded and rebuilt; layout 12 adds the `script_cookie` ranges.
 
 On every call the backend checks that identity and both digests against the
 store. A truncated, rewritten or replaced store discards the index, rebuilds it

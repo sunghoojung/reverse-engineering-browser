@@ -272,7 +272,9 @@ The source-of-truth pins remain:
 
 The build tooling pin is depot_tools
 `1afcf0756e47f3a6ee82d7736b9fcda2d57b268e` (`browser/config/depot_tools.rev`),
-which `--init` writes to Brave's ignored `.env` before Brave installs depot_tools.
+which `--init` writes to Brave's ignored `.env` before Brave installs depot_tools,
+together with `lean_sync=true` so a resumed `--init` does not refetch Chromium
+history (see [the browser README](../../browser/README.md)).
 `--init` also applies the pre-initialization stack in
 `browser/integration/brave/patches/init/` before Brave reads `DEPS`; that
 stack is empty at `v1.99.57`.

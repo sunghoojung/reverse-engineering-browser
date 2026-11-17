@@ -27,7 +27,7 @@ index 2d2f0fd..10ac15c 100644
    void GrantSendMidiMessage_Cpp(int child_id);
    void GrantSendMidiSysExMessage(int child_id) override;
 diff --git a/content/public/browser/child_process_security_policy.h b/content/public/browser/child_process_security_policy.h
-index 852a08e..abcd28e 100644
+index 852a08e..a21addf 100644
 --- a/content/public/browser/child_process_security_policy.h
 +++ b/content/public/browser/child_process_security_policy.h
 @@ -204,6 +204,9 @@ class ChildProcessSecurityPolicy {
@@ -35,7 +35,7 @@ index 852a08e..abcd28e 100644
    virtual bool HasWebUIBindings(ChildProcessId child_id) = 0;
  
 +  // The scheme of |child_id|'s process lock URL, or empty when unlocked.
-+  virtual std::string GetProcessLockScheme(int child_id) { return {}; }
++  virtual std::string GetProcessLockScheme(int child_id) = 0;
 +
    // Grants permission to send messages to any MIDI devices.
    virtual void GrantSendMidiMessage(int child_id) = 0;

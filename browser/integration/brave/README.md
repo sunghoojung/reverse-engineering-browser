@@ -36,6 +36,20 @@ to evaluate the actual patched GN files across desktop/mobile and
 production/development and branding combinations. This uses minimal platform/branding stubs;
 it does not replace a full Chromium build or the native runtime acceptance gate.
 
+## GPU process responsibility on macOS
+
+Chromium 157 has the GPU process disclaim TCC responsibility whenever the
+browser is not its own responsible process (`kMacDisclaimGpuTccResponsibility`).
+A terminal, an agent or Origin Trace's launcher always starts the research
+browser, so every capture session took that path: the GPU process became its own
+TCC client, and with the Brave build in a protected folder such as `~/Documents`
+or `~/Downloads` it blocked opening its first library and never started. Canvas
+readback, WebGL and compositing then waited on it indefinitely. Chromium patch
+`0063` turns the feature off, so the GPU process inherits its launcher's
+responsibility as it did before 157. It keeps its GPU sandbox, which bounds its
+file access either way. A browser opened from Finder is its own responsible
+process and is unaffected.
+
 ## Early native network capture
 
 The source candidate now activates the existing opt-in transport before profile

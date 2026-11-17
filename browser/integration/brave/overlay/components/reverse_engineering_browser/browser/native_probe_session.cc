@@ -26,7 +26,8 @@
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
 #include "content/public/browser/render_process_host.h"
-#include "mojo/public/cpp/bindings/self_owned_receiver.h"
+#include "ipc/ipc_channel_proxy.h"
+#include "mojo/public/cpp/bindings/pending_associated_remote.h"
 
 namespace reb {
 
@@ -112,10 +113,11 @@ NativeProbeSession::NativeProbeSession() = default;
 
 NativeProbeSession::~NativeProbeSession() = default;
 
-void NativeProbeSession::BindHost(const int renderer_process_id,
-                                  mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
-  auto* process = content::RenderProcessHost::FromID(renderer_process_id);
-  if (!process || !NativeNetworkCaptureSink::Get().IsOwnedContext(process->GetBrowserContext())) {
+void NativeProbeSession::RenderProcessWillLaunch(content::RenderProcessHost& process) {
+  const int renderer_process_id = process.GetID().GetUnsafeValue();
+  // A relaunched process has a new channel, so it gets a new host.
+  launched_hosts_.erase(renderer_process_id);
+  if (!NativeNetworkCaptureSink::Get().IsOwnedContext(process.GetBrowserContext())) {
     return;
   }
   // Native Console targets do not depend on admission.
@@ -124,8 +126,38 @@ void NativeProbeSession::BindHost(const int renderer_process_id,
     NoteWebUiRendererExcluded();
     return;
   }
-  mojo::MakeSelfOwnedReceiver(std::make_unique<NativeProbeHost>(*this, renderer_process_id),
-                              std::move(receiver));
+  IPC::ChannelProxy* const channel = process.GetChannel();
+  if (!channel) {
+    return;
+  }
+  mojo::PendingAssociatedRemote<mojom::NativeProbeClient> client;
+  channel->GetRemoteAssociatedInterface(client.InitWithNewEndpointAndPassReceiver());
+  auto host = std::make_unique<NativeProbeHost>(*this, renderer_process_id);
+  host->BindClient(std::move(client));
+  launched_hosts_.emplace(renderer_process_id, std::move(host));
+  if (!observed_processes_.IsObservingSource(&process)) {
+    observed_processes_.AddObservation(&process);
+  }
+}
+
+void NativeProbeSession::BindHost(const int renderer_process_id,
+                                  mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
+  // A process the session did not admit at launch has no host to bind.
+  const auto host = launched_hosts_.find(renderer_process_id);
+  if (host != launched_hosts_.end()) {
+    host->second->BindReceiver(std::move(receiver));
+  }
+}
+
+void NativeProbeSession::RenderProcessExited(content::RenderProcessHost* const process,
+                                             const content::ChildProcessTerminationInfo&) {
+  // The host publishes what the renderer queued before it exited as it goes.
+  launched_hosts_.erase(process->GetID().GetUnsafeValue());
+}
+
+void NativeProbeSession::RenderProcessHostDestroyed(content::RenderProcessHost* const process) {
+  launched_hosts_.erase(process->GetID().GetUnsafeValue());
+  observed_processes_.RemoveObservation(process);
 }
 
 bool NativeProbeSession::StartSession(const std::uint64_t session_id,

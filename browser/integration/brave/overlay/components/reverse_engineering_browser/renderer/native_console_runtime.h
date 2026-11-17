@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/timer/timer.h"
 #include "base/values.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_messages.h"
@@ -78,7 +79,7 @@ class NativeConsoleRuntime final {
                         blink::WebLocalFrame* frame,
                         const base::DictValue& command);
   std::uint64_t watch_frame_ = 0;
-  v8::Isolate* watch_isolate_ = nullptr;
+  raw_ptr<v8::Isolate> watch_isolate_ = nullptr;
   std::array<Slot, 128> slots_;
   std::size_t next_slot_ = 0;
   std::uint64_t next_handle_ = 1;

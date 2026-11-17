@@ -32,7 +32,7 @@ if [[ -n "${REB_PROBE_TEST_SANITIZERS:-}" ]]; then
 fi
 sources="$root/browser/integration/brave/overlay/components/reverse_engineering_browser"
 readonly sources
-"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$build/include" "$fixture/main.cc" \
+"${CXX:-c++}" "${flags[@]}" -I"$fixture" -I"$build/stubs" -I"$root/tools/native-test-support" -I"$build/include" "$fixture/main.cc" \
   "$sources/browser/native_tab_registry.cc" "$sources/browser/native_factory_scope.cc" \
   "$sources/browser/native_tab_resolver.cc" "$sources/common/native_factory_owner_hook.cc" \
   -o "$build/native-tab-registry"

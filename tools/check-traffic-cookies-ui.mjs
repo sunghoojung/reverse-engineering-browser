@@ -240,8 +240,21 @@ await settle();
 let older = panel.querySelector('.traffic-cookie-provenance');
 assert.match(older.textContent, /Set by responses \(1\)request 900 · hop 2 — This Set-Cookie was blocked because it is Secure/);
 assert.match(older.textContent, /Sent with requests \(2\).*request 901/);
-assert.match(older.textContent, /Not in the scanned range: the backend reads the newest retained network records/);
+assert.match(older.textContent, /Script access \(0\)Not among the script calls the store located, which are not yet every call/);
 assert.doesNotMatch(older.textContent, /No recorded document\.cookie/, 'A partial store read does not claim absence');
+panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
+await settle();
+// Script calls are located across the session, so they can be complete while the lists are not.
+provenanceAnswer = {...provenanceAnswer, set_by: [], script_coverage: {complete: true, located_outside_window: 4, unreadable: 0}};
+await new Promise(resolve => setTimeout(resolve, 5100));
+[...panel.querySelectorAll('.traffic-cookie-name')].find(node => node.textContent === 'pref')
+  .dispatchEvent(new window.Event('click'));
+await settle();
+api.renderTrafficCookies(panel, request, rerender, {...ui, storeRevision: '"pref-script"'});
+await settle();
+older = panel.querySelector('.traffic-cookie-provenance');
+assert.match(older.textContent, /Set by responses \(0\)Not in the scanned range: the backend reads the newest retained network records/);
+assert.match(older.textContent, /Script access \(0\)No recorded document\.cookie or Cookie Store call used this name\./);
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
 // A settled answer is read again once the store changed, but not on every render.
@@ -279,7 +292,7 @@ await new Promise(resolve => setTimeout(resolve, 0));
 assert.match(panel.querySelector('.traffic-cookie-provenance').textContent, /Provenance of track/);
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
-// Keyboard focus survives sort, the filter switch and Close.
+// Keyboard focus survives sort and the filter switch, moves into provenance, and returns on Close.
 {
   let active = null;
   Object.defineProperty(document, 'activeElement', {configurable: true, get: () => active});
@@ -301,7 +314,7 @@ await settle();
   nameButton.dispatchEvent(new window.Event('click'));
   await settle();
   const closeButton = panel.querySelector('.traffic-cookie-provenance button');
-  closeButton.focus();
+  assert.equal(active, closeButton, 'opening provenance moves focus to it, which brings it into view');
   closeButton.dispatchEvent(new window.Event('click'));
   await settle();
   assert.equal(active?.dataset.focusKey, openerKey, 'focus returns to the name that opened provenance');
@@ -412,7 +425,7 @@ assert.equal(panel.querySelectorAll('img').length, 0, 'captured markup is still 
     const absentUi = {requests: [absent], events: []};
     const drawAbsent = () => api.renderTrafficCookies(panel, absent, drawAbsent, absentUi);
     provenanceAnswer = {set_by: [], sent_with: [], script: [], lists_read: 1, lists_unread: 0, stacks_unresolved: 0,
-      malformed_records: [], coverage: {complete: true},
+      malformed_records: [], coverage: {complete: true}, script_coverage: {complete: true, located_outside_window: 0, unreadable: 0},
       read_coverage: {complete: false, whole_jar_reads: 0, reads_with_unrecorded_names: 0, unrecorded_names: 0,
         unnamed_store_reads: 1, records_dropped: 0}};
     drawAbsent();

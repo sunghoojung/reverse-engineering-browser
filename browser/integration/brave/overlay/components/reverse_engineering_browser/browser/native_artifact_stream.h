@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
 #include "crypto/hash.h"
@@ -39,7 +40,7 @@ enum class NativeArtifactStreamState : std::uint8_t {
 // at a time; it may move between sequences.
 class NativeArtifactStream final {
  public:
-  NativeArtifactStream() = default;
+  NativeArtifactStream();
   // Queues the open header. `digest` keeps a SHA-256 of the kept bytes.
   NativeArtifactStream(NativeArtifactMemoryPool& pool,
                        const NativeArtifactHeader& header,
@@ -82,7 +83,7 @@ class NativeArtifactStream final {
   [[nodiscard]] bool Control(NativeArtifactStreamOp op, std::uint64_t value);
   void Fail(NativeArtifactStreamState state);
 
-  NativeArtifactMemoryPool* pool_ = nullptr;
+  raw_ptr<NativeArtifactMemoryPool> pool_ = nullptr;
   std::uint64_t session_ = 0;
   std::uint64_t artifact_id_ = 0;
   std::size_t limit_ = 0;

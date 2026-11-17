@@ -256,13 +256,13 @@ class PartsReader final {
 
   // The size callback and the pipe travel on different channels, so either
   // may arrive first; the part ends once both say the same thing.
-  void OnPipeSize(const std::int32_t status, const std::uint64_t size) {
-    if (status != net::OK) {
+  void OnPipeSize(const network::mojom::DataPipeGetter::ReadResult result) {
+    if (!result.has_value()) {
       Finish(NativeRequestBodyReadEnd::kIncomplete);
       return;
     }
-    pipe_size_ = size;
-    body_length_ += size;
+    pipe_size_ = result->InBytes();
+    body_length_ += *pipe_size_;
     MaybeEndPipe();
   }
 
@@ -552,12 +552,21 @@ bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
     const auto read_only_once = chunked.read_only_once();
     mojo::PendingRemote<network::mojom::ChunkedDataPipeGetter> tee;
     auto receiver = tee.InitWithNewPipeAndPassReceiver();
-    // Bound to the reader's sequence here, so no posted task can drop the
-    // page's getter.
-    mojo::MakeSelfOwnedReceiver(
-        std::make_unique<ChunkedTee>(chunked.ReleaseChunkedDataPipeGetter(), std::move(stream),
-                                     allowance, std::move(reply), std::move(done)),
-        std::move(receiver), runner);
+    // Mojo requires a receiver's first use to be on the sequence that dispatches
+    // to it, and setting its disconnect handler is a use, so the tee is bound on
+    // the reader's sequence. The network's calls wait in the pipe until then.
+    // Only a pool that is shutting down drops the task: the tee then reports the
+    // read incomplete as it is destroyed, and the request sees its getter gone.
+    static_cast<void>(runner->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            [](std::unique_ptr<ChunkedTee> impl,
+               mojo::PendingReceiver<network::mojom::ChunkedDataPipeGetter> receiver) {
+              mojo::MakeSelfOwnedReceiver(std::move(impl), std::move(receiver));
+            },
+            std::make_unique<ChunkedTee>(chunked.ReleaseChunkedDataPipeGetter(), std::move(stream),
+                                         allowance, std::move(reply), std::move(done)),
+            std::move(receiver))));
     elements[0] =
         network::DataElement(network::DataElementChunkedDataPipe(std::move(tee), read_only_once));
     return true;

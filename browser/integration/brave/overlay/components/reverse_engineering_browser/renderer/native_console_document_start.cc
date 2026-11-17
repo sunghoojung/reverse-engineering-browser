@@ -45,7 +45,8 @@ bool g_armed = false;
 std::uint64_t FrameIdentity(const blink::WebLocalFrame* frame) noexcept {
   // Same derived identity the capture path already publishes for a frame, so a
   // document-start record and a captured event name the same frame alike.
-  const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
+  // GetLocalFrameToken() returns by value; a reference into it would dangle.
+  const base::UnguessableToken token = frame->GetLocalFrameToken().value();
   return std::rotl(token.GetHighForSerialization(), 17) ^ token.GetLowForSerialization();
 }
 

@@ -1,0 +1,34 @@
+diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
+index 8e7dfa7..106f5b8 100644
+--- a/browser/brave_content_browser_client.cc
++++ b/browser/brave_content_browser_client.cc
+@@ -602,6 +602,9 @@ void BraveContentBrowserClient::BrowserURLHandlerCreated(
+ 
+ void BraveContentBrowserClient::RenderProcessWillLaunch(
+     content::RenderProcessHost* host) {
++  // Capture configuration goes out on the process channel before any frame
++  // of this process can commit.
++  reb::NativeProbeSession::Get().RenderProcessWillLaunch(*host);
+   if (reb::IsNativeConsoleEnabled()) {
+     auto retired = reb::NativeConsoleRetireCallback();
+     if (!retired) {
+diff --git a/renderer/brave_content_renderer_client.cc b/renderer/brave_content_renderer_client.cc
+index b09b1d8..c24a6da 100644
+--- a/renderer/brave_content_renderer_client.cc
++++ b/renderer/brave_content_renderer_client.cc
+@@ -23,6 +23,7 @@
+ #include "brave/components/reverse_engineering_browser/renderer/native_console_agent.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_debugger_pause_agent.h"
++#include "brave/components/reverse_engineering_browser/renderer/native_probe_thread_observer.h"
+ #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
+ #include "brave/components/script_injector/renderer/script_injector_render_frame_observer.h"
+ #include "brave/components/skus/common/features.h"
+@@ -186,6 +187,7 @@ void BraveContentRendererClient::RenderThreadStarted() {
+   content::RenderThread::Get()->BindHostReceiver(
+       pending_probe_host.InitWithNewPipeAndPassReceiver());
+   reb::NativeProbeTransport::Get().Connect(std::move(pending_probe_host));
++  reb::RegisterNativeProbeClient(*content::RenderThread::Get());
+   // Connect before any frame exists so a process created after arming holds
+   // the set before its first document commits.
+   if (reb::IsNativeConsoleDocumentStartPermitted()) {

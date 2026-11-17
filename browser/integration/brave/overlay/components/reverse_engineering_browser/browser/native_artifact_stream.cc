@@ -18,6 +18,8 @@ constexpr std::size_t kChunk = kNativeArtifactStreamChunkBytes;
 
 }  // namespace
 
+NativeArtifactStream::NativeArtifactStream() = default;
+
 NativeArtifactStream::NativeArtifactStream(NativeArtifactMemoryPool& pool,
                                            const NativeArtifactHeader& header,
                                            std::string url,

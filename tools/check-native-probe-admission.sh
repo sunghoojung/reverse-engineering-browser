@@ -17,7 +17,8 @@ headers=(
   base/no_destructor.h base/threading/thread_local.h base/functional/bind.h
   base/task/sequenced_task_runner.h mojo/public/cpp/base/big_buffer.h
   base/synchronization/lock.h
-  mojo/public/cpp/bindings/receiver.h mojo/public/cpp/bindings/shared_remote.h
+  mojo/public/cpp/bindings/associated_receiver.h
+  mojo/public/cpp/bindings/pending_associated_receiver.h mojo/public/cpp/bindings/shared_remote.h
   third_party/blink/public/web/web_local_frame.h
   brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h
 )

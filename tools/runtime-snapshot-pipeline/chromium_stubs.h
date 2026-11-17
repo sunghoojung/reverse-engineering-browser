@@ -94,7 +94,14 @@ class UnsafeSharedMemoryRegion {
   WritableSharedMemoryMapping Map() const { return {}; }
 };
 template <class T>
-class ThreadLocalOwnedPointer {};
+class ThreadLocalOwnedPointer {
+ public:
+  T* Get() { return value_.get(); }
+  void Set(std::unique_ptr<T> value) { value_ = std::move(value); }
+
+ private:
+  inline static thread_local std::unique_ptr<T> value_;
+};
 struct Location {};
 enum class TaskPriority { USER_VISIBLE };
 enum class TaskShutdownBehavior { SKIP_ON_SHUTDOWN };

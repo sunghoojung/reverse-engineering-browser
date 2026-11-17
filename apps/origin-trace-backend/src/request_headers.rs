@@ -355,12 +355,13 @@ fn decode(event: &Value) -> Option<Block> {
     };
     let zero = |slice: &[u8]| slice.iter().all(|byte| *byte == 0);
     let addressed = block.family != 0;
+    let http_status = block.status <= 999 && (block.status == 0 || block.status >= 100);
     let shape = if response {
         block.policy == 0
-            && if block.source == 1 {
-                block.status <= 999 && (block.status == 0 || block.status >= 100)
-            } else {
-                block.source == 3 && block.status == 103 && !addressed
+            && match block.source {
+                1 => http_status,
+                2 => http_status && !addressed,
+                _ => block.source == 3 && block.status == 103 && !addressed,
             }
     } else {
         block.status == 0
@@ -762,10 +763,25 @@ mod tests {
             record("request_headers", 22, 20, payload(1, 2, 4, sent, 1, 0), "5"),
             record("request_headers", 23, 9, payload(2, 3, 0, b"", 0, 0), "0"),
             record("request_headers", 24, 20, payload(1, 1, 0, sent, 1, 0), "5"),
+            // What the network stack received for hop 0, a child of its start.
+            record(
+                "response_headers",
+                25,
+                11,
+                payload(2, 2, 0, got, 0, 302),
+                "6",
+            ),
+            record(
+                "response_headers",
+                26,
+                11,
+                payload(2, 2, 0, got, 0, 42),
+                "6",
+            ),
         ];
         let result = build(&events, &Drops::default(), &artifacts, &root, "7", "17");
         assert_eq!(result["unattached_records"], 1);
-        assert_eq!(result["malformed_records"], json!(["24"]));
+        assert_eq!(result["malformed_records"], json!(["24", "26"]));
         let hop0 = &result["hops"][0];
         assert_eq!(hop0["provisional"], true);
         assert_eq!(hop0["request"][0]["referrer_policy"], "unsafe-url");
@@ -778,6 +794,9 @@ mod tests {
         assert_eq!(hop0["response"][0]["status_code"], 302);
         assert_eq!(hop0["response"][0]["headers"][0]["value_withheld"], true);
         assert_eq!(hop0["response"][0]["headers"][1]["value"], "/next");
+        assert_eq!(hop0["response"][1]["source"], "network");
+        assert_eq!(hop0["response"][1]["status_code"], 302);
+        assert_eq!(hop0["response"][1]["artifact"], "verified");
         let hop1 = &result["hops"][1];
         assert_eq!(hop1["request"][0]["state"], "captured_shared");
         assert_eq!(hop1["request"][0]["artifact"], "verified");

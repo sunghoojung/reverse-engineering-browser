@@ -830,7 +830,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let label = try await ui.value("\(find)?.getAttribute('aria-label') ?? ''") as? String ?? ""
         XCTAssertTrue(label.contains(kind), "\(size.name): artifact \(artifact) names its kind: \(label)")
       }
-      // The retained request body, header blocks and cookie lists (artifacts 320 to 324) are Traffic evidence, never source files.
+      // The retained request body, header blocks and cookie lists (artifacts 320 to 324 and 326) are Traffic evidence, never source files.
       let tree = try await ui.value("document.querySelector('#source-tree')?.textContent ?? ''") as? String ?? ""
       XCTAssertFalse(tree.contains(expected.requestBodyHost), "\(size.name): Sources lists no request body origin: \(tree)")
       let rows = try await ui.json("""

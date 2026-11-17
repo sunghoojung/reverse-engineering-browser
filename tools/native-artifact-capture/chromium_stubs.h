@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
@@ -586,8 +587,6 @@ inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter
 
 // NativeProbeHost boundaries: ownership, shared memory, Mojo and frames.
 template <class T>
-using raw_ptr = T*;
-template <class T>
 class raw_ref {
  public:
   explicit raw_ref(T& value) : value_(&value) {}
@@ -654,18 +653,27 @@ struct UnguessableToken {
 }  // namespace base
 namespace mojo {
 template <class T>
-struct PendingRemote {
+struct PendingAssociatedRemote {
   T* target = nullptr;
 };
 template <class T>
-class Remote {
+class AssociatedRemote {
  public:
   bool is_bound() const { return target_ != nullptr; }
-  void Bind(PendingRemote<T> pending) { target_ = pending.target; }
+  void Bind(PendingAssociatedRemote<T> pending) { target_ = pending.target; }
   T* operator->() const { return target_; }
 
  private:
   T* target_ = nullptr;
+};
+template <class T>
+struct PendingReceiver {};
+template <class T>
+class Receiver {
+ public:
+  explicit Receiver(T*) {}
+  void reset() {}
+  void Bind(PendingReceiver<T>) {}
 };
 }  // namespace mojo
 namespace reb::mojom {
@@ -693,7 +701,6 @@ class NativeProbeClient {
 class NativeProbeHost {
  public:
   virtual ~NativeProbeHost() = default;
-  virtual void BindClient(mojo::PendingRemote<NativeProbeClient>) = 0;
   virtual void EventsAvailable() = 0;
   virtual void CaptureWasmDispatch(std::uint64_t,
                                    std::uint64_t,
@@ -843,13 +850,24 @@ struct TestProcess {
   bool IsValid() const { return pid != 0; }
   int Pid() const { return pid; }
 };
+class ChildProcessId {
+ public:
+  static ChildProcessId FromUnsafeValue(int value) { return ChildProcessId(value); }
+  int GetUnsafeValue() const { return value_; }
+
+ private:
+  explicit ChildProcessId(int value) : value_(value) {}
+  int value_;
+};
 class ChildProcessSecurityPolicy {
  public:
   static ChildProcessSecurityPolicy* GetInstance() {
     static ChildProcessSecurityPolicy policy;
     return &policy;
   }
-  bool HasWebUIBindings(int child_id) const { return webui.contains(child_id); }
+  bool HasWebUIBindings(ChildProcessId child_id) const {
+    return webui.contains(child_id.GetUnsafeValue());
+  }
   std::string GetProcessLockScheme(int child_id) const {
     const auto lock = locks.find(child_id);
     return lock == locks.end() ? std::string() : lock->second;

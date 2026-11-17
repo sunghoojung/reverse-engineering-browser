@@ -1348,9 +1348,11 @@ answer decides.
 `tools/check-traffic-response-ui.mjs` covers both tabs in a DOM model.
 **Headers** shows General (URL, method, status, remote address, referrer
 policy), then response and request headers per redirect hop, newest first.
-Each section collapses and has **Raw** and **Copy all**; each header has
-**Copy**. A hop the network stack never reported reads "Provisional headers
-are shown" and says why: the request is still in progress, the HTTP cache or
+Response headers are what the network stack received; a hop it did not report
+shows the browser's copy, which says that Chromium removed its `Set-Cookie`,
+`Set-Cookie2` and `Clear-Site-Data`. Each section collapses and has **Raw**
+and **Copy all**; each header has **Copy**. A hop the network stack never
+reported reads "Provisional headers are shown" and says why: the request is still in progress, the HTTP cache or
 a service worker answered it, it is a download, it failed first, or the
 network stack reported nothing for it ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).
 The Cookies tab lists such a hop with the same reason, and a hop with sent
@@ -1359,8 +1361,9 @@ SHA-256 check and are inserted as text. **Cookies** shows each hop's Response co
 reason a `Set-Cookie` was blocked) and Request cookies, with **Show filtered out
 request cookies** for excluded ones and their reasons. Columns sort, values
 truncate with the full value as a tooltip, and each row has **Copy**. A name
-opens its provenance: the responses that set it, the `document.cookie` and
-Cookie Store calls that used it with their script position (file, line and
+opens its provenance at the top of the tab and moves focus to it; Close
+returns focus to the name. Provenance lists the responses that set it, the
+`document.cookie` and Cookie Store calls that used it with their script position (file, line and
 function from `get_cookie_provenance`, with **Show in Sources**, when the
 script's source was retained), and the requests that sent it, linked by value
 digest to the script write. A `document.cookie` read is listed under each

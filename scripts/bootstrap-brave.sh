@@ -31,31 +31,50 @@ usage() {
   echo "Use --full-history with --init only when complete Chromium Git history is required."
 }
 
+# Records one setting in the ignored brave-core .env. Returns 1 when the file
+# already holds it and refuses when the file holds a different value.
+require_env_setting() {
+  local key="$1"
+  local value="$2"
+  local env_file="${brave_directory}/.env"
+  if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
+    if ! grep -qx "${key}=${value}" "${env_file}"; then
+      echo "${env_file} sets a different ${key}." >&2
+      echo "Expected ${key}=${value}; preserve or update that local setting first." >&2
+      exit 1
+    fi
+    return 1
+  fi
+  if [[ -s "${env_file}" && -n "$(tail -c 1 "${env_file}")" ]]; then
+    printf '\n' >> "${env_file}"
+  fi
+  printf '%s=%s\n' "${key}" "${value}" >> "${env_file}"
+}
+
 # Brave clones depot_tools at its moving tip unless the ignored brave-core .env
 # names a revision, so the same Brave pin can stop initializing when depot_tools
 # changes. Record the tracked revision before Brave first installs depot_tools.
 pin_depot_tools() {
   local revision
-  local env_file="${brave_directory}/.env"
-  local key=projects_depot_tools_revision
   revision="$(tr -d '[:space:]' < "${depot_tools_revision_file}")"
   if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
     echo "browser/config/depot_tools.rev must name a full depot_tools commit." >&2
     exit 1
   fi
-  if [[ -f "${env_file}" ]] && grep -q "^${key}=" "${env_file}"; then
-    if ! grep -qx "${key}=${revision}" "${env_file}"; then
-      echo "${env_file} pins a different depot_tools revision." >&2
-      echo "Expected ${key}=${revision}; preserve or update that local setting first." >&2
-      exit 1
-    fi
-    return
+  if require_env_setting projects_depot_tools_revision "${revision}"; then
+    echo "Pinned depot_tools to ${revision}"
   fi
-  if [[ -s "${env_file}" && -n "$(tail -c 1 "${env_file}")" ]]; then
-    printf '\n' >> "${env_file}"
+}
+
+# A resumed --init asks gclient for src@<tag>. Over the shallow Chromium clone,
+# depot_tools cannot resolve that tag locally and fetches every branch of
+# chromium/src, which can stall for hours. Brave's lean sync checks out the
+# pinned tag itself and runs gclient without --revision; before src exists it
+# falls back to the ordinary clone, so a first --init is unchanged.
+enable_lean_sync() {
+  if require_env_setting lean_sync true; then
+    echo "Enabled Brave lean sync"
   fi
-  printf '%s=%s\n' "${key}" "${revision}" >> "${env_file}"
-  echo "Pinned depot_tools to ${revision}"
 }
 
 # Brave's init runs DEPS hooks before sync-browser-integration.sh can apply the
@@ -287,6 +306,7 @@ if [[ "${run_init}" == true ]]; then
     exit 1
   fi
   pin_depot_tools
+  enable_lean_sync
   apply_init_patches
   (
     cd "${brave_directory}"

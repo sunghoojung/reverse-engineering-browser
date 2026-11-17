@@ -82,19 +82,19 @@ index b7fdcba..d106545 100644
    // by the window.open'd frame.
    bool is_opener_navigation = false;
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index ceb3d3c..cf7c78e 100644
+index 497a015..7c389b0 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -53,7 +53,7 @@
+@@ -52,7 +52,7 @@
+ #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
- #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
 -#include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_request_stack_blink.h"
  #include "build/build_config.h"
  #include "components/crash/core/common/crash_key.h"
  #include "services/metrics/public/cpp/ukm_builders.h"
-@@ -830,7 +830,8 @@ void NativeStackFramesReady(void* data, const v8::NativeStackCapture& capture) {
+@@ -829,7 +829,8 @@ void NativeStackFramesReady(void* data, const v8::NativeStackCapture& capture) {
    copy(0, capture.recorded);
    copy(capture.sync_capacity, capture.async_frames);
    walk.FramesReady(capture.total_depth, capture.recorded, capture.omitted,
@@ -104,7 +104,7 @@ index ceb3d3c..cf7c78e 100644
  }
  
  std::string NativeStackUtf8(v8::Isolate* isolate, v8::Local<v8::String> text,
-@@ -916,11 +917,16 @@ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
+@@ -915,11 +916,16 @@ reb::NativeRequestStackWalkResult WalkNativeRequestStack(
            ToExecutionContext(isolate->GetCurrentContext())) {
      walk.SetExecutionContext(StableExecutionContextId(*execution_context));
    }

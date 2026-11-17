@@ -1898,7 +1898,7 @@ void ProbeNativeWasmLimits() noexcept {
 void NativeWasmScopeGaps() {
   NativeProbeQueue queue;
   const auto retained_before = native_wasm_retained;
-  transport.SetNativeWasmLimitProbe(nullptr);
+  sink.SetNativeWasmLimitProbe(nullptr);
   Configure(queue);
   assert(sink.NoteNativeWasmDispatchScope(reb::NativeWasmScopeGap::kWorker));
   assert(ScopeGapReason(One(queue)) == "native_wasm_dispatch_worker_unsupported");
@@ -1968,7 +1968,7 @@ void NativeWasmScopeGaps() {
   sink.NoteNativeWasmIndirectScope(reb::NativeWasmScopeGap::kLeftLiftoff);
   assert(Drain(queue) == 0);
 
-  transport.SetNativeWasmLimitProbe(&ProbeNativeWasmLimits);
+  sink.SetNativeWasmLimitProbe(&ProbeNativeWasmLimits);
   Configure(queue, 45);
   assert(native_wasm_limit_probes == 1);
   NativeProbeEvent first;
@@ -1980,7 +1980,7 @@ void NativeWasmScopeGaps() {
   Configure(queue, 46);
   assert(native_wasm_limit_probes == 2);
   assert(Drain(queue) == 2);
-  transport.SetNativeWasmLimitProbe(nullptr);
+  sink.SetNativeWasmLimitProbe(nullptr);
   Configure(queue, 47);
   assert(native_wasm_limit_probes == 2);
   assert(Drain(queue) == 0);

@@ -315,6 +315,13 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // retry.
   bool NoteNativeWasmDispatchScope(NativeWasmScopeGap gap) noexcept;
   bool NoteNativeWasmIndirectScope(NativeWasmScopeGap gap) noexcept;
+  // Blink's session-start probe for limits V8 can see without a guest
+  // execution, such as jitless. It lives here because Blink links the sink,
+  // not the transport that runs it after each configuration. Not cleared by
+  // Disable: it reads process flags, not the session.
+  using NativeWasmLimitProbe = void (*)() noexcept;
+  void SetNativeWasmLimitProbe(NativeWasmLimitProbe probe) noexcept;
+  void ProbeNativeWasmLimits() const noexcept;
   // Host-visible Wasm call ledger. Entry and exit stay paired after the
   // 16-record outcome budget is spent; that budget only refuses records.
   // These never call the frame-id provider or allocate V8 handles.
@@ -890,6 +897,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeGuestHostEmitter> native_guest_host_{nullptr};
   std::atomic<NativeWasmGuestContextProvider> native_guest_context_{nullptr};
   std::atomic<NativeWasmGuestReset> native_guest_reset_{nullptr};
+  std::atomic<NativeWasmLimitProbe> native_wasm_limit_probe_{nullptr};
   std::array<std::atomic<std::uint64_t>, kNativeGuestSampleLimit> native_guest_slots_{};
   std::atomic<std::uint64_t> native_guest_capped_generation_{0};
   // Coalesced guest gaps, at most one of each per configuration.

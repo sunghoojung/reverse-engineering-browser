@@ -4858,6 +4858,13 @@ void NativeProbeSink::SetNativeWasmGuestRuntime(NativeWasmGuestContextProvider c
   native_guest_context_.store(context, std::memory_order_release);
   native_guest_reset_.store(reset, std::memory_order_release);
 }
+void NativeProbeSink::SetNativeWasmLimitProbe(const NativeWasmLimitProbe probe) noexcept {
+  native_wasm_limit_probe_.store(probe, std::memory_order_release);
+}
+void NativeProbeSink::ProbeNativeWasmLimits() const noexcept {
+  if (const auto probe = native_wasm_limit_probe_.load(std::memory_order_acquire))
+    probe();
+}
 bool NativeProbeSink::IsNativeWasmGuestEnabled() const noexcept {
   // Keep invalidating parents at matching dispatches after the sample cap.
   return native_guest_adapter_.load(std::memory_order_acquire) &&

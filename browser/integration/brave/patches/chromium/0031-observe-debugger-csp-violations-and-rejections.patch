@@ -1,16 +1,16 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 699a008..c367ec1 100644
+index ec1879c..497a015 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -49,6 +49,7 @@
+@@ -50,6 +50,7 @@
  #include "base/task/thread_pool.h"
  #include "base/time/time.h"
  #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
 +#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
- #include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
  #include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
-@@ -1594,6 +1595,12 @@ void V8Initializer::PromiseRejectHandlerInMainThread(
+ #include "build/build_config.h"
+@@ -1607,6 +1608,12 @@ void V8Initializer::PromiseRejectHandlerInMainThread(
    if (!script_state->ContextIsValid())
      return;
  
@@ -24,7 +24,7 @@ index 699a008..c367ec1 100644
        &window->GetAgent()->GetRejectedPromises();
    PromiseRejectHandler(data, *rejected_promises, script_state);
 diff --git a/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc b/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc
-index 6117e88..18f5730 100644
+index 39785b9..3b83de0 100644
 --- a/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc
 +++ b/third_party/blink/renderer/core/frame/csp/execution_context_csp_delegate.cc
 @@ -4,6 +4,7 @@
@@ -72,7 +72,7 @@ index 6117e88..18f5730 100644
  ExecutionContextCSPDelegate::ExecutionContextCSPDelegate(
      ExecutionContext& execution_context)
      : execution_context_(&execution_context) {}
-@@ -150,6 +174,9 @@ String ExecutionContextCSPDelegate::GetDocumentReferrer() {
+@@ -170,6 +194,9 @@ String ExecutionContextCSPDelegate::GetDocumentReferrer() {
  void ExecutionContextCSPDelegate::DispatchViolationEvent(
      const SecurityPolicyViolationEventInit& violation_data,
      Element* element) {

@@ -1,16 +1,8 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index efc4ff8..56496ac 100644
+index 5c93376..6ae105f 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-@@ -49,6 +49,7 @@
- #include "base/time/time.h"
- #include "brave/components/reverse_engineering_browser/common/native_runtime_snapshot_queue.h"
- #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
-+#include "brave/components/reverse_engineering_browser/renderer/native_probe_transport.h"
- #include "build/build_config.h"
- #include "components/crash/core/common/crash_key.h"
- #include "services/metrics/public/cpp/ukm_builders.h"
-@@ -917,6 +918,44 @@ void CaptureWasmExecutionTrap(v8::Local<v8::Context> context,
+@@ -927,6 +927,44 @@ void CaptureWasmExecutionTrap(v8::Local<v8::Context> context,
        source_url, document_token_high, document_token_low, bytes);
  }
  
@@ -55,14 +47,14 @@ index efc4ff8..56496ac 100644
  void CaptureWasmModuleBytes(v8::Local<v8::Context> context,
                              const v8::WasmModuleBytesOrigin origin,
                              const std::uint8_t* bytes,
-@@ -1989,6 +2028,10 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+@@ -1956,6 +1994,10 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
      reb::NativeProbeSink::Get().SetNativeJsInvocationContextProvider(
          CurrentJsInvocation);
    }
 +  // Every isolate, including workers. The worker br_table gap is recorded
 +  // from the dispatch callback; this one names jitless and left-Liftoff.
 +  isolate->SetWasmDispatchScopeCallback(NoteWasmDispatchScope);
-+  reb::NativeProbeTransport::SetNativeWasmLimitProbe(ProbeWasmDispatchLimits);
++  reb::NativeProbeSink::Get().SetNativeWasmLimitProbe(ProbeWasmDispatchLimits);
    isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
    isolate->SetWasmCustomDescriptorsEnabledCallback(
        WasmCustomDescriptorsEnabledCallback);

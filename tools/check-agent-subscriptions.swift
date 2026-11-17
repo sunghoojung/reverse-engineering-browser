@@ -174,10 +174,14 @@ final class OAuthStandIn: @unchecked Sendable {
 
 @MainActor
 enum AgentSubscriptionChecks {
+  // The budget counts only time the Mac is awake. A laptop sleeps with work in
+  // flight (lid closed, or a dark wake ended by a thermal emergency under
+  // load) and resumes it intact, but the wall clock jumps past the deadline.
   static func waitFor(_ label: String, timeout: TimeInterval = 20, _ condition: () -> Bool) async {
-    let deadline = Date().addingTimeInterval(timeout)
+    let clock = SuspendingClock()
+    let deadline = clock.now.advanced(by: .seconds(timeout))
     while !condition() {
-      check(Date() < deadline, "timed out: \(label)")
+      check(clock.now < deadline, "timed out: \(label)")
       try? await Task.sleep(nanoseconds: 20_000_000)
     }
   }

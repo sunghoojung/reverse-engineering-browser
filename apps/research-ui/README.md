@@ -776,7 +776,9 @@ accepts only a loopback stand-in, for tests; it never redirects a real key.
   environment, own process group, reads, Allow once and Deny, refusals, Stop
   with helpers killed, unreadable output and Grok's MCP stubs. It runs the
   ChatGPT sign-in against a loopback issuer that checks PKCE, state and nonce,
-  and covers renewal, refusal, a forged issuer and sign out.
+  and covers renewal, refusal, a forged issuer and sign out. Its waits count
+  only time the Mac is awake, so a sleep during a run (a closed lid, or a dark
+  wake that load ends) does not fail it.
 - `node tools/check-agent-panel.mjs` (`make native-only-check`) checks the dock's
   states, safe rendering, citations and budgets in a DOM model, collapsed tool
   results, the menu, Info and picker, a new conversation, the subscription

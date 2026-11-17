@@ -303,17 +303,27 @@ func agentRedactedError(_ text: String) -> String {
   return agentRedactedKeys(bounded)
 }
 
-// Keys (`sk-`, `xai-`), JWT-shaped access and ID tokens, and any bearer value.
-private let agentSecretPatterns: [(NSRegularExpression, String)] = [
+// Keys (`sk-`, `xai-`), JWT-shaped access and ID tokens, and any bearer value,
+// matched in one pass so each secret is replaced whole from where it starts.
+// A token's random characters can spell `sk-`; a key rule run first cut it
+// there and left the token's header and leading claims in the text.
+private let agentSecretRules: [(pattern: String, template: String)] = [
   ("sk-[A-Za-z0-9_*.-]{4,}", "[key]"), ("xai-[A-Za-z0-9_*.-]{8,}", "[key]"),
   ("eyJ[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]{6,}\\.[A-Za-z0-9_-]*", "[token]"),
-  ("(?i)bearer\\s+[A-Za-z0-9._~+/=-]{12,}", "Bearer [token]"),
-].compactMap { pattern, template in (try? NSRegularExpression(pattern: pattern)).map { ($0, template) } }
+  ("(?i:bearer)\\s+[A-Za-z0-9._~+/=-]{12,}", "Bearer [token]"),
+]
+// A literal; check-agent-core compiles and exercises it on every app build.
+private let agentSecretPattern = try! NSRegularExpression(
+  pattern: agentSecretRules.map { "(\($0.pattern))" }.joined(separator: "|"))
 
 func agentRedactedKeys(_ text: String) -> String {
   var result = text
-  for (pattern, template) in agentSecretPatterns {
-    result = pattern.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: template)
+  // From the end, so each earlier match's offsets still hold.
+  for match in agentSecretPattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+    guard let range = Range(match.range, in: result),
+      let rule = agentSecretRules.indices.first(where: { match.range(at: $0 + 1).location != NSNotFound })
+    else { continue }
+    result.replaceSubrange(range, with: agentSecretRules[rule].template)
   }
   return result
 }

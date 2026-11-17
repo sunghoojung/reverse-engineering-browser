@@ -58,6 +58,13 @@ renderer has one multi-producer queue because probes can run on its render
 thread and worker threads. Mojo carries session configuration and coalesced
 wake-ups while event records remain in shared memory. Session configuration
 includes an immutable category bitmask and a monotonic expiration deadline.
+The browser creates each admitted renderer's host when the process launches
+and requests the renderer's configuration client on that process's IPC
+channel (Brave patch `0025`). Navigation commits travel on the same channel,
+so a configuration sent before a commit is applied before that document runs
+its first script; a renderer started for a page captures the page from its
+first inline script. The renderer's own host connection binds to that host
+once it runs.
 Renderer and browser-process sinks check both values before queue insertion,
 and the browser session checks them again before socket delivery. The
 browser-side session starts only after its Unix-socket client authenticates to

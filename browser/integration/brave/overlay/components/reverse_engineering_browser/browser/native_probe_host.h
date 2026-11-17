@@ -23,7 +23,10 @@
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "mojo/public/cpp/base/big_buffer.h"
-#include "mojo/public/cpp/bindings/remote.h"
+#include "mojo/public/cpp/bindings/associated_remote.h"
+#include "mojo/public/cpp/bindings/pending_associated_remote.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/receiver.h"
 
 namespace reb {
 
@@ -37,8 +40,13 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   NativeProbeHost& operator=(const NativeProbeHost&) = delete;
   ~NativeProbeHost() override;
 
+  // The client the session requested on this renderer's IPC channel at
+  // launch. Configures the renderer at once while a session is active.
+  void BindClient(mojo::PendingAssociatedRemote<mojom::NativeProbeClient> client);
+  // The renderer's own connection, which it opens once it runs.
+  void BindReceiver(mojo::PendingReceiver<mojom::NativeProbeHost> receiver);
+
   // mojom::NativeProbeHost:
-  void BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) override;
   void EventsAvailable() override;
   void CaptureWasmDispatch(std::uint64_t capture_epoch,
                            std::uint64_t session_id,
@@ -143,6 +151,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
  private:
   void Drain();
   // WebUI bindings can be granted after the renderer bound.
+  [[nodiscard]] std::uint32_t RendererOsPid();
   [[nodiscard]] bool IsBrowserInternal();
   void ReportExclusions();
   [[nodiscard]] std::uint32_t FrameTab(const std::unordered_map<std::uint64_t, std::uint32_t>& live,
@@ -160,7 +169,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
 
   const raw_ref<NativeProbeSession> session_;
   const int renderer_process_id_;
-  mojo::Remote<mojom::NativeProbeClient> client_;
+  mojo::AssociatedRemote<mojom::NativeProbeClient> client_;
+  mojo::Receiver<mojom::NativeProbeHost> receiver_{this};
   base::UnsafeSharedMemoryRegion queue_region_;
   base::WritableSharedMemoryMapping queue_mapping_;
   raw_ptr<NativeProbeQueue> queue_ = nullptr;

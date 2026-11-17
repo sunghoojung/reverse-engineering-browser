@@ -127,13 +127,18 @@ NativeProbeHost::~NativeProbeHost() {
   session_->RemoveHost(*this);
 }
 
-void NativeProbeHost::BindClient(mojo::PendingRemote<mojom::NativeProbeClient> client) {
+void NativeProbeHost::BindClient(mojo::PendingAssociatedRemote<mojom::NativeProbeClient> client) {
   client_.Bind(std::move(client));
   if (session_->IsActive()) {
     Configure(session_->session_id(), session_->category_mask(),
               session_->expires_at_monotonic_ns(), session_->capture_canvas_images(),
               session_->capture_request_content());
   }
+}
+
+void NativeProbeHost::BindReceiver(mojo::PendingReceiver<mojom::NativeProbeHost> receiver) {
+  receiver_.reset();
+  receiver_.Bind(std::move(receiver));
 }
 
 void NativeProbeHost::EventsAvailable() {
@@ -724,10 +729,6 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
       wasm_capture_epoch_ == std::numeric_limits<std::uint64_t>::max() || IsBrowserInternal()) {
     return;
   }
-  auto* const process = content::RenderProcessHost::FromID(renderer_process_id_);
-  renderer_os_pid_ = process && process->GetProcess().IsValid()
-                         ? static_cast<std::uint32_t>(process->GetProcess().Pid())
-                         : 0;
   reported_exclusions_ = {};
   extension_requests_excluded_ = 0;
   no_page_requests_excluded_ = 0;
@@ -798,6 +799,17 @@ void NativeProbeHost::ResetWasmSampleBudgets() {
     client_->ResetWasmSampleBudgets();
 }
 
+std::uint32_t NativeProbeHost::RendererOsPid() {
+  // The session configures a host at launch, before its process has a pid.
+  if (renderer_os_pid_ == 0) {
+    auto* const process = content::RenderProcessHost::FromID(renderer_process_id_);
+    if (process && process->GetProcess().IsValid()) {
+      renderer_os_pid_ = static_cast<std::uint32_t>(process->GetProcess().Pid());
+    }
+  }
+  return renderer_os_pid_;
+}
+
 bool NativeProbeHost::IsBrowserInternal() {
   if (!browser_internal_ && !session_->capture_browser_internal() &&
       IsNativeBrowserInternalProcess(renderer_process_id_)) {
@@ -812,7 +824,7 @@ void NativeProbeHost::ReportExclusions() {
     const std::uint64_t count = queue_->ExclusionCount(slot);
     if (count > reported_exclusions_[slot]) {
       reported_exclusions_[slot] = count;
-      session_->EmitExclusion(renderer_os_pid_, NativeRendererExclusionClass(slot), count);
+      session_->EmitExclusion(RendererOsPid(), NativeRendererExclusionClass(slot), count);
     }
   }
 }
@@ -862,13 +874,13 @@ void NativeProbeHost::EmitWorkerRequest(NativeProbeEvent& event) {
   const bool extension = resolution.status == NativeTabResolution::Status::kExtension;
   if (extension && !(session_->capture_extension_traffic() && resolution.extension)) {
     excluded_requests_[excluded_next_++ % excluded_requests_.size()] = event.header.request_id;
-    session_->EmitExclusion(renderer_os_pid_, kNativeExtensionWorkerExclusion,
+    session_->EmitExclusion(RendererOsPid(), kNativeExtensionWorkerExclusion,
                             ++extension_requests_excluded_);
     return;
   }
   if (resolution.status == NativeTabResolution::Status::kNoPage) {
     excluded_requests_[excluded_next_++ % excluded_requests_.size()] = event.header.request_id;
-    session_->EmitExclusion(renderer_os_pid_, kNativeServiceWorkerNoPageExclusion,
+    session_->EmitExclusion(RendererOsPid(), kNativeServiceWorkerNoPageExclusion,
                             ++no_page_requests_excluded_);
     return;
   }

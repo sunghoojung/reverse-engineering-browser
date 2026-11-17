@@ -64,7 +64,12 @@ void NativeProbeTransport::Connect(mojo::PendingRemote<mojom::NativeProbeHost> p
   host_.set_disconnect_handler(
       base::BindOnce(&NativeProbeTransport::Disable, base::Unretained(this)),
       base::SequencedTaskRunner::GetCurrentDefault());
-  host_->BindClient(receiver_.BindNewPipeAndPassRemote());
+}
+
+void NativeProbeTransport::BindClient(
+    mojo::PendingAssociatedReceiver<mojom::NativeProbeClient> receiver) {
+  receiver_.reset();
+  receiver_.Bind(std::move(receiver));
 }
 
 void NativeProbeTransport::Configure(const std::uint64_t session_id,

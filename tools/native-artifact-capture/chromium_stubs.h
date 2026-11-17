@@ -653,18 +653,27 @@ struct UnguessableToken {
 }  // namespace base
 namespace mojo {
 template <class T>
-struct PendingRemote {
+struct PendingAssociatedRemote {
   T* target = nullptr;
 };
 template <class T>
-class Remote {
+class AssociatedRemote {
  public:
   bool is_bound() const { return target_ != nullptr; }
-  void Bind(PendingRemote<T> pending) { target_ = pending.target; }
+  void Bind(PendingAssociatedRemote<T> pending) { target_ = pending.target; }
   T* operator->() const { return target_; }
 
  private:
   T* target_ = nullptr;
+};
+template <class T>
+struct PendingReceiver {};
+template <class T>
+class Receiver {
+ public:
+  explicit Receiver(T*) {}
+  void reset() {}
+  void Bind(PendingReceiver<T>) {}
 };
 }  // namespace mojo
 namespace reb::mojom {
@@ -692,7 +701,6 @@ class NativeProbeClient {
 class NativeProbeHost {
  public:
   virtual ~NativeProbeHost() = default;
-  virtual void BindClient(mojo::PendingRemote<NativeProbeClient>) = 0;
   virtual void EventsAvailable() = 0;
   virtual void CaptureWasmDispatch(std::uint64_t,
                                    std::uint64_t,

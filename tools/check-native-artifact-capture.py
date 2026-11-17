@@ -74,7 +74,10 @@ HEADERS = (
     "content/public/browser/render_process_host.h",
     "content/public/browser/web_contents.h",
     "content/public/browser/weak_document_ptr.h",
-    "mojo/public/cpp/bindings/remote.h",
+    "mojo/public/cpp/bindings/associated_remote.h",
+    "mojo/public/cpp/bindings/pending_associated_remote.h",
+    "mojo/public/cpp/bindings/pending_receiver.h",
+    "mojo/public/cpp/bindings/receiver.h",
 )
 
 

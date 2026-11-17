@@ -149,7 +149,6 @@ struct NativeProbeClient {
 struct NativeProbeHost {
   inline static std::atomic<unsigned> notifications{0};
   inline static std::atomic<unsigned> artifacts{0};
-  void BindClient(int) {}
   void EventsAvailable() { ++notifications; }
   template <class... Args>
   void CaptureWasmDispatch(Args&&...) {
@@ -213,9 +212,12 @@ class SharedRemote {
   T* value_ = nullptr;
 };
 template <class T>
-struct Receiver {
-  explicit Receiver(T*) {}
-  int BindNewPipeAndPassRemote() { return 0; }
+struct PendingAssociatedReceiver {};
+template <class T>
+struct AssociatedReceiver {
+  explicit AssociatedReceiver(T*) {}
+  void reset() {}
+  void Bind(PendingAssociatedReceiver<T>) {}
 };
 }  // namespace mojo
 

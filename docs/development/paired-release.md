@@ -181,11 +181,12 @@ sources (#446, #450).
 ### 7. Live acceptance
 
 Every case runs on an owned loopback fixture in a visibly labeled session, per
-[SAFETY.md](../../SAFETY.md). The repository has fixtures for step 6 only; the
-pages and server behaviour each case below needs (echo, `Set-Cookie` variants,
-redirects, a 304, compressed and streamed bodies, workers and a service worker)
-are not in the tree yet, so write them first, under `tools/`, in their own pull
-request. One content session covers most cases:
+[SAFETY.md](../../SAFETY.md). `REB_BRAVE_BINARY="$BRAVE" make live-acceptance-check`
+serves the fixtures in `tools/live_acceptance/`, runs every session below and
+prints PASS, FAIL or the exact MANUAL steps per case
+([tools README](../../tools/README.md#live-acceptance)). The budget cases run in
+their own session with 1 MiB budgets, so they do not cut the content cases
+short. One content session covers most cases:
 
 ```sh
 REB_NATIVE_PROMISE_STACKS=1 "$REB_API" session start \

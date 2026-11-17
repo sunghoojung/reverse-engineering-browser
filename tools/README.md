@@ -58,6 +58,45 @@ with their make targets. Native event transport tests and offline UI model tests
 remain in the normal gates; `make rendered-ui-check` drives the packaged app. Full live-browser acceptance requires a rebuilt
 instrumented Brave and is not established by these offline checks.
 
+## Live acceptance
+
+`check-live-acceptance.py` runs the paired-release
+[live acceptance](../docs/development/paired-release.md#7-live-acceptance)
+through a Brave built from this tree. It serves the owned fixtures in
+`live_acceptance/` on 127.0.0.1, plus `localhost` at the same port as a second
+site, and starts one visibly labeled `--localhost-only` session per kind:
+
+| Session | Start | Areas |
+| --- | --- | --- |
+| `content` | The runbook's content flags, promise stacks on | baseline, #425 tabs, #427 headers, #428 bodies, #429 stacks, #430 cookies, #434 phase 1 debugger, #436 limits |
+| `budget` | The content flags with 1 MiB request and response budgets | #428 and #436 budgets run out and are shown |
+| `metadata` | Without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images` | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` |
+| `no-stacks` | Without `--request-stacks` | No stack walk runs |
+
+It drives each page with `session_action` `open_url` (a trusted click opens the
+#425 popup), compares the stored evidence with the requests the fixture server
+received and the responses it sent, and ends each session with `end`. Each case
+prints `PASS`, `FAIL`, `SKIP` with its reason, or `MANUAL` with the exact steps
+when it needs a person, DevTools, a profiler or HTTPS; a `MANUAL` case never
+passes. The command exits 1 on any `FAIL` and 2, after
+`UNAVAILABLE: ...`, when no browser is given.
+
+```sh
+REB_BRAVE_BINARY="/path/to/Brave Browser Development" make live-acceptance-check
+REB_BRAVE_BINARY="..." LIVE_ACCEPTANCE_SESSION=content make live-acceptance-check
+python3 tools/check-live-acceptance.py --brave "..." --session content --only stacks,headers \
+  --sessions-root /absolute/kept-evidence
+python3 tools/check-live-acceptance.py --serve --port 8765   # fixture pages for the MANUAL steps
+```
+
+Without `--sessions-root` each session's evidence is removed after the run. The
+Python brotli module or a `brotli` executable enables the brotli case.
+`check-live-acceptance-test.py`, part of `make check`, needs no browser: it
+requests every fixture route, syntax-checks the page scripts and compares the
+expected stack frames with the frames V8 records (with Node.js), and runs each
+check against a stand-in backend with the real API's JSON shapes, on matching
+and on differing evidence.
+
 ## Integrated browser inputs
 
 `brave_patch_contract.py` validates patch destinations against their independent

@@ -99,15 +99,16 @@ def check_context(run: Run) -> None:
 
 
 def ended(session: Session, timeout: float = 30) -> None:
-    """Wait until the backend stops answering, so its files can be removed."""
+    """Wait until the backend stops answering, so its files can be removed, then close its window."""
     session.end()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             urllib.request.urlopen(session.api.endpoint + "/api/health", timeout=2).close()
         except (urllib.error.URLError, OSError):
-            return
+            break
         time.sleep(0.5)
+    session.close_app()
 
 
 def guarded(report: Report, issue: str, step: str, work) -> None:
@@ -147,6 +148,8 @@ def run_kind(name: str, args: argparse.Namespace, options: Options) -> Report:
             for area in areas:
                 guarded(report, area.ISSUE, f"{area.NAME} drive", lambda area=area: area.drive(run))
             time.sleep(SETTLE_SECONDS)
+            # A drive may read rows mid-page; verification reads them after every page ran.
+            run.forget()
             for area in areas:
                 guarded(report, area.ISSUE, f"{area.NAME} verify", lambda area=area: area.verify(run))
             if name == "content":

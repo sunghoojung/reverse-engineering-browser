@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 import urllib.error
@@ -330,6 +331,24 @@ class Session:
             self.api.action({"action": "end", "confirm": True})
         except (ApiError, OSError):
             pass
+
+    def close_app(self) -> None:
+        """Quit the Origin Trace instance the launcher opened for this session.
+
+        The launcher leaves it open after the session ends, as a person reading the evidence wants;
+        a run of four sessions would otherwise leave four windows. Only the instance reading this
+        session's store is matched, so another Origin Trace window stays open.
+        """
+        store = f"--store {Path(self.document['session_dir']) / 'events.jsonl'} "
+        listed = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True,
+                                check=False).stdout
+        for line in listed.splitlines():
+            pid, _, command = line.strip().partition(" ")
+            if "/Contents/MacOS/OriginTrace " in command and store in command:
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except (OSError, ValueError):
+                    pass
 
 
 def start_session(reb_api: Path, arguments: list[str], environment: dict[str, str],

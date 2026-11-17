@@ -814,7 +814,11 @@ class Evidence(unittest.TestCase):
             (root / "brave-profile" / "Cookies").write_bytes(b"reb-secret-js-cookie")
             (root / "events.jsonl").write_text("{}\n")
             self.run_.session.document["session_dir"] = directory
-            row = self.build.row(None, host=f"localhost:{self.fx.port}")
+            # A metadata row keeps only its host, without the port, in domain and path.
+            host_only = {"host": None, "target_kind": "host"}
+            post = self.build.row(None, "POST", domain="127.0.0.1", path="127.0.0.1", **host_only)
+            self.build.request_body(post, 3, b"reb-secret-body-value", flags=0)
+            row = self.build.row(None, domain="localhost", path="localhost", **host_only)
             self.build.stack(row, [{"index": 0, "kind": "javascript", "eval": True,
                                     "resolution": {"status": "unresolved", "reason": "source_not_retained"}}])
             metadata.verify(self.run_)

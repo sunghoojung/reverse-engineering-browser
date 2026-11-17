@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from live_acceptance.evidence import find_rows, for_row
+from live_acceptance.evidence import find_rows, for_row, members
 from live_acceptance.fixture import Fixture, Request, cors, html_response, payload, redirect, text_response
 from live_acceptance.pages import document
 from live_acceptance.run import Options, Run
@@ -11,6 +11,9 @@ ISSUE = "#436"
 NAME = "limits"
 SCRIPTS = 40
 BODY_LIMIT = 16 * 1024 * 1024
+# ERR_ALPN_NEGOTIATION_FAILED: the stream body needs HTTP/2 or QUIC and the fixture offers HTTP/1.1.
+STREAM_REFUSED = -122
+CHUNKED_DATA_PIPE = 4
 LARGE_BODY = 17 * 1024 * 1024
 GRAPHQL_FIELDS = 760
 
@@ -45,13 +48,20 @@ function bytes(length, seed) {{
     await fetch('/limits/multipart', {{method: 'POST', body: form}});
   }});
   await REB.run('limits:blob', () => fetch('/limits/blob', {{method: 'POST', body: new Blob([bytes(131072, 11)])}}));
+  // Chromium sends a stream body only over HTTP/2 or QUIC, which this plain
+  // HTTP fixture cannot negotiate, so the browser refuses it before sending.
   await REB.run('limits:stream', async () => {{
     const parts = [bytes(65536, 21), bytes(65536, 22), bytes(1000, 23)];
     const body = new ReadableStream({{start(controller) {{
       for (const part of parts) controller.enqueue(part);
       controller.close();
     }}}});
-    await fetch('/limits/stream', {{method: 'POST', body, duplex: 'half', allowHTTP1ForStreamingUpload: true}});
+    try {{
+      await fetch('/limits/stream', {{method: 'POST', body, duplex: 'half'}});
+      return 'sent';
+    }} catch (error) {{
+      return 'refused: ' + error.message;
+    }}
   }});
   await REB.run('limits:redirected-post', () => fetch('/limits/post-307', {{
     method: 'POST', body: 'redirected post body ' + 'y'.repeat(2000),
@@ -166,7 +176,7 @@ def verify(run: Run) -> None:
 
     problems = []
     for path, label, read in (("/limits/json", "5 MiB JSON POST", False), ("/limits/multipart", "multipart with a file", True),
-                              ("/limits/blob", "Blob upload", True), ("/limits/stream", "stream-body fetch", True)):
+                              ("/limits/blob", "Blob upload", True)):
         body = received(run, path)
         if body is None:
             ok, error = run.result(label_name(path))
@@ -175,8 +185,26 @@ def verify(run: Run) -> None:
         if path == "/limits/json" and len(body) < 5 * 1024 * 1024:
             problems.append(f"{label}: only {len(body)} bytes")
         body_kept(run, path, body, problems, label, read)
-    report.check(ISSUE, "5 MiB JSON, multipart, Blob and stream bodies", problems,
+    report.check(ISSUE, "5 MiB JSON, multipart and Blob bodies", problems,
                  "each kept with the exact bytes the server received")
+
+    problems = []
+    if fx.receipts("/limits/stream"):
+        problems.append(f"the server got {len(fx.receipts('/limits/stream'))} stream-body requests over HTTP/1.1")
+    record = body_record(run, "/limits/stream", problems, "stream-body fetch")
+    if record is not None:
+        seen = (record.kind, record.state, record.captured_length, record.sha256)
+        if seen != (CHUNKED_DATA_PIPE, "not_captured_read_incomplete", 0, None):
+            problems.append(f"kind {record.kind} state {record.state} captured {record.captured_length} "
+                            f"digest {'present' if record.sha256 else 'absent'}")
+        keys = {(m["process_id"], m["request_id"]) for row in find_rows(run.rows(), target="/limits/stream")
+                for m in members(row)}
+        codes = [e.get("error_code") for e in run.api.events("request_failed")
+                 if (e["process_id"], e["request_id"]) in keys]
+        if codes != [STREAM_REFUSED]:
+            problems.append(f"request_failed error codes {codes}, expected [{STREAM_REFUSED}]")
+    report.check(ISSUE, "stream-body fetch over HTTP/1.1", problems,
+                 "Chromium refuses it unsent; the chunked body is recorded unread, with no bytes and no digest")
 
     problems = []
     hops = [received(run, "/limits/post-307"), received(run, "/limits/post-307-target")]
@@ -227,11 +255,15 @@ def verify(run: Run) -> None:
                   "<input type=file> on the fixture origin, choose a file, POST it as multipart and compare "
                   "get_events request_body (read flag, captured) and its artifact with the file; then attach a "
                   "file, change it on disk before sending, and check not_captured_read_incomplete")
+    report.manual(ISSUE, "stream-body fetch over HTTP/2",
+                  "Chromium sends a ReadableStream body only over HTTP/2 or QUIC, which the loopback fixture "
+                  "cannot serve. On an owned HTTPS endpoint that negotiates h2, POST a ReadableStream body with "
+                  "duplex 'half' and compare get_events request_body (kind 4, read flag, captured) and its "
+                  "artifact with the bytes the server received")
     report.manual("#428 #436", "browser memory bound",
                   "watch the browser's memory with Instruments or Activity Monitor during this page: it stays "
                   "within the 32 MiB in-flight pool plus the browser's baseline; record how it was measured")
 
 
 def label_name(path: str) -> str:
-    return {"/limits/json": "limits:json", "/limits/multipart": "limits:multipart", "/limits/blob": "limits:blob",
-            "/limits/stream": "limits:stream"}[path]
+    return {"/limits/json": "limits:json", "/limits/multipart": "limits:multipart", "/limits/blob": "limits:blob"}[path]

@@ -81,7 +81,11 @@ function frame(src) {
   await REB.run('bodies:sse', stream);
   await REB.run('bodies:redirect', () => read('/bodies/redirect?r=1'));
   await REB.run('bodies:etag-first', () => read('/bodies/etag?r=1'));
+  // The HTTP cache revalidates its own copy and gives the page that 200; a 304
+  // reaches the page only for a conditional request the page makes itself.
   await REB.run('bodies:etag-revalidated', () => read('/bodies/etag?r=1', {cache: 'no-cache'}));
+  await REB.run('bodies:etag-conditional', () => read('/bodies/etag?r=2',
+    {cache: 'no-store', headers: {'If-None-Match': ETAG}}));
   await REB.run('bodies:parallel', () => Promise.all(
     Array.from({length: PARALLEL}, (_, i) => read('/bodies/parallel?i=' + i))));
   await REB.run('bodies:download', async () => {
@@ -151,7 +155,8 @@ def _etag(request: Request) -> Response:
 
 
 def install(fx: Fixture, options: Options) -> None:
-    index = INDEX.replace("BROTLI", "true" if options.brotli else "false").replace("PARALLEL", str(PARALLEL))
+    index = (INDEX.replace("BROTLI", "true" if options.brotli else "false").replace("PARALLEL", str(PARALLEL))
+             .replace("ETAG", json.dumps(ETAG)))
     fx.page("/bodies/index.html", index)
     fx.route("/bodies/json", lambda _r: bytes_response(JSON_BODY, "application/json"))
     fx.route("/bodies/html", lambda _r: bytes_response(HTML_BODY, "text/html; charset=utf-8"))
@@ -202,7 +207,7 @@ def drive(run: Run) -> None:
     STATE.partial = None
     names = ["bodies:json", "bodies:html", "bodies:image-fetch", "bodies:image-element", "bodies:gzip",
              "bodies:chunked", "bodies:sse", "bodies:redirect", "bodies:etag-first", "bodies:etag-revalidated",
-             "bodies:parallel", "bodies:download", "bodies:sw", "bodies:sw-answer", "bodies:preload"]
+             "bodies:etag-conditional", "bodies:parallel", "bodies:download", "bodies:sw", "bodies:sw-answer", "bodies:preload"]
     if run.options.brotli:
         names.append("bodies:brotli")
     run.open("/bodies/index.html")
@@ -221,16 +226,17 @@ def drive(run: Run) -> None:
     time.sleep(1)
 
 
-def kept(run: Run, target: str, expected: bytes, problems: list[str], label: str | None = None) -> None:
-    """The row's body is captured and its artifact holds exactly these bytes."""
+def kept(run: Run, target: str, expected: bytes, problems: list[str], label: str | None = None,
+         case: str = "captured") -> None:
+    """The row's body has this case and its artifact holds exactly these bytes."""
     label = label or target
     rows = find_rows(run.rows(), target=target)
     if len(rows) != 1:
         problems.append(f"{label}: {len(rows)} rows")
         return
     body = rows[0].get("response_body") or {}
-    if body.get("case") != "captured":
-        problems.append(f"{label}: case {body.get('case')}")
+    if body.get("case") != case:
+        problems.append(f"{label}: case {body.get('case')}, expected {case}")
         return
     if body.get("sha256") != sha256(expected) or body.get("body_length") != str(len(expected)):
         problems.append(f"{label}: {body.get('body_length')} bytes {str(body.get('sha256'))[:12]}, "
@@ -274,8 +280,11 @@ def verify(run: Run) -> None:
     if len(sse) != 1:
         problems.append(f"the event stream was requested {len(sse)} times")
     else:
-        kept(run, "/bodies/sse?r=1", sse[0].decoded_body, problems, "event stream")
-    report.check(ISSUE, "chunked and streamed bodies", problems, "a chunked body and an event stream kept whole")
+        # The page closes the stream at its end event, as EventSource clients do, so the
+        # body ends cancelled with every byte the server sent kept.
+        kept(run, "/bodies/sse?r=1", sse[0].decoded_body, problems, "event stream", "cancelled")
+    report.check(ISSUE, "chunked and streamed bodies", problems,
+                 "a chunked body kept whole, and an event stream the page closed kept as sent and cancelled")
 
     problems = []
     rows = [row for target in ("/bodies/redirect?r=1", "/bodies/redirect-target?r=1")
@@ -295,13 +304,19 @@ def verify(run: Run) -> None:
     report.check(ISSUE, "redirect", problems, "the hop carries redirected and the target body is kept")
 
     problems = []
-    served = [r.status for r in fx.receipts("/bodies/etag")]
-    cases = sorted(case_of(run, "/bodies/etag?r=1"))
-    if served != [200, 304]:
-        problems.append(f"the server answered {served}, expected [200, 304]")
-    if cases != ["captured", "not_modified"]:
-        problems.append(f"cases {cases}, expected captured and not_modified")
-    report.check(ISSUE, "304", problems, "the revalidation carries not_modified")
+    served = [(r.request.query.get("r"), r.status) for r in fx.receipts("/bodies/etag")]
+    if served != [("1", 200), ("1", 304), ("2", 304)]:
+        problems.append(f"the server answered {served}, expected 200 and 304 for r=1, then 304 for r=2")
+    bodies = [row.get("response_body") or {} for row in find_rows(run.rows(), target="/bodies/etag?r=1")]
+    if [(b.get("case"), b.get("shared")) for b in bodies] != [("captured", False), ("captured", True)] or \
+            len({b.get("sha256") for b in bodies}) != 1:
+        problems.append(f"the cache revalidation is {[(b.get('case'), b.get('shared')) for b in bodies]}, "
+                        "expected the first body captured, then shared by the cached 200")
+    conditional = case_of(run, "/bodies/etag?r=2")
+    if conditional != ["not_modified"]:
+        problems.append(f"the page's own conditional request is {conditional}, expected not_modified")
+    report.check(ISSUE, "304", problems,
+                 "a 304 the page receives carries not_modified; a cache revalidation keeps the cached body")
 
     problems = []
     aborted = [r for r in fx.receipts("/bodies/abort-download") if r.aborted]

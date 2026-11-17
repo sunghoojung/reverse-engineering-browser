@@ -161,14 +161,14 @@ def many_page(index: int) -> str:
 
 def many_frame(request: Request) -> str:
     index = int(request.query.get("i", "0"))
-    last = index == MANY_TABS - 1
-    tail = (f"""  await REB.wait('tabs:all-open', 120);
-  navigator.serviceWorker.controller.postMessage({{all: {MANY_TABS}}});""" if last else "")
+    # The driver releases all-open once every frame reported, so the last one waits after its report.
+    tail = (f""".then(() => REB.wait('tabs:all-open', 120))
+  .then(() => navigator.serviceWorker.controller.postMessage({{all: {MANY_TABS}}}))"""
+            if index == MANY_TABS - 1 else "")
     return document(f"frame {index}", f"""<script>
 REB.run('tabs:many-{index}', async () => {{
   if (!navigator.serviceWorker.controller) throw new Error('this frame is not controlled');
-{tail}
-}});
+}}){tail};
 </script>""")
 
 
@@ -344,8 +344,22 @@ def verify(run: Run) -> None:
 
     registrant = run.tab_of("/tabs/sw-register.html")
     problems = []
+    # The register job's own fetches come first. Later ones are the update checks a navigation in
+    # scope starts, which link to the version's tabs when no page asked (native-network-v3.md).
+    updates = 0
     for target in ("/tabs/sw/sw.js", "/tabs/sw/import.js?r=1"):
-        _on_tab(run, problems, target, registrant)
+        found = find_rows(rows, target=target)
+        if not found:
+            problems.append(f"no row for {target}")
+            continue
+        if registrant not in row_tabs(found[0]):
+            problems.append(f"{target} registration fetch is on {sorted(row_tabs(found[0]))}, not tab {registrant}")
+        for row in found[1:]:
+            link = row.get("tab_link") or {}
+            if not (row_tabs(row) and link.get("complete") and link.get("kind") in (LINK_CLIENTS, LINK_LAST_CLIENTS,
+                                                                                 LINK_REGISTRANT)):
+                problems.append(f"{target} update check on {sorted(row_tabs(row))} with tab_link {link}")
+            updates += 1
     installs = [row for row in find_rows(rows, target="/tabs/sw/cached?r=1") if row.get("initiator") != "script"
                 and (row.get("tab_link") or {}).get("kind") == LINK_REGISTRANT]
     if not installs:
@@ -356,7 +370,8 @@ def verify(run: Run) -> None:
     if not ok:
         problems.append(f"the controlled frame failed: {value}")
     report.check(ISSUE, "service worker install, passthrough, respondWith(fetch()) and cache", problems,
-                 f"registration, imports, cache.addAll and the controlled frame's loads are on tab {registrant}")
+                 f"registration, imports, cache.addAll and the controlled frame's loads are on tab {registrant}; "
+                 f"{updates} later update-check fetches link to the version's tabs")
 
     popup = fx.beacon("tabs:last-client-popup") is not None
     last_target = "/tabs/sw/last.html?r=popup" if popup else "/tabs/sw/last.html?r=nav"

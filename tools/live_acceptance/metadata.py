@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from live_acceptance.evidence import SENSITIVE_KINDS, find_rows, for_row, per_request, request_stack
+from live_acceptance.evidence import SENSITIVE_KINDS, for_row, per_request, request_stack
 from live_acceptance.fixture import Fixture, cors, html_response, text_response
 from live_acceptance.pages import document
 from live_acceptance.run import Options, Run
@@ -63,6 +63,11 @@ def scan_files(root: Path) -> list[str]:
     return found
 
 
+def on_host(rows: list[dict], host: str) -> list[dict]:
+    """A metadata session keeps only each row's host, without its port, in `domain`."""
+    return [row for row in rows if row.get("target_kind") == "host" and row.get("domain") == host]
+
+
 def verify(run: Run) -> None:
     report = run.report
     problems: list[str] = []
@@ -72,7 +77,7 @@ def verify(run: Run) -> None:
     kept = [a for a in run.api.artifacts(kind=",".join(sorted(SENSITIVE_KINDS)))]
     if kept:
         problems.append(f"{len(kept)} sensitive artifacts: {sorted({a['kind'] for a in kept})}")
-    rows = [row for row in run.rows() if row.get("host") == f"127.0.0.1:{run.fixture.port}" and row.get("method") == "POST"]
+    rows = [row for row in on_host(run.rows(), "127.0.0.1") if row.get("method") == "POST"]
     with_path = [row for row in run.rows() if row.get("target")]
     if with_path:
         problems.append(f"{len(with_path)} rows keep a path, e.g. {with_path[0].get('target')}")
@@ -82,8 +87,8 @@ def verify(run: Run) -> None:
         if per_request(run.api, "/api/request-cookies", row).get("hops"):
             problems.append("get_request_cookies returned cookie lists")
     bodies = [body for row in rows for body in for_row(run.records()[0], row)]
-    if any(body.state != "metadata_only" for body in bodies):
-        problems.append(f"request body states {[body.state for body in bodies]}")
+    if not bodies or any(body.state != "metadata_only" for body in bodies):
+        problems.append(f"request body states {[body.state for body in bodies]} of {len(rows)} POST rows")
     session_dir = Path(run.session.document.get("session_dir", ""))
     if session_dir.is_dir():
         problems += scan_files(session_dir)
@@ -94,7 +99,7 @@ def verify(run: Run) -> None:
                  f"and no session file holds any of {len(SECRETS)} fixture values")
 
     problems = []
-    found = find_rows(run.rows(), host=f"localhost:{run.fixture.port}")
+    found = on_host(run.rows(), "localhost")
     if len(found) != 1:
         problems.append(f"{len(found)} rows for the eval's request to localhost")
     else:

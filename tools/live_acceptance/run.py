@@ -86,6 +86,11 @@ class Run:
             self._records = request_records(self.api)
         return self._records
 
+    def forget(self) -> None:
+        """Drop cached evidence, so a read taken while pages ran is not verified."""
+        self._rows = None
+        self._records = None
+
     def tab_of(self, target: str) -> str | None:
         """The tab of a document the fixture served: the tab its own row names."""
         for row in find_rows(self.rows(), target=target):

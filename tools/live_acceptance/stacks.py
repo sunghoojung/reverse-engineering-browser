@@ -231,11 +231,18 @@ def verify(run: Run) -> None:
         want = expected_await_lines()
         if stack.get("async_frames", 0) < 2 or lines[:2] != want:
             problems.append(f"async_frames {stack.get('async_frames')}, await frames at lines {lines}, expected {want}")
-        if not any(segment.get("kind") == "microtask" and segment.get("promise_stacks_on")
-                   for segment in stack.get("task_segments", [])):
-            problems.append("no microtask segment with promise stacks on: "
-                            f"{[(s.get('kind'), s.get('promise_stacks_on')) for s in stack.get('task_segments', [])]}")
-    report.check(ISSUE, "await chain", problems, "the awaiting callers show as async frames")
+        # With promise stacks on, the reaction's microtask segment carries the await that registered it
+        # and the stack it registered from; promise_stacks_on is only for one with no registration.
+        registered = [[(frame.get("resolution") or {}).get("function_name") for frame in segment.get("frames", [])]
+                      for segment in stack.get("task_segments", [])
+                      if (segment.get("kind"), segment.get("registration"), segment.get("state"))
+                      == ("microtask", "await", "captured")]
+        if not any(names[:3] == ["innerAwait", "middleAwait", "outerAwait"] for names in registered):
+            problems.append("no captured await registration from innerAwait, middleAwait and outerAwait: "
+                            f"{[(s.get('kind'), s.get('registration'), s.get('state')) for s in stack.get('task_segments', [])]}"
+                            f" {registered}")
+    report.check(ISSUE, "await chain", problems,
+                 "the awaiting callers show as async frames, and the microtask carries its await registration")
 
     problems = []
     digests = []

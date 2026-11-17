@@ -116,7 +116,8 @@ std::uint64_t FrameId(const blink::WebLocalFrame* frame) {
   if (!frame) {
     return 0;
   }
-  const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
+  // GetLocalFrameToken() returns by value; a reference into it would dangle.
+  const base::UnguessableToken token = frame->GetLocalFrameToken().value();
   return NativeFrameIdOf(token.GetHighForSerialization(), token.GetLowForSerialization());
 }
 // A Console command's own throw is not a page exception.

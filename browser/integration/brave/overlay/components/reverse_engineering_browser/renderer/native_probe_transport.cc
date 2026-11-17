@@ -33,7 +33,8 @@ std::uint64_t CurrentFrameId() noexcept {
   if (!frame) {
     return 0;
   }
-  const base::UnguessableToken& token = frame->GetLocalFrameToken().value();
+  // GetLocalFrameToken() returns by value; a reference into it would dangle.
+  const base::UnguessableToken token = frame->GetLocalFrameToken().value();
   return NativeFrameIdOf(token.GetHighForSerialization(), token.GetLowForSerialization());
 }
 

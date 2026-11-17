@@ -552,12 +552,21 @@ bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
     const auto read_only_once = chunked.read_only_once();
     mojo::PendingRemote<network::mojom::ChunkedDataPipeGetter> tee;
     auto receiver = tee.InitWithNewPipeAndPassReceiver();
-    // Bound to the reader's sequence here, so no posted task can drop the
-    // page's getter.
-    mojo::MakeSelfOwnedReceiver(
-        std::make_unique<ChunkedTee>(chunked.ReleaseChunkedDataPipeGetter(), std::move(stream),
-                                     allowance, std::move(reply), std::move(done)),
-        std::move(receiver), runner);
+    // Mojo requires a receiver's first use to be on the sequence that dispatches
+    // to it, and setting its disconnect handler is a use, so the tee is bound on
+    // the reader's sequence. The network's calls wait in the pipe until then.
+    // Only a pool that is shutting down drops the task: the tee then reports the
+    // read incomplete as it is destroyed, and the request sees its getter gone.
+    static_cast<void>(runner->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            [](std::unique_ptr<ChunkedTee> impl,
+               mojo::PendingReceiver<network::mojom::ChunkedDataPipeGetter> receiver) {
+              mojo::MakeSelfOwnedReceiver(std::move(impl), std::move(receiver));
+            },
+            std::make_unique<ChunkedTee>(chunked.ReleaseChunkedDataPipeGetter(), std::move(stream),
+                                         allowance, std::move(reply), std::move(done)),
+            std::move(receiver))));
     elements[0] =
         network::DataElement(network::DataElementChunkedDataPipe(std::move(tee), read_only_once));
     return true;

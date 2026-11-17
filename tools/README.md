@@ -91,7 +91,7 @@ python3 tools/check-live-acceptance.py --serve --port 8765   # fixture pages for
 
 Without `--sessions-root` each session's evidence is removed after the run. The
 Python brotli module or a `brotli` executable enables the brotli case.
-`check-live-acceptance-test.py`, part of `make check`, needs no browser: it
+`check-live-acceptance-test.py`, part of `make lint`, needs no browser: it
 requests every fixture route, syntax-checks the page scripts and compares the
 expected stack frames with the frames V8 records (with Node.js), and runs each
 check against a stand-in backend with the real API's JSON shapes, on matching

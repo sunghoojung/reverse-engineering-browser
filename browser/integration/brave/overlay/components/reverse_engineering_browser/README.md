@@ -24,22 +24,27 @@ changing the surface result.
 
 While no session is active, no hook allocates, locks, makes a system call, or
 calls into V8 or the embedder. Every first check reads static,
-constant-initialized state. A thread's first hook therefore does not make dyld
-allocate and fill the image's thread-local block: per-thread sink state larger
-than a pointer is allocated on that thread's first active use and freed when
-the thread exits.
+constant-initialized state, and no per-event hook touches a thread-local.
+Per-thread sink state larger than a pointer is allocated on a thread's first
+active use and freed when the thread exits, so the sink image's thread-local
+block is 81 bytes on arm64 (it was 131 KiB). The only write to it without a
+session is a V8 thread's scope, once when the thread starts. In a static build
+those bytes are part of the image's one block, which every thread allocates
+anyway; in a component build that store makes dyld allocate the sink
+library's block for the thread.
 
 | Hook | Cost with no session |
 | --- | --- |
 | Renderer sink checks, generated binding, Canvas, Web Audio and runtime operation records | One atomic load of the exported sink's field, inline |
 | Renderer request start | The same load, before the URL's scheme or host is read |
 | Script cookie access | One atomic load of a static member, inline |
-| `TypedArray` and `ArrayBuffer` construction | Two loads in the V8 builtin, the gate pointer then its byte; no runtime call or callback |
-| Wasm trap | One V8 flag test without `--reb-wasm-br-table-dispatch` or `--reb-wasm-call-indirect-dispatch`; with either, one sink check before any URL is converted |
+| `TypedArray` and `ArrayBuffer` construction | Three loads in the `TypedArray` builtin (the external reference, the gate pointer, its byte) and two in the `ArrayBuffer` builtin; no runtime call or callback |
+| Wasm trap | Two V8 flag tests without `--reb-wasm-br-table-dispatch` or `--reb-wasm-call-indirect-dispatch`; with either, one sink check before any URL is converted |
 | Blink async task run and navigation kind scope | One atomic load without `--reb-request-stacks` |
 | Proxied browser request | Two atomic loads when it starts; later events read only the request's own fields |
 | Early-hints loader factory | Two atomic loads; the factory is built as stock |
 | Factory owner scope | One atomic load in a browser that did not start capture from its command line |
+| V8 thread start (document and dedicated, shared or service worker) | One thread-local store of the thread's scope, once per thread |
 
 Two launch-time choices keep work on these paths without a session, because
 evidence from before a session depends on it. With `--reb-request-stacks` the

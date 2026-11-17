@@ -80,15 +80,16 @@ index fadb490..6b9379d 100644
    if (!callback || !IsJSArrayBuffer(value)) {
      return;
 diff --git a/src/builtins/builtins-typed-array-gen.cc b/src/builtins/builtins-typed-array-gen.cc
-index cf10dbc..f0364e8 100644
+index cf10dbc..5e4bc40 100644
 --- a/src/builtins/builtins-typed-array-gen.cc
 +++ b/src/builtins/builtins-typed-array-gen.cc
-@@ -123,7 +123,16 @@ TF_BUILTIN(TypedArrayConstructor, TypedArrayBuiltinsAssembler) {
+@@ -123,7 +123,17 @@ TF_BUILTIN(TypedArrayConstructor, TypedArrayBuiltinsAssembler) {
    TNode<JSAny> result =
        CallBuiltin<JSAny>(Builtin::kCreateTypedArray, context, target,
                           new_target, arg1, arg2, arg3);
 +  // Isolate::runtime_buffer_gate_open: while the embedder's capture is
-+  // inactive a construction costs two loads, not a runtime call.
++  // inactive a construction costs three loads (the external reference, the
++  // gate pointer and its byte), not a runtime call.
 +  Label capture(this, Label::kDeferred), done(this);
 +  const TNode<RawPtrT> gate = Load<RawPtrT>(
 +      ExternalConstant(ExternalReference::address_of_runtime_buffer_gate()));
@@ -143,17 +144,18 @@ index 8d0ec81..f202410 100644
  // A global counter for all generated Isolates, might overflow.
  std::atomic<int> isolate_counter{0};
 diff --git a/src/execution/isolate.h b/src/execution/isolate.h
-index 5d1c726..f28aaa6 100644
+index 5d1c726..c7e4b36 100644
 --- a/src/execution/isolate.h
 +++ b/src/execution/isolate.h
-@@ -2013,6 +2013,22 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -2013,6 +2013,23 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
      return reinterpret_cast<Address>(&async_event_delegate_);
    }
  
-+  // Process-wide, so TypedArrayConstructor reads it with two loads and no
-+  // isolate. A supported construction calls runtime_buffer_callback only
-+  // while the byte it points to is nonzero. Until an embedder installs its
-+  // own, it points to a constant 1.
++  // Process-wide, for every isolate. A supported construction calls
++  // runtime_buffer_callback only while the byte it points to is nonzero, so
++  // TypedArrayConstructor loads the pointer and the byte instead of making a
++  // runtime call. Until an embedder installs its own, it points to a
++  // constant 1.
 +  static void set_runtime_buffer_gate(const std::atomic<uint8_t>* gate) {
 +    runtime_buffer_gate_.store(gate ? gate : &kRuntimeBufferGateOpen,
 +                               std::memory_order_relaxed);
@@ -169,7 +171,7 @@ index 5d1c726..f28aaa6 100644
    Address javascript_execution_assert_address() {
      return reinterpret_cast<Address>(&javascript_execution_assert_);
    }
-@@ -3034,6 +3050,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+@@ -3034,6 +3051,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
  
    debug::AsyncEventDelegate* async_event_delegate_ = nullptr;
    const v8::NativePromiseCallbacks* reb_promise_callbacks_ = nullptr;

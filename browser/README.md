@@ -62,6 +62,12 @@ initializations of the same Brave pin can use different tooling. Before
 `--init`, bootstrap writes the revision to the ignored `src/brave/.env` as
 `projects_depot_tools_revision`, and Brave installs that exact commit.
 `make brave-doctor` reports the installed revision and fails on a mismatch.
+Bootstrap also sets `lean_sync=true` there. A resumed `--init` otherwise asks
+gclient for the pinned tag over the shallow Chromium clone, and depot_tools
+fetches every branch of `chromium/src` to find it, which can stall for hours.
+Brave's lean sync checks out that tag itself and fetches only it when it is
+missing; on a first `--init`, before `src` exists, it falls back to the
+ordinary clone.
 
 Bootstrap also applies `browser/integration/brave/patches/init/` to brave-core
 before Brave's own initialization reads `DEPS`. That stack holds backports that

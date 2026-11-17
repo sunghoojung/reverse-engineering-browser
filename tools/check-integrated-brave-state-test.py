@@ -523,6 +523,48 @@ class StateGuards(unittest.TestCase):
         self.assertEqual(git(checkout, "rev-parse", f"{revision}^{{commit}}"),
                          git(checkout, "rev-parse", "HEAD"))
 
+    def test_bootstrap_init_records_env_settings_once(self):
+        revision = "v1.2.4"
+        git(self.brave, "tag", "-a", revision, "-m", "owned release fixture")
+        worktree = self.root / "init-bootstrap"
+        mocks = self.root / "init-bin"
+        mocks.mkdir()
+        calls = self.root / "corepack-calls"
+        values = {
+            "df": "printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 999999999 0 999999999 0%% /\\n'",
+            "node": "echo 24.16.0",
+            "corepack": f"printf '%s\\n' \"$*\" >> {shlex.quote(str(calls))}",
+        }
+        for name, content in values.items():
+            path = mocks / name
+            path.write_text("#!/bin/sh\n" + content + "\n")
+            path.chmod(0o755)
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("REB_")}
+        environment.update(PATH=str(mocks) + os.pathsep + os.environ["PATH"],
+                           REB_BRAVE_WORKTREE=str(worktree))
+
+        def bootstrap():
+            return subprocess.run(
+                ["bash", str(HELPER.parent.parent / "scripts/bootstrap-brave.sh"),
+                 "--remote", str(self.brave), "--revision", revision, "--init"],
+                env=environment, capture_output=True, text=True, check=False,
+            )
+
+        depot_tools = (HELPER.parent.parent / "browser/config/depot_tools.rev").read_text().strip()
+        settings = f"projects_depot_tools_revision={depot_tools}\nlean_sync=true\n"
+        env_file = worktree / "src/brave/.env"
+        for _ in range(2):
+            result = bootstrap()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(env_file.read_text(), settings)
+        self.assertEqual(calls.read_text(), "pnpm run init --no-history\n" * 2)
+
+        env_file.write_text(f"projects_depot_tools_revision={depot_tools}\nlean_sync=false\n")
+        result = bootstrap()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("sets a different lean_sync", result.stderr)
+        self.assertEqual(calls.read_text(), "pnpm run init --no-history\n" * 2)
+
     def test_wrapper_records_prepared_sources_and_still_rejects_user_edits(self):
         scripts = self.repo / "scripts"
         scripts.mkdir()

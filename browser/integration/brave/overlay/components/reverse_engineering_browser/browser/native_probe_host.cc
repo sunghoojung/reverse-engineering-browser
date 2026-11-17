@@ -687,6 +687,11 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
                                                bool allocating_script_is_eval,
                                                mojo_base::BigBuffer allocating_script_source,
                                                std::uint64_t allocating_script_session_id) {
+  // Content does not pass through Drain, which refuses a renderer that became
+  // browser-internal after admission (a spare given a WebUI page).
+  if (browser_internal_ || IsBrowserInternal()) {
+    return;
+  }
   if (kind == static_cast<std::uint16_t>(NativeArtifactKind::kBytecodeBuffer) &&
       capture_origin ==
           static_cast<std::uint16_t>(NativeArtifactCaptureOrigin::kRuntimeTypedArray)) {

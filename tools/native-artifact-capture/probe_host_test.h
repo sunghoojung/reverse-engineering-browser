@@ -516,9 +516,19 @@ void NativeProbeHostStackRefusal() {
   Check(client.refused_stacks.size() == 2 && client.refused_stacks.back() == 902,
         "A stack artifact the queue refuses is reported to its renderer");
   transfers.clear();
+  // Admitted at launch, then given a WebUI page: its content never reaches the
+  // sink, though no drain has refused the renderer yet.
+  auto& security = *content::ChildProcessSecurityPolicy::GetInstance();
+  const unsigned excluded = session.webui_excluded;
+  security.webui.insert(1);
+  capture(903);
+  Check(transfers.empty(), "An artifact from a renderer that became browser-internal is refused");
+  Check(session.webui_excluded == excluded + 1, "That renderer is counted once");
+  security.webui.clear();
   session.active = false;
   session.emitted = {};
-  std::cout << "PASS production NativeProbeHost reports refused stack artifacts to the renderer\n";
+  std::cout << "PASS production NativeProbeHost reports refused stack artifacts to the renderer "
+               "and refuses content from a renderer that became browser-internal\n";
 }
 
 void NativeProbeHostBrowserInternalScope() {

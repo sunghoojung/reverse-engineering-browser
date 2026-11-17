@@ -161,11 +161,13 @@ function trafficHeaderBlockSection(id, title, block, rerender, extraNote = '') {
 
 function trafficHeadersGeneral(request, hops, targetView) {
   const last = hops.at(-1);
+  // Only the browser block knows the remote endpoint; the network block keeps a status.
   const response = last?.response.find(block => block.source === 'browser');
+  const status = response?.statusCode || last?.response.find(block => block.source === 'network')?.statusCode;
   const provisional = hops[0]?.request.find(block => block.source === 'browser');
   const rows = [['Request URL', trafficRequestUrl(request, targetView)],
     ['Request method', request.method],
-    ['Status code', response?.statusCode ? String(response.statusCode) : String(request.status ?? 'Not captured')],
+    ['Status code', status ? String(status) : String(request.status ?? 'Not captured')],
     ['Remote address', response?.remoteAddress ? `${response.remoteAddress}:${response.remotePort}` : 'Not captured'],
     ['Referrer policy', provisional?.referrerPolicy ?? 'Not captured']];
   if (hops.length > 1) rows.push(['Redirect hops', String(hops.length - 1)]);
@@ -200,10 +202,13 @@ function renderTrafficHeaders(container, request, rerender, targetView = null) {
   const finals = typeof trafficFinalBlocks === 'function' ? trafficFinalBlocks(request) : null;
   for (const hop of [...hops].reverse()) {
     const suffix = hops.length > 1 ? ` · hop ${hop.hop}` : '';
-    const response = hop.response.find(block => block.source === 'browser');
+    // What the network stack received; else the copy that reached the browser.
+    const received = hop.response.find(block => block.source === 'network');
+    const response = received ?? hop.response.find(block => block.source === 'browser');
     if (response) {
       parts.push(trafficHeaderBlockSection(`response-${hop.hop}`,
-        `Response headers${suffix}${response.statusCode ? ` (${response.statusCode})` : ''}`, response, rerender));
+        `Response headers${suffix}${response.statusCode ? ` (${response.statusCode})` : ''}`, response, rerender,
+        received ? '' : 'Headers as they reached the browser, without Set-Cookie, Set-Cookie2 and Clear-Site-Data, which Chromium removes first.'));
     }
     hop.response.filter(block => block.source === 'early_hints').forEach((block, index) =>
       parts.push(trafficHeaderBlockSection(`hints-${hop.hop}-${index}`, `Early hints${suffix} (103)`, block, rerender)));

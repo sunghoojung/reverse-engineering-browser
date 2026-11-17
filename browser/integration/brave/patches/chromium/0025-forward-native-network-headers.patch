@@ -19,17 +19,18 @@ diff --git a/content/browser/devtools/network_service_devtools_observer.cc b/con
    auto* host = GetDevToolsAgentHost();
    if (!host)
      return;
-@@ -97,6 +101,9 @@ void NetworkServiceDevToolsObserver::OnRawResponse(
+@@ -97,6 +101,10 @@ void NetworkServiceDevToolsObserver::OnRawResponse(
      network::mojom::IPAddressSpace resource_address_space,
      int32_t http_status_code,
      const std::optional<net::CookiePartitionKey>& cookie_partition_key) {
 +  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse,
 +                                  devtools_request_id, response_headers,
-+                                  {.received = &response_cookie_list});
++                                  {.received = &response_cookie_list},
++                                  http_status_code);
    auto* host = GetDevToolsAgentHost();
    if (!host)
      return;
-@@ -109,6 +116,8 @@ void NetworkServiceDevToolsObserver::OnRawResponse(
+@@ -109,6 +117,8 @@ void NetworkServiceDevToolsObserver::OnRawResponse(
  void NetworkServiceDevToolsObserver::OnEarlyHintsResponse(
      const std::string& devtools_request_id,
      std::vector<network::mojom::HttpRawHeaderPairPtr> headers) {

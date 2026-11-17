@@ -582,6 +582,8 @@ void CheckHeaderBlocks() {
         HeaderEvent(false, block(Source::kNetwork, state), artifact), true);
     add("response headers browser state " + suffix,
         HeaderEvent(true, response(Source::kBrowser, state), artifact), true);
+    add("response headers network state " + suffix,
+        HeaderEvent(true, response(Source::kNetwork, state), artifact), true);
     add("response headers early hints state " + suffix,
         HeaderEvent(true, response(Source::kEarlyHints, state), artifact), true);
     add("header artifact disagrees with state " + suffix,
@@ -619,7 +621,15 @@ void CheckHeaderBlocks() {
       {"over the limit captured", false, [](auto& v) { v.block_length = 400 * 1024; }},
       {"missing digest", false, [](auto& v) { v.sha256 = {}; }},
       {"response policy", true, [](auto& v) { v.referrer_policy = 1; }},
-      {"response network source", true, [](auto& v) { v.source = Source::kNetwork; }},
+      {"network response address", true, [](auto& v) { v.source = Source::kNetwork; }},
+      {"network response status below 100", true,
+       [](auto& v) {
+         v.source = Source::kNetwork;
+         v.address_family = 0;
+         v.remote_port = 0;
+         v.remote_address = {};
+         v.status_code = 42;
+       }},
       {"response status above 999", true, [](auto& v) { v.status_code = 1000; }},
       {"response status below 100", true, [](auto& v) { v.status_code = 42; }},
       {"early hints status", true,
@@ -651,6 +661,12 @@ void CheckHeaderBlocks() {
   auto unparsed = answered;
   unparsed.status_code = 0;
   add("response status unparsed", HeaderEvent(true, unparsed, 77), true);
+  auto received = unparsed;
+  received.source = reb::NativeHeaderSource::kNetwork;
+  received.address_family = 0;
+  received.remote_port = 0;
+  received.remote_address = {};
+  add("network response status unparsed", HeaderEvent(true, received, 77), true);
   auto ipv4 = answered;
   ipv4.address_family = 4;
   ipv4.remote_address = {127, 0, 0, 1};

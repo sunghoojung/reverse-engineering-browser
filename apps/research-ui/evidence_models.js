@@ -778,7 +778,8 @@
         const addressed = family !== 0;
         if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || state < 1 || state > 8 ||
             !zero(bytes.slice(44, 48)) || !zero(bytes.slice(80))) return null;
-        if (response ? policy !== 0 || (source === 1 ? status > 999 || (status !== 0 && status < 100)
+        const httpStatus = status === 0 || (status >= 100 && status <= 999);
+        if (response ? policy !== 0 || (source === 1 ? !httpStatus : source === 2 ? !httpStatus || addressed
           : source !== 3 || status !== 103 || addressed)
           : status !== 0 || addressed || (source === 1 ? policy < 1 || policy > 8 : source !== 2 || policy !== 0)) return null;
         if (![0, 4, 6].includes(family) || (!addressed && (port !== 0 || !zero(address))) ||

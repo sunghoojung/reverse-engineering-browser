@@ -278,8 +278,10 @@ bool ForwardNavigationInitiator(const std::string_view devtools_request_id,
 void ForwardNetworkHeaders(const NativeNetworkHeadersKind kind,
                            const std::string_view devtools_request_id,
                            const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
-                           const NativeNetworkCookies cookies) {
-  NativeNetworkCaptureSink::Get().RecordNetworkHeaders(kind, devtools_request_id, headers, cookies);
+                           const NativeNetworkCookies cookies,
+                           const std::int32_t response_code) {
+  NativeNetworkCaptureSink::Get().RecordNetworkHeaders(kind, devtools_request_id, headers, cookies,
+                                                       response_code);
 }
 
 std::uint8_t SameSiteCode(const net::CookieSameSite same_site) noexcept {
@@ -1267,7 +1269,8 @@ void NativeNetworkCaptureSink::RecordNetworkHeaders(
     const NativeNetworkHeadersKind kind,
     const std::string_view devtools_request_id,
     const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
-    const NativeNetworkCookies cookies) noexcept {
+    const NativeNetworkCookies cookies,
+    const std::int32_t response_code) noexcept {
   const NativeProbeEmitter emitter = emitter_.load(std::memory_order_acquire);
   if (!emitter || !capture_content_.load(std::memory_order_relaxed)) {
     return;
@@ -1290,36 +1293,28 @@ void NativeNetworkCaptureSink::RecordNetworkHeaders(
                                             return !item.second.devtools_id.empty() &&
                                                    item.second.devtools_id == devtools_request_id;
                                           });
-  if (tracked == tracked_headers_.end()) {
-    std::uint32_t& unattributed = kind == NativeNetworkHeadersKind::kRawResponse
-                                      ? unattributed_cookie_lists_
-                                      : unattributed_header_blocks_;
-    const std::size_t hash = std::hash<std::string_view>{}(devtools_request_id);
-    const bool finished = own != 0 || (!devtools_request_id.empty() &&
-                                       std::ranges::find(finished_devtools_ids_, hash) !=
-                                           finished_devtools_ids_.end());
-    if (finished && unattributed != std::numeric_limits<std::uint32_t>::max()) {
+  const auto count = [](std::uint32_t& unattributed) {
+    if (unattributed != std::numeric_limits<std::uint32_t>::max()) {
       ++unattributed;
+    }
+  };
+  // A raw response is both a header block and a received cookie list.
+  const auto lost = [&] {
+    count(unattributed_header_blocks_);
+    if (kind == NativeNetworkHeadersKind::kRawResponse) {
+      count(unattributed_cookie_lists_);
+    }
+  };
+  if (tracked == tracked_headers_.end()) {
+    const std::size_t hash = std::hash<std::string_view>{}(devtools_request_id);
+    if (own != 0 ||
+        (!devtools_request_id.empty() &&
+         std::ranges::find(finished_devtools_ids_, hash) != finished_devtools_ids_.end())) {
+      lost();
     }
     return;
   }
   TrackedHeaders& entry = tracked->second;
-  if (kind == NativeNetworkHeadersKind::kRawResponse) {
-    if (!entry.raw_hop) {
-      if (unattributed_cookie_lists_ != std::numeric_limits<std::uint32_t>::max()) {
-        ++unattributed_cookie_lists_;
-      }
-      return;
-    }
-    if (cookies.received) {
-      NativeCookieListSummary summary;
-      summary.direction = NativeCookieDirection::kReceived;
-      summary.hop = entry.raw_hop->hop;
-      EmitCookieList(emitter, entry.raw_hop->parent, summary, entry.raw_hop->url,
-                     ReceivedCookies(*cookies.received));
-    }
-    return;
-  }
   const auto lines = [&headers](const auto& visit) {
     for (const auto& header : headers) {
       if (header) {
@@ -1328,6 +1323,29 @@ void NativeNetworkCaptureSink::RecordNetworkHeaders(
     }
   };
   NativeHeaderBlockSummary summary;
+  if (kind == NativeNetworkHeadersKind::kRawResponse) {
+    if (!entry.raw_hop) {
+      lost();
+      return;
+    }
+    // The headers the network stack received, before the response head crosses
+    // Mojo: URLResponseHead's copy has no Set-Cookie, Set-Cookie2 or
+    // Clear-Site-Data at the pin (HttpResponseHeaders::SerializeForMojoIpc).
+    summary.source = NativeHeaderSource::kNetwork;
+    summary.status_code = static_cast<std::uint16_t>(
+        response_code >= 100 && response_code <= 999 ? response_code : 0);
+    summary.hop = entry.raw_hop->hop;
+    EmitHeaderBlock(emitter, NativeProbeType::kResponseHeaders, entry.raw_hop->parent, summary,
+                    entry.raw_hop->url, lines);
+    if (cookies.received) {
+      NativeCookieListSummary received;
+      received.direction = NativeCookieDirection::kReceived;
+      received.hop = entry.raw_hop->hop;
+      EmitCookieList(emitter, entry.raw_hop->parent, received, entry.raw_hop->url,
+                     ReceivedCookies(*cookies.received));
+    }
+    return;
+  }
   if (kind == NativeNetworkHeadersKind::kEarlyHints) {
     summary.source = NativeHeaderSource::kEarlyHints;
     summary.status_code = 103;

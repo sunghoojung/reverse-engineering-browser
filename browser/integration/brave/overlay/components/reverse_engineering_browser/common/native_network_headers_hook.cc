@@ -36,10 +36,11 @@ bool NativeNetworkHeadersObserved() noexcept {
 void NotifyNativeNetworkHeaders(const NativeNetworkHeadersKind kind,
                                 const std::string_view devtools_request_id,
                                 const std::vector<network::mojom::HttpRawHeaderPairPtr>& headers,
-                                const NativeNetworkCookies cookies) {
+                                const NativeNetworkCookies cookies,
+                                const std::int32_t response_code) {
   if (const NativeNetworkHeadersObserver observer = g_observer.load(std::memory_order_acquire))
       [[unlikely]] {
-    observer(kind, devtools_request_id, headers, cookies);
+    observer(kind, devtools_request_id, headers, cookies, response_code);
   }
 }
 

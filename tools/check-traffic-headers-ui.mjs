@@ -62,7 +62,8 @@ const request = {id: 'r', origin: 'live', method: 'GET', path: 'https://echo.tes
   headerBlocks: [
     block('request', 'browser', 'Accept: */*\r\n'),
     block('request', 'network', `:method: GET\r\ncookie: sid=1\r\nx-markup: ${markup}\r\n`),
-    block('response', 'browser', 'Location: /final\r\nSet-Cookie: a=b\r\n', {statusCode: 302}),
+    block('response', 'browser', 'Location: /final\r\n', {statusCode: 302}),
+    block('response', 'network', 'Location: /final\r\nSet-Cookie: a=b\r\n', {statusCode: 302}),
     block('request', 'browser', 'Accept: */*\r\n', {hop: 1}),
     block('response', 'early_hints', 'link: </a.css>; rel=preload\r\n', {hop: 1, statusCode: 103, remoteAddress: null}),
     block('response', 'browser', `X-Large: ${'v'.repeat(200 * 1024)}\r\n`, {hop: 1}),
@@ -97,6 +98,12 @@ assert.match(sections[3].textContent, /Provisional headers are shown/);
 assert.equal(sections[3].dataset.source, 'browser');
 assert.doesNotMatch(sections[5].textContent, /Provisional headers/);
 assert.equal(sections[5].dataset.source, 'network');
+// Hop 0's response is what the network stack received, Set-Cookie included;
+// hop 1 has only the browser's copy, which says what Chromium removed.
+assert.equal(sections[4].dataset.source, 'network');
+assert.doesNotMatch(sections[4].textContent, /Chromium removes/);
+assert.equal(sections[1].dataset.source, 'browser');
+assert.match(sections[1].textContent, /without Set-Cookie, Set-Cookie2 and Clear-Site-Data, which Chromium removes first/);
 assert.equal(panel.querySelectorAll('img').length, 0, 'captured markup is text');
 assert(sections[5].textContent.includes(markup));
 assert(sections[1].querySelector('.traffic-header-value').textContent.length === 200 * 1024);

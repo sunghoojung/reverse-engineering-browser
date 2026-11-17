@@ -170,6 +170,24 @@ void HeaderBlocks() {
          Text(artifacts.header_calls.back().content) ==
              ":method: GET\r\n:path: /start?a=1\r\ncookie: sid=1\r\n");
 
+  // Its raw response is what the network stack received, Set-Cookie included,
+  // joined to the hop of that raw request.
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse, id,
+                                  Raw({{"location", "/second"}, {"set-cookie", "a=b; Secure"}}), {},
+                                  302);
+  value = Headers(events.back());
+  assert(events.size() == 1 && AllValid() &&
+         events.back().header.type == reb::NativeProbeType::kResponseHeaders &&
+         events.back().header.parent_event_id == started.sequence_number &&
+         value.source == static_cast<std::uint8_t>(reb::HeaderSource::kNetwork) &&
+         value.status_code == 302 && value.hop == 0 && value.referrer_policy == 0 &&
+         value.address_family == 0 &&
+         artifacts.header_calls.back().kind == reb::NativeArtifactKind::kResponseHeaders &&
+         Text(artifacts.header_calls.back().content) ==
+             "location: /second\r\nset-cookie: a=b; Secure\r\n" &&
+         artifacts.header_calls.back().url == "https://echo.test/start?a=1");
+
   // Hop 0 ends in a 302 with Set-Cookie and a remote endpoint.
   net::RedirectInfo redirect;
   redirect.new_url = GURL("https", "echo.test", "/second");
@@ -265,6 +283,14 @@ void HeaderBlocks() {
   events.clear();
   reb::NotifyNativeNetworkHeaders(kRaw, "1234.5", Raw({{"host", "echo.test"}}));
   assert(events.size() == 1 && Headers(events[0]).hop == 0 && events[0].header.request_id == 502);
+  // A raw response status outside 100 to 999 is recorded as 0.
+  events.clear();
+  reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse, "1234.5",
+                                  Raw({{"server", "echo"}}), {}, 42);
+  assert(events.size() == 1 && AllValid() &&
+         events[0].header.type == reb::NativeProbeType::kResponseHeaders &&
+         Headers(events[0]).status_code == 0 &&
+         Headers(events[0]).source == static_cast<std::uint8_t>(reb::HeaderSource::kNetwork));
 
   // Beyond 320 KiB: count and length only, no digest, no artifact.
   head.headers->lines = {{"X-Huge", std::string(reb::kNativeHeaderBlockLimitBytes, 'h')}};
@@ -390,7 +416,8 @@ void HeaderBlocks() {
   assert(events.empty() && !reb::NativeNetworkHeadersObserved());
   std::cout
       << "PASS native header blocks: metadata-only none, provisional/network/response over "
-         "two redirect hops, out-of-order raw request, early hints, pseudo-headers, "
+         "two redirect hops, raw response with Set-Cookie and its status, out-of-order raw "
+         "request, early hints, pseudo-headers, "
          "200 KiB retained whole, network headers before rewrite, sharing, unattributed "
          "count, DevTools-owned ID, block limit, unavailable/refused/URL, session budget, "
          "early-hints factory gate only in a current, unexpired content session with Network\n";
@@ -891,10 +918,14 @@ void CookieLists() {
   events.clear();
   reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse, id,
                                   Raw({{"set-cookie", "track=1; SameSite=None"}}),
-                                  {.received = &received});
-  assert(events.size() == 1 && AllValid());
-  value = Cookies(events[0]);
-  assert(events[0].header.parent_event_id == started.sequence_number &&
+                                  {.received = &received}, 200);
+  // The response's own header block comes first.
+  assert(events.size() == 2 && AllValid() &&
+         events[0].header.type == reb::NativeProbeType::kResponseHeaders &&
+         events[0].header.parent_event_id == started.sequence_number &&
+         Headers(events[0]).status_code == 200 && Headers(events[0]).hop == 0);
+  value = Cookies(events[1]);
+  assert(events[1].header.parent_event_id == started.sequence_number &&
          value.direction == static_cast<std::uint8_t>(reb::CookieDirection::kReceived) &&
          value.cookie_count == 2 && value.blocked_count == 2 && value.hop == 0);
   cookies = ParseList(artifacts.header_calls.back().content, 2);
@@ -948,14 +979,17 @@ void CookieLists() {
   start(702);
   events.clear();
   reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse,
-                                  "reb-00000000000002be", {}, {.received = &received});
+                                  "reb-00000000000002be", {}, {.received = &received}, 200);
   network::URLLoaderCompletionStatus status;
   sink.RecordRequestCompleted(701, 0, 0, 4, 5, 11, 12, status);
   reb::NotifyNativeNetworkHeaders(reb::NativeNetworkHeadersKind::kRawResponse,
-                                  "reb-00000000000002bd", {}, {.received = &received});
-  assert(CountType(reb::NativeProbeType::kCookieList) == 0);
+                                  "reb-00000000000002bd", {}, {.received = &received}, 200);
+  assert(CountType(reb::NativeProbeType::kCookieList) == 0 &&
+         CountType(reb::NativeProbeType::kResponseHeaders) == 0);
+  // Each lost raw response is a lost header block and a lost cookie list.
   reb::NotifyNativeNetworkHeaders(kRaw, "reb-00000000000002be", Raw({{"a", "b"}}), sent_cookies);
-  assert(Cookies(Last(reb::NativeProbeType::kCookieList)).unattributed_lists == 2);
+  assert(Cookies(Last(reb::NativeProbeType::kCookieList)).unattributed_lists == 2 &&
+         Headers(Last(reb::NativeProbeType::kRequestHeaders)).unattributed_blocks == 2);
 
   // Beyond 2 MiB: counts and length only.
   std::vector<net::CookieWithAccessResult> huge(520, session);
@@ -973,8 +1007,8 @@ void CookieLists() {
   sink.SetEmitter(nullptr, 0, 0, 0, true);
   std::cout << "PASS native cookie lists: metadata-only none, sent list with excluded cookie and "
                "reasons, every attribute, received list joined to its raw request's hop, "
-               "unparsed line, empty redirect list, sharing, early and late lists counted, "
-               "2 MiB limit\n";
+               "unparsed line, empty redirect list, sharing, early and late lists counted "
+               "with their response blocks, 2 MiB limit\n";
 }
 // A navigation's request start names the renderer stack its loader noted.
 void NavigationLinks() {

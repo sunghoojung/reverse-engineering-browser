@@ -1295,7 +1295,16 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   let clock = 1000, renders = 0;
   const timers = [], fetches = [];
   const respond = [];
-  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto, URLSearchParams, AbortSignal,
+  // Hashing a multi-megabyte body takes real time on a loaded machine, so
+  // settle also waits for every digest the code under test started.
+  const digests = new Set();
+  const trackedCrypto = {subtle: {digest: (...args) => {
+    const digest = crypto.subtle.digest(...args);
+    digests.add(digest);
+    digest.finally(() => digests.delete(digest)).catch(() => {});
+    return digest;
+  }}};
+  const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto: trackedCrypto, URLSearchParams, AbortSignal,
     Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "", isArtifactResponse: body => Array.isArray(body?.artifacts),
     setTimeout: (fn) => {timers.push(fn); return timers.length;}, clearTimeout: () => {},
     fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
@@ -1303,7 +1312,12 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   const body = runInNewContext(trafficSource + "\n" +
     appSection("      const REQUEST_BODY_PAGE_BYTES", "      function renderInspectorMessage(") +
     ";({requestBodyView,requestContentViewKey,refreshSelectedRequestBody,loadMoreRequestBody,requestFullUrl})", context);
-  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...digests]);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (digests.size);
+  };
   // The first read times out.
   respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
   assert.equal(body.requestBodyView(request).status, "loading");

@@ -28,4 +28,15 @@ if [[ "${status}" -ne 1 ]]; then
   exit 1
 fi
 
+# On macOS the app's Info.plist sets the deployment target of every object.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  status=0
+  make --question --what-if=apps/research-ui/macos/Info.plist \
+    BUILD_DIR="${build_directory}" demo || status=$?
+  if [[ "${status}" -ne 1 ]]; then
+    echo "An Info.plist change should rebuild native objects for its minimum macOS (status ${status})" >&2
+    exit 1
+  fi
+fi
+
 echo "Native build dependency check passed"

@@ -38,8 +38,8 @@ stay on loopback. Read [SAFETY.md](SAFETY.md) before you capture anything.
 
 ## Install
 
-Apple silicon. The two apps are about 1 GiB, plus browser profiles and
-session data.
+Apple silicon with macOS 13 or later. The two apps are about 1 GiB, plus
+browser profiles and session data.
 
 1. Download Origin Trace and Brave Browser Development from the
    [latest release](https://github.com/sunghoojung/reverse-engineering-browser/releases/latest).

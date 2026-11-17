@@ -1238,6 +1238,18 @@ the canonical consumer paths and rejects duplicate root copies. It reports bytes
 removed from the current source assets; this is an uncompressed payload saving,
 not a promised ZIP-size reduction.
 
+Every Mach-O in the bundle must start on the oldest macOS that
+`LSMinimumSystemVersion` in [`Info.plist`](macos/Info.plist) declares, not
+only on the build host's release. The build passes that value to each `swiftc`
+as `-target`, smoke checks included, and
+[`mk/config.mk`](../../mk/config.mk) passes it to the C++ helpers as
+`-mmacosx-version-min`. Rust's own default, 11.0 on arm64, is older. After
+signing,
+[`check-macos-deployment-target.py`](../../tools/check-macos-deployment-target.py)
+refuses the bundle when any Mach-O records a newer minimum, or none. Change
+the minimum in `Info.plist` and in the root README's install requirement
+together.
+
 After `make check` and `make app-build` on macOS, run:
 
 ```sh

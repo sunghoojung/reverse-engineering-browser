@@ -292,7 +292,7 @@ await new Promise(resolve => setTimeout(resolve, 0));
 assert.match(panel.querySelector('.traffic-cookie-provenance').textContent, /Provenance of track/);
 panel.querySelector('.traffic-cookie-provenance button').dispatchEvent(new window.Event('click'));
 await settle();
-// Keyboard focus survives sort, the filter switch and Close.
+// Keyboard focus survives sort and the filter switch, moves into provenance, and returns on Close.
 {
   let active = null;
   Object.defineProperty(document, 'activeElement', {configurable: true, get: () => active});
@@ -314,7 +314,7 @@ await settle();
   nameButton.dispatchEvent(new window.Event('click'));
   await settle();
   const closeButton = panel.querySelector('.traffic-cookie-provenance button');
-  closeButton.focus();
+  assert.equal(active, closeButton, 'opening provenance moves focus to it, which brings it into view');
   closeButton.dispatchEvent(new window.Event('click'));
   await settle();
   assert.equal(active?.dataset.focusKey, openerKey, 'focus returns to the name that opened provenance');

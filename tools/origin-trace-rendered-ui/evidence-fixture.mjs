@@ -295,7 +295,8 @@ function headerBlockPayload({source, block, status = 0, policy = 0, hop = 0, sta
   payload.writeUInt32LE(block.length, 12);
   payload.writeUInt32LE(hop, 16);
   payload.writeUInt16LE(status, 20);
-  if (status) {
+  // Only the browser's response block knows the remote endpoint.
+  if (status && source === 1) {
     payload[7] = 4;
     payload.writeUInt16LE(8443, 22);
     Buffer.from([127, 0, 0, 1]).copy(payload, 24);
@@ -433,16 +434,20 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   const record = row(retained, 'request_body', requestBodyPayload({state: 4, content: true, bytes: body, captured: body.length}),
     {parent_event_id: start.sequence_number, artifact_id: '320'});
   const sentBlock = Buffer.from(`:method: POST\r\n:path: /getcaptcha/site-key\r\ncookie: sid=fixture\r\nx-note: ${HEADER_VALUE_MARKER}\r\n`);
+  // What the network stack received, and the browser's copy, which Chromium sends without Set-Cookie.
   const receivedBlock = Buffer.from('content-type: application/json\r\nset-cookie: hc=1; Secure; HttpOnly\r\n');
+  const deliveredBlock = Buffer.from('content-type: application/json\r\n');
   const sent = row(retained, 'request_headers', headerBlockPayload({source: 2, block: sentBlock}),
     {parent_event_id: start.sequence_number, artifact_id: '321'});
   const sentCookies = cookieListBytes(1, [{strings: ['sid', 'fixture', 'api.body.test', '/', '', '']},
     {strings: ['pref', 'dark', 'api.body.test', '/settings', '', ''], exclusions: 1n << 5n, flags: 0x01, sameSite: 4}]);
   const sentList = row(retained, 'cookie_list', cookieListPayload(1, sentCookies, 2, 1),
     {parent_event_id: start.sequence_number, artifact_id: '323'});
+  const received = row(retained, 'response_headers', headerBlockPayload({source: 2, block: receivedBlock, status: 200}),
+    {parent_event_id: start.sequence_number, artifact_id: '322'});
   const response = row(retained, 'response_started', hex('application/json'), {status_code: 200});
-  const received = row(retained, 'response_headers', headerBlockPayload({source: 1, block: receivedBlock, status: 200}),
-    {parent_event_id: response.sequence_number, artifact_id: '322'});
+  const delivered = row(retained, 'response_headers', headerBlockPayload({source: 1, block: deliveredBlock, status: 200}),
+    {parent_event_id: response.sequence_number, artifact_id: '326'});
   const receivedCookies = cookieListBytes(2, [{strings: ['hc', '1', 'api.body.test', '/', '', 'hc=1; Secure; HttpOnly']},
     {strings: ['track', COOKIE_VALUE_MARKER, 'api.body.test', '/', '', `track=${COOKIE_VALUE_MARKER}; SameSite=None`],
       exclusions: 1n << 8n, flags: 0x01, sameSite: 2}]);
@@ -464,7 +469,8 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
     url: `https://${REQUEST_BODY_HOST}${REQUEST_BODY_TARGET}`}, body);
   const headerArtifacts = [];
   for (const [id, kind, creator, bytes] of [['321', 'request_headers', sent, sentBlock], ['322', 'response_headers', received, receivedBlock],
-    ['323', 'cookie_list', sentList, sentCookies], ['324', 'cookie_list', receivedList, receivedCookies]]) {
+    ['323', 'cookie_list', sentList, sentCookies], ['324', 'cookie_list', receivedList, receivedCookies],
+    ['326', 'response_headers', delivered, deliveredBlock]]) {
     headerArtifacts.push(await artifact(artifactsRoot, {artifact_id: id, session_id: template.session_id, navigation_id: '0',
       frame_id: template.frame_id, creator_event_id: creator.sequence_number, execution_context_id: '0',
       capture_origin: 'network_request', kind, mime_type: kind === 'cookie_list' ? 'application/x-reb-cookie-list' : 'text/plain',

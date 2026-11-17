@@ -516,10 +516,11 @@ function renderTrafficCookies(container, request, rerender, context = {}) {
     container.dataset.renderKey = '';
     return;
   }
+  // The panel opens at the top of the tab, so focus moves there and brings it into view.
   const onProvenance = (name, openerKey = null) => {
     trafficCookieOptions.provenance = name;
     trafficCookieOptions.opener = openerKey;
-    trafficCookieOptions.focusKey = openerKey;
+    trafficCookieOptions.focusKey = 'provenance-close';
     container.dataset.renderKey = '';
     rerender?.();
   };

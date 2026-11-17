@@ -890,6 +890,19 @@ class Evidence(unittest.TestCase):
         debugger.verify(self.run_)
         self.assertEqual(self.statuses(), {"arm a watch": "FAIL"})
 
+    def test_debugger_settle_waits_only_for_a_pending_source(self):
+        waiting = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_artifact_missing"}}]}
+        resolved = {"frames": [{"resolution": {"status": "resolved", "line": 14}}]}
+        reads = iter([waiting, waiting, resolved])
+        self.assertIs(debugger.settle(lambda: next(reads), debugger.top_frame, 5, 0), resolved)
+        never = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_not_retained"}}]}
+        calls = []
+        self.assertIs(debugger.settle(lambda: calls.append(1) or never, debugger.top_frame, 5, 0), never)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(debugger.settle(lambda: waiting, debugger.top_frame, 0, 0), waiting)
+        site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
+        self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
+
     def test_report_never_passes_a_manual_or_skipped_case(self):
         report = Report("x")
         report.manual("#1", "a", "steps")

@@ -13,6 +13,11 @@ ISSUE = "#434"
 NAME = "debugger"
 TYPES = ("request_watch_match", "listener_dispatch", "csp_violation")
 CSP = ("Content-Security-Policy", "img-src 'self'")
+# A frame or site reads one of these until its script's source artifact is
+# stored. On a loaded host that can land after the observation itself, so the
+# reads wait for it; a source that never lands still fails with its reason.
+PENDING = ("source_artifact_missing", "script_identity_missing", "script_identity_outside_scan")
+SETTLE_SECONDS = 30
 
 
 def index_page(cross_origin: str) -> str:
@@ -64,6 +69,26 @@ def console_target(run: Run, url: str) -> tuple[dict, dict] | None:
     return None
 
 
+def settle(read, resolution, timeout: float = SETTLE_SECONDS, interval: float = 0.5):
+    """read() again until resolution(value) no longer waits on a source artifact."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = read()
+        if (resolution(value) or {}).get("reason") not in PENDING or time.monotonic() >= deadline:
+            return value
+        time.sleep(interval)
+
+
+def top_frame(stack: dict | None) -> dict:
+    frames = (stack or {}).get("frames") or []
+    return frames[0].get("resolution", {}) if frames else {}
+
+
+def listener_site(event: dict | None) -> dict:
+    site = ((event or {}).get("debugger_observation") or {}).get("site") or {}
+    return site.get("resolution", site)
+
+
 def drive(run: Run) -> None:
     global STATE
     STATE = State()
@@ -89,7 +114,7 @@ def drive(run: Run) -> None:
         if (armed.get("runtime") or {}).get("status") != "ok":
             STATE.error = f"watch was not armed: {armed.get('runtime')}"
             return
-        cursor = run.api.cursor(",".join(TYPES))
+        start = cursor = run.api.cursor(",".join(TYPES))
         run.fixture.release("debugger:armed")
         deadline = time.monotonic() + 60
         while len(STATE.observed) < len(TYPES) and time.monotonic() < deadline:
@@ -99,7 +124,13 @@ def drive(run: Run) -> None:
         request = STATE.observed.get("request_watch_match")
         read = ((request or {}).get("debugger_observation") or {}).get("stack_read")
         if read:
-            STATE.stack = run.api.get("/api/request-stack", **read)
+            STATE.stack = settle(lambda: run.api.get("/api/request-stack", **read), top_frame)
+        dispatch = STATE.observed.get("listener_dispatch")
+        if dispatch is not None:
+            # A filtered events read resolves a waiting site again once the manifest grew.
+            STATE.observed["listener_dispatch"] = settle(lambda: (run.api.get(
+                "/api/events", type="listener_dispatch", after=start, limit=1)["events"] or [dispatch])[0],
+                listener_site)
         run.wait(ISSUE, ["debugger:done"], 30)
     except ApiError as error:
         STATE.error = str(error)
@@ -125,8 +156,7 @@ def verify(run: Run) -> None:
     else:
         if (match.get("debugger_observation") or {}).get("status") != "decoded":
             problems.append(f"observation {match.get('debugger_observation')}")
-        frames = (STATE.stack or {}).get("frames") or []
-        resolution = frames[0].get("resolution", {}) if frames else {}
+        resolution = top_frame(STATE.stack)
         want = line_of(page, "fetch('/api/x")
         if resolution.get("status") != "resolved" or resolution.get("line") != want:
             problems.append(f"its stack's top frame is {resolution or STATE.stack}, expected line {want}")
@@ -136,9 +166,9 @@ def verify(run: Run) -> None:
     problems = []
     dispatch = STATE.observed.get("listener_dispatch")
     observation = (dispatch or {}).get("debugger_observation") or {}
-    detail, site = observation.get("detail") or {}, observation.get("site") or {}
+    detail = observation.get("detail") or {}
     want = line_of(page, "function onWatchedClick")
-    resolution = site.get("resolution", site)
+    resolution = listener_site(dispatch)
     if dispatch is None:
         problems.append("no listener_dispatch for click")
     elif detail.get("event_type") != "click" or resolution.get("line") != want:

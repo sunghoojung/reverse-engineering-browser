@@ -405,6 +405,11 @@ enum AgentCoreChecks {
     check(agentStandInBaseURL(["REB_AGENT_PROVIDER_BASE_URL": "http://127.0.0.1:9"]) != nil, "loopback stand-in accepted")
     check(agentStandInBaseURL(["REB_AGENT_PROVIDER_BASE_URL": "https://evil.example:443"]) == nil, "remote stand-in refused")
     check(agentRedactedError("key sk-abcd1234 failed") == "key [key] failed", "keys are scrubbed")
+    // Random token characters can spell a key prefix; the token still goes whole.
+    check(agentRedactedKeys("id eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4sk-In0.c2lnxai-bmF0dXJlsk-AB end") == "id [token] end",
+      "a token with sk- or xai- inside is scrubbed whole")
+    check(agentRedactedKeys("Bearer abcsk-defghijklmnop and xai-abcdsk-efghij") == "Bearer [token] and [key]",
+      "a bearer value or key with another prefix inside is scrubbed whole")
     let anthropic = AgentProviderRoute.resolve("https://api.anthropic.com/v1/messages", method: "POST", standIn: nil)
     check(anthropic?.provider == .claude && anthropic?.target.absoluteString == "https://api.anthropic.com/v1/messages", "Anthropic messages")
     check(AgentProviderRoute.resolve("https://api.openai.com/v1/responses", method: "post", standIn: nil)?.provider == .chatgpt, "OpenAI responses")

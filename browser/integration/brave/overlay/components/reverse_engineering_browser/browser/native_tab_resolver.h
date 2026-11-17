@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "brave/components/reverse_engineering_browser/common/native_tab_link.h"
 
 namespace reb {
@@ -86,7 +87,8 @@ class NativeTabResolver final {
 
   static NativeTabResolver& Get();
 
-  NativeTabResolver() = default;
+  NativeTabResolver();
+  ~NativeTabResolver();
   NativeTabResolver(const NativeTabResolver&) = delete;
   NativeTabResolver& operator=(const NativeTabResolver&) = delete;
 
@@ -195,7 +197,7 @@ class NativeTabResolver final {
   const Worker* DedicatedParent(NativeToken128 token) const;
   struct DedicatedOwner final {
     // Where the walk stopped: a worker with a tab or an extension, or the last reached.
-    const Worker* root = nullptr;
+    raw_ptr<const Worker> root = nullptr;
     // Nonzero only when the worker is fewer than kCreatorDepth creators from it.
     std::uint32_t tab = 0;
     std::uint32_t hops = 0;

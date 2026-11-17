@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <utility>
 
+#include "base/memory/raw_ptr.h"
+
 namespace reb {
 
 // Captured bytes held in the browser until the writer drops their transfer.
@@ -103,7 +105,7 @@ class NativeArtifactReservation final {
   }
 
  private:
-  NativeArtifactMemoryPool* pool_ = nullptr;
+  raw_ptr<NativeArtifactMemoryPool> pool_ = nullptr;
   std::size_t bytes_ = 0;
 };
 

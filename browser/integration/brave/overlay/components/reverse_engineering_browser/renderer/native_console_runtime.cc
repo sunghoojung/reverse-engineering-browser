@@ -668,7 +668,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     result = Watch(isolate, frame, *parsed);
   else if (*operation == "unwatch") {
     Unwatch();
-    result.Set("status", "ok").Set("text", "Watch rules disarmed");
+    result = base::DictValue().Set("status", "ok").Set("text", "Watch rules disarmed");
   } else if (*operation == "evaluate") {
     const auto* source = parsed->FindString("source");
     if (!source || source->empty() || source->size() > 8192 ||

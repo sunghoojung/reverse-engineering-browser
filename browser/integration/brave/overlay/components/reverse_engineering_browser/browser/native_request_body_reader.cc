@@ -256,13 +256,13 @@ class PartsReader final {
 
   // The size callback and the pipe travel on different channels, so either
   // may arrive first; the part ends once both say the same thing.
-  void OnPipeSize(const std::int32_t status, const std::uint64_t size) {
-    if (status != net::OK) {
+  void OnPipeSize(const network::mojom::DataPipeGetter::ReadResult result) {
+    if (!result.has_value()) {
       Finish(NativeRequestBodyReadEnd::kIncomplete);
       return;
     }
-    pipe_size_ = size;
-    body_length_ += size;
+    pipe_size_ = result->InBytes();
+    body_length_ += *pipe_size_;
     MaybeEndPipe();
   }
 

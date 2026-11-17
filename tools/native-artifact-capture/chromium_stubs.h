@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
@@ -586,8 +587,6 @@ inline std::shared_ptr<const NativeWasmGuestAdapter> ParseNativeWasmGuestAdapter
 
 // NativeProbeHost boundaries: ownership, shared memory, Mojo and frames.
 template <class T>
-using raw_ptr = T*;
-template <class T>
 class raw_ref {
  public:
   explicit raw_ref(T& value) : value_(&value) {}
@@ -843,13 +842,24 @@ struct TestProcess {
   bool IsValid() const { return pid != 0; }
   int Pid() const { return pid; }
 };
+class ChildProcessId {
+ public:
+  static ChildProcessId FromUnsafeValue(int value) { return ChildProcessId(value); }
+  int GetUnsafeValue() const { return value_; }
+
+ private:
+  explicit ChildProcessId(int value) : value_(value) {}
+  int value_;
+};
 class ChildProcessSecurityPolicy {
  public:
   static ChildProcessSecurityPolicy* GetInstance() {
     static ChildProcessSecurityPolicy policy;
     return &policy;
   }
-  bool HasWebUIBindings(int child_id) const { return webui.contains(child_id); }
+  bool HasWebUIBindings(ChildProcessId child_id) const {
+    return webui.contains(child_id.GetUnsafeValue());
+  }
   std::string GetProcessLockScheme(int child_id) const {
     const auto lock = locks.find(child_id);
     return lock == locks.end() ? std::string() : lock->second;

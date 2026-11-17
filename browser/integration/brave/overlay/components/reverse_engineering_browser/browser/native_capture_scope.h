@@ -17,7 +17,7 @@ inline constexpr char kNativeCaptureExtensionTrafficSwitch[] = "reb-capture-exte
 // WebUI bindings, or a process lock to a browser-internal scheme (Chromium patch 0035).
 [[nodiscard]] inline bool IsNativeBrowserInternalProcess(const int child_id) {
   auto* const policy = content::ChildProcessSecurityPolicy::GetInstance();
-  return policy->HasWebUIBindings(child_id) ||
+  return policy->HasWebUIBindings(content::ChildProcessId::FromUnsafeValue(child_id)) ||
          IsBrowserInternalSchemeClass(ClassifyNativeScheme(policy->GetProcessLockScheme(child_id)));
 }
 

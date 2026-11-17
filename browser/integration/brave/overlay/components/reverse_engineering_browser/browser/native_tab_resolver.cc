@@ -29,6 +29,10 @@ void Bound(std::unordered_map<Key, Value>& map,
 
 }  // namespace
 
+NativeTabResolver::NativeTabResolver() = default;
+
+NativeTabResolver::~NativeTabResolver() = default;
+
 NativeTabResolver& NativeTabResolver::Get() {
   static NativeTabResolver* const resolver = new NativeTabResolver();
   return *resolver;

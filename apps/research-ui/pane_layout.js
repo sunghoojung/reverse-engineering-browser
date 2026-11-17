@@ -11,6 +11,9 @@ function initializePaneLayout() {
     { id: 'decoder', parent: '.decoder-grid', panes: ['.decoder-column:first-child', '.decoder-column:last-child'], axis: 'x', minimum: [340, 300], label: 'Decoder pipeline and output' },
     { id: 'agent', parent: '#workspace', panes: ['.main', '#agent-dock'], axis: 'x', minimum: [420, 300], label: 'workspace and agent' }
   ];
+  // How far each handle reaches into both panes. app.css owns the length so the
+  // panes that keep it clear of controls use the same value.
+  const reach = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--pane-divider-reach')) || 4;
   let saved = {};
   try {
     const value = JSON.parse(localStorage.getItem(storageKey));
@@ -157,10 +160,10 @@ function initializePaneLayout() {
       handle.setAttribute('aria-valuetext', `${Math.round(geometry.size)} pixels`);
       const horizontal = configuration.axis === 'x';
       Object.assign(handle.style, {
-        left: `${horizontal ? geometry.position - 4 : geometry.start}px`,
-        top: `${horizontal ? geometry.start : geometry.position - 4}px`,
-        width: `${horizontal ? 8 : geometry.end - geometry.start}px`,
-        height: `${horizontal ? geometry.end - geometry.start : 8}px`
+        left: `${horizontal ? geometry.position - reach : geometry.start}px`,
+        top: `${horizontal ? geometry.start : geometry.position - reach}px`,
+        width: `${horizontal ? 2 * reach : geometry.end - geometry.start}px`,
+        height: `${horizontal ? geometry.end - geometry.start : 2 * reach}px`
       });
     };
     const refresh = (positionOnly = false) => {

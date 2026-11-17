@@ -210,6 +210,28 @@ final class Harness {
     try await settle()
   }
 
+  // A native press, move and release between two CSS points, as a researcher
+  // drags a pane divider. Each move settles so the page sees every step.
+  func drag(from start: NSPoint, to end: NSPoint, steps: Int = 8) async throws {
+    try await activate()
+    func send(_ type: NSEvent.EventType, _ point: NSPoint) throws {
+      let location = NSPoint(x: point.x, y: webView.isFlipped ? point.y : webView.bounds.height - point.y)
+      guard let event = NSEvent.mouseEvent(
+        with: type, location: webView.convert(location, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+      else { throw HarnessError("Could not create a mouse event") }
+      window.sendEvent(event)
+    }
+    try send(.leftMouseDown, start)
+    for step in 1...steps {
+      let fraction = CGFloat(step) / CGFloat(steps)
+      try send(.leftMouseDragged, NSPoint(x: start.x + (end.x - start.x) * fraction, y: start.y + (end.y - start.y) * fraction))
+      try await settle()
+    }
+    try send(.leftMouseUp, end)
+    try await settle()
+  }
+
   func key(_ code: UInt16, _ characters: String, modifiers: NSEvent.ModifierFlags = []) async throws {
     try await activate()
     for type in [NSEvent.EventType.keyDown, .keyUp] {
@@ -452,6 +474,30 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let moved = try await ui.value("document.querySelector('.source-more-menu').contains(document.querySelector(\(String(reflecting: selector))))") as? Bool
     if moved == true { try await ui.click("#source-more > summary") }
     try await ui.click(selector)
+  }
+
+  // No control meets the block graph's divider. The linear view's rows are
+  // swept through one row height of scroll offsets, so a row's sliver cannot
+  // pass under the divider at whatever offset the window size leaves.
+  @MainActor
+  private func assertGraphDividerClear(_ ui: Harness, _ context: String,
+                                       file: StaticString = #filePath, line: UInt = #line) async throws {
+    let sweep = try await ui.json("""
+      (() => { const wrap = document.querySelector('#source-code-wrap'), start = wrap.scrollTop, found = [];
+        const from = Math.max(0, Math.min(start, wrap.scrollHeight - wrap.clientHeight - 19));
+        for (let offset = 0; offset <= 18; offset += 0.5) {
+          wrap.scrollTop = from + offset;
+          const result = __rebUiProbe.dividerReach('#pane-divider-source-graph', '#screen-sources', ['#source-code-wrap']);
+          if (!result.shown) { wrap.scrollTop = start; return {shown: false}; }
+          for (const item of result.offenders) found.push(`scrollTop ${wrap.scrollTop}: ${item}`);
+        }
+        wrap.scrollTop = start;
+        return {shown: true, scrolls: wrap.scrollHeight > wrap.clientHeight + 19, offenders: [...new Set(found)].slice(0, 20)}; })()
+      """)
+    XCTAssertEqual(sweep["shown"] as? Bool, true, "\(context): the graph and linear split has its divider", file: file, line: line)
+    XCTAssertEqual(sweep["scrolls"] as? Bool, true, "\(context): the linear view scrolls through a full row", file: file, line: line)
+    XCTAssertEqual(sweep["offenders"] as? [String], [], "\(context): controls under the block graph divider", file: file, line: line)
+    try await assertLayout(ui, "#screen-sources", context, file: file, line: line)
   }
 
   @MainActor
@@ -2911,6 +2957,57 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertFullyVisible(ui, ".block-graph-fn-menu", "\(size.name) functions menu")
       try await ui.screenshot("wasm-identification-badges-\(size.name)")
       try await ui.key(53, "\u{1B}")
+      // A short window opens the graph without Linear; show it as a researcher
+      // would, so the graph and linear split exists at both sizes.
+      if try await ui.value("document.querySelector('.sources-editor').hasAttribute('data-graph-linear-hidden')") as? Bool == true {
+        try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear")
+      }
+      try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(size.name): the graph and linear split has no divider")
+      try await assertGraphDividerClear(ui, "\(size.name) wasm identification divider")
+      try await ui.screenshot("wasm-identification-divider-\(size.name)")
+      // Key sits in the footer beside the divider. Space opens the edge key
+      // and Escape returns a visible focus ring to Key, clear of the divider.
+      let key = "#source-graph-host .block-graph-key-toggle"
+      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(size.name): Space did not open the edge key")
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(size.name) edge key")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
+        "\(size.name): Escape did not close the edge key onto Key")
+      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(size.name): Key shows keyboard focus: \(keyFocus)")
+      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(size.name): Key draws a focus ring: \(keyFocus)")
+      try await assertGraphDividerClear(ui, "\(size.name) Key focused beside the divider")
+      // Drag the divider with the pointer to the graph's minimum, where the
+      // Functions menu must still open whole, and then to the linear view's
+      // minimum. Home on the divider restores the default split and forgets
+      // the drag, so the saved layout does not reach later tests.
+      let limits = "(() => { const d = document.querySelector('#pane-divider-source-graph'); return {now: Number(d.getAttribute('aria-valuenow')), min: Number(d.getAttribute('aria-valuemin')), max: Number(d.getAttribute('aria-valuemax'))}; })()"
+      for (edge, target) in [("graph", "split.top - 40"), ("linear", "Math.min(innerHeight - 2, split.bottom + 40)")] {
+        let points = try await ui.json("""
+          (() => { const d = document.querySelector('#pane-divider-source-graph').getBoundingClientRect(), split = document.querySelector('#source-view-split').getBoundingClientRect();
+            return {x: d.left + d.width / 2, y: d.top + d.height / 2, to: \(target)}; })()
+          """)
+        let x = points["x"] as? Double ?? 0
+        try await ui.drag(from: NSPoint(x: x, y: points["y"] as? Double ?? 0), to: NSPoint(x: x, y: points["to"] as? Double ?? 0))
+        let state = try await ui.json(limits)
+        // aria-valuenow is rounded and aria-valuemax floored.
+        XCTAssertEqual(state["now"] as? Double ?? -10, state[edge == "graph" ? "min" : "max"] as? Double ?? 10, accuracy: 1,
+          "\(size.name): the drag reached the \(edge) minimum: \(state)")
+        try await assertGraphDividerClear(ui, "\(size.name) divider at the \(edge) minimum")
+        try await ui.screenshot("wasm-identification-divider-\(edge)-minimum-\(size.name)")
+        if edge == "graph" {
+          try await ui.click("#source-graph-host .block-graph-tool", containing: "Functions")
+          try await ui.waitUntil("document.querySelector('.block-graph-fn-row') !== null", "\(size.name): the Functions menu did not open at the graph minimum")
+          try await assertLayout(ui, ".block-graph-fn-menu", "\(size.name) Functions menu at the graph minimum")
+          try await assertFullyVisible(ui, ".block-graph-fn-menu", "\(size.name) Functions menu at the graph minimum")
+          try await ui.key(53, "\u{1B}")
+        }
+      }
+      _ = try await ui.value("(document.querySelector('#pane-divider-source-graph').focus(), 1)")
+      try await ui.key(115, "\u{F729}")
+      try await ui.waitUntil("!('source-graph' in JSON.parse(localStorage.getItem('origin-trace.layout.v1') || '{}'))", "\(size.name): Home did not forget the dragged split")
       try await ui.click("#source-graph")
     }
   }

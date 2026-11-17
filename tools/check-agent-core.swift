@@ -181,7 +181,6 @@ enum AgentCoreChecks {
     // The real tool server on a real backend, with --omit-content.
     let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("reb-agent-core-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: root.appendingPathComponent("blobs"), withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
     let source = Data("console.log('SECRET_SOURCE_BODY');\n".utf8)
     let sha = sha256Hex(source)
     try! source.write(to: root.appendingPathComponent("blobs/\(sha).bin"))
@@ -313,6 +312,9 @@ enum AgentCoreChecks {
 
     backendProcess.terminate()
     backendProcess.waitUntilExit()
+    // Here, not in a defer: exit skips defers. A failed run keeps the folder,
+    // with the stand-in CLIs' recorded invocations, for diagnosis.
+    try? FileManager.default.removeItem(at: root)
     print("PASS agent native: fixed-endpoint proxy, native key, dropped page credentials, redacted errors, cancel, real reb-api gates and user-only transcript")
     exit(0)
   }

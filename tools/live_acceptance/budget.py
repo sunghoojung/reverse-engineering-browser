@@ -19,6 +19,10 @@ BUDGET_MIB = 1
 POSTS = 5000
 RESPONSES, RESPONSE_SIZE = 12, 128 * 1024
 BUDGET_CASE = "not_captured_session_budget"
+# The artifact queue holds at most 288 opens and the writer waits for the
+# receiver to accept each one, so on a loaded host some POST bodies are refused
+# before the budget runs out. That refusal is bounded and shown, not lost.
+TRANSFER_REFUSED = "not_captured_transfer_refused"
 
 INDEX = document("budgets", f"""<script>
 (async () => {{
@@ -51,15 +55,17 @@ def drive(run: Run) -> None:
     run.wait(ISSUE, ["budget:posts"], 900)
 
 
-def ordered(states: list[str], kept: str) -> list[str]:
-    """Problems with a sequence that should keep, then refuse for the budget."""
+def ordered(states: list[str], kept: str, refused: tuple[str, ...] = ()) -> list[str]:
+    """Problems with a sequence that should keep, then refuse for the budget.
+
+    A `refused` state may appear only before the budget runs out."""
     problems = []
     if kept not in states or BUDGET_CASE not in states:
         problems.append(f"states {dict(Counter(states))}: expected some {kept}, then {BUDGET_CASE}")
         return problems
     first = states.index(BUDGET_CASE)
     late = [i for i, state in enumerate(states) if i > first and state != BUDGET_CASE]
-    other = {state for state in states if state not in (kept, BUDGET_CASE)}
+    other = {state for state in states if state not in (kept, BUDGET_CASE, *refused)}
     if late:
         problems.append(f"{len(late)} kept after the budget ran out at #{first}")
     if other:
@@ -107,7 +113,7 @@ def verify(run: Run) -> None:
         problems.append(f"{sum(len(found) != 1 for found in records)} rows without exactly one request_body record")
     bodies = [found[0] for found in records if len(found) == 1]
     states = [body.state for body in bodies]
-    problems += ordered(states, "captured")
+    problems += ordered(states, "captured", (TRANSFER_REFUSED,))
     if Counter(body.sha256 for body in bodies) != Counter(sha256(r.request.body) for r in served):
         problems.append("the recorded body digests are not the bodies the server received")
     kept = {body.sha256 for body in bodies if body.state == "captured"}
@@ -115,5 +121,13 @@ def verify(run: Run) -> None:
     if not kept <= stored:
         problems.append(f"{len(kept - stored)} captured bodies have no request_body artifact")
     shown = budget_shown(run, "request_body", problems)
+    refused = states.count(TRANSFER_REFUSED)
+    if refused:
+        checks = summary_checks(run.api.summary(), "request_content_not_retained",
+                                category="request_body", reason=TRANSFER_REFUSED)
+        counted = int(checks[0].get("count") or 0) if checks else 0
+        if counted != refused:
+            problems.append(f"get_session_summary counts {counted} {TRANSFER_REFUSED}, the records {refused}")
     report.check(ISSUE, f"{POSTS} small POSTs until the request budget runs out", problems,
-                 f"{states.count('captured')} kept, then {states.count(BUDGET_CASE)} {BUDGET_CASE}; {shown}")
+                 f"{states.count('captured')} kept and {refused} refused by the artifact queue, "
+                 f"then {states.count(BUDGET_CASE)} {BUDGET_CASE}; {shown}")

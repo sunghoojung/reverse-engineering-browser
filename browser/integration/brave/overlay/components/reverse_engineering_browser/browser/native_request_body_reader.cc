@@ -371,7 +371,13 @@ class PartsReader final {
 
 // Stands in for a stream body's getter: the network reads the page's stream
 // through it byte for byte while a tee keeps the bytes. Owned by its receiver
-// on the reader's sequence; the network dropping it ends an unfinished read.
+// on the reader's sequence. The page's size answer is its statement that the
+// stream ended, so the read is complete once that answer is OK and the tee saw
+// exactly that many bytes. The page's pipe closing and the network dropping
+// the getter both follow, in either order: the network drops it as soon as the
+// size completes a read that already has every byte
+// (ChunkedDataPipeUploadDataStream::OnSizeReceived). Dropped earlier, it ends
+// an unfinished read.
 class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
  public:
   ChunkedTee(mojo::PendingRemote<network::mojom::ChunkedDataPipeGetter> original,
@@ -384,7 +390,10 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
         allowance_(allowance),
         reply_(std::move(reply)),
         done_(std::move(done)) {}
-  ~ChunkedTee() override { Finish(NativeRequestBodyReadEnd::kIncomplete); }
+  ~ChunkedTee() override {
+    Finish(SawDeclaredBody() ? NativeRequestBodyReadEnd::kComplete
+                             : NativeRequestBodyReadEnd::kIncomplete);
+  }
 
   void GetSize(GetSizeCallback callback) override {
     // The network still gets an answer if the page's getter goes away.
@@ -456,10 +465,14 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
     MaybeFinish();
   }
 
+  // A read still open, sized OK by the page, holding exactly that many bytes.
+  bool SawDeclaredBody() const {
+    return done_ && size_known_ && size_status_ == net::OK && size_ == stream_.observed();
+  }
+
   void MaybeFinish() {
     if (tee_done_ && size_known_) {
-      Finish(tee_end_ == NativeArtifactBodyEnd::kSourceClosed && size_status_ == net::OK &&
-                     size_ == stream_.observed()
+      Finish(tee_end_ == NativeArtifactBodyEnd::kSourceClosed && SawDeclaredBody()
                  ? NativeRequestBodyReadEnd::kComplete
                  : NativeRequestBodyReadEnd::kIncomplete);
     }

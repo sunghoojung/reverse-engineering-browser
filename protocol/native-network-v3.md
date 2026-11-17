@@ -1373,7 +1373,12 @@ retained as a `request_body` artifact with exact bytes and digest.
   once, so its getter is replaced by one that forwards the size and every byte
   unchanged to the network through a tee. That getter is the only change to the
   request, and the upload is never delayed: a full pool ends the read, not the
-  upload.
+  upload. The page answers the size once its stream ends, so the read is
+  complete when that answer is OK and the tee saw exactly that many bytes,
+  whether the page's pipe closing or the network dropping the getter comes
+  next; the network drops it as soon as the size completes a read that already
+  has every byte. The request's completion status says whether the network
+  then sent them.
 - Bytes stream to the receiver as they are read. Past 16 MiB a part is sized,
   not read.
 - The record is emitted when the read ends, still the child of

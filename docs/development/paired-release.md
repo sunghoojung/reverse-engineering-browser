@@ -85,6 +85,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -license che
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun --sdk macosx --show-sdk-version
 node --version                                    # v24.16.0 or later on the 24 line
 corepack pnpm --version                           # 11.11.0 or later
+command -v pnpm                                   # Brave's DEPS hooks run this one
 command -v sccache cargo python3
 df -h "$(dirname "$WT")"                          # at least 150 GiB free; plan for about 350 GiB
 python3 tools/check-brave-services.py            # patch contract only
@@ -94,8 +95,19 @@ make lint check e2e sanitize                      # this checkout is the one CI 
 Chromium 157 accepts macOS SDK 15 or newer for a non-official build; Xcode
 26.x is enough. If `corepack pnpm` reports an older pnpm, Corepack is reusing a
 cached version from the `v1.95.52` pin, which accepted 11.9: make Corepack
-provide 11.11.0 or later before step 3, or Brave's `pnpm install` stops. The
-350 GiB plan covers the component checkout and output, the later
+provide 11.11.0 or later before step 3, or Brave's `pnpm install` stops.
+Brave's DEPS hooks run the first `pnpm` on `PATH`, not `corepack pnpm`, and
+`brave/vendor/web-discovery-project` pins pnpm 11.25.0. A fixed-version pnpm
+from Nix or Homebrew stops that hook with `This project is configured to use
+11.25.0 of pnpm`. Put a Corepack shim first on `PATH` for the build, which
+follows each project's `packageManager` pin:
+
+```sh
+corepack enable --install-directory "$PWD/build/corepack-shims" pnpm
+export PATH="$PWD/build/corepack-shims:$PATH" COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+```
+
+The 350 GiB plan covers the component checkout and output, the later
 `Static_arm64` output, and a second checkout if a fix needs one.
 
 ### 3. Initialize a fresh pinned worktree

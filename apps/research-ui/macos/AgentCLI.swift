@@ -204,7 +204,9 @@ final class AgentChildProcess: @unchecked Sendable {
   }
 
   // Asks politely, then guarantees the group and anything it started is gone.
-  // Helpers a CLI moved to another group are found by parentage first.
+  // Helpers a CLI moved to another group are found by parentage first, and
+  // only then is its input closed: a CLI exits at the end of its input, and
+  // launchd adopts its children, so a walk after that finds none of them.
   // A reaped leader's id may be reused, so its group is signaled only while it
   // has not been reaped. `force` is for app exit, which cannot wait a second.
   func terminate(force: Bool = false) {
@@ -214,6 +216,7 @@ final class AgentChildProcess: @unchecked Sendable {
     let signal = force ? SIGKILL : SIGTERM
     if leaderAlive { killpg(pid, signal) }
     for child in family { kill(child, signal) }
+    closeInput()
     guard !force, leaderAlive || !family.isEmpty else { return }
     DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
       if leaderAlive { killpg(pid, SIGKILL) }
@@ -578,7 +581,6 @@ class AgentCLIDriver {
     guard let process else { return }
     self.process = nil
     cliStopped()
-    process.closeInput()
     process.terminate(force: force)
     onStateChange()
   }

@@ -38,7 +38,8 @@ inline constexpr std::size_t kNativeScriptCookieReadNames = 360;
 
 // document.cookie and Cookie Store API calls ("Script cookie access" in
 // protocol/native-network-v3.md). Enabled only for a content-capture session;
-// Blink checks IsEnabled, one atomic load, before converting any string.
+// Blink checks the static IsEnabled, one atomic load with no call, before it
+// reaches Get or converts any string.
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
  public:
   // The innermost script frame of the calling thread, or false.
@@ -55,7 +56,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
   // Transport sequence, before the configuration's emitters change: records
   // each read key's remainder into it, then disables and frees the table.
   void Flush() noexcept;
-  [[nodiscard]] bool IsEnabled() const noexcept {
+  [[nodiscard]] static bool IsEnabled() noexcept {
     return generation_.load(std::memory_order_acquire) != 0;
   }
 
@@ -123,7 +124,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
             std::uint64_t sequence = 0) noexcept;
 
   // The NativeProbeSink generation the gate belongs to, or 0 when disabled.
-  std::atomic<std::uint64_t> generation_{0};
+  // A static member, so IsEnabled needs neither Get nor a guard load.
+  static std::atomic<std::uint64_t> generation_;
   std::atomic<FrameProvider> provider_{nullptr};
   // Read aggregation of the current configuration, null unless content
   // capture configured it. Blink calls arrive from the main thread and

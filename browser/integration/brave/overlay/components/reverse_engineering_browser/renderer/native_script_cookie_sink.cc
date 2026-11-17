@@ -71,6 +71,8 @@ void ForEachCookieName(const std::string_view cookie_string, Visit&& visit) noex
 
 }  // namespace
 
+std::atomic<std::uint64_t> NativeScriptCookieSink::generation_{0};
+
 NativeScriptCookieSink& NativeScriptCookieSink::Get() {
   static base::NoDestructor<NativeScriptCookieSink> sink;
   return *sink;

@@ -183,8 +183,7 @@ std::uint64_t NoScriptHandle(const NativeAsyncTaskKind kind) noexcept {
   return kSyntheticSegment | static_cast<std::uint8_t>(kind);
 }
 
-std::atomic<NativeRequestStackProvider> g_provider{nullptr};
-// Written once by SetProvider before its release store of g_provider; read
+// Written once by SetProvider before its release store of provider_; read
 // only after an acquire load of it found the provider.
 void* (*g_allocate_frames)() = nullptr;
 void (*g_release_frames)(void*) = nullptr;
@@ -693,6 +692,8 @@ void AppendChainFrom(const NativeRequestStackTables& state,
 
 }  // namespace
 
+std::atomic<NativeRequestStackProvider> NativeRequestStackWalk::provider_{nullptr};
+
 bool NativeRequestStackWalk::NetworkActive(const NativeProbeSink& sink) noexcept {
   return sink.emitter_.load(std::memory_order_relaxed) != nullptr &&
          (sink.category_mask_.load(std::memory_order_relaxed) &
@@ -734,14 +735,14 @@ void NativeRequestStackWalk::EmitGap(const std::string_view reason,
 void NativeRequestStackWalk::SetProvider(const NativeRequestStackProvider provider,
                                          void* (*const allocate_frames)(),
                                          void (*const release_frames)(void*)) noexcept {
-  if (!provider || g_provider.load(std::memory_order_acquire)) {
+  if (!provider || provider_.load(std::memory_order_acquire)) {
     return;
   }
   g_allocate_frames = allocate_frames;
   g_release_frames = release_frames;
   // Release/acquire publishes the frame allocator, and orders
   // EnablePromiseRegistrations before it.
-  g_provider.store(provider, std::memory_order_release);
+  provider_.store(provider, std::memory_order_release);
 }
 
 void NativeRequestStackWalk::EnablePromiseRegistrations() noexcept {
@@ -796,12 +797,9 @@ void NativeRequestStackWalk::DetachThread() noexcept {
   }
 }
 
-void NativeRequestStackWalk::Record(const std::int32_t request_id,
-                                    const std::uint64_t initiated_sequence) noexcept {
-  if (initiated_sequence == 0) {
-    return;
-  }
-  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+void NativeRequestStackWalk::RecordAdmitted(const std::int32_t request_id,
+                                            const std::uint64_t initiated_sequence) noexcept {
+  const NativeRequestStackProvider provider = provider_.load(std::memory_order_acquire);
   if (!provider || request_id == 0 || g_walking) {
     return;
   }
@@ -873,7 +871,7 @@ void NativeRequestStackWalk::RecordObservation(const NativeProbeType type,
         sink.frame_id_provider_.load(std::memory_order_relaxed);
     resolved_frame = frame_ids ? frame_ids() : 0;
   }
-  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+  const NativeRequestStackProvider provider = provider_.load(std::memory_order_acquire);
   NativeRequestStackWalk walk(provider ? Tables(generation, true) : nullptr, generation, request_id,
                               parent_sequence, resolved_frame, type, tail);
   NativeRequestStackWalkResult result = NativeRequestStackWalkResult::kNoScript;
@@ -900,7 +898,7 @@ bool NativeRequestStackWalk::RecordCookieStack(const std::uint64_t cookie_sequen
                                                const std::uint64_t frame_id,
                                                std::array<std::uint8_t, 32>& digest,
                                                NativeStackFrame& innermost) noexcept {
-  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+  const NativeRequestStackProvider provider = provider_.load(std::memory_order_acquire);
   if (!provider || cookie_sequence == 0 || g_walking) {
     return false;
   }
@@ -922,27 +920,19 @@ bool NativeRequestStackWalk::RecordCookieStack(const std::uint64_t cookie_sequen
   return true;
 }
 
-NativeNavigationKindScope::NativeNavigationKindScope(const NativeNavigationKind kind) noexcept
-    : previous_(g_navigation_kind) {
-  g_navigation_kind = kind;
+NativeNavigationKind NativeRequestStackWalk::ExchangeNavigationKind(
+    const NativeNavigationKind kind) noexcept {
+  return std::exchange(g_navigation_kind, kind);
 }
 
-NativeNavigationKindScope::~NativeNavigationKindScope() {
-  g_navigation_kind = previous_;
-}
-
-NativeNavigationKind NativeNavigationKindScope::Current() noexcept {
+NativeNavigationKind NativeRequestStackWalk::CurrentNavigationKind() noexcept {
   return g_navigation_kind;
-}
-
-bool NativeRequestStackWalk::Enabled() noexcept {
-  return g_provider.load(std::memory_order_acquire) != nullptr;
 }
 
 std::uint64_t NativeRequestStackWalk::RecordNavigation(
     const NativeNavigationKind kind,
     const std::uint64_t target_frame_id) noexcept {
-  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+  const NativeRequestStackProvider provider = provider_.load(std::memory_order_acquire);
   if (!provider || target_frame_id == 0 || g_walking) {
     return 0;
   }
@@ -964,7 +954,7 @@ std::uint64_t NativeRequestStackWalk::RecordNavigation(
 }
 
 void NativeRequestStackWalk::ScheduleFormNavigation(const std::uint64_t target_frame_id) noexcept {
-  if (!g_provider.load(std::memory_order_acquire) || target_frame_id == 0) {
+  if (!provider_.load(std::memory_order_acquire) || target_frame_id == 0) {
     return;
   }
   const std::uint64_t sequence =
@@ -988,7 +978,7 @@ void NativeRequestStackWalk::ScheduleFormNavigation(const std::uint64_t target_f
 
 std::uint64_t NativeRequestStackWalk::TakeFormNavigation(
     const std::uint64_t target_frame_id) noexcept {
-  if (!g_provider.load(std::memory_order_acquire) || target_frame_id == 0) {
+  if (!provider_.load(std::memory_order_acquire) || target_frame_id == 0) {
     return 0;
   }
   const std::uint64_t generation =
@@ -1010,7 +1000,7 @@ std::uint64_t NativeRequestStackWalk::TakeFormNavigation(
 
 std::uint64_t NativeRequestStackWalk::RecordAsyncTask(const NativeAsyncTaskKind kind,
                                                       const bool script_running) noexcept {
-  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+  const NativeRequestStackProvider provider = provider_.load(std::memory_order_acquire);
   if (!provider || g_walking) {
     return 0;
   }
@@ -1087,7 +1077,7 @@ std::size_t NativeRequestStackWalk::PostMessageOrigin(
 std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
     const NativeAsyncTaskKind kind,
     const std::span<const std::uint8_t> origin) noexcept {
-  if (!g_provider.load(std::memory_order_acquire)) {
+  if (!provider_.load(std::memory_order_acquire)) {
     return 0;
   }
   NativeProbeSink& sink = NativeProbeSink::Get();
@@ -1170,26 +1160,17 @@ std::uint64_t NativeRequestStackWalk::ReceiveMessageOrigin(
   return parent;
 }
 
-std::uint64_t NativeRequestStackWalk::EnterAsyncTask(const std::uint64_t segment) noexcept {
-  if (!g_provider.load(std::memory_order_acquire)) {
-    return 0;
-  }
+std::uint64_t NativeRequestStackWalk::ExchangeAsyncTask(const std::uint64_t segment) noexcept {
   return std::exchange(g_current_segment, segment);
 }
 
-void NativeRequestStackWalk::ExitAsyncTask(const std::uint64_t previous) noexcept {
-  if (g_provider.load(std::memory_order_acquire)) {
-    g_current_segment = previous;
-  }
-}
-
-std::uint64_t NativeRequestStackWalk::CurrentAsyncTask() noexcept {
-  return g_provider.load(std::memory_order_acquire) ? g_current_segment : 0;
+std::uint64_t NativeRequestStackWalk::ThreadAsyncTask() noexcept {
+  return g_current_segment;
 }
 
 void NativeRequestStackWalk::AttributeAsyncTask(const std::uint32_t task_attribution,
                                                 const std::uint64_t segment) noexcept {
-  if (!g_provider.load(std::memory_order_acquire) || task_attribution == 0 || segment == 0) {
+  if (!provider_.load(std::memory_order_acquire) || task_attribution == 0 || segment == 0) {
     return;
   }
   const std::uint64_t generation =
@@ -1208,7 +1189,7 @@ void NativeRequestStackWalk::AttributeAsyncTask(const std::uint32_t task_attribu
 
 bool NativeRequestStackWalk::PromiseRegistrationActive() noexcept {
   if (!g_promise_stacks.load(std::memory_order_acquire) ||
-      !g_provider.load(std::memory_order_acquire) || g_walking) {
+      !provider_.load(std::memory_order_acquire) || g_walking) {
     return false;
   }
   // Tables made from now on keep a ring; ones made before the flag do not.
@@ -1223,7 +1204,7 @@ bool NativeRequestStackWalk::PromiseRegistrationActive() noexcept {
 void NativeRequestStackWalk::RecordPromiseRegistration(
     const std::uint32_t task_id,
     const NativePromiseRegistration kind) noexcept {
-  const NativeRequestStackProvider provider = g_provider.load(std::memory_order_acquire);
+  const NativeRequestStackProvider provider = provider_.load(std::memory_order_acquire);
   if (task_id == 0 || !provider || !PromiseRegistrationActive()) {
     return;
   }

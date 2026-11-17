@@ -20,6 +20,35 @@ never retains arguments, text, pixels, or return values. The inactive sink path
 performs one atomic emitter check and returns without allocating, blocking, or
 changing the surface result.
 
+## Inactive path
+
+While no session is active, no hook allocates, locks, makes a system call, or
+calls into V8 or the embedder. Every first check reads static,
+constant-initialized state. A thread's first hook therefore does not make dyld
+allocate and fill the image's thread-local block: per-thread sink state larger
+than a pointer is allocated on that thread's first active use and freed when
+the thread exits.
+
+| Hook | Cost with no session |
+| --- | --- |
+| Renderer sink checks, generated binding, Canvas, Web Audio and runtime operation records | One atomic load of the exported sink's field, inline |
+| Renderer request start | The same load, before the URL's scheme or host is read |
+| Script cookie access | One atomic load of a static member, inline |
+| `TypedArray` and `ArrayBuffer` construction | Two loads in the V8 builtin, the gate pointer then its byte; no runtime call or callback |
+| Wasm trap | One V8 flag test without `--reb-wasm-br-table-dispatch` or `--reb-wasm-call-indirect-dispatch`; with either, one sink check before any URL is converted |
+| Blink async task run and navigation kind scope | One atomic load without `--reb-request-stacks` |
+| Proxied browser request | Two atomic loads when it starts; later events read only the request's own fields |
+| Early-hints loader factory | Two atomic loads; the factory is built as stock |
+| Factory owner scope | One atomic load in a browser that did not start capture from its command line |
+
+Two launch-time choices keep work on these paths without a session, because
+evidence from before a session depends on it. With `--reb-request-stacks` the
+stack provider is installed at renderer start and never removed, so a task
+run with a carried segment exchanges one thread-local word on entry and exit.
+A browser the launcher starts arms the factory owner scope before its profile
+exists, so each scope exchanges one thread-local owner record. Requests made
+before a session still name their owner.
+
 While capture is active, renderer operations resolve the current Blink frame
 token only after the policy check. The browser-process host maps that token to
 its top-level tab through live frames, then through `browser/native_tab_resolver.h`

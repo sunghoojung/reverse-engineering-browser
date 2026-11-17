@@ -18,6 +18,11 @@ class NativeNetworkLifecycle final {
   explicit NativeNetworkLifecycle(std::uint64_t generation = 0) noexcept
       : generation_(generation) {}
 
+  // Admitted and not yet finished, from this request's own fields: a proxy
+  // tests it before reading the sink, so a request outside capture loads
+  // nothing after it starts.
+  [[nodiscard]] bool Open() const noexcept { return generation_ != 0 && !terminal_; }
+
   [[nodiscard]] bool IsCurrent(std::uint64_t generation) const noexcept {
     return generation_ != 0 && generation_ == generation && !terminal_;
   }

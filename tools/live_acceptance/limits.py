@@ -227,7 +227,7 @@ def verify(run: Run) -> None:
                   "<input type=file> on the fixture origin, choose a file, POST it as multipart and compare "
                   "get_events request_body (read flag, captured) and its artifact with the file; then attach a "
                   "file, change it on disk before sending, and check not_captured_read_incomplete")
-    report.manual(ISSUE, "browser memory bound",
+    report.manual("#428 #436", "browser memory bound",
                   "watch the browser's memory with Instruments or Activity Monitor during this page: it stays "
                   "within the 32 MiB in-flight pool plus the browser's baseline; record how it was measured")
 

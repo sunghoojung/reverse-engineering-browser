@@ -258,4 +258,4 @@ def verify(run: Run) -> None:
                   "with get_request_stack: the same functions, files, lines and columns, frame for frame")
     report.manual(ISSUE, "stack walk cost",
                   "measure p50 and p99 stack walk time per request with a profiler (Instruments) on this page, and "
-                  "record how it was measured; the inactive path is one atomic load")
+                  "record how it was measured")

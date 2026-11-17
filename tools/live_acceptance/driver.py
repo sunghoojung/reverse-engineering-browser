@@ -29,6 +29,12 @@ CONTENT_FLAGS = ["--localhost-only", "--request-content", "--confirm-sensitive-c
                  "--request-stacks", "--document-start", "--wasm-dispatch", "--wasm-call-indirect"]
 METADATA_DROPS = {"--request-content", "--confirm-sensitive-capture", "--canvas-images"}
 SETTLE_SECONDS = 3
+# A session always turns the probes on, so the inactive path is measured outside one.
+INACTIVE_STEPS = ("launch the same Brave without a session (every probe disabled), serve the pages with "
+                  "`check-live-acceptance.py --serve`, and profile the renderer and browser while "
+                  "/tabs/index.html, /headers/index.html, /debugger/index.html and /limits/index.html load "
+                  "(Instruments Time Profiler and Allocations): each probe entry costs one atomic load and "
+                  "allocates nothing; record how it was measured")
 
 
 @dataclass(frozen=True)
@@ -143,6 +149,8 @@ def run_kind(name: str, args: argparse.Namespace, options: Options) -> Report:
             time.sleep(SETTLE_SECONDS)
             for area in areas:
                 guarded(report, area.ISSUE, f"{area.NAME} verify", lambda area=area: area.verify(run))
+            if name == "content":
+                report.manual("#425 #427 #434 #436", "inactive probe path cost", INACTIVE_STEPS)
         finally:
             ended(session)
             fixture.stop()

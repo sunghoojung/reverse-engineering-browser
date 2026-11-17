@@ -13,6 +13,7 @@
 #include <string_view>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_request_stack.h"
 
@@ -267,7 +268,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                           const std::array<std::uint8_t, 32>& digest,
                           std::span<const std::uint8_t> content) noexcept;
 
-  NativeRequestStackTables* const state_;
+  const raw_ptr<NativeRequestStackTables> state_;
   const std::uint64_t generation_;
   const NativeProbeType type_;
   const std::array<std::uint8_t, 48> tail_;

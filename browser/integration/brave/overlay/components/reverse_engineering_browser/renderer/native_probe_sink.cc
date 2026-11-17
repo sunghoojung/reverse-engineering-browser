@@ -23,10 +23,13 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <utility>
 
 #include "base/compiler_specific.h"
+#include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
+#include "base/threading/thread_local.h"
 #include "base/time/time.h"
 
 namespace reb {
@@ -112,14 +115,22 @@ struct CompiledScriptThreadState final {
   bool too_large_reported = false;
 };
 
-thread_local std::unique_ptr<CompiledScriptThreadState> compiled_script_state;
+// Frees each thread's state when that thread exits. A thread_local
+// unique_ptr would need an exit-time destructor, which Chromium refuses.
+base::ThreadLocalOwnedPointer<CompiledScriptThreadState>& CompiledScriptStates() {
+  static base::NoDestructor<base::ThreadLocalOwnedPointer<CompiledScriptThreadState>> states;
+  return *states;
+}
 
 CompiledScriptThreadState& CompiledScriptStateFor(const std::uint64_t generation) {
-  if (!compiled_script_state || compiled_script_state->generation != generation) {
-    compiled_script_state = std::make_unique<CompiledScriptThreadState>();
-    compiled_script_state->generation = generation;
+  CompiledScriptThreadState* state = CompiledScriptStates().Get();
+  if (!state || state->generation != generation) {
+    auto fresh = std::make_unique<CompiledScriptThreadState>();
+    fresh->generation = generation;
+    state = fresh.get();
+    CompiledScriptStates().Set(std::move(fresh));
   }
-  return *compiled_script_state;
+  return *state;
 }
 
 std::size_t CompiledScriptSlot(const CompiledScriptKey& key) noexcept {
@@ -1708,7 +1719,7 @@ void NativeProbeSink::FillSequenceGap(const NativeProbeHeader& source,
 
 bool NativeProbeSink::CompiledScriptNeedsRecord(const std::uint64_t execution_context_id,
                                                 const std::uint32_t script_id) const noexcept {
-  const CompiledScriptThreadState* state = compiled_script_state.get();
+  const CompiledScriptThreadState* state = CompiledScriptStates().Get();
   if (!state || state->generation != config_generation_.load(std::memory_order_acquire)) {
     return true;
   }

@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "base/compiler_specific.h"
+#include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/synchronization/lock.h"
@@ -106,9 +107,9 @@ struct NativeRequestStackTables final {
   std::uint32_t process_id = 0;
   // Process-unique; the owner ring names it so a refusal reaches this table.
   std::uint64_t ordinal = 0;
-  void* embedder_frames = nullptr;
+  raw_ptr<void> embedder_frames = nullptr;
   // Registry list, guarded by the registry lock.
-  NativeRequestStackTables* next = nullptr;
+  raw_ptr<NativeRequestStackTables> next = nullptr;
   // Refusal mailbox: a single-producer, single-consumer ring that never
   // overwrites. The producer is the transport's sequence, under the registry
   // lock. It loads refused_tail with acquire and writes only to a free slot:
@@ -771,16 +772,23 @@ void NativeRequestStackWalk::DetachThread() noexcept {
   {
     // After this no refusal can reach the tables.
     base::AutoLock lock(RegistryLock());
-    for (NativeRequestStackTables** link = &g_registry; *link; link = &(*link)->next) {
-      if (*link == state) {
-        *link = state->next;
-        break;
+    if (g_registry == state) {
+      g_registry = state->next;
+    } else {
+      for (NativeRequestStackTables* node = g_registry; node; node = node->next) {
+        if (node->next == state) {
+          node->next = state->next;
+          break;
+        }
       }
     }
   }
   t_tables = nullptr;
-  if (state->embedder_frames && g_release_frames) {
-    g_release_frames(state->embedder_frames);
+  // Cleared first, so no pointer to Blink's buffer outlives it.
+  void* const frames = state->embedder_frames;
+  state->embedder_frames = nullptr;
+  if (frames && g_release_frames) {
+    g_release_frames(frames);
   }
   delete state;
   if (worker) {

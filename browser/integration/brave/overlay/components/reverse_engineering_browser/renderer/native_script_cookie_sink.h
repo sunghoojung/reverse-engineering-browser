@@ -70,6 +70,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeScriptCookieSink final {
  private:
   friend class base::NoDestructor<NativeScriptCookieSink>;
   NativeScriptCookieSink() noexcept;
+  ~NativeScriptCookieSink();
 
   struct ReadKey final {
     std::uint64_t frame_id = 0;

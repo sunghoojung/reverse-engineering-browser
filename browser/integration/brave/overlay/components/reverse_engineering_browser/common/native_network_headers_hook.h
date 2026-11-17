@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/memory/raw_ptr.h"
 #include "services/network/public/mojom/http_raw_headers.mojom.h"
 
 namespace net {
@@ -33,8 +34,8 @@ enum class NativeNetworkHeadersKind : std::uint8_t {
 // The cookie list of a raw request (sent) or raw response (received), with
 // each cookie's inclusion status; null for other notifications.
 struct NativeNetworkCookies final {
-  const std::vector<net::CookieWithAccessResult>* sent = nullptr;
-  const std::vector<net::CookieAndLineWithAccessResult>* received = nullptr;
+  raw_ptr<const std::vector<net::CookieWithAccessResult>> sent = nullptr;
+  raw_ptr<const std::vector<net::CookieAndLineWithAccessResult>> received = nullptr;
 };
 
 using NativeNetworkHeadersObserver =

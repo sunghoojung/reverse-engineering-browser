@@ -1238,6 +1238,18 @@ the canonical consumer paths and rejects duplicate root copies. It reports bytes
 removed from the current source assets; this is an uncompressed payload saving,
 not a promised ZIP-size reduction.
 
+Every Mach-O in the bundle must start on the oldest macOS that
+`LSMinimumSystemVersion` in [`Info.plist`](macos/Info.plist) declares, not
+only on the build host's release. The build passes that value to each `swiftc`
+as `-target`, smoke checks included, and
+[`mk/config.mk`](../../mk/config.mk) passes it to the C++ helpers as
+`-mmacosx-version-min`. Rust's own default, 11.0 on arm64, is older. After
+signing,
+[`check-macos-deployment-target.py`](../../tools/check-macos-deployment-target.py)
+refuses the bundle when any Mach-O records a newer minimum, or none. Change
+the minimum in `Info.plist` and in the root README's install requirement
+together.
+
 After `make check` and `make app-build` on macOS, run:
 
 ```sh
@@ -2414,7 +2426,9 @@ the view.
 **Graph** on a captured WASM artifact draws one function at a time as basic
 blocks, above the linear disassembly and hex. The graph takes about two thirds
 of the height; drag the divider between them like the other pane splits, or
-use **Linear** to hide the linear pane. The text view's line window and search
+use **Linear** to hide the linear pane (hidden at first in a window under 600
+px high). Neither pane keeps a control or a scrolled row under the divider
+(see [Pane sizes](#pane-sizes)). The text view's line window and search
 notice are hidden while Graph is active. A graph opens at actual size, centered
 on the entry block (or the whole graph when it fits), and **Fit** or `0` shows
 all of it. Below the zoom where rows are readable, cards keep a screen-size
@@ -3040,7 +3054,11 @@ proportions in the local `origin-trace.layout.v1` preference, independently of e
 Minimum pane sizes keep controls and empty states usable. The Sources toolbar
 stays one row (a rename field wraps below it); its narrow details overlay starts below those controls. Saved widths are suspended when the
 responsive layout stacks panes or lacks enough space. Returning to a wide window restores them. Handles follow scrolling and
-are clipped to the active workspace. `pane_layout.js` owns the shared layout controller;
+are clipped to the active workspace. A handle reaches `--pane-divider-reach`
+(4 px, set in `app.css`) into each pane, so a pane edge that holds controls or
+scrolling rows keeps that strip clear: the Sources graph and linear split pads
+the graph footer and starts the linear scrollport below it, so no row can
+scroll under the divider. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
 
 Captured WASM opens in Hex. **Inspect** shows bounded sections, types, imports,

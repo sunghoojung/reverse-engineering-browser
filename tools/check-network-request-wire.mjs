@@ -14,15 +14,23 @@ const model = new Function(`${source}
 return {decodeRequestBodyRecord, decodeRequestTargetRecord, decodeResponseBodyRecord, decodeHeaderBlockRecord,
   decodeCookieListRecord, decodeScriptCookieRecord, requestsFromEvents, isBrokerEvent, isBrokerResponse};`)();
 
-const cases = JSON.parse(execFileSync(exe, ['--golden'], {encoding: 'utf8'}));
+// Each child normally finishes in well under a second. A bounded wait turns a
+// hang into a failure with the child's stacks instead of a stalled CI job.
+const deadline = 60_000;
+const cases = JSON.parse(execFileSync(exe, ['--golden'], {encoding: 'utf8', timeout: deadline}));
 assert(cases.length > 40 && cases.some(item => item.valid) && cases.some(item => !item.valid));
 const python = `import importlib.util,json,sys
 s=importlib.util.spec_from_file_location('validator',sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 for event in json.load(sys.stdin):
   try: m.validate_event(event,1);print('true')
   except ValueError: print('false')`;
-const verdicts = execFileSync('python3', ['-c', python, new URL('tools/validate-evidence-store.py', root).pathname],
-  {input: JSON.stringify(cases.map(item => item.event)), encoding: 'utf8'}).trim().split('\n').map(value => value === 'true');
+// SIGABRT at the deadline makes faulthandler print every Python thread's stack,
+// even one still starting up. Inherited stderr keeps those stacks: a timed-out
+// child's piped stderr is discarded.
+const verdicts = execFileSync('python3', ['-X', 'faulthandler', '-c', python, new URL('tools/validate-evidence-store.py', root).pathname],
+  {input: JSON.stringify(cases.map(item => item.event)), encoding: 'utf8', timeout: deadline, killSignal: 'SIGABRT',
+    stdio: ['pipe', 'pipe', 'inherit']})
+  .trim().split('\n').map(value => value === 'true');
 cases.forEach((item, index) => {
   const decode = {request_target: model.decodeRequestTargetRecord, response_body: model.decodeResponseBodyRecord,
     request_headers: model.decodeHeaderBlockRecord, response_headers: model.decodeHeaderBlockRecord,

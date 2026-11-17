@@ -1,6 +1,7 @@
 // Self-check of the rendered layout probe (tools/origin-trace-rendered-ui/probes.js)
 // against a minimal DOM with fixed boxes: a row its scroller has almost scrolled
-// out is skipped, but a control whose own box has collapsed is still reported.
+// out is skipped, but a control whose own box has collapsed is still reported,
+// and a scroller clips at its padding box when a divider's reach is measured.
 // Layout, clipping and hit testing are modelled here, not rendered.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,7 +10,7 @@ import vm from 'node:vm';
 const source = fs.readFileSync(new URL('origin-trace-rendered-ui/probes.js', import.meta.url), 'utf8');
 
 class Element {
-  constructor(tagName, {id = '', rect, style = {}, text = '', scrollWidth, clientWidth, scrollHeight, clientHeight} = {}) {
+  constructor(tagName, {id = '', rect, style = {}, text = '', scrollWidth, clientWidth, scrollHeight, clientHeight, borderTop = 0} = {}) {
     this.tagName = tagName.toUpperCase();
     this.id = id;
     this.rect = rect;
@@ -22,7 +23,10 @@ class Element {
     this.scrollWidth = scrollWidth ?? rect.width;
     this.clientWidth = clientWidth ?? rect.width;
     this.scrollHeight = scrollHeight ?? rect.height;
-    this.clientHeight = clientHeight ?? rect.height;
+    // Only a top border is modelled; clientTop is its width, as in the DOM.
+    this.clientLeft = 0;
+    this.clientTop = borderTop;
+    this.clientHeight = clientHeight ?? rect.height - borderTop;
   }
   append(...children) {
     for (const child of children) {
@@ -57,8 +61,9 @@ function probe(root) {
     let {left, top, right, bottom} = element.rect;
     for (let node = element.parentElement; node; node = node.parentElement) {
       if (/(hidden|clip|auto|scroll)/.test(node.computed.overflowX + node.computed.overflowY)) {
+        const inner = node.rect.top + node.clientTop;
         left = Math.max(left, node.rect.left); right = Math.min(right, node.rect.right);
-        top = Math.max(top, node.rect.top); bottom = Math.min(bottom, node.rect.bottom);
+        top = Math.max(top, inner); bottom = Math.min(bottom, inner + node.clientHeight);
       }
     }
     return {left, top, right, bottom};
@@ -66,7 +71,7 @@ function probe(root) {
   const document = {
     body: root,
     documentElement: {scrollWidth: 800},
-    querySelector: selector => (selector === `#${root.id}` ? root : null),
+    querySelector: selector => all().find(node => `#${node.id}` === selector) ?? null,
     elementFromPoint(x, y) {
       return all().reverse().find(node => {
         const area = clipped(node);
@@ -78,9 +83,11 @@ function probe(root) {
   const context = vm.createContext({window, document, innerWidth: 800, innerHeight: 600,
     getComputedStyle: element => element.computed});
   vm.runInContext(source, context);
-  // Copied out of the probe's realm, so assert compares plain arrays.
-  return [...window.__rebUiProbe.layoutIssues(`#${root.id}`).issues];
+  return window.__rebUiProbe;
 }
+// Copied out of the probe's realm, so assert compares plain arrays.
+const issues = root => [...probe(root).layoutIssues(`#${root.id}`).issues];
+const reach = (root, panes = []) => [...probe(root).dividerReach('#divider', `#${root.id}`, panes).offenders];
 
 // A list scrolled so that 0.5 px of a row stays under its scroller's top edge,
 // with the next row snapped half a pixel up over it, as WebKit hit testing does.
@@ -90,21 +97,43 @@ const above = new Element('button', {rect: box(0, 78.5, 300, 22), text: 'item-8.
 const selected = new Element('button', {rect: box(0, 100, 300, 22), text: 'inert.test'});
 const below = new Element('button', {rect: box(0, 122, 300, 22), text: 'item-6.scroll.test'});
 scroller.append(above, selected, below);
-assert.deepEqual(probe(scroller), [], 'A sliver of a scrolled-out row is not a covered control');
+assert.deepEqual(issues(scroller), [], 'A sliver of a scrolled-out row is not a covered control');
 
 // A real collision is still a defect: two rows drawn over each other.
 const collided = new Element('div', {id: 'collided', rect: box(0, 0, 300, 100)});
 collided.append(new Element('button', {rect: box(0, 10, 300, 22), text: 'first'}),
   new Element('button', {rect: box(0, 16, 300, 22), text: 'second'}));
-assert(probe(collided).some(issue => issue.startsWith('covered:') || issue.startsWith('overlap:')),
+assert(issues(collided).some(issue => issue.startsWith('covered:') || issue.startsWith('overlap:')),
   'Rows drawn over each other are reported');
 
 // A control whose own box collapsed to 1 px, its label hidden past it, is checked.
 const toolbar = new Element('div', {id: 'toolbar', rect: box(0, 0, 300, 40)});
 toolbar.append(new Element('button', {rect: box(10, 10, 1, 20), text: 'Export',
   style: {overflowX: 'hidden'}, scrollWidth: 40, clientWidth: 1}));
-assert(probe(toolbar).some(issue => issue.startsWith('label overflows its control')),
+assert(issues(toolbar).some(issue => issue.startsWith('label overflows its control')),
   'A collapsed control with a hidden label still fails');
 
+// A divider straddles the edge between a footer and a scroller below it at
+// y 100, reaching 4 px into each. A row scrolled up under the scroller's top
+// border paints nothing there, so only its part inside the padding box counts.
+const split = borderTop => {
+  const root = new Element('div', {id: `split-${borderTop}`, rect: box(0, 0, 300, 200)});
+  const footer = new Element('div', {rect: box(0, 70, 300, 30)});
+  footer.append(new Element('button', {rect: box(250, 74, 40, 20), text: 'Key'}));
+  const linear = new Element('div', {id: `linear-${borderTop}`, rect: box(0, 100, 300, 100), style: {overflowY: 'auto'},
+    scrollHeight: 400, borderTop});
+  linear.append(new Element('button', {rect: box(0, 90, 60, 18), text: 'Rename row'}));
+  root.append(footer, linear, new Element('div', {id: 'divider', rect: box(0, 96, 300, 8)}));
+  return root;
+};
+assert.deepEqual(reach(split(5)), [], 'A row clipped below a scroller border that clears the reach is not under the divider');
+assert.deepEqual(reach(split(1)), ['button "Rename row" meets 60x3px'], 'A row sliver inside the reach is under the divider');
+// A control's edge counts as well as its center, and a named pane is skipped.
+const edge = split(5);
+edge.children[0].children[0].rect = box(250, 78, 40, 20);
+const pane = edge.children[1];
+pane.tagName = 'BUTTON';
+assert.deepEqual(reach(edge, [`#${pane.id}`]), ['button "Key" meets 40x2px'], 'A control edge inside the reach is under the divider');
+
 console.log('PASS rendered layout probe: a scrolled-out row sliver is skipped, a collapsed control and ' +
-  'overlapping rows still fail (modelled boxes, not rendered QA)');
+  'overlapping rows still fail, and a divider reach clips at padding boxes (modelled boxes, not rendered QA)');

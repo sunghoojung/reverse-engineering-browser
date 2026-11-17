@@ -131,12 +131,12 @@ $(BUILD_DIR)/%.o: %.cc
 # sccache replays cached dependency files with the original output path. Generate
 # these separately, without cache, so each build directory has correct targets.
 # Discover dependency files without adding sources to any link target implicitly.
-NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/main.cpp services/*/main.cpp tests/*.cpp)
+NATIVE_CPP_SOURCES := $(wildcard src/*/*.cpp apps/*/*.cpp services/*/*.cpp tests/*.cpp)
 NATIVE_OBJECTS := $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(NATIVE_CPP_SOURCES)) \
 	$(NATIVE_CONSOLE_MESSAGES_OBJECT) $(NATIVE_PROBE_QUEUE_OBJECT) $(NATIVE_CONSOLE_IO_OBJECT) $(NATIVE_WORKER_SOURCE_OBJECT) $(NATIVE_WORKER_OBSERVATION_OBJECT) $(NATIVE_WORKER_TRANSFER_OBJECT) $(NATIVE_WORKER_AUTHORITY_OBJECT) $(NATIVE_WORKER_TRANSFER_GATE_OBJECT) \
 	$(NATIVE_PROXY_POLICY_OBJECT) $(BUILD_DIR)/tools/check-native-proxy-policy.o $(BUILD_DIR)/tools/check-native-console-document-start.o $(BUILD_DIR)/tools/decoder-test-driver.o $(BUILD_DIR)/tools/check-owned-vm-fixture.o
 
-$(NATIVE_OBJECTS) $(BUILD_DIR)/tools/check-magic-decoder-limits.o: mk/config.mk mk/native.mk
+$(NATIVE_OBJECTS) $(BUILD_DIR)/tools/check-magic-decoder-limits.o: mk/config.mk mk/native.mk $(MACOS_INFO_PLIST)
 $(APP_BINARIES) $(NATIVE_PROXY_POLICY_TEST) $(OWNED_VM_FIXTURE_TEST) $(NATIVE_TEST_BINARIES): mk/native.mk
 
 -include $(NATIVE_OBJECTS:.o=.d)
@@ -150,7 +150,7 @@ $(BUILD_DIR)/check-magic-decoder-limits: $(BUILD_DIR)/tools/check-magic-decoder-
 NATIVE_WASM_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-wasm-dispatch-golden
 .PHONY: native-wasm-dispatch-golden
 native-wasm-dispatch-golden: $(NATIVE_WASM_DISPATCH_GOLDEN)
-$(BUILD_DIR)/tools/native-wasm-dispatch-golden.o: mk/config.mk mk/native.mk
+$(BUILD_DIR)/tools/native-wasm-dispatch-golden.o: mk/config.mk mk/native.mk $(MACOS_INFO_PLIST)
 $(NATIVE_WASM_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-wasm-dispatch-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tools/native-wasm-dispatch-golden.d
@@ -159,7 +159,7 @@ $(NATIVE_WASM_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-wasm-dispatch-golden.o
 NATIVE_WASM_GUEST_GOLDEN := $(BUILD_DIR)/reb-native-wasm-guest-golden
 .PHONY: native-wasm-guest-golden
 native-wasm-guest-golden: $(NATIVE_WASM_GUEST_GOLDEN)
-$(BUILD_DIR)/tools/native-wasm-guest-golden.o: mk/config.mk mk/native.mk
+$(BUILD_DIR)/tools/native-wasm-guest-golden.o: mk/config.mk mk/native.mk $(MACOS_INFO_PLIST)
 $(NATIVE_WASM_GUEST_GOLDEN): $(BUILD_DIR)/tools/native-wasm-guest-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tools/native-wasm-guest-golden.d
@@ -199,7 +199,7 @@ $(DEBUGGER_PAUSE_WIRE_TEST): $(BUILD_DIR)/tests/debugger_pause_wire_test.o
 NATIVE_JS_DISPATCH_GOLDEN := $(BUILD_DIR)/reb-native-js-dispatch-golden
 .PHONY: native-js-dispatch-golden
 native-js-dispatch-golden: $(NATIVE_JS_DISPATCH_GOLDEN)
-$(BUILD_DIR)/tools/native-js-dispatch-golden.o: mk/config.mk mk/native.mk
+$(BUILD_DIR)/tools/native-js-dispatch-golden.o: mk/config.mk mk/native.mk $(MACOS_INFO_PLIST)
 $(NATIVE_JS_DISPATCH_GOLDEN): $(BUILD_DIR)/tools/native-js-dispatch-golden.o $(BUILD_DIR)/src/capture/event.o mk/native.mk
 	$(CXX) $(filter %.o,$^) $(LDFLAGS) $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tools/native-js-dispatch-golden.d

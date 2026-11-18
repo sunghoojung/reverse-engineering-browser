@@ -5,7 +5,9 @@
 //! complete scan of it would. Content integrity is never cached: a caller
 //! verifies the bytes a record names when it reads them. The index also
 //! counts the manifest for the session summary: records by kind, and the
-//! unique bytes each content budget's artifacts hold.
+//! unique bytes each content budget's artifacts hold. JavaScript artifacts are
+//! also kept by content digest and URL, so a saved invocation site finds the
+//! retained versions of its script in a manifest of any length.
 use crate::{
     error::{Error, Result},
     evidence,
@@ -22,8 +24,9 @@ use std::{
 };
 
 pub const SUFFIX: &str = ".lookup-v1";
-/// The second layout adds the summary's counts and manifest order.
-const FORMAT: &str = "reb-artifact-lookup-v1/2";
+/// The second layout adds the summary's counts and manifest order, the
+/// third JavaScript artifacts by digest and URL.
+const FORMAT: &str = "reb-artifact-lookup-v1/3";
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, parent INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS artifacts_parent ON artifacts(parent) WHERE parent != 0;
@@ -35,7 +38,10 @@ const SCHEMA: &str = "
     -- digest is kept as its first 64 bits.
     CREATE TABLE IF NOT EXISTS budget_digests(budget TEXT NOT NULL, digest INTEGER NOT NULL,
         PRIMARY KEY(budget, digest)) WITHOUT ROWID;
-    CREATE TABLE IF NOT EXISTS budget_bytes(budget TEXT PRIMARY KEY, bytes INTEGER NOT NULL) WITHOUT ROWID;";
+    CREATE TABLE IF NOT EXISTS budget_bytes(budget TEXT PRIMARY KEY, bytes INTEGER NOT NULL) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL, url TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS scripts_sha256 ON scripts(sha256);
+    CREATE INDEX IF NOT EXISTS scripts_url ON scripts(url);";
 /// A manifest line, its newline included, as the receiver writes it.
 pub const RECORD_BYTES: usize = 8192;
 /// Bytes folded per call, so a lookup never holds the index for long.
@@ -105,6 +111,19 @@ pub fn children(root: &Path, parent: u64, deadline: Instant) -> Result<Vec<Value
     let index = index(root);
     let mut index = lock(&index);
     index.children(parent, deadline)
+}
+
+/// The validated JavaScript records whose content has `sha256` or whose URL
+/// is `url`, from the whole manifest in manifest order.
+pub fn scripts(
+    root: &Path,
+    sha256: &str,
+    url: Option<&str>,
+    deadline: Instant,
+) -> Result<Vec<Value>> {
+    let index = index(root);
+    let mut index = lock(&index);
+    index.scripts(sha256, url, deadline)
 }
 
 fn not_found() -> Error {
@@ -289,6 +308,42 @@ impl ArtifactIndex {
     }
 }
 
+impl ArtifactIndex {
+    fn scripts(
+        &mut self,
+        sha256: &str,
+        url: Option<&str>,
+        deadline: Instant,
+    ) -> Result<Vec<Value>> {
+        let Some(mut ready) = self.ready(deadline)? else {
+            return Ok(Vec::new());
+        };
+        // Each arm of the OR reads its own index.
+        let ranges: Vec<(i64, i64)> = self
+            .index
+            .sidecar()
+            .connection()
+            .prepare_cached(
+                "SELECT a.start, a.end FROM scripts s JOIN artifacts a ON a.id = s.id
+                 WHERE s.sha256 = ?1 OR s.url = ?2 ORDER BY a.start",
+            )
+            .sql()?
+            .query_map(params![sha256, url], |row| Ok((row.get(0)?, row.get(1)?)))
+            .sql()?
+            .collect::<rusqlite::Result<_>>()
+            .sql()?;
+        let mut scripts = ranges
+            .into_iter()
+            .map(|(start, end)| self.row(&mut ready.file, start, end))
+            .collect::<Result<Vec<_>>>()?;
+        scripts.extend(ready.unterminated.filter(|value| {
+            value["kind"] == "javascript"
+                && (value["sha256"] == sha256 || url.is_some_and(|url| value["url"] == url))
+        }));
+        Ok(scripts)
+    }
+}
+
 struct Ready {
     file: File,
     /// The manifest's last record when it still lacks its newline.
@@ -300,9 +355,21 @@ fn artifact_key(value: &Value) -> u64 {
     value["artifact_id"].as_str().unwrap().parse().unwrap()
 }
 
-/// Counts one indexed record for the summary.
+/// Counts one indexed record for the summary, and keeps a script by its
+/// digest and URL.
 fn count(transaction: &rusqlite::Transaction<'_>, value: &Value) -> Result<()> {
     let kind = value["kind"].as_str().unwrap_or("");
+    if kind == "javascript" {
+        transaction
+            .prepare_cached("INSERT INTO scripts(id, sha256, url) VALUES (?1, ?2, ?3)")
+            .sql()?
+            .execute(params![
+                index_db::key(artifact_key(value)),
+                value["sha256"].as_str().unwrap_or(""),
+                value["url"].as_str().unwrap_or("")
+            ])
+            .sql()?;
+    }
     transaction
         .prepare_cached(
             "INSERT INTO kinds(kind, count) VALUES (?1, 1)

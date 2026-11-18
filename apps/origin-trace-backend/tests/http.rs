@@ -10958,6 +10958,47 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     assert_eq!(entry["source_url"], "https://example.test/source.js");
     assert_eq!(entry["session_id"], "11");
     assert_eq!(entry["retained"]["state"], "matches");
+    // The saved script is found behind any number of newer artifacts, and a
+    // newer version at its URL is named beside it.
+    let manifest = server.root.path().join("artifacts/manifest.jsonl");
+    let blob = |bytes: &[u8]| {
+        let hash = hex::encode(Sha256::digest(bytes));
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+        (hash, bytes.len())
+    };
+    let filler = blob(b"other();");
+    let version = blob(b"f0=function(a){return a+1};");
+    let mut appended = String::new();
+    for id in 8..=6_008u64 {
+        let (url, (hash, size)) = if id == 6_008 {
+            ("https://example.test/source.js".to_owned(), &version)
+        } else {
+            (format!("https://cdn.example.test/{id}.js"), &filler)
+        };
+        appended.push_str(&format!("{}\n", json!({
+            "protocol_version":1,"artifact_id":id.to_string(),"session_id":"11","navigation_id":"13",
+            "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+            "execution_context_id":"23","capture_origin":"dynamic_javascript",
+            "kind":"javascript","url":url,"mime_type":"text/javascript",
+            "byte_size":size,"sha256":hash,"sensitive":false,
+            "content_path":format!("blobs/{hash}.bin")})));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&manifest)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let listed = set(assert_contract_response(
+        server.get("/api/js-invocation-sites").await,
+        "get",
+        "/api/js-invocation-sites",
+        200,
+    )
+    .await);
+    let retained = &listed["sites"][0]["retained"];
+    assert_eq!(retained["state"], "matches", "{retained}");
+    assert_eq!(retained["other_version_artifact_id"], "6008", "{retained}");
     // The file is the browser's exact format, user-only, in a private folder.
     let text = std::fs::read_to_string(&store).unwrap();
     assert_eq!(

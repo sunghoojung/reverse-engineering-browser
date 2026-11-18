@@ -726,7 +726,9 @@ those sites; none of them changes the open page or a running capture.
 - `GET /api/js-invocation-sites` (`get_js_invocation_sites`) returns the saved
   set with each site's label, source URL and session, whether this session
   retained the saved script version (`retained.state`: `matches`,
-  `other_version` or `not_retained`), and what this session's launcher armed
+  `other_version` or `not_retained`, over every JavaScript artifact of the
+  manifest with the saved bytes or URL, through its index), and what this
+  session's launcher armed
   (`session.state`: `not_armed`, `armed`, `browser_unsupported` or
   `unreadable`, with `digests`).
 - `POST /api/js-invocation-sites/actions` (`js_invocation_site_action`) takes

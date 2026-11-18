@@ -224,6 +224,9 @@ const INDEX_INTERVAL: Duration = Duration::from_secs(1);
 /// How long an event poll folds appended records into the gap totals; the
 /// background fold keeps the index within a second of the store.
 const EVENT_TOTALS_FOLD: Duration = Duration::from_millis(100);
+/// Script-text digests kept by content SHA-256 before the cache starts over:
+/// a few MiB, so listing saved sites reads each script version once.
+const TEXT_DIGESTS: usize = 65_536;
 /// How long a signal profile lookup may spend bringing its index up to the
 /// signal store before it answers that indexing is still under way.
 const SIGNAL_PROFILE_FOLD: Duration = Duration::from_secs(2);
@@ -2163,45 +2166,47 @@ impl App {
         let root = self.options.artifacts.clone();
         let digests = self.text_digests.clone();
         let listed = saved.clone();
+        let _lookup = self.artifact_lookup.lock().await;
         let retained = self
             .blocking(move || {
-                // A store without a manifest has retained nothing yet.
-                let artifacts = if root.join("manifest.jsonl").exists() {
-                    evidence::artifacts(&root, 5000)?
-                } else {
-                    Vec::new()
-                };
-                // At most four same-URL artifacts are read per listing; their
-                // digests are cached by content SHA-256, which never changes.
-                let mut reads = 0;
-                Ok(listed
+                let deadline = std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE;
+                listed
                     .iter()
                     .map(|saved| {
-                        js_invocation_sites::retained(saved, &artifacts, |artifact| {
-                            let sha = artifact["sha256"].as_str()?.to_owned();
-                            if let Some(known) = digests.lock().ok()?.get(&sha) {
-                                return Some(known.clone());
-                            }
-                            if reads >= 4 {
-                                return None;
-                            }
-                            reads += 1;
-                            let raw = evidence::content(
-                                &root,
-                                artifact,
-                                js_invocation_sites::MAX_SOURCE_BYTES,
-                            )
-                            .ok()?;
-                            let digest = js_invocation_sites::text_digest(&raw)?;
-                            let mut cache = digests.lock().ok()?;
-                            if cache.len() >= 256 {
-                                cache.clear();
-                            }
-                            cache.insert(sha, digest.clone());
-                            Some(digest)
-                        })
+                        // Every retained version of the script, from the whole
+                        // manifest: its exact bytes, or its URL.
+                        let artifacts = crate::artifact_lookup::scripts(
+                            &root,
+                            &saved.site.artifact_sha256,
+                            saved.source_url.as_deref(),
+                            deadline,
+                        )?;
+                        Ok(js_invocation_sites::retained(
+                            saved,
+                            &artifacts,
+                            |artifact| {
+                                // Digests are cached by content SHA-256, which never changes.
+                                let sha = artifact["sha256"].as_str()?.to_owned();
+                                if let Some(known) = digests.lock().ok()?.get(&sha) {
+                                    return Some(known.clone());
+                                }
+                                let raw = evidence::content(
+                                    &root,
+                                    artifact,
+                                    js_invocation_sites::MAX_SOURCE_BYTES,
+                                )
+                                .ok()?;
+                                let digest = js_invocation_sites::text_digest(&raw)?;
+                                let mut cache = digests.lock().ok()?;
+                                if cache.len() >= TEXT_DIGESTS {
+                                    cache.clear();
+                                }
+                                cache.insert(sha, digest.clone());
+                                Some(digest)
+                            },
+                        ))
                     })
-                    .collect::<Vec<_>>())
+                    .collect::<Result<Vec<_>>>()
             })
             .await?;
         Ok(js_invocation_sites::set_document(

@@ -155,7 +155,7 @@ const REQUEST_STACK_REGISTRATIONS = Object.freeze({then: 'Promise.then', catch: 
   finally: 'Promise.finally', await: 'await'});
 
 const REQUEST_STACK_TASK_NOTES = Object.freeze({
-  not_recorded: 'the call that registered it is not recorded: promise registration stacks were off (REB_NATIVE_PROMISE_STACKS=1 records them)',
+  not_recorded: 'the call that registered it is not recorded: promise registration stacks were off (Promise stacks, under Advanced options in New Live Session…, records them)',
   not_recorded_promise_stacks_on: 'the call that registered it is not recorded: promise registration stacks were on, but this thread remembered no registration for it (a builtin such as Promise.all registered it, capture was off when it was registered, or 2,048 later registrations replaced it)',
   no_script: 'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here',
   origin_rejected: 'its task origin did not validate (forged, damaged or longer than 1,544 bytes), so the sender is not known; the chain ends here',
@@ -334,7 +334,7 @@ function createRequestStackPanel({open, refresh, load = null}) {
       nodes.push(note(linkEvent
         ? 'The navigation initiator link is malformed.'
         : initiated
-          ? 'No request call stack record. Request stacks are recorded with REB_NATIVE_REQUEST_STACKS=1, and a record that left the retained window is not shown.'
+          ? 'No request call stack record. Request stacks were off for this session (Advanced options in New Live Session…), its browser predates them, or the record left the retained window.'
           : 'No renderer request record, and no script navigation stack names this request.'));
       return nodes;
     }

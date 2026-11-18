@@ -901,7 +901,11 @@ def check_backend(binary, backend):
             disabled = read_document_start()
             assert disabled["document_start"]["permitted"] is False
             assert disabled["document_start"]["status"] == "unavailable"
-            assert "REB_CONSOLE_DOCUMENT_START" in disabled["document_start"]["message"]
+            # The notice names the app control that grants the permission, not
+            # an environment variable.
+            message = disabled["document_start"]["message"]
+            assert "Allow document-start Console scripts" in message, message
+            assert "REB_" not in message, message
             armed_request = {"action": "arm_document_start", "session_id": session,
                              "confirm_document_start": True,
                              "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "top",

@@ -469,7 +469,7 @@ enum AgentSubscriptionChecks {
           let servers = mcp?["mcpServers"] as? [String: Any] ?? [:]
           let rebArguments = (servers["reb"] as? [String: Any])?["args"] as? [String] ?? []
           check(Array(servers.keys) == ["reb"] && rebArguments.firstIndex(of: "--permission").map { rebArguments[$0 + 1] } == tag
-            && !rebArguments.contains("--allow-effects") && !rebArguments.contains("--allow-sensitive-capture"),
+            && !rebArguments.contains("--allow-effects"),
             "Claude: one reb-api server at the same --permission level as the graph: \(rebArguments)")
           let serverEnvironment = (servers["reb"] as? [String: Any])?["env"] as? [String: String] ?? [:]
           check((serverEnvironment["HOME"] != nil) == (level == .full), "Claude: only a Full access tool server gets a home folder")
@@ -570,12 +570,13 @@ enum AgentSubscriptionChecks {
           try? FileManager.default.removeItem(at: directory.appendingPathComponent("stand-in-sticky"))
         }
         if level == .full {
-          // A sensitive start is refused natively, whatever the CLI asks for.
-          driver.turn = AgentCLITurn(id: "sensitive-\(tag)")
-          let refusal = Answer()
+          // Full access is the one consent: a start with the app's content
+          // defaults runs without a second question.
+          driver.turn = AgentCLITurn(id: "start-\(tag)")
+          let started = Answer()
           driver.permission(callId: "s1", cliName: provider == .claude ? "mcp__reb__start_live_session" : "reb__start_live_session",
-            input: ["request_content": true, "confirm_sensitive_capture": true]) { allow, message in refusal.set(allow, message) }
-          check(refusal.allow == false && (refusal.message ?? "").contains("were not allowed"), "\(label): sensitive capture needs its own consent")
+            input: ["request_content": true, "canvas_images": true]) { allow, message in started.set(allow, message) }
+          check(started.allow == true && started.message == nil, "\(label): Full access starts a content session without another consent")
           driver.endTurn()
           // Lowering from Full access ends the CLI, whose tool server returns content.
           try! await driver.send(turnId: "f\(tag)", text: "Again SCENARIO:read")
@@ -600,7 +601,7 @@ enum AgentSubscriptionChecks {
         driver.shutdown()
         session.disable()
       }
-      print("PASS agent subscriptions: \(label) CLI driver at every permission level, isolation flags and environment, structural reads, Allow once and Deny, actions without asking, sensitive refusal, lowering, refusals, Stop with process-group kill (stand-in CLI, real reb-api)")
+      print("PASS agent subscriptions: \(label) CLI driver at every permission level, isolation flags and environment, structural reads, Allow once and Deny, actions without asking, Full access session starts, lowering, refusals, Stop with process-group kill (stand-in CLI, real reb-api)")
     }
   }
 }

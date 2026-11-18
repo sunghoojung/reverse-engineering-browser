@@ -198,10 +198,11 @@ script length with no armed site.
 Digests follow the capture mode: on in Content mode when sites are saved, off
 in Metadata mode whatever the environment holds. An explicit
 `REB_NATIVE_JS_INVOCATION_SITES` wins, and in Content mode so does an explicit
-`REB_NATIVE_JS_INVOCATION_DIGESTS`. Agent-started sessions arm sites and
-digests only when the start request names them (`js_invocation_sites`,
-`js_invocation_saved_sites`, `js_invocation_digests` with
-`confirm_sensitive_capture`), never from the caller's environment. They keep
+`REB_NATIVE_JS_INVOCATION_DIGESTS`. Agent-started sessions arm sites only
+when the start request names them (`js_invocation_sites` or
+`js_invocation_saved_sites`), never from the caller's environment, and then
+record digests as a Content session does, with request content under the
+same consent, unless `js_invocation_digests` is `false`. They keep
 their own saved set at `~/.config/origin-trace/agent-sessions/`, which an
 agent session's site routes edit and a `js_invocation_saved_sites` start arms
 and follows, so an agent never reads or changes the researcher's set. A named

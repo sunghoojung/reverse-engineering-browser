@@ -47,10 +47,11 @@ browser profiles and session data.
    record names the Brave build those probes belong to.
 3. Unzip them side by side, or put Brave in `/Applications`, and open Origin Trace.
 
-Origin Trace starts capture and an isolated Brave window. A session runs for
-one hour with the implemented capture categories, bounded request content,
-Canvas images, quiet mode, and Wasm dispatch. A page `debugger;` statement
-is ignored. **New Live Session…** can start a **Metadata only** session
+Origin Trace starts capture and a Brave window with its own research
+profile, kept from one session to the next so sign-ins carry over. A session
+runs until you end it, with the implemented capture categories, bounded
+request content, Canvas images, quiet mode, and Wasm dispatch. A page
+`debugger;` statement is ignored. **New Live Session…** can start a **Metadata only** session
 instead, which keeps no request content. What that pair includes is on the
 release page.
 
@@ -112,10 +113,10 @@ make live
 ```
 
 Browse in that Brave window. Evidence is under `build/sessions/live/`. Close
-Brave to end the session. `REB_CAPTURE_REQUEST_CONTENT=1` keeps request paths,
-queries, and bodies for that session, which is what the packaged app does by
-default. `REB_CAPTURE_CANVAS_IMAGES=1` keeps `HTMLCanvasElement.toDataURL()`
-output in the local store, up to 2 MiB an image.
+Brave to end the session. Like the packaged app, `make live` keeps request
+paths, queries, and bodies, and `HTMLCanvasElement.toDataURL()` output up to
+2 MiB an image, in the local store; `REB_CAPTURE_REQUEST_CONTENT=0` or
+`REB_CAPTURE_CANVAS_IMAGES=0` turns either off for that session.
 
 Building Brave needs macOS, full Xcode, Node.js, pnpm, Python 3, and at
 least 150 GiB free (200 to 250 GiB is safer). The first compile takes hours.

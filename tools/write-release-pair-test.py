@@ -316,6 +316,93 @@ class RepositoryPin(unittest.TestCase):
             self.assertIn("brave_name", result.stderr)
             self.assertFalse((root / "build").exists())
 
+    def test_only_what_the_brave_build_reads_ends_the_pair(self):
+        """A change to an input the Brave build reads refuses the pin; any other change keeps it."""
+        inputs = [
+            "browser/config/brave-core.rev", "browser/config/chromium.rev",
+            "browser/integration/brave/overlay/components/reverse_engineering_browser/BUILD.gn",
+            "browser/integration/brave/patches/0001-example.patch",
+            "scripts/bootstrap-brave.sh", "scripts/brave-toolchain.sh", "scripts/build-brave-distribution.sh",
+            "scripts/build-integrated-brave.sh", "scripts/package-brave-distribution.sh",
+            "scripts/sync-browser-integration.sh", "tools/brave_patch_advance.py",
+            "tools/brave_patch_contract.py", "tools/check-integrated-brave-state.py",
+        ]
+        others = [
+            "include/reb/event.h", "src/capture/event.cpp", "protocol/native-network-v3.md",
+            "services/event-broker/main.cpp", "apps/research-ui/app.js", "tools/check-brave-services.py",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*arguments):
+                return subprocess.run(["git", "-C", str(root), *arguments], check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "release@example.invalid")
+            git("config", "user.name", "Release test")
+            (root / "apps/research-ui/macos").mkdir(parents=True)
+            (root / "apps/research-ui/macos/Info.plist").write_bytes(plistlib.dumps(self.info))
+            for path in inputs + others:
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text("built\n")
+            git("add", "-A")
+            git("commit", "-q", "-m", "Browser build source")
+            build = git("rev-parse", "HEAD")
+            block = re.compile(r"# BEGIN reviewed paired browser pin\n.*# END reviewed paired browser pin\n",
+                               re.DOTALL)
+            reviewed = pin_script(
+                brave_name=self.helper.pin_block(self.script)["brave_name"],
+                source_url="https://github.com/sunghoojung/reverse-engineering-browser/releases/download/brave-test",
+                brave_sha256="a" * 64, provenance_sha256="b" * 64, build_source=build,
+            ).split("\n", 1)[1]
+            script = root / "scripts/prepare-release-brave.sh"
+            script.write_text(block.sub(lambda _: reviewed, self.script, count=1))
+            git("add", "-A")
+            git("commit", "-q", "-m", "Pin the browser")
+
+            def check():
+                return subprocess.run(["bash", str(script), "--check-pin"], cwd=root, capture_output=True, text=True)
+
+            result = check()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("matches this source's browser inputs", result.stdout)
+            for path in others:
+                with self.subTest(kept=path):
+                    (root / path).write_text("changed\n")
+                    git("commit", "-q", "-am", f"Change {path}")
+                    result = check()
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            for path in inputs:
+                with self.subTest(refused=path):
+                    (root / path).write_text("changed\n")
+                    result = check()
+                    self.assertEqual(result.returncode, 1, result.stdout)
+                    self.assertIn("Browser inputs changed since", result.stderr)
+                    git("checkout", "-q", "--", path)
+            self.assertFalse((root / "build").exists())
+
+    def test_inputs_name_every_helper_the_build_scripts_import(self):
+        """A project helper a listed script runs or a listed helper imports is itself listed."""
+        listed = re.search(r"readonly browser_inputs=\(\n(.*?)\n\)", self.script, re.DOTALL).group(1).split()
+        pending = [path for path in listed if path.endswith((".sh", ".py"))]
+        seen = set()
+        while pending:
+            path = pending.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            text = (REPOSITORY_ROOT / path).read_text()
+            helpers = {f"tools/{name}.py" for name in re.findall(r"^(?:from|import) (\w+)", text, re.MULTILINE)}
+            helpers |= set(re.findall(r"tools/[\w-]+\.py", text))
+            for helper in sorted(helper for helper in helpers if (REPOSITORY_ROOT / helper).is_file()):
+                # Checks the build runs verify its result and never change the browser bytes.
+                if helper == "tools/check-brave-services.py":
+                    continue
+                with self.subTest(script=path, helper=helper):
+                    self.assertIn(helper, listed)
+                pending.append(helper)
+
 
 if __name__ == "__main__":
     unittest.main()

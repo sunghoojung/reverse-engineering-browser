@@ -100,7 +100,9 @@ console.log('PASS native Wasm launch is explicit opt-in, category-gated, and com
 {
   const labels = section('# Labels for the session context; they enable nothing in the backend.', '# The session header says');
   const run = variables => {
-    const result = spawnSync(shell, ['-c', `set -eu; ui_arguments=(); capture_canvas_images=0; console_document_start=0; request_stacks_state=off; ${variables}; ${labels}
+    const result = spawnSync(shell, ['-c', `set -eu; ui_arguments=(); capture_canvas_images=0; console_document_start=0; request_stacks_state=off;
+      native_wasm_dispatch=0; native_wasm_call_indirect=0; native_wasm_samples_per_function=; native_wasm_samples_per_indirect_site=;
+      native_wasm_function_allow=; native_wasm_function_deny=; native_wasm_module_allowlist=; ${variables}; ${labels}
 printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trimEnd().split('\n').filter(Boolean);
@@ -113,6 +115,17 @@ printf '%s\\n' "${'${ui_arguments[@]-}'}"`], {encoding:'utf8'});
       '--session-response-media', '1']);
   assert.deepEqual(run('capture_request_content=0; request_content_budget_mib=4096; response_body_budget_mib=16384; capture_response_media=0'), [],
     'a metadata session names no limit');
+  // The Wasm sampling labels name the streams and the allowances and filters
+  // the launcher passes Brave, counted rather than listed.
+  const quiet = 'capture_request_content=0; request_content_budget_mib=256; response_body_budget_mib=512; capture_response_media=0';
+  assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1; native_wasm_call_indirect=1; native_wasm_samples_per_function=064;
+    native_wasm_samples_per_indirect_site=16; native_wasm_function_allow=1,2,3; native_wasm_function_deny=9; native_wasm_module_allowlist=/tmp/mods.txt`),
+    ['--session-wasm-dispatch', '--session-wasm-call-indirect', '--session-wasm-samples-per-function', '64',
+      '--session-wasm-samples-per-indirect-site', '16', '--session-wasm-function-allow-count', '3',
+      '--session-wasm-function-deny-count', '1', '--session-wasm-module-allowlist']);
+  assert.deepEqual(run(`${quiet}; native_wasm_dispatch=1`), ['--session-wasm-dispatch'], 'unnamed allowances are not labeled');
+  assert.deepEqual(run(`${quiet}; native_wasm_samples_per_function=64; native_wasm_function_allow=1`), [],
+    'a session without a Wasm stream names no sampling policy');
   // The launcher refuses a value the backend label would refuse, before anything starts.
   for (const [options, message] of [
     [{REB_REQUEST_CONTENT_BUDGET_MIB:'4097'}, /REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096/],
@@ -271,6 +284,59 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
   console.log('PASS native request and promise stacks opt-in, Network and Artifact gate, promise stacks dependency and js-flags merge');
 }
 
+// A session started as another ends waits for that session's Brave to close
+// instead of refusing the profile it still holds. The holder is a stand-in
+// whose command line names the profile, as a running Brave's does; the shell
+// starts it so the shell, not this check, reaps it when it exits.
+{
+  const holderCode = section('# Only one browser can hold a profile', '# The project V8 flags');
+  const quick = holderCode.replace('profile_release_wait_seconds=10', 'profile_release_wait_seconds=4');
+  assert.notEqual(quick, holderCode, 'The release wait is a named bound');
+  const profiles = await realpath(await mkdtemp(join(tmpdir(), 'reb-profile-holder-')));
+  try {
+    const run = async (kind, hold) => {
+      const profile = join(profiles, `${kind}-${hold}`);
+      await mkdir(profile);
+      const holder = hold === 'none' ? 'holder=""' :
+        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"`;
+      return spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
+trap '[[ -z "$holder" ]] || kill "$holder" 2>/dev/null || true' EXIT
+profile_kind=${kind}; profile_path="$1"; ${holder}
+${quick}echo started`, 'holder', profile], {encoding:'utf8'});
+    };
+    const closing = await run('research', 'closing');
+    assert.equal(closing.status, 0, closing.stdout + closing.stderr);
+    assert.match(closing.stdout, /^Waiting for the Brave that holds .*research-closing \(PID \d+\) to close\.\nstarted\n$/);
+    const held = await run('research', 'held');
+    assert.equal(held.status, 2, held.stdout + held.stderr);
+    assert.match(held.stdout, /^Waiting for the Brave that holds .*\nThe browser profile .*research-held is in use by a running Brave \(PID \d+\), so this session could not open it\..*Fresh profile in New Live Session…/s);
+    for (const [kind, hold] of [['research', 'none'], ['fresh', 'held']]) {
+      const result = await run(kind, hold);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(result.stdout, 'started\n', `${kind} ${hold}`);
+    }
+  } finally {
+    await rm(profiles, {recursive:true, force:true});
+  }
+  console.log('PASS held profile: a closing holder is waited out, a held one is refused, a fresh profile is never checked');
+}
+
+// An app session's summary says which start panel option turns a switch on;
+// make live's names the environment setting.
+{
+  const hintCode = section('# How the summary says to turn a switch on', 'echo "Origin Trace live session');
+  const hint = embedded => spawnSync(shell, ['-c', `set -eu; embedded_session=${embedded}; ${hintCode}
+printf '%s\\n' "$(switch_hint 'Extension traffic' REB_CAPTURE_EXTENSION_TRAFFIC=1)"`], {encoding:'utf8'}).stdout;
+  assert.equal(hint(1), 'turn on Extension traffic in New Live Session… Advanced options\n');
+  assert.equal(hint(0), 'set REB_CAPTURE_EXTENSION_TRAFFIC=1\n');
+  const summary = section('echo "Origin Trace live session', 'echo "Capture transport:');
+  for (const name of ['REB_CAPTURE_CANVAS_IMAGES', 'REB_CAPTURE_BROWSER_INTERNAL', 'REB_CAPTURE_EXTENSION_TRAFFIC', 'REB_CONSOLE_DOCUMENT_START']) {
+    assert.doesNotMatch(summary, new RegExp(`set ${name}=`), `${name} is named through switch_hint`);
+    assert.match(summary, new RegExp(`\\$\\(switch_hint '[^']+' ${name}=1\\)`), name);
+  }
+  console.log('PASS session summary hints name the start panel option in an app session and the environment setting for make live');
+}
+
 // V8 ignores an unknown --js-flags entry and every later one, so the real
 // launcher must refuse a Brave build whose loaded V8 lacks a requested flag
 // before any helper or browser starts. Synthetic bundles and recording helpers
@@ -374,6 +440,7 @@ exec ${quote(systemGrep)} "$@"
     '--reb-wasm-guest-capture': ['REB_NATIVE_WASM_GUEST_ADAPTER', 'unset REB_NATIVE_WASM_GUEST_ADAPTER'],
     '--reb-js-dispatch-capture': ['REB_NATIVE_JS_DISPATCH_SITES', 'unset REB_NATIVE_JS_DISPATCH_SITES'],
     '--reb-js-invocation-capture': ['REB_NATIVE_JS_INVOCATION_SITES', 'unset REB_NATIVE_JS_INVOCATION_SITES'],
+    '--reb-request-stacks': ['REB_NATIVE_REQUEST_STACKS=1', 'REB_NATIVE_REQUEST_STACKS=0'],
   };
   const prefix = 'REB_LIVE_SESSION_FAILURE: ';
   const optOuts = flags => flags.map(flag => settings[flag][1]).join(', ');
@@ -398,7 +465,7 @@ exec ${quote(systemGrep)} "$@"
     REB_LOCAL_ANALYST_STORE:at('analyst.json'), REB_ACTIVE_ENDPOINT_FILE:at('active.endpoint'),
     REB_CAPTURE_CATEGORY_MASK:'4095', REB_NATIVE_QUIET_MODE:'0', REB_NATIVE_WASM_DISPATCH:'0',
     REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'',
-    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', ...requested});
+    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', REB_NATIVE_REQUEST_STACKS:'0', ...requested});
   const clearReceipts = () => Promise.all([receipts, scans, started, finished].map(file => rm(file, {force:true})));
   const launchWith = async (executable, requested, cwd) => {
     await clearReceipts();
@@ -514,9 +581,9 @@ exec ${quote(systemGrep)} "$@"
   }
   console.log('PASS a following session writes the revision generation only for a Brave that follows revisions; an empty slot table arms nothing on an older one');
 
-  // The packaged app's request and promise stacks defaults: a Brave without
-  // promise registration stacks starts with request stacks alone, and one
-  // with both arms both. An explicit request stays strict.
+  // The packaged app's request stacks with promise stacks chosen in its start
+  // panel: a Brave without promise registration stacks starts with request
+  // stacks alone, and one with both arms both. An explicit request stays strict.
   const stackDefaults = {...switches.packaged, REB_NATIVE_REQUEST_STACKS:'1', REB_NATIVE_PROMISE_STACKS:'1',
     REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'1'};
   const prePromise = await braveApp({framework: [...allNames, 'reb_request_stacks']});
@@ -529,7 +596,23 @@ exec ${quote(systemGrep)} "$@"
   const strictPromise = await launchWith(prePromise.executable, {...stackDefaults, REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'0'});
   assert.equal(strictPromise.status, 1, strictPromise.stderr);
   assert.match(strictPromise.stderr, /does not define the requested V8 flag --reb-promise-stacks \(from REB_NATIVE_PROMISE_STACKS=1\)/);
-  console.log('PASS packaged request and promise stacks defaults drop promise stacks from a Brave that lacks them; an explicit request stays strict');
+  console.log('PASS packaged request stacks with promise stacks chosen drop promise stacks from a Brave that lacks them; an explicit request stays strict');
+
+  // Request stacks default on, as in the app, when the mask holds Network and
+  // Artifact. The default looks for the flag once: a Brave without it starts
+  // without stacks, and one with it is then checked like any requested flag.
+  // A mask without Network never asks, and an explicit request stays strict.
+  const stackDefault = {...switches.packaged, REB_NATIVE_REQUEST_STACKS:''};
+  const withoutStacks = await launchWith(preInvocation.executable, stackDefault);
+  accepted(withoutStacks, [...packaged, '--reb-request-stacks'], preInvocation.framework);
+  const withStacks = await braveApp({framework: [...allNames, 'reb_request_stacks']});
+  const stacksOn = await launchWith(withStacks.executable, stackDefault);
+  accepted(stacksOn, [...packaged, '--reb-request-stacks', '--reb-request-stacks'], withStacks.framework);
+  accepted(await launchWith(preInvocation.executable, {...stackDefault, REB_CAPTURE_CATEGORY_MASK:'3839'}),
+    packaged, preInvocation.framework);
+  refused(await launchWith(preInvocation.executable, {...switches.packaged, REB_NATIVE_REQUEST_STACKS:'1'}),
+    undefinedCause(preInvocation.executable, preInvocation.framework, ['--reb-request-stacks']));
+  console.log('PASS request stacks default on where Brave defines them and drop with a launch line where it does not; an explicit request stays strict');
 
   // Request content capture is a Chromium switch, not a V8 flag. Invalid values
   // and masks without Network and Artifact refuse before any helper starts.
@@ -595,7 +678,7 @@ printf '%s\\n' "${'${brave_arguments[@]-}'}"`], {env:{...process.env, TEST_SOCKE
     ['0b11', null], ['12345678901', null], ['0x123456789', null], ['１２', null],
     ['0x１２', null], ['0xａ', null],
     [`a[$(touch ${injected})]`, null]];
-  const maskCode = section('# One category mask grammar', 'if [[ "${native_quiet_mode}"');
+  const maskCode = section('# One category mask grammar', '# A default turns on only when the mask holds');
   for (const [value, expected] of maskVectors) {
     const result = spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
 category_mask_setting="\${1:-4095}"; ${maskCode}printf '%s' "\${category_mask}"`, 'mask', value], {encoding:'utf8'});

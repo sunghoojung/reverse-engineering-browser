@@ -4,8 +4,9 @@ import Foundation
 @main
 enum LiveSessionFailureChecks {
   // Starts as the app does: resolve the content switches once from the mode,
-  // the panel's limits and the environment, then build the launcher's
-  // environment from them.
+  // the panel's limits and the environment, take the session options from the
+  // environment (as a launch with nothing saved does), then build the
+  // launcher's environment from them.
   static func launch(
     _ environment: [String: String], content: Bool, sites: URL? = nil, limits: ContentLimits? = nil, chosen: Bool = false
   ) -> [String: String] {
@@ -13,6 +14,7 @@ enum LiveSessionFailureChecks {
       environment: environment,
       content: LiveCaptureContent.resolve(
         environment: environment, mode: content ? .content : .metadata, limits: limits, modeChosen: chosen),
+      options: LiveSessionOptions.configured(environment),
       savedInvocationSites: sites)
   }
 
@@ -49,24 +51,36 @@ enum LiveSessionFailureChecks {
     let workspace = URL(string: "http://127.0.0.1:7319/")!
     let marked = Data((prefix + browser + "\n" + noise).utf8)
     let log = "\n\nSession log: /owned/live.log"
+    // The launcher prints the session's store before it can end, and names a
+    // clean Brave close as the cause with status 0.
+    let endedFolder = URL(fileURLWithPath: "/owned/sessions/live/42", isDirectory: true)
+    let started = "Evidence store: /owned/sessions/live/42/events.jsonl\n"
+    let closedCause = "Brave was closed, so the live session ended. Its evidence stays in /owned/sessions/live/42."
+    let closed = Data((started + prefix + closedCause + "\nLive session cleanup complete.\n").utf8)
     let next = { (phase: Coordinator.Phase, report: Coordinator.Report) in
       Coordinator.next(phase, after: report, logPath: "/owned/live.log")
     }
     let transitions: [(String, Coordinator.Phase, Coordinator.Report, Coordinator.Phase?)] = [
       ("handshake", .starting, .published(workspace), .ready(workspace)),
-      ("exit during startup", .starting, .exited(log: marked), .failed(.init(message: browser + log, afterStartup: false))),
-      ("unmarked exit during startup", .starting, .exited(log: nil), .failed(.init(message: fallback + log, afterStartup: false))),
+      ("exit during startup", .starting, .exited(log: marked, status: 1), .failed(.init(message: browser + log, afterStartup: false))),
+      ("unmarked exit during startup", .starting, .exited(log: nil, status: 1), .failed(.init(message: fallback + log, afterStartup: false))),
       ("startup deadline", .starting, .timedOut(log: nil), .failed(.init(
         message: "Live capture did not become ready within 60 seconds. " + fallback + log, afterStartup: false))),
-      ("exit after the handshake", .ready(workspace), .exited(log: marked), .failed(.init(message: browser + log, afterStartup: true))),
-      ("unmarked exit after the handshake", .ready(workspace), .exited(log: nil),
+      ("exit after the handshake", .ready(workspace), .exited(log: marked, status: 1), .failed(.init(message: browser + log, afterStartup: true))),
+      ("unmarked exit after the handshake", .ready(workspace), .exited(log: nil, status: 1),
         .failed(.init(message: Coordinator.sessionFallback + log, afterStartup: true))),
+      ("a named end the researcher chose", .ready(workspace), .exited(log: closed, status: 0), .failed(.init(
+        message: closedCause + log, afterStartup: true, sessionDirectory: endedFolder, endedNormally: true))),
+      ("an unnamed clean exit is not a chosen end", .ready(workspace), .exited(log: nil, status: 0),
+        .failed(.init(message: Coordinator.sessionFallback + log, afterStartup: true))),
+      ("a fault names its folder too", .ready(workspace), .exited(log: Data((started + prefix + helper + "\n").utf8), status: 1),
+        .failed(.init(message: helper + log, afterStartup: true, sessionDirectory: endedFolder))),
       ("stop while starting", .starting, .stopped, .ended),
       ("stop while ready", .ready(workspace), .stopped, .ended),
       ("second handshake", .ready(workspace), .published(workspace), nil),
       ("deadline after the handshake", .ready(workspace), .timedOut(log: nil), nil),
-      ("exit after stop", .ended, .exited(log: marked), nil),
-      ("exit after a reported failure", .failed(.init(message: browser, afterStartup: false)), .exited(log: nil), nil),
+      ("exit after stop", .ended, .exited(log: marked, status: 1), nil),
+      ("exit after a reported failure", .failed(.init(message: browser, afterStartup: false)), .exited(log: nil, status: 1), nil),
       ("handshake after stop", .ended, .published(workspace), nil),
       ("stop after a failure", .failed(.init(message: browser, afterStartup: true)), .stopped, nil),
       ("report before start", .idle, .published(workspace), nil),
@@ -74,7 +88,15 @@ enum LiveSessionFailureChecks {
     for (name, phase, report, expected) in transitions {
       precondition(next(phase, report) == expected, name)
     }
-    print("PASS native live session phases: handshake, startup failure, ended session, stop, and no report after the end")
+    for (text, expected) in [
+      (started, endedFolder), ("Evidence store: /owned/a b/events.jsonl\n", URL(fileURLWithPath: "/owned/a b", isDirectory: true)),
+      ("Evidence store: relative/events.jsonl\n", nil), ("Evidence store: /owned/events.json\n", nil),
+      ("Evidence store: /events.jsonl\n", nil), ("nothing\n", nil),
+    ] as [(String, URL?)] {
+      precondition(Coordinator.sessionDirectory(in: Data(text.utf8)) == expected, "session folder \(text)")
+    }
+    precondition(Coordinator.sessionDirectory(in: nil) == nil, "no log names no folder")
+    print("PASS native live session phases: handshake, startup failure, ended session with its folder, a chosen end apart from a fault, stop, and no report after the end")
 
     // The launcher's mask grammar. tools/check-native-only-launch.mjs runs the
     // same vectors through scripts/run-live-session.sh.
@@ -97,14 +119,14 @@ enum LiveSessionFailureChecks {
     }
     let names = [
       "REB_CAPTURE_CANVAS_IMAGES", "REB_CAPTURE_REQUEST_CONTENT", "REB_NATIVE_WASM_DISPATCH",
-      "REB_NATIVE_WASM_CALL_INDIRECT", "REB_NATIVE_REQUEST_STACKS", "REB_NATIVE_PROMISE_STACKS",
+      "REB_NATIVE_WASM_CALL_INDIRECT", "REB_NATIVE_REQUEST_STACKS",
     ]
     let defaultCases: [(String?, Bool, [String])] = [
-      (nil, true, ["1", "1", "1", "1", "1", "1"]), (nil, false, ["0", "0", "1", "1", "1", "1"]),
-      ("0x500", true, ["0", "1", "0", "0", "1", "1"]), ("0x300", true, ["0", "0", "0", "0", "0", "0"]),
-      ("768", true, ["0", "0", "0", "0", "0", "0"]), ("1025", true, ["1", "0", "0", "0", "0", "0"]),
-      ("0x7ff", true, ["1", "1", "1", "1", "1", "1"]), ("0xzz", true, ["0", "0", "0", "0", "0", "0"]),
-      (" 4095", true, ["0", "0", "0", "0", "0", "0"]),
+      (nil, true, ["1", "1", "1", "1", "1"]), (nil, false, ["0", "0", "1", "1", "1"]),
+      ("0x500", true, ["0", "1", "0", "0", "1"]), ("0x300", true, ["0", "0", "0", "0", "0"]),
+      ("768", true, ["0", "0", "0", "0", "0"]), ("1025", true, ["1", "0", "0", "0", "0"]),
+      ("0x7ff", true, ["1", "1", "1", "1", "1"]), ("0xzz", true, ["0", "0", "0", "0", "0"]),
+      (" 4095", true, ["0", "0", "0", "0", "0"]),
     ]
     for (mask, content, expected) in defaultCases {
       let environment = defaults(mask, content)
@@ -115,9 +137,6 @@ enum LiveSessionFailureChecks {
     let explicit = launch(
       ["REB_CAPTURE_CATEGORY_MASK": "256", "REB_CAPTURE_REQUEST_CONTENT": "1", "REB_NATIVE_WASM_DISPATCH": "0"], content: true)
     precondition(explicit["REB_CAPTURE_REQUEST_CONTENT"] == "1" && explicit["REB_NATIVE_WASM_DISPATCH"] == "0", "explicit values")
-    // An explicit promise stacks choice wins; explicit request stacks leave it to the launcher's default.
-    precondition(launch(["REB_NATIVE_PROMISE_STACKS": "0"], content: true)["REB_NATIVE_PROMISE_STACKS"] == "0", "explicit promise stacks")
-    precondition(launch(["REB_NATIVE_REQUEST_STACKS": "0"], content: true)["REB_NATIVE_PROMISE_STACKS"] == nil, "promise stacks follow request stacks")
     print("PASS native live category mask: the launcher's decimal and 0x grammar, content defaults only where the mask allows, no 4095 fallback for unreadable text")
 
     // Content is the default for app-started captures. Metadata is the opt-out,
@@ -301,32 +320,32 @@ enum LiveSessionFailureChecks {
     print("PASS native content limits: the launcher's bounds and grammar for the panel's first values, start messages checked as the agent path checks them, launcher switches only for a session that retains content, inherited content-only switches dropped otherwise, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
 
     // Saved invocation sites arm app-started captures, which follow the saved
-    // set. Digests follow the mode, the launcher drops sites a Brave cannot
-    // arm, and explicit values win.
+    // set. Digests follow the mode and the session option, the launcher drops
+    // sites a Brave cannot arm, and explicit sites win.
     let saved = URL(fileURLWithPath: "/private/tmp/origin-trace-live-x-js-invocation-sites.json")
     let invocationNames = ["REB_NATIVE_JS_INVOCATION_SITES", "REB_NATIVE_JS_INVOCATION_DIGESTS",
       "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "REB_NATIVE_JS_INVOCATION_LIVE"]
     let invocationCases: [(String, [String: String], Bool, URL?, [String?])] = [
       ("content", [:], true, saved, [saved.path, "1", "1", "1"]),
       ("metadata", [:], false, saved, [saved.path, "0", "1", "1"]),
-      ("no copy", [:], true, nil, [nil, nil, nil, nil]),
+      ("nothing saved", [:], true, nil, [nil, "0", nil, nil]),
       ("explicit digests off", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "0"], true, saved, [saved.path, "0", "1", "1"]),
       ("explicit digests on", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], true, saved, [saved.path, "1", "1", "1"]),
       ("explicit digests never reach Metadata", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1"], false, saved, [saved.path, "0", "1", "1"]),
       ("nor with explicit sites", ["REB_NATIVE_JS_INVOCATION_DIGESTS": "1", "REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], false, saved,
         ["/explicit.json", "0", nil, nil]),
-      ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", nil, nil, nil]),
-      ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", nil, nil, nil]),
+      ("explicit sites", ["REB_NATIVE_JS_INVOCATION_SITES": "/explicit.json"], true, saved, ["/explicit.json", "1", nil, nil]),
+      ("explicit sites off", ["REB_NATIVE_JS_INVOCATION_SITES": ""], true, saved, ["", "0", nil, nil]),
       ("strict check kept", ["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED": "0"], true, saved, [saved.path, "1", "0", "1"]),
       ("following opted out", ["REB_NATIVE_JS_INVOCATION_LIVE": "0"], true, saved, [saved.path, "1", "1", "0"]),
-      ("no VM category", ["REB_CAPTURE_CATEGORY_MASK": "1280"], true, saved, [nil, nil, nil, nil]),
-      ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, nil, nil, nil]),
+      ("no VM category", ["REB_CAPTURE_CATEGORY_MASK": "1280"], true, saved, [nil, "0", nil, nil]),
+      ("unreadable mask", ["REB_CAPTURE_CATEGORY_MASK": "0xzz"], true, saved, [nil, "0", nil, nil]),
     ]
     for (name, given, content, url, expected) in invocationCases {
       let environment = launch(given, content: content, sites: url)
       precondition(invocationNames.map { environment[$0] } == expected, "invocation defaults: \(name) \(invocationNames.map { environment[$0] })")
     }
-    print("PASS native live invocation sites: saved sites armed and followed, with digests in Content and without in Metadata, explicit sites and Content digests win, no VM category arms nothing")
+    print("PASS native live invocation sites: saved sites armed and followed, with digests in Content and without in Metadata, explicit sites win, digests only with armed sites, no VM category arms nothing")
 
     // A Metadata start decides every content-derived switch, whatever the
     // environment holds: chosen in the panel or by REB_AUTOMATIC_CAPTURE_MODE,
@@ -384,7 +403,9 @@ enum LiveSessionFailureChecks {
     var mismatches: [String] = []
     for (name, given, failed) in failedStarts {
       let mask = given["REB_CAPTURE_CATEGORY_MASK"].map { ["REB_CAPTURE_CATEGORY_MASK": $0] } ?? [:]
-      let first = LiveSessionCoordinator.captureDefaults(environment: given, content: failed, savedInvocationSites: saved)
+      // Retry repeats the failed start's options as well (sessionPanel.options).
+      let options = LiveSessionOptions.configured(given)
+      let first = LiveSessionCoordinator.captureDefaults(environment: given, content: failed, options: options, savedInvocationSites: saved)
       let firstSwitches = LiveCaptureContent.names.map { first[$0] }
       // The panel's label: Metadata keeps nothing, and named limits are the ones given.
       if failed.mode == .metadata, LiveCaptureContent.names.contains(where: { first[$0] != metadataOff[$0] }) {
@@ -398,7 +419,7 @@ enum LiveSessionFailureChecks {
       }
       for (retryName, environment) in retryEnvironments {
         let retried = LiveSessionCoordinator.captureDefaults(
-          environment: environment.merging(mask) { a, _ in a }, content: failed, savedInvocationSites: saved)
+          environment: environment.merging(mask) { a, _ in a }, content: failed, options: options, savedInvocationSites: saved)
         if LiveCaptureContent.names.map({ retried[$0] }) != firstSwitches {
           mismatches.append("\(name), Retry with \(retryName) inherited: \(LiveCaptureContent.names.map { retried[$0] }) after \(firstSwitches)")
         }
@@ -406,6 +427,150 @@ enum LiveSessionFailureChecks {
     }
     precondition(mismatches.isEmpty, "Retry or its label differed from the failed start:\n" + mismatches.joined(separator: "\n"))
     print("PASS native live Retry: the failed start's content switches whatever the environment holds, Metadata labels that keep nothing and named limits that were given")
+
+    // The start panel's session options: the defaults app sessions run with,
+    // a start message checked for exactly the known names as booleans, and
+    // launcher switches that are exactly the choice wherever the mask allows.
+    let optionDefaults = LiveSessionOptions.defaults
+    precondition(!optionDefaults.freshProfile && optionDefaults.requestStacks && !optionDefaults.promiseStacks
+      && optionDefaults.wasmDispatch && optionDefaults.ignoreDebuggerStatements && optionDefaults.canvasImages
+      && optionDefaults.invocationDigests && optionDefaults.documentStart && !optionDefaults.browserInternal
+      && !optionDefaults.extensionTraffic, "session option defaults")
+    let every = Dictionary(uniqueKeysWithValues: LiveSessionOptions.keys.map { ($0, yes as Any) })
+    guard case .success(let allOn) = LiveSessionOptions.parse(every) else { preconditionFailure("every option on") }
+    precondition(allOn.freshProfile && allOn.promiseStacks && allOn.browserInternal && allOn.extensionTraffic, "options parse")
+    let optionRefusals: [(String, Any?)] = [
+      ("missing", nil), ("not an object", "fresh"), ("one name missing", every.filter { $0.key != "fresh_profile" }),
+      ("an unknown name", every.merging(["duration_seconds": yes]) { a, _ in a }),
+      ("a number", every.merging(["fresh_profile": NSNumber(value: 1)]) { _, b in b }),
+      ("text", every.merging(["wasm_dispatch": "true"]) { _, b in b }),
+    ]
+    for (name, value) in optionRefusals {
+      guard case .failure = LiveSessionOptions.parse(value) else { preconditionFailure("options refused: \(name)") }
+    }
+    // Fresh profile is never saved, so a later app run starts in the research
+    // profile; every other choice round trips.
+    var allOnSaved = allOn
+    allOnSaved.freshProfile = false
+    precondition(allOn.stored["fresh_profile"] == nil && LiveSessionOptions(stored: allOn.stored) == allOnSaved
+      && LiveSessionOptions(stored: ["fresh_profile": yes]) == optionDefaults
+      && LiveSessionOptions(stored: ["wasm_dispatch": NSNumber(value: 0), "later": yes]) == optionDefaults,
+      "a saved record keeps known booleans other than Fresh profile and defaults the rest")
+    let state = optionDefaults.panelState["request_stacks"] as? [String: Any]
+    precondition(state?["value"] as? Bool == true && state?["default"] as? Bool == true
+      && optionDefaults.panelState.count == LiveSessionOptions.keys.count, "panel state")
+    // Each environment switch seeds its option, and outranks a saved choice.
+    var seeded = optionDefaults
+    seeded.freshProfile = true
+    seeded.wasmDispatch = false
+    precondition(LiveSessionOptions.configured(["REB_FRESH_PROFILE": "1", "REB_NATIVE_WASM_DISPATCH": "0", "REB_CAPTURE_BROWSER_INTERNAL": "x"])
+      == seeded, "environment seeds")
+    precondition(LiveSessionOptions.configured([:], saved: allOn) == allOn
+      && !LiveSessionOptions.configured(["REB_CAPTURE_EXTENSION_TRAFFIC": "0"], saved: allOn).extensionTraffic, "saved choices")
+    let switchCases: [(UInt32, LiveSessionOptions, [String: String])] = [
+      (4095, optionDefaults, ["REB_FRESH_PROFILE": "0", "REB_NATIVE_REQUEST_STACKS": "1", "REB_NATIVE_PROMISE_STACKS": "0",
+        "REB_NATIVE_WASM_DISPATCH": "1", "REB_NATIVE_WASM_CALL_INDIRECT": "1", "REB_NATIVE_QUIET_MODE": "1",
+        "REB_CONSOLE_DOCUMENT_START": "1", "REB_CAPTURE_BROWSER_INTERNAL": "0", "REB_CAPTURE_EXTENSION_TRAFFIC": "0"]),
+      (4095, allOn, ["REB_FRESH_PROFILE": "1", "REB_NATIVE_REQUEST_STACKS": "1", "REB_NATIVE_PROMISE_STACKS": "1",
+        "REB_CAPTURE_BROWSER_INTERNAL": "1", "REB_CAPTURE_EXTENSION_TRAFFIC": "1"]),
+      // Promise stacks need request stacks, and both need Network and Artifact.
+      (4095, LiveSessionOptions(stored: ["promise_stacks": yes, "request_stacks": no]),
+        ["REB_NATIVE_REQUEST_STACKS": "0", "REB_NATIVE_PROMISE_STACKS": "0"]),
+      (512 | 256, allOn, ["REB_NATIVE_REQUEST_STACKS": "0", "REB_NATIVE_PROMISE_STACKS": "0", "REB_NATIVE_WASM_DISPATCH": "0"]),
+      (0, allOn, ["REB_NATIVE_WASM_DISPATCH": "0", "REB_NATIVE_WASM_CALL_INDIRECT": "0", "REB_NATIVE_QUIET_MODE": "1"]),
+    ]
+    for (mask, options, expected) in switchCases {
+      let switches = options.launcherEnvironment(mask: mask)
+      precondition(expected.allSatisfy { switches[$0.key] == $0.value }, "switches \(mask) \(switches)")
+    }
+    // Every option replaces an inherited switch, and the profile and duration
+    // never come from the environment.
+    let panelEnvironment = ["REB_NATIVE_REQUEST_STACKS": "0", "REB_FRESH_PROFILE": "1", "REB_CAPTURE_BROWSER_INTERNAL": "1"]
+    let chosenDefaults = LiveSessionCoordinator.captureDefaults(
+      environment: panelEnvironment, content: LiveCaptureContent.resolve(environment: panelEnvironment, mode: .content, limits: nil, modeChosen: true),
+      options: optionDefaults)
+    precondition(chosenDefaults["REB_NATIVE_REQUEST_STACKS"] == "1" && chosenDefaults["REB_FRESH_PROFILE"] == "0"
+      && chosenDefaults["REB_CAPTURE_BROWSER_INTERNAL"] == "0", "the panel's options replace inherited switches")
+    // call_indirect sites have no option of their own: an explicit 0 turns
+    // off just them, and an inherited 1 never outlasts Wasm dispatch off.
+    let callIndirect = { (inherited: String, options: LiveSessionOptions) -> [String: String] in
+      let environment = ["REB_NATIVE_WASM_CALL_INDIRECT": inherited]
+      return LiveSessionCoordinator.captureDefaults(
+        environment: environment, content: LiveCaptureContent.resolve(environment: environment, mode: .content, limits: nil, modeChosen: true),
+        options: options)
+    }
+    var wasmOff = optionDefaults
+    wasmOff.wasmDispatch = false
+    precondition(callIndirect("0", optionDefaults)["REB_NATIVE_WASM_CALL_INDIRECT"] == "0"
+      && callIndirect("0", optionDefaults)["REB_NATIVE_WASM_DISPATCH"] == "1"
+      && callIndirect("1", wasmOff)["REB_NATIVE_WASM_CALL_INDIRECT"] == "0", "call_indirect opt-out")
+    // The saved mode applies unless the environment decides it.
+    precondition(LiveCaptureMode.configured([:], saved: .metadata) == .metadata
+      && LiveCaptureMode.configured(["REB_AUTOMATIC_CAPTURE_MODE": "content"], saved: .metadata) == .content
+      && LiveCaptureMode.configured(["REB_CAPTURE_REQUEST_CONTENT": "0"], saved: .content) == .metadata, "saved mode")
+    let profiles = URL(fileURLWithPath: "/owned/Origin Trace", isDirectory: true)
+    precondition(LiveSessionOptions.researchProfile(environment: [:], originTrace: profiles, systemKeychain: false).path
+      == "/owned/Origin Trace/research-profiles/default"
+      && LiveSessionOptions.researchProfile(environment: [:], originTrace: profiles, systemKeychain: true).path
+      == "/owned/Origin Trace/research-profiles/system-keychain"
+      && LiveSessionOptions.researchProfile(environment: ["REB_RESEARCH_PROFILE_ROOT": "/owned/p"], originTrace: profiles, systemKeychain: false).path
+      == "/owned/p/default", "one research profile per Keychain mode, under an explicit root when one is set")
+    precondition(RecordedSession.root(environment: [:], originTrace: profiles).path == "/owned/Origin Trace/sessions/live"
+      && RecordedSession.root(environment: ["REB_LIVE_SESSION_ROOT": "/owned/s"], originTrace: profiles).path == "/owned/s", "session root")
+    print("PASS native session options: defaults, exact start messages, environment seeds over saved choices, switches only where the mask allows, inherited switches replaced, the saved mode, and one research profile per Keychain mode")
+
+    // The panel's choices survive an app run in a user-only file; anything
+    // unreadable starts from the defaults.
+    let preferenceFolder = FileManager.default.temporaryDirectory.appendingPathComponent("reb-session-preferences-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: preferenceFolder) }
+    let preferenceStore = preferenceFolder.appendingPathComponent("app/" + LiveSessionPreferences.fileName)
+    precondition(LiveSessionPreferences.load(preferenceStore) == LiveSessionPreferences(), "missing preferences")
+    let remembered = LiveSessionPreferences(mode: .metadata, options: allOn)
+    try! remembered.write(to: preferenceStore)
+    precondition(LiveSessionPreferences.load(preferenceStore) == LiveSessionPreferences(mode: .metadata, options: allOnSaved),
+      "preferences round trip, without Fresh profile")
+    let fileMode = ((try? FileManager.default.attributesOfItem(atPath: preferenceStore.path))?[.posixPermissions] as? NSNumber)?.intValue
+    precondition(fileMode == 0o600, "user-only preferences")
+    for bad in ["", "[]", "{\"version\":2,\"mode\":\"metadata\"}", "{\"mode\":\"metadata\"}"] {
+      try! bad.write(to: preferenceStore, atomically: true, encoding: .utf8)
+      precondition(LiveSessionPreferences.load(preferenceStore) == LiveSessionPreferences(), "unreadable preferences \(bad)")
+    }
+    try! "{\"version\":1,\"mode\":\"everything\",\"options\":{\"fresh_profile\":true,\"wasm_dispatch\":false}}".write(to: preferenceStore, atomically: true, encoding: .utf8)
+    precondition(LiveSessionPreferences.load(preferenceStore)
+      == LiveSessionPreferences(mode: nil, options: LiveSessionOptions(stored: ["wasm_dispatch": no])), "partly readable preferences")
+    precondition(LiveSessionPreferences.load(preferenceStore).options?.freshProfile == false, "a saved Fresh profile is ignored")
+    precondition(LiveSessionPreferences.storeURL(environment: ["REB_LIVE_SESSION_PREFERENCES": "/a/p.json"], applicationSupport: preferenceFolder).path == "/a/p.json"
+      && LiveSessionPreferences.storeURL(environment: [:], applicationSupport: preferenceFolder).lastPathComponent == LiveSessionPreferences.fileName,
+      "preferences location")
+    print("PASS native saved start choices: round trip without Fresh profile, user-only file, unreadable or other-version files ignored, unknown values defaulted, explicit location")
+
+    // Open Recent Session lists recorded sessions newest first and leaves out
+    // one a broker still writes.
+    let sessionRoot = preferenceFolder.appendingPathComponent("sessions/live", isDirectory: true)
+    for (name, events) in [("1", true), ("2", true), ("3", false), ("4", true)] {
+      let session = sessionRoot.appendingPathComponent(name, isDirectory: true)
+      try! FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+      if events { FileManager.default.createFile(atPath: session.appendingPathComponent("events.jsonl").path, contents: Data()) }
+      Thread.sleep(forTimeInterval: 0.02)
+    }
+    precondition(RecordedSession.recent(in: sessionRoot, limit: 10).map(\.folder.lastPathComponent) == ["4", "2", "1"], "newest first")
+    precondition(RecordedSession.recent(in: sessionRoot, limit: 2).count == 2 && RecordedSession.at(sessionRoot.appendingPathComponent("3")) == nil,
+      "a limit, and a folder without an event store is no session")
+    let guardURL = sessionRoot.appendingPathComponent("4/events.jsonl.reb-lock-v1")
+    FileManager.default.createFile(atPath: guardURL.path, contents: Data())
+    let holder = open(guardURL.path, O_RDONLY | O_CLOEXEC)
+    precondition(holder >= 0 && flock(holder, LOCK_EX | LOCK_NB) == 0, "hold the broker guard")
+    // flock leases belong to the open file description, so this process's own
+    // second open is refused just as the app's would be.
+    precondition(RecordedSession.recording(sessionRoot.appendingPathComponent("4")), "a held guard is recording")
+    precondition(RecordedSession.recent(in: sessionRoot, limit: 10).map(\.folder.lastPathComponent) == ["2", "1"], "a recording session is left out")
+    close(holder)
+    precondition(!RecordedSession.recording(sessionRoot.appendingPathComponent("4"))
+      && !RecordedSession.recording(sessionRoot.appendingPathComponent("1")), "a released or missing guard is not recording")
+    let titled = RecordedSession(folder: sessionRoot, started: Date(timeIntervalSince1970: 0), lastWritten: Date(timeIntervalSince1970: 4_560))
+    // The duration words follow the locale; its numbers do not.
+    precondition(titled.title.hasSuffix(")") && titled.title.contains("16"), "menu title \(titled.title)")
+    print("PASS native recorded sessions: newest first, folders without an event store skipped, a session still recording left out, menu titles")
 
     // The Swift store reads and writes exactly what the backend and browser do.
     let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

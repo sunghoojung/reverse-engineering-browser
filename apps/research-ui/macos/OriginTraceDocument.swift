@@ -481,8 +481,8 @@ enum OriginTraceDocumentBuilder {
     return number.stringValue == String(expected)
   }
 
-  // Compact identity past a 16-record Wasm budget. The same wording as
-  // overflow_summary in origin_trace.rs. Nil rejects the record.
+  // Compact identity past a full Wasm sample window or allowance. The same
+  // wording as overflow_summary in origin_trace.rs. Nil rejects the record.
   private static func wasmOverflowSummary(_ event: [String: Any]) -> String? {
     guard let operation = event["type"] as? String,
       operation == "wasm_dispatch_overflow" || operation == "wasm_indirect_overflow",

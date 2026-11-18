@@ -31,18 +31,27 @@ it.
 - Opening the packaged Origin Trace app starts a visibly labeled local research
   session with implemented native capture categories. CDP collection and injected
   JavaScript hooks have been removed. Launch only for authorized targets/data.
-  Every session the app starts uses an isolated research profile with
-  Chromium's mock Keychain, so the browser neither reads nor writes the macOS
-  Keychain; the start panel offers no Keychain choice. The only route to the
-  macOS Keychain for an app session is `REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1`,
+  Sessions the app starts share one persistent research profile, separate
+  from the researcher's own browser profiles, with Chromium's mock Keychain,
+  so the browser neither reads nor writes the macOS Keychain; the start panel
+  offers no Keychain choice. The profile keeps cookies, sign-ins and site
+  storage from one session to the next, so a sign-in made for one authorized
+  target is still there in the next session: sign in only with credentials the
+  authorization covers, and choose **Fresh profile** (a new, empty profile for
+  one session, kept in its session folder) when a session must start signed
+  out. Evidence stays per session; the profile holds none. The only route to
+  the macOS Keychain for an app session is `REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1`,
   which applies to the automatic launch and a reopen's restart, never to a
-  session the panel starts or retries. The standalone `make live` launcher reads
-  `REB_USE_SYSTEM_KEYCHAIN`. Do not save real credentials in an isolated profile.
-  The session expires after one hour. The packaged app also enables native Wasm
-  `br_table` and `call_indirect` dispatch instrumentation and ignores page
-  `debugger;` statements by default; set `REB_NATIVE_WASM_DISPATCH`,
-  `REB_NATIVE_WASM_CALL_INDIRECT` or `REB_NATIVE_QUIET_MODE` to `0` to opt out.
-  The standalone `make live` launcher leaves all three off unless set to `1`.
+  session the panel starts or retries, and uses a separate persistent profile.
+  The standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN`.
+  A session runs until the researcher ends it or closes the capture browser.
+  Only `make live` (`REB_CAPTURE_DURATION_SECONDS`) and an agent's
+  `duration_seconds` set a time limit, and a session that reaches it says so;
+  an app session has none. The packaged app and `make live` both enable native Wasm
+  `br_table` and `call_indirect` dispatch instrumentation and ignore page
+  `debugger;` statements by default; turn them off in the start panel's
+  Advanced options, or set `REB_NATIVE_WASM_DISPATCH`,
+  `REB_NATIVE_WASM_CALL_INDIRECT` or `REB_NATIVE_QUIET_MODE` to `0`.
   Wasm dispatch needs a rebuilt browser. Native guest-program
   capture is a further opt-in on top of it: it needs a researcher-supplied
   adapter recipe file and records typed local values and bounded bytecode
@@ -78,8 +87,8 @@ it.
   script navigation, and of the stack that scheduled each async task it came
   from, including the stack that posted a message to a port, a broadcast
   channel or a worker, never names or values. `REB_NATIVE_PROMISE_STACKS=1`,
-  on with request stacks in the packaged app and off by default in
-  `make live`, also records the stack of each promise registration. Content capture sessions also retain the source of
+  off by default everywhere, also records the stack of each promise
+  registration. Content capture sessions also retain the source of
   each script a stack names as an artifact; metadata-only sessions do not.
   Agent-started sessions record them only when the start names
   `request_stacks`.
@@ -199,13 +208,16 @@ it.
   the app starts or retries gets no request content, Canvas images or
   invocation value digests, whatever the environment holds, and Retry starts
   with the failed start's content switches, never a new reading of the
-  environment. The app saves no choice between launches, and a choice made in the
-  start panel holds for the rest of that app run. The standalone `make live` launcher
-  leaves request content and Canvas images off unless set to `1`. Agent-started
-  sessions (`reb-api session start`, MCP `start_live_session`) retain request
-  content only when the start request names it (`request_content` with
-  `confirm_sensitive_capture`), never inherited, and turn Canvas images on only
-  with the same explicit confirmation.
+  environment. The start panel saves its mode and session options other than
+  Fresh profile for later app runs, and a choice made there holds for the rest
+  of that app run. The
+  standalone `make live` launcher retains request content and Canvas images
+  as the app does, when the category mask holds them, unless set to `0`.
+  Agent-started sessions (`reb-api session start`, MCP `start_live_session`)
+  take the same defaults, never inherited from the environment: the CLI's
+  `--confirm-sensitive-capture` is its consent, and through MCP the
+  researcher's `--permission full` (or `--allow-session-start`) is. A start
+  that names `request_content` or `canvas_images` false keeps them off.
 - Settled-value digests of armed JavaScript invocations are a sensitive
   capture path: `REB_NATIVE_JS_INVOCATION_DIGESTS=1`, accepted only with an
   invocation site file and labeled when the session starts. Each fulfilled
@@ -217,8 +229,8 @@ it.
   app starts with saved invocation sites record these digests by default; the
   start panel says so, and the launch log and titlebar label the session.
   Metadata mode never records them. Agent-started sessions record them only
-  when the start request names them (`js_invocation_digests` with named sites
-  and `confirm_sensitive_capture`), never inherited. An explicit
+  with named sites and request content, under the same consent, never
+  inherited. An explicit
   `REB_NATIVE_JS_INVOCATION_DIGESTS=0` opts out in Content mode. A Brave
   without invocation capture starts without the saved sites, so it records
   no digests either.
@@ -273,16 +285,20 @@ it.
   `--allow-session-start`. Those flags are not authorization. The researcher
   still names the authorized target, and the agent opens only URLs inside it.
   An agent-started session is an ordinary visibly labeled capture session with
-  its own fresh browser profile, every capture switch off unless named, and the
-  usual one-hour expiry. Through MCP, `session_action` acts only on a session
-  that connection started, never on the researcher's own session. `open_url`
+  the app's capture defaults and no time limit unless `duration_seconds` sets
+  one. Agent sessions share one persistent agent research profile, separate
+  from the app's, so an agent's sign-in carries over to its next session;
+  `fresh_profile` starts one signed out. Through MCP, `session_action` acts
+  only on a session that connection started, never on the researcher's own
+  session. `open_url`
   reaches only that session's capture browser, only while its capture broker
   runs, and never through page JavaScript. A running broker does not prove the
   browser records, so `open_url` reports `capture_observed`; when it is false
-  the page was not recorded and the agent ends the session. An agent may turn
-  on sensitive capture (Canvas images, request content or invocation value
-  digests) only with `confirm_sensitive_capture`, and only when the
-  researcher's authorization for that session covers that content. The start
+  the page was not recorded and the agent ends the session. Its sessions keep
+  request content, Canvas images and, with named sites, invocation value
+  digests by default, as the app's do, so the researcher grants Full access
+  (or session start) only when the authorization covers that content; an
+  agent sets an option false when the question does not need it. The start
   result, the first line of its launch log and the session context name every
   such switch the session runs with.
   An agent may supply guest adapter or dispatch-site files it wrote for the
@@ -417,23 +433,24 @@ it.
   such as `Location` or `Referer`, are returned as captured and can still hold
   a secret, and script the agent evaluates in a connected document at Full
   access returns whatever that page can read, such as `document.cookie`. The
-  agent's own sessions can name request content, response media, canvas images
-  or invocation value digests only when the researcher also ticks a separate
-  sensitive-capture box, off by default and never remembered. Consent in the
-  agent dock turns a level on: it shows what leaves the machine for that
-  level, with the warning for Auto-approve actions and Full access, beside a
-  button that names the level, and there is no other confirmation. The native
-  app accepts only a known level, and the sensitive-capture choice only with
-  Full access, then holds the level and enforces it: it decides every tool
-  call by the running level for every provider and CLI, remembers no level
-  above Ask for actions across launches, and lowers the level at once from the
-  dock menu; raising it goes back through consent. No level authorizes a
-  target, widens session scope or exempts the agent from this policy.
+  agent's own sessions capture what the researcher's do, request content and
+  Canvas images included; Full access is the one consent for that, and its
+  warning says so. Consent in the agent dock turns a level on: it shows what
+  leaves the machine for that level, with the warning for Auto-approve
+  actions and Full access, beside a button that names the level, and there is
+  no other confirmation. The native app accepts only a known level, then holds
+  the level and enforces it: it decides every tool call by the running level
+  for every provider and CLI, saves the level last turned on or lowered to for
+  the next consent (which still asks, starting from it), shows the running
+  level on the dock button, and lowers the level at once from the dock menu;
+  raising it goes back through consent. No level authorizes a target, widens
+  session scope or exempts the agent from this policy.
 - `reb-api mcp --permission read-only|ask|auto|full` applies the same levels to
   a local coding agent connected through `scripts/reb-api-mcp.sh`. `full` (or
   `--allow-content`) sends captured content to that client's model provider in
-  the same way, and `--allow-sensitive-capture` is the same separate consent
-  for sensitive options in the sessions it starts.
+  the same way, and is the same one consent for what the sessions it starts
+  capture; `--allow-sensitive-capture` from an older configuration is accepted
+  and ignored.
 - Researcher names for Wasm functions (Analyst evidence names) are joined
   into the Wasm reads as `analyst_name` at every level, like identifiers, so
   they go to the provider with the structural results. They are the
@@ -469,11 +486,11 @@ of the data-handling policy:
 | Compiled script source opt-in (`--reb-capture-request-content`) | Brave overlay renderer `native_probe_sink.cc` and browser `native_artifact_capture_sink.cc`, which refuses the text outside content capture |
 | Canvas image opt-in | Brave overlay renderer `native_probe_sink.cc` and browser `native_artifact_capture_sink.cc`, which refuses an image the session did not opt in to |
 | Capture category mask and session expiration | `protocol/README.md`, native probes |
-| Agent-started sessions get request content, document-start permission, invocation sites and digests only when the start request names them, never inherited | [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
+| Agent-started sessions take the app's capture defaults from the start request alone, never inherited, and a named false keeps a switch off | `StartOptions::resolve` in [`session_launch.rs`](apps/origin-trace-backend/src/session_launch.rs) |
 | JavaScript invocation value digests opt-in | `scripts/run-live-session.sh`, the overlay's `native_probe_session.cc`, and the renderer sink, which refuses a digest without it |
 | App-started Metadata content switches, digest default and agent-session exclusion | `LiveCaptureContent.resolve` and `LiveSessionCoordinator.captureDefaults` (Metadata turns request content, Canvas images and digests off; digests by default in Content mode with saved sites only, where an explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
-| In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level and sensitive choice consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
-| Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
+| In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift), which alone save a level (`AgentPreferences`) |
+| Tool server content, effect and session-start gates (`--permission`, `--allow-content`, `--allow-session-start`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
 | Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |
 | Message task origins bounded before they are read and validated before use | `CloneableMessage` traits and `ShallowClone` in Chromium patch `0047-carry-message-task-origins.patch`, then `DecodeNativeTaskOrigin` in the overlay's `common/native_request_stack.h` |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |

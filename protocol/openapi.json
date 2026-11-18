@@ -126,7 +126,7 @@
         "run_wasm_function",
         "get_wasm_runs"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -4572,7 +4572,7 @@
         "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
-          "description": "JSON object. Explicit decimal Content-Length required; 1..1114112 encoded bytes. Chunked request bodies are not supported.",
+          "description": "JSON object. Explicit decimal Content-Length required; 1..1073741824 encoded bytes. Chunked request bodies are not supported. The limit only bounds one request's buffer: a run's selected artifact is read from the store, not sent, and a library or evidence snapshot the page holds fits.",
           "content": {
             "application/json": {
               "schema": {
@@ -4581,7 +4581,7 @@
             }
           }
         },
-        "x-max-body-bytes": 1114112,
+        "x-max-body-bytes": 1073741824,
         "x-reb-execution": {
           "kind": "action-dependent",
           "effects": null,
@@ -10041,7 +10041,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 16777216,
+        "x-max-body-bytes": 1073741824,
         "requestBody": {
           "required": true,
           "content": {
@@ -10083,7 +10083,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Documents and reports of any size; only nesting past 128 levels is refused. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/vm_pack.rs",
@@ -10183,7 +10183,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 16777216,
+        "x-max-body-bytes": 1073741824,
         "requestBody": {
           "required": true,
           "content": {
@@ -10239,7 +10239,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Documents and reports of any size; only nesting past 128 levels is refused. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/vm_pack.rs",
@@ -22014,8 +22014,7 @@
             ]
           },
           "content": {
-            "type": "string",
-            "x-max-utf8-bytes": 32768
+            "type": "string"
           }
         },
         "required": [
@@ -22057,8 +22056,7 @@
             ]
           },
           "content": {
-            "type": "string",
-            "x-max-utf8-bytes": 32768
+            "type": "string"
           },
           "content_bytes": {
             "type": "integer"
@@ -22284,7 +22282,7 @@
                 "type": "string"
               },
               "protocol_version": {
-                "const": 1,
+                "const": 2,
                 "type": "integer"
               },
               "run_id": {
@@ -22297,8 +22295,7 @@
                 "$ref": "#/components/schemas/SafeInteger"
               },
               "source": {
-                "type": "string",
-                "x-max-utf8-bytes": 32768
+                "type": "string"
               },
               "variables": {
                 "type": "object",
@@ -22352,7 +22349,21 @@
                     "anyOf": [
                       {
                         "type": "object",
-                        "additionalProperties": true
+                        "properties": {
+                          "artifact_id": {
+                            "type": "string"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          }
+                        },
+                        "required": [
+                          "artifact_id",
+                          "sha256"
+                        ],
+                        "additionalProperties": false,
+                        "description": "A stored artifact by ID and the SHA-256 the caller selected. A different stored SHA-256 is refused with 409."
                       },
                       {
                         "type": "null"
@@ -22381,7 +22392,7 @@
               },
               "confirmed_sensitive": {
                 "type": "boolean",
-                "description": "Must be true when selected_artifact.sensitive is true."
+                "description": "Must be true when the stored record of the selected artifact is sensitive. The host reads sensitivity from the manifest, not from the request."
               }
             },
             "required": [
@@ -22410,7 +22421,7 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Completion, timeout, cancellation, or a dropped request cleans up the owned helper process group."
+                  "when": "Completion, cancellation, or a dropped request cleans up the owned helper process group."
                 }
               ],
               "uncertainties": [],
@@ -22422,6 +22433,10 @@
                 {
                   "id": "saved-analyst-script",
                   "condition": "library_generation, script_id, and source must match the current saved JavaScript analyst script."
+                },
+                {
+                  "id": "sensitive-selected-artifact",
+                  "condition": "confirmed_sensitive must be true when the stored record of evidence.selected_artifact is sensitive."
                 }
               ],
               "confirmations": [
@@ -22429,40 +22444,9 @@
                   "field": "confirmed",
                   "value": true,
                   "when": {}
-                },
-                {
-                  "field": "confirmed_sensitive",
-                  "value": true,
-                  "when": {
-                    "type": "object",
-                    "required": [
-                      "evidence"
-                    ],
-                    "properties": {
-                      "evidence": {
-                        "type": "object",
-                        "required": [
-                          "selected_artifact"
-                        ],
-                        "properties": {
-                          "selected_artifact": {
-                            "type": "object",
-                            "required": [
-                              "sensitive"
-                            ],
-                            "properties": {
-                              "sensitive": {
-                                "const": true
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
                 }
               ],
-              "notes": "Executes an explicitly selected saved script in the bounded disposable analyst helper using caller-supplied frozen evidence. The helper is separate from the browser.",
+              "notes": "Executes an explicitly selected saved script in a disposable analyst helper, separate from the browser, over caller-supplied frozen evidence and the selected artifact's verified stored bytes. There is no execution deadline, CPU limit or input, result or log size limit.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/analyst.rs",
@@ -22473,7 +22457,8 @@
                   "symbol": "normalize"
                 }
               ]
-            }
+            },
+            "description": "Runs a saved script once, with no deadline: it runs until the script settles, cancel_local_analyst_script stops it, or this request goes away. Protocol 2 names the selected artifact by artifact_id and sha256; the host reads its stored, SHA-256 verified bytes, whatever their size, and refuses protocol 1."
           },
           {
             "type": "object",
@@ -22546,8 +22531,7 @@
             "enum": [
               "completed",
               "failed",
-              "cancelled",
-              "timed_out"
+              "cancelled"
             ]
           },
           "result_type": {

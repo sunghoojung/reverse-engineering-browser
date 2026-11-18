@@ -112,6 +112,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let analystRunnerLock = NSLock()
   private var activeAnalystProcess: Process?
   private var activeAnalystRunID: Int?
+  private var activeAnalystTask: ObjectIdentifier?
   private var analystCancelRequested = false
 
   init(
@@ -153,6 +154,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     activeAnalystProcess?.terminate()
     activeAnalystProcess = nil
     activeAnalystRunID = nil
+    activeAnalystTask = nil
     analystRunnerLock.unlock()
   }
 
@@ -316,6 +318,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
     tasks.stop(urlSchemeTask)
+    // A run has no deadline, so the page that started it ending it is what
+    // frees the runner when nothing is left to read its result.
+    analystRunnerLock.lock()
+    if activeAnalystTask == ObjectIdentifier(urlSchemeTask) {
+      analystCancelRequested = true
+      activeAnalystProcess?.terminate()
+    }
+    analystRunnerLock.unlock()
     // A page that aborts a forwarded analysis stops its backend work too.
     forwarded.removeValue(forKey: ObjectIdentifier(urlSchemeTask))?.cancel()
   }
@@ -772,28 +782,36 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func apiCollectionRequestBody(_ request: URLRequest) throws -> Data {
+    try requestBody(
+      request, label: "API Collection action", maximumBytes: 2 * 1_024 * 1_024 + 64 * 1_024
+    )
+  }
+
+  /// A request body read whole; nil `maximumBytes` reads one of any size.
+  private func requestBody(_ request: URLRequest, label: String, maximumBytes: Int?) throws -> Data {
+    let fits = { (count: Int) in maximumBytes.map { count <= $0 } ?? true }
     if let body = request.httpBody {
-      guard body.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
-        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      guard fits(body.count) else {
+        throw LocalHTTPError(status: 413, message: "\(label) is oversized")
       }
       return body
     }
     guard let stream = request.httpBodyStream else {
-      throw LocalHTTPError(status: 400, message: "API Collection action body is missing")
+      throw LocalHTTPError(status: 400, message: "\(label) body is missing")
     }
     stream.open()
     defer { stream.close() }
     var data = Data()
-    var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
+    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
     while stream.hasBytesAvailable {
       let count = stream.read(&buffer, maxLength: buffer.count)
       if count < 0 {
-        throw LocalHTTPError(status: 400, message: "API Collection action body could not be read")
+        throw LocalHTTPError(status: 400, message: "\(label) body could not be read")
       }
       if count == 0 { break }
       data.append(buffer, count: count)
-      guard data.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
-        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      guard fits(data.count) else {
+        throw LocalHTTPError(status: 413, message: "\(label) is oversized")
       }
     }
     return data
@@ -892,23 +910,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
+  // The library has no byte limit and a run no deadline or size limit, as in
+  // the Rust backend's workspace::Kind::Analyst.
   private func localAnalystLimits() -> [String: Int] {
     [
       "folders": 32,
       "files": 64,
       "folder_depth": 4,
-      "file_bytes": 32 * 1_024,
-      "total_file_bytes": 512 * 1_024,
-      "document_bytes": 1_024 * 1_024,
       "variables": 32,
       "variable_value_bytes": 4 * 1_024,
       "variable_bytes": 16 * 1_024,
-      "evidence_bytes": 768 * 1_024,
-      "selected_artifact_bytes": 64 * 1_024,
-      "execution_timeout_ms": 2_000,
-      "logs": 64,
-      "log_bytes": 1_024,
-      "result_bytes": 32 * 1_024,
     ]
   }
 
@@ -935,11 +946,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let controls = content.unicodeScalars.contains {
       $0.value < 0x20 && ![0x09, 0x0a, 0x0d].contains($0.value)
     }
-    guard content.utf8.count <= 32 * 1_024, !controls else {
-      throw LocalHTTPError(
-        status: 400,
-        message: "Analyst file content is oversized or contains controls"
-      )
+    guard !controls else {
+      throw LocalHTTPError(status: 400, message: "Analyst file content contains controls")
     }
     return (content, content.utf8.count)
   }
@@ -1049,9 +1057,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       ),
       try apiCollectionInteger(document["contract_version"], label: "Analyst contract version") == 1,
       document["document_kind"] as? String == "local-analyst-workspace",
-      NSDictionary(dictionary: document["limits"] as? [String: Any] ?? [:]).isEqual(
-        to: localAnalystLimits()
-      ),
+      // A document written under other limits still reads; the next save
+      // records these.
+      document["limits"] is [String: Any],
       let rawFolders = document["folders"] as? [Any],
       (1...32).contains(rawFolders.count),
       let rawFiles = document["files"] as? [Any],
@@ -1106,7 +1114,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
     }
     var fileIDs = Set<Int>()
-    var totalContentBytes = 0
     for file in files {
       let identifier = file["id"] as! Int
       let folderID = file["folder_id"] as! Int
@@ -1116,10 +1123,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       else {
         throw LocalHTTPError(status: 400, message: "Analyst file ID, folder, or name is invalid")
       }
-      totalContentBytes += file["content_bytes"] as! Int
-    }
-    guard totalContentBytes <= 512 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst file content exceeds 512 KiB")
     }
     let normalized: [String: Any] = [
       "contract_version": 1,
@@ -1130,9 +1133,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "files": files.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
       "limits": localAnalystLimits(),
     ]
-    guard try JSONSerialization.data(withJSONObject: normalized).count <= 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst workspace document exceeds 1 MiB")
-    }
     if generation == 0 {
       guard updatedAt == 0, folders.count == 1, files.isEmpty else {
         throw LocalHTTPError(status: 400, message: "Analyst workspace generation zero must be empty")
@@ -1159,26 +1159,22 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     defer { Darwin.close(descriptor) }
     var metadata = stat()
     guard fstat(descriptor, &metadata) == 0,
-      (metadata.st_mode & S_IFMT) == S_IFREG,
-      metadata.st_size <= 1_024 * 1_024
+      (metadata.st_mode & S_IFMT) == S_IFREG
     else {
-      throw LocalHTTPError(status: 500, message: "Analyst workspace store must be a bounded regular file")
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store must be a regular file")
     }
     do {
-      let maximumBytes = 1_024 * 1_024
       var data = Data()
-      var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
-      while data.count <= maximumBytes {
-        let requested = min(buffer.count, maximumBytes + 1 - data.count)
-        let count = Darwin.read(descriptor, &buffer, requested)
+      data.reserveCapacity(Int(metadata.st_size))
+      var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+      while true {
+        let count = Darwin.read(descriptor, &buffer, buffer.count)
         if count < 0 {
+          if errno == EINTR { continue }
           throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be read")
         }
         if count == 0 { break }
         data.append(buffer, count: count)
-      }
-      guard data.count <= maximumBytes else {
-        throw LocalHTTPError(status: 500, message: "Analyst workspace store exceeds 1 MiB")
       }
       return try decodeLocalAnalyst(data)
     } catch let error as LocalHTTPError where error.status == 500 {
@@ -1203,18 +1199,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func writeLocalAnalyst(_ workspace: [String: Any], lease: NativeWorkspaceLease) throws {
     var data = try JSONSerialization.data(withJSONObject: workspace)
     data.append(0x0a)
-    guard data.count <= 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst workspace store exceeds 1 MiB")
-    }
     try lease.write(data)
-  }
-
-  private func localAnalystRequestBody(_ request: URLRequest) throws -> Data {
-    let data = try apiCollectionRequestBody(request)
-    guard data.count <= 1_024 * 1_024 + 64 * 1_024 else {
-      throw LocalHTTPError(status: 413, message: "Analyst workspace action is oversized")
-    }
-    return data
   }
 
   private func replaceLocalAnalyst(_ action: [String: Any]) throws -> (Data, Int, [String: String]) {
@@ -1229,7 +1214,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       action["expected_generation"], label: "Expected analyst workspace generation"
     )
     let lease = try NativeWorkspaceLease(
-      at: localAnalystStoreURL, label: "Analyst workspace", maximumBytes: 1_024 * 1_024
+      at: localAnalystStoreURL, label: "Analyst workspace", maximumBytes: nil
     )
     defer { lease.close() }
     let current = try decodeLocalAnalyst(lease.read())
@@ -1303,6 +1288,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func normalizeLocalAnalystRun(_ action: [String: Any]) throws -> (Data, Int) {
+    guard try apiCollectionInteger(action["protocol_version"], label: "Analyst protocol version") == 2
+    else {
+      throw LocalHTTPError(
+        status: 400,
+        message: "Analyst runs use protocol 2, which names the selected artifact by artifact_id and sha256"
+      )
+    }
     guard apiCollectionExactKeys(
       action,
       [
@@ -1310,14 +1302,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "source", "variables", "evidence", "confirmed", "confirmed_sensitive",
       ]
     ), action["action"] as? String == "run_local_analyst_script",
-      try apiCollectionInteger(action["protocol_version"], label: "Analyst protocol version") == 1,
       action["confirmed"] as? Bool == true,
+      let confirmedSensitive = action["confirmed_sensitive"] as? Bool,
       let source = action["source"] as? String,
       !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-      source.utf8.count <= 32 * 1_024,
       let variables = action["variables"] as? [String: Any],
       variables.count <= 32,
-      let evidence = action["evidence"] as? [String: Any],
+      var evidence = action["evidence"] as? [String: Any],
       apiCollectionExactKeys(
         evidence,
         [
@@ -1325,15 +1316,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "selected_artifact", "summary",
         ]
       ),
-      let events = evidence["events"] as? [Any], events.count <= 500,
-      let artifacts = evidence["artifacts"] as? [Any], artifacts.count <= 500,
-      let traceEdges = evidence["trace_edges"] as? [Any], traceEdges.count <= 1_000,
-      let profiles = evidence["signal_profiles"] as? [Any], profiles.count <= 256,
+      evidence["events"] is [Any], evidence["artifacts"] is [Any],
+      evidence["trace_edges"] is [Any], evidence["signal_profiles"] is [Any],
       evidence["vm_analysis"] is NSNull || evidence["vm_analysis"] is [String: Any],
       evidence["selected_artifact"] is NSNull || evidence["selected_artifact"] is [String: Any],
       evidence["summary"] is [String: Any]
     else {
-      throw LocalHTTPError(status: 400, message: "Analyst run action is malformed or oversized")
+      throw LocalHTTPError(status: 400, message: "Analyst run action is malformed")
     }
     let runID = try apiCollectionInteger(action["run_id"], label: "Analyst run ID", minimum: 1)
     let scriptID = try apiCollectionInteger(
@@ -1353,21 +1342,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
       variableBytes += name.utf8.count + value.utf8.count
     }
-    guard variableBytes <= 16 * 1_024,
-      try JSONSerialization.data(withJSONObject: evidence).count <= 768 * 1_024
-    else {
-      throw LocalHTTPError(status: 400, message: "Analyst variables or evidence are oversized")
-    }
-    if let selected = evidence["selected_artifact"] as? [String: Any] {
-      guard let content = selected["content"] as? String,
-        content.utf8.count <= 64 * 1_024,
-        selected["sensitive"] as? Bool != true || action["confirmed_sensitive"] as? Bool == true
-      else {
-        throw LocalHTTPError(
-          status: 400,
-          message: "Confirm bounded sensitive selected artifact bytes before running"
-        )
-      }
+    guard variableBytes <= 16 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "Analyst variables exceed 16 KiB")
     }
     let workspace = try loadLocalAnalyst()
     guard workspace["generation"] as? Int == generation,
@@ -1383,8 +1359,59 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         message: "Only the current saved JavaScript analyst script can execute"
       )
     }
+    // The script reads the stored, SHA-256 verified bytes of the artifact the
+    // page selected, whatever their size, and its manifest record.
+    var selectedBytes = Data()
+    if let reference = evidence["selected_artifact"] as? [String: Any] {
+      guard apiCollectionExactKeys(reference, ["artifact_id", "sha256"]),
+        let artifactID = reference["artifact_id"] as? String,
+        let sha256 = reference["sha256"] as? String,
+        sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+      else {
+        throw LocalHTTPError(status: 400, message: "Analyst selected artifact reference is invalid")
+      }
+      guard let artifact = try artifactEntries().first(where: {
+        $0["artifact_id"] as? String == artifactID
+      }) else {
+        throw LocalHTTPError(status: 404, message: "Artifact not found")
+      }
+      // The kinds Sources never lists are read only with their own evidence,
+      // never by a script, as in the Rust backend's analyst::Run::admit.
+      guard ![
+        "canvas_data_url", "request_body", "request_target", "request_headers",
+        "response_headers", "cookie_list", "stack",
+      ].contains(artifact["kind"] as? String ?? "") else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "Only an artifact Sources lists can be a run's selected artifact"
+        )
+      }
+      guard artifact["sha256"] as? String == sha256 else {
+        throw LocalHTTPError(
+          status: 409,
+          message: "The selected artifact changed; select it again before running"
+        )
+      }
+      guard artifact["sensitive"] as? Bool != true || confirmedSensitive else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "Confirm inclusion of sensitive selected artifact bytes before running"
+        )
+      }
+      selectedBytes = try verifiedArtifactBytes(artifact)
+      var metadata: [String: Any] = [:]
+      for field in [
+        "protocol_version", "artifact_id", "session_id", "navigation_id", "frame_id",
+        "parent_artifact_id", "creator_event_id", "execution_context_id", "capture_origin",
+        "kind", "origin", "url", "mime_type", "byte_size", "sha256", "sensitive",
+      ] {
+        if let value = artifact[field], !(value is NSNull) { metadata[field] = value }
+      }
+      metadata["byte_size"] = selectedBytes.count
+      evidence["selected_artifact"] = metadata
+    }
     let runnerInput: [String: Any] = [
-      "protocol_version": 1,
+      "protocol_version": 2,
       "run_id": runID,
       "script_id": scriptID,
       "library_generation": generation,
@@ -1392,11 +1419,29 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "variables": variables,
       "evidence": evidence,
     ]
-    let data = try JSONSerialization.data(withJSONObject: runnerInput)
-    guard data.count <= 800 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst runner input exceeds 800 KiB")
-    }
+    // Runner input v2: one JSON line, then the selected artifact's bytes.
+    var data = try JSONSerialization.data(withJSONObject: runnerInput)
+    data.reserveCapacity(data.count + 1 + selectedBytes.count)
+    data.append(0x0a)
+    data.append(selectedBytes)
     return (data, runID)
+  }
+
+  /// A stored artifact's whole content, checked against its manifest's byte
+  /// size and SHA-256 before anything reads it.
+  private func verifiedArtifactBytes(_ artifact: [String: Any]) throws -> Data {
+    guard let byteSize = artifact["byte_size"] as? Int,
+      let sha256 = artifact["sha256"] as? String
+    else {
+      throw LocalHTTPError(status: 500, message: "Artifact manifest record is malformed")
+    }
+    let data = try Data(contentsOf: artifactContentURL(artifact), options: .mappedIfSafe)
+    guard data.count == byteSize,
+      SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256
+    else {
+      throw LocalHTTPError(status: 500, message: "Artifact content does not match its manifest")
+    }
+    return data
   }
 
   private func localAnalystFailure(
@@ -1418,7 +1463,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "result_truncated": false,
         "logs": [],
         "logs_truncated": false,
-        "duration_ms": min(max(duration, 0), 7_000),
+        "duration_ms": max(duration, 0),
         "error": String(message.prefix(512)),
       ]
     )
@@ -1428,8 +1473,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     _ data: Data,
     action: [String: Any]
   ) throws -> Data {
-    guard data.count <= 128 * 1_024,
-      let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       apiCollectionExactKeys(
         result,
         [
@@ -1447,15 +1491,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         == apiCollectionInteger(action["library_generation"], label: "Analyst generation"),
       let ok = result["ok"] as? Bool,
       let outcome = result["outcome"] as? String,
-      ["completed", "failed", "cancelled", "timed_out"].contains(outcome),
+      ["completed", "failed", "cancelled"].contains(outcome),
       ok == (outcome == "completed"),
       let resultType = result["result_type"] as? String, resultType.utf8.count <= 64,
-      let resultText = result["result_text"] as? String, resultText.utf8.count <= 32 * 1_024,
+      result["result_text"] is String,
       result["result_truncated"] is Bool,
-      let logs = result["logs"] as? [[String: Any]], logs.count <= 64,
+      let logs = result["logs"] as? [[String: Any]],
       result["logs_truncated"] is Bool,
-      let duration = try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration"),
-      duration <= 7_000,
+      (try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration")) != nil,
       let error = result["error"] as? String, error.utf8.count <= 512,
       ok ? error.isEmpty : !error.isEmpty
     else {
@@ -1465,8 +1508,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       guard apiCollectionExactKeys(log, ["level", "text"]),
         let level = log["level"] as? String,
         ["log", "info", "warn", "error"].contains(level),
-        let text = log["text"] as? String,
-        text.utf8.count <= 1_024
+        log["text"] is String
       else {
         throw LocalHTTPError(status: 422, message: "Analyst runner returned a malformed log")
       }
@@ -1474,8 +1516,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return data
   }
 
+  /// Runs until the script settles, the researcher cancels it, or the page
+  /// that asked goes away (`task`); there is no deadline.
   private func runLocalAnalyst(
-    _ action: [String: Any]
+    _ action: [String: Any],
+    task: ObjectIdentifier
   ) throws -> Data {
     guard FileManager.default.isExecutableFile(atPath: analystRunnerURL.path),
       FileManager.default.isReadableFile(atPath: analystRunnerCoreURL.path)
@@ -1504,6 +1549,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       try process.run()
       activeAnalystProcess = process
       activeAnalystRunID = normalized.1
+      activeAnalystTask = task
       analystCancelRequested = false
       analystRunnerLock.unlock()
     } catch {
@@ -1532,23 +1578,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       outputGroup.leave()
     }
     let started = Date()
-    // The deadline covers the input too: a runner that never reads it must not
-    // hold this write, and with it the only runner slot. A write after the
-    // runner ended fails with EPIPE instead of signalling this app.
+    // The input is written apart from this wait, so a runner that never reads
+    // it can still be cancelled. A write after the runner ended fails with
+    // EPIPE instead of signalling this app.
     let input = inputPipe.fileHandleForWriting
     _ = fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1)
     DispatchQueue.global(qos: .userInitiated).async {
       try? input.write(contentsOf: normalized.0)
       try? input.close()
     }
-    let timedOut = terminated.wait(timeout: .now() + 2.5) == .timedOut
-    if timedOut {
-      process.terminate()
-      if terminated.wait(timeout: .now() + 0.25) == .timedOut {
-        kill(process.processIdentifier, SIGKILL)
-        _ = terminated.wait(timeout: .now() + 0.25)
-      }
-    }
+    terminated.wait()
     // Ending the runner closes its output, unless something it started still
     // holds the pipe. The slot is released either way.
     let drained = outputGroup.wait(timeout: .now() + 1) == .success
@@ -1558,6 +1597,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     if activeAnalystProcess === process {
       activeAnalystProcess = nil
       activeAnalystRunID = nil
+      activeAnalystTask = nil
       analystCancelRequested = false
     }
     analystRunnerLock.unlock()
@@ -1566,14 +1606,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         action: action,
         outcome: "cancelled",
         message: "Analyst script cancelled",
-        duration: duration
-      )
-    }
-    if timedOut {
-      return try localAnalystFailure(
-        action: action,
-        outcome: "timed_out",
-        message: "Analyst script exceeded the 2 second execution limit",
         duration: duration
       )
     }
@@ -1661,7 +1693,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   ) {
     let action: [String: Any]
     do {
-      let body = try localAnalystRequestBody(request)
+      let body = try requestBody(request, label: "Analyst action", maximumBytes: nil)
       guard let value = try JSONSerialization.jsonObject(with: body) as? [String: Any],
         let kind = value["action"] as? String
       else {
@@ -1702,7 +1734,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         self.send(
-          try self.runLocalAnalyst(action),
+          try self.runLocalAnalyst(action, task: ObjectIdentifier(task)),
           contentType: "application/json; charset=utf-8",
           status: 200,
           headers: [:],
@@ -1894,7 +1926,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let artifactID = String(components[2])
     guard artifactID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
       let artifact = try artifactEntries().first(where: { ($0["artifact_id"] as? String) == artifactID }),
-      let relativePath = artifact["content_path"] as? String,
       let byteSize = artifact["byte_size"] as? Int,
       byteSize >= 0
     else {
@@ -1905,15 +1936,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       )
     }
 
-    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
-    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
-    guard contentURL.path.hasPrefix(root.path + "/") else {
-      throw NSError(
-        domain: "OriginTrace",
-        code: 6,
-        userInfo: [NSLocalizedDescriptionKey: "Artifact content path escapes the artifact store"]
-      )
-    }
+    let contentURL = try artifactContentURL(artifact)
     let attributes = try FileManager.default.attributesOfItem(atPath: contentURL.path)
     guard let storedSize = attributes[.size] as? NSNumber, storedSize.intValue == byteSize else {
       throw NSError(
@@ -1951,6 +1974,28 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "X-Artifact-Truncated": offset + data.count < byteSize ? "1" : "0",
       ]
     )
+  }
+
+  /// The stored file a manifest record names, refused when its path leaves
+  /// the artifact store.
+  private func artifactContentURL(_ artifact: [String: Any]) throws -> URL {
+    guard let relativePath = artifact["content_path"] as? String else {
+      throw NSError(
+        domain: "OriginTrace",
+        code: 5,
+        userInfo: [NSLocalizedDescriptionKey: "Artifact not found"]
+      )
+    }
+    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
+    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
+    guard contentURL.path.hasPrefix(root.path + "/") else {
+      throw NSError(
+        domain: "OriginTrace",
+        code: 6,
+        userInfo: [NSLocalizedDescriptionKey: "Artifact content path escapes the artifact store"]
+      )
+    }
+    return contentURL
   }
 
   private func vmAnalysisResponse(for requestURL: URL) throws -> Data {
@@ -3401,7 +3446,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
             const updated = await replacement.json();
             if (!isLocalAnalystWorkspace(updated)) throw new Error('Analyst POST returned a malformed workspace');
             const run = {
-              action: 'run_local_analyst_script', protocol_version: 1, run_id: 1, script_id: scriptID,
+              action: 'run_local_analyst_script', protocol_version: 2, run_id: 1, script_id: scriptID,
               library_generation: updated.generation, source, variables: {seed: 'native-verified'},
               evidence: {events: [{sequence_number: '1'}], artifacts: [], trace_edges: [],
                 signal_profiles: [], vm_analysis: null, selected_artifact: null,

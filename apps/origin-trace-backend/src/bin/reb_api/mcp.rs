@@ -61,6 +61,7 @@ fn binary_response(definition: &Value) -> bool {
         .is_some()
 }
 
+const ANALYST_ARTIFACT_REFUSED: &str = "An analyst run that names a selected artifact reads its stored bytes, which are captured content, so it needs --allow-content. Run it without selected_artifact, or open it in Origin Trace.";
 const SOURCE_FORMAT_BODY_REFUSED: &str = "get_source_format returns JavaScript artifacts only through MCP. A request or response body is not returned to a model; open it in Origin Trace.";
 
 /// Fails closed: only a layout that names a JavaScript artifact may be inlined.
@@ -1209,6 +1210,16 @@ async fn call_tool(
             true,
         );
     }
+    if name == "analyst_action"
+        && !allow_content
+        && arguments["body"]["action"] == "run_local_analyst_script"
+        && !arguments["body"]["evidence"]["selected_artifact"].is_null()
+    {
+        return tool_message(
+            format!("{ANALYST_ARTIFACT_REFUSED} No request was sent"),
+            true,
+        );
+    }
     // Only a body can be laid out as JSON, so that form needs no request.
     if name == "get_source_format"
         && !allow_content
@@ -2004,6 +2015,7 @@ mod tests {
             "row_limit",
             "line_offset",
             "line_limit",
+            "total_matches",
             "canvas_images",
             "response_media",
             "response_body_budget_mib",
@@ -2233,6 +2245,56 @@ mod tests {
             .unwrap();
         });
         format!("http://{address}/")
+    }
+
+    #[tokio::test]
+    async fn analyst_runs_that_read_an_artifact_need_allow_content() {
+        let spec = specification().unwrap();
+        let ops = operations(&spec).unwrap();
+        let run = |selected: serde_json::Value| {
+            json!({"name": "analyst_action", "arguments": {"body": {
+                "action": "run_local_analyst_script", "protocol_version": 2, "run_id": 1,
+                "script_id": 1, "library_generation": 1, "source": "return 1;", "variables": {},
+                "evidence": {"events": [], "artifacts": [], "trace_edges": [], "signal_profiles": [],
+                    "vm_analysis": null, "selected_artifact": selected, "summary": {}},
+                "confirmed": true, "confirmed_sensitive": false}}})
+        };
+        let call = async |allow_content: bool, base: &str, request: serde_json::Value| {
+            call_tool(
+                &spec,
+                &ops,
+                Connection {
+                    base,
+                    admission: Admission::flags(true, false, !allow_content, allow_content),
+                    timeout: 2.0,
+                    expected_instance: None,
+                },
+                &request,
+            )
+            .await
+        };
+        let reference = json!({"artifact_id": "7", "sha256": "a".repeat(64)});
+        // The host would read the stored bytes, so no port is ever contacted.
+        let refused = call(false, "http://127.0.0.1:1/", run(reference.clone())).await;
+        assert_eq!(refused["isError"], true);
+        let text = refused["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("--allow-content") && text.contains("No request was sent"),
+            "{text}"
+        );
+        let result = json!({"protocol_version": 1, "run_id": 1, "script_id": 1,
+            "library_generation": 1, "ok": true, "outcome": "completed", "result_type": "number",
+            "result_text": "1", "result_truncated": false, "logs": [], "logs_truncated": false,
+            "duration_ms": 1, "error": ""});
+        let ran = call(
+            false,
+            &serve_once(result.clone()),
+            run(serde_json::Value::Null),
+        )
+        .await;
+        assert_eq!(ran["isError"], false, "{ran}");
+        let ran = call(true, &serve_once(result), run(reference)).await;
+        assert_eq!(ran["isError"], false, "{ran}");
     }
 
     #[tokio::test]

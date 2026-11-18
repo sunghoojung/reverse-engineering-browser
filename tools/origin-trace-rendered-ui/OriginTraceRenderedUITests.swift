@@ -2589,10 +2589,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   // The bundled reb:// workspace answers its requests natively. A request the
-  // page no longer owns, because the page reloaded while the analyst runner
-  // held it for its 2 second limit, must not be answered: WebKit raises on a
-  // reply to a stopped request, which ended the app. The runner slot must also
-  // come back, so the next run gets its own answer instead of 409.
+  // page no longer owns, because the page reloaded while a run that never
+  // ends held it, must not be answered: WebKit raises on a reply to a stopped
+  // request, which ended the app. A run has no deadline, so stopping its
+  // request must terminate the runner and free its slot, and the next run
+  // gets its own answer instead of 409.
   @MainActor
   func test21StoppedRequestIsNotAnswered() async throws {
     let ui = try Harness()
@@ -2616,9 +2617,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
         const files = current.files.map(({content_bytes, created_at_ms, updated_at_ms, ...file}) => file);
         const id = Math.max(0, ...files.map(file => file.id)) + 1, source = 'for (;;) {}';
         let body = {action: 'replace_local_analyst_workspace', expected_generation: current.generation, folders: current.folders,
-          files: [...files, {id, folder_id: 1, name: '__stopped-request.js', kind: 'analyst-script', language: 'javascript', content: source}]};
+          files: [...files, {id, folder_id: 1, name: '__stopped-request.js', kind: 'analyst-script', language: 'javascript', content: source},
+            {id: id + 1, folder_id: 1, name: '__next-run.js', kind: 'analyst-script', language: 'javascript', content: 'return 1;'}]};
         const library = await fetch('/api/local-analyst/actions', \(post)).then(response => response.json());
-        window.__rebRun = {action: 'run_local_analyst_script', protocol_version: 1, run_id: 1, script_id: id,
+        window.__rebRun = {action: 'run_local_analyst_script', protocol_version: 2, run_id: 1, script_id: id,
           library_generation: library.generation, source, variables: {}, evidence: {events: [], artifacts: [], trace_edges: [],
           signal_profiles: [], vm_analysis: null, selected_artifact: null, summary: {}}, confirmed: true, confirmed_sensitive: false};
         body = window.__rebRun;
@@ -2632,14 +2634,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ui.webView.reload()
     try await ui.waitUntil("window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object'",
       timeout: 30, "the bundled workspace did not reload")
-    // The runner gives up after 2 seconds and replies to the request the reload stopped.
-    try await ui.waitUntil("\(runner).then(state => state.active_run_id === null)", timeout: 10, "the analyst runner slot was not released")
-    try await Task.sleep(nanoseconds: 1_000_000_000)
+    // The reload stops the request, which terminates the runner at once.
+    try await ui.waitUntil("\(runner).then(state => state.active_run_id === null)", timeout: 10, "stopping the request did not end its run")
     let second = try await ui.json(
-      "(async () => { const body = {...JSON.parse(\(String(reflecting: run))), run_id: 2}; " +
+      "(async () => { const run = JSON.parse(\(String(reflecting: run))); " +
+      "const body = {...run, run_id: 2, script_id: run.script_id + 1, source: 'return 1;'}; " +
       "const response = await fetch('/api/local-analyst/actions', \(post)); return {status: response.status, outcome: (await response.json()).outcome}; })()")
     XCTAssertEqual(second["status"] as? Int, 200, "the next run gets its own answer: \(second)")
-    XCTAssertEqual(second["outcome"] as? String, "timed_out", "the next run reaches the runner: \(second)")
+    XCTAssertEqual(second["outcome"] as? String, "completed", "the next run reaches the runner: \(second)")
     let files = try XCTUnwrap(saved["files"] as? String)
     let generation = try XCTUnwrap(saved["generation"] as? Int)
     _ = try await ui.value(

@@ -861,7 +861,7 @@ const applicationResults = runInNewContext(
 const analystResult = {protocol_version: 1, run_id: 1, script_id: 1, library_generation: 1,
   ok: false, outcome: "failed", result_type: "error", result_text: "", result_truncated: false,
   logs: [], logs_truncated: false, duration_ms: 1, error: "Synthetic failure"};
-for (const [outcome, code] of [["failed", "application_failed"], ["cancelled", "cancelled"], ["timed_out", "timeout"]]) {
+for (const [outcome, code] of [["failed", "application_failed"], ["cancelled", "cancelled"]]) {
   const legacy = {...analystResult, outcome};
   const annotated = {...legacy, code, details: {phase: "worker"}};
   assert(applicationResults.isLocalAnalystResult(legacy, legacy));
@@ -870,8 +870,14 @@ for (const [outcome, code] of [["failed", "application_failed"], ["cancelled", "
     assert.equal(applicationResults.isLocalAnalystResult({...annotated, ...patch}, legacy), false);
   }
 }
+// Runs have no deadline, so nothing reports timed_out any more.
+assert.equal(applicationResults.isLocalAnalystResult({...analystResult, outcome: "timed_out"}, analystResult), false);
 const completedAnalyst = {...analystResult, ok: true, outcome: "completed", error: ""};
 assert(applicationResults.isLocalAnalystResult(completedAnalyst, completedAnalyst));
+// Results and logs are kept whole, and a run lasts as long as it needs.
+const wholeAnalyst = {...completedAnalyst, result_text: "x".repeat(4 * 1024 * 1024), duration_ms: 3_600_000,
+  logs: Array.from({length: 5000}, (_, index) => ({level: "log", text: `${index} ${"y".repeat(2048)}`}))};
+assert(applicationResults.isLocalAnalystResult(wholeAnalyst, wholeAnalyst));
 assert.equal(applicationResults.isLocalAnalystResult({...completedAnalyst, code: "application_failed", details: {phase: "worker"}}, completedAnalyst), false);
 const jwtCommon = {protocol_version: 1, ok: false, error: "Synthetic failure", duration_us: 1};
 for (const [validate, legacy] of [
@@ -1203,7 +1209,7 @@ function sourceProductionFunction(name) {
   return appSource.slice(start, start + end.index + end[0].length);
 }
 const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference', 'sourceLimitText',
-  'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
+  'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'stopCanvasPreview', 'canvasPreviewProgress', 'showCanvasGalleryPage', 'boundSourcePreviews', 'boundSourceAnalysis',
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceHexView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'renderSourceLoading', 'cancelSourcePreview', 'refreshArtifacts', 'applyDocumentSearch', 'sourceFindFor', 'markSourceMatch',
   'closeSource',
@@ -1213,7 +1219,7 @@ const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsC
 const canvasProductionRules=runInNewContext(
   appSection('      const nativeCanvasCaptureDisplayLimit =','      const nativeCanvasDrawingMethods')+
   appSection('      const canvasDataUrlPattern =','      function canvasReadbackName(')+
-  ';({nativeCanvasCaptureDisplayLimit,canvasPreviewByteLimit,canvasPreviewReadLimit,canvasDataUrlPattern,canvasPreviewAxisLimit,canvasPreviewPixelLimit,canvasGalleryPixelLimit,inspectCanvasPng})', {atob});
+  ';({nativeCanvasCaptureDisplayLimit,canvasPreviewReadLimit,canvasDataUrlPattern,canvasPreviewAxisLimit,canvasPreviewPixelLimit,canvasGalleryPixelLimit,inspectCanvasPng})', {atob});
 const ownershipModels = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
 // The shipped paged Inspect client, wired as app.js wires it. A fresh client
 // stands for one that released a module's pages.
@@ -2086,7 +2092,8 @@ function canvasAccounting(context) {
   const loaded=context.state.artifacts.filter(value=>value.kind==='canvas_data_url'&&value.content!==undefined);
   const reserved=[...(context.state.canvasPreviewOwners?.values()??[])].reduce((sum,owner)=>sum+owner.artifact.byte_size*2,0);
   const textBytes=loaded.reduce((sum,artifact)=>sum+artifact.content.length*2,0);
-  assert(loaded.length<=24);assert(reserved<=8*1024*1024);assert(textBytes<=reserved);
+  // One gallery page of previews of any size: memory follows the page.
+  assert(loaded.length<=24);assert(textBytes<=reserved);
   assert((context.state.canvasPreviewOwners?.size??0)<=24);assert((context.state.canvasPreviewReads?.size??0)<=2);
   return {loaded:loaded.length,reservedUTF16Bytes:reserved,retainedUTF16Bytes:textBytes};
 }
@@ -2130,14 +2137,41 @@ function canvasAccounting(context) {
   canvasOwnershipReceipt.push({test:'visible_growth_rollover_stable_scope_activity_navigation',status:'passed',maxReads,maxRawReadBufferReservations:maxRawReservations,maxRetained:maxLoaded,retainedDescriptors:480,afterNavigation:canvasAccounting(context)});
 }
 {
-  const large='data:image/png;base64,'+'A'.repeat(2097152-'data:image/png;base64,'.length),original=await canvasArtifact('1',large);let reads=0;
+  // Past the former 2 MiB preview and 8 MiB gallery caps: every preview on
+  // the page loads, two at a time, and an unchanged gallery never rereads.
+  const large='data:image/png;base64,'+'A'.repeat(3*1024*1024),original=await canvasArtifact('1',large);let reads=0;
   const artifacts=Array.from({length:24},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
   const context=canvasContext({state:{artifacts},fetch:async()=>{reads++;return new Response(large);}});
   context.events(artifacts);context.render();await canvasSettled(context);
-  assert.equal(reads,2);assert.equal(canvasAccounting(context).loaded,2);
-  assert.equal(context.state.canvasPreviewOwners.size,2);assert.equal(artifacts.filter(value=>/8 MiB/.test(value.canvasPreviewNotice)).length,22);
-  for(let refresh=0;refresh<30;refresh++)context.render();await canvasSettled(context);assert.equal(reads,2);
-  canvasOwnershipReceipt.push({test:'aggregate_reservations_stop_byte_budget_reload_churn',status:'passed',contentReads:reads,...canvasAccounting(context)});
+  assert.equal(reads,24);assert.equal(canvasAccounting(context).loaded,24);
+  assert(artifacts.every(value=>value.content===large&&!value.canvasPreviewNotice&&!value.contentTruncated));
+  for(let refresh=0;refresh<30;refresh++)context.render();await canvasSettled(context);assert.equal(reads,24);
+  canvasOwnershipReceipt.push({test:'previews_of_any_size_load_without_reload_churn',status:'passed',contentReads:reads,...canvasAccounting(context)});
+}
+{
+  // Every readback, newest first, 24 a page. Only the shown page owns text.
+  const original=await canvasArtifact('1');let reads=0;
+  const artifacts=Array.from({length:50},(_,index)=>({...original,artifact_id:String(index+1),creator_event_id:String(index+1)}));
+  const context=canvasContext({state:{artifacts},fetch:async()=>{reads++;return new Response(canvasText);}});
+  const pager=()=>context.elements.signalRenderList.querySelectorAll('.signal-render-page');
+  const loaded=()=>artifacts.filter(value=>value.content!==undefined).map(value=>Number(value.artifact_id)).sort((a,b)=>b-a);
+  context.events(artifacts);context.render();await canvasSettled(context);
+  assert.equal(context.elements.signalRenderCount.textContent,'50');
+  assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 1-24 of 50, newest first');
+  assert.deepEqual(pager().map(button=>[button.textContent,button.disabled]),[['Newer',true],['Older',false]]);
+  assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,24);assert.deepEqual(loaded(),Array.from({length:24},(_,i)=>50-i));
+  pager()[1].focus();pager()[1].click();await canvasSettled(context);
+  assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 25-48 of 50, newest first');
+  assert.deepEqual(loaded(),Array.from({length:24},(_,i)=>26-i));canvasAccounting(context);
+  pager()[1].click();await canvasSettled(context);
+  assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 49-50 of 50, newest first');
+  assert.deepEqual(loaded(),[2,1]);assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,2);
+  assert.deepEqual(pager().map(button=>button.disabled),[false,true]);
+  assert.equal(context.sandbox.document.activeElement?.textContent,'Newer','Focus stays on a page control that can still be pressed');
+  pager()[0].click();await canvasSettled(context);assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 25-48 of 50, newest first');
+  context.events(artifacts.slice(0,10));context.render();await canvasSettled(context);
+  assert.equal(context.state.canvasGalleryPage,0);assert.equal(context.elements.signalRenderSummary.textContent,'10 canvas readbacks');assert.equal(pager().length,0);
+  canvasOwnershipReceipt.push({test:'gallery_pages_every_readback_and_releases_other_pages',status:'passed',contentReads:reads,...canvasAccounting(context)});
 }
 {
   const old=await canvasArtifact('1'),other=await canvasArtifact('2'),replacement=await canvasArtifact('1',canvasText,'2');
@@ -2199,22 +2233,24 @@ function canvasAccounting(context) {
   const context=canvasContext({state:{artifacts},
     setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
     fetch:async()=>{reads++;if(reads>2)return new Response(canvasText);const pending=ownedDeferred();held.push(pending);return pending.promise;}});
-  context.events(artifacts);context.render();assert.equal(reads,2);assert.equal(timers.size,2);
-  for(const timer of [...timers.values()]){assert.equal(timer.delay,10000);timer.callback();}
+  context.events(artifacts);context.render();assert.equal(reads,2);assert.equal(timers.size,0,'A preview read has no deadline');
+  assert.match(context.elements.signalRenderList.textContent,/Reading the retained Canvas preview · 0 bytes of /);
+  const stops=context.elements.signalRenderList.querySelectorAll('button').filter(button=>button.textContent==='Stop');assert.equal(stops.length,2);
+  for(const stop of stops)stop.click();
   assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);
-  assert.equal(artifacts.filter(artifact=>/timed out/.test(artifact.loadError)).length,2);
+  assert.equal(artifacts.filter(artifact=>/stopped/.test(artifact.loadError)).length,2);
   for(const pending of held)pending.resolve({body:{cancel:async()=>{cancelled++;}},ok:true});
   await canvasSettled(context);assert.equal(cancelled,2);assert.equal(reads,3);assert.equal(canvasAccounting(context).loaded,1);
-  context.render();await canvasSettled(context);assert.equal(reads,3,'Timed-out previews require explicit retry');
+  context.render();await canvasSettled(context);assert.equal(reads,3,'Stopped previews require explicit retry');
   assert.equal(timers.size,0);
-  canvasOwnershipReceipt.push({test:'deadline_keeps_noncooperative_fetch_credit_and_failed_reason',status:'passed',lateHeadersCancelled:cancelled,contentReads:reads,...canvasAccounting(context)});
+  canvasOwnershipReceipt.push({test:'stop_keeps_noncooperative_fetch_credit_and_reason',status:'passed',lateHeadersCancelled:cancelled,contentReads:reads,...canvasAccounting(context)});
 }
 {
-  const oversized={...await canvasArtifact('1'),byte_size:2097153},invalid=await canvasArtifact('2','invalid image'),wrongHash={...await canvasArtifact('3'),sha256:'b'.repeat(64)};
+  const oversized={...await canvasArtifact('1'),byte_size:0},invalid=await canvasArtifact('2','invalid image'),wrongHash={...await canvasArtifact('3'),sha256:'b'.repeat(64)};
   const artifacts=[oversized,invalid,wrongHash];let reads=0;
   const context=canvasContext({state:{artifacts},fetch:async url=>{reads++;return new Response(url.includes('/2/')?'invalid image':canvasText);}});
   context.events(artifacts);context.render();await canvasSettled(context);assert.equal(reads,2);assert.equal(canvasAccounting(context).loaded,0);
-  assert.match(oversized.canvasPreviewNotice,/2 MiB/);assert.match(invalid.loadError,/image data URL validator/);assert.match(wrongHash.loadError,/SHA-256/);
+  assert.match(oversized.canvasPreviewNotice,/invalid size/);assert.match(invalid.loadError,/image data URL validator/);assert.match(wrongHash.loadError,/SHA-256/);
   for(let repeat=0;repeat<5;repeat++)context.render();await canvasSettled(context);assert.equal(reads,2);
   context.sandbox.fetch=async()=>Response.json({count:0,artifacts:[]});await context.api.refreshArtifacts();
   assert.equal(context.state.artifacts.length,0);assert.equal(context.state.canvasPreviewOwners.size,0);assert.equal(context.elements.signalRenderList.children.length,0);
@@ -2459,7 +2495,7 @@ const canvasPngUrl=bytes=>'data:image/png;base64,'+bytes.toString('base64');
 }
 console.log('PASS Canvas PNG admission before img.src: declared axes/per-image/gallery pixels, narrow static RGB/RGBA8 profile, CRC/chunk/base64 validation, no inflation, exact owners and stale decoder-error protection (not decoder-memory or rendered QA)');
 
-console.log('PASS Canvas gallery ownership: hidden/visible 480-entry growth, 24 owners / 8 MiB UTF-16 reservations, two unsettled reads, no churn, scope/navigation/DOM cleanup, session replacement, stale headers and explicit retry (no image decoding or RSS claim)');
+console.log('PASS Canvas gallery ownership: hidden/visible 480-entry growth, 24-readback pages of every readback with Newer/Older focus, 3 MiB previews past the former caps, two unsettled reads, Stop with no deadline, no churn, scope/navigation/DOM cleanup, session replacement, stale headers and explicit retry (no image decoding or RSS claim)');
 if(process.env.REB_CANVAS_OWNERSHIP_RECEIPT)await writeFile(process.env.REB_CANVAS_OWNERSHIP_RECEIPT,JSON.stringify({scope:'Production-function and DOM ownership accounting, not image decoding or process RSS',results:canvasOwnershipReceipt},null,2));
 
 if (process.env.REB_SOURCE_OWNERSHIP_RECEIPT) await writeFile(process.env.REB_SOURCE_OWNERSHIP_RECEIPT, JSON.stringify({scope:'Production-function and DOM fixtures; not rendered acceptance',results:sourceOwnershipReceipt},null,2));

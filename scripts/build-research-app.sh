@@ -49,6 +49,7 @@ stored_evidence_backend_source="${repo_root}/apps/research-ui/macos/StoredEviden
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
+analyst_runner_entitlements="${repo_root}/apps/research-ui/macos/OriginTraceAnalystRunner.entitlements"
 close_smoke_source="${repo_root}/apps/research-ui/macos/NativeCloseGuardSmoke.swift"
 close_guard_source="${repo_root}/apps/research-ui/macos/NativeCloseGuard.swift"
 client_project_export_source="${repo_root}/apps/research-ui/macos/ClientProjectExport.swift"
@@ -246,6 +247,12 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -o "${macos_path}/OriginTraceAnalystRunner"
 
 codesign --force --deep --sign - "${app_path}" >/dev/null
+# Without allow-jit, JavaScriptCore interprets every analyst script: summing a
+# 57 MB artifact's bytes takes 4.4 s instead of 0.09 s. Only the runner gets
+# it, and the app is sealed again over the re-signed runner.
+codesign --force --sign - --entitlements "${analyst_runner_entitlements}" \
+  "${macos_path}/OriginTraceAnalystRunner" >/dev/null
+codesign --force --sign - "${app_path}" >/dev/null
 # macOS opens the app on any release LSMinimumSystemVersion admits, but will
 # not start a helper built for a newer one. Never replace the bundle with one
 # that has such a helper.

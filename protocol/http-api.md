@@ -895,7 +895,11 @@ The action routes are multiplexed, not invented REST resources:
   Replacement responses do not include an ETag; read the workspace to obtain
   its current conditional-GET validator.
 - Analyst execution requires the current saved JavaScript script and explicit
-  confirmation; sensitive selected artifact data needs additional confirmation.
+  confirmation. Protocol 2 names the selected artifact by `artifact_id` and
+  `sha256`; the host reads the whole stored artifact, verifies it, and refuses
+  non-source kinds (400) and a changed SHA-256 (409). A sensitive artifact
+  needs `confirmed_sensitive=true`. A run has no deadline; dropping the request
+  stops its helper process.
 
 Known behavior worth preserving in clients:
 
@@ -904,7 +908,7 @@ Known behavior worth preserving in clients:
   bounds; offsets and identifiers must be canonical unsigned decimals.
 - At the application handler, malformed JSON, non-object bodies, invalid body
   lengths and unsupported chunked bodies return JSON 400 errors. A body read
-  exceeding five seconds returns 408. Transport-level HTTP framing failures
+  exceeding five seconds, plus one second per declared 16 MiB, returns 408. Transport-level HTTP framing failures
   may be rejected before the application handler and have no JSON guarantee.
 - Unknown API paths return JSON 404; unsupported methods return JSON 405.
   Every application response includes `Cache-Control: no-store` and
@@ -961,8 +965,9 @@ descriptions. Individual execution entries have these fields:
   JSON Schema 2020-12 `when` predicate over the entire request. `{}` means
   unconditional. For example, unsigned JWT creation needs
   `allow_unsigned_confirmed=true` when `algorithm` is `none`; selected-field
-  capture needs `confirmed=true` when `enabled` is true. Analyst execution also
-  needs `confirmed_sensitive=true` when the selected artifact is sensitive.
+  capture needs `confirmed=true` when `enabled` is true. Analyst execution's
+  `confirmed_sensitive=true` depends on the stored manifest, not the request,
+  so it is the `sensitive-selected-artifact` state-dependent prerequisite.
   Ordinary requiredness and boolean types remain in the request schema.
 - `notes` supplies the effect scope and caveats. `sources` gives repository
   `path` and Rust `symbol` pointers for auditing, without fragile line numbers.

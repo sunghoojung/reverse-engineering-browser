@@ -2462,10 +2462,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let triskel = "document.querySelector('#flow-graph-host .flow-graph-triskel')"
     let elapsed = "document.querySelector('#flow-graph-host .flow-graph-engine-run')"
     let engine = "document.querySelector('#flow-graph-host .flow-graph-engine')"
-    try await ui.waitUntil("!\(triskel).hidden || (\(elapsed).hidden && !/waiting/.test(\(engine).textContent))", timeout: 600, "large: Triskel's state was not shown")
+    try await ui.waitUntil("!\(triskel).hidden || (\(elapsed).hidden && !/waiting/.test(\(engine).title))", timeout: 600, "large: Triskel's state was not shown")
     if try await ui.value("!\(triskel).hidden && \(triskel).textContent === 'Cancel'") as? Bool == true {
       try await ui.click("#flow-graph-host .flow-graph-triskel")
-      try await ui.waitUntil("\(elapsed).hidden && !/waiting/.test(\(engine).textContent)", timeout: 60, "large: Cancel did not stop the unasked realms")
+      try await ui.waitUntil("\(elapsed).hidden && !/waiting/.test(\(engine).title)", timeout: 60, "large: Cancel did not stop the unasked realms")
     }
     if try await ui.value("!\(triskel).hidden && \(triskel).textContent === 'Lay out with Triskel'") as? Bool == true {
       try await ui.click("#flow-graph-host .flow-graph-triskel")

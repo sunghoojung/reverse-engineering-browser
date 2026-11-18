@@ -692,10 +692,11 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     const sized = realms.filter(item => item.reason?.code !== 'one_card'), triskel = sized.filter(item => item.engine === 'triskel').length;
     const waiting = sized.filter(item => item.reason?.code === 'pending').length, failure = sessionLayout.engine.failure;
-    engineLabel.textContent = (triskel ? `Triskel layout${triskel < sized.length ? ` · ${triskel} of ${sized.length} realms` : ''}` : failure ? 'Layered layout · Triskel unavailable' : 'Layered layout')
-      + (waiting ? ` · ${waiting} waiting` : '');
+    // Triskel's elapsed seconds beside the label say it is still running;
+    // the hover counts the realms it has left, so the selection keeps its room.
+    engineLabel.textContent = triskel ? `Triskel layout${triskel < sized.length ? ` · ${triskel} of ${sized.length} realms` : ''}` : failure ? 'Layered layout · Triskel unavailable' : 'Layered layout';
     engineLabel.dataset.engine = triskel ? 'triskel' : 'layered';
-    engineLabel.title = [triskel || waiting ? `Triskel ${sessionLayout.engine.revision ? sessionLayout.engine.revision.slice(0, 7) : ''} lays out each realm of up to ${graphLayoutClient.AUTOMATIC.graphNodes.toLocaleString()} cards in the background, and larger ones when asked; a realm it would draw far wider than the stacked layered layout keeps that one.`.replace('  ', ' ') : 'Laid out in the app with the layered layout.',
+    engineLabel.title = [waiting ? `${waiting.toLocaleString()} ${waiting === 1 ? 'realm' : 'realms'} waiting for Triskel.` : '', triskel || waiting ? `Triskel ${sessionLayout.engine.revision ? sessionLayout.engine.revision.slice(0, 7) : ''} lays out each realm of up to ${graphLayoutClient.AUTOMATIC.graphNodes.toLocaleString()} cards in the background, and larger ones when asked; a realm it would draw far wider than the stacked layered layout keeps that one.`.replace('  ', ' ') : 'Laid out in the app with the layered layout.',
       // Realms of one origin are told apart by their realm, the detail's first part.
       ...realms.filter(item => flowGraphLayoutReason(item.reason)).map(item => {
         const label = model?.contexts[item.key]?.label;

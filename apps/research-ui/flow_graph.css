@@ -247,7 +247,8 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 .flow-graph-summary { flex: 0 1000 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
 .flow-graph-summary::before { content: "●"; margin-right: 7px; color: var(--accent); font-size: 9px; vertical-align: 1px; }
 .flow-graph-summary:empty { display: none; }
-.flow-graph-engine { flex: 0 0 auto; color: var(--faint); font-family: var(--sans); }
+/* The engine gives way before the selection, which names what is chosen. */
+.flow-graph-engine { flex: 0 4 auto; min-width: 0; overflow: hidden; color: var(--faint); font-family: var(--sans); text-overflow: ellipsis; }
 .flow-graph-engine[data-engine="triskel"] { color: var(--muted); }
 .flow-graph-engine:empty { display: none; }
 .flow-graph-engine-run { flex: 0 0 auto; color: var(--muted); font-family: var(--sans); }

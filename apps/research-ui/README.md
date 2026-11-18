@@ -3253,8 +3253,8 @@ Triskel does not stack a wide fan of calls, and a call tree's breadth would
 otherwise run off to the side. The layered layout also stays when Triskel's
 answer is missing, failed or the wrong shape. Either way the bands keep the
 layered order and are stacked, aligned and routed between the same way. The
-status bar says `Triskel layout`, or how many realms it took and how many
-are still pending, and hovering it gives each other realm's reason.
+status bar says `Triskel layout`, or how many realms it took, and hovering
+it counts the realms still waiting and gives each other realm's reason.
 
 The canvas is one bounded backing store, released with the minimap while the
 view is hidden, and only visible bands, cards and edges are drawn, with no

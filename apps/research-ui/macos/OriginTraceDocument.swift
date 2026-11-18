@@ -648,8 +648,9 @@ enum OriginTraceDocumentBuilder {
     (0..<width).reduce(UInt64(0)) { $0 | (UInt64(p[at + $1]) << (8 * UInt64($1))) }
   }
 
-  // The checks of payload() in js_invocation.rs: a version 1 invocation record
-  // in a valid vm envelope.
+  // The checks of payload() in js_invocation.rs: a version 1 or 2 invocation
+  // record in a valid vm envelope. Version 2 records every call of up to 256
+  // sites with a u32 ordinal; version 1 kept the bounds of its budgets.
   private static func invocationPayload(_ event: [String: Any], _ kind: String) -> [UInt8]? {
     guard event["type"] as? String == kind, event["category"] as? String == "vm",
       exactInteger(event["protocol_version"], equals: 3), exactInteger(event["flags"], equals: 0),
@@ -660,10 +661,12 @@ enum OriginTraceDocumentBuilder {
       canonicalUInt64(event["frame_id"]) != nil, canonicalUInt64(event["request_id"]) != nil,
       let process = processID(event["process_id"]), process != 0,
       let thread = processID(event["thread_id"]), thread != 0,
-      let p = payloadBytes(event), le(p, 0, 2) == 1, le(p, 2, 2) == 128
+      let p = payloadBytes(event), (1...2).contains(le(p, 0, 2)), le(p, 2, 2) == 128
     else { return nil }
     return p
   }
+
+  private static func version1(_ p: [UInt8]) -> Bool { le(p, 0, 2) == 1 }
 
   private static func validKind(_ kind: UInt8, _ low: UInt64) -> Bool {
     (1...14).contains(kind) && (kind == 1 || (kind == 7 ? low <= 1 : low == 0))
@@ -676,8 +679,8 @@ enum OriginTraceDocumentBuilder {
       event["frame_id"] as? String != "0", event["request_id"] as? String == "0"
     else { return nil }
     let (slot, flags, argc, id, parent) = (p[4], p[5], le(p, 6, 2), le(p, 20, 4), le(p, 24, 4))
-    guard slot < 8, flags & ~0x03 == 0, le(p, 8, 4) != 0, le(p, 16, 4) != 0,
-      le(p, 12, 4) < le(p, 16, 4), id != 0, le(p, 28, 2) < 64, le(p, 30, 2) < 256,
+    guard !version1(p) || (slot < 8 && le(p, 28, 2) < 64 && le(p, 30, 2) < 256),
+      flags & ~0x03 == 0, le(p, 8, 4) != 0, le(p, 16, 4) != 0, le(p, 12, 4) < le(p, 16, 4), id != 0,
       le(p, 104, 8) != 0, p[112...].allSatisfy({ $0 == 0 }),
       parent == 0 || (parent < id && flags & 0x01 == 0), (flags & 0x02 != 0) == (argc > 8)
     else { return nil }
@@ -699,7 +702,7 @@ enum OriginTraceDocumentBuilder {
     let (byteLength, rolling) = (le(p, 20, 4), le(p, 24, 8))
     let (fulfilled, rejected) = (outcome == 1, outcome == 2)
     let (string, bytes) = (kind == 3, kind == 12 || kind == 13)
-    guard slot < 8, fulfilled || rejected, (1...14).contains(kind), le(p, 8, 4) != 0,
+    guard !version1(p) || slot < 8, fulfilled || rejected, (1...14).contains(kind), le(p, 8, 4) != 0,
       le(p, 64, 8) != 0, p[19] == 0, flags & ~0x01 == 0, p[72...].allSatisfy({ $0 == 0 }),
       (via == 1 && fulfilled) || (via == 2 && rejected) || via == 3,
       length == 0 || string || bytes || kind == 11
@@ -733,8 +736,9 @@ enum OriginTraceDocumentBuilder {
       requestID <= UInt64(UInt32.max)
     else { return nil }
     let (state, id) = (p[4], le(p, 8, 4))
-    guard state == 2 || state == 3, (state == 2) == (id != 0), le(p, 12, 2) < 256,
-      p[5..<8].allSatisfy({ $0 == 0 }), le(p, 14, 2) == 0, p[16...].allSatisfy({ $0 == 0 })
+    guard state == 2 || state == 3, (state == 2) == (id != 0),
+      !version1(p) || (le(p, 12, 2) < 256 && le(p, 14, 2) == 0),
+      p[5..<8].allSatisfy({ $0 == 0 }), p[16...].allSatisfy({ $0 == 0 })
     else { return nil }
     return (state == 2, id)
   }

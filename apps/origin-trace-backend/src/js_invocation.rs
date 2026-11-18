@@ -85,7 +85,14 @@ fn payload(event: &Value, kind: &str) -> Option<Vec<u8>> {
         return None;
     }
     let bytes = hex::decode(event["payload"].as_str()?).ok()?;
-    (bytes.len() == 128 && le16(&bytes, 0) == 1 && le16(&bytes, 2) == 128).then_some(bytes)
+    (bytes.len() == 128 && matches!(le16(&bytes, 0), 1 | 2) && le16(&bytes, 2) == 128)
+        .then_some(bytes)
+}
+
+/// Payload version 1, from earlier builds, armed at most 8 sites and sampled
+/// its records; version 2 records every call of up to 256 sites.
+fn version_1(p: &[u8]) -> bool {
+    le16(p, 0) == 1
 }
 
 fn kind_valid(kind: u8, low32: u32) -> bool {
@@ -106,8 +113,11 @@ pub struct Start {
     pub argument_count: u16,
     pub script_id: u32,
     pub anchor_offset: u32,
-    pub site_sample_index: u16,
-    pub sample_index: u16,
+    /// Version 2: the call's ordinal among its site's calls in the
+    /// configuration. Version 1: its per-site sample index, below 64.
+    pub site_sample_index: u32,
+    /// The version 1 per-configuration sample index; version 2 has none.
+    pub sample_index: Option<u16>,
     pub source_sha256: [u8; 32],
     pub document_id: u64,
 }
@@ -119,14 +129,17 @@ pub fn start(event: &Value) -> Option<Start> {
     }
     let (slot, flags, argc) = (p[4], p[5], le16(&p, 6));
     let (id, parent) = (le32(&p, 20), le32(&p, 24));
-    if slot >= 8
+    let (site_sample_index, sample_index) = if version_1(&p) {
+        (u32::from(le16(&p, 28)), Some(le16(&p, 30)))
+    } else {
+        (le32(&p, 28), None)
+    };
+    if (version_1(&p) && (slot >= 8 || site_sample_index >= 64 || sample_index >= Some(256)))
         || flags & !0x03 != 0
         || le32(&p, 8) == 0
         || le32(&p, 16) == 0
         || le32(&p, 12) >= le32(&p, 16)
         || id == 0
-        || le16(&p, 28) >= 64
-        || le16(&p, 30) >= 256
         || le64(&p, 104) == 0
         || p[112..].iter().any(|b| *b != 0)
         || (parent != 0 && (parent >= id || flags & 0x01 != 0))
@@ -153,8 +166,8 @@ pub fn start(event: &Value) -> Option<Start> {
         argument_count: argc,
         script_id: le32(&p, 8),
         anchor_offset: le32(&p, 12),
-        site_sample_index: le16(&p, 28),
-        sample_index: le16(&p, 30),
+        site_sample_index,
+        sample_index,
         source_sha256: p[72..104].try_into().ok()?,
         document_id: le64(&p, 104),
     })
@@ -192,7 +205,7 @@ pub fn settle(event: &Value) -> Option<Settle> {
     let (fulfilled, rejected) = (outcome == 1, outcome == 2);
     let string = kind == 3;
     let bytes = kind == 12 || kind == 13;
-    if slot >= 8
+    if (version_1(&p) && slot >= 8)
         || !(fulfilled || rejected)
         || !(1..=14).contains(&kind)
         || le32(&p, 8) == 0
@@ -267,9 +280,10 @@ pub fn request(event: &Value) -> Option<Request> {
     ((state == 2 || state == 3)
         && request_id <= u64::from(u32::MAX)
         && context_valid(state, id)
-        && le16(&p, 12) < 256
+        // Version 2 holds a u32 ordinal at 12; version 1 a u16 index below
+        // 256 and two zero bytes.
+        && (!version_1(&p) || (le16(&p, 12) < 256 && le16(&p, 14) == 0))
         && p[5..8].iter().all(|b| *b == 0)
-        && le16(&p, 14) == 0
         && p[16..].iter().all(|b| *b == 0))
     .then_some(Request {
         inside: state == 2,
@@ -413,7 +427,7 @@ pub(crate) mod tests {
 
     pub(crate) fn start_payload(id: u32, parent: u32) -> [u8; 128] {
         let mut p = [0u8; 128];
-        p[0] = 1;
+        p[0] = 2;
         p[2] = 128;
         p[6] = 2;
         p[8..12].copy_from_slice(&17u32.to_le_bytes());
@@ -430,7 +444,7 @@ pub(crate) mod tests {
 
     pub(crate) fn settle_payload(id: u32, value: Option<&[u8]>) -> [u8; 128] {
         let mut p = [0u8; 128];
-        p[0] = 1;
+        p[0] = 2;
         p[2] = 128;
         p[5] = 1;
         p[6] = 3;
@@ -450,7 +464,7 @@ pub(crate) mod tests {
 
     pub(crate) fn request_payload(state: u8, id: u32) -> [u8; 128] {
         let mut p = [0u8; 128];
-        p[0] = 1;
+        p[0] = 2;
         p[2] = 128;
         p[4] = state;
         p[8..12].copy_from_slice(&id.to_le_bytes());
@@ -477,6 +491,49 @@ pub(crate) mod tests {
         let mut no_document = start_payload(5, 0);
         no_document[104] = 0;
         assert!(start(&event("js_invocation_start", 1, 0, &no_document)).is_none());
+        // Version 2 takes every slot and a u32 ordinal; version 1 evidence
+        // keeps its 8 slots and its indexes below 64 and 256.
+        let mut wide = start_payload(5, 0);
+        wide[4] = 255;
+        wide[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
+        let wide = start(&event("js_invocation_start", 1, 0, &wide)).unwrap();
+        assert_eq!(
+            (wide.site_slot, wide.site_sample_index, wide.sample_index),
+            (255, u32::MAX, None)
+        );
+        let old = |slot: u8, site: u16, sample: u16| {
+            let mut p = start_payload(5, 0);
+            p[0] = 1;
+            p[4] = slot;
+            p[28..30].copy_from_slice(&site.to_le_bytes());
+            p[30..32].copy_from_slice(&sample.to_le_bytes());
+            start(&event("js_invocation_start", 1, 0, &p))
+                .map(|s| (s.site_slot, s.site_sample_index, s.sample_index))
+        };
+        assert_eq!(old(7, 63, 255), Some((7, 63, Some(255))));
+        assert_eq!(old(8, 0, 0), None);
+        assert_eq!(old(0, 64, 0), None);
+        assert_eq!(old(0, 0, 256), None);
+        let mut version = start_payload(5, 0);
+        version[0] = 3;
+        assert!(start(&event("js_invocation_start", 1, 0, &version)).is_none());
+        let mut last = settle_payload(5, None);
+        last[4] = 255;
+        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_some());
+        last[0] = 1;
+        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_none());
+        last[4] = 7;
+        assert!(settle(&event("js_invocation_settle", 2, 0, &last)).is_some());
+        let ordinal = |version: u8, value: u32| {
+            let mut p = request_payload(2, 5);
+            p[0] = version;
+            p[12..16].copy_from_slice(&value.to_le_bytes());
+            request(&event("js_invocation_request", 3, 31, &p)).is_some()
+        };
+        assert!(ordinal(2, u32::MAX));
+        assert!(ordinal(1, 255));
+        assert!(!ordinal(1, 256));
+        assert!(!ordinal(1, 0x1_0000));
 
         let value = settle(&event(
             "js_invocation_settle",
@@ -553,11 +610,13 @@ pub(crate) mod tests {
                 "parent_invocation_id":2,"parent_unknown":false,"argument_count":2,
                 "script_id":17,"anchor_offset":41,
                 "source_sha256":format!("5a{}", "00".repeat(31)),
-                "site_sample_index":0,"sample_index":0,"document_id":"7"})
+                "site_sample_index":0,"sample_index":null,"document_id":"7"})
             )
         );
         // Parent unknown: no parent ID, and a parent ID beside the flag is refused.
+        // Version 1 also names its per-configuration sample index.
         let mut unknown = start_payload(5, 0);
+        unknown[0] = 1;
         unknown[5] = 0x01;
         unknown[4] = 3;
         unknown[28] = 12;
@@ -664,7 +723,7 @@ pub(crate) mod tests {
         wrong_type["request_id"] = json!("31");
         refused.push(wrong_type);
         let mut version = start_payload(5, 2);
-        version[0] = 2;
+        version[0] = 3;
         refused.push(event("js_invocation_start", 1, 0, &version));
         refused.push(event("js_invocation_request", 3, 0, &request_payload(2, 5)));
         for record in &refused {

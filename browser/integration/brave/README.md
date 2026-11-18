@@ -624,7 +624,7 @@ All CDP capture/transport functionality has been removed from the companion.
 
 ## Native JavaScript dispatch (opt-in)
 
-Rebuilt browsers can record live dispatch at up to 8 static interpreter-candidate
+Rebuilt browsers can record live dispatch at up to 256 static interpreter-candidate
 JavaScript sites (`switch` and `t[k](...)`) named in an analyzer-written site
 file. Launch with `REB_NATIVE_JS_DISPATCH_SITES=/absolute/path/sites.json`; the
 launcher adds `--js-flags=--reb-js-dispatch-capture` and
@@ -632,21 +632,23 @@ launcher adds `--js-flags=--reb-js-dispatch-capture` and
 browser validates the canonical file once per session, refuses a changed file
 until restart, and sends the renderer fixed 44-byte site records. Chromium patch
 `0020` installs the V8 callbacks for the main-thread isolate only, so workers
-are never armed. Records use the ordinary renderer ring (256 per configuration,
-64 per site) and every refusal is a coalesced `gap`.
+are never armed. Every dispatch is recorded through the ordinary renderer ring
+with its site's ordinal, and every refusal is a coalesced `gap`. V8 patch
+`0023` and Chromium patch `0066` removed the earlier 8-site limit and the 256
+and 64 sample budgets.
 
 The V8 flag turns off code caching, script streaming and the in-memory
 compilation cache browser-wide and never optimizes an armed function, so this
 mode is not performance-neutral. See the
 [wire contract and limits](../../../protocol/native-js-dispatch-v1.md) and the
 [design review](../../../docs/product/native-js-dispatch-v1.md).
-`./tools/check-native-probe-admission.sh` covers the renderer budgets, expiry
+`./tools/check-native-probe-admission.sh` covers the renderer ordinals, expiry
 and gaps; `native_js_dispatch_sites_unittests` covers the site-file parser and
 needs the pinned Chromium build.
 
 ## Native JavaScript invocation identity (opt-in)
 
-Rebuilt browsers can give each call of up to 8 armed functions (for example
+Rebuilt browsers can give each call of up to 256 armed functions (for example
 the hCaptcha challenge frame's `window.hsw`) an invocation identity that V8
 carries across the call's awaits and promise jobs. Write the site file with
 `tools/native-js-invocation-site.py` and launch with
@@ -660,9 +662,12 @@ continuation-preserved embedder data slot without changing what Blink's task
 attribution reads; Chromium patch `0021` installs the callbacks for the
 main-thread isolate only and records `js_invocation_request` beside
 `request_initiated`. Wasm `br_table`, `call_indirect` and guest invocation
-records carry the current context. Workers are unsupported. See the
+records carry the current context. V8 patch `0023` and Chromium patch `0066`
+record every call: V8 carries and settles only the starts the renderer
+recorded, and each start takes its site's ordinal. Workers are unsupported.
+See the
 [wire contract](../../../protocol/native-js-invocation-v1.md) and the
 [design](../../../docs/product/native-js-invocation-v1.md).
-`./tools/check-native-probe-admission.sh` covers the renderer budgets, digest
+`./tools/check-native-probe-admission.sh` covers the renderer ordinals, digest
 gating and request states; the `RebNativeJsInvocation*` cctests run in the
 native V8 runtime workflow.

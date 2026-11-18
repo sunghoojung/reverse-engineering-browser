@@ -699,6 +699,10 @@ fn check(code: &str, severity: &str, message: impl Into<String>) -> Value {
 fn gap_meaning(reason: &str) -> &'static str {
     if reason == "service_worker_page_decision_unshared" {
         "A service-worker request's class 68 answer was evicted before its other half asked, so that half decided alone: the request may have one half recorded without the other, as a row without a tab, or one half left out. The count is the evicted answers (protocol/native-network-v3.md)."
+    } else if reason == "native_js_invocation_ids_exhausted" {
+        "V8 used every invocation ID of this renderer process, so its later calls of tracked functions were not recorded. A new session starts new renderer processes."
+    } else if reason == "native_js_dispatch_ids_exhausted" {
+        "V8 used every dispatch activation ID of this renderer process, so later activations of armed dispatch sites were not recorded. A new session starts new renderer processes."
     } else if reason.contains("filtered") {
         "A sample policy excluded these observations before a sample slot was taken. Retained observations are unchanged."
     } else if reason.contains("limit_or_invalid") || reason.contains("module_invalid") {

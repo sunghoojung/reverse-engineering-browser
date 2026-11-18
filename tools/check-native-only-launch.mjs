@@ -187,11 +187,11 @@ try {
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, /REB_NATIVE_JS_DISPATCH_SITES/);
   }
-  for (const size of [0,4097]) {
+  for (const size of [0,131073]) {
     await writeFile(sitesPath, Buffer.alloc(size,32));
     const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_DISPATCH_SITES:sitesPath},encoding:'utf8'});
     assert.equal(result.status,2,result.stderr);
-    assert.match(result.stderr,/between 1 and 4096/);
+    assert.match(result.stderr,/between 1 and 131072/);
   }
   // Native browser code owns canonical site-file validation; the shell gates
   // the opt-in and file bounds and passes the path as one argument.
@@ -228,11 +228,11 @@ try {
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, message);
   }
-  for (const size of [0, 4097]) {
+  for (const size of [0, 131073]) {
     await writeFile(invocationPath, Buffer.alloc(size, 32));
     const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_INVOCATION_SITES:invocationPath},encoding:'utf8'});
     assert.equal(result.status, 2, result.stderr);
-    assert.match(result.stderr, /between 1 and 4096/);
+    assert.match(result.stderr, /between 1 and 131072/);
   }
   await writeFile(invocationPath, '{}');
   for (const [digests, tail] of [[0, []], [1, ['--reb-js-invocation-digests']]]) {

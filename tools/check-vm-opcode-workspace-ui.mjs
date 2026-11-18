@@ -708,10 +708,10 @@ if (process.env.REB_NATIVE_WASM_GOLDEN) {
   }
   console.log('PASS actual C++ → viewer typed payload, unsigned fields, envelope and reserved-byte cases');
 }
-const jsValid = ['default', 'indexed', 'nested', 'string-selector', 'parent-unknown', 'wide-identities'];
+const jsValid = ['default', 'indexed', 'nested', 'string-selector', 'parent-unknown', 'wide-identities', 'last-slot', 'version-1'];
 if (process.env.REB_NATIVE_JS_GOLDEN) {
-  for (const mode of [...jsValid, 'reserved', 'version', 'size', 'truncated', 'shape', 'kind', 'slot', 'flags', 'parent-order',
-    'handler-without-flag', 'switch-handler', 'non-integer-bits', 'sample-index', 'site-sample-index', 'anchor', 'boolean-bits',
+  for (const mode of [...jsValid, 'reserved', 'version', 'size', 'truncated', 'shape', 'kind', 'version-1-slot', 'flags', 'parent-order',
+    'handler-without-flag', 'switch-handler', 'non-integer-bits', 'version-1-sample-index', 'version-1-site-sample-index', 'anchor', 'boolean-bits',
     'activation', 'script', 'source-length', 'parent-flags', 'handler-order', 'handler-script', 'envelope-version',
     'envelope-flags', 'identity', 'artifact', 'parent-event', 'navigation', 'request', 'big-endian']) {
     const event=JSON.parse(execFileSync(process.env.REB_NATIVE_JS_GOLDEN,['--case',mode],{encoding:'utf8'}));

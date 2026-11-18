@@ -1,7 +1,9 @@
 # Native JavaScript dispatch-site probe v1
 
 Status: reviewed design, implemented by V8 patch `0010`, Chromium patch
-`0020`, the overlay and the analyzer (probe P3). The review was written before
+`0020`, the overlay and the analyzer (probe P3). V8 patch `0023` and Chromium
+patch `0066` later removed the sample budgets and raised the site limit from 8
+to 256; the bounds below are the current ones. The review was written before
 any probe code; [Implementation map](#implementation-map) records what each
 layer now does and which acceptance layers remain.
 
@@ -104,9 +106,9 @@ regenerated it asks again, so:
 - regeneration after arming changed emits the new decision, including plain
   bytecode when the site is no longer armed;
 - re-emission is bounded: one regeneration emits at most one runtime call per
-  armed anchor in that function (at most 8 per isolate), and every sample is
-  charged to the embedder's per-configuration budget, not to a bytecode
-  instance, so repeated flushes cannot multiply captured records.
+  armed anchor in that function (at most 256 per isolate), and each record is
+  one dispatch that ran, not a bytecode instance, so repeated flushes cannot
+  multiply captured records.
 
 Two caveats are part of the contract. A function that was armed keeps
 optimization disabled after a later unarmed regeneration (see
@@ -190,17 +192,18 @@ enclosing frames with `UnoptimizedJSFrame::ReadInterpreterRegister`
 (`frames.h:1231`), which works for interpreter and Sparkplug frames. An inlined
 or optimized armed frame would make that read impossible without deoptimizer
 state translation. Only functions that contain an armed site lose optimization
-(at most 8 per isolate); their handlers and callers tier normally. This changes
+(at most 256 per isolate); their handlers and callers tier normally. This changes
 the timing of those functions and is declared, like the Liftoff-only Wasm mode.
 Already optimized code is never armed: arming only happens at generation, and
 flushing discards optimized code together with the bytecode it was built from.
 
 ## Arming scope, expiry and cost
 
-- **Configuration.** The researcher supplies at most 8 sites in an immutable
-  file for the browser lifetime, as with the Wasm guest adapter. The browser
-  validates it and sends it with each renderer configuration. The renderer
-  sink owns the active configuration generation, budgets and expiry.
+- **Configuration.** The researcher supplies at most 256 sites, the most the
+  records' one-byte slot names, in an immutable file for the browser
+  lifetime, as with the Wasm guest adapter. The browser validates it and sends
+  it with each renderer configuration. The renderer sink owns the active
+  configuration generation, the per-site ordinals and expiry.
 - **Per isolate, pulled by V8.** V8 holds a fixed per-isolate copy of the
   armed sites and the embedder epoch. It pulls the epoch from the embedder at
   generation and at each trace, and refreshes the sites when the epoch changes,
@@ -219,11 +222,11 @@ flushing discards optimized code together with the bytecode it was built from.
   setting changes. This is tested by comparing bytecode arrays.
 - **Cost when the flag is on but a script is unarmed.** That script's bytecode
   is byte-identical. Per function compile the generator compares the script's
-  UTF-16 length with at most 8 armed lengths, and hashes a script at most once
+  UTF-16 length with at most 256 armed lengths, and hashes a script at most once
   per epoch when a length matches (a fixed cache of recent bindings). The
   browser-wide cache, streaming and source-position settings above apply.
-- **Cost of an armed site.** One runtime call per dispatch. After the budget
-  is spent the call returns at the admission predicate without walking frames.
+- **Cost of an armed site.** One runtime call per dispatch and one fixed-size
+  record per dispatch. A parent walk runs only for a new activation.
 
 ## Activation and parent activation
 
@@ -257,13 +260,14 @@ A walk that hits the 64-frame bound is flagged as truncated.
 
 | Bound | Value | When exceeded |
 | --- | --- | --- |
-| Armed sites per configuration | 8 | file rejected at browser startup, no arming |
-| Samples per configuration | 256 | one coalesced `gap` (`native_js_dispatch_budget_incomplete`) per configuration |
-| Samples per site | 64 | that site's admission predicate returns false; one coalesced gap per configuration names the per-site limit |
+| Armed sites per configuration | 256 | file rejected at browser startup, no arming |
+| Records per configuration or site | none | every dispatch is recorded with its site's ordinal |
 | Frames walked for a parent | 64 | `parent_search_truncated` flag in the record |
-| Activation parents retained per configuration | 256 | later activations carry the `parent_unknown` flag |
+| Activation parents retained | the 256 most recent | an older activation's later dispatches carry `parent_unknown`; its first dispatch carries the parent |
+| Armed functions | every one whose script lives | entries of collected scripts are dropped; no loss |
+| Activation IDs per isolate | 2^30 - 1 | one coalesced `gap` (`native_js_dispatch_ids_exhausted`) per configuration |
 | Script bindings cached per epoch | 64 | the oldest is evicted and rehashed on demand; no loss |
-| Renderer ring | 8,192 records | existing visible drop counter |
+| Renderer ring | 8,192 records | existing visible drop counter and a missing site ordinal |
 
 Every refusal of an admitted sample before the ring (emitter rejected,
 invalid record) is one coalesced gap per configuration and reason. A
@@ -278,12 +282,14 @@ No blocker. At the pinned sources the probe can be made:
 
 - **disabled by default**: a new flag, off by default, with byte-identical
   bytecode when it is off or when a site is unarmed;
-- **bounded**: fixed per-isolate tables, at most 8 armed sites, at most one
-  runtime call per armed anchor per generation, a 64-frame parent walk only
-  for a new admitted activation, and the 256 and 64 sample budgets;
+- **bounded**: per-isolate tables sized by the armed sites and live armed
+  functions, at most 256 armed sites, at most one runtime call per armed
+  anchor per dispatch, a 64-frame parent walk only for a new activation, and
+  fixed-size work per record;
 - **loss-visible**: every path that would install bytecode without the
   generator is closed in capture mode, late arming is reported per script and
-  site, and every budget, refusal and queue loss is a gap or counter.
+  site, and every refusal, ID exhaustion and queue loss is a gap, counter or
+  missing ordinal.
 
 The conditions above are part of the design. A change that re-enables code
 caching, streaming, the compilation cache or lazy source positions in capture
@@ -295,18 +301,19 @@ mode, or allows optimizing an armed function, reopens this review.
 | --- | --- |
 | V8 | patch `v8/0010`: flag and implications, arming table and SHA-256 binding, generator emission for the two shapes, `Runtime_RebTraceJsDispatch`, cache refusal, cctests |
 | Chromium | patch `chromium/0020`: install the V8 callbacks in `V8Initializer`, admit only live local documents |
-| Overlay | wire header, site-file parsing, renderer budgets and gaps, Mojo configuration, browser forwarding |
+| Overlay | wire header, site-file parsing, renderer ordinals and gaps, Mojo configuration, browser forwarding |
 | Protocol and analyzer | event `js_dispatch_observation`, C++/Rust/JavaScript validators, site-scoped JavaScript observed claims, JavaScript nesting through the parent activation, arming export |
 
 Acceptance needs ordered replay on the pinned sources, the V8 cctests in
-`tools/check-native-v8-runtime.py`, renderer budget, expiry and queue-loss
+`tools/check-native-v8-runtime.py`, renderer ordinal, expiry and queue-loss
 checks, bytecode identity for unarmed code, and the flush, re-arm and
 code-cache cases decided here. The cctests (`test-api/RebNativeJsDispatch*`)
 cover disabled and unarmed bytecode identity, selector kinds, handler spans,
 `eval` and `new Function`, late arming, flush and re-arm, code-cache refusal,
-Sparkplug and disabled optimization, parent activation, and admission and the
-site cap; the native-v8-runtime CI job compiles and runs them. The renderer
-budgets, expiry and loss gaps run in `tools/check-native-probe-admission.sh`.
+Sparkplug and disabled optimization, parent activation across many armed
+functions and activations, and admission and the site limit; the
+native-v8-runtime CI job compiles and runs them. The renderer ordinals,
+expiry and loss gaps run in `tools/check-native-probe-admission.sh`.
 A rebuilt Brave run on the owned two-level fixture
 (`tools/fixtures/native-js-dispatch/two-level-vm.js`) is the remaining live
 acceptance layer.

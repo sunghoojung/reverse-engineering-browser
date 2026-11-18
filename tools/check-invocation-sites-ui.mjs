@@ -46,7 +46,7 @@ const site = (label, extra = {}) => ({site: {anchor_offset: label.length, artifa
   shape: 'function-entry', source_length: 99, source_sha256: 'b'.repeat(64)}, label, source_url: 'https://example.test/glue.js', session_id: '11',
   retained: {state: 'not_retained', matching_artifact_id: null, other_version_artifact_id: null}, ...extra});
 const set = (sites, session = {state: 'not_armed', count: 0, digests: false, sites: []}) =>
-  ({format: 'reb-js-invocation-site-set-v1', limit: 8, count: sites.length, sites, next_capture: 'x', session});
+  ({format: 'reb-js-invocation-site-set-v1', limit: 256, count: sites.length, sites, next_capture: 'x', session});
 
 {
   const {invocationSiteHeader} = load();
@@ -119,7 +119,7 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
   await view.ui.refresh();
   assert.equal(view.chip.hidden, true, 'No chip without saved or armed sites');
   assert.match(view.text(), /not the open page/);
-  assert.match(view.text(), /Saved for the next capture \(0 of 8\)/);
+  assert.match(view.text(), /Saved for the next capture \(0 of 256\)/);
   // Keyboard: Enter in the name field resolves the name.
   view.ui.input.value = 'o.dup';
   const enter = view.fire(view.ui.input, 'keydown', {key: 'Enter'});
@@ -182,12 +182,12 @@ const resolution = extra => ({format: 'reb-js-invocation-site-resolution-v1', st
   assert.match(view.text(), /Connection refused\. The list below is from the last successful read\./);
   // Errors from the server are shown as given, such as a full set.
   fail = false;
-  const full = panel({responses: (path, body) => body ? {status: 409, body: {error: 'The saved set already tracks 8 functions, the most one capture can arm. Remove one first.'}} : {status: 200, body: set([])}});
+  const full = panel({responses: (path, body) => body ? {status: 409, body: {error: 'The saved set already tracks 256 functions, the most one capture can arm. Remove one first.'}} : {status: 200, body: set([])}});
   await full.ui.refresh();
   full.ui.input.value = 'hsw';
   full.ui.trackName();
   await settle(); await settle();
-  assert.match(full.text(), /already tracks 8 functions/);
+  assert.match(full.text(), /already tracks 256 functions/);
   // A non-artifact source and a non-original view say why the action is off.
   const derived = panel({responses: () => ({status: 200, body: set([])}), positionProblem: () => 'Switch to the original source view to track a function at a position.'});
   await derived.ui.refresh();

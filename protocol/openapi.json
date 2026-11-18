@@ -16866,7 +16866,7 @@
               "site_slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 7
+                "maximum": 255
               },
               "script_id": {
                 "type": "integer",
@@ -16993,10 +16993,13 @@
               "site_sample_index": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 63
+                "maximum": 4294967295
               },
               "sample_index": {
-                "type": "integer",
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 0,
                 "maximum": 255
               }
@@ -17083,7 +17086,7 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 8,
+                "maxItems": 256,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -19145,7 +19148,7 @@
               "site_slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 7,
+                "maximum": 255,
                 "description": "Index of the called function in the site file this session armed."
               },
               "invocation_id": {
@@ -19190,14 +19193,17 @@
               "site_sample_index": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 63,
-                "description": "This call's index in its site's 64-start budget."
+                "maximum": 4294967295,
+                "description": "This call's ordinal among its site's calls in the renderer's capture configuration; a missing ordinal is a start the full ring dropped. A payload version 1 record from an earlier build: its index in the site's 64-start budget."
               },
               "sample_index": {
-                "type": "integer",
+                "type": [
+                  "integer",
+                  "null"
+                ],
                 "minimum": 0,
                 "maximum": 255,
-                "description": "This call's index in the configuration's 256-start budget."
+                "description": "A payload version 1 record's index in the configuration's 256-start budget; null for version 2, which records every call."
               },
               "document_id": {
                 "$ref": "#/components/schemas/NonzeroUint64String",
@@ -19230,7 +19236,7 @@
               "site_slot": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 7
+                "maximum": 255
               },
               "invocation_id": {
                 "type": "integer",
@@ -41148,7 +41154,7 @@
             "type": "string",
             "minLength": 2,
             "maxLength": 4096,
-            "description": "Absolute path of a JavaScript dispatch-site file, 1 to 4096 bytes. Turns off code caching browser-wide for the session."
+            "description": "Absolute path of a JavaScript dispatch-site file of 1 to 256 sites, 1 to 131072 bytes. Turns off code caching browser-wide for the session."
           },
           "quiet": {
             "type": "boolean",
@@ -41577,16 +41583,16 @@
             "const": "reb-js-invocation-site-set-v1"
           },
           "limit": {
-            "const": 8
+            "const": 256
           },
           "count": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 8
+            "maximum": 256
           },
           "sites": {
             "type": "array",
-            "maxItems": 8,
+            "maxItems": 256,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -41688,7 +41694,7 @@
               "count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 8
+                "maximum": 256
               },
               "digests": {
                 "type": "boolean",
@@ -41696,7 +41702,7 @@
               },
               "sites": {
                 "type": "array",
-                "maxItems": 8,
+                "maxItems": 256,
                 "description": "The armed site file in order: entry n is site_slot n of this session's js_invocation records, and its source_sha256 and anchor_offset equal theirs. label comes from the saved set this backend started with, or Unlabeled function.",
                 "items": {
                   "type": "object",

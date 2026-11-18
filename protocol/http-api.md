@@ -698,7 +698,7 @@ bodies. Identifiers and origins can still be sensitive. It has its own ETag.
 
 ## Saved JavaScript invocation sites
 
-The Origin Trace app keeps one saved set of at most 8
+The Origin Trace app keeps one saved set of at most 256
 [native JavaScript invocation sites](native-js-invocation-v1.md#site-file)
 and arms it in the next capture it starts. These routes name, save and list
 those sites; none of them changes the open page or a running capture.
@@ -1138,7 +1138,7 @@ include `js_invocation` beside the hex `payload`, decoded with the rules of
 
 | `kind` | Fields |
 | --- | --- |
-| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index`, `sample_index`, `document_id` |
+| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index` (the call's ordinal among its site's calls; a version 1 record's budget index), `sample_index` (null for version 2), `document_id` |
 | `settle` | `site_slot`, `invocation_id`, `fulfilled`, `via` (`sync_return`, `sync_throw` or `promise`), `value_kind`, `value_length`, `digest_state` (`not_requested`, `present`, `not_digestible`, `too_large` or `unavailable`), `document_id` |
 | `request` | `inside`, `invocation_id` (0 exactly when `inside` is false), `request_id` |
 

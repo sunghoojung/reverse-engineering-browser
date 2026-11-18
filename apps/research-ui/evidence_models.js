@@ -562,13 +562,18 @@
         const view = new DataView(bytes.buffer);
         const u32 = at => view.getUint32(at, true);
         const [shape, kind, slot, flags] = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        // Version 2 has a u32 site ordinal at 44 and any one-byte slot. Version
+        // 1, from earlier builds, had 8 slots and u16 indexes below 64 and 256.
+        const version = view.getUint16(0, true);
         const row = {shape, kind, slot, flags, script: u32(8), anchor: u32(12), length: u32(16), selector: u32(20),
           handler_script: u32(24), handler_start: u32(28), handler_end: u32(32), activation: u32(36), parent: u32(40),
-          site_sample: view.getUint16(44, true), sample: view.getUint16(46, true)};
+          site_sample: version === 1 ? view.getUint16(44, true) : u32(44),
+          sample: version === 1 ? view.getUint16(46, true) : null};
         const handler = (flags & 8) !== 0;
-        if (view.getUint16(0, true) !== 1 || view.getUint16(2, true) !== 128 || bytes.slice(80).some(byte => byte !== 0) ||
-          ![1, 2].includes(shape) || kind < 1 || kind > 9 || slot > 7 || (flags & ~0x0f) !== 0 || row.script === 0 ||
-          row.length === 0 || row.anchor >= row.length || row.activation === 0 || row.site_sample >= 64 || row.sample >= 256 ||
+        if (![1, 2].includes(version) || view.getUint16(2, true) !== 128 || bytes.slice(80).some(byte => byte !== 0) ||
+          (version === 1 && (slot > 7 || row.site_sample >= 64 || row.sample >= 256)) ||
+          ![1, 2].includes(shape) || kind < 1 || kind > 9 || (flags & ~0x0f) !== 0 || row.script === 0 ||
+          row.length === 0 || row.anchor >= row.length || row.activation === 0 ||
           (kind === 7 && row.selector > 1) || (kind !== 1 && kind !== 7 && row.selector !== 0) ||
           (handler ? shape !== 2 || row.handler_script === 0 || row.handler_start >= row.handler_end
             : row.handler_script !== 0 || row.handler_start !== 0 || row.handler_end !== 0) ||
@@ -1036,11 +1041,14 @@
         const u16 = at => view.getUint16(at, true);
         const u32 = at => view.getUint32(at, true);
         const u64 = at => view.getBigUint64(at, true);
-        if (u16(0) !== 1 || u16(2) !== 128) return null;
+        // Version 2 records every call of up to 256 sites, with u32 ordinals.
+        // Version 1, from earlier builds, had 8 sites and sampled indexes.
+        const v1 = u16(0) === 1;
+        if (![1, 2].includes(u16(0)) || u16(2) !== 128) return null;
         if (event.type === 'js_invocation_request') {
           const [state, id] = [bytes[4], u32(8)];
           return event.request_id !== '0' && BigInt(event.request_id) <= 0xffffffffn && [2, 3].includes(state) &&
-            (state === 2) === (id !== 0) && u16(12) < 256 && u16(14) === 0 &&
+            (state === 2) === (id !== 0) && (!v1 || (u16(12) < 256 && u16(14) === 0)) &&
             bytes.slice(5, 8).every(byte => byte === 0) && bytes.slice(16).every(byte => byte === 0)
             ? {state: state === 2 ? 'inside' : 'unknown', invocation_id: id} : null;
         }
@@ -1048,8 +1056,8 @@
         const validKind = (kind, low) => kind >= 1 && kind <= 14 && (kind === 1 || (kind === 7 ? low <= 1 : low === 0));
         if (event.type === 'js_invocation_start') {
           const [slot, flags, argc, id, parent] = [bytes[4], bytes[5], u16(6), u32(20), u32(24)];
-          if (slot > 7 || (flags & ~0x03) !== 0 || u32(8) === 0 || u32(16) === 0 || u32(12) >= u32(16) || id === 0 ||
-            u16(28) >= 64 || u16(30) >= 256 || u64(104) === 0n || bytes.slice(112).some(byte => byte !== 0) ||
+          if ((v1 && (slot > 7 || u16(28) >= 64 || u16(30) >= 256)) || (flags & ~0x03) !== 0 || u32(8) === 0 ||
+            u32(16) === 0 || u32(12) >= u32(16) || id === 0 || u64(104) === 0n || bytes.slice(112).some(byte => byte !== 0) ||
             (parent !== 0 && (parent >= id || (flags & 1) !== 0)) || ((flags & 2) !== 0) !== (argc > 8)) return null;
           const kinds = [];
           for (let index = 0; index < 8; index += 1) {
@@ -1065,7 +1073,7 @@
           [u32(12), bytes[16], bytes[17], bytes[18], u32(20), u64(24)];
         const [fulfilled, rejected] = [outcome === 1, outcome === 2];
         const [string, raw] = [kind === 3, kind === 12 || kind === 13];
-        if (slot > 7 || !(fulfilled || rejected) || kind < 1 || kind > 14 || u32(8) === 0 || u64(64) === 0n ||
+        if ((v1 && slot > 7) || !(fulfilled || rejected) || kind < 1 || kind > 14 || u32(8) === 0 || u64(64) === 0n ||
           bytes[19] !== 0 || (flags & ~1) !== 0 || bytes.slice(72).some(byte => byte !== 0) ||
           !((via === 1 && fulfilled) || (via === 2 && rejected) || via === 3) ||
           (length !== 0 && !(string || raw || kind === 11))) return null;
@@ -2699,12 +2707,16 @@
           'parent_unknown', 'parent_search_truncated', 'site_sample_index', 'sample_index']) ||
           !vmSampleEvent(row.event) || !isCanonicalInteger(row.monotonic_time_ns, 1n, uint64Max) ||
           !isSafeIntegerInRange(row.thread_id, 1, 0xffffffff) || !['switch', 'indexed-call'].includes(row.shape) ||
-          !isSafeIntegerInRange(row.site_slot, 0, 7) || !isSafeIntegerInRange(row.script_id, 1, 0xffffffff) ||
+          !isSafeIntegerInRange(row.site_slot, 0, 255) || !isSafeIntegerInRange(row.script_id, 1, 0xffffffff) ||
           !isSafeIntegerInRange(row.anchor_offset, 0, Number.MAX_SAFE_INTEGER) ||
           !vmNativeJsSelectorKinds.includes(row.selector_kind) || !isSafeIntegerInRange(row.selector_bits, 0, 0xffffffff) ||
           !isSafeIntegerInRange(row.activation_id, 1, 0xffffffff) ||
           !['new_activation', 'parent_unknown', 'parent_search_truncated'].every(key => typeof row[key] === 'boolean') ||
-          !isSafeIntegerInRange(row.site_sample_index, 0, 63) || !isSafeIntegerInRange(row.sample_index, 0, 255)) return false;
+          // A version 2 record has a u32 site ordinal and no sample index;
+          // a version 1 record keeps its 8 slots and 64 and 256 indexes.
+          !isSafeIntegerInRange(row.site_sample_index, 0, 0xffffffff) ||
+          (row.sample_index !== null && (!isSafeIntegerInRange(row.sample_index, 0, 255) ||
+            row.site_slot > 7 || row.site_sample_index > 63))) return false;
         if (row.selector_kind === 'integer' ? row.selector !== row.selector_bits
           : row.selector !== null || row.selector_bits > (row.selector_kind === 'boolean' ? 1 : 0)) return false;
         if (row.parent_activation_id !== null && (!isSafeIntegerInRange(row.parent_activation_id, 1, row.activation_id - 1) ||
@@ -2744,7 +2756,7 @@
           arming.version !== 1 || !(arming.source_sha256 === null || vmWorkspaceDigest(arming.source_sha256)) ||
           !(arming.source_length === null || isSafeIntegerInRange(arming.source_length, 0, 0xffffffff)) ||
           (arming.source_sha256 === null) !== (arming.source_length === null) ||
-          !Array.isArray(arming.sites) || arming.sites.length > 8 || !Array.isArray(arming.refused) || arming.refused.length > 64 ||
+          !Array.isArray(arming.sites) || arming.sites.length > 256 || !Array.isArray(arming.refused) || arming.refused.length > 64 ||
           !isSafeIntegerInRange(arming.omitted_refused_count, 0, Number.MAX_SAFE_INTEGER) ||
           (arming.omitted_refused_count > 0 && arming.refused.length !== 64)) return false;
         const seen = new Set();
@@ -2763,7 +2775,8 @@
           isSafeIntegerInRange(row.byte_offset, 0, Number.MAX_SAFE_INTEGER) &&
           ['switch', 'indexed call', 'aliased call', 'if ladder', 'self call'].includes(row.instruction) &&
           ['js-dispatch-shape-unobservable', 'js-dispatch-anchor-unresolved', 'js-dispatch-site-limit', 'js-dispatch-source-not-utf8'].includes(row.reason) &&
-          (row.reason !== 'js-dispatch-site-limit' || arming.sites.length === 8))) return false;
+          // A full list: 256 sites, or 8 from a producer before 2.18.0.
+          (row.reason !== 'js-dispatch-site-limit' || [8, 256].includes(arming.sites.length)))) return false;
         if (arming.sites.length === 0) return arming.file === null;
         return typeof arming.file === 'string' && arming.file.length <= 4096 &&
           arming.file === vmCanonicalJson({sites: arming.sites, version: 1});

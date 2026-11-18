@@ -2305,7 +2305,7 @@ int main() {
   Run<&NativeJsDispatchAdmission>();
   Run<&NativeJsInvocationAdmission>();
   Run<&NativeJsInvocationOpenStarts>();
-  Run<&NativeJsInvocationBudgetCaps>();
+  Run<&NativeJsInvocationHeldGaps>();
   Run<&NativeRequestStacks>();
   Run<&NativeTaskChainsAndNavigations>();
   Run<&NativeAsyncSegmentNotAdmitted>();

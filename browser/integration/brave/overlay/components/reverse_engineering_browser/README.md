@@ -328,19 +328,20 @@ use `common/native_js_dispatch.h` for the 128-byte payload and the fixed 44-byte
 site records, and `common/native_js_dispatch_sites.h` for the browser-side
 canonical site file. The renderer sink exposes a pulled epoch and an
 allocation-free admission predicate to V8, never calls the frame-id provider on
-that path, and claims one of 256 configuration samples and one of 64 site samples
-before emitting through the ordinary ring. A full ring returns both claims and
-keeps its drop count; budget, emitter, invalid-input and compiled-before-arming
-refusals are coalesced gaps. See the
+that path, and gives every dispatch of up to 256 sites its site's next ordinal
+before emitting through the ordinary ring. A full ring keeps its drop count and
+leaves the ordinal missing; emitter, invalid-input, compiled-before-arming and
+activation-ID refusals are coalesced gaps. See the
 [contract](../../../../../../protocol/native-js-dispatch-v1.md).
 
 Native JavaScript invocation records (`js_invocation_start`,
 `js_invocation_settle` and `js_invocation_request`, events 24 to 26) use
 `common/native_js_invocation.h` for the payloads and the 44-byte
 function-entry site records (shape 3), and `common/native_js_invocation_sites.h`
-for the browser-side site file. The sink claims one of 256 starts per
-configuration and one of 64 per site, and one of 256 request records; settles
-carry a digest only under the session's opt-in. It reads the current
+for the browser-side site file. The sink records every start of up to 256
+sites with its site's next ordinal, tells V8 whether it recorded each start so
+V8 settles only those, and gives each request record the configuration's next
+ordinal; settles carry a digest only under the session's opt-in. It reads the current
 invocation through a provider Blink installs, for Wasm `br_table` and
 `call_indirect` observations, guest invocation markers and loader requests.
 See the [contract](../../../../../../protocol/native-js-invocation-v1.md).

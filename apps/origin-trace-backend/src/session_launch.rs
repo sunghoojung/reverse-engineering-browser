@@ -696,7 +696,7 @@ fn invocation_sites(
         std::str::from_utf8(&bytes)
             .ok()
             .and_then(js_invocation_sites::parse_sites_file)
-            .ok_or("js_invocation_sites is not a native-js-invocation-sites-v1 file: canonical JSON naming 1 to 8 distinct function-entry sites in at most 4096 bytes. resolve_js_invocation_site returns exact site entries.")?
+            .ok_or("js_invocation_sites is not a native-js-invocation-sites-v1 file: canonical JSON naming 1 to 256 distinct function-entry sites in at most 128 KiB. resolve_js_invocation_site returns exact site entries.")?
     } else {
         return Ok(None);
     };

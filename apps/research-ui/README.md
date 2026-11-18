@@ -2298,7 +2298,7 @@ the calls' settled-value digests; Metadata mode does not. The titlebar names
 what the running capture tracks, says when its Brave predates invocation
 capture and started without the sites, and warns when this session retained
 another version of a saved script, which the saved site will not match. At
-most 8 functions are saved, in
+most 256 functions are saved, the most one capture can arm, in
 `~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json` with a
 label sidecar; `REB_JS_INVOCATION_SITE_STORE` names another file. Stored-evidence
 native mode has no backend for these routes and says so. The routes and

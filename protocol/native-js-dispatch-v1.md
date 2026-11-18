@@ -25,14 +25,15 @@ Workers, worklets and service workers are unsupported.
 ## Site file
 
 `native-js-dispatch-sites-v1` is exact compact canonical JSON (keys sorted,
-no whitespace, no trailing newline), at most 4096 bytes, validated by
+no whitespace, no trailing newline), at most 128 KiB, validated by
 [the schema](native-js-dispatch-sites-v1.schema.json):
 
 ```json
 {"sites":[{"anchor_offset":120,"artifact_id":"12","artifact_sha256":"<64 lowercase hex>","byte_offset":118,"shape":"switch","source_length":456,"source_sha256":"<64 lowercase hex>"}],"version":1}
 ```
 
-- 1 to 8 sites, each `(source_sha256, anchor_offset)` unique.
+- 1 to 256 sites, each `(source_sha256, anchor_offset)` unique. The bound is
+  the record's one-byte site slot.
 - `shape` is `switch` or `indexed-call`.
 - `source_sha256` is SHA-256 over the script text as UTF-16LE code units.
   The text is the artifact decoded as strict UTF-8 with one leading U+FEFF
@@ -61,26 +62,42 @@ inactive) at bytecode generation and before each trace, and pulls the armed
 sites when the epoch changes. `enabled(epoch, slot)` runs before any frame
 walk or handle and must not allocate or call into V8. `observe` and `status`
 run synchronously on the isolate thread and must not execute JavaScript,
-allocate V8 objects, block or perform I/O. `kJsDispatchSiteLimit` is 8.
+allocate V8 objects, block or perform I/O. `kJsDispatchSiteLimit` is 256
+(8 before V8 patch `0023-track-every-call-of-up-to-256-sites`). V8 keeps its
+armed sites and per-function anchors in tables sized when a configuration or
+an armed function's bytecode is made, never on a dispatch. Armed functions
+are kept by script and function for as long as their script lives, so a
+parent walk finds every armed frame however many functions are armed. The
+parents of the 256 most recent activations are kept; an older activation
+reports `parent unknown` on its later dispatches, and its first dispatch,
+which a consumer links from, always carries the parent. Activation IDs are
+never reused in an isolate: after 2^30 - 1 of them V8 stops reporting new
+activations and reports the `ids_exhausted` site status once per
+configuration and slot.
 
 ## Renderer admission and loss
 
 Blink admits an observation only from a live local document context and
-attaches its frame identity. The renderer sink rechecks the configuration
-generation, session, VM category and expiry, then claims one of 256 samples
-for the configuration and one of 64 for the site. Records travel through the
-existing 8,192-slot renderer ring and browser bridge.
+attaches its frame identity; a slot past the one-byte field is refused as
+input, never narrowed. The renderer sink rechecks the configuration
+generation, session, VM category and expiry, then records every dispatch with
+the site's next ordinal. There is no per-configuration or per-site count:
+each record is fixed-size work on the main thread, and records travel through
+the existing 8,192-slot renderer ring and browser bridge, which count what
+they cannot hold.
 
 | Loss | Visible as |
 | --- | --- |
-| Configuration budget (256) exhausted | one `gap`, `native_js_dispatch_budget_incomplete`, per configuration |
-| A site budget (64) exhausted | one `gap`, `native_js_dispatch_site_budget_incomplete`, per configuration |
-| Emitter rejected an admitted record | one `gap`, `native_js_dispatch_transport_unavailable`, per configuration |
+| Emitter rejected a record | one `gap`, `native_js_dispatch_transport_unavailable`, per configuration |
 | Record invalid, or context is not a live document | one `gap`, `native_js_dispatch_input_unavailable`, per configuration |
-| Armed after its function was compiled | one `gap`, `native_js_dispatch_site_<n>_compiled_before_arming` (`n` is the slot, 0 to 7), per configuration and slot |
-| Renderer ring full | the ring's existing drop counter |
+| Armed after its function was compiled | one `gap`, `native_js_dispatch_site_<n>_compiled_before_arming` (`n` is the slot, 0 to 255), per configuration and slot |
+| V8 used every activation ID of the isolate | one `gap`, `native_js_dispatch_ids_exhausted`, per configuration |
+| Renderer ring full | the ring's existing drop counter, and a missing site ordinal |
 
-Gaps are `vm` category events whose payload is the reason text.
+Gaps are `vm` category events whose payload is the reason text. Renderers from
+earlier builds also wrote `native_js_dispatch_budget_incomplete` (256 per
+configuration) and `native_js_dispatch_site_budget_incomplete` (64 per site);
+readers still name them.
 
 ## Wire contract
 
@@ -90,15 +107,15 @@ protocol 3. `session_id`, `sequence_number`, `monotonic_time_ns`, `process_id`,
 `navigation_id`, `request_id` and `flags` are zero; `tab_id` may be set by the
 browser bridge. Wide identities are decimal strings in JSON.
 
-The payload is exactly 128 bytes, little-endian, version 1:
+The payload is exactly 128 bytes, little-endian, version 2:
 
 | Offset | Field | Type | Rule |
 | --- | --- | --- | --- |
-| 0 | version (1) | u16 | |
+| 0 | version (2) | u16 | 1 is still read, as below |
 | 2 | size (128) | u16 | |
 | 4 | shape | u8 | 1 switch, 2 indexed call |
 | 5 | selector kind | u8 | 1 integer, 2 non-integer number, 3 string, 4 symbol, 5 undefined, 6 null, 7 boolean, 8 BigInt, 9 object |
-| 6 | site slot | u8 | 0 to 7, index in the site file |
+| 6 | site slot | u8 | 0 to 255, index in the site file |
 | 7 | flags | u8 | bit 0 new activation, bit 1 parent unknown, bit 2 parent search truncated, bit 3 handler span present; other bits zero |
 | 8 | script ID | u32 | nonzero V8 script ID, scoped to the renderer process isolate |
 | 12 | anchor offset | u32 | UTF-16, below source length |
@@ -109,10 +126,13 @@ The payload is exactly 128 bytes, little-endian, version 1:
 | 32 | handler end | u32 | above handler start, with flag bit 3 |
 | 36 | activation ID | u32 | nonzero |
 | 40 | parent activation ID | u32 | 0 when none; nonzero only below the activation ID and without flag bits 1 and 2 |
-| 44 | site sample index | u16 | below 64 |
-| 46 | configuration sample index | u16 | below 256 |
+| 44 | site ordinal | u32 | this dispatch's ordinal among the site's dispatches in its configuration, from 0 |
 | 48 | source SHA-256 | 32 bytes | the armed site's key |
 | 80 | reserved, all zero | 48 bytes | |
+
+Version 1, written by earlier builds, is read with its own rules: site slot 0
+to 7, a u16 site sample index below 64 at 44 and a u16 configuration sample
+index below 256 at 46.
 
 A `switch` record has no handler span. An `indexed call` record has a handler
 span only when the callee is a JavaScript function with a script. Selector

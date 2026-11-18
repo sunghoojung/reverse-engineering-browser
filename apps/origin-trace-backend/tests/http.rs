@@ -10753,7 +10753,8 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         store.display().to_string(),
     ])
     .await;
-    let source = (0..9)
+    // One function past the 256 one capture can arm.
+    let source = (0..257)
         .map(|index| format!("f{index}=function(a){{return a}};"))
         .collect::<String>();
     put_source_facts_artifact(&server, source.as_bytes(), "javascript");
@@ -10789,7 +10790,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     .await);
     assert_eq!(
         (list["count"].as_u64(), list["limit"].as_u64()),
-        (Some(0), Some(8))
+        (Some(0), Some(256))
     );
     assert_eq!(list["session"]["state"], "not_armed");
     assert!(
@@ -10871,7 +10872,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     let bytes =
         assert_contract_response(duplicate, "post", "/api/js-invocation-sites/actions", 409).await;
     assert!(String::from_utf8_lossy(&bytes).contains("already saved"));
-    for &anchor in &anchors[1..8] {
+    for &anchor in &anchors[1..256] {
         let response = action(json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchor,"label":format!("f at {anchor}")})).await;
         assert_eq!(
             set(assert_contract_response(
@@ -10884,13 +10885,13 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             true
         );
     }
-    let ninth = action(
-        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[8]}),
+    let over = action(
+        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[256]}),
     )
     .await;
     let bytes =
-        assert_contract_response(ninth, "post", "/api/js-invocation-sites/actions", 409).await;
-    assert!(String::from_utf8_lossy(&bytes).contains("8 functions"));
+        assert_contract_response(over, "post", "/api/js-invocation-sites/actions", 409).await;
+    assert!(String::from_utf8_lossy(&bytes).contains("256 functions"));
     // A refused resolution saves nothing and returns its reason.
     std::fs::write(
         directory.path().join("reply-1.json"),
@@ -10911,7 +10912,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         ),
         (Some(false), Some("no_function"))
     );
-    assert_eq!(refused["set"]["count"], 8);
+    assert_eq!(refused["set"]["count"], 256);
 
     let sha = entry["site"]["source_sha256"].clone();
     let removed =
@@ -10921,7 +10922,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             assert_contract_response(removed, "post", "/api/js-invocation-sites/actions", 200)
                 .await
         )["set"]["count"],
-        7
+        255
     );
     let missing =
         action(json!({"action":"remove","source_sha256":sha,"anchor_offset":anchors[0]})).await;
@@ -10940,7 +10941,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             cleared["cleared"].as_u64(),
             cleared["set"]["count"].as_u64()
         ),
-        (Some(7), Some(0))
+        (Some(255), Some(0))
     );
     assert!(!store.exists());
 }

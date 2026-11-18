@@ -17,12 +17,16 @@ use std::{
     sync::Mutex,
 };
 
-pub const SITE_LIMIT: usize = 8;
-pub const FILE_LIMIT: usize = 4096;
+/// Every one-byte record slot; the browser and V8 arm this many.
+pub const SITE_LIMIT: usize = 256;
+/// The browser's `kNativeJsInvocationSitesFileLimit`, which holds 256 sites.
+pub const FILE_LIMIT: usize = 128 * 1024;
 pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
-const LABELS_LIMIT: usize = 128 * 1024;
 const LABEL_CHARS: usize = 128;
 const URL_BYTES: usize = 8192;
+/// A sidecar entry for every site, each URL escaped at worst to twice its
+/// bytes.
+const LABELS_LIMIT: usize = SITE_LIMIT * (2 * URL_BYTES + 4096);
 const CONTEXT_CHARS: usize = 60;
 const CANDIDATE_LIMIT: usize = 32;
 const NEXT_CAPTURE: &str = "Tracking starts with the next capture Origin Trace starts, not the open page: a function compiled before its site is armed cannot gain tracking.";
@@ -161,7 +165,7 @@ pub fn site(
     })
 }
 
-/// The exact `native-js-invocation-sites-v1` file for 1 to 8 distinct sites.
+/// The exact `native-js-invocation-sites-v1` file for 1 to 256 distinct sites.
 pub fn sites_file(sites: &[Site]) -> std::result::Result<String, SiteError> {
     if !(1..=SITE_LIMIT).contains(&sites.len()) {
         return Err(SiteError::Count);
@@ -183,8 +187,8 @@ fn keys(object: &Map<String, Value>, expected: &[&str]) -> bool {
     object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
 }
 
-/// Accepts exactly what the browser accepts: canonical text, 1 to 8 distinct
-/// valid `function-entry` sites.
+/// Accepts exactly what the browser accepts: canonical text, 1 to 256
+/// distinct valid `function-entry` sites.
 pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
     if text.is_empty() || text.len() > FILE_LIMIT {
         return None;
@@ -368,7 +372,8 @@ impl Store {
 
     /// Labels first, then the site file, each replaced atomically with
     /// user-only permissions, so the site file never names a site whose label
-    /// was lost. An empty set has no site file: the format needs 1 to 8 sites.
+    /// was lost. An empty set has no site file: the format needs 1 to 256
+    /// sites.
     fn write(&self, saved: &[Saved]) -> Result<()> {
         if saved.is_empty() {
             for path in [&self.path, &self.labels] {
@@ -417,9 +422,9 @@ impl Store {
             ));
         }
         if current.len() >= SITE_LIMIT {
-            return Err(Error::conflict(
-                "The saved set already tracks 8 functions, the most one capture can arm. Remove one first.",
-            )
+            return Err(Error::conflict(format!(
+                "The saved set already tracks {SITE_LIMIT} functions, the most one capture can arm. Remove one first."
+            ))
             .with_code(Code::ResourceLimit));
         }
         current.push(saved);
@@ -1080,7 +1085,7 @@ mod tests {
                 artifact_id: "12".into(),
                 artifact_sha256: "a".repeat(64),
                 byte_offset: index,
-                source_length: 100,
+                source_length: 1000,
                 source_sha256: "b".repeat(64),
             },
             label: format!("f{index}"),
@@ -1096,12 +1101,12 @@ mod tests {
         let path = root.path().join("app/js-invocation-sites-v1.json");
         let store = Store::new(path.clone());
         assert!(store.load().unwrap().is_empty());
-        for index in 0..8 {
+        for index in 0..256 {
             store.add(saved(index)).unwrap();
         }
-        let ninth = store.add(saved(8)).unwrap_err();
-        assert_eq!(ninth.status, 409);
-        assert!(ninth.message.contains("8 functions"));
+        let past = store.add(saved(256)).unwrap_err();
+        assert_eq!(past.status, 409);
+        assert!(past.message.contains("256 functions"));
         let duplicate = store.add(saved(3)).unwrap_err();
         assert_eq!(
             (
@@ -1116,15 +1121,16 @@ mod tests {
         assert_eq!(mode(path.parent().unwrap()), 0o700);
         let text = std::fs::read_to_string(&path).unwrap();
         let sites = parse_sites_file(&text).expect("the browser's exact format");
-        assert_eq!(sites.len(), 8);
+        assert_eq!(sites.len(), 256);
+        assert!(text.len() <= FILE_LIMIT);
         let loaded = store.load().unwrap();
         assert_eq!(loaded[3], saved(3));
-        assert_eq!(store.remove(&"b".repeat(64), 3).unwrap().len(), 7);
+        assert_eq!(store.remove(&"b".repeat(64), 3).unwrap().len(), 255);
         assert_eq!(store.remove(&"b".repeat(64), 3).unwrap_err().status, 404);
         // A lost sidecar never loses a site, only its label.
         std::fs::remove_file(labels_path(&path)).unwrap();
         assert_eq!(store.load().unwrap()[0].label, "Unlabeled function");
-        assert_eq!(store.clear().unwrap(), 7);
+        assert_eq!(store.clear().unwrap(), 255);
         assert!(!path.exists() && !labels_path(&path).exists());
         assert!(store.load().unwrap().is_empty());
         // An invalid site file is reported, and clearing repairs it.

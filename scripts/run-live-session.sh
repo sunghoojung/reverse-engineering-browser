@@ -215,8 +215,8 @@ if [[ -n "${native_js_dispatch_sites}" ]]; then
     fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must name a readable absolute regular file."
   fi
   js_sites_bytes="$(wc -c < "${native_js_dispatch_sites}")"
-  if (( js_sites_bytes == 0 || js_sites_bytes > 4096 )); then
-    fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must contain between 1 and 4096 bytes."
+  if (( js_sites_bytes == 0 || js_sites_bytes > 131072 )); then
+    fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must contain between 1 and 131072 bytes."
   fi
 fi
 if [[ -n "${native_js_invocation_sites}" ]]; then
@@ -228,8 +228,8 @@ if [[ -n "${native_js_invocation_sites}" ]]; then
     fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must name a readable absolute regular file."
   fi
   invocation_sites_bytes="$(wc -c < "${native_js_invocation_sites}")"
-  if (( invocation_sites_bytes == 0 || invocation_sites_bytes > 4096 )); then
-    fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must contain between 1 and 4096 bytes."
+  if (( invocation_sites_bytes == 0 || invocation_sites_bytes > 131072 )); then
+    fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must contain between 1 and 131072 bytes."
   fi
 fi
 if [[ "${native_js_invocation_digests}" != 0 && "${native_js_invocation_digests}" != 1 ]]; then

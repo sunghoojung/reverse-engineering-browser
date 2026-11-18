@@ -235,7 +235,7 @@ struct LiveCaptureContent: Equatable {
 
 // The app's saved native JavaScript invocation sites, which every capture it
 // starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
-// is exactly the browser's native-js-invocation-sites-v1 form with 1 to 8
+// is exactly the browser's native-js-invocation-sites-v1 form with 1 to 256
 // sites; a sidecar the browser never reads keeps each label, source URL and
 // session. The backend's routes add sites from Sources, the start panel lists
 // and removes them, and each capture arms a private copy, because the browser
@@ -271,8 +271,8 @@ struct InvocationSiteSet: Equatable {
     case unreadable
   }
 
-  static let limit = 8
-  static let fileLimit = 4096
+  static let limit = 256
+  static let fileLimit = 128 * 1024
   static let fileName = "js-invocation-sites-v1.json"
 
   // An explicit REB_JS_INVOCATION_SITE_STORE wins, as for the other app stores.
@@ -297,7 +297,7 @@ struct InvocationSiteSet: Equatable {
     return text.utf8.count <= fileLimit ? text : nil
   }
 
-  // Accepts exactly what the browser accepts: the canonical text of 1 to 8
+  // Accepts exactly what the browser accepts: the canonical text of 1 to 256
   // distinct valid sites. Rebuilding the text rejects every other spelling.
   static func parse(_ text: String) -> [Site]? {
     guard !text.isEmpty, text.utf8.count <= fileLimit,

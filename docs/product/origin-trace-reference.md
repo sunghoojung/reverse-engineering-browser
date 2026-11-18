@@ -384,9 +384,9 @@ the same route through its bundled backend.
 
 Pass `--signal-store /path/to/request-signals.jsonl` when the request signal
 profile sidecar is not next to the default demo store. The endpoint selects an
-exact session, request, process, and sequence root, reads at most 10,000
-profiles, rejects records larger than 8 KiB, and supports entity-tag
-revalidation. Observed parent chains and correlated same-context activity stay
+exact session, request, process, and sequence root, finds its profile of any
+age through the store's disk index, rejects records larger than 16 KiB, and
+supports entity-tag revalidation. Observed parent chains and correlated same-context activity stay
 visibly distinct.
 
 Captured JavaScript and WebAssembly artifacts are analyzed automatically on

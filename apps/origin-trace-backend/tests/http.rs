@@ -7391,9 +7391,15 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
             // The backend keeps derived indexes beside the stores on its own
             // timers, so a run can see them appear with no request causing them.
             let name = entry.file_name().to_string_lossy().into_owned();
-            if [".requests-v2", ".events-v1", ".edges-v1", ".lookup-v1"]
-                .iter()
-                .any(|suffix| name.contains(suffix))
+            if [
+                ".requests-v2",
+                ".events-v1",
+                ".edges-v1",
+                ".profiles-v1",
+                ".lookup-v1",
+            ]
+            .iter()
+            .any(|suffix| name.contains(suffix))
             {
                 continue;
             }

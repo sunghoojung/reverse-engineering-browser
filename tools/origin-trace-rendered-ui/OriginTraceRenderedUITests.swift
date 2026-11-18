@@ -3285,17 +3285,18 @@ final class OriginTraceRenderedUITests: XCTestCase {
           return {seed: rows[0]?.innerText ?? '', seedKindWhole: Boolean(kind) && kind.getBoundingClientRect().width > 0 && kind.scrollWidth <= kind.clientWidth + 1,
             sections, groups: rows.filter(row => row.classList.contains('is-group')).length,
             sources: rows.filter(row => row.classList.contains('is-source')).length,
-            sinks: rows.filter(row => row.classList.contains('is-sink')).length,
             marked: document.querySelectorAll('#source-code .source-line[data-value-flow]').length,
             seedMarked: document.querySelectorAll('#source-code .source-line[data-value-flow="seed"]').length}; })()
         """)
       XCTAssertTrue((slice["seed"] as? String ?? "").contains("env.send"), "\(size.name): the seed is the JavaScript crossing: \(slice)")
       XCTAssertEqual(slice["seedKindWhole"] as? Bool, true, "\(size.name): the import name is visible, not cut, at this window size: \(slice)")
+      // The seed is an import call with no result: every value flows into
+      // it and none out, which the status says exactly.
       let sections = slice["sections"] as? [String] ?? []
-      XCTAssertTrue(sections.contains(where: { $0.contains("Comes from") }) && sections.contains(where: { $0.contains("Goes to") }), "\(size.name): both directions are sections: \(sections)")
-      XCTAssertGreaterThanOrEqual(slice["groups"] as? Int ?? 0, 3, "\(size.name): sources and sinks are grouped by kind: \(slice)")
+      XCTAssertTrue(sections.contains(where: { $0.contains("Comes from") }), "\(size.name): the sources section leads: \(sections)")
+      XCTAssertTrue(status.range(of: #"\d+ sources · 0 sinks"#, options: .regularExpression) != nil, "\(size.name): the status counts both directions: \(status)")
+      XCTAssertGreaterThanOrEqual(slice["groups"] as? Int ?? 0, 3, "\(size.name): sources are grouped by kind: \(slice)")
       XCTAssertGreaterThanOrEqual(slice["sources"] as? Int ?? 0, 5, "\(size.name): sources are listed: \(slice)")
-      XCTAssertGreaterThanOrEqual(slice["sinks"] as? Int ?? 0, 1, "\(size.name): sinks are listed: \(slice)")
       XCTAssertGreaterThan(slice["marked"] as? Int ?? 0, 3, "\(size.name): the slice is marked in the listing: \(slice)")
       XCTAssertEqual(slice["seedMarked"] as? Int, 1, "\(size.name): the seed row is marked: \(slice)")
       // A source's path to the seed opens in place, with its connectors named.

@@ -453,6 +453,7 @@ pub fn find_values(body: &[u8], digests: &[Digest32], cancelled: &AtomicBool) ->
 
 /// Whether the exact digested bytes occur in `body`: [`find_values`] for one
 /// digest, never cancelled.
+#[cfg(test)]
 pub fn body_contains(body: &[u8], digest: &Digest32) -> bool {
     find_values(body, std::slice::from_ref(digest), &AtomicBool::new(false))
         .map(|found| found[0])

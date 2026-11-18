@@ -1260,7 +1260,6 @@ async fn call_tool(
     // A paged operation whose result would not be inlined is asked again
     // with its page parameters halved, until the result fits or no page can
     // shrink further; the structural summary is the last resort.
-    let mut call_params = call_params;
     let mut rounds = 0usize;
     let completed = loop {
         let mut completed = match super::exchange(super::ExchangeRequest {

@@ -826,7 +826,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 68);
+    assert_eq!(operation_count, 69);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [

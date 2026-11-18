@@ -44,9 +44,11 @@ out of the asynchronous gap after native activation. Option+Tab is used when Ful
 matching Safari, so every control is a stop. [`probes.js`](probes.js) inspects
 the DOM and computed layout and scrolls targets into view. It skips a row its
 scroller shows by under 2 px, where hit testing snaps onto the next row, but
-still checks a control whose own box is that small;
+still checks a control whose own box is that small. It clips a box only by
+the ancestors that contain it, as CSS paints it, so a popover fixed to the
+window is not judged cut by the short table it opens from;
 [`check-rendered-ui-probes.mjs`](../check-rendered-ui-probes.mjs), part of
-`make lint`, checks both against modelled boxes.
+`make lint`, checks these against modelled boxes.
 
 No smoke flag or test hook exists in the product, and nothing here uses the
 Chrome DevTools Protocol. The evidence is synthetic; this suite does not

@@ -3236,17 +3236,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const toggle = notice.querySelector('#request-not-kept-toggle'), line = notice.querySelector('#request-not-kept-text');
         if (!shown.length) {
           if (line) line.textContent = '';
-          notice.dataset.expanded = 'false';
-          toggle?.setAttribute('aria-expanded', 'false');
+          toggleTrafficNotKept(false);
           return;
         }
         const text = `${shown.map(({entry, count, exact}) => `${entry.label}: ${exact ? '' : 'at least '}`
           + `${count.toLocaleString('en-US')} ${count === 1 ? entry.one : entry.many} ${entry.meaning}`).join(' · ')}.`;
         if (line && line.textContent !== text) line.textContent = text;
         // The short stacked layout shows only this one-line button while a
-        // request is open; it opens the sentence above it (app.css).
+        // request is open; it opens the sentence beside it (placeTrafficNotKept).
         const label = shown.length === 1 ? shown[0].entry.label : 'Bodies not kept';
         if (toggle && toggle.textContent !== label) toggle.textContent = label;
+        placeTrafficNotKept();
       }
 
       function toggleTrafficNotKept(open) {
@@ -3256,6 +3256,26 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const next = open ?? notice.dataset.expanded !== 'true';
         notice.dataset.expanded = String(next);
         toggle.setAttribute('aria-expanded', String(next));
+        placeTrafficNotKept();
+      }
+
+      // The stacked layout's open sentence is fixed to the window (app.css):
+      // above its button when it fits there or that side has more room, below
+      // it otherwise, and always inside the window. Elsewhere the sentence is
+      // in the footer's flow and keeps no placement.
+      function placeTrafficNotKept() {
+        const notice = document.querySelector('#request-not-kept');
+        const toggle = notice?.querySelector('#request-not-kept-toggle');
+        const line = notice?.querySelector('#request-not-kept-text');
+        if (!toggle || !line) return;
+        line.style.left = line.style.top = '';
+        if (notice.dataset.expanded !== 'true' || getComputedStyle(line).position !== 'fixed') return;
+        const anchor = toggle.getBoundingClientRect(), gap = 6, edge = 4;
+        const width = line.offsetWidth, height = line.offsetHeight;
+        const above = anchor.top - gap - edge, below = innerHeight - anchor.bottom - gap - edge;
+        const top = height <= above || above >= below ? anchor.top - gap - height : anchor.bottom + gap;
+        line.style.left = `${Math.max(edge, Math.min(anchor.right - width, innerWidth - width - edge))}px`;
+        line.style.top = `${Math.max(edge, Math.min(top, innerHeight - height - edge))}px`;
       }
 
       // The summary's counts of bodies not kept, whether its event scan
@@ -9566,6 +9586,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       document.addEventListener('pointerdown', event => {
         if (trafficNotKept.dataset.expanded === 'true' && !trafficNotKept.contains(event.target)) toggleTrafficNotKept(false);
       }, true);
+      // Fixed to the window, the open sentence follows its button when the
+      // window resizes or a pane holding the button scrolls.
+      const followTrafficNotKept = () => { if (trafficNotKept.dataset.expanded === 'true') placeTrafficNotKept(); };
+      addEventListener('resize', followTrafficNotKept);
+      document.addEventListener('scroll', followTrafficNotKept, true);
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;
         state.requestType = 'all';

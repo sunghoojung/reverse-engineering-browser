@@ -2178,7 +2178,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
         context["capture_options"],
         json!({"source":"launcher","request_content":false,"content_limits":null,"canvas_images":false,
             "request_stacks":false,"document_start":"not_permitted",
-            "js_invocation":{"state":"not_armed","count":0,"digests":false}})
+            "js_invocation":{"state":"not_armed","live":false,"count":0,"digests":false}})
     );
     let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
     assert_eq!(summary["result"]["isError"], false);

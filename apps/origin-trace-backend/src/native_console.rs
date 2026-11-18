@@ -973,7 +973,9 @@ impl Inner {
         Ok(true)
     }
     async fn action(&self, request: &Value) -> Result<Value> {
-        if request["action"] == "interrupt" {
+        let action = request["action"].as_str().unwrap_or("");
+        // A Stop never waits for the command it stops.
+        if action == "interrupt" {
             return self.interrupt(request).await;
         }
         let _action = self
@@ -983,7 +985,6 @@ impl Inner {
         // Only a read can hold the session here, and briefly: no command runs
         // without this action.
         let mut guard = self.session.lock().await;
-        let action = request["action"].as_str().unwrap_or("");
         if action == "start" {
             // The experiment opt-in is optional so an existing caller that never
             // asks for it keeps working unchanged.

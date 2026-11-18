@@ -20,8 +20,9 @@ connects those existing identifiers without adding capture work to the renderer.
 1. The event broker validates and stores a normalized event.
 2. An optional broker cold-path index emits up to three fixed-size edges for
    that accepted event.
-3. The HTTP or native application handler reads bounded event and edge tail
-   windows and selects one concrete request-start event.
+3. The backend reads the event and edge stores through disk-backed identity
+   indexes and selects one concrete request-start event. The native
+   application answers the same route through its bundled backend.
 4. The query walks backward for at most 32 steps.
 5. The UI renders every step, confidence label, retained-evidence gap, and
    supporting record as text.
@@ -70,9 +71,22 @@ produce an ambiguous result instead of an arbitrary trace.
   trace store is disabled beyond one cold-path branch.
 - Renderer probes, the shared-memory queue, and browser-process transport are
   unchanged.
-- HTTP and native readers retain at most 10,000 events, 30,000 edges, and
-  10,000 artifact records for one query. Event records are capped at 4 KiB,
-  edge records at 2 KiB, and artifact records at 8 KiB.
+- A trace reads the whole session. The backend keeps SQLite sidecar indexes
+  beside the stores (`events.jsonl.events-v1`, `<trace store>.edges-v1`, and
+  the artifact manifest's `.lookup-v1`) that map an event identity, a request
+  ID, a stream's settle records and an edge's source to record byte ranges, and
+  count each stream's queue-drop markers. A background task folds appended
+  records every second, so a trace reads a handful of records however long the
+  session is, and memory does not grow with it. Indexes are rebuilt when a store
+  is rewritten or replaced, and removed when capture is cleared.
+- A trace waits at most five seconds for the indexes to reach the end of the
+  stores. A store still being indexed past that returns `503` with how far
+  indexing got, never a trace over part of the session. An unterminated last
+  record that parses as a whole object is read as written.
+- Event and edge records are capped at 4 KiB, and artifact records at 8 KiB.
+  An oversized, malformed or duplicate record anywhere in a store refuses every
+  trace over that store until it is cleared: a trace never walks past damaged
+  evidence.
 - Traversal stops after 32 steps and reports `step_limit`. A time-adjacent row
   may occupy the last step without the limit being the reason traversal stopped.
 - Timestamp proximity is bounded to one millisecond, requires a different
@@ -88,15 +102,15 @@ produce an ambiguous result instead of an arbitrary trace.
 - Native queue-drop markers share their last retained event's reference. They
   are validated separately and never become request roots or predecessor steps;
   duplicate addressable events still fail closed. A trace reports one
-  `capture_gap` when its retained session/process streams contain such markers,
-  including markers whose anchor is outside the event window. This is a stream
+  `capture_gap` when its session/process streams contain such markers anywhere
+  in the store. This is a stream
   coverage warning, not proof of a missing predecessor or value flow. Repeated
   markers remain counted as marker records, not a unique lost-event total.
   Coverage compares recorded links with named gaps, including this warning.
 - A named capture-limit gap, whose payload is a reason such as
   `native_wasm_dispatch_budget_incomplete` rather than a drop count, takes its
   own sequence slot and is a sampling limit of its own category. Like Traffic,
-  a request trace neither counts it as a `capture_gap` nor refuses the window
+  a request trace neither counts it as a `capture_gap` nor refuses the store
   over it. A gap whose payload is neither a count nor a reason identifier is
   still malformed. Wasm executions past that cap are separate
   `wasm_dispatch_overflow` and `wasm_indirect_overflow` event-store records.

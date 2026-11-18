@@ -83,10 +83,7 @@ pub fn requested_sections(raw: &str) -> Result<BTreeSet<u8>> {
 
 pub fn load(root: &Path, id: &str, sections: Option<&BTreeSet<u8>>) -> Result<Value> {
     validation::canonical(&json!(id), 64, true, "Artifact ID")?;
-    let artifact = evidence::artifacts(root, 10000)?
-        .into_iter()
-        .find(|a| a["artifact_id"] == id)
-        .ok_or_else(|| Error::new(404, "Artifact not found"))?;
+    let artifact = evidence::find_artifact(root, id)?;
     if artifact["kind"] != "wasm" {
         return Err(Error::bad("Artifact is not WebAssembly"));
     }

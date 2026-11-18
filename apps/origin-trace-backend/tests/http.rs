@@ -7273,12 +7273,12 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
     ) {
         for entry in std::fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
-            // The backend rewrites its derived request index on its own 30-second
-            // timer, so a slow run can see it appear with no request causing it.
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("events.jsonl.requests-v1")
+            // The backend keeps derived indexes beside the stores on its own
+            // timers, so a run can see them appear with no request causing them.
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if [".requests-v1", ".events-v1", ".edges-v1", ".lookup-v1"]
+                .iter()
+                .any(|suffix| name.contains(suffix))
             {
                 continue;
             }
@@ -8792,7 +8792,7 @@ async fn float32_http_cli_discovery_parity_and_no_helpers() {
     }
 }
 #[tokio::test]
-async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and_scan_limits() {
+async fn float32_verified_artifact_rejects_corruption_stale_identity_and_missing() {
     const ROUTE: &str = "/api/float32/compare";
     let server = Server::start().await;
     let bytes = [0, 0, 128, 63, 0, 0, 0, 128, 1, 0, 192, 127, 0, 0, 128, 127];
@@ -8842,36 +8842,33 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and
         &format!("artifacts/{}", artifact["content_path"].as_str().unwrap()),
         &bytes,
     );
-    // Blank lines also consume the explicit line/work budget; no matching prefix.
-    server.file(
-        "artifacts/manifest.jsonl",
-        format!("{artifact}\n{}", "\n".repeat(8192)).as_bytes(),
-    );
-    let error: Value = serde_json::from_slice(
-        &assert_contract_response(
+    // The manifest is read whole through its index: an artifact is found
+    // however many records or blank lines follow it.
+    let mut later = artifact.clone();
+    let lines = (8..20_008)
+        .map(|id| {
+            later["artifact_id"] = json!(id.to_string());
+            later.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for manifest in [
+        format!("{artifact}\n{}", "\n".repeat(8192)),
+        format!("{artifact}\n{}", (" ".repeat(8191) + "\n").repeat(1024)),
+        format!("{artifact}\n{lines}\n"),
+    ] {
+        server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+        assert_contract_response(
             server.action(ROUTE, request.clone()).await,
             "post",
             ROUTE,
-            413,
+            200,
         )
-        .await,
-    )
-    .unwrap();
-    assert_eq!(error["code"], "resource_limit");
-    // The new opt-in scan cap must not silently narrow existing readers.
-    let old_reader = server.get("/api/artifacts/7/content").await;
-    assert_eq!(old_reader.status(), 200);
-    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
-    // Byte scan exhaustion is independent of the line cap and follows an early match.
-    server.file(
-        "artifacts/manifest.jsonl",
-        format!("{artifact}\n{}", (" ".repeat(8191) + "\n").repeat(1024)).as_bytes(),
-    );
-    let bounded = server.action(ROUTE, request.clone()).await;
-    assert_contract_response(bounded, "post", ROUTE, 413).await;
-    let old_reader = server.get("/api/artifacts/7/content").await;
-    assert_eq!(old_reader.status(), 200);
-    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
+        .await;
+        let reader = server.get("/api/artifacts/7/content").await;
+        assert_eq!(reader.status(), 200);
+        assert_eq!(reader.bytes().await.unwrap().as_ref(), &bytes);
+    }
     server.file(
         "artifacts/manifest.jsonl",
         format!("{artifact}\n{artifact}\n").as_bytes(),

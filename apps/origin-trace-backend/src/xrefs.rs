@@ -21,7 +21,7 @@ use regex::bytes::Regex;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -681,7 +681,7 @@ enum Plan {
         category: String,
         event_type: String,
         payload: Value,
-        script_names: HashMap<String, String>,
+        script_names: ScriptNames,
     },
     Artifact {
         selection: Value,
@@ -735,20 +735,38 @@ fn resolved(kind: &str, label: Option<String>) -> Value {
     json!({"kind":kind,"status":"resolved","label":label})
 }
 
-fn artifact_index(root: &Path, session: u64) -> (HashMap<String, Value>, Option<String>) {
-    match evidence::artifacts(root, 10000) {
-        Ok(records) => (
-            records
-                .into_iter()
-                .filter(|record| same_session(record, session))
-                .map(|record| (text_id(&record["artifact_id"]), record))
-                .collect(),
-            None,
-        ),
-        Err(_) => (
-            HashMap::new(),
-            Some("The artifact manifest could not be read.".to_owned()),
-        ),
+/// The manifest record of one artifact of `session`, from the index of the
+/// whole manifest. None when it is not retained for that session; a manifest
+/// that cannot be read is an error, never a missing artifact.
+fn session_artifact(root: &Path, session: u64, artifact: &str) -> Result<Option<Value>> {
+    match evidence::find_artifact(root, artifact) {
+        Ok(record) => Ok(Some(record).filter(|record| same_session(record, session))),
+        Err(error) if error.status == 404 => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Names of the scripts matching API calls ran in, looked up by artifact ID
+/// as the rows that name them are read, so no manifest window bounds them. A
+/// name is a label: one that cannot be read leaves the row its artifact ID.
+struct ScriptNames {
+    root: PathBuf,
+    session: u64,
+    names: Mutex<HashMap<String, Option<String>>>,
+}
+impl ScriptNames {
+    fn get(&self, artifact: &str) -> Option<String> {
+        self.names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(artifact.to_owned())
+            .or_insert_with(|| {
+                session_artifact(&self.root, self.session, artifact)
+                    .ok()
+                    .flatten()
+                    .map(|record| artifact_ref(&record).name)
+            })
+            .clone()
     }
 }
 
@@ -849,11 +867,11 @@ fn build_plan(
                         category: root["category"].as_str().unwrap_or("").to_owned(),
                         event_type: root["type"].as_str().unwrap_or("").to_owned(),
                         payload,
-                        script_names: artifact_index(&stores.artifacts, *session)
-                            .0
-                            .iter()
-                            .map(|(id, record)| (id.clone(), artifact_ref(record).name))
-                            .collect(),
+                        script_names: ScriptNames {
+                            root: stores.artifacts.clone(),
+                            session: *session,
+                            names: Default::default(),
+                        },
                     }
                 }
                 [_] => unresolved(
@@ -889,8 +907,8 @@ fn artifact_plan(
     artifact: u64,
     byte_offset: Option<u32>,
 ) -> Result<Plan> {
-    let (index, _) = artifact_index(&stores.artifacts, session);
-    let Some(record) = index.get(&artifact.to_string()) else {
+    let artifact_text = artifact.to_string();
+    let Some(record) = &session_artifact(&stores.artifacts, session, &artifact_text)? else {
         return Ok(unresolved(
             "artifact",
             "not-retained",
@@ -900,19 +918,18 @@ fn artifact_plan(
     let info = artifact_ref(record);
     let creator_id = unsigned(&record["creator_event_id"]);
     let parent_id = text_id(&record["parent_artifact_id"]);
-    let parent = (parent_id != "0")
-        .then(|| {
-            index
-                .get(&parent_id)
-                .map(|parent| (parent_id.clone(), artifact_ref(parent)))
-        })
-        .flatten();
-    let artifact_text = artifact.to_string();
-    let mut children: Vec<_> = index
-        .iter()
-        .filter(|(_, candidate)| text_id(&candidate["parent_artifact_id"]) == artifact_text)
-        .map(|(id, candidate)| (id.clone(), artifact_ref(candidate)))
-        .collect();
+    let parent = match parent_id.as_str() {
+        "0" => None,
+        _ => session_artifact(&stores.artifacts, session, &parent_id)?
+            .map(|parent| (parent_id.clone(), artifact_ref(&parent))),
+    };
+    let deadline = std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE;
+    let mut children: Vec<_> =
+        crate::artifact_lookup::children(&stores.artifacts, artifact, deadline)?
+            .iter()
+            .filter(|candidate| same_session(candidate, session))
+            .map(|candidate| (text_id(&candidate["artifact_id"]), artifact_ref(candidate)))
+            .collect();
     children.sort_by(|(a, _), (b, _)| {
         a.parse::<u64>()
             .unwrap_or(0)
@@ -1342,7 +1359,6 @@ fn classify_event(
                 } else {
                     script_names
                         .get(&artifact)
-                        .cloned()
                         .unwrap_or_else(|| format!("artifact {artifact}"))
                 };
                 let detail = if artifact == "0" {

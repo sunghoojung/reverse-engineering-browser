@@ -5,7 +5,7 @@ import Foundation
 final class StoredEvidenceBackend {
   static let getRoutes: Set<String> = [
     "/api/requests", "/api/request-headers", "/api/request-cookies", "/api/cookie-provenance",
-    "/api/request-stack", "/api/native-debugger", "/api/source-format",
+    "/api/request-stack", "/api/native-debugger", "/api/source-format", "/api/origin-trace",
   ]
   static let postRoutes: Set<String> = ["/api/native-debugger/actions"]
   static let maximumBodyBytes = 64 * 1024

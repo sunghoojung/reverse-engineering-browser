@@ -114,12 +114,7 @@ pub fn write(root: &Path, input: &Path, output: &Path) -> Result<usize> {
     ] {
         nonzero_id(value)?;
     }
-    let artifact = evidence::find_artifact_bounded(
-        root,
-        &document.interpreter_artifact_id,
-        10000,
-        64 * 1024 * 1024,
-    )?;
+    let artifact = evidence::find_artifact(root, &document.interpreter_artifact_id)?;
     if artifact["kind"] != "wasm"
         || artifact["sha256"] != document.source_artifact_sha256
         || artifact["session_id"] != document.session_id

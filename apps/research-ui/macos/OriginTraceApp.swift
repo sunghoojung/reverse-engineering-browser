@@ -309,8 +309,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         return
       case "/api/events":
         response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
-      case "/api/origin-trace":
-        response = (try originTraceResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/request-signal-profile":
         let profileResponse = try requestSignalProfileResponse(
           for: requestURL,
@@ -2273,66 +2271,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return try JSONSerialization.data(withJSONObject: document, options: [])
   }
 
-  private func originTraceResponse(for requestURL: URL) throws -> Data {
-    let items = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
-    for name in ["request_id", "session_id", "root_process_id", "root_sequence_number"] {
-      let matches = items.filter { $0.name == name }
-      guard matches.count <= 1, matches.allSatisfy({ $0.value != nil }) else {
-        throw artifactError("Specify \(name) only once with a value")
-      }
-    }
-    let sessionID = items.first(where: { $0.name == "session_id" })?.value
-    if let sessionID, !isCanonicalUInt64(sessionID, nonzero: true) {
-      throw artifactError("Session ID must be a canonical nonzero unsigned 64-bit integer")
-    }
-    guard let requestID = items.first(where: { $0.name == "request_id" })?.value,
-      requestID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
-      UInt64(requestID) != nil
-    else {
-      throw artifactError("Request ID must be a canonical unsigned 64-bit integer")
-    }
-    let processText = items.first(where: { $0.name == "root_process_id" })?.value
-    let rootSequence = items.first(where: { $0.name == "root_sequence_number" })?.value
-    let rootProcessID: UInt32?
-    if let processText {
-      guard processText.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
-        let value = UInt32(processText)
-      else {
-        throw artifactError("Root process ID must be a canonical unsigned 32-bit integer")
-      }
-      rootProcessID = value
-    } else {
-      rootProcessID = nil
-    }
-
-    let events = try recentJSONObjects(
-      at: eventStoreURL,
-      limit: 10_000,
-      maxRecordBytes: 4 * 1024,
-      recordName: "event"
-    )
-    let edges = try recentJSONObjects(
-      at: traceStoreURL,
-      limit: 30_000,
-      maxRecordBytes: 2 * 1024,
-      recordName: "origin trace edge"
-    )
-    let artifacts = try recentArtifactEntries()
-    let document = try OriginTraceDocumentBuilder.build(
-      events: events,
-      edges: edges,
-      artifacts: artifacts,
-      requestID: requestID,
-      sessionID: sessionID,
-      rootProcessID: rootProcessID,
-      rootSequenceNumber: rootSequence,
-      requestBodies: OriginTraceDocumentBuilder.retainedRequestBodies(
-        events: events, artifacts: artifacts, requestID: requestID,
-        read: verifiedRequestBodyBytes)
-    )
-    return try JSONSerialization.data(withJSONObject: document, options: [])
-  }
-
   private func requestSignalProfileResponse(
     for requestURL: URL,
     ifNoneMatch: String?
@@ -2516,40 +2454,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       !parentDepthLimited || parsedParentDepth == 32
     else { return false }
     return true
-  }
-
-  // The verified bytes of a retained request-body artifact, at most 1 MiB, or
-  // nil: the manifest's size and SHA-256 must both match the stored file.
-  private func verifiedRequestBodyBytes(_ artifact: [String: Any]) -> [UInt8]? {
-    guard let relativePath = artifact["content_path"] as? String,
-      let byteSize = artifact["byte_size"] as? Int, byteSize >= 0, byteSize <= 1 << 20,
-      let sha256 = artifact["sha256"] as? String
-    else { return nil }
-    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
-    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath()
-      .standardizedFileURL
-    guard contentURL.path.hasPrefix(root.path + "/"),
-      let data = try? Data(contentsOf: contentURL), data.count == byteSize,
-      SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256
-    else { return nil }
-    return [UInt8](data)
-  }
-
-  private func recentArtifactEntries() throws -> [[String: Any]] {
-    let artifacts = try recentJSONObjects(
-      at: artifactStoreURL.appendingPathComponent("manifest.jsonl"),
-      limit: 10_000,
-      maxRecordBytes: 8 * 1024,
-      recordName: "artifact"
-    )
-    guard artifacts.allSatisfy(isValidArtifact) else {
-      throw artifactError("The artifact manifest contains a malformed record")
-    }
-    let identifiers = artifacts.compactMap { $0["artifact_id"] as? String }
-    guard identifiers.count == artifacts.count, Set(identifiers).count == identifiers.count else {
-      throw artifactError("The artifact manifest contains a duplicate artifact ID")
-    }
-    return artifacts
   }
 
   private func recentJSONObjects(

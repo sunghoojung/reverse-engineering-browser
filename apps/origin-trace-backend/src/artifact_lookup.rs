@@ -1,260 +1,303 @@
-//! Byte-verified metadata lookup acceleration; content integrity is never cached.
+//! The artifact manifest indexed by artifact ID on disk (`index_db`), so a
+//! record of any age is found in a manifest of any length. Every appended
+//! row is validated once as it is indexed; a malformed, oversized or
+//! duplicate row fails every lookup until the manifest is rewritten, as a
+//! complete scan of it would. Content integrity is never cached: a caller
+//! verifies the bytes a record names when it reads them.
 use crate::{
     error::{Error, Result},
     evidence,
+    index_db::{self, Indexed, Position, SqlResult},
 };
+use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
-    fs::{File, Metadata},
+    fs::File,
     io::{Read, Seek, SeekFrom},
-    path::Path,
-    time::Instant,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
-// The largest manifest a live session reaches at default budgets, so that path
-// stays indexed: scripts/run-live-session.sh derives 262,144 artifacts and a
-// 256 MiB manifest from the 1 GiB store a content capture gets by default.
-const MAX_BYTES: usize = 256 * 1024 * 1024;
-const MAX_RECORDS: usize = 262_144;
+pub const SUFFIX: &str = ".lookup-v1";
+const FORMAT: &str = "reb-artifact-lookup-v1";
+const SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, parent INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS artifacts_parent ON artifacts(parent) WHERE parent != 0;
+    CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0), message TEXT NOT NULL);";
+/// A manifest line, its newline included, as the receiver writes it.
+pub const RECORD_BYTES: usize = 8192;
+/// Bytes folded per call, so a lookup never holds the index for long.
+const FOLD_BYTES: u64 = 64 * 1024 * 1024;
+/// How long one lookup may spend bringing the index up to the manifest.
+pub const LOOKUP_DEADLINE: Duration = Duration::from_secs(5);
+/// Open indexes kept between lookups. A cache of connections, not of rows:
+/// a root dropped from it is reopened from disk when it is next used.
+const OPEN_ROOTS: usize = 8;
 
-#[derive(PartialEq, Eq)]
-struct Stamp {
-    length: u64,
-    modified: Option<std::time::SystemTime>,
-    #[cfg(unix)]
-    identity: (u64, u64, i64, i64),
-    #[cfg(not(unix))]
-    created: Option<std::time::SystemTime>,
+pub struct ArtifactIndex {
+    index: Indexed,
 }
-impl Stamp {
-    fn of(metadata: &Metadata) -> Self {
-        Self {
-            length: metadata.len(),
-            modified: metadata.modified().ok(),
-            #[cfg(unix)]
-            identity: {
-                use std::os::unix::fs::MetadataExt;
-                (
-                    metadata.dev(),
-                    metadata.ino(),
-                    metadata.ctime(),
-                    metadata.ctime_nsec(),
-                )
-            },
-            #[cfg(not(unix))]
-            created: metadata.created().ok(),
-        }
-    }
-    fn same_file(&self, other: &Self) -> bool {
-        #[cfg(unix)]
-        {
-            self.identity.0 == other.identity.0 && self.identity.1 == other.identity.1
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = other;
-            false
-        }
-    }
-    fn verify(&self, path: &Path, file: &File) -> Result<()> {
-        let current = path.symlink_metadata()?;
-        if !current.is_file() || *self != Self::of(&current) || *self != Self::of(&file.metadata()?)
-        {
-            return Err(Error::new(500, "Artifact manifest changed during lookup"));
-        }
-        Ok(())
-    }
+
+type Shared = Arc<Mutex<ArtifactIndex>>;
+/// Open indexes by manifest path, least recently used first.
+static OPEN: LazyLock<Mutex<Vec<(PathBuf, Shared)>>> = LazyLock::new(Mutex::default);
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
-struct Snapshot {
-    stamp: Stamp,
-    bytes: Vec<u8>,
-    // Canonical unsigned IDs have one spelling. Offsets refer only to these bytes.
-    offsets: HashMap<u64, (usize, usize)>,
-}
-pub struct ArtifactLookupCache {
-    snapshot: Option<Snapshot>,
-    // A false positive only forgoes indexing: complete streaming validation still
-    // runs. Keep one hint, and recover caching after a shrink or replacement.
-    noncacheable: Option<Stamp>,
-    maximum_bytes: usize,
-    maximum_records: usize,
-    #[cfg(test)]
-    parsed_records: usize,
-    #[cfg(test)]
-    read_bytes: usize,
-}
-impl Default for ArtifactLookupCache {
-    fn default() -> Self {
-        Self {
-            snapshot: None,
-            noncacheable: None,
-            maximum_bytes: MAX_BYTES,
-            maximum_records: MAX_RECORDS,
-            #[cfg(test)]
-            parsed_records: 0,
-            #[cfg(test)]
-            read_bytes: 0,
-        }
+
+/// The index of the manifest under `root`, shared by every caller in the
+/// process so it is folded once.
+fn index(root: &Path) -> Shared {
+    let manifest = root.join("manifest.jsonl");
+    let mut open = lock(&OPEN);
+    if let Some(at) = open.iter().position(|(path, _)| *path == manifest) {
+        let entry = open.remove(at);
+        let index = entry.1.clone();
+        open.push(entry);
+        return index;
     }
-}
-impl ArtifactLookupCache {
-    #[cfg(test)]
-    fn find(&mut self, root: &Path, id: &str) -> Result<Value> {
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        match self.find_until(root, id, deadline)? {
-            Some(value) => Ok(value),
-            None => evidence::find_artifact_until(root, id, deadline),
-        }
+    let index = Arc::new(Mutex::new(ArtifactIndex {
+        index: Indexed::new(&manifest, SUFFIX, FORMAT, SCHEMA),
+    }));
+    open.push((manifest, index.clone()));
+    if open.len() > OPEN_ROOTS {
+        open.remove(0);
     }
-    /// None requests complete streaming validation after releasing the cache lock.
-    pub fn find_until(
-        &mut self,
-        root: &Path,
-        id: &str,
-        deadline: Instant,
-    ) -> Result<Option<Value>> {
-        // Failures discard reuse authority; a partial index must never hide a bad row.
-        let previous = self.snapshot.take();
-        #[cfg(test)]
-        {
-            self.parsed_records = 0;
-            self.read_bytes = 0;
-        }
-        let path = root.join("manifest.jsonl");
-        let mut file = match evidence::regular_file(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
-            Err(error) => return Err(error.into()),
-        };
-        let stamp = Stamp::of(&file.metadata()?);
-        check_deadline(deadline)?;
-        self.noncacheable = self
-            .noncacheable
-            .take()
-            .filter(|hint| hint.same_file(&stamp) && stamp.length >= hint.length);
-        if stamp.length > self.maximum_bytes as u64 || self.noncacheable.is_some() {
-            drop(previous);
-            return Ok(None);
-        }
-        // Reuse the validated prefix in place rather than rereading it into a
-        // second buffer: at the record cap two manifests would be 512 MiB.
-        let reuse = previous.filter(|old| {
-            old.stamp.same_file(&stamp)
-                && old.bytes.len() as u64 <= stamp.length
-                && (old.bytes.is_empty() || old.bytes.last() == Some(&b'\n'))
-        });
-        let (mut bytes, mut offsets) = match reuse {
-            Some(old) if prefix_matches(&mut file, &old.bytes, deadline)? => {
-                (old.bytes, old.offsets)
-            }
-            _ => (Vec::new(), HashMap::new()),
-        };
-        let mut position = bytes.len();
-        bytes.reserve_exact(stamp.length as usize - position);
-        bytes.resize(stamp.length as usize, 0);
-        file.seek(SeekFrom::Start(position as u64))?;
-        file.read_exact(&mut bytes[position..])?;
-        #[cfg(test)]
-        {
-            self.read_bytes = bytes.len();
-        }
-        stamp.verify(&path, &file)?;
-        check_deadline(deadline)?;
-        // Decide fallback before parsing: a large noncacheable manifest must not
-        // validate its first 100k records twice or monopolize the cache mutex.
-        let remaining = self.maximum_records.saturating_sub(offsets.len());
-        if bytes[position..]
-            .split_inclusive(|byte| *byte == b'\n')
-            .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
-            .take(remaining + 1)
-            .count()
-            > remaining
-        {
-            self.noncacheable = Some(stamp);
-            return Ok(None);
-        }
-        for line in bytes[position..].split_inclusive(|byte| *byte == b'\n') {
-            check_deadline(deadline)?;
-            let start = position;
-            position += line.len();
-            if line.len() > 8192 {
-                return Err(Error::new(
-                    500,
-                    "The artifact manifest contains an oversized record",
-                ));
-            }
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            let value = parse(line)?;
-            let key = value["artifact_id"]
-                .as_str()
-                .unwrap()
-                .parse::<u64>()
-                .unwrap();
-            if offsets.insert(key, (start, position)).is_some() {
-                return Err(Error::new(
-                    500,
-                    "The artifact manifest contains a duplicate artifact ID",
-                ));
-            }
-            #[cfg(test)]
-            {
-                self.parsed_records += 1;
-            }
-        }
-        check_deadline(deadline)?;
-        stamp.verify(&path, &file)?;
-        // Parse just the selected row into the existing public representation.
-        let selected = id
-            .parse::<u64>()
-            .ok()
-            .filter(|key| key.to_string() == id)
-            .and_then(|key| offsets.get(&key))
-            .map(|&(start, end)| parse(&bytes[start..end]))
-            .transpose()?;
-        self.snapshot = Some(Snapshot {
-            stamp,
-            bytes,
-            offsets,
-        });
-        selected.map(Some).ok_or_else(not_found)
-    }
+    index
 }
-/// Whether the file begins with exactly `expected`, read in fixed chunks.
-fn prefix_matches(file: &mut File, expected: &[u8], deadline: Instant) -> Result<bool> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut buffer = [0u8; 64 * 1024];
-    let mut position = 0;
-    while position < expected.len() {
-        check_deadline(deadline)?;
-        let size = (expected.len() - position).min(buffer.len());
-        file.read_exact(&mut buffer[..size])?;
-        if buffer[..size] != expected[position..position + size] {
-            return Ok(false);
-        }
-        position += size;
-    }
-    Ok(true)
+
+/// The validated manifest record of `id`, from the whole manifest.
+pub fn find(root: &Path, id: &str, deadline: Instant) -> Result<Value> {
+    let index = index(root);
+    let mut index = lock(&index);
+    index.find(id, deadline)
 }
+
+/// Brings the index of `root` up to its manifest within `deadline`, for the
+/// backend's background indexer. Returns whether it is caught up.
+pub fn catch_up(root: &Path, deadline: Instant) -> Result<bool> {
+    let index = index(root);
+    let mut index = lock(&index);
+    let Some((mut file, position)) = index.open()? else {
+        return Ok(true);
+    };
+    let position = index.fold(&mut file, position, deadline)?;
+    Ok(position.caught_up(RECORD_BYTES as u64))
+}
+
+/// The validated records whose parent is `parent`, in manifest order.
+pub fn children(root: &Path, parent: u64, deadline: Instant) -> Result<Vec<Value>> {
+    let index = index(root);
+    let mut index = lock(&index);
+    index.children(parent, deadline)
+}
+
+fn not_found() -> Error {
+    Error::new(404, "Artifact not found")
+}
+
 fn parse(bytes: &[u8]) -> Result<Value> {
     let mut value = serde_json::from_slice(bytes)
         .map_err(|_| Error::new(500, "The artifact manifest contains malformed JSON"))?;
     evidence::validate_artifact(&mut value)?;
     Ok(value)
 }
-fn check_deadline(deadline: Instant) -> Result<()> {
-    if Instant::now() >= deadline {
-        return Err(Error::new(
-            408,
-            "Artifact manifest read exceeded its deadline",
-        ));
-    }
-    Ok(())
+
+fn read(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>> {
+    let mut bytes = vec![0; (end - start) as usize];
+    file.seek(SeekFrom::Start(start))?;
+    file.read_exact(&mut bytes)?;
+    Ok(bytes)
 }
-fn not_found() -> Error {
-    Error::new(404, "Artifact not found")
+
+impl ArtifactIndex {
+    fn open(&mut self) -> Result<Option<(File, Position)>> {
+        self.index.open()
+    }
+
+    fn fold(
+        &mut self,
+        file: &mut File,
+        mut position: Position,
+        deadline: Instant,
+    ) -> Result<Position> {
+        let sidecar = self.index.sidecar();
+        while !position.caught_up(0) {
+            let before = position.indexed_to;
+            let oversized = "The artifact manifest contains an oversized record";
+            position = sidecar.fold(file, &position, FOLD_BYTES, deadline, RECORD_BYTES, oversized, |tx, line, start, end| {
+                if line.len() + 1 > RECORD_BYTES {
+                    return damage(tx, oversized);
+                }
+                if line.iter().all(u8::is_ascii_whitespace) {
+                    return Ok(());
+                }
+                let value = match parse(line) {
+                    Ok(value) => value,
+                    Err(error) => return damage(tx, &error.message),
+                };
+                let parent = value["parent_artifact_id"].as_str().unwrap().parse::<u64>().unwrap();
+                let inserted = tx
+                    .execute(
+                        "INSERT OR IGNORE INTO artifacts(id, start, end, parent) VALUES (?1, ?2, ?3, ?4)",
+                        params![index_db::key(artifact_key(&value)), start as i64, end as i64, index_db::key(parent)],
+                    )
+                    .sql()?;
+                if inserted == 0 {
+                    return damage(tx, "The artifact manifest contains a duplicate artifact ID");
+                }
+                Ok(())
+            })?;
+            if position.indexed_to == before || Instant::now() >= deadline {
+                break;
+            }
+        }
+        Ok(position)
+    }
+
+    /// The index caught up with every complete line and the manifest's last
+    /// record if it still lacks its newline. An answer stands for the whole
+    /// manifest, so a bad row anywhere in it fails every lookup.
+    fn ready(&mut self, deadline: Instant) -> Result<Option<Ready>> {
+        let Some((mut file, position)) = self.open()? else {
+            return Ok(None);
+        };
+        let position = self.fold(&mut file, position, deadline)?;
+        let behind = || Error::new(408, "Artifact manifest read exceeded its deadline");
+        if position.file_end - position.indexed_to > RECORD_BYTES as u64 {
+            return Err(behind());
+        }
+        let bytes = read(&mut file, position.indexed_to, position.file_end)?;
+        if bytes.contains(&b'\n') {
+            return Err(behind());
+        }
+        let connection = self.index.sidecar().connection();
+        if let Some(message) = connection
+            .query_row("SELECT message FROM damage WHERE id = 0", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .sql()?
+        {
+            return Err(Error::new(500, message));
+        }
+        let unterminated = if bytes.iter().all(u8::is_ascii_whitespace) {
+            None
+        } else {
+            let value = parse(&bytes)?;
+            let key = artifact_key(&value);
+            let duplicate: Option<i64> = connection
+                .query_row(
+                    "SELECT id FROM artifacts WHERE id = ?1",
+                    [index_db::key(key)],
+                    |row| row.get(0),
+                )
+                .optional()
+                .sql()?;
+            if duplicate.is_some() {
+                return Err(Error::new(
+                    500,
+                    "The artifact manifest contains a duplicate artifact ID",
+                ));
+            }
+            Some(value)
+        };
+        Ok(Some(Ready { file, unterminated }))
+    }
+
+    fn row(&self, file: &mut File, start: i64, end: i64) -> Result<Value> {
+        parse(&index_db::record(file, start, end)?)
+    }
+
+    fn find(&mut self, id: &str, deadline: Instant) -> Result<Value> {
+        let Some(mut ready) = self.ready(deadline)? else {
+            return Err(not_found());
+        };
+        let Some(key) = id.parse::<u64>().ok().filter(|key| key.to_string() == id) else {
+            return Err(not_found());
+        };
+        if let Some(value) = ready
+            .unterminated
+            .take()
+            .filter(|value| artifact_key(value) == key)
+        {
+            return Ok(value);
+        }
+        let range: Option<(i64, i64)> = self
+            .index
+            .sidecar()
+            .connection()
+            .query_row(
+                "SELECT start, end FROM artifacts WHERE id = ?1",
+                [index_db::key(key)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .sql()?;
+        let (start, end) = range.ok_or_else(not_found)?;
+        let value = self.row(&mut ready.file, start, end)?;
+        // The anchors cover only the prefix ends; the row itself must still say so.
+        if value["artifact_id"] != id {
+            return Err(Error::new(500, "Artifact manifest changed during lookup"));
+        }
+        Ok(value)
+    }
+
+    fn children(&mut self, parent: u64, deadline: Instant) -> Result<Vec<Value>> {
+        let Some(mut ready) = self.ready(deadline)? else {
+            return Ok(Vec::new());
+        };
+        let ranges: Vec<(i64, i64)> = self
+            .index
+            .sidecar()
+            .connection()
+            // `parent != 0` lets SQLite use the partial index, which a bound
+            // parameter alone never implies.
+            .prepare_cached(
+                "SELECT start, end FROM artifacts WHERE parent = ?1 AND parent != 0 ORDER BY start",
+            )
+            .sql()?
+            .query_map([index_db::key(parent)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .sql()?
+            .collect::<rusqlite::Result<_>>()
+            .sql()?;
+        let mut children = ranges
+            .into_iter()
+            .map(|(start, end)| self.row(&mut ready.file, start, end))
+            .collect::<Result<Vec<_>>>()?;
+        children.extend(ready.unterminated.filter(|value| {
+            value["parent_artifact_id"].as_str() == Some(parent.to_string().as_str())
+        }));
+        Ok(children)
+    }
+}
+
+struct Ready {
+    file: File,
+    /// The manifest's last record when it still lacks its newline.
+    unterminated: Option<Value>,
+}
+
+/// A validated record's canonical decimal artifact ID.
+fn artifact_key(value: &Value) -> u64 {
+    value["artifact_id"].as_str().unwrap().parse().unwrap()
+}
+
+/// Records why the manifest cannot answer; the first reason stands.
+fn damage(transaction: &rusqlite::Transaction<'_>, message: &str) -> Result<()> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO damage(id, message) VALUES (0, ?1)",
+            [message],
+        )
+        .sql()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -271,48 +314,73 @@ mod tests {
             "byte_size":1,"sha256":hash,"sensitive":false,"content_path":format!("blobs/{hash}.bin")});
         format!("{value}\n").into_bytes()
     }
-    fn compare(cache: &mut ArtifactLookupCache, root: &Path, id: &str) {
-        match (cache.find(root, id), evidence::find_artifact(root, id)) {
-            (Ok(cached), Ok(fresh)) => assert_eq!(cached, fresh),
-            (Err(cached), Err(fresh)) => {
-                assert_eq!(cached.status, fresh.status);
-                assert_eq!(cached.message, fresh.message);
+    fn lookup(root: &Path, id: &str) -> Result<Value> {
+        find(root, id, Instant::now() + LOOKUP_DEADLINE)
+    }
+    fn compare(root: &Path, id: &str) {
+        match (lookup(root, id), evidence::scan_find_artifact(root, id)) {
+            (Ok(indexed), Ok(scanned)) => assert_eq!(indexed, scanned),
+            (Err(indexed), Err(scanned)) => {
+                assert_eq!(indexed.status, scanned.status);
+                assert_eq!(indexed.message, scanned.message);
             }
-            _ => panic!("cached and fresh manifest results differ"),
+            (indexed, scanned) => {
+                panic!("indexed {indexed:?} and scanned {scanned:?} results differ")
+            }
         }
+    }
+    fn append(path: &Path, bytes: &[u8]) {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_oldest_record_of_a_long_manifest_is_found() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("manifest.jsonl");
+        let mut file = fs::File::create(&path).unwrap();
+        // Past the old 10,000-row window and, with the background catch-up a
+        // backend runs, without a row cap; tools/long-session-fixture covers
+        // 300,000 rows through the product path.
+        for id in 1..=20_001u64 {
+            file.write_all(&record(id)).unwrap();
+        }
+        drop(file);
+        while !catch_up(root.path(), Instant::now() + LOOKUP_DEADLINE).unwrap() {}
+        assert_eq!(lookup(root.path(), "1").unwrap()["artifact_id"], "1");
+        assert_eq!(
+            lookup(root.path(), "20001").unwrap()["artifact_id"],
+            "20001"
+        );
+        assert_eq!(lookup(root.path(), "20002").unwrap_err().status, 404);
+        assert!(index_db::sidecar_path(&path, SUFFIX).exists());
     }
 
     #[cfg(unix)]
     #[test]
-    fn exact_byte_reuse_append_and_lifecycle_match_complete_scan() {
+    fn appends_rewrites_replacement_and_removal_match_a_complete_scan() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("manifest.jsonl");
         let mut bytes = [record(1), record(u64::MAX)].concat();
         fs::write(&path, &bytes).unwrap();
-        let mut cache = ArtifactLookupCache::default();
-        compare(&mut cache, root.path(), &u64::MAX.to_string());
-        assert_eq!(cache.parsed_records, 2);
-        compare(&mut cache, root.path(), "1");
-        assert_eq!(cache.parsed_records, 0);
-        compare(&mut cache, root.path(), "2"); // Missing selections may share validated bytes.
-        assert_eq!(cache.parsed_records, 0);
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(&record(2))
-            .unwrap();
-        compare(&mut cache, root.path(), "2");
-        assert_eq!(cache.parsed_records, 1);
+        compare(root.path(), &u64::MAX.to_string());
+        compare(root.path(), "1");
+        compare(root.path(), "2");
+        compare(root.path(), "01");
+        append(&path, &record(2));
+        compare(root.path(), "2");
         bytes.extend(record(2));
-        // Same-size rewrite with restored mtime must not retain the old ID index.
+        // A same-size rewrite with restored mtime must not keep the old IDs.
         let modified = path.metadata().unwrap().modified().unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap().replacen(
             "\"artifact_id\":\"1\"",
             "\"artifact_id\":\"3\"",
             1,
         );
-        assert_eq!(text.len(), bytes.len());
         fs::write(&path, text).unwrap();
         File::options()
             .write(true)
@@ -320,30 +388,24 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-        compare(&mut cache, root.path(), "3");
-        assert_eq!(cache.parsed_records, 3);
-        compare(&mut cache, root.path(), "1");
+        compare(root.path(), "3");
+        compare(root.path(), "1");
         let replacement = root.path().join("replacement");
         fs::write(&replacement, &bytes).unwrap();
         fs::rename(&replacement, &path).unwrap();
-        compare(&mut cache, root.path(), "1");
-        assert_eq!(cache.parsed_records, 3);
+        compare(root.path(), "1");
         fs::write(&path, record(1)).unwrap();
-        compare(&mut cache, root.path(), "2");
-        assert_eq!(cache.parsed_records, 1);
+        compare(root.path(), "2");
         fs::remove_file(&path).unwrap();
-        compare(&mut cache, root.path(), "1");
-        assert!(cache.snapshot.is_none());
+        compare(root.path(), "1");
         fs::write(&path, &bytes).unwrap();
-        compare(&mut cache, root.path(), "1");
-        assert_eq!(cache.parsed_records, 3);
+        compare(root.path(), "1");
     }
 
     #[test]
-    fn incomplete_duplicate_malformed_and_oversized_tails_never_publish_partial_index() {
+    fn incomplete_duplicate_malformed_and_oversized_rows_fail_like_a_complete_scan() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("manifest.jsonl");
-        let mut cache = ArtifactLookupCache::default();
         for tail in [
             record(1),
             b"{\"protocol_version\":".to_vec(),
@@ -351,181 +413,33 @@ mod tests {
             vec![b' '; 8193],
         ] {
             fs::write(&path, record(1)).unwrap();
-            compare(&mut cache, root.path(), "1");
-            fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap()
-                .write_all(&tail)
-                .unwrap();
-            compare(&mut cache, root.path(), "1");
-            assert!(cache.snapshot.is_none());
+            compare(root.path(), "1");
+            append(&path, &tail);
+            compare(root.path(), "1");
+            compare(root.path(), "2");
         }
+        // A last record without its newline is still a record.
         let mut complete = record(1);
         complete.pop();
         fs::write(&path, &complete).unwrap();
-        compare(&mut cache, root.path(), "1");
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(&[b"\n".to_vec(), record(2)].concat())
-            .unwrap();
-        compare(&mut cache, root.path(), "2");
-        assert_eq!(
-            cache.parsed_records, 2,
-            "unterminated tail is reparsed rather than reused"
-        );
+        compare(root.path(), "1");
+        append(&path, &[b"\n".to_vec(), record(2)].concat());
+        compare(root.path(), "2");
+        // A damaged row stays damage after later appends.
+        append(&path, b"{}\n");
+        append(&path, &record(3));
+        compare(root.path(), "3");
     }
 
     #[test]
-    fn a_default_session_stays_on_the_indexed_path() {
-        // scripts/run-live-session.sh at its default budgets: a 1 GiB store.
-        let store_bytes = 1024 * 1024 * 1024;
-        let artifacts = store_bytes / 4096;
-        let manifest_bytes = artifacts * 1024;
-        assert!(artifacts <= MAX_RECORDS, "{artifacts} rows");
-        assert!(manifest_bytes <= MAX_BYTES, "{manifest_bytes} bytes");
-    }
-
-    #[test]
-    fn a_manifest_exactly_at_the_record_cap_is_indexed() {
-        let (root, mut cache) = (
-            tempfile::tempdir().unwrap(),
-            ArtifactLookupCache {
-                maximum_records: 2,
-                ..Default::default()
-            },
-        );
-        let path = root.path().join("manifest.jsonl");
-        let body = [record(1), record(2)].concat();
-        fs::write(&path, &body).unwrap();
-        assert_eq!(cache.find(root.path(), "2").unwrap()["artifact_id"], "2");
-        assert_eq!(cache.parsed_records, 2, "both rows were indexed");
-        assert_eq!(cache.find(root.path(), "1").unwrap()["artifact_id"], "1");
-        assert_eq!(cache.parsed_records, 0, "the index answers without parsing");
-    }
-
-    #[test]
-    fn cache_caps_fall_back_without_narrowing_validation_or_resetting_deadline() {
+    fn a_lookup_past_its_deadline_keeps_its_progress() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("manifest.jsonl");
-        let mut cache = ArtifactLookupCache {
-            maximum_records: 1,
-            ..Default::default()
-        };
-        fs::write(&path, [record(1), record(2)].concat()).unwrap();
-        compare(&mut cache, root.path(), "2");
-        assert!(cache.snapshot.is_none());
-        assert_eq!(
-            cache.parsed_records, 0,
-            "fallback does not parse the prefix twice"
-        );
-        fs::write(&path, [record(1), record(2), record(1)].concat()).unwrap();
-        compare(&mut cache, root.path(), "2");
-        assert!(cache.snapshot.is_none());
-        cache.maximum_bytes = 1;
-        compare(&mut cache, root.path(), "2");
-        assert_eq!(cache.parsed_records, 0);
-        fs::write(&path, record(1)).unwrap();
-        assert_eq!(
-            cache
-                .find_until(root.path(), "1", Instant::now())
-                .unwrap_err()
-                .status,
-            408
-        );
-        cache.maximum_bytes = MAX_BYTES;
         fs::write(&path, [record(1), record(2)].concat()).unwrap();
         assert_eq!(
-            cache
-                .find_until(root.path(), "1", Instant::now())
-                .unwrap_err()
-                .status,
+            find(root.path(), "1", Instant::now()).unwrap_err().status,
             408
         );
-        assert!(cache.snapshot.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn noncacheable_hint_skips_only_indexing_and_recovers_after_shrink_or_rotation() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("manifest.jsonl");
-        let rows = [record(1), record(2)].concat();
-        fs::write(&path, &rows).unwrap();
-        let mut cache = ArtifactLookupCache {
-            maximum_records: 1,
-            ..Default::default()
-        };
-        compare(&mut cache, root.path(), "2");
-        assert_eq!(cache.read_bytes, rows.len());
-        assert!(cache.noncacheable.is_some());
-        compare(&mut cache, root.path(), "2");
-        assert_eq!(
-            cache.read_bytes, 0,
-            "noncacheable stores are not read twice"
-        );
-        fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .unwrap()
-            .write_all(&record(3))
-            .unwrap();
-        compare(&mut cache, root.path(), "3");
-        assert_eq!(cache.read_bytes, 0, "growth keeps the streaming-only hint");
-        // Same-size rewrites cannot turn the hint into trusted evidence.
-        fs::write(&path, [record(1), record(2), record(1)].concat()).unwrap();
-        compare(&mut cache, root.path(), "2");
-        assert_eq!(cache.read_bytes, 0);
-        fs::write(&path, record(1)).unwrap();
-        compare(&mut cache, root.path(), "1");
-        assert!(cache.noncacheable.is_none());
-        assert!(cache.snapshot.is_some());
-        fs::write(&path, &rows).unwrap();
-        compare(&mut cache, root.path(), "2");
-        assert!(cache.noncacheable.is_some());
-        let replacement = root.path().join("replacement");
-        let mut padded = record(1);
-        padded.extend(vec![b'\n'; rows.len()]);
-        fs::write(&replacement, padded).unwrap();
-        fs::rename(replacement, &path).unwrap();
-        compare(&mut cache, root.path(), "1");
-        assert!(cache.noncacheable.is_none());
-        assert!(
-            cache.snapshot.is_some(),
-            "replacement recovers indexing even at a larger size"
-        );
-    }
-
-    #[test]
-    fn verification_rejects_mutation_and_replacement_after_read() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("manifest.jsonl");
-        fs::write(&path, record(1)).unwrap();
-        let file = File::open(&path).unwrap();
-        let stamp = Stamp::of(&file.metadata().unwrap());
-        fs::write(&path, record(2)).unwrap();
-        assert!(stamp.verify(&path, &file).is_err());
-        let stamp = Stamp::of(&file.metadata().unwrap());
-        let replacement = root.path().join("replacement");
-        fs::write(&replacement, record(2)).unwrap();
-        fs::rename(replacement, &path).unwrap();
-        assert!(stamp.verify(&path, &file).is_err());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn replaced_manifest_symlink_is_not_a_cache_hit() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("manifest.jsonl");
-        fs::write(&path, record(1)).unwrap();
-        let mut cache = ArtifactLookupCache::default();
-        compare(&mut cache, root.path(), "1");
-        let other = root.path().join("other");
-        fs::rename(&path, &other).unwrap();
-        std::os::unix::fs::symlink(other, &path).unwrap();
-        assert!(cache.find(root.path(), "1").is_err());
-        assert!(cache.snapshot.is_none());
+        assert_eq!(lookup(root.path(), "2").unwrap()["artifact_id"], "2");
     }
 }

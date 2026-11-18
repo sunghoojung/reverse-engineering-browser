@@ -1,7 +1,6 @@
 use crate::{
     analysis_catalog,
     analyst::Analyst,
-    artifact_lookup::ArtifactLookupCache,
     artifact_map, artifact_query, artifact_text,
     capture::{self, Capture, StopRefusal},
     config::{CaptureMode, Options},
@@ -37,7 +36,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
-use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 const UI_ASSETS: [&str; 82] = [
     "index.html",
@@ -204,7 +203,11 @@ pub struct App {
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
     observation_sites: Arc<std::sync::Mutex<crate::request_stack::ObservationSites>>,
-    artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
+    /// Serializes artifact lookups before they take a shared reader slot, so
+    /// callers waiting on the manifest index cannot hold every slot.
+    artifact_lookup: Arc<Mutex<()>>,
+    /// Identity indexes of the event and edge stores, which Origin Trace walks.
+    indexes: Arc<std::sync::Mutex<crate::event_index::Indexes>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
     live_browser: LiveBrowser,
@@ -213,22 +216,8 @@ pub struct App {
     /// Script-text digests of immutable artifacts, by artifact SHA-256.
     text_digests: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
-fn cached_artifact_lookup(
-    mut cache: OwnedMutexGuard<ArtifactLookupCache>,
-    root: &Path,
-    id: &str,
-    stream: impl FnOnce(std::time::Instant) -> Result<Value>,
-) -> Result<Value> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let indexed = cache.find_until(root, id, deadline);
-    // Noncacheable full scans retain their reader permit and deadline,
-    // but must not serialize unrelated lookups behind this cache guard.
-    drop(cache);
-    match indexed? {
-        Some(value) => Ok(value),
-        None => stream(deadline),
-    }
-}
+/// How often, and for how long at a time, the background indexer folds.
+const INDEX_INTERVAL: Duration = Duration::from_secs(1);
 
 impl App {
     pub async fn stop(&self) {
@@ -299,6 +288,10 @@ impl App {
             live_browser: LiveBrowser::new(&options),
             lifecycle: Capture::new(&options),
             requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
+            indexes: Arc::new(std::sync::Mutex::new(crate::event_index::Indexes::new(
+                &options.store,
+                &options.trace_store,
+            ))),
             initiator_frames: Arc::default(),
             observation_sites: Arc::default(),
             invocation_sites,
@@ -315,10 +308,34 @@ impl App {
             wasm_names: Arc::default(),
             analyst_etag: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
-            artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
+            artifact_lookup: Arc::default(),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
         });
         app.native_console.arm_live_bridge().await;
+        // Keeps the disk indexes up with their stores, so a lookup in a long
+        // session reads an index instead of building one, and opening stored
+        // evidence indexes it once in the background.
+        let weak = Arc::downgrade(&app);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(INDEX_INTERVAL);
+            loop {
+                ticks.tick().await;
+                let Some(app) = weak.upgrade() else {
+                    break;
+                };
+                let (root, indexes) = (app.options.artifacts.clone(), app.indexes.clone());
+                drop(app);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let deadline = std::time::Instant::now() + INDEX_INTERVAL;
+                    let _ = crate::artifact_lookup::catch_up(&root, deadline);
+                    indexes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .catch_up(deadline)
+                })
+                .await;
+            }
+        });
         let index = app.requests.clone();
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(request_index::PERSIST_INTERVAL);
@@ -1278,16 +1295,19 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let indexes = self.indexes.clone();
                 self.blocking(move || {
+                    let mut indexes = indexes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let deadline = std::time::Instant::now() + crate::event_index::TRACE_DEADLINE;
                     origin_trace::build(
-                        &evidence::recent(&options.store, 10000, 4096, "event")?,
-                        &evidence::recent(&options.trace_store, 30000, 4096, "origin trace edge")?,
-                        &evidence::artifacts(&options.artifacts, 10000)?,
+                        &mut indexes.trace(&options.artifacts, deadline)?,
                         &request,
                         session.as_deref(),
                         process,
                         sequence.as_deref(),
-                        Some(&options.artifacts),
+                        &options.artifacts,
                     )
                 })
                 .await?
@@ -2144,12 +2164,11 @@ impl App {
         }
         let root = self.options.artifacts.clone();
         let id = id.to_owned();
-        // Wait for the cache before taking a shared reader permit.
-        let cache = self.artifact_lookup.clone().lock_owned().await;
+        // Wait for the index before taking a shared reader permit.
+        let gate = self.artifact_lookup.clone().lock_owned().await;
         self.blocking(move || {
-            cached_artifact_lookup(cache, &root, &id, |deadline| {
-                evidence::find_artifact_until(&root, &id, deadline)
-            })
+            let _gate = gate;
+            evidence::find_artifact(&root, &id)
         })
         .await
     }
@@ -2254,8 +2273,13 @@ impl App {
             ];
             let mut index = self.requests.clone().lock_owned().await;
             let (gaps, sites) = (self.gaps.clone(), self.observation_sites.clone());
+            let indexes = self.indexes.clone();
             self.blocking(move || {
                 index.discard()?;
+                indexes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .discard()?;
                 gaps.reset();
                 // Kept observation sites belong to the evidence being cleared.
                 sites
@@ -2828,42 +2852,6 @@ mod tests {
             assert!(task.await.unwrap().unwrap().events.is_empty());
         }
         app.stop().await;
-    }
-
-    #[tokio::test]
-    async fn artifact_streaming_fallback_releases_cache_but_retains_reader_permit() {
-        let root = tempfile::tempdir().unwrap();
-        // A sparse over-byte-cap manifest selects fallback without expensive reads.
-        std::fs::File::create(root.path().join("manifest.jsonl"))
-            .unwrap()
-            .set_len(256 * 1024 * 1024 + 1)
-            .unwrap();
-        let cache = Arc::new(Mutex::new(ArtifactLookupCache::default()));
-        let guard = cache.clone().lock_owned().await;
-        let io = Arc::new(Semaphore::new(1));
-        let permit = io.clone().acquire_owned().await.unwrap();
-        let started = std::time::Instant::now();
-        let result = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            cached_artifact_lookup(guard, root.path(), "1", |deadline| {
-                assert!(
-                    cache.try_lock().is_ok(),
-                    "streaming cannot hold the cache guard"
-                );
-                assert_eq!(
-                    io.available_permits(),
-                    0,
-                    "streaming must retain reader admission"
-                );
-                assert!(deadline >= started + Duration::from_secs(5));
-                assert!(deadline <= std::time::Instant::now() + Duration::from_secs(5));
-                Ok(json!("streamed"))
-            })
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(result, "streamed");
     }
 
     #[tokio::test]

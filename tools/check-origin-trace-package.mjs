@@ -212,7 +212,7 @@ async function checkStoredEvidenceContract(native, build) {
       assert(!native.includes(`case "${route}"`), `${route} has no second native answer`);
     }
   }
-  assert(build.includes('"${stored_evidence_backend_source}" "${trace_document_source}"'), 'The app compiles the forwarder');
+  assert(build.includes('"${stored_event_window_source}" "${stored_evidence_backend_source}"'), 'The app compiles the forwarder');
   assert(build.includes('tools/check-stored-evidence-backend.swift') && build.includes('check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"'),
     'The native build runs the forwarder against the packaged backend');
   const types = text => [...text.matchAll(/"([a-z_]+)"/g)].map(match => match[1]).sort();

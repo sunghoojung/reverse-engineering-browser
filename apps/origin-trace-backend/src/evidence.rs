@@ -489,40 +489,21 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
     Ok(())
 }
 
+/// The validated manifest record of `id`, from the index of the whole
+/// manifest (`artifact_lookup`), so a record of any age is found.
 pub fn find_artifact(root: &Path, id: &str) -> Result<Value> {
-    find_artifact_bounded(root, id, usize::MAX, u64::MAX)
-}
-/// Same complete manifest validation with deterministic cold-path scan bounds.
-pub fn find_artifact_bounded(
-    root: &Path,
-    id: &str,
-    max_records: usize,
-    max_bytes: u64,
-) -> Result<Value> {
-    find_artifact_with_deadline(
+    crate::artifact_lookup::find(
         root,
         id,
-        max_records,
-        max_bytes,
-        std::time::Instant::now() + std::time::Duration::from_secs(5),
+        std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE,
     )
 }
-pub(crate) fn find_artifact_until(
-    root: &Path,
-    id: &str,
-    deadline: std::time::Instant,
-) -> Result<Value> {
-    find_artifact_with_deadline(root, id, usize::MAX, u64::MAX, deadline)
-}
-fn find_artifact_with_deadline(
-    root: &Path,
-    id: &str,
-    max_records: usize,
-    max_bytes: u64,
-    deadline: std::time::Instant,
-) -> Result<Value> {
+/// The same answer from a complete scan, which the index must match.
+#[cfg(test)]
+pub(crate) fn scan_find_artifact(root: &Path, id: &str) -> Result<Value> {
     let mut selected = None;
-    scan_manifest(root, max_records, max_bytes, deadline, |value| {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    scan_manifest(root, usize::MAX, u64::MAX, deadline, |value| {
         if value["artifact_id"] == id {
             selected = Some(value);
         }

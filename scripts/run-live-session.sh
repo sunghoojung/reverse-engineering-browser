@@ -72,7 +72,7 @@ readonly native_wasm_module_allowlist="${REB_NATIVE_WASM_MODULE_ALLOWLIST:-}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
 readonly native_js_invocation_sites="${REB_NATIVE_JS_INVOCATION_SITES:-}"
-readonly native_js_invocation_digests="${REB_NATIVE_JS_INVOCATION_DIGESTS:-0}"
+native_js_invocation_digests="${REB_NATIVE_JS_INVOCATION_DIGESTS:-}"
 # The packaged app sets this for the saved sites it arms in every capture: a
 # Brave without invocation capture then starts without them instead of failing.
 readonly native_js_invocation_if_supported="${REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:-0}"
@@ -144,8 +144,18 @@ fi
 # Network (256) and Artifact (1024).
 capture_canvas_images="${capture_canvas_images:-$(mask_default 1025)}"
 capture_request_content="${capture_request_content:-$(mask_default 1280)}"
+# Settled-value digests of armed calls are content capture: on, as in the app,
+# for explicit invocation sites in a session that keeps request content.
+if [[ -z "${native_js_invocation_digests}" ]]; then
+  if [[ -n "${native_js_invocation_sites}" && "${capture_request_content}" == 1 ]]; then
+    native_js_invocation_digests=1
+  else
+    native_js_invocation_digests=0
+  fi
+fi
 readonly native_wasm_dispatch native_wasm_call_indirect native_request_stacks \
-  native_request_stacks_if_supported capture_canvas_images capture_request_content
+  native_request_stacks_if_supported capture_canvas_images capture_request_content \
+  native_js_invocation_digests
 
 if [[ -z "${duration_setting}" ]]; then
   duration_seconds="${open_ended_duration_seconds}"

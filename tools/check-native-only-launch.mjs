@@ -374,6 +374,7 @@ exec ${quote(systemGrep)} "$@"
     '--reb-wasm-guest-capture': ['REB_NATIVE_WASM_GUEST_ADAPTER', 'unset REB_NATIVE_WASM_GUEST_ADAPTER'],
     '--reb-js-dispatch-capture': ['REB_NATIVE_JS_DISPATCH_SITES', 'unset REB_NATIVE_JS_DISPATCH_SITES'],
     '--reb-js-invocation-capture': ['REB_NATIVE_JS_INVOCATION_SITES', 'unset REB_NATIVE_JS_INVOCATION_SITES'],
+    '--reb-request-stacks': ['REB_NATIVE_REQUEST_STACKS=1', 'REB_NATIVE_REQUEST_STACKS=0'],
   };
   const prefix = 'REB_LIVE_SESSION_FAILURE: ';
   const optOuts = flags => flags.map(flag => settings[flag][1]).join(', ');
@@ -398,7 +399,7 @@ exec ${quote(systemGrep)} "$@"
     REB_LOCAL_ANALYST_STORE:at('analyst.json'), REB_ACTIVE_ENDPOINT_FILE:at('active.endpoint'),
     REB_CAPTURE_CATEGORY_MASK:'4095', REB_NATIVE_QUIET_MODE:'0', REB_NATIVE_WASM_DISPATCH:'0',
     REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'',
-    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', ...requested});
+    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', REB_NATIVE_REQUEST_STACKS:'0', ...requested});
   const clearReceipts = () => Promise.all([receipts, scans, started, finished].map(file => rm(file, {force:true})));
   const launchWith = async (executable, requested, cwd) => {
     await clearReceipts();
@@ -470,6 +471,22 @@ exec ${quote(systemGrep)} "$@"
   assert.match(badSwitch.stderr, /REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1/);
   console.log('PASS saved invocation sites start without invocation capture on a Brave that lacks it; explicit sites and other flags stay strict');
 
+  // Request stacks default on, as in the app, when the mask holds Network and
+  // Artifact. The default looks for the flag once: a Brave without it starts
+  // without stacks, and one with it is then checked like any requested flag.
+  // A mask without Network never asks, and an explicit request stays strict.
+  const stackDefault = {...switches.packaged, REB_NATIVE_REQUEST_STACKS:''};
+  const withoutStacks = await launchWith(preInvocation.executable, stackDefault);
+  accepted(withoutStacks, [...packaged, '--reb-request-stacks'], preInvocation.framework);
+  const withStacks = await braveApp({framework: [...allNames, 'reb_request_stacks']});
+  const stacksOn = await launchWith(withStacks.executable, stackDefault);
+  accepted(stacksOn, [...packaged, '--reb-request-stacks', '--reb-request-stacks'], withStacks.framework);
+  accepted(await launchWith(preInvocation.executable, {...stackDefault, REB_CAPTURE_CATEGORY_MASK:'3839'}),
+    packaged, preInvocation.framework);
+  refused(await launchWith(preInvocation.executable, {...switches.packaged, REB_NATIVE_REQUEST_STACKS:'1'}),
+    undefinedCause(preInvocation.executable, preInvocation.framework, ['--reb-request-stacks']));
+  console.log('PASS request stacks default on where Brave defines them and drop with a launch line where it does not; an explicit request stays strict');
+
   // Request content capture is a Chromium switch, not a V8 flag. Invalid values
   // and masks without Network and Artifact refuse before any helper starts.
   const content = await braveApp({framework: allNames});
@@ -534,7 +551,7 @@ printf '%s\\n' "${'${brave_arguments[@]-}'}"`], {env:{...process.env, TEST_SOCKE
     ['0b11', null], ['12345678901', null], ['0x123456789', null], ['１２', null],
     ['0x１２', null], ['0xａ', null],
     [`a[$(touch ${injected})]`, null]];
-  const maskCode = section('# One category mask grammar', 'if [[ "${native_quiet_mode}"');
+  const maskCode = section('# One category mask grammar', '# A default turns on only when the mask holds');
   for (const [value, expected] of maskVectors) {
     const result = spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
 category_mask_setting="\${1:-4095}"; ${maskCode}printf '%s' "\${category_mask}"`, 'mask', value], {encoding:'utf8'});

@@ -1115,7 +1115,7 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
         Ok(counts) => counts,
         Err(reason) => {
             summary["response_bodies"] = json!({"available": false, "reason": reason,
-                "complete": false, "requests": "0", "unindexed_records": "0",
+                "complete": false, "requests": "0",
                 "snapshots_withheld": "0", "earlier_snapshots": "0", "cases": []});
             return;
         }
@@ -1161,7 +1161,6 @@ pub fn add_response_bodies(summary: &mut Value, counts: std::result::Result<Valu
     summary["response_bodies"] = json!({
         "available": true, "reason": null,
         "complete": counts["complete"], "requests": counts["requests"],
-        "unindexed_records": counts["unindexed_records"],
         "snapshots_withheld": counts["snapshots_withheld"].as_str().unwrap_or("0"),
         "earlier_snapshots": earlier_total.to_string(), "cases": cases,
     });
@@ -1208,7 +1207,7 @@ mod tests {
         add_response_bodies(
             &mut summary,
             Ok(
-                json!({"complete": true, "requests": "8", "unindexed_records": "0", "snapshots_withheld": "3",
+                json!({"complete": true, "requests": "8", "snapshots_withheld": "3",
                 "cases": {"captured": "2", "memory_cache": "1", "service_worker": "2", "renderer_answered": "1",
                     "not_captured_session_budget": "2"},
                 "earlier_snapshots": {"not_captured_session_budget": "1"}}),
@@ -1273,7 +1272,7 @@ mod tests {
         add_response_bodies(
             &mut quiet,
             Ok(
-                json!({"complete": true, "requests": "2", "unindexed_records": "0", "cases": {"captured": "2"}}),
+                json!({"complete": true, "requests": "2", "cases": {"captured": "2"}}),
             ),
         );
         assert!(quiet["checks"].as_array().unwrap().is_empty());

@@ -67,7 +67,7 @@ enum StoredEvidenceBackendChecks {
     precondition((catalog.json["artifacts"] as? [[String: Any]])?.first?["content_path"] == nil, "manifest paths stay private: \(catalog.json)")
 
     let index = call(request("/api/requests?limit=10"))
-    precondition(index.status == 200 && index.json["format"] as? String == "reb-request-index-v1", "\(index)")
+    precondition(index.status == 200 && index.json["format"] as? String == "reb-request-index-v2", "\(index)")
     precondition(index.json["total"] as? Int == 3, "every stored request is indexed: \(index.json)")
     guard let tag = index.tag else { preconditionFailure("the index answer carries its ETag") }
     precondition(call(request("/api/requests?limit=10", etag: tag)).status == 304)

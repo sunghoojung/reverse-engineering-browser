@@ -221,8 +221,6 @@ const INDEX_INTERVAL: Duration = Duration::from_secs(1);
 
 impl App {
     pub async fn stop(&self) {
-        let mut index = self.requests.clone().lock_owned().await;
-        let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
         self.analyst.stop();
         self.native_console.stop().await;
         if self.owned_vm_debugger.stop().await.is_err() {
@@ -336,13 +334,27 @@ impl App {
                 .await;
             }
         });
-        let index = app.requests.clone();
+        // The request index folds in slices, so a Traffic read waits for the
+        // lock at most one slice while a long store is first indexed.
+        let weak = Arc::downgrade(&app);
         tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(request_index::PERSIST_INTERVAL);
             loop {
-                ticks.tick().await;
-                let mut index = index.clone().lock_owned().await;
-                let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
+                let Some(app) = weak.upgrade() else {
+                    break;
+                };
+                let index = app.requests.clone();
+                drop(app);
+                let mut index = index.lock_owned().await;
+                let behind = tokio::task::spawn_blocking(move || {
+                    let folded =
+                        index.refresh(std::time::Instant::now() + request_index::FOLD_SLICE);
+                    folded.is_ok() && !index.is_caught_up()
+                })
+                .await
+                .unwrap_or(false);
+                if !behind {
+                    tokio::time::sleep(INDEX_INTERVAL).await;
+                }
             }
         });
         app

@@ -668,7 +668,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `bounded_scope` | Only the newest 64 MiB of events were summarized. |
 
 `response_bodies` counts every request's response body case from the request
-index's rows ([request index v1](request-index-v1.md)): `cases` lists each case
+index's rows ([request index v2](request-index-v2.md)): `cases` lists each case
 with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 `redirected`, `aborted`, `cancelled`, `empty`, `service_worker`, `memory_cache`,
 `failed_before_response` and `cancelled_before_response`
@@ -1229,7 +1229,7 @@ timeline. Each row names its root event and the
 `get_events` with `category=network`, `after=first_offset` and the member's
 `records` as `limit` reads them. The
 contract, bounds and invalidation rules are in
-[request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence
+[request-index-v2.md](request-index-v2.md). The `reb://` stored-evidence
 workspace answers it through the bundled backend.
 
 ## Cross-references

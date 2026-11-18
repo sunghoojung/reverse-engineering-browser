@@ -2432,7 +2432,7 @@
       "get": {
         "operationId": "get_requests",
         "summary": "Page through every network request of the session",
-        "description": "One row per request of the whole session, from an index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v1.md), so counts, filters and search cover every request, not the newest event window. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging the same requests, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed, and index counts unreadable records and requests past the request limit. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with category=network, after=first_offset and limit set to that member's records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
+        "description": "One row per request of the whole session, from an on-disk index the backend folds incrementally from the event store and keeps beside it (protocol/request-index-v2.md), so counts, filters, search and paging cover every request of the session with no row limit. A row is a Traffic row: method, path (URL path and query only when the session retained request content, else the host), status, type, time, tab, domain and the root event that get_origin_trace takes. Default order is capture order, oldest first. Page with offset and limit; pass a previous answer's through to keep paging the same requests, and since to count rows added after it. total and matching are exact for the indexed bytes; index.complete is false while a large store is still being indexed in the background, and index counts unreadable records. Read one request's records with get_events: for each member pass its session_id, process_id and request_id with category=network, after=first_offset and limit set to that member's records. Each row also carries the recorded transfer and resource sizes, MIME type, protocol, initiator class and response time; the answer adds the matching sizes, hidden_internal and a 120-bucket start timeline. Unknown parameters are rejected. Use a small limit, such as 50, through MCP.",
         "tags": [
           "events"
         ],
@@ -19590,7 +19590,6 @@
           "domain",
           "root",
           "members",
-          "members_limited",
           "first_offset",
           "end_offset",
           "records",
@@ -19669,7 +19668,7 @@
             "type": "boolean"
           },
           "status": {
-            "description": "The HTTP status, or failed, incomplete (observation ended or a service worker's end was lost), pending, or finished: a memory-cache reuse that carried no HTTP status, such as an MHTML archive resource (protocol/request-index-v1.md).",
+            "description": "The HTTP status, or failed, incomplete (observation ended or a service worker's end was lost), pending, or finished: a memory-cache reuse that carried no HTTP status, such as an MHTML archive resource (protocol/request-index-v2.md).",
             "oneOf": [
               {
                 "type": "integer",
@@ -19857,9 +19856,6 @@
               }
             },
             "description": "Each session, process and request ID whose records form this row, with its record count."
-          },
-          "members_limited": {
-            "type": "boolean"
           },
           "first_offset": {
             "$ref": "#/components/schemas/Uint64String",
@@ -20135,7 +20131,7 @@
         ],
         "properties": {
           "format": {
-            "const": "reb-request-index-v1"
+            "const": "reb-request-index-v2"
           },
           "total": {
             "type": "integer",
@@ -20265,8 +20261,7 @@
             "type": "object",
             "required": [
               "tabs",
-              "domains",
-              "domains_truncated"
+              "domains"
             ],
             "additionalProperties": false,
             "properties": {
@@ -20303,14 +20298,15 @@
                       }
                     },
                     "domains_truncated": {
-                      "type": "boolean"
+                      "type": "boolean",
+                      "description": "The tab has more domains than the eight its preview names; the domain facet with this tab_id lists every one."
                     }
                   }
                 }
               },
               "domains": {
                 "type": "array",
-                "description": "Domains within the tab_id filter, with counts; at most 512 plus the domain filter.",
+                "description": "Every domain within the tab_id filter, in byte order, with its count.",
                 "items": {
                   "type": "object",
                   "required": [
@@ -20328,9 +20324,6 @@
                     }
                   }
                 }
-              },
-              "domains_truncated": {
-                "type": "boolean"
               }
             }
           },
@@ -20343,8 +20336,6 @@
               "store_end",
               "complete",
               "malformed_records",
-              "unindexed_records",
-              "request_limit",
               "reopened",
               "persisted",
               "persist_error"
@@ -20367,25 +20358,20 @@
                 "$ref": "#/components/schemas/Uint64String",
                 "description": "Network records the index could not read."
               },
-              "unindexed_records": {
-                "$ref": "#/components/schemas/Uint64String",
-                "description": "Records of requests past request_limit."
-              },
-              "request_limit": {
-                "type": "integer"
-              },
               "reopened": {
                 "type": "boolean",
-                "description": "The index was read from its sidecar, not rebuilt."
+                "description": "The index was reopened from disk, not rebuilt."
               },
               "persisted": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "The index is beside the store, so a restart reopens it."
               },
               "persist_error": {
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Why the index lives in a private temporary directory instead, such as a read-only evidence directory."
               }
             }
           },
@@ -40193,7 +40179,6 @@
                 "reason",
                 "complete",
                 "requests",
-                "unindexed_records",
                 "cases",
                 "snapshots_withheld",
                 "earlier_snapshots"
@@ -40215,9 +40200,6 @@
                   "description": "The index had read the whole store; otherwise the counts cover the part read so far."
                 },
                 "requests": {
-                  "$ref": "#/components/schemas/Uint64String"
-                },
-                "unindexed_records": {
                   "$ref": "#/components/schemas/Uint64String"
                 },
                 "cases": {

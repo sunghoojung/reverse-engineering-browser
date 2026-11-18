@@ -7276,7 +7276,7 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
             // The backend keeps derived indexes beside the stores on its own
             // timers, so a run can see them appear with no request causing them.
             let name = entry.file_name().to_string_lossy().into_owned();
-            if [".requests-v1", ".events-v1", ".edges-v1", ".lookup-v1"]
+            if [".requests-v2", ".events-v1", ".edges-v1", ".lookup-v1"]
                 .iter()
                 .any(|suffix| name.contains(suffix))
             {
@@ -11394,8 +11394,8 @@ async fn request_index_reaches_every_request_of_a_large_session() {
     assert_eq!(first["index"]["complete"], true);
     assert_eq!(first["facets"]["tabs"].as_array().unwrap().len(), 4);
     assert!(
-        !server.root.path().join("events.jsonl.requests-v1").exists(),
-        "a read writes no file"
+        server.root.path().join("events.jsonl.requests-v2").is_file(),
+        "the index is kept beside the store"
     );
     let unchanged = server
         .client

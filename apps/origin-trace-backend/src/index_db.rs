@@ -54,6 +54,8 @@ pub struct Sidecar {
     /// The private directory holding the database when its file's own
     /// directory cannot, as for read-only evidence. It lives as long as the index.
     _temporary: Option<tempfile::TempDir>,
+    /// Why the database is not beside its file, when it is not.
+    temporary_reason: Option<String>,
     format: &'static str,
     schema: &'static str,
     reopened: bool,
@@ -250,6 +252,7 @@ impl Sidecar {
             Ok((connection, reopened)) => Ok(Self {
                 connection,
                 _temporary: None,
+                temporary_reason: None,
                 format,
                 schema,
                 reopened,
@@ -276,6 +279,7 @@ impl Sidecar {
                 Ok(Self {
                     connection,
                     _temporary: Some(temporary),
+                    temporary_reason: Some(error.message),
                     format,
                     schema,
                     reopened: false,
@@ -286,6 +290,11 @@ impl Sidecar {
 
     pub fn connection(&self) -> &Connection {
         &self.connection
+    }
+
+    /// Why the database lives in a temporary directory, when it does.
+    pub fn temporary_reason(&self) -> Option<&str> {
+        self.temporary_reason.as_deref()
     }
 
     fn meta(&self) -> Result<(String, String, u64, String, String)> {
@@ -377,7 +386,7 @@ impl Sidecar {
         deadline: Instant,
         max_line: usize,
         oversized: &str,
-        mut each: impl FnMut(&Transaction<'_>, &[u8], u64, u64) -> Result<()>,
+        each: &mut dyn Fold,
     ) -> Result<Position> {
         let from = position.indexed_to;
         let limit = position.file_end.min(from.saturating_add(budget));
@@ -407,7 +416,7 @@ impl Sidecar {
             for line in chunk[..=last].split_inclusive(|byte| *byte == b'\n') {
                 let line_start = at + start as u64;
                 start += line.len();
-                each(
+                each.line(
                     &transaction,
                     &line[..line.len() - 1],
                     line_start,
@@ -420,6 +429,7 @@ impl Sidecar {
                 return Err(Error::new(500, oversized));
             }
         }
+        each.finish(&transaction)?;
         if at > from {
             let (head, tail) = anchors(file, at)?;
             transaction
@@ -437,6 +447,37 @@ impl Sidecar {
     }
 }
 
+/// What a fold does with each terminated line, and before its transaction
+/// commits: an index that changes rows in memory writes them back there, so
+/// they commit with the position they describe.
+pub trait Fold {
+    fn line(
+        &mut self,
+        transaction: &Transaction<'_>,
+        line: &[u8],
+        start: u64,
+        end: u64,
+    ) -> Result<()>;
+    fn finish(&mut self, _transaction: &Transaction<'_>) -> Result<()> {
+        Ok(())
+    }
+}
+impl<F: FnMut(&Transaction<'_>, &[u8], u64, u64) -> Result<()>> Fold for F {
+    fn line(
+        &mut self,
+        transaction: &Transaction<'_>,
+        line: &[u8],
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
+        self(transaction, line, start, end)
+    }
+}
+
+/// SQL functions or collations an index's queries use, registered on each
+/// connection it opens.
+pub type Setup = fn(&Connection) -> rusqlite::Result<()>;
+
 /// One file and its index, opened when first used. A missing file has an
 /// empty index; a capture clear removes the index from disk.
 pub struct Indexed {
@@ -444,6 +485,7 @@ pub struct Indexed {
     suffix: &'static str,
     format: &'static str,
     schema: &'static str,
+    setup: Option<Setup>,
     sidecar: Option<Sidecar>,
 }
 impl Indexed {
@@ -458,8 +500,14 @@ impl Indexed {
             suffix,
             format,
             schema,
+            setup: None,
             sidecar: None,
         }
+    }
+
+    pub fn with_setup(mut self, setup: Setup) -> Self {
+        self.setup = Some(setup);
+        self
     }
 
     /// The file and the index checked against it; None when there is no file.
@@ -475,12 +523,11 @@ impl Indexed {
             Err(error) => return Err(error.into()),
         };
         if self.sidecar.is_none() {
-            self.sidecar = Some(Sidecar::open(
-                &self.source,
-                self.suffix,
-                self.format,
-                self.schema,
-            )?);
+            let sidecar = Sidecar::open(&self.source, self.suffix, self.format, self.schema)?;
+            if let Some(setup) = self.setup {
+                setup(sidecar.connection()).sql()?;
+            }
+            self.sidecar = Some(sidecar);
         }
         let position = self.sidecar.as_mut().unwrap().check(&mut file)?;
         Ok(Some((file, position)))
@@ -489,6 +536,16 @@ impl Indexed {
     /// The open index; `open` must have returned a file.
     pub fn sidecar(&mut self) -> &mut Sidecar {
         self.sidecar.as_mut().expect("an opened index")
+    }
+
+    /// Why the open index lives in a temporary directory, when it does.
+    pub fn temporary_reason(&self) -> Option<&str> {
+        self.sidecar.as_ref().and_then(Sidecar::temporary_reason)
+    }
+
+    /// The open index's database, if it has been opened.
+    pub fn connection(&self) -> Option<&Connection> {
+        self.sidecar.as_ref().map(Sidecar::connection)
     }
 
     /// Closes the index and removes it from disk.
@@ -532,7 +589,7 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(5),
                 64,
                 "oversized",
-                |tx, _, start, end| {
+                &mut |tx: &Transaction<'_>, _: &[u8], start: u64, end: u64| {
                     tx.execute(
                         "INSERT INTO lines VALUES (?1, ?2)",
                         params![start as i64, end as i64],
@@ -556,7 +613,7 @@ mod tests {
         let path = root.path().join("store.jsonl");
         std::fs::write(&path, b"a\nbb\npartial").unwrap();
         let mut sidecar = Sidecar::open(&path, ".test-v1", "test-v1", SCHEMA).unwrap();
-        assert!(sidecar._temporary.is_none());
+        assert!(sidecar.temporary_reason().is_none());
         let first = fold_all(&mut sidecar, &path);
         assert_eq!((first.indexed_to, count(&sidecar)), (5, 2));
         assert!(!first.caught_up(0) && first.caught_up(64));
@@ -614,7 +671,7 @@ mod tests {
         remove(&path, ".test-v1").unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
         let mut sidecar = Sidecar::open(&path, ".test-v1", "test-v1", SCHEMA).unwrap();
-        assert!(sidecar._temporary.is_some());
+        assert!(sidecar.temporary_reason().is_some());
         assert!(!sidecar_path(&path, ".test-v1").exists());
         assert_eq!(fold_all(&mut sidecar, &path).indexed_to, 2);
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -623,7 +680,7 @@ mod tests {
         std::fs::write(&target, b"").unwrap();
         std::os::unix::fs::symlink(&target, sidecar_path(&path, ".link-v1")).unwrap();
         let linked = Sidecar::open(&path, ".link-v1", "test-v1", SCHEMA).unwrap();
-        assert!(linked._temporary.is_some());
+        assert!(linked.temporary_reason().is_some());
         assert_eq!(std::fs::read(&target).unwrap(), b"");
     }
 
@@ -643,7 +700,7 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(5),
                 64,
                 "oversized",
-                |_, _, _, _| Ok(()),
+                &mut |_: &Transaction<'_>, _: &[u8], _: u64, _: u64| Ok(()),
             )
             .unwrap_err();
         assert_eq!(error.status, 500);

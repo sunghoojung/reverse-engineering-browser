@@ -1399,7 +1399,7 @@ The layout follows familiar [network inspection conventions](https://developer.c
 while keeping Origin Trace's own controls and Rosé Pine Moon palette.
 
 Traffic lists every request of the session from the backend request index
-(`get_requests`, [request index v1](../../protocol/request-index-v1.md)). The
+(`get_requests`, [request index v2](../../protocol/request-index-v2.md)). The
 ledger reads one 500-row page of the index around the view and mounts only
 the fixed-height rows in view plus 8 on each side, with spacers for the rest,
 so every request is reachable. Each row names its place in the whole list

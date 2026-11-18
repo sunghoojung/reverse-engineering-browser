@@ -1,4 +1,4 @@
-/* Traffic rows from the backend request index (protocol/request-index-v1.md).
+/* Traffic rows from the backend request index (protocol/request-index-v2.md).
  * One read in flight at a time; a failed read keeps the last answer. */
 const TRAFFIC_INDEX_DEADLINE_MS = 10000;
 const TRAFFIC_DETAIL_PAGE = 200;
@@ -54,7 +54,7 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
       if (response.status === 404) unsupported = true;
       if (!response.ok) throw new Error(`the request index returned HTTP ${response.status}`);
       const document = await response.json();
-      if (!document || document.format !== 'reb-request-index-v1' || !Array.isArray(document.requests)) {
+      if (!document || document.format !== 'reb-request-index-v2' || !Array.isArray(document.requests)) {
         throw new Error('the request index answer is malformed');
       }
       const previous = answer;
@@ -116,7 +116,7 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
       const response = await fetcher(`/api/requests?${query}`, {cache: 'no-store', signal});
       if (!response.ok) throw new Error(`the request index returned HTTP ${response.status}`);
       const document = await response.json();
-      if (!document || document.format !== 'reb-request-index-v1' || !Array.isArray(document.requests)) {
+      if (!document || document.format !== 'reb-request-index-v2' || !Array.isArray(document.requests)) {
         throw new Error('the request index answer is malformed');
       }
       // `capped`: more rows matched than the answer holds, so the rest were not read.
@@ -127,7 +127,7 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
     // `partial` means some records were not read, so a missing one is unknown, not absent.
     async events(row, signal) {
       const events = new Map();
-      let partial = row.members_limited === true;
+      let partial = false;
       for (const member of row.members) {
         let after = row.first_offset, remaining = member.records;
         for (let page = 0; page < TRAFFIC_DETAIL_PAGES && remaining > 0; page += 1) {

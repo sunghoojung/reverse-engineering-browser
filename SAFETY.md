@@ -155,7 +155,7 @@ it.
   1 MiB to 16 GiB. See [Native network v3](protocol/native-network-v3.md).
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
-  ([request index v1](protocol/request-index-v1.md)).
+  ([request index v2](protocol/request-index-v2.md)).
   A load Blink answers from a resource it already holds (its memory cache, or
   a `data:` URL or MHTML archive resource it decodes itself) makes no request
   and is still recorded as one row: its host, status, decoded size, Blink

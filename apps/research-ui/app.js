@@ -1476,7 +1476,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       // The index alone knows End lost, every row's body answer (a window row
       // can lack its response_started), the row a reuse names with its body,
-      // and a store copy's tabs (protocol/request-index-v1.md). Copied in
+      // and a store copy's tabs (protocol/request-index-v2.md). Copied in
       // place; the row is then checked against the index.
       function copyTrafficIndexFacts(request, indexed) {
         if (!indexed) return;
@@ -3547,7 +3547,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const end = Number(coverage.store_end);
           notes.push(`indexing ${end ? Math.floor(Number(coverage.indexed_end) * 100 / end) : 0}%`);
         }
-        if (coverage.unindexed_records !== '0') notes.push(`${coverage.unindexed_records} records past the ${coverage.request_limit.toLocaleString('en-US')}-request limit`);
         if (coverage.malformed_records !== '0') notes.push(`${coverage.malformed_records} unreadable records`);
         return notes.join(' · ');
       }

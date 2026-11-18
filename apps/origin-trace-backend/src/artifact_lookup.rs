@@ -129,7 +129,7 @@ impl ArtifactIndex {
         while !position.caught_up(0) {
             let before = position.indexed_to;
             let oversized = "The artifact manifest contains an oversized record";
-            position = sidecar.fold(file, &position, FOLD_BYTES, deadline, RECORD_BYTES, oversized, |tx, line, start, end| {
+            position = sidecar.fold(file, &position, FOLD_BYTES, deadline, RECORD_BYTES, oversized, &mut |tx: &rusqlite::Transaction<'_>, line: &[u8], start: u64, end: u64| {
                 if line.len() + 1 > RECORD_BYTES {
                     return damage(tx, oversized);
                 }

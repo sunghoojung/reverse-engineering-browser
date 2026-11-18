@@ -283,7 +283,7 @@ const TRAFFIC_INITIATOR_TITLES = Object.freeze({
 function trafficInitiatorLabel(request) {
   return Object.hasOwn(TRAFFIC_INITIATOR_LABELS, request?.initiator ?? '') ? TRAFFIC_INITIATOR_LABELS[request.initiator] : null;
 }
-// A script start's resolved innermost frame (protocol/request-index-v1.md), named file:line as DevTools does.
+// A script start's resolved innermost frame (protocol/request-index-v2.md), named file:line as DevTools does.
 function trafficInitiatorFrame(request) {
   const frame = request?.initiatorFrame;
   if (frame?.status !== 'resolved') return null;
@@ -460,7 +460,7 @@ function trafficWatchText(watch) {
     : 'A request watch rule matched (the record names no rule it could decode)';
 }
 
-// The request watch rule that matched a row (protocol/request-index-v1.md), in
+// The request watch rule that matched a row (protocol/request-index-v2.md), in
 // the shape requestsFromEvents gives it.
 function trafficIndexWatch(watch) {
   if (!watch || typeof watch !== 'object') return null;
@@ -469,7 +469,7 @@ function trafficIndexWatch(watch) {
     ruleRead: true};
 }
 
-// A request index row (protocol/request-index-v1.md) in the Traffic row shape.
+// A request index row (protocol/request-index-v2.md) in the Traffic row shape.
 function trafficIndexRequest(row, origin) {
   return {id: row.id, path: row.path, method: row.method, status: row.status, time: row.time, type: row.type, origin,
     targetKind: row.target_kind, hostOnly: row.target_kind === 'host', failed: row.failed, interrupted: row.interrupted,

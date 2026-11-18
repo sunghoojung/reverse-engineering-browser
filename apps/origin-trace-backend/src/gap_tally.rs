@@ -57,7 +57,7 @@ impl GapTally {
         let (length, identity) = match &file {
             Some(file) => {
                 let metadata = file.metadata()?;
-                (metadata.len(), crate::request_index::identity_of(&metadata))
+                (metadata.len(), crate::index_db::identity_of(&metadata))
             }
             None => (0, String::new()),
         };

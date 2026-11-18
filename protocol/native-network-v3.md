@@ -1197,7 +1197,7 @@ launcher passes for content sessions.
 Some requests have no browser `response_started`, so they have no
 `response_body` record. Each request instead has one body case, which Traffic's
 `responseBodyCase` and the request index decide alike
-([request index v1](request-index-v1.md)): the state of the newest
+([request index v2](request-index-v2.md)): the state of the newest
 `response_body` record of its final `response_started`, or `malformed`, else in
 this order:
 
@@ -1886,7 +1886,7 @@ record of the session (at most 65,536) and provenance reads back those older
 than its window by byte range; `script_coverage` says whether that list is
 complete. `coverage` says what the window read, so an absent response or request
 is not proof when `coverage.complete` is false (see
-[request index v1](request-index-v1.md#per-request-detail-reads)). Each
+[request index v2](request-index-v2.md#per-request-detail-reads)). Each
 script call's `stack` resolves like `get_request_stack`: through
 `script_identity` records in the window and the index to line, column and function name,
 with every walked frame when its digest names a retained stack artifact; at
@@ -2361,7 +2361,7 @@ scripts even when the main isolate described the same script IDs.
 
 `get_request_stack` (`GET /api/request-stack?process_id=&request_id=`, the
 renderer identity) returns the newest stack record for that request with its
-frames, reading the bytes the [request index](request-index-v1.md#per-request-detail-reads)
+frames, reading the bytes the [request index](request-index-v2.md#per-request-detail-reads)
 names for it. `status` is `outside_scan`, not `not_recorded`, when the read did
 not reach them all; `coverage` says what was read:
 

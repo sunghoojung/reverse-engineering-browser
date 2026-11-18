@@ -218,12 +218,12 @@ fn duplicate_event() -> Error {
     Error::bad("Origin trace input contains a duplicate event reference")
 }
 
-type Fold = fn(&rusqlite::Transaction<'_>, &[u8], u64, u64) -> Result<()>;
+type FoldLine = fn(&rusqlite::Transaction<'_>, &[u8], u64, u64) -> Result<()>;
 
 /// One store and its identity index.
 struct StoreIndex {
     index: Indexed,
-    fold: Fold,
+    fold: FoldLine,
     oversized: &'static str,
 }
 
@@ -243,7 +243,7 @@ impl StoreIndex {
                 deadline,
                 RECORD_BYTES,
                 self.oversized,
-                self.fold,
+                &mut self.fold,
             )?;
             if position.indexed_to == before {
                 break;

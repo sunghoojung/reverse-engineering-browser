@@ -1555,7 +1555,7 @@ for (const section of [debuggerThreadsSection(), debuggerWatchSection(), debugge
             throw error;
           }
           const page = await response.json().catch(() => null);
-          if (!response.ok || page?.format !== 'reb-request-index-v1' || !Array.isArray(page.requests)) throw new Error(`the request index answered HTTP ${response.status}`);
+          if (!response.ok || page?.format !== 'reb-request-index-v2' || !Array.isArray(page.requests)) throw new Error(`the request index answered HTTP ${response.status}`);
           return page;
         };
         try {

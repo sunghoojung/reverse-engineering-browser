@@ -297,7 +297,9 @@ gives each reason, and such a request says why on its Headers tab. Chromium patc
 `document.cookie` and Cookie Store API calls in the renderer for the same
 sessions, naming each cookie a read returns.
 Renderer events use a bounded shared-memory queue with Mojo lifecycle control
-and coalesced wake-ups. The browser process
+and coalesced wake-ups. A wake-up leaves on the renderer's IO thread, so the
+browser drains the queue while a long synchronous script still holds the main
+thread. The browser process
 authenticates to the event broker with a session identifier and a mode-0600
 token file, then sends exact fixed-size records over a Unix socket. A bounded
 browser-process queue keeps those socket writes off the capture paths.

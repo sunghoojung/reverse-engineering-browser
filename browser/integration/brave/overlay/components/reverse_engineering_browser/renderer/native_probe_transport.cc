@@ -24,6 +24,7 @@
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_position.h"
 #include "mojo/public/cpp/base/big_buffer.h"
+#include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 
 namespace reb {
@@ -62,7 +63,11 @@ void NativeProbeTransport::Connect(mojo::PendingRemote<mojom::NativeProbeHost> p
     return;
   }
 
-  host_.Bind(std::move(pending_host), base::SequencedTaskRunner::GetCurrentDefault());
+  // A SharedRemote sends every message, EventsAvailable among them, from the
+  // sequence it is bound to. The IO thread keeps running while a main-thread
+  // task runs page script, so the browser hears that the ring is filling and
+  // drains it during a synchronous burst, not after the task ends.
+  host_.Bind(std::move(pending_host), blink::Platform::Current()->GetIOTaskRunner());
   host_.set_disconnect_handler(
       base::BindOnce(&NativeProbeTransport::Disable, base::Unretained(this)),
       base::SequencedTaskRunner::GetCurrentDefault());

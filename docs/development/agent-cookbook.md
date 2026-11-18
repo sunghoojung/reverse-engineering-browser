@@ -511,14 +511,17 @@ Needs Full access.
 ```text
 search_artifact_text {"q": "sha256", "kind": "javascript", "limit": 50}
 search_artifact_text {"q": "sha256", "kind": "javascript", "limit": 50, "offset": 50}
+search_artifact_text {"q": "crypto\\.subtle\\.(sign|digest)", "regex": true, "kind": "javascript"}
 ```
 
-Good: `matches` with `artifact_id`, `line`, `column` and a little context, and
+Good: `total_matches` counts every match in every file, read whole whatever
+its size; `matches` is a page with `artifact_id`, `line`, `column` and a
+little context, `files` gives each file on the page its match count, and
 `coverage.complete: true`. `next_offset` pages further. A file named in
-`coverage.not_fully_searched` was skipped (over 16 MiB) or hit 100 matches;
-narrow with `artifact_id`, `sha256` or `host`, or read it with recipe 21. The
-literal is plain text: there are no patterns, and `match_case` false folds
-ASCII letters only.
+`coverage.not_searched` could not be read or verified. `q` is literal text
+unless `regex` is true; regular expressions use the Rust `regex` syntax and
+run in time linear in the text. `match_case` false folds letters by Unicode
+simple case folding.
 
 ## 23. Read a large Wasm module's disassembly
 

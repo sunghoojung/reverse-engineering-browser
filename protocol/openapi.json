@@ -3516,8 +3516,8 @@
     "/api/artifacts/search": {
       "get": {
         "operationId": "search_artifact_text",
-        "summary": "Search retained artifacts for literal text",
-        "description": "Captured content: finds a literal of 1 to 256 bytes on one line in retained artifacts, oldest artifact first, as Sources Search does. There is no pattern language, because captured text is adversarial. Header blocks and cookie lists are never searched, so no match shows a credential or cookie value. match_case false folds ASCII letters only. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. Each match has its artifact, byte_offset, 1-based line and column (characters), and up to 48 bytes of the same line before and after it. At most 100 matches are taken from one file, files over 16 MiB are skipped, one call reads at most 64 MiB and stops after 10 seconds; coverage names each file not fully searched and complete says whether the scope was searched whole. offset skips matches and next_offset continues. The MCP projection lists this operation only with --allow-content (--permission full).",
+        "summary": "Search retained artifacts for text or a regular expression",
+        "description": "Captured content: finds q, literal text or (with regex true) a regular expression, on one line, in every selected retained artifact, oldest artifact first, as Sources Search does. Each artifact is searched whole, whatever its size, and verified against its manifest digest; nothing is skipped for size and there is no deadline. Regular expressions use the Rust regex syntax, whose matching time is linear in the text, so captured text cannot make a search backtrack; ^ and $ match at line breaks, and an empty match is not counted. Without match_case, letters fold by Unicode simple case folding. Header blocks and cookie lists are never searched, so no match shows a credential or cookie value. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. total_matches counts every match exactly; matches is one page of them from offset, and next_offset continues. Each match has its artifact, byte_offset and byte_length, 1-based line, column (characters) and utf16_column, utf16_length, at most 256 bytes of the match, and up to 48 bytes of the same line before and after it. files gives each artifact on the page its exact match count. coverage names each artifact that could not be read or verified, and each whose bytes are not valid UTF-8. The count is kept for the query and artifact set, so a later page reads only the files it lists. A request that goes away stops the search (499). The MCP projection lists this operation only with --allow-content (--permission full).",
         "tags": [
           "artifacts"
         ],
@@ -3526,18 +3526,27 @@
             "name": "q",
             "in": "query",
             "required": true,
-            "description": "The literal text, 1 to 256 bytes, no line breaks.",
+            "description": "Literal text, or a regular expression with regex true, on one line (no line breaks, U+2028 or U+2029).",
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 256
+              "minLength": 1
+            }
+          },
+          {
+            "name": "regex",
+            "in": "query",
+            "required": false,
+            "description": "When true, q is a regular expression in the Rust regex syntax. Default false.",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           },
           {
             "name": "match_case",
             "in": "query",
             "required": false,
-            "description": "Default false.",
+            "description": "Default false: letters fold by Unicode simple case folding.",
             "schema": {
               "type": "boolean",
               "default": false
@@ -3626,7 +3635,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..200, default 50.",
+            "description": "Matches in this page, clamped to 1..200, default 50. Every match is counted; next_offset reaches the rest.",
             "schema": {
               "type": "integer",
               "default": 50
@@ -3645,7 +3654,7 @@
             }
           },
           "400": {
-            "description": "Missing or invalid q, or an unknown, duplicate or malformed parameter.",
+            "description": "Missing or invalid q, an invalid regular expression, or an unknown, duplicate or malformed parameter.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3685,7 +3694,17 @@
             }
           },
           "500": {
-            "description": "Store, read or validation failure.",
+            "description": "Store, read or validation failure, or an artifact that changed between the count and its page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the search stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3708,7 +3727,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads retained artifacts within fixed byte, match and time budgets. Returns captured content; nothing is changed.",
+          "notes": "Reads every selected artifact whole, on every core, and keeps the match count per artifact for later pages. Returns captured content; nothing is changed.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -26486,23 +26505,27 @@
       "ArtifactSearchResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Literal matches with bounded same-line context. Snippets are captured content.",
+        "description": "Every match, counted exactly and returned a page at a time, with bounded same-line context. Snippets are captured content.",
         "required": [
           "format",
           "query",
+          "total_matches",
+          "files_with_matches",
           "matches",
+          "files",
           "next_offset",
           "coverage"
         ],
         "properties": {
           "format": {
-            "const": "reb-artifact-search-v1"
+            "const": "reb-artifact-search-v2"
           },
           "query": {
             "type": "object",
             "additionalProperties": false,
             "required": [
               "q_bytes",
+              "regex",
               "match_case",
               "filters",
               "offset",
@@ -26511,8 +26534,10 @@
             "properties": {
               "q_bytes": {
                 "type": "integer",
-                "minimum": 1,
-                "maximum": 256
+                "minimum": 1
+              },
+              "regex": {
+                "type": "boolean"
               },
               "match_case": {
                 "type": "boolean"
@@ -26531,6 +26556,14 @@
               }
             }
           },
+          "total_matches": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "files_with_matches": {
+            "type": "integer",
+            "minimum": 0
+          },
           "matches": {
             "type": "array",
             "maxItems": 200,
@@ -26542,11 +26575,17 @@
                 "session_id",
                 "kind",
                 "byte_offset",
+                "byte_length",
                 "line",
                 "column",
+                "utf16_column",
+                "utf16_length",
                 "before",
                 "match",
-                "after"
+                "match_complete",
+                "after",
+                "clipped_before",
+                "clipped_after"
               ],
               "properties": {
                 "artifact_id": {
@@ -26562,11 +26601,25 @@
                   "type": "integer",
                   "minimum": 0
                 },
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1
+                },
                 "line": {
                   "type": "integer",
                   "minimum": 1
                 },
                 "column": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "1-based, in characters; each invalid UTF-8 sequence is one U+FFFD."
+                },
+                "utf16_column": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "1-based, in UTF-16 code units, as the Sources editor counts columns."
+                },
+                "utf16_length": {
                   "type": "integer",
                   "minimum": 1
                 },
@@ -26576,11 +26629,56 @@
                 },
                 "match": {
                   "type": "string",
-                  "maxLength": 256
+                  "maxLength": 256,
+                  "description": "The matched text, or its first 256 bytes when match_complete is false."
+                },
+                "match_complete": {
+                  "type": "boolean"
                 },
                 "after": {
                   "type": "string",
                   "maxLength": 48
+                },
+                "clipped_before": {
+                  "type": "boolean",
+                  "description": "The line continues before `before`."
+                },
+                "clipped_after": {
+                  "type": "boolean",
+                  "description": "The line continues after `after`."
+                }
+              }
+            }
+          },
+          "files": {
+            "type": "array",
+            "maxItems": 200,
+            "description": "Each artifact with a match on this page, in page order.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "artifact_id",
+                "matches",
+                "first_match",
+                "valid_utf8"
+              ],
+              "properties": {
+                "artifact_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "matches": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Every match in this artifact."
+                },
+                "first_match": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The offset of its first match."
+                },
+                "valid_utf8": {
+                  "type": "boolean"
                 }
               }
             }
@@ -26599,9 +26697,10 @@
               "artifacts_selected",
               "artifacts_searched",
               "bytes_searched",
-              "stopped",
-              "not_fully_searched",
-              "not_fully_searched_count",
+              "not_searched",
+              "not_searched_count",
+              "not_valid_utf8",
+              "not_valid_utf8_count",
               "complete"
             ],
             "properties": {
@@ -26617,16 +26716,10 @@
                 "type": "integer",
                 "minimum": 0
               },
-              "stopped": {
-                "enum": [
-                  "deadline",
-                  "total_bytes",
-                  null
-                ]
-              },
-              "not_fully_searched": {
+              "not_searched": {
                 "type": "array",
                 "maxItems": 32,
+                "description": "The first 32 artifacts that could not be read or verified; not_searched_count counts them all.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -26640,20 +26733,31 @@
                     },
                     "reason": {
                       "enum": [
-                        "larger_than_16_mib",
-                        "unreadable_or_integrity",
-                        "file_match_limit"
+                        "unreadable_or_integrity"
                       ]
                     }
                   }
                 }
               },
-              "not_fully_searched_count": {
+              "not_searched_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "not_valid_utf8": {
+                "type": "array",
+                "maxItems": 32,
+                "description": "The first 32 searched artifacts whose bytes are not valid UTF-8, so text in them may be replacement characters; not_valid_utf8_count counts them all.",
+                "items": {
+                  "$ref": "#/components/schemas/Uint64String"
+                }
+              },
+              "not_valid_utf8_count": {
                 "type": "integer",
                 "minimum": 0
               },
               "complete": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Every selected artifact was searched."
               }
             }
           }

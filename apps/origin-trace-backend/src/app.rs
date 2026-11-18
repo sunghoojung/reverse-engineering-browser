@@ -1735,23 +1735,24 @@ impl App {
             "/api/artifacts/search" => {
                 q.only(
                     &artifact_query::ARTIFACT_QUERY_KEYS[..8],
-                    &["q", "match_case", "offset", "limit"],
+                    &["q", "regex", "match_case", "offset", "limit"],
                 )?;
-                let query = artifact_text::SearchRequest::query(q.required("q")?)?;
-                let match_case = match q.one("match_case")? {
-                    None | Some("false") => false,
-                    Some("true") => true,
-                    Some(_) => return Err(Error::bad("match_case must be true or false")),
+                let text = artifact_text::SearchRequest::query(q.required("q")?)?;
+                let flag = |name: &str| match q.one(name)? {
+                    None | Some("false") => Ok(false),
+                    Some("true") => Ok(true),
+                    Some(_) => Err(Error::bad(format!("{name} must be true or false"))),
                 };
                 let request = artifact_text::SearchRequest {
-                    query,
-                    match_case,
+                    text,
+                    regex: flag("regex")?,
+                    match_case: flag("match_case")?,
                     filter: artifact_query::ArtifactFilter::parse(&q)?,
-                    offset: q.number("offset", Some("0"), 32, false)? as usize,
+                    offset: q.number("offset", Some("0"), 64, false)?,
                     limit: q.limit(50, artifact_text::SEARCH_MAX_LIMIT)?,
                 };
                 let root = self.options.artifacts.clone();
-                self.blocking(move || artifact_text::search(&root, &request))
+                self.cancellable(move |cancelled| artifact_text::search(&root, &request, cancelled))
                     .await?
             }
             _ if path.starts_with("/api/artifacts/") && path.ends_with("/text") => {

@@ -1381,18 +1381,35 @@ every level, because they hold `Cookie`, `Set-Cookie`, `Authorization` and
 cookie values; `get_request_headers` and `get_request_cookies` read them with
 those values withheld.
 
-`GET /api/artifacts/search` (`search_artifact_text`) finds a literal `q` of 1
-to 256 bytes on one line, as Sources Search does. There is no pattern
-language, and header blocks and cookie lists are never searched. `match_case` (default false) folds ASCII letters only. `kind`,
-`artifact_id`, `session_id`, `navigation_id`, `frame_id`,
+`GET /api/artifacts/search` (`search_artifact_text`,
+`reb-artifact-search-v2`) finds `q` on one line in every selected artifact, as
+Sources Search does: literal text, or with `regex=true` a regular expression
+in the Rust `regex` syntax. That engine's matching time is linear in the text
+whatever the pattern, so captured text cannot make a search backtrack; `^`
+and `$` match at line breaks and an empty match is not counted. Without
+`match_case` (default false), letters fold by Unicode simple case folding, as
+Find in Sources folds them. Header blocks and cookie lists are never searched.
+`kind`, `artifact_id`, `session_id`, `navigation_id`, `frame_id`,
 `execution_context_id`, `sha256` and `host` select artifacts as
-[`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first. Each
-match names its artifact, `byte_offset`, 1-based `line` and `column` (in
-characters), and up to 48 bytes of the same line in `before` and `after`. At
-most 100 matches come from one file, a file over 16 MiB is skipped, one call
-reads at most 64 MiB and stops after 10 seconds. `coverage` names every file
-not fully searched, with its reason, and `complete` says whether the whole
-scope was searched; `offset` skips matches and `next_offset` continues.
+[`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first.
+
+Every selected artifact is read whole, whatever its size, verified against its
+manifest digest and searched on every core; nothing is skipped for size and
+there is no deadline. A request that goes away stops the search with 499.
+`total_matches` counts every match exactly, `matches` is one page of them
+from `offset` (`limit` 1 to 200, default 50) and `next_offset` continues.
+Each match names its artifact, `byte_offset` and `byte_length`, 1-based
+`line`, `column` (in characters) and `utf16_column` (in UTF-16 code units, as
+the editor counts), `utf16_length`, the match (its first 256 bytes when
+`match_complete` is false), and up to 48 bytes of the same line in `before`
+and `after`, with `clipped_before` and `clipped_after` saying whether the line
+continues. `files` gives each artifact on the page its exact match count and
+the offset of its first match. `coverage` names artifacts that could not be
+read or verified (`complete` is false then) and those whose bytes are not
+valid UTF-8. The count is kept per query and artifact set (eight searches), so
+a later page reads only the files whose matches it lists. v1 skipped files over
+16 MiB, read at most 64 MiB per call, stopped after 10 seconds and took at most
+100 matches from a file; v2 has none of those limits.
 
 `inspect_wasm` returns one window of a module of any size: `row_offset` (or
 `byte_offset`, which starts at the row for an original byte) and `row_limit`

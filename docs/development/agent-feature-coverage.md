@@ -101,7 +101,7 @@ Every option is off unless the start names it, and none is inherited.
 | Source tree, Captured tab, Open file, quick open | `get_artifacts` (`kind`, `host`, `frame_id`, `sha256`) | R | Covered |
 | Source text in the editor | `get_artifact_text` (pages of 64 KiB); `get_source_format` (`start_line`, `line_count`) | F | Added |
 | Pretty print `{ }` | `get_source_format` | A (layout), F (text) | Covered; below Full access the laid-out text is omitted, at Full access request and response bodies are laid out too |
-| Search text in all retained files | `search_artifact_text` | F | Added (before: the page read every file itself) |
+| Search text in all retained files | `search_artifact_text` (literal or `regex`) | F | Added; the page uses the same route, so Sources and agents search every file whole with exact counts |
 | Find in source, Go to line | `search_artifact_text` (`artifact_id`), `get_artifact_text` (`offset`) | F | Added |
 | Inspect (Wasm disassembly) | `inspect_wasm` with `row_offset` or `byte_offset`, `row_limit`, `sections` | R (structure), F (instruction text) | Added row windows over every row of any module; below Full access row text is omitted |
 | Find in Inspect | `search_wasm_inspection` (`q`, `match_offset`, `match_limit`) | F | Added; counts and pages every match in every row |

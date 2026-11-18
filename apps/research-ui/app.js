@@ -9975,66 +9975,27 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // After the caret update that the same click schedules.
         requestAnimationFrame(syncSourceSelection);
       });
-      // Search all files. Reads use the artifact content route with a 2 MiB
-      // limit and the Sources preview's checks. A loaded preview is reused as is;
-      // other text stays in a small search-owned cache, so typing does not
-      // refetch every file and neither cache grows the other's bound.
-      const SOURCE_SEARCH_CACHE_UNITS = 8 * 1024 * 1024;
-      const sourceSearchCache = new Map();
-      function sourceSearchFiles() {
-        const sources = capturedSources(), retained = new Set(sources.map(sourceIdentity));
-        for (const key of sourceSearchCache.keys()) if (!retained.has(key)) sourceSearchCache.delete(key);
-        return sources.map(source => ({identity: sourceIdentity(source), artifactId: source.artifact_id, name: `${sourceDisplayName(source)} · artifact ${source.artifact_id}`,
-          url: source.url ?? '', icon: sourceIcon(source), byteSize: source.byte_size, binary: sourceHexArtifact(source)}));
+      // Search all files: the backend's artifact search reads every text file
+      // Sources lists whole and counts every match. Hex kinds are not text, so
+      // they are named instead of searched.
+      function sourceSearchDescribe(artifactId) {
+        const sources = capturedSources(artifactId);
+        if (sources.length !== 1) return null;
+        const [source] = sources;
+        return {identity: sourceIdentity(source), name: `${sourceDisplayName(source)} · artifact ${source.artifact_id}`,
+          url: source.url ?? '', icon: sourceIcon(source)};
       }
-      async function readSourceSearchText(entry, signal, limit) {
-        const matches = state.artifacts.filter(artifact => artifact.artifact_id === entry.artifactId);
-        const artifact = matches.length === 1 && sourceIdentity(matches[0]) === entry.identity ? matches[0] : null;
-        if (!artifact) throw new Error('changed or left the retained catalog');
-        if (artifact.content !== undefined && !artifact.loading) {
-          return {text: artifact.content.slice(0, artifact.sourceTextLength ?? artifact.content.length), bytes: Math.min(artifact.byte_size, limit),
-            partial: artifact.byte_size > limit || Boolean(artifact.contentTruncated), lossy: Boolean(artifact.contentLossy)};
-        }
-        const cached = sourceSearchCache.get(entry.identity);
-        if (cached) {sourceSearchCache.delete(entry.identity); sourceSearchCache.set(entry.identity, cached); return cached;}
-        const controller = new AbortController(), abort = () => controller.abort();
-        signal.addEventListener('abort', abort, {once: true});
-        let timedOut = false;
-        const timeout = setTimeout(() => {timedOut = true; abort();}, 10000);
-        try {
-          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=${limit}`, {cache: 'no-store', signal: controller.signal});
-          if (!response.ok) {response.body?.cancel().catch(() => {}); throw new Error(`artifact store returned ${response.status}`);}
-          const buffer = await sourceFactsReadBytes(response, limit, controller.signal);
-          const total = response.headers.get('X-Artifact-Total-Bytes');
-          if (buffer.length !== Math.min(artifact.byte_size, limit) || total !== null && Number(total) !== artifact.byte_size) throw new Error('its retained byte size changed');
-          if (artifact.byte_size <= limit && globalThis.crypto?.subtle) {
-            const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), byte => byte.toString(16).padStart(2, '0')).join('');
-            if (hash !== artifact.sha256) throw new Error('its bytes do not match the retained SHA-256');
-          }
-          let lossy = false;
-          try {new TextDecoder('utf-8', {fatal: true}).decode(buffer);} catch {lossy = true;}
-          const result = {text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer), bytes: buffer.length, partial: artifact.byte_size > buffer.length, lossy};
-          if (signal.aborted) return result;
-          sourceSearchCache.set(entry.identity, result);
-          let units = 0;
-          for (const value of sourceSearchCache.values()) units += value.text.length;
-          for (const [key, value] of sourceSearchCache) {
-            if (units <= SOURCE_SEARCH_CACHE_UNITS) break;
-            units -= value.text.length; sourceSearchCache.delete(key);
-          }
-          return result;
-        } catch (error) {
-          throw new Error(timedOut ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, ''));
-        } finally {
-          clearTimeout(timeout);
-          signal.removeEventListener('abort', abort);
-        }
+      function sourceSearchKinds() {
+        return [...new Set(capturedSources().filter(source => !sourceHexArtifact(source)).map(source => source.kind))].sort();
+      }
+      function sourceSearchBinaryFiles() {
+        return capturedSources().filter(sourceHexArtifact).length;
       }
       // A result opens through the Sources selection with its location, so
       // Back returns to these results with their scroll and focus.
       function openSourceSearchMatch(file, match) {
         const matches = state.artifacts.filter(artifact => artifact.artifact_id === file.artifactId);
-        if (matches.length !== 1 || sourceIdentity(matches[0]) !== file.identity) {
+        if (!file.identity || matches.length !== 1 || sourceIdentity(matches[0]) !== file.identity) {
           state.sourceNoticeKind = 'warning';
           state.sourceNotice = 'This file changed or left the retained catalog after the search. Search again before opening it.';
           renderSourceHealth();
@@ -10047,9 +10008,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
       const sourceSearchPanel = createSourceSearchPanel({
         input: document.querySelector('#source-search-all-input'), matchCase: document.querySelector('#source-search-all-case'),
-        status: document.querySelector('#source-search-all-status'), notes: document.querySelector('#source-search-all-notes'),
+        regex: document.querySelector('#source-search-all-regex'), status: document.querySelector('#source-search-all-status'),
+        cancel: document.querySelector('#source-search-all-cancel'), notes: document.querySelector('#source-search-all-notes'),
         results: document.querySelector('#source-search-all-results'),
-        list: sourceSearchFiles, read: readSourceSearchText, open: openSourceSearchMatch
+        kinds: sourceSearchKinds, binary: sourceSearchBinaryFiles, describe: sourceSearchDescribe, open: openSourceSearchMatch
       });
       function openSourceSearch(query) {
         showScreen('sources');

@@ -1705,7 +1705,7 @@ capture, fetch anything or change a row.
 | `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
 | `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one cancellable value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
-| `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
+| `source_search.js` | Search all files: the paged, cancellable client of the backend's artifact search, coverage notes and the results panel; `app.js` supplies the catalog's text kinds, names and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
 | `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
@@ -2046,39 +2046,45 @@ transformation completeness separate from search coverage.
 
 **Search** beside **Captured** in the Sources navigator searches the text of
 every retained file at once, for the string constants, endpoint paths and magic
-numbers that are usually the first thread to pull. The query is a literal single
-line of at most 512 UTF-16 code units, case-insensitive unless **Match case** is
-on. No pattern syntax is offered, because captured scripts are adversarial and a
-regular expression could backtrack catastrophically on crafted input. Typing
-retires the running search at once and searches again after a short pause;
-Enter searches immediately. The command palette's **Search all sources** entry
-opens this view with its query and runs it; typing in the palette never reads
-artifact bytes.
+numbers that are usually the first thread to pull. The query is one line of
+text, case-insensitive (Unicode simple case folding, as Find folds) unless
+**Match case** is on. With **Regex** it is a regular expression in the Rust
+`regex` syntax: that engine's matching time is linear in the text whatever the
+pattern, so a crafted script cannot make a search backtrack. Typing retires the
+running search at once and searches again after a short pause; Enter searches
+immediately. The command palette's **Search all sources** entry opens this view
+with its query and runs it; typing in the palette never reads artifact bytes.
 
-Each file is read once through `/api/artifacts/{artifact_id}/content` with a
-2 MiB limit and the Sources preview's byte-size and SHA-256 checks. A loaded
-preview is reused without a request, and other text is kept in a separate cache
-of at most 8 Mi UTF-16 code units, so the next query does not refetch it; files
-that leave the catalog leave that cache. One search reads at most 32 MiB and
-collects at most 100 matches per file and 1,000 overall. WebAssembly and guest
-bytecode are binary and are not searched. The status line counts files as they
-finish ("Searched 12 of 40 files"), and a note above the results names every
-file that was not searched completely: binary files, files that failed to load
-(with the reason), files over the 2 MiB size cap where only their first 2 MiB
-was searched, files that are not valid UTF-8 (a miss there is not proof of
-absence), files that stopped at the per-file match cap, and files left unsearched
-by the overall match cap or read budget. Nothing is dropped without a note.
+One request to the backend's artifact search (`search_artifact_text`,
+[`reb-artifact-search-v2`](../../protocol/http-api.md)) covers every text kind
+the Sources list shows. The backend reads each file whole, whatever its size,
+verifies it against its SHA-256, searches the files on every core and counts
+every match exactly; nothing is skipped for size and there is no deadline.
+While it runs the status line shows the elapsed seconds and **Cancel** (or
+Escape), and a cancelled or replaced search stops the backend's work. The
+results then name the exact total and the files that hold matches ("4,812
+matches in 37 files · searched 40 of 40 files"). The first 200 matches are
+shown, and **Show the next 200 of N remaining matches** at the end loads the
+next page: the backend kept the count, so a page reads only the files it lists.
+WebAssembly and guest bytecode are not text; a note names how many there are,
+and Find in their Hex or Inspect view searches every byte or row. A note also
+names every file that could not be read or verified (search again to retry) and
+every file that is not valid UTF-8, where a miss is not proof of absence.
 
-Results are grouped by file with its name, match count and URL. Each match shows
-`line:column` and its line with the match marked; captured text is inserted as
-text nodes. Arrow keys move through the matches (Arrow Down from the field enters
-them), and Enter or a click opens that file at the match: the same Sources
-selection as the tree, revealing the line and marking the match like Find. Opened
-from Sources, the previous view becomes a Back stop, so Back returns to the
-results with their scroll and focus. A file that changed or left the catalog
-after the search is refused rather than reopened. `node tools/check-source-search.mjs`
-(part of `make check`) exercises the matcher, caps, cancellation, partial-result
-notes, reader checks and this open-and-Back path in the shipped scripts.
+Results are grouped by file with its name, exact match count and URL. Each
+match shows `line:column` and up to twelve characters before it on its line,
+with the match marked; captured text is inserted as text nodes. Arrow keys move
+through the matches (Arrow Down from the field enters them, and from the last
+match reaches the next-page control, after which focus lands on the first new
+match), and Enter or a click opens that file at the match: the same Sources
+selection as the tree, revealing the line and marking the match like Find.
+Opened from Sources, the previous view becomes a Back stop, so Back returns to
+the results with their scroll and focus. A file that changed or left the
+catalog after the search is refused rather than reopened.
+`node tools/check-source-search.mjs` (part of `make check`) exercises the
+controller, paging, cancellation, coverage notes, the panel's keyboard use and
+this open-and-Back path in the shipped scripts, and `make e2e` runs it against
+the built backend over a real store with a 17 MiB file.
 
 The editor mounts at most 1,000 lines. A row above and below them reaches the
 previous and next 1,000 lines, and **Go to line** (Ctrl+G, or **More**) takes a

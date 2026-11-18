@@ -2741,6 +2741,27 @@ async fn verified_range_from_large_artifact_and_corruption_rejection() {
             .len(),
         bytes.len() - 16777216
     );
+    // Search reads the whole 20 MiB file and counts every match exactly; a
+    // page near the end reads only that file again.
+    let search = |query: String| {
+        let server = &server;
+        async move {
+            let response = server.get(&format!("/api/artifacts/search?{query}")).await;
+            let bytes =
+                assert_contract_response(response, "get", "/api/artifacts/search", 200).await;
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+    let counted = search("q=xxxxxxxx&limit=1".into()).await;
+    let total = bytes.len() as u64 / 8;
+    assert_eq!(counted["total_matches"], total);
+    assert_eq!(counted["next_offset"], 1);
+    assert_eq!(counted["coverage"]["bytes_searched"], bytes.len());
+    let last = search(format!("q=xxxxxxxx&offset={}", total - 1)).await;
+    assert_eq!(last["matches"][0]["byte_offset"], bytes.len() - 8);
+    assert_eq!(last["matches"][0]["utf16_column"], bytes.len() - 7);
+    assert_eq!(last["matches"][0]["clipped_before"], true);
+    assert!(last["next_offset"].is_null());
     let response = server
         .get(&format!("/api/artifacts/1/content?offset={}", bytes.len()))
         .await;
@@ -12046,15 +12067,43 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
     };
     let folded = search("q=token&kind=javascript").await;
     let found = folded["matches"].as_array().unwrap();
-    assert_eq!(found.len(), 3, "ASCII case folds by default");
+    assert_eq!(found.len(), 3, "case folds by default");
+    assert_eq!(folded["format"], "reb-artifact-search-v2");
     assert_eq!(
-        (found[0]["line"].as_u64(), found[0]["column"].as_u64()),
-        (Some(2), Some(7))
+        (
+            folded["total_matches"].as_u64(),
+            folded["files_with_matches"].as_u64()
+        ),
+        (Some(3), Some(1))
+    );
+    assert_eq!(
+        folded["files"],
+        json!([{"artifact_id":"1","matches":3,"first_match":0,"valid_utf8":true}])
+    );
+    assert_eq!(
+        (
+            found[0]["line"].as_u64(),
+            found[0]["column"].as_u64(),
+            found[0]["utf16_column"].as_u64(),
+            found[0]["utf16_length"].as_u64(),
+            found[0]["byte_offset"].as_u64(),
+            found[0]["byte_length"].as_u64(),
+        ),
+        (Some(2), Some(7), Some(7), Some(5), Some(18), Some(5))
     );
     assert_eq!(found[0]["match"], "Token");
     assert_eq!(found[0]["before"], "const ");
     assert_eq!(found[0]["after"], " = 'token';");
+    assert_eq!(found[0]["match_complete"], true);
     assert_eq!(folded["coverage"]["complete"], true);
+    assert!(folded["next_offset"].is_null());
+    // A regular expression runs in linear time; `^` is a line anchor.
+    let expression = search("q=%5E%2F%2F%20t.k%5Cw%2B&regex=true&kind=javascript").await;
+    assert_eq!(expression["total_matches"], 1);
+    assert_eq!(expression["matches"][0]["match"], "// TOKEN");
+    assert_eq!(expression["query"]["regex"], true);
+    let literal = search("q=t.ken&kind=javascript").await;
+    assert_eq!(literal["total_matches"], 0, "a literal's dot is text");
     let exact = search("q=token&match_case=true").await;
     let ids = exact["matches"]
         .as_array()
@@ -12081,6 +12130,9 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         "q=",
         "q=a%0Ab",
         "q=a&match_case=yes",
+        "q=a&regex=yes",
+        "q=(&regex=true",
+        "q=a%E2%80%A8b",
         "q=a&after=1",
         "match_case=true",
     ] {

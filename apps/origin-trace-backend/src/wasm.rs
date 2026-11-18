@@ -6,6 +6,7 @@
 //! execution.
 use crate::{
     error::{Error, Result, check_cancelled},
+    result_cache::{Cache, kept},
     wasm_graph,
 };
 use serde_json::{Value, json};
@@ -875,37 +876,6 @@ impl Inspection {
         }
         Ok(rows)
     }
-}
-
-/// Returns the entry for `key`, building and keeping it when absent. A build
-/// that fails or is cancelled keeps nothing.
-/// A few recently built values, most recent last.
-type Cache<K, V> = Mutex<Vec<(K, Arc<V>)>>;
-
-fn kept<K: PartialEq, V>(
-    cache: &Cache<K, V>,
-    key: K,
-    capacity: usize,
-    build: impl FnOnce() -> Result<V>,
-) -> Result<Arc<V>> {
-    let found = cache.lock().ok().and_then(|entries| {
-        entries
-            .iter()
-            .find(|(k, _)| *k == key)
-            .map(|(_, value)| value.clone())
-    });
-    if let Some(found) = found {
-        return Ok(found);
-    }
-    let value = Arc::new(build()?);
-    if let Ok(mut entries) = cache.lock() {
-        entries.retain(|(k, _)| *k != key);
-        entries.push((key, value.clone()));
-        while entries.len() > capacity {
-            entries.remove(0);
-        }
-    }
-    Ok(value)
 }
 
 type Key = (String, Option<BTreeSet<u8>>);

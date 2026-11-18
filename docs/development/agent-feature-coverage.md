@@ -113,7 +113,7 @@ Every option is off unless the start names it, and none is inherited.
 | Compare with (Wasm module diff) | `get_wasm_module_diff` with `status`, `row_offset`, `row_limit` | R | Added; structure only, so nothing is omitted below Full access |
 | Trace value (Wasm value flow for one operand or local) | `get_wasm_value_flow` | R (structure), F (instruction text) | Added; below Full access `text` and `expression` are omitted |
 | Map (entropy and kind map) | `get_artifact_map` | R | Covered |
-| Facts | `get_source_facts` | A | Covered |
+| Facts | `get_source_facts`, `list_source_fact_rows` | A | Covered |
 | Track calls (saved invocation sites) | `get_js_invocation_sites`, `resolve_js_invocation_site`, `js_invocation_site_action` | R to read, A to change | Covered |
 | Static cleanup (deobfuscation) | `get_deobfuscation` | A (structure), F (transformed source) | Covered |
 | Decode range | `decoder_action` with bytes read by `get_artifact_text` `encoding=hex` | F | Partial: two calls instead of one selection |

@@ -7,90 +7,150 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
-    sync::LazyLock,
-    time::Duration,
+    sync::{Arc, LazyLock},
 };
 use tokio::{process::Command, sync::Mutex};
-const SOURCE_MAX: usize = 4 * 1024 * 1024;
+
+/// Analyses kept by source SHA-256 and intrinsic assumption.
+const CACHE_ENTRIES: usize = 4;
+type Analysis = (String, bool);
+
 pub struct Deobfuscator {
     path: PathBuf,
     lock: Mutex<()>,
+    /// Held while one analysis checks the cache and runs, so two requests
+    /// for the same bytes share one worker run.
+    analysis: Mutex<()>,
+    cache: std::sync::Mutex<VecDeque<(Analysis, Arc<Value>, usize)>>,
 }
 impl Deobfuscator {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
             lock: Mutex::new(()),
+            analysis: Mutex::new(()),
+            cache: Default::default(),
         }
     }
+    /// The analysis of these exact bytes, from the cache when the same bytes
+    /// and assumption were analyzed before. The result is a function of the
+    /// bytes, so a cached one is the one the worker would return again.
     pub async fn analyze(
         &self,
         source: &str,
         assume_intrinsics: bool,
         derived: bool,
     ) -> Result<Value> {
-        if source.is_empty() || source.len() > SOURCE_MAX {
-            return Err(Error::bad(
-                "Source is empty or exceeds the deobfuscation byte limit",
-            ));
+        if source.is_empty() {
+            return Err(Error::bad("Source is empty"));
         }
+        let key = (
+            hex::encode(Sha256::digest(source.as_bytes())),
+            assume_intrinsics,
+        );
+        let whole = match self.cached(&key) {
+            Some(whole) => whole,
+            None => {
+                let _run = self.analysis.lock().await;
+                match self.cached(&key) {
+                    Some(whole) => whole,
+                    None => {
+                        let whole = Arc::new(self.run(source, &key.0, assume_intrinsics).await?);
+                        self.store(key, whole.clone(), source.len());
+                        whole
+                    }
+                }
+            }
+        };
+        let mut result = Value::clone(&whole);
+        if !derived {
+            result.as_object_mut().unwrap().remove("representation");
+        }
+        Ok(result)
+    }
+
+    async fn run(&self, source: &str, sha256: &str, assume_intrinsics: bool) -> Result<Value> {
         let response = self
             .request(json!({"source":source,"assume_intrinsics":assume_intrinsics}))
             .await?;
         let representation = representation(source, &response, assume_intrinsics)?;
         let stats = metrics(source);
         let classification = classify(&stats);
-        let analysis = json!({"schema":"deobfuscation-analysis-v1","source":{"url":null,"sha256":hex::encode(Sha256::digest(source.as_bytes())),"byte_size":source.len(),"lines":source.matches('\n').count()+1},"classification":classification,"stats":stats,"assumptions":representation["assumptions"],"representation":{"status":if representation["text"]==source {"unchanged"} else {"derived"},"derived_bytes":representation["text"].as_str().unwrap().len(),"segment_count":representation["segments"].as_array().unwrap().len(),"truncated":representation["truncated"],"transformations":representation["transformations"]},"string_tables":tables(source),"omissions":["Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."],"limits":{"max_source_bytes":SOURCE_MAX,"max_derived_bytes":SOURCE_MAX+512*1024,"max_segments":250000,"max_string_tables":64,"max_string_entries":2048}});
-        let mut result = json!({"schema":"deobfuscation-analysis-v1","engine":"rust-oxc","original_source":source,"source_truncated":false,"analysis":analysis});
-        if derived {
-            result["representation"] = representation;
-        }
-        Ok(result)
+        let analysis = json!({"schema":"deobfuscation-analysis-v1","source":{"url":null,"sha256":sha256,"byte_size":source.len(),"lines":source.matches('\n').count()+1},"classification":classification,"stats":stats,"assumptions":representation["assumptions"],"representation":{"status":if representation["text"]==source {"unchanged"} else {"derived"},"derived_bytes":representation["text"].as_str().unwrap().len(),"segment_count":representation["segments"].as_array().unwrap().len(),"truncated":representation["truncated"],"transformations":representation["transformations"]},"string_tables":tables(source),"omissions":["Unsupported decoder operations, custom prototype hooks, mutable or escaping tables, and cross-scope propagation remain unresolved."]});
+        Ok(
+            json!({"schema":"deobfuscation-analysis-v1","engine":"rust-oxc","original_source":source,"source_truncated":false,"analysis":analysis,"representation":representation}),
+        )
     }
+
+    fn cached(&self, key: &Analysis) -> Option<Arc<Value>> {
+        let mut cache = self.cache.lock().unwrap();
+        let at = cache.iter().position(|(entry, ..)| entry == key)?;
+        let entry = cache.remove(at)?;
+        let whole = entry.1.clone();
+        cache.push_front(entry);
+        Some(whole)
+    }
+
+    fn store(&self, key: Analysis, whole: Arc<Value>, source_bytes: usize) {
+        // An evicted analysis only costs a rerun. Keep the newest whatever its
+        // size, and older ones while they fit beside it. The original, derived
+        // text and per-segment records are each about the source's size.
+        let budget = (crate::js_worker_alloc::machine_ceiling() / 16) as usize;
+        let mut cache = self.cache.lock().unwrap();
+        cache.push_front((key, whole, source_bytes.saturating_mul(4)));
+        while cache.len() > CACHE_ENTRIES
+            || (cache.len() > 1 && cache.iter().map(|entry| entry.2).sum::<usize>() > budget)
+        {
+            cache.pop_back();
+        }
+    }
+    /// The worker's facts report as its own JSON text, which
+    /// `source_facts::admit` checks row by row.
     pub async fn source_facts(
         &self,
         source: &str,
         region: Option<(usize, usize)>,
-    ) -> Result<Value> {
-        if source.len() > SOURCE_MAX {
-            return Err(Error::bad("Source exceeds the source facts byte limit"));
-        }
+    ) -> Result<Vec<u8>> {
         let mut request = json!({"operation":"source_facts","source":source});
         if let Some((start, end)) = region {
             // The worker resolves this range to one callable body inside its own
             // parse of the complete source; a byte slice is never analyzed alone.
             request["region"] = json!({"start":start,"end":end});
         }
-        let response = self.request(request).await?;
-        crate::source_facts::validate(source, region, &response)?;
-        Ok(response)
+        self.reply(&request).await
     }
 
     /// Finds the function an invocation site names, in the BOM-free script
     /// text that `request` carries. The reply is checked by the caller.
     pub async fn invocation_site(&self, request: Value) -> Result<Value> {
-        if request["source"]
-            .as_str()
-            .is_none_or(|s| s.len() > SOURCE_MAX)
-        {
-            return Err(Error::bad("Source exceeds the invocation site byte limit"));
+        if !request["source"].is_string() {
+            return Err(Error::bad(
+                "An invocation site query carries its source text",
+            ));
         }
         self.request(request).await
     }
 
     async fn request(&self, request: Value) -> Result<Value> {
+        serde_json::from_slice(&self.reply(&request).await?)
+            .map_err(|_| Error::new(502, "Deobfuscation worker returned malformed JSON"))
+    }
+
+    async fn reply(&self, request: &Value) -> Result<Vec<u8>> {
         if !worker::executable(&self.path) {
             return Err(
                 Error::new(503, "The Rust JavaScript analysis worker is unavailable")
                     .with_code(Code::DependencyUnavailable),
             );
         }
-        let _guard = self.lock.try_lock().map_err(|_| {
-            Error::conflict("Deobfuscation worker is busy; retry when analysis finishes")
-        })?;
-        let mut input = serde_json::to_vec(&request)?;
+        // One worker at a time, in arrival order: each holds a whole parse of
+        // its source, so queuing keeps two large bundles from doubling peak
+        // memory. A request that goes away while it waits or runs drops this
+        // future, which leaves the queue or kills its worker.
+        let _guard = self.lock.lock().await;
+        let mut input = serde_json::to_vec(request)?;
         input.push(b'\n');
         let output = worker::run(
             Command::new(&self.path)
@@ -98,8 +158,8 @@ impl Deobfuscator {
                 .env("LANG", "C")
                 .env("LC_ALL", "C"),
             &input,
-            32 * 1024 * 1024,
-            Duration::from_secs(5),
+            None,
+            None,
         )
         .await?;
         if !output.success {
@@ -108,8 +168,7 @@ impl Deobfuscator {
                 "JavaScript analysis worker terminated unexpectedly; original source is preserved",
             ));
         }
-        serde_json::from_slice(&output.bytes)
-            .map_err(|_| Error::new(502, "Deobfuscation worker returned malformed JSON"))
+        Ok(output.bytes)
     }
 }
 fn representation(source: &str, response: &Value, intrinsics: bool) -> Result<Value> {
@@ -125,13 +184,6 @@ fn representation(source: &str, response: &Value, intrinsics: bool) -> Result<Va
                 "Derived JavaScript failed bounded syntax validation; original source is preserved",
             ),
             Some("syntax") => Error::new(422, "JavaScript could not be parsed"),
-            Some("preflight-limit") => Error::new(
-                422,
-                "JavaScript exceeds the bounded syntax preflight's depth, size or time budget; original source is preserved",
-            ),
-            Some("source-limit") => {
-                Error::bad("Source is empty or exceeds the deobfuscation byte limit")
-            }
             Some("invalid-request") => {
                 Error::new(502, "Deobfuscation worker rejected the analysis request")
             }
@@ -149,7 +201,6 @@ fn representation(source: &str, response: &Value, intrinsics: bool) -> Result<Va
     }
     let rewrites = response["transformations"]
         .as_array()
-        .filter(|a| a.len() <= 4096)
         .ok_or_else(malformed)?;
     let derived = response["derived_source"].as_str().ok_or_else(malformed)?;
     let mut rebuilt = String::new();
@@ -612,20 +663,42 @@ fn decode_literal(raw: &str) -> (String, &'static str) {
             }
         }
     }
-    (chars_limit(&text, 4096), encoding)
+    (text, encoding)
 }
-fn hint(source: &str, boundary: usize) -> Value {
+/// `boundary_chars` is the code-point offset of byte `boundary`.
+fn hint(source: &str, boundary: usize, boundary_chars: usize) -> Value {
     let window = source[boundary..].chars().take(2000).collect::<String>();
     let definition = PATTERNS["function"].captures(&window);
-    json!({"kind":if definition.is_some() {"function-definition-near-table"} else {"none"},"name":definition.as_ref().map(|d|d[1].to_owned()),"offset":definition.as_ref().map(|d|source[..boundary].chars().count()+window[..d.get(0).unwrap().start()].chars().count()),"dynamic_code_nearby":PATTERNS["dynamic_code_calls"].is_match(&window),"confidence":if definition.is_some() {"low"} else {"none"},"note":"A nearby definition is a hint, not proof, that it decodes this table."})
+    json!({"kind":if definition.is_some() {"function-definition-near-table"} else {"none"},"name":definition.as_ref().map(|d|d[1].to_owned()),"offset":definition.as_ref().map(|d|boundary_chars+window[..d.get(0).unwrap().start()].chars().count()),"dynamic_code_nearby":PATTERNS["dynamic_code_calls"].is_match(&window),"confidence":if definition.is_some() {"low"} else {"none"},"note":"A nearby definition is a hint, not proof, that it decodes this table."})
 }
+/// Code-point offsets of nondecreasing byte offsets, in one walk of the source.
+struct Characters<'a> {
+    source: &'a str,
+    byte: usize,
+    count: usize,
+}
+impl<'a> Characters<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            byte: 0,
+            count: 0,
+        }
+    }
+    fn at(&mut self, byte: usize) -> usize {
+        debug_assert!(byte >= self.byte);
+        self.count += self.source[self.byte..byte].chars().count();
+        self.byte = byte;
+        self.count
+    }
+}
+/// Every literal table in the source, in source order. Each match is visited
+/// once and code-point offsets advance with it, so the report stays linear in
+/// the source however many tables a bundle holds.
 fn tables(source: &str) -> Vec<Value> {
     let mut tables = Vec::new();
-    let mut used = 0;
+    let mut characters = Characters::new(source);
     for m in PATTERNS["code_array"].find_iter(source) {
-        if tables.len() >= 64 || used >= 2048 {
-            break;
-        }
         let numbers = PATTERNS["integer"]
             .find_iter(m.as_str())
             .map(|n| (n.as_str().parse::<u32>().unwrap(), m.start() + n.start()))
@@ -646,31 +719,24 @@ fn tables(source: &str) -> Vec<Value> {
         {
             continue;
         }
-        if used + numbers.len() > 2048 {
-            break;
-        }
-        used += numbers.len();
-        tables.push(json!({"kind":"code-point-array","offset":source[..m.start()].chars().count(),"length":m.as_str().chars().count(),"entry_count":numbers.len(),"encodings":["code-point"],"entries":numbers.iter().enumerate().map(|(i,(n,offset))|json!({"index":i,"offset":source[..*offset].chars().count(),"raw":n.to_string(),"encoding":"code-point","value":char::from_u32(*n).unwrap().to_string()})).collect::<Vec<_>>(),"decoded_preview":chars_limit(&decoded,512),"decoder_hint":hint(source,m.end())}));
+        let offset = characters.at(m.start());
+        let entries = numbers.iter().enumerate().map(|(i,(n,at))|json!({"index":i,"offset":characters.at(*at),"raw":n.to_string(),"encoding":"code-point","value":char::from_u32(*n).unwrap().to_string()})).collect::<Vec<_>>();
+        tables.push(json!({"kind":"code-point-array","offset":offset,"length":m.as_str().chars().count(),"entry_count":numbers.len(),"encodings":["code-point"],"entries":entries,"decoded_preview":chars_limit(&decoded,512),"decoder_hint":hint(source,m.end(),characters.at(m.end()))}));
     }
+    let mut characters = Characters::new(source);
     for m in PATTERNS["string_array"].find_iter(source) {
-        if tables.len() >= 64 || used >= 2048 {
-            break;
-        }
+        let offset = characters.at(m.start());
         let mut entries = Vec::new();
         let mut encodings = BTreeSet::new();
         for (i, literal) in PATTERNS["string"].find_iter(m.as_str()).enumerate() {
-            if used >= 2048 {
-                break;
-            }
             let (value, encoding) = decode_literal(literal.as_str());
-            used += 1;
             encodings.insert(encoding);
-            entries.push(json!({"index":i,"offset":source[..m.start()+literal.start()].chars().count(),"raw":chars_limit(literal.as_str(),4096),"encoding":encoding,"value":value}));
+            entries.push(json!({"index":i,"offset":characters.at(m.start()+literal.start()),"raw":literal.as_str(),"encoding":encoding,"value":value}));
         }
         if entries.len() < 8 {
             continue;
         }
-        tables.push(json!({"kind":"string-array","offset":source[..m.start()].chars().count(),"length":m.as_str().chars().count(),"entry_count":entries.len(),"encodings":encodings,"entries":entries,"decoder_hint":hint(source,m.end())}));
+        tables.push(json!({"kind":"string-array","offset":offset,"length":m.as_str().chars().count(),"entry_count":entries.len(),"encodings":encodings,"entries":entries,"decoder_hint":hint(source,m.end(),characters.at(m.end()))}));
     }
     tables.sort_by_key(|v| v["offset"].as_u64());
     tables
@@ -695,8 +761,6 @@ mod tests {
         let mut original_error = response;
         for (kind, status, message) in [
             ("syntax", 422, "JavaScript could not be parsed"),
-            ("preflight-limit", 422, "bounded syntax preflight"),
-            ("source-limit", 400, "byte limit"),
             ("invalid-request", 502, "rejected the analysis request"),
         ] {
             original_error["error_kind"] = json!(kind);

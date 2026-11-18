@@ -18,6 +18,7 @@ import {checkCommandPalette} from './check-command-palette.mjs';
 import {checkSourcesHistoryFixture} from "./check-sources-history.mjs";
 import {checkSourcesTreeFixture} from "./check-sources-tree.mjs";
 import {checkSourceTreeModel} from "./check-source-tree-model.mjs";
+import {checkSourceFactsUI, sourceFactsServer} from "./check-source-facts-ui.mjs";
 const fieldsOnly = process.argv[2] === "--field-provenance-only";
 if (process.argv[2] && process.argv[2].startsWith('--') && !fieldsOnly) {
   throw new Error('Rendered/CDP UI modes are retired; use --field-provenance-only for retained offline assertions. No rendered QA is claimed.');
@@ -57,344 +58,13 @@ for (const path of ['/../float32_inspector.js','/x/../float32_inspector.js','/%6
   let status;await serveFixtureAsset({url:path},{writeHead:value=>{status=value;},end(){}});assert.equal(status,404,path);
 }
 console.log('PASS actual fixture public-asset handler: Float32 bytes, canonical paths, private/unknown/traversing/encoded negatives (not rendered QA)');
-// Facts are UI projections over the already validated Rust contract. These
-// fixtures exercise identity and stale/cancelled request ownership, not JS execution.
+// Other Sources checks share the Facts identity, reader and controller.
 const sourceFactsUI = runInNewContext(
   (await readFile(join(root, 'apps/research-ui/source_facts.js'), 'utf8')) +
-  ';({sourceFactsFields,sourceFactsIdentity,sourceFactsUnavailable,isSourceFactsReport,sourceFactsPosition,sourceFactsReadBytes,createSourceFactsController,sourceFactsReferenceTarget,sourceFactsBindingOperations,sourceFactsOperationSummary,sourceFactsReferenceContext,createSourceFactsPanel})',
+  ';({sourceFactsFields,sourceFactsIdentity,sourceFactsUnavailable,sourceFactsReadBytes,createSourceFactsController})',
   {TextEncoder, TextDecoder, Uint8Array, AbortController, setTimeout, clearTimeout, fetch, crypto},
 );
-function factsReferenceFixture(source) {
-  const text = '\ufefflet 雪 = "😀";\nfunction shadow(雪) { return 雪; }\nfunction closure() { return 雪; }\n雪++;\nvar duplicate; var duplicate;\nduplicate(); new duplicate();\nconst spare = 0;\nunknown; object.雪;\n' + '雪;\n'.repeat(105);
-  const bytes = new TextEncoder().encode(text);
-  const range = (needle, after = 0) => {const index = text.indexOf(needle, after); assert(index >= 0); return {start:Buffer.byteLength(text.slice(0,index)),end:Buffer.byteLength(text.slice(0,index+needle.length))};};
-  const full = {start:0,end:bytes.length};
-  const target = id => ({kind:'binding',binding_ids:[id],resolution:'lexical-only',name:'雪'});
-  const ambiguous = {kind:'ambiguous',binding_ids:[2,3],resolution:'duplicate-declarations',name:'duplicate'};
-  const operation = (id, kind, range, target, region_id=0) => ({id,region_id,order:id,range,kind,detail:{target}});
-  const operations = [
-    operation(0,'read',range('雪',text.indexOf('closure')),target(0),2),
-    operation(1,'read',range('雪',text.indexOf('return')),target(1),1),
-    operation(2,'read',range('雪++'),target(0)),operation(3,'write',range('雪++'),target(0)),
-    operation(4,'call',range('duplicate()'),ambiguous),operation(5,'construct',range('new duplicate()'),ambiguous),
-    operation(6,'read',range('unknown'),{kind:'unresolved',binding_ids:[],resolution:'dynamic-scope',name:'雪'}),
-    operation(7,'read',range('object.雪'),{kind:'property',object_range:range('object'),key_range:range('雪',text.indexOf('object')),computed:false}),
-  ];
-  let after=text.indexOf('object.雪;')+'object.雪;'.length;
-  for(let i=0;i<105;i++){const start=text.indexOf('雪;',after);operations.push(operation(8+i,'read',range('雪',start),target(0)));after=start+2;}
-  const scope = (id, needle) => ({id,parent_id:0,range:range(needle),kind:'function'});
-  const scopes = [{id:0,parent_id:null,range:full,kind:'program'},scope(1,'function shadow(雪) { return 雪; }'),scope(2,'function closure() { return 雪; }')];
-  const binding = (id,name,kind,scope_id,after=0) => ({id,name,kind,scope_id,range:range(name,after)});
-  const report = {schema:'reb-javascript-source-facts-v1',profile:'lexical-effects-v1',offset_unit:'utf-8-byte',source_bytes:bytes.length,source,ok:true,scopes,
-    bindings:[binding(0,'雪','let',0),binding(1,'雪','parameter',1,text.indexOf('shadow')),binding(2,'duplicate','var',0),binding(3,'duplicate','var',0,text.indexOf('duplicate;')+10),binding(4,'spare','const',0)],callables:[],
-    regions:scopes.map(({id,range})=>({id,parent_id:id?0:null,callable_id:null,range,kind:id?'conditional-then':'program',entry_order:id})),operations,
-    coverage:{status:'partial',truncated:false,diagnostics:[],frontiers:[{range:range('duplicate()'),reason:'unknown-call-mutation-or-throw'}],analyzed_range:full},
-    limits:{max_source_bytes:4194304,max_ast_nodes:262144,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:2097152,preflight_parse_heap_bytes:402653184}};
-  return {text,bytes,report};
-}
-const references = factsReferenceFixture();
-assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,1),row=>row.id),[1],'Shadowed spelling must not join outer lexical operations');
-assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,0,'read').length,107,'Closure and outer reads share the exact binding ID');
-assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,0,'write'),row=>row.id),[3]);
-assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,2),row=>row.id),[4,5]);
-assert.deepEqual(Array.from(sourceFactsUI.sourceFactsBindingOperations(references.report,3),row=>row.id),[4,5]);
-assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,4).length,0);
-assert.equal(sourceFactsUI.sourceFactsBindingOperations(references.report,999).length,0);
-const cachedReferenceContext = sourceFactsUI.sourceFactsReferenceContext(references.report);
-assert.equal(sourceFactsUI.sourceFactsReferenceContext(references.report),cachedReferenceContext,'Filters and paging reuse one bounded report context');
-assert.equal(cachedReferenceContext.target(references.report.operations[0]),references.report.operations[0].detail.target,'Cache retains the existing target, never copies candidate arrays');
-assert.notEqual(sourceFactsUI.sourceFactsReferenceContext(structuredClone(references.report)),cachedReferenceContext,'Reanalysis must receive a fresh report-local cache');
-const referenceBindings = new Map(references.report.bindings.map(row=>[row.id,row]));
-assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[4],referenceBindings),/Ambiguous.*runtime call target unknown/);
-assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[6],referenceBindings),/Unresolved: dynamic-scope/);
-assert.match(sourceFactsUI.sourceFactsOperationSummary(references.report.operations[7],referenceBindings),/Property target; runtime object unknown/);
-for(const invalid of [{kind:'binding',binding_ids:[0,1],resolution:'lexical-only'},{kind:'ambiguous',binding_ids:[2,2],resolution:'duplicate-declarations'},{kind:'binding',binding_ids:[999],resolution:'lexical-only'},{kind:'binding',binding_ids:[0],resolution:'runtime'},{kind:'ambiguous',binding_ids:Array.from({length:65},(_,i)=>i),resolution:'duplicate-declarations'}]) {
-  assert.equal(sourceFactsUI.sourceFactsReferenceTarget({...references.report.operations[0],detail:{target:invalid}},referenceBindings),null);
-}
-assert.equal(sourceFactsUI.sourceFactsReferenceTarget({...references.report.operations[0],detail:{nested:{target:references.report.operations[0].detail.target}}},referenceBindings),null,'Arbitrary nested JSON is never lexical evidence');
-console.log('PASS Facts lexical joins: same-name shadowing, closures, reads/writes, ambiguous declaration candidates, unresolved/property refusal, malformed joins and operation filtering (not rendered QA)');
-async function checkFactsReferencePanel() {
-const panelSource = await readFile(join(root,'apps/research-ui/source_facts.js'),'utf8');
-const reference = factsReferenceFixture();
-let document;
-class FactsReviewNode {
-  constructor(tag) {
-    this.tagName = tag; this.children = []; this.dataset = {}; this.attributes = {};
-    this.listeners = {}; this._text = ''; this.value = ''; this.disabled = false;
-    this.selectionStart = 0; this.selectionEnd = 0; this.parentNode = null;
-  }
-  set textContent(value) { this._text = String(value); this.replaceChildren(); }
-  get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
-  append(...nodes) { for (const node of nodes) { node.parentNode = this; this.children.push(node); } }
-  replaceChildren(...nodes) {
-    for (const child of this.children) {
-      if (child.contains(document?.activeElement)) document.activeElement = null;
-      child.parentNode = null;
-    }
-    this.children = []; this.append(...nodes);
-  }
-  setAttribute(name, value) { this.attributes[name] = String(value); }
-  getAttribute(name) { return this.attributes[name] ?? null; }
-  addEventListener(name, handler) { (this.listeners[name] ??= []).push(handler); }
-  fire(name, values = {}) { for (const handler of this.listeners[name] ?? []) handler({target: this, currentTarget: this, ...values}); }
-  click() { if (!this.disabled) this.fire('click'); }
-  contains(node) { return this === node || this.children.some(child => child.contains(node)); }
-  get isConnected() { return roots.some(root => root.contains(this)); }
-  focus() { if (this.isConnected) document.activeElement = this; }
-  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
-  getClientRects() { return this.isConnected ? [1] : []; }
-  scrollIntoView() {}
-  matches(selector) {
-    if (selector.includes(',')) return selector.split(',').some(value => this.matches(value.trim()));
-    if (selector.startsWith('.')) return this.className?.split(' ').includes(selector.slice(1)) ?? false;
-    if (selector.startsWith('[')) {
-      const match = selector.match(/^\[([^=\]]+)(?:="?([^"\]]*)"?)?\]$/);
-      if (!match) return false;
-      const name = match[1];
-      const value = name.startsWith('data-') ? this.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] : this.attributes[name];
-      return match[2] === undefined ? value !== undefined : value === match[2];
-    }
-    return selector === this.tagName;
-  }
-  querySelectorAll(selector) { return this.children.flatMap(child => [...(child.matches(selector) ? [child] : []), ...child.querySelectorAll(selector)]); }
-  querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
-  closest(selector) { return this.matches(selector) ? this : this.parentNode?.closest(selector); }
-}
-const toggle = new FactsReviewNode('button');
-const details = new FactsReviewNode('details');
-const container = new FactsReviewNode('div');
-const roots = [toggle, details];
-details.append(new FactsReviewNode('summary'), container);
-details.open = true;
-document = {activeElement: null, createElement: tag => new FactsReviewNode(tag), querySelector: selector => ({'#source-facts-toggle': toggle, '#source-facts-details': details, '#source-facts-report': container}[selector])};
-let selected = {source_type: 'artifact', protocol_version: 1, artifact_id: '12', session_id: '11', navigation_id: '13', frame_id: '17', parent_artifact_id: '0', creator_event_id: '19', execution_context_id: '23', capture_origin: 'dynamic_javascript', kind: 'javascript', url: 'https://fixture.invalid/facts-12.js', mime_type: 'text/javascript', byte_size: reference.bytes.length, sha256: Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',reference.bytes)),byte=>byte.toString(16).padStart(2,'0')).join(''), sensitive: false};
-let reportError = false, finishOriginal, navigations = 0;
-const create = Function('document', 'location', 'fetch', `${panelSource}; return createSourceFactsPanel;`)(document, {protocol: 'http:'}, async url => url.startsWith('/api/artifacts/') ? new Promise(resolve=>{finishOriginal=()=>resolve(new Response(reference.bytes,{headers:{'X-Artifact-Total-Bytes':String(reference.bytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}}));}) : reportError ? Response.json({error: 'Authored retry failure'}, {status: 503}) : Response.json(factsReferenceFixture(selected).report));
-const panel = create({getSource: () => selected, onNavigate() { navigations++; }, openSidebar() {}});
-const control = selector => { const node = container.querySelector(selector); assert(node, `Missing ${selector}`); return node; };
-const action = name => control(`[data-facts-action="${name}"]`);
-const category = value => { const node = control('[aria-label="JavaScript fact category"]'); node.value = value; node.fire('change'); };
-const row = id => control(`[data-fact-id="${id}"]`);
-panel.sync(selected);
-const idleArtifact = selected;
-selected = {source_type:'script',kind:'javascript'};panel.sync(selected);
-selected = idleArtifact;assert.doesNotThrow(()=>panel.sync(selected),'Idle captured → unsupported → captured must rebuild the retained DOM');
-await panel.load();
-assert.equal(container.querySelectorAll('article').length, 100);
-category('bindings');
-const composingInput = control('[data-facts-binding-query]'); composingInput.focus();
-composingInput.fire('compositionstart'); composingInput.value = '雪';
-composingInput.fire('input', {isComposing: true});
-let composingEscapePrevented = false, composingEscapeStopped = false;
-details.fire('keydown',{key:'Escape',isComposing:true,preventDefault(){composingEscapePrevented=true;},stopPropagation(){composingEscapeStopped=true;}});
-assert.equal(composingEscapeStopped,true,'IME Escape must not bubble into the document Sources shortcut and toggle Console');
-assert.equal(details.open,true);assert.equal(composingEscapePrevented,false,'IME Escape must remain available to composition');
-assert(composingInput.isConnected, 'Composition must not detach its input');
-assert.equal(document.activeElement, composingInput);
-composingInput.fire('compositionend', {isComposing: false});
-assert.equal(container.querySelectorAll('article').length, 2);
-assert.equal(document.activeElement.value, '雪');
-row(1).querySelector('[data-facts-action="explore-binding"]').click();
-assert.equal(container.querySelectorAll('article').length, 1);
-assert.equal(container.querySelector('article').dataset.factId, '1', 'Shadowed name must not join outer references');
-action('reveal-declaration').click();
-for(let turn=0;turn<20&&!finishOriginal;turn++)await new Promise(resolve=>setTimeout(resolve,0));
-assert(finishOriginal,'Verified original read did not start');
-const pendingAllBindings = action('all-bindings');
-panel.cancel('A newer interaction retired this original-range return.');
-assert(pendingAllBindings.isConnected,'Capture-phase cancellation must preserve the pending click target');
-pendingAllBindings.click();assert(control('[data-facts-binding-query]'),'The original click must still change the view after capture cancellation');
-finishOriginal();
-await new Promise(resolve=>setTimeout(resolve,0));
-assert.equal(navigations,0,'Changing lexical selection must retire a pending original range');
-const retiredQuery = control('[data-facts-binding-query]');
-const retiredCategory = control('[aria-label="JavaScript fact category"]');
-const retiredExplore = action('explore-binding');
-selected = {...selected, artifact_id: '13'}; panel.sync(selected); await panel.load(); category('operations');
-const currentText = container.textContent;
-retiredQuery.value = 'must not leak'; retiredQuery.fire('input');
-retiredCategory.value = 'frontiers'; retiredCategory.fire('change'); retiredExplore.click();
-assert.equal(container.textContent, currentText, 'Detached controls must not change the newer source/report');
-category('bindings'); row(0).querySelector('[data-facts-action="explore-binding"]').click();
-reportError = true; await panel.load();
-assert(container.querySelector('.source-facts-binding').textContent.includes('Binding #0'), 'Failed retry must preserve the selected declaration');
-reportError = false; await panel.load();
-assert.equal(container.querySelector('.source-facts-binding'), null, 'Successful reanalysis must retire report-local binding selection');
-console.log('PASS offline Facts panel read-cancellation, composing-Escape, IME input lifetime, same-name shadowing, detached controls, failed-retry selection retention and successful-retry invalidation. Not rendered QA.');
-
-}
-await checkFactsReferencePanel();
-const factsBytes = new TextEncoder().encode('\ufeffconst 雪 = "😀";\n雪++;');
-const factsHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', factsBytes)), byte => byte.toString(16).padStart(2, '0')).join('');
-const factsArtifact = {source_type:'artifact', protocol_version:1, artifact_id:'7', session_id:'11', navigation_id:'13', frame_id:'17', parent_artifact_id:'0', creator_event_id:'19', execution_context_id:'23', capture_origin:'dynamic_javascript', kind:'javascript', url:'https://fixture.invalid/facts.js', mime_type:'text/javascript', byte_size:factsBytes.length, sha256:factsHash, sensitive:false};
-const factsFixture = source => ({schema:'reb-javascript-source-facts-v1', profile:'lexical-effects-v1', offset_unit:'utf-8-byte', source_bytes:source.byte_size, ok:true,
-  source:Object.fromEntries(Object.entries(source).filter(([key]) => key !== 'source_type')),
-  scopes:[{id:0,parent_id:null,range:{start:0,end:source.byte_size},kind:'program'}], bindings:[], callables:[], regions:[{id:0,parent_id:null,callable_id:null,range:{start:0,end:source.byte_size},kind:'program',entry_order:0}], operations:[],
-  coverage:{status:'complete',truncated:false,frontiers:[],diagnostics:[],analyzed_range:{start:0,end:source.byte_size}}, limits:{max_source_bytes:4194304,max_ast_nodes:262144,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:2097152,preflight_parse_heap_bytes:402653184}});
-assert.equal(sourceFactsUI.sourceFactsUnavailable(factsArtifact, 'http:'), '');
-assert.match(sourceFactsUI.sourceFactsUnavailable(factsArtifact, 'reb:'), /stored-evidence native mode/);
-assert.match(sourceFactsUI.sourceFactsUnavailable({...factsArtifact,source_type:'script'}, 'http:'), /captured JavaScript/);
-for (const source of [{...factsArtifact,artifact_id:'07'},{...factsArtifact,session_id:'18446744073709551616'},{...factsArtifact,byte_size:4194305}]) assert(sourceFactsUI.sourceFactsUnavailable(source, 'http:'));
-const factsReport = factsFixture(factsArtifact);
-assert(sourceFactsUI.isSourceFactsReport(factsReport, factsArtifact));
-for (const field of Object.keys(factsReport.source)) {
-  const foreign = structuredClone(factsReport); foreign.source[field] = null;
-  assert.equal(sourceFactsUI.isSourceFactsReport(foreign, factsArtifact), false, field);
-}
-for (const update of [{offset_unit:'utf-16'}, {source_bytes:0}, {ok:false}, {bindings:Array(16385).fill({})},
-  {scopes:[{...factsReport.scopes[0],range:{start:0,end:factsBytes.length+1}}]},
-  {scopes:[factsReport.scopes[0],factsReport.scopes[0]]},
-  {scopes:[{...factsReport.scopes[0],kind:'executed'}]},
-  {coverage:{status:'complete',truncated:true,frontiers:[],diagnostics:[]}},
-  {coverage:{status:'partial',truncated:false,frontiers:Array(257).fill({}),diagnostics:[]}}]) {
-  assert.equal(sourceFactsUI.isSourceFactsReport({...factsReport,...update}, factsArtifact), false);
-}
-const partialFacts = {...factsReport, coverage:{status:'partial',truncated:true,frontiers:[{range:{start:0,end:0},reason:'fact-limit'}],diagnostics:['Bounded coverage']}};
-assert(sourceFactsUI.isSourceFactsReport(partialFacts, factsArtifact));
-const unavailableFacts = {...factsReport,ok:false,scopes:[],regions:[],coverage:{status:'unavailable',truncated:false,frontiers:[],diagnostics:['Malformed source']}};
-assert(sourceFactsUI.isSourceFactsReport(unavailableFacts, factsArtifact));
-assert.equal(sourceFactsUI.isSourceFactsReport({...unavailableFacts,scopes:factsReport.scopes}, factsArtifact), false);
-const snowOffset = new TextEncoder().encode('\ufeffconst ').length;
-const snowPosition = sourceFactsUI.sourceFactsPosition(factsBytes,{start:snowOffset,end:snowOffset+3});
-assert.equal(snowPosition.line,0); assert.equal(snowPosition.column,7); assert.equal(snowPosition.length,1);
-assert.throws(() => sourceFactsUI.sourceFactsPosition(factsBytes,{start:snowOffset+1,end:snowOffset+3}));
-assert.equal(sourceFactsUI.sourceFactsPosition(factsBytes,{start:0,end:factsBytes.length}).multiline,true);
-assert.equal(sourceFactsUI.sourceFactsPosition(new Uint8Array(),{start:0,end:0}).column,0);
-await assert.rejects(sourceFactsUI.sourceFactsReadBytes(new Response(new Uint8Array(5)),4), /byte limit/);
-// Response storage owns one bounded byte buffer, never a retained chunk list.
-const factsReaderFixture = (read, cancel = async () => {}) => {
-  const counts = {reads:0,cancels:0,releases:0};
-  return {counts, response:{body:{getReader:()=>({
-    read:()=>{counts.reads++;return read(counts.reads);},
-    cancel:()=>{counts.cancels++;return cancel();},
-    releaseLock:()=>{counts.releases++;},
-  })}}};
-};
-const factsFragmented = (count, width) => factsReaderFixture(async index => index>count
-  ? {done:true} : {done:false,value:new Uint8Array(width).fill(index%251)});
-for (const [count,width] of [[0,0],[65536,0],[65536,1]]) {
-  const fixture=factsFragmented(count,width);
-  const result=await sourceFactsUI.sourceFactsReadBytes(fixture.response,count*width);
-  assert.equal(result.length,count*width);assert.equal(result.buffer.byteLength,count*width);
-  if(width) for(let index=0;index<result.length;index++) assert.equal(result[index],(index+1)%251);
-  assert.deepEqual(fixture.counts,{reads:count+1,cancels:0,releases:1});
-}
-for (const width of [0,1]) {
-  const fixture=factsFragmented(65537,width);
-  await assert.rejects(sourceFactsUI.sourceFactsReadBytes(fixture.response,65537),/stream chunk limit/);
-  assert.deepEqual(fixture.counts,{reads:65537,cancels:1,releases:1});
-}
-const oversizedFacts=factsFragmented(1,5);
-await assert.rejects(sourceFactsUI.sourceFactsReadBytes(oversizedFacts.response,4),/byte limit/);
-assert.deepEqual(oversizedFacts.counts,{reads:1,cancels:1,releases:1});
-const nonbyteFacts=factsReaderFixture(async()=>({done:false,value:[1]}));
-await assert.rejects(sourceFactsUI.sourceFactsReadBytes(nonbyteFacts.response,4),/non-byte chunk/);
-assert.equal(nonbyteFacts.counts.cancels,1);assert.equal(nonbyteFacts.counts.releases,1);
-const reusedFactsChunk=new Uint8Array(1024*1024);
-const aliasedFacts=factsReaderFixture(async index=>{
-  if(index>factsBytes.length)return {done:true};
-  reusedFactsChunk[17]=factsBytes[index-1];
-  return {done:false,value:reusedFactsChunk.subarray(17,18)};
-});
-const ownedFactsBytes=await sourceFactsUI.sourceFactsReadBytes(aliasedFacts.response,factsBytes.length);
-assert.deepEqual(ownedFactsBytes,factsBytes,'Copy each fragmented UTF-8/BOM byte before its producer reuses the backing store');
-assert.equal(ownedFactsBytes.buffer.byteLength,factsBytes.length);
-assert.notEqual(ownedFactsBytes.buffer,reusedFactsChunk.buffer);
-const cancelledFactsSignal=new AbortController();cancelledFactsSignal.abort();
-const preCancelledFacts=factsFragmented(1,1);
-await assert.rejects(sourceFactsUI.sourceFactsReadBytes(preCancelledFacts.response,1,cancelledFactsSignal.signal),/cancelled/);
-assert.deepEqual(preCancelledFacts.counts,{reads:0,cancels:1,releases:1});
-const fragmentedFactsSignal=new AbortController();
-const interruptibleFacts=factsFragmented(65537,1);
-const interruptFactsTimer=setTimeout(()=>fragmentedFactsSignal.abort(),0);
-try {
-  await assert.rejects(sourceFactsUI.sourceFactsReadBytes(interruptibleFacts.response,65537,fragmentedFactsSignal.signal),/cancelled/);
-} finally {clearTimeout(interruptFactsTimer);}
-assert(interruptibleFacts.counts.reads<=256,'Fragmented streams must yield to cancellation/deadline tasks');
-assert.equal(interruptibleFacts.counts.cancels,1);assert.equal(interruptibleFacts.counts.releases,1);
-const stalledFactsSignal=new AbortController();let stalledFactsCancelled=0;
-const stalledFactsResponse=new Response(new ReadableStream({cancel(){stalledFactsCancelled++;return new Promise(()=>{});}}));
-const stalledFactsRead=sourceFactsUI.sourceFactsReadBytes(stalledFactsResponse,4,stalledFactsSignal.signal);
-stalledFactsSignal.abort();
-let stalledFactsWatchdog;
-try {
-  await assert.rejects(Promise.race([stalledFactsRead,new Promise((_,reject)=>{stalledFactsWatchdog=setTimeout(()=>reject(new Error('Stalled reader did not cancel promptly')),1000);})]),/cancelled/);
-} finally {clearTimeout(stalledFactsWatchdog);}
-assert.equal(stalledFactsCancelled,1);assert.equal(stalledFactsResponse.body.locked,false);
-console.log('PASS Sources owned response bytes, exact byte/chunk limits, empty/fragmented/aliased streams and cancellation despite stalled producer cleanup');
-let selectedFactsArtifact = factsArtifact;
-let factsPending = [];
-let factsNavigations = [];
-const factsController = sourceFactsUI.createSourceFactsController({getSource:()=>selectedFactsArtifact,protocol:'http:',onChange:()=>{},onNavigate:(...args)=>factsNavigations.push(args),cryptoApi:crypto,
-  fetcher:(url,options)=>new Promise(resolve=>factsPending.push({url,options,resolve}))});
-const deliverFacts = (entry, source = selectedFactsArtifact) => entry.resolve(Response.json(factsFixture(source)));
-factsController.sync(selectedFactsArtifact);
-const firstFactsLoad = factsController.load();
-assert.equal(factsPending.length,1); assert.match(factsPending[0].url,/session_id=11&artifact_id=7$/);
-await factsController.load(); assert.equal(factsPending.length,1,'Repeated load shares one in-flight request');
-factsController.cancel(); assert.equal(factsPending[0].options.signal.aborted,true);
-const secondFactsLoad = factsController.load();
-deliverFacts(factsPending[1]); await secondFactsLoad;
-const retainedFactsReport = factsController.model.report;
-deliverFacts(factsPending[0]); await firstFactsLoad;
-assert.equal(factsController.model.report,retainedFactsReport,'A cancelled older response cannot replace current facts');
-const staleFactsLoad = factsController.load();
-selectedFactsArtifact = {...factsArtifact,session_id:'12'}; factsController.sync(selectedFactsArtifact);
-deliverFacts(factsPending[2],factsArtifact); await staleFactsLoad;
-assert.equal(factsController.model.report,null,'Switching source clears facts and rejects delayed responses');
-selectedFactsArtifact = factsArtifact; factsController.sync(selectedFactsArtifact);
-const matchingFactsLoad = factsController.load(); deliverFacts(factsPending[3]); await matchingFactsLoad;
-const nav = factsController.navigate({start:snowOffset,end:snowOffset+3});
-assert.match(factsPending[4].url,/artifact[s]\/7\/content\?offset=0&limit=2097152$/);
-factsPending[4].resolve(new Response(factsBytes,{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})); await nav;
-assert.equal(factsNavigations.length,1); assert.equal(factsNavigations[0][2].column,7);
-assert.equal(factsController.original(factsArtifact),'\ufeffconst 雪 = "😀";\n雪++;');
-await factsController.navigate({start:0,end:0}); assert.equal(factsPending.length,5,'Repeated navigation reuses verified original bytes');
-selectedFactsArtifact = {...factsArtifact,sha256:'b'.repeat(64)}; factsController.sync(selectedFactsArtifact);
-assert.equal(factsController.original(selectedFactsArtifact),undefined,'Changed hash invalidates original bytes');
-const mismatchedFactsLoad = factsController.load(); deliverFacts(factsPending[5],factsArtifact); await mismatchedFactsLoad;
-assert.equal(factsController.model.status,'error'); assert.equal(factsController.model.report,null);
-for (const body of [new Response(factsBytes,{headers:{'X-Artifact-Truncated':'1'}}),new Response(new Uint8Array(factsBytes.length),{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})]) {
-  const attempt = factsController.navigate({start:0,end:0}); factsPending.at(-1).resolve(body); await attempt;
-  assert.equal(factsController.model.status,'error'); assert.equal(factsController.original(selectedFactsArtifact),undefined);
-}
-selectedFactsArtifact = factsArtifact;
-let timeoutNavigations = 0;
-const slowFacts = sourceFactsUI.createSourceFactsController({getSource:()=>selectedFactsArtifact,protocol:'http:',deadline:5,onChange:()=>{},onNavigate:()=>timeoutNavigations++,cryptoApi:crypto,
-  fetcher:async(_url,{signal})=>new Response(new ReadableStream({start(stream){signal.addEventListener('abort',()=>stream.error(new DOMException('Aborted','AbortError')),{once:true});}}))});
-await slowFacts.load(); assert.match(slowFacts.model.error,/timed out/); assert.equal(timeoutNavigations,0);
-assert.equal(slowFacts.model.report,null);
-for (const mode of ['facts','source']) {
-  let cancelledBody=0, bodyChunks=0;
-  const fragmentedController=sourceFactsUI.createSourceFactsController({getSource:()=>factsArtifact,protocol:'http:',deadline:5,onChange:()=>{},onNavigate:()=>{throw new Error('Timed-out fragmented source navigated');},cryptoApi:crypto,
-    fetcher:async()=>new Response(new ReadableStream({
-      pull(stream){bodyChunks++;stream.enqueue(new Uint8Array());},
-      cancel(){cancelledBody++;return new Promise(()=>{});},
-    }),{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})});
-  const operation=mode==='facts'?fragmentedController.load():fragmentedController.navigate({start:0,end:0});
-  let watchdog;
-  try {
-    await Promise.race([operation,new Promise((_,reject)=>{watchdog=setTimeout(()=>reject(new Error('Fragmented controller deadline stalled')),2000);})]);
-  } finally {clearTimeout(watchdog);}
-  assert.match(fragmentedController.model.error,/timed out/);assert.equal(fragmentedController.model.status,'error');
-  assert.equal(fragmentedController.model.report,null);assert.equal(fragmentedController.model.original,null);
-  assert.equal(cancelledBody,1);assert(bodyChunks<65536,'Body deadlines must run before exhausting the chunk budget');
-}
-let finishFactsDigest, factsDigestArrived, factsDigestTimedOut;
-const digestArrival = new Promise(resolve=>{factsDigestArrived=resolve;});
-const digestTimeout = new Promise(resolve=>{factsDigestTimedOut=resolve;});
-const digestFacts = sourceFactsUI.createSourceFactsController({getSource:()=>factsArtifact,protocol:'http:',deadline:100,onChange:model=>{if(model.status==='error') factsDigestTimedOut();},onNavigate:()=>{throw new Error('Late digest navigated');},
-  cryptoApi:{subtle:{digest:()=>new Promise(resolve=>{finishFactsDigest=resolve;factsDigestArrived();})}},
-  fetcher:async()=>new Response(factsBytes,{headers:{'X-Artifact-Total-Bytes':String(factsBytes.length),'X-Artifact-Offset':'0','X-Artifact-Truncated':'false'}})});
-const digestNavigation = digestFacts.navigate({start:0,end:0});
-let digestWatchdog;
-try { await Promise.race([Promise.all([digestArrival,digestTimeout]),new Promise((_,reject)=>{digestWatchdog=setTimeout(()=>reject(new Error('Digest timeout fixture did not reach both states')),2000);})]); }
-finally { clearTimeout(digestWatchdog); }
-assert.equal(digestFacts.model.status,'error','Deadline ends busy state while non-abortable digest is pending');
-assert.match(digestFacts.model.error,/timed out/);
-finishFactsDigest(await crypto.subtle.digest('SHA-256',factsBytes)); await digestNavigation;
-assert.equal(digestFacts.model.status,'error'); assert.equal(digestFacts.model.original,null);
-console.log('PASS Sources facts identity, UTF-8/BOM ranges, bounded streams, repeated loads, cancellation, stale responses, hash checks and timeout');
+await checkSourceFactsUI(root);
 
 // Native capabilities must not depend on callers remembering a URL flag.
 // Execute the actual JS consumer; Swift normalization itself is tested by the
@@ -1520,7 +1190,7 @@ function ownedContext(patch = {}) {
   const state = {artifacts:[], openArtifactIds:[], selectedArtifactId:null, deobfuscationRequests:new Map(), deobfuscationCache:new Map(),
     sourceFormatCache:new Map(), wasmRequests:new Map(), wasmCache:new Map(),
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
-  const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout,
+  const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
     sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsUnavailable:sourceFactsUI.sourceFactsUnavailable, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
     appendSourceSyntax:(node,tokens)=>{node.textContent=tokens.map(value=>value.text).join('');}, sourceOccurrenceRange:()=>null,
     sourceFactsPanel:{original:()=>undefined,cancel(){}}, investigationBeforeSelection(){}, investigationPassiveSource:false, location:{protocol:'http:'}, document:{querySelector:()=>({hidden:true})},
@@ -1763,11 +1433,13 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
     setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
     fetch:async()=>Response.json(ownedPayload(artifact,'const a = 1;'))});
   const old=api.loadDeobfuscation(api.selectedSource());for(let i=0;i<50&&!hashes;i++)await new Promise(resolve=>setImmediate(resolve));assert.equal(hashes,1);
-  const key=api.deobfuscationKey(api.selectedSource());[...timers.values()][0].callback();
-  assert.equal(state.deobfuscationRequests.get(key).status,'error');assert.match(state.deobfuscationRequests.get(key).error,/timed out/);
+  // Static cleanup has no deadline: only Cancel or a newer request retires it.
+  assert.equal(timers.size,0);
+  const key=api.deobfuscationKey(api.selectedSource());api.cancelDeobfuscation(api.selectedSource(),state.deobfuscationRequests.get(key));
+  assert.equal(state.deobfuscationRequests.get(key).status,'cancelled');assert.match(state.deobfuscationRequests.get(key).error,/backend work was stopped/);
   await api.loadDeobfuscation(api.selectedSource(),{retry:true});const newer=state.deobfuscationCache.get(key);assert(newer);
   digest.resolve(realHash);await old;assert.equal(state.deobfuscationCache.get(key),newer);assert.equal(timers.size,0);
-  sourceOwnershipReceipt.push({test:'analysis_deadline_late_crypto_cannot_replace_retry',status:'passed'});
+  sourceOwnershipReceipt.push({test:'analysis_cancel_late_crypto_cannot_replace_retry',status:'passed'});
 }
 {
   const artifact=await ownedArtifact('1'); const {api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},
@@ -1959,7 +1631,6 @@ function ownedDerivedPayload(source, original, replacements) {
   const artifact=await ownedArtifact('inspector',original);artifact.content=original;
   let payload=ownedDerivedPayload(artifact,original,Array.from({length:7},(_,i)=>[`1+${i}`,`(${i+1})`]));
   payload.analysis.omissions=['Generic unsupported operations remain unresolved.'];
-  payload.analysis.limits={max_source_bytes:4194304,max_transformations:4096};
   payload.analysis.classification={label:'minified',confidence:95,evidence:[{id:'fixture-signal',detail:'Heuristic fixture signal'}]};
   payload.analysis.string_tables=Array.from({length:5},(_,i)=>({kind:`table-${i+1}`,offset:0,entry_count:8,encodings:['literal'],decoded_preview:'<script>inert</script>'}));
   const {document,elements}=sourceReviewDOM();let api;
@@ -1992,7 +1663,6 @@ function ownedDerivedPayload(source, original, replacements) {
     value=>{value.representation.segments[1].original_end=value.representation.segments[1].original_start;},
     value=>{value.analysis.representation.transformations[0].count++;},
     value=>{value.representation.transformations=[{id:'claimed',count:9999,detail:'Untrusted claim'}];},
-    value=>{value.analysis.limits={max_source_bytes:'unbounded'};},
     value=>{value.engine='unknown-engine';},
     value=>{value.representation.segments[0].original_end=1;},
   ];
@@ -2001,6 +1671,22 @@ function ownedDerivedPayload(source, original, replacements) {
   const stale=control('retry');ctx.state.deobfuscationAssumeIntrinsics=true;const before=ctx.state.deobfuscationRequests.size;await stale.listeners.click[0]();assert.equal(ctx.state.deobfuscationRequests.size,before);
   api.releaseSourcePreview(source);ctx.state.selectedArtifactId=null;api.renderDeobfuscationReport(null);assert.equal(report.deobfuscationRender,null);assert.equal(report.querySelectorAll('pre').length,0);
   sourceOwnershipReceipt.push({test:'deob_changed_spans_unicode_paging_inert_reports_focus_retry_and_admission',status:'passed',changes:7,tables:5,corruptions:corruptions.length});
+}
+{
+  // A report is admitted whatever its size: more changes, tables, entries and
+  // segments than the removed 4,096, 64, 2,048 and 250,000 caps allowed.
+  const count=5000,original=Array.from({length:count},(_,i)=>`v[${i}]=1+${i};`).join('');
+  const artifact=await ownedArtifact('large-report',original);artifact.content=original;
+  const payload=ownedDerivedPayload(artifact,original,Array.from({length:count},(_,i)=>[`1+${i};`,`${i+1};`]));
+  payload.analysis.representation.transformations=[{id:'fold',kind:'rewrite',count,detail:'Authored aggregate fixture.'}];
+  payload.analysis.string_tables=Array.from({length:70},(_,i)=>({kind:`table-${i}`,offset:0,entry_count:3000,encodings:['literal'],decoded_preview:'x'.repeat(5000)}));
+  payload.analysis.source.lines=4194306;
+  const {api,state}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:artifact.artifact_id},fetch:async()=>Response.json(payload)});
+  await api.loadDeobfuscation(api.selectedSource());const key=api.deobfuscationKey(api.selectedSource());
+  assert.equal(state.deobfuscationRequests.get(key).status,'ready',state.deobfuscationRequests.get(key).error);
+  assert.equal(state.deobfuscationCache.get(key).sourceInspection.changes.length,count);
+  assert(state.deobfuscationCache.get(key).representation.segments.length>=count);
+  sourceOwnershipReceipt.push({test:'deob_report_admitted_without_change_table_or_entry_caps',status:'passed',changes:count,tables:70});
 }
 {
   const {document,elements}=sourceReviewDOM();
@@ -2757,13 +2443,13 @@ async function sourceFactsBrowserFixture() {
     const content=Buffer.from(text),source={...artifact(id),byte_size:content.length,sha256:await ownershipHash(content)};
     artifacts.push(source);documents.set(id,content);return source;
   };
-  const report = source => ({schema:'reb-javascript-source-facts-v1',profile:'lexical-effects-v1',offset_unit:'utf-8-byte',source_bytes:bytes.length,source,ok:fixture.mode!=='unavailable',
-    scopes:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,range:{start:0,end:bytes.length},kind:'program'}],
+  // The whole report the backend would admit; it answers summary and row
+  // queries the way the HTTP adapter does.
+  const report = () => ({scopes:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,range:{start:0,end:bytes.length},kind:'program'}],
     regions:fixture.mode==='unavailable'?[]:[{id:0,parent_id:null,callable_id:null,range:{start:0,end:bytes.length},kind:'program',entry_order:0}],
     bindings:fixture.mode==='unavailable'?[]:[{id:0,scope_id:0,name:'雪',range:{start:snow,end:snow+3},kind:'const'}],callables:[],
     operations:fixture.mode==='unavailable'?[]:Array.from({length:205},(_,id)=>({id,region_id:0,order:id,range:{start:snow,end:snow+3},kind:'read',detail:{target:{kind:'binding',binding_ids:[0],resolution:'lexical-only',name:'雪'}}})),
-    coverage:{status:fixture.mode==='unavailable'?'unavailable':fixture.mode==='complete'?'complete':'partial',truncated:fixture.mode==='truncated',diagnostics:fixture.mode==='unavailable'?['Synthetic parse rejection']:[],frontiers:['unavailable','complete'].includes(fixture.mode)?[]:[{range:{start:snow,end:snow+3},reason:'abrupt-completion'}],analyzed_range:{start:0,end:bytes.length}},
-    limits:{max_source_bytes:4194304,max_ast_nodes:262144,max_facts:16384,max_frontiers:256,max_binding_candidates:64,preflight_depth:128,preflight_nodes:2097152,preflight_parse_heap_bytes:402653184}});
+    coverage:{status:fixture.mode==='unavailable'?'unavailable':fixture.mode==='complete'?'complete':'partial',diagnostics:fixture.mode==='unavailable'?['Synthetic parse rejection']:[],frontiers:['unavailable','complete'].includes(fixture.mode)?[]:[{range:{start:snow,end:snow+3},reason:'abrupt-completion'}],analyzed_range:{start:0,end:bytes.length}}});
   fixture.handle = async (request,response) => {
     const url = new URL(request.url,'http://127.0.0.1');
     const json = (status,value) => {if(!response.destroyed){response.writeHead(status,{'Content-Type':'application/json'});response.end(JSON.stringify(value));}};
@@ -2774,13 +2460,14 @@ async function sourceFactsBrowserFixture() {
     }
     if(url.pathname==='/api/events'){json(200,{count:0,events:[],capture_mode:'demo',broker_connected:false,capture_controls_available:false});return true;}
     if(url.pathname==='/api/artifacts'){json(200,{count:artifacts.length,artifacts});return true;}
-    if(url.pathname==='/api/source-facts'){
-      fixture.requests.push(url.search);
+    if(url.pathname==='/api/source-facts'||url.pathname==='/api/source-facts/rows'){
+      fixture.requests.push(url.pathname+url.search);
       const source=artifacts.find(value=>value.artifact_id===url.searchParams.get('artifact_id') && value.session_id===url.searchParams.get('session_id'));
       if(!source){json(404,{error:'Synthetic exact source not found'});return true;}
       if(fixture.mode==='pending') await new Promise(resolve=>fixture.pending.push(resolve));
       if(fixture.mode==='error'){json(503,{error:fixture.errorMessage??'Synthetic worker unavailable',code:'dependency_unavailable',details:{}});return true;}
-      const value=fixture.factsReports.has(source.artifact_id)?{...fixture.factsReports.get(source.artifact_id),source}:report(source);
+      const server=sourceFactsServer(fixture.factsReports.get(source.artifact_id)??report());
+      const value=url.pathname.endsWith('/rows')?server.page(source,url.pathname+url.search):server.summary(source);
       if(fixture.mode==='malformed') value.source={...source,sha256:'b'.repeat(64)};
       json(200,value);return true;
     }
@@ -2834,7 +2521,9 @@ assert.equal(sourcesEventsControl.status,200);assert(sourcesFixtureModels.isBrok
 const sourcesArtifactsControl=await sourcesFixtureResponse('/api/artifacts?limit=500');
 assert.equal(sourcesArtifactsControl.status,200);assert(sourcesFixtureModels.isArtifactResponse(JSON.parse(sourcesArtifactsControl.body)));
 const sourcesFactsControl=await sourcesFixtureResponse('/api/source-facts?session_id=11&artifact_id=7');
-assert.equal(JSON.parse(sourcesFactsControl.body).source.artifact_id,'7');
+assert.equal(JSON.parse(sourcesFactsControl.body).source.artifact_id,'7');assert.equal(JSON.parse(sourcesFactsControl.body).counts.operations,205);
+const sourcesFactRows=JSON.parse((await sourcesFixtureResponse('/api/source-facts/rows?session_id=11&artifact_id=7&table=operations&offset=200&limit=100')).body);
+assert.equal(sourcesFactRows.total,205);assert.equal(sourcesFactRows.rows.length,5);assert.deepEqual(sourcesFactRows.bindings.map(row=>row.id),[0]);
 assert.equal((await sourcesFixtureResponse('/api/source-facts?session_id=12&artifact_id=7')).status,404);
 const sourcesBytesControl=await sourcesFixtureResponse('/api/artifacts/7/content?offset=0&limit=2097152');
 assert.equal(sourcesBytesControl.headers['X-Artifact-Truncated'],'false');assert.deepEqual(sourcesBytesControl.body,sourcesFixtureControl.bytes);

@@ -53,8 +53,6 @@ pub(crate) struct Doc {
     hugs: Vec<Option<u32>>,
 }
 
-pub(crate) struct OutputLimit;
-
 impl Doc {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
@@ -141,7 +139,7 @@ impl Doc {
         }
     }
 
-    pub(crate) fn print(&self, source: &str, limit: usize) -> Result<String, OutputLimit> {
+    pub(crate) fn print(&self, source: &str) -> String {
         Printer {
             doc: self,
             source,
@@ -152,7 +150,6 @@ impl Doc {
             chosen: vec![Mode::Flat; self.groups.len()],
             column: 0,
             line_start: true,
-            limit,
         }
         .run()
     }
@@ -170,15 +167,14 @@ struct Printer<'d> {
     chosen: Vec<Mode>,
     column: usize,
     line_start: bool,
-    limit: usize,
 }
 
 impl Printer<'_> {
-    fn run(mut self) -> Result<String, OutputLimit> {
+    fn run(mut self) -> String {
         let mut at = 0;
         while at < self.doc.cmds.len() {
             match self.doc.cmds[at] {
-                Cmd::Text(start, end) => self.write(start as usize, end as usize)?,
+                Cmd::Text(start, end) => self.write(start as usize, end as usize),
                 Cmd::Space => {
                     if !self.line_start {
                         self.out.push(' ');
@@ -232,7 +228,7 @@ impl Printer<'_> {
         let trimmed = self.out.trim_end_matches([' ', '\n']).len();
         self.out.truncate(trimmed.max(self.text_end));
         self.out.push('\n');
-        Ok(self.out)
+        self.out
     }
 
     fn choose(&self, at: usize, id: u32) -> Mode {
@@ -322,7 +318,7 @@ impl Printer<'_> {
         true
     }
 
-    fn write(&mut self, start: usize, end: usize) -> Result<(), OutputLimit> {
+    fn write(&mut self, start: usize, end: usize) {
         let text = &self.source[start..end];
         if self.line_start {
             let indent = *self.indents.last().unwrap();
@@ -336,10 +332,6 @@ impl Printer<'_> {
             Some(at) => self.column = text[at + 1..].chars().count(),
             None => self.column += width(text, isize::MAX).0,
         }
-        if self.out.len() > self.limit {
-            return Err(OutputLimit);
-        }
-        Ok(())
     }
 
     fn newline(&mut self, blank: bool) {

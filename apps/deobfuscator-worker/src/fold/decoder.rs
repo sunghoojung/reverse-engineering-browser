@@ -29,7 +29,7 @@ impl Folder<'_> {
         let body = function.body.as_ref()?;
         let mut locals = Locals::default();
         locals.visit_function_body(body);
-        if locals.invalid || locals.names.len() + self.constants.len() > 64 {
+        if locals.invalid {
             return None;
         }
         for name in locals.names {
@@ -45,6 +45,8 @@ impl Folder<'_> {
         Some(Value::Undefined)
     }
 
+    // Every statement spends a step, so a loop runs until it completes or its
+    // expression's step allowance is spent, never for a fixed iteration count.
     fn statement(&mut self, statement: &Statement<'_>, depth: usize) -> Option<Flow> {
         if depth >= MAX_DEPTH || self.steps >= MAX_STEPS {
             self.truncated = true;
@@ -85,7 +87,7 @@ impl Folder<'_> {
                         init => self.effect(init.as_expression()?, next)?,
                     }
                 }
-                for _ in 0..4096 {
+                loop {
                     if let Some(test) = &s.test
                         && !self.eval(test, next)?.truthy()
                     {
@@ -100,39 +102,29 @@ impl Folder<'_> {
                         self.effect(update, next)?;
                     }
                 }
-                self.truncated = true;
-                return None;
             }
             Statement::BreakStatement(s) if s.label.is_none() => return Some(Flow::Break),
             Statement::ContinueStatement(s) if s.label.is_none() => return Some(Flow::Continue),
-            Statement::WhileStatement(s) => {
-                for _ in 0..4096 {
-                    if !self.eval(&s.test, next)?.truthy() {
-                        return Some(Flow::Next);
-                    }
-                    match self.statement(&s.body, next)? {
-                        result @ Flow::Return(_) => return Some(result),
-                        Flow::Break => return Some(Flow::Next),
-                        Flow::Next | Flow::Continue => (),
-                    }
+            Statement::WhileStatement(s) => loop {
+                if !self.eval(&s.test, next)?.truthy() {
+                    return Some(Flow::Next);
                 }
-                self.truncated = true;
-                return None;
-            }
-            Statement::DoWhileStatement(s) => {
-                for _ in 0..4096 {
-                    match self.statement(&s.body, next)? {
-                        result @ Flow::Return(_) => return Some(result),
-                        Flow::Break => return Some(Flow::Next),
-                        Flow::Next | Flow::Continue => (),
-                    }
-                    if !self.eval(&s.test, next)?.truthy() {
-                        return Some(Flow::Next);
-                    }
+                match self.statement(&s.body, next)? {
+                    result @ Flow::Return(_) => return Some(result),
+                    Flow::Break => return Some(Flow::Next),
+                    Flow::Next | Flow::Continue => (),
                 }
-                self.truncated = true;
-                return None;
-            }
+            },
+            Statement::DoWhileStatement(s) => loop {
+                match self.statement(&s.body, next)? {
+                    result @ Flow::Return(_) => return Some(result),
+                    Flow::Break => return Some(Flow::Next),
+                    Flow::Next | Flow::Continue => (),
+                }
+                if !self.eval(&s.test, next)?.truthy() {
+                    return Some(Flow::Next);
+                }
+            },
             Statement::SwitchStatement(s) => {
                 let value = self.eval(&s.discriminant, next)?;
                 if !value.is_primitive() {
@@ -297,9 +289,6 @@ impl Folder<'_> {
         } else {
             Some(self.eval(&member.object, depth)?)
         };
-        if call.arguments.len() > 256 {
-            return None;
-        }
         self.value_budget
             .reserve(0, call.arguments.len() * std::mem::size_of::<Value>())?;
         let mut args = Vec::with_capacity(call.arguments.len());
@@ -341,14 +330,10 @@ impl Folder<'_> {
                     return None;
                 };
                 let count = if separator.is_empty() {
-                    text.encode_utf16().take(257).count()
+                    text.encode_utf16().count()
                 } else {
-                    text.split(separator).take(257).count()
+                    text.split(separator).count()
                 };
-                if count > 256 {
-                    self.truncated = true;
-                    return None;
-                }
                 let mut parts = self.value_budget.array(count)?;
                 if separator.is_empty() {
                     for unit in text.encode_utf16() {

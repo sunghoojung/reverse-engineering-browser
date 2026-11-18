@@ -123,9 +123,9 @@ const UI_ASSETS: [&str; 82] = [
     "debugger_sidebar.js",
     "debugger_sidebar.css",
 ];
-/// Flags a blocking read (cross-references or an artifact map) as abandoned
+/// Flags blocking work (cross-references, an artifact map or a facts admission) as abandoned
 /// when its request future is dropped.
-struct CancelOnDrop(Arc<AtomicBool>);
+pub(crate) struct CancelOnDrop(pub(crate) Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -173,6 +173,7 @@ pub struct App {
     decoder: Decoder,
     analyst: Analyst,
     deobfuscator: Deobfuscator,
+    source_facts: source_facts::SourceFacts,
     source_format: source_format::SourceFormat,
     /// Process-lifetime identity for `/api/health` and `X-REB-Expected-Instance`.
     instance_id: String,
@@ -270,6 +271,7 @@ impl App {
                 "OriginTraceDeobfuscator",
                 "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker",
             )),
+            source_facts: source_facts::SourceFacts::default(),
             source_format: source_format::SourceFormat::default(),
             instance_id: format!(
                 "{}:{}",
@@ -829,59 +831,76 @@ impl App {
             "/api/local-analyst/runner" => self.analyst.state(),
             "/api/source-facts" => {
                 // Never infer identity from a URL, live script, or selected UI row.
-                if q.0.keys().any(|key| {
-                    ![
-                        "session_id",
-                        "artifact_id",
-                        "region_start_byte",
-                        "region_end_byte",
-                    ]
-                    .contains(&key.as_str())
-                }) {
+                if q.0.keys().any(|key| !FACTS_KEYS.contains(&key.as_str())) {
                     return Err(Error::bad(
                         "Source facts require session_id and artifact_id with an optional region",
                     ));
                 }
-                q.number("session_id", None, 64, false)?;
-                q.number("artifact_id", None, 64, false)?;
-                // A region narrows analysis of the same verified bytes. Half a
-                // range is a caller mistake, not a default to invent. Offsets
-                // admit the contract's full unsigned 64-bit form; one past the
-                // artifact is refused by the byte-range check below.
-                let offset = |key| {
-                    q.number(key, None, 64, false)
-                        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
-                };
-                let region = match (q.one("region_start_byte")?, q.one("region_end_byte")?) {
-                    (None, None) => None,
-                    (Some(_), Some(_)) => {
-                        Some((offset("region_start_byte")?, offset("region_end_byte")?))
-                    }
-                    _ => {
-                        return Err(Error::bad(
-                            "A source facts region requires region_start_byte and region_end_byte",
-                        ));
-                    }
-                };
-                let session = q.required("session_id")?.to_owned();
-                let id = q.required("artifact_id")?.to_owned();
-                let root = self.options.artifacts.clone();
-                let (source, identity) = self
-                    .blocking(move || source_facts::load(&root, &session, &id))
-                    .await?;
-                if let Some((start, end)) = region
-                    && (start > end
-                        || end > source.len()
-                        || !source.is_char_boundary(start)
-                        || !source.is_char_boundary(end))
+                let (report, cached, identity) = self.facts_report(&q).await?;
+                report.summary(identity, cached)
+            }
+            "/api/source-facts/rows" => {
+                let keys = [
+                    "table",
+                    "offset",
+                    "limit",
+                    "binding_id",
+                    "kind",
+                    "name",
+                    "candidates_of",
+                ];
+                if q.0
+                    .keys()
+                    .any(|key| !FACTS_KEYS.contains(&key.as_str()) && !keys.contains(&key.as_str()))
                 {
                     return Err(Error::bad(
-                        "A source facts region must be an original byte range in this artifact",
+                        "Source fact rows take the source facts parameters with table, offset, limit and one optional filter",
                     ));
                 }
-                let mut result = self.deobfuscator.source_facts(&source, region).await?;
-                result["source"] = identity;
-                result
+                let table = source_facts::TABLES
+                    .iter()
+                    .position(|(name, _)| Some(*name) == q.one("table").ok().flatten())
+                    .ok_or_else(|| {
+                        Error::bad(
+                            "table must be scopes, bindings, callables, regions, operations or frontiers",
+                        )
+                    })?;
+                let optional = |key: &str| -> Result<Option<usize>> {
+                    q.one(key)?
+                        .map(|_| q.number(key, None, 32, false).map(|n| n as usize))
+                        .transpose()
+                };
+                let page = source_facts::Page {
+                    table,
+                    offset: q.number("offset", Some("0"), 32, false)? as usize,
+                    limit: q.limit(100, source_facts::PAGE_ROWS)?,
+                    binding: optional("binding_id")?,
+                    kind: q.one("kind")?.map(str::to_owned),
+                    name: q
+                        .one("name")?
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned),
+                    candidates_of: optional("candidates_of")?,
+                };
+                let operations = table
+                    == source_facts::TABLES
+                        .iter()
+                        .position(|t| t.0 == "operations")
+                        .unwrap();
+                let bindings = table
+                    == source_facts::TABLES
+                        .iter()
+                        .position(|t| t.0 == "bindings")
+                        .unwrap();
+                if (page.binding.is_some() || page.kind.is_some()) && !operations
+                    || (page.name.is_some() || page.candidates_of.is_some()) && !bindings
+                {
+                    return Err(Error::bad(
+                        "binding_id and kind filter operations; name and candidates_of filter bindings",
+                    ));
+                }
+                let (report, _, identity) = self.facts_report(&q).await?;
+                report.page(identity, &page)?
             }
             "/api/source-format" => {
                 q.only(
@@ -1013,7 +1032,7 @@ impl App {
                 }
                 let root = self.options.artifacts.clone();
                 let bytes = self
-                    .blocking(move || evidence::content(&root, &record, 4 * 1024 * 1024))
+                    .blocking(move || evidence::read(&root, &record))
                     .await?;
                 let source = String::from_utf8(bytes)
                     .map_err(|_| Error::bad("Artifact is not valid UTF-8 JavaScript"))?;
@@ -2020,9 +2039,7 @@ impl App {
         let root = self.options.artifacts.clone();
         let record = artifact.clone();
         let raw = self
-            .blocking(move || {
-                evidence::content(&root, &record, js_invocation_sites::MAX_SOURCE_BYTES)
-            })
+            .blocking(move || evidence::read(&root, &record))
             .await?;
         let request = js_invocation_sites::worker_request(&raw, target)?;
         let response = self.deobfuscator.invocation_site(request).await?;
@@ -2068,12 +2085,7 @@ impl App {
                                 return None;
                             }
                             reads += 1;
-                            let raw = evidence::content(
-                                &root,
-                                artifact,
-                                js_invocation_sites::MAX_SOURCE_BYTES,
-                            )
-                            .ok()?;
+                            let raw = evidence::read(&root, artifact).ok()?;
                             let digest = js_invocation_sites::text_digest(&raw)?;
                             let mut cache = digests.lock().ok()?;
                             if cache.len() >= 256 {
@@ -2137,6 +2149,43 @@ impl App {
         };
         result["set"] = self.invocation_site_set().await?;
         Ok(result)
+    }
+    /// The admitted facts report a source facts query names, from the cache
+    /// when these exact bytes and region were analyzed before.
+    async fn facts_report(&self, q: &Query) -> Result<(Arc<source_facts::Report>, bool, Value)> {
+        q.number("session_id", None, 64, false)?;
+        q.number("artifact_id", None, 64, false)?;
+        // A region narrows analysis of the same verified bytes. Half a range
+        // is a caller mistake, not a default to invent. Offsets admit the
+        // contract's full unsigned 64-bit form; one past the artifact is
+        // refused by the byte-range check before analysis.
+        let offset = |key| {
+            q.number(key, None, 64, false)
+                .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+        };
+        let region = match (q.one("region_start_byte")?, q.one("region_end_byte")?) {
+            (None, None) => None,
+            (Some(_), Some(_)) => Some((offset("region_start_byte")?, offset("region_end_byte")?)),
+            _ => {
+                return Err(Error::bad(
+                    "A source facts region requires region_start_byte and region_end_byte",
+                ));
+            }
+        };
+        let session = q.required("session_id")?.to_owned();
+        let id = q.required("artifact_id")?.to_owned();
+        let root = self.options.artifacts.clone();
+        // Every page re-reads and verifies the artifact; only the analysis of
+        // bytes with this SHA-256 is reused.
+        let (source, identity) = self
+            .blocking(move || source_facts::load(&root, &session, &id))
+            .await?;
+        let sha256 = identity["sha256"].as_str().unwrap_or_default().to_owned();
+        let (report, cached) = self
+            .source_facts
+            .report(&self.deobfuscator, source, &sha256, region)
+            .await?;
+        Ok((report, cached, identity))
     }
     async fn find_artifact(&self, id: &str) -> Result<Value> {
         if validation::canonical(&json!(id), 64, false, "Artifact ID").is_err() {
@@ -2702,6 +2751,13 @@ impl Query {
         })
     }
 }
+/// The parameters that name a source facts report.
+const FACTS_KEYS: [&str; 4] = [
+    "session_id",
+    "artifact_id",
+    "region_start_byte",
+    "region_end_byte",
+];
 fn analysis_input_signature(path: &Path) -> String {
     // Evidence can be restored or atomically replaced with the same length and
     // mtime. Unix identity includes change time and a content hash so a

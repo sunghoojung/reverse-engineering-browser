@@ -173,7 +173,7 @@ assert.equal(panel.querySelectorAll('.traffic-response-line').length, 1);
 const press = async control => {panel.querySelector(`[data-control="${control}"]`).click(); await settle();};
 // The backend Oxc layout of the retained JSON body; a clicked token names its raw range.
 const laid = '{\n  "challenge": "c1",\n  "answers": [1, 2, { "deep": [true, null] }],\n  "html": "<b>x</b>"\n}';
-formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only', language: 'json',
+formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only', language: 'json',
   source: {artifact_id: jsonArtifact.artifact_id, sha256: jsonArtifact.sha256}, status: 'formatted', text: laid})}));
 await press('pretty');
 assert.equal(formatReads.at(-1), `/api/source-format?session_id=7&artifact_id=${jsonArtifact.artifact_id}`);
@@ -207,7 +207,7 @@ await press('hex');
 await press('pretty');
 // A body Oxc refuses is laid out in the page, with the reason.
 const broken = retain('{"a":1,}', 'application/json');
-formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only', language: 'json',
+formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only', language: 'json',
   source: {artifact_id: broken.artifact_id, sha256: broken.sha256}, status: 'unavailable', reason: 'parse-failed', text: null})}));
 await show(request(record(broken)));
 await press('pretty');

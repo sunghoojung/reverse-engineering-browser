@@ -43,6 +43,7 @@ check: native-wasm-golden-check wasm-readable-values-check native-js-golden-chec
 	$(RUST_SUITE) apps/origin-trace-backend/Cargo.toml
 	$(if $(RUST_DOCTESTS),$(RUST_DOCTESTS) apps/origin-trace-backend/Cargo.toml)
 	$(RUST_SUITE) apps/deobfuscator-worker/Cargo.toml
+	$(RUST_SUITE) apps/js-lexer/Cargo.toml
 	$(call ignored-rust-test,--lib,owned_vm_debugger::tests::owned_vm_real_helper_control_and_independent_goldens,\
 		REB_OWNED_VM_TEST_HELPER="$(abspath $(NATIVE_VM_FIXTURE_BINARY))")
 	$(call ignored-rust-test,--test owned_vm_http,owned_vm_real_helper_http_cli_lifecycle,\
@@ -257,6 +258,8 @@ lint: format-check shellcheck python-check javascript-check repository-check wor
 	cargo clippy --locked --manifest-path apps/origin-trace-backend/Cargo.toml -- -D warnings
 	cargo fmt --check --manifest-path apps/deobfuscator-worker/Cargo.toml
 	cargo clippy --locked --all-targets --manifest-path apps/deobfuscator-worker/Cargo.toml -- -D warnings
+	cargo fmt --check --manifest-path apps/js-lexer/Cargo.toml
+	cargo clippy --locked --all-targets --manifest-path apps/js-lexer/Cargo.toml -- -D warnings
 
 deob-worker-build:
 	@command -v cargo >/dev/null 2>&1 || { echo "Cargo is not installed" >&2; exit 1; }

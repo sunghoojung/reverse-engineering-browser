@@ -116,6 +116,13 @@ if grep -q '^apps/deobfuscator-worker/.*\.rs$' "${changed}" \
     cargo check --locked --manifest-path apps/deobfuscator-worker/Cargo.toml
   fi
 fi
+if grep -q '^apps/js-lexer/.*\.rs$' "${changed}" \
+  || grep -q '^apps/js-lexer/Cargo\.toml$' "${changed}"; then
+  cargo fmt --check --manifest-path apps/js-lexer/Cargo.toml
+  if [[ "${TYPECHECK:-}" == "1" ]]; then
+    cargo check --locked --manifest-path apps/js-lexer/Cargo.toml
+  fi
+fi
 
 if [[ "${failed}" -ne 0 ]]; then
   exit 1

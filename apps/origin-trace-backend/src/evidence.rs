@@ -135,6 +135,12 @@ pub fn public_artifact(artifact: &Value) -> Value {
             .unwrap_or_default()
     )
 }
+/// The whole verified content of one artifact. Analysis reads use this: the
+/// manifest's byte size is the only size, the read is sized to it up front,
+/// and the bytes are hashed before any of them are interpreted.
+pub fn read(root: &Path, artifact: &Value) -> Result<Vec<u8>> {
+    content(root, artifact, usize::MAX)
+}
 pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>> {
     let root = root.canonicalize()?;
     let path = root
@@ -155,8 +161,10 @@ pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>>
         return Err(Error::new(500, "Artifact content byte size is invalid")
             .with_code(Code::ArtifactIntegrity));
     }
-    let mut bytes = Vec::new();
-    file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+    let expected = file.metadata()?.len();
+    let mut bytes = Vec::with_capacity(usize::try_from(expected).unwrap_or(0).min(maximum));
+    file.take((maximum as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
     if bytes.len() > maximum {
         return Err(Error::bad("Artifact content exceeds its byte limit"));
     }

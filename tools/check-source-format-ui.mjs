@@ -207,7 +207,7 @@ a b c {
   const client = model.createSourceFormatClient({request: async url => replies.shift()(url), onChange: changed => changes.push(changed.artifact_id),
     layouts: model.createSourceLayoutWorker({spawn: null, defer: callback => callback()})});
   const reply = (status, body) => url => ({ok: status === 200, status, json: async () => ({...body, url})});
-  const document = (extra, sha256 = source.sha256) => ({schema: 'source-format-v1', mapping: 'whitespace-only', source: {artifact_id: '7', sha256}, ...extra});
+  const document = (extra, sha256 = source.sha256) => ({schema: 'source-format-v2', mapping: 'whitespace-only', source: {artifact_id: '7', sha256}, ...extra});
   const settle = () => new Promise(resolve => setImmediate(resolve));
   replies.push(reply(200, document({status: 'formatted', text: formatted})));
   assert.equal(client.view(source, original).pending, true);
@@ -260,7 +260,7 @@ a b c {
     anchors.push(at);
   }
   const bigSource = {...source, artifact_id: '9', sha256: 'd'.repeat(64), byte_size: big.length, content: big};
-  const pageReply = (block, extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only',
+  const pageReply = (block, extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only',
     source: {artifact_id: '9', sha256: bigSource.sha256}, status: 'formatted', language: 'javascript', line_count: lines.length,
     anchors: {lines: 1000, source_utf16: anchors}, window: {start_line: block * 1000 + 1, line_count: Math.min(1000, lines.length - block * 1000)},
     text: lines.slice(block * 1000, block * 1000 + 1000).join('\n'), url, ...extra})});

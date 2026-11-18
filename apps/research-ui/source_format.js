@@ -1,11 +1,10 @@
 // Client for get_source_format and the in-page layout. Both change only whitespace, so one map walks either back to its input.
 
-const SOURCE_FORMAT_LIMITS = Object.freeze({entries: 4, characters: 64 * 1024 * 1024, timeout: 180000, sourceBytes: 16 * 1024 * 1024,
-  wholeBytes: 4 * 1024 * 1024, pageLines: 1000, pages: 16});
+// Cache sizes only: a layout of any size is requested, and an evicted one is fetched again.
+const SOURCE_FORMAT_LIMITS = Object.freeze({entries: 4, characters: 64 * 1024 * 1024, wholeBytes: 4 * 1024 * 1024, pageLines: 1000, pages: 16});
 const SOURCE_FORMAT_REASONS = Object.freeze({
-  'parse-failed': 'Oxc could not parse this file', 'output-limit': 'the Oxc layout exceeds its size limit',
-  'fidelity-check-failed': 'the Oxc layout failed its token check', 'memory-limit': 'Oxc reached its memory limit',
-  'nesting-limit': 'the file nests too deeply for Oxc'
+  'parse-failed': 'Oxc could not parse this file', 'fidelity-check-failed': 'the Oxc layout failed its token check',
+  'memory-limit': 'this file needs more memory than this machine can give Oxc'
 });
 
 function sourceLayoutTask(task) {
@@ -65,7 +64,7 @@ function sourceFormatLanguage(source) {
 
 function sourceFormatEligible(source) {
   return source?.source_type === 'artifact' && Boolean(sourceFormatLanguage(source)) && typeof source.content === 'string' &&
-    !source.contentTruncated && !source.contentLossy && Number(source.byte_size) <= SOURCE_FORMAT_LIMITS.sourceBytes;
+    !source.contentTruncated && !source.contentLossy;
 }
 
 function createSourceFormatClient({request = (...args) => fetch(...args), onChange = () => {}, layouts = createSourceLayoutWorker()} = {}) {
@@ -83,9 +82,20 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
       entries.delete(name);
     }
   };
-  const fail = (entry, error, aborted) => {
-    const notice = `Oxc layout unavailable: ${aborted ? 'timed out' : String(error?.message ?? error).slice(0, 240)}`;
+  const fail = (entry, error) => {
+    const notice = `Oxc layout unavailable: ${String(error?.message ?? error).slice(0, 240)}`;
     Object.assign(entry, {status: 'error', notice: notice.replace(/\.$/, '')});
+  };
+  // A layout has no deadline. The backend lays out one file at a time, so a
+  // file the researcher moved away from stops its unfinished layouts.
+  const retire = keep => {
+    for (const [name, entry] of entries) {
+      if (name === keep) continue;
+      entry.controller?.abort();
+      for (const page of entry.pages?.values() ?? []) page.controller?.abort();
+      if (entry.status === 'loading') entries.delete(name);
+      else for (const [block, page] of entry.pages ?? []) if (page.status === 'loading') entry.pages.delete(block);
+    }
   };
   async function read(source, window, signal) {
     const language = ['request_body', 'response_body'].includes(source.kind) && source.language ? `&language=${source.language}` : '';
@@ -94,15 +104,14 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
       {cache: 'no-store', signal});
     const payload = await response.json();
     if (!response.ok) throw new Error(payload?.error || `Formatter returned ${response.status}`);
-    if (payload?.schema !== 'source-format-v1' || payload.mapping !== 'whitespace-only' || String(payload.source?.artifact_id) !== String(source.artifact_id) || payload.source?.sha256 !== source.sha256) {
+    if (payload?.schema !== 'source-format-v2' || payload.mapping !== 'whitespace-only' || String(payload.source?.artifact_id) !== String(source.artifact_id) || payload.source?.sha256 !== source.sha256) {
       throw new Error('Formatter response does not match this artifact');
     }
     if (payload.status === 'formatted' && typeof payload.text !== 'string') throw new Error('Formatter returned no text');
     return payload;
   }
   async function load(name, source, original, entry) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SOURCE_FORMAT_LIMITS.timeout);
+    const controller = entry.controller = new AbortController();
     try {
       const payload = await read(source, null, controller.signal);
       if (payload.status !== 'formatted') {
@@ -115,18 +124,17 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
         engine: 'oxc', sourceInput: original};
       entry.status = 'ready';
     } catch (error) {
-      fail(entry, error, controller.signal.aborted);
+      if (!controller.signal.aborted) fail(entry, error);
     } finally {
-      clearTimeout(timer);
+      entry.controller = null;
       if (entries.get(name) === entry) {bound(name); onChange(source);}
     }
   }
   // One block of a large layout, checked against its slice of the original between two anchors.
   async function loadPage(name, source, original, entry, block) {
-    const page = {status: 'loading'};
-    entry.pages.set(block, page);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), SOURCE_FORMAT_LIMITS.timeout);
+    const page = {status: 'loading', controller};
+    entry.pages.set(block, page);
     const stride = SOURCE_FORMAT_LIMITS.pageLines;
     try {
       const payload = await read(source, {start: block * stride + 1, count: stride}, controller.signal);
@@ -154,9 +162,9 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
         if (other !== block && value.status !== 'loading') entry.pages.delete(other);
       }
     } catch (error) {
-      fail(entry, error, controller.signal.aborted);
+      if (!controller.signal.aborted) fail(entry, error);
     } finally {
-      clearTimeout(timer);
+      page.controller = null;
       if (entry.pages.get(block) === page && page.status === 'loading') entry.pages.delete(block);
       if (entries.get(name) === entry) {bound(name); onChange(source);}
     }
@@ -170,6 +178,7 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
       const name = key(source, 'whole');
       let entry = entries.get(name);
       if (!entry) {
+        retire(name);
         entry = {status: 'loading'};
         entries.set(name, entry);
         load(name, source, original, entry);
@@ -181,7 +190,10 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
       if (!sourceFormatEligible(source) || original !== source.content) return null;
       const name = key(source, 'page');
       let entry = entries.get(name);
-      if (!entry) entries.set(name, entry = {status: 'loading', pages: new Map(), shown: null});
+      if (!entry) {
+        retire(name);
+        entries.set(name, entry = {status: 'loading', pages: new Map(), shown: null});
+      }
       // The first page names the layout's length, so a saved line past its end cannot be asked for.
       const block = entry.lineCount === undefined ? 0 : Math.max(0, Math.min(entry.anchors.length - 1, Math.floor(line / SOURCE_FORMAT_LIMITS.pageLines)));
       if (entry.status === 'error' || entry.status === 'unavailable') return settled(entry);

@@ -8219,38 +8219,37 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const expectedAssumptions = assumeIntrinsics ? ['standard-intrinsics'] : [];
         if (payload?.schema !== 'deobfuscation-analysis-v1' || !['rust-oxc', 'python-lexical'].includes(payload.engine) || payload.mode !== 'derived' || payload.source_truncated !== false ||
             source.source_type !== 'artifact' || payload.artifact_id !== source.artifact_id || payload.script_id !== null ||
-            typeof original !== 'string' || original.length > 4 * 1024 * 1024 ||
+            typeof original !== 'string' ||
             !/^[0-9a-f]{64}$/.test(payload.analysis?.source?.sha256) ||
             !/^[0-9a-f]{64}$/.test(source.sha256) || payload.analysis.source.sha256 !== source.sha256 ||
             JSON.stringify(payload.analysis?.assumptions) !== JSON.stringify(expectedAssumptions) ||
-            typeof representation?.text !== 'string' || representation.text.length > 4 * 1024 * 1024 + 512 * 1024 ||
-            !Array.isArray(representation.segments) || representation.segments.length > 250000 ||
+            typeof representation?.text !== 'string' || !Array.isArray(representation.segments) ||
             !['utf-8-byte', 'unicode-code-point', undefined].includes(representation.offset_unit)) {
           throw new Error('The analyzer response does not match the submitted source and representation.');
         }
-        const boundedText = (value, maximum = 4096) => typeof value === 'string' && value.length <= maximum;
-        const rows = (value, check, maximum = 64) => value === undefined || (Array.isArray(value) && value.length <= maximum && value.every(check));
+        // Report metadata grows with the source, as the source does: every
+        // table and every change of an artifact of any size is admitted.
+        const text = value => typeof value === 'string';
+        const rows = (value, check) => value === undefined || (Array.isArray(value) && value.every(check));
         const analysis = payload.analysis;
-        if (!rows(analysis.omissions, value => boundedText(value)) ||
-            !rows(analysis.classification?.evidence, value => value && boundedText(value.id, 128) && boundedText(value.detail)) ||
-            (analysis.classification?.label !== undefined && !boundedText(analysis.classification.label, 128)) ||
-            (analysis.source.lines !== undefined && (!Number.isSafeInteger(analysis.source.lines) || analysis.source.lines < 0 || analysis.source.lines > 4194305)) ||
-            (analysis.representation?.status !== undefined && !boundedText(analysis.representation.status, 128)) ||
+        if (!rows(analysis.omissions, text) ||
+            !rows(analysis.classification?.evidence, value => value && text(value.id) && text(value.detail)) ||
+            (analysis.classification?.label !== undefined && !text(analysis.classification.label)) ||
+            (analysis.source.lines !== undefined && (!Number.isSafeInteger(analysis.source.lines) || analysis.source.lines < 0)) ||
+            (analysis.representation?.status !== undefined && !text(analysis.representation.status)) ||
             (analysis.representation?.truncated !== undefined && typeof analysis.representation.truncated !== 'boolean') ||
             (representation.truncated !== undefined && typeof representation.truncated !== 'boolean') ||
             (analysis.representation?.segment_count !== undefined && analysis.representation.segment_count !== representation.segments.length) ||
-            !rows(analysis.representation?.transformations, value => value && boundedText(value.id, 128) && boundedText(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0 && value.count <= 4096) ||
-            !rows(representation.transformations, value => value && boundedText(value.id, 128) && boundedText(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0 && value.count <= 4096) ||
-            (analysis.limits !== undefined && (!analysis.limits || Array.isArray(analysis.limits) || typeof analysis.limits !== 'object' ||
-              Object.keys(analysis.limits).length > 32 || !Object.entries(analysis.limits).every(([key, value]) => boundedText(key, 128) && Number.isSafeInteger(value) && value >= 0))) ||
-            !rows(analysis.string_tables, value => value && boundedText(value.kind, 128) && Number.isSafeInteger(value.offset) && value.offset >= 0 &&
-              value.offset <= original.length && Number.isSafeInteger(value.entry_count) && value.entry_count >= 0 && value.entry_count <= 2048 && rows(value.encodings, entry => boundedText(entry, 128)) &&
-              (value.decoded_preview === undefined || boundedText(value.decoded_preview)))) {
-          throw new Error('The analyzer returned malformed or oversized report metadata.');
+            !rows(analysis.representation?.transformations, value => value && text(value.id) && text(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0) ||
+            !rows(representation.transformations, value => value && text(value.id) && text(value.detail) && Number.isSafeInteger(value.count) && value.count >= 0) ||
+            !rows(analysis.string_tables, value => value && text(value.kind) && Number.isSafeInteger(value.offset) && value.offset >= 0 &&
+              value.offset <= original.length && Number.isSafeInteger(value.entry_count) && value.entry_count >= 0 && rows(value.encodings, text) &&
+              (value.decoded_preview === undefined || text(value.decoded_preview)))) {
+          throw new Error('The analyzer returned malformed report metadata.');
         }
         const bytes = new TextEncoder().encode(original);
         if (new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes) !== original ||
-            bytes.length > 4 * 1024 * 1024 || payload.analysis.source.byte_size !== bytes.length ||
+            payload.analysis.source.byte_size !== bytes.length ||
             (source.source_type === 'artifact' && bytes.length !== source.byte_size)) throw new Error('The analyzer source byte size changed.');
         if (!globalThis.crypto?.subtle) throw new Error('SHA-256 verification is unavailable in this workspace.');
         const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -8260,7 +8259,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const segments = sourceSegmentsUTF16(original, representation.text, representation.segments, representation.offset_unit);
         const derivedBytes = new TextEncoder().encode(representation.text);
         if (new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(derivedBytes) !== representation.text ||
-            derivedBytes.length > 4 * 1024 * 1024 + 512 * 1024 ||
             (analysis.representation?.derived_bytes !== undefined && analysis.representation.derived_bytes !== derivedBytes.length) ||
             (payload.engine === 'rust-oxc' && representation.offset_unit !== 'utf-8-byte')) {
           throw new Error('The analyzer returned an invalid derived encoding or byte size.');
@@ -8282,8 +8280,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (segment.kind === 'synthetic') synthetic++;
           end = segment.derived_end; originalEnd = segment.original_end;
         }
-        if (end !== representation.text.length || (payload.engine === 'rust-oxc' && originalEnd !== original.length) || changes.length > 4096) {
-          throw new Error('The analyzer source map is incomplete or exceeds the change limit.');
+        if (end !== representation.text.length || (payload.engine === 'rust-oxc' && originalEnd !== original.length)) {
+          throw new Error('The analyzer source map is incomplete.');
         }
         if (payload.engine === 'rust-oxc') {
           for (const summary of [analysis.representation?.transformations, representation.transformations]) {
@@ -8308,23 +8306,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (previous?.status === 'loading' || (!retry && (['error', 'cancelled'].includes(previous?.status) || state.deobfuscationCache.has(key)))) return;
         retireSourceAnalysis();
         const controller = new AbortController();
-        const request = {status: 'loading', error: null, identity, controller};
+        const request = {status: 'loading', error: null, identity, controller, started: Date.now()};
         state.deobfuscationRequests.set(key, request);
         renderSources();
         while (state.deobfuscationRequests.size > 128) state.deobfuscationRequests.delete(state.deobfuscationRequests.keys().next().value);
         const current = () => state.deobfuscationRequests.get(key) === request && request.status === 'loading' &&
           !controller.signal.aborted && sourceIsCurrent(source) && deobfuscationKey(source) === key;
-        const timeout = setTimeout(() => {
-          if (state.deobfuscationRequests.get(key) !== request || request.status !== 'loading') return;
-          request.status = 'error'; request.error = 'Analysis timed out. Retry explicitly; original bytes are preserved.';
-          controller.abort();
-          if (sourceIdentity(selectedSource()) === identity) renderSources();
-        }, 10000);
+        // The whole artifact is analyzed however long that takes. Elapsed time
+        // is shown while it runs, and Cancel stops the backend worker.
+        const ticker = setInterval(() => {
+          if (request.status === 'loading' && sourceIdentity(selectedSource()) === identity) renderDeobfuscationReport(selectedSource());
+        }, 1000);
         try {
           const response = await fetch(`/api/deobfuscation?artifact_id=${encodeURIComponent(sourceId)}&mode=derived&assume_intrinsics=${assumeIntrinsics ? 1 : 0}`, {cache: 'no-store', signal: controller.signal});
-          const bytes = await sourceFactsReadBytes(response, 33 * 1024 * 1024, controller.signal);
+          const bytes = await sourceFactsReadBytes(response, Infinity, controller.signal);
           if (!current()) return;
-          if (bytes.length > 32 * 1024 * 1024) throw new Error('The analyzer response exceeds the retained-document budget.');
           const payload = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
           if (!response.ok) throw new Error(payload.error || `Deobfuscation analysis returned ${response.status}`);
           const inspection = await validateSourceAnalysis(payload, source, assumeIntrinsics);
@@ -8334,19 +8330,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           payload.sourceInspection = inspection;
           payload.inspectorView = {change: 0, pages: {}, open: {}, notice: ''};
           payload.sourceDocumentBytes = bytes.length;
-          if (payload.original_source.length + payload.representation.text.length > 8 * 1024 * 1024) {
-            throw new Error('The analysis exceeds the retained-source budget.');
-          }
           state.deobfuscationCache.delete(key);
           state.deobfuscationCache.set(key, payload);
-          boundSourceAnalysis(state.deobfuscationCache, 8, 8 * 1024 * 1024, 250000);
+          boundSourceAnalysis(state.deobfuscationCache, 8, 64 * 1024 * 1024, Infinity, key);
           request.status = 'ready';
         } catch (error) {
           if (!current()) return;
           request.status = 'error';
           request.error = `Analysis unavailable: ${String(error.message).slice(0, 1024)} Original bytes are preserved.`;
         } finally {
-          clearTimeout(timeout);
+          clearInterval(ticker);
           delete request.controller;
           if (state.deobfuscationRequests.get(key) === request && request.status === 'loading') {
             request.status = 'error'; request.error = 'The source changed before analysis completed. Retry explicitly.';
@@ -8381,7 +8374,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const request = state.deobfuscationRequests.get(owner.key);
         if (request?.status !== 'loading' || (pending && pending !== request)) return;
         request.status = 'cancelled';
-        request.error = 'Analysis cancelled. A bounded worker may still finish; its late result will not be applied.';
+        request.error = 'Analysis cancelled. Its backend work was stopped; original evidence is unchanged.';
         request.controller?.abort();
         delete request.controller;
         renderSources();
@@ -8519,7 +8512,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const payload = target.deobfuscation;
         const inspection = payload?.sourceInspection;
         const view = payload?.inspectorView;
-        const stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing, view?.compare]);
+        const elapsed = request?.status === 'loading' ? Math.floor((Date.now() - request.started) / 1000) : null;
+        const stampOf = () => JSON.stringify([key, request?.status, request?.error, elapsed, view?.change, view?.pages, view?.notice, view?.revealing, view?.compare]);
+        const stamp = stampOf();
         if (container.deobfuscationRender?.stamp === stamp && container.deobfuscationRender?.view === view) return;
         const sameOwner = container.deobfuscationRender?.key === key;
         if (sameOwner && container.deobfuscationRender?.view === view && view) {
@@ -8540,7 +8535,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         container.deobfuscationRender = {key, view, stamp, change: view?.change};
         const reference = {...sourceReference(target), deobfuscationAssumption: Boolean(state.deobfuscationAssumeIntrinsics)}, nodes = [];
         if (request?.status === 'loading') {
-          const status = textElement('p', 'deobfuscation-notice', payload ? 'Reanalyzing. Last successful report remains below.' : 'Analyzing source without executing it…');
+          const status = textElement('p', 'deobfuscation-notice', `${payload ? 'Reanalyzing' : 'Analyzing source without executing it'}… ${elapsed} s. The whole artifact is analyzed; Cancel stops the worker.${payload ? ' Last successful report remains below.' : ''}`);
           status.setAttribute('role', 'status'); nodes.push(status);
           nodes.push(deobfuscationButton('cancel', 'Cancel analysis', cancelDeobfuscation.bind(null, reference, request)));
         } else if (['error', 'cancelled'].includes(request?.status)) {
@@ -8627,13 +8622,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           nodes.push(deobfuscationDisclosure(reference, view, 'tables', 'Recovered tables', tableRows));
           const limits = [deobfuscationRow('Engine', payload.engine === 'rust-oxc' ? 'Rust / Oxc static rewriting' : 'Legacy lexical analysis'),
             deobfuscationRow('Assumption', analysis.assumptions.length ? 'Standard intrinsics requested. Visible conflicts may suppress the model; this is not evidence of pristine runtime prototypes.' : 'Standard-intrinsics modeling is off.'),
-            deobfuscationRow('UI retention', 'Up to 8 analysis documents, 8 Mi UTF-16 units of original and derived text, 250,000 map segments and 32 MiB of response data combined.'),
-            ...(analysis.omissions ?? []).map(message => deobfuscationRow('Unresolved', message)),
-            ...Object.entries(analysis.limits ?? {}).map(([name, value]) => deobfuscationRow(name.replaceAll('_', ' '), String(value)))];
-          nodes.push(deobfuscationDisclosure(reference, view, 'limits', 'Assumptions and limits', limits));
+            deobfuscationRow('UI retention', 'The newest analysis is kept whatever its size. Up to 7 earlier ones stay while all of them fit in 64 Mi UTF-16 units of text and 32 MiB of response data; an evicted one is analyzed again on request.'),
+            ...(analysis.omissions ?? []).map(message => deobfuscationRow('Unresolved', message))];
+          nodes.push(deobfuscationDisclosure(reference, view, 'limits', 'Assumptions and retention', limits));
         }
         container.replaceChildren(...nodes);
-        container.deobfuscationRender.stamp = JSON.stringify([key, request?.status, request?.error, view?.change, view?.pages, view?.notice, view?.revealing, view?.compare]);
+        // Rendering clamps the change and page positions, so the stamp is taken again.
+        container.deobfuscationRender.stamp = stampOf();
         scroller.scrollTop = scroll;
         for (const node of container.querySelectorAll('pre')) {
           const previous = snippetScroll.find(([key]) => key === node.dataset.deobControl);

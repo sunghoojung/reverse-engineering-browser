@@ -2208,7 +2208,7 @@ the detected source type. JavaScript, CSS and JSON with a line over 16 KiB open
 pretty-printed, shown as **Pretty-printed · Show original**; the choice either
 way is remembered per artifact for the session. The gutter numbers formatted
 lines; its tooltip names the original line and column. A complete JavaScript artifact is laid out by the
-backend's Oxc formatter (`get_source_format`, [Source format v1](../../protocol/source-format-v1.md)):
+backend's Oxc formatter (`get_source_format`, [Source format v2](../../protocol/source-format-v2.md)):
 Prettier's layout at 80 columns, with every token printed as captured. Sources
 reads it one 1,000-line page at a time; each page's anchor names its first
 original offset, so the editor maps every character back by walking that
@@ -2228,8 +2228,8 @@ rewrites stored evidence. Both layouts map back through one sync point per
 4 Ki formatted units rather than a segment per change. The in-page formatter
 streams its tokens, accepts the 16 MiB artifact cap and stops when its output
 exceeds three times that.
-**Details > Static cleanup** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
-over captured artifacts. It needs no Python runtime. Building the app
+**Details > Static cleanup** shows analysis, assumptions, omissions, and retry actions. The native app ships a Rust/Oxc worker for static AST rewriting
+over captured artifacts of any size. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
 The Rust backend preserves classification, formatting, and literal-table
 analysis for captured artifacts. The Deobfuscation details
@@ -2238,12 +2238,16 @@ restricted to non-escaping local tables with proven own-index reads.
 
 Failed analysis remains visible until **Retry analysis** is selected. A failed
 retry retains the last successful result. Source selection does not switch the
-Sources editor away from original evidence. The UI retains at most eight analysis
-documents and distinguishes source hashes and artifact identities in its cache.
-The report retains the last successful summary and snippets during a retry or
-failure. **Cancel analysis** retires the current request; a worker may still
-finish, but its late response cannot replace the report. Cancellation and errors
-require an explicit retry.
+Sources editor away from original evidence. The whole artifact is analyzed and
+every change, table and segment of the report is admitted. Analysis has no
+deadline: the report shows the elapsed seconds while it runs, and **Cancel
+analysis** stops the backend worker and retires the request, so a late response
+cannot replace the report. The UI keeps the newest analysis whatever its size,
+and up to seven earlier ones while all fit in 64 Mi UTF-16 units of text; an
+evicted one is analyzed again on request, from the backend's cache of recent
+results by source SHA-256. The cache distinguishes source hashes and artifact
+identities. The report retains the last successful summary and snippets during
+a retry or failure. Cancellation and errors require an explicit retry.
 
 The report's changed-span inspector shows one validated replacement at a time,
 with Previous/Next, exact half-open UTF-8 ranges, and original/derived snippets
@@ -2254,9 +2258,9 @@ through the existing Facts path. Stored-evidence native mode displays an explici
 unavailable reason for that navigation. Neither path executes source. Pretty printing remains a separate display layer.
 
 Transformation families, heuristic classification signals, recovered table
-summaries, and assumptions/limits have explicit counts and four-row paging.
+summaries, and assumptions have explicit counts and four-row paging.
 Generic omissions do not hide recovered tables. Raw table entries are not shown;
-only bounded admitted summary fields and previews are displayed. Family totals
+only admitted summary fields and each table's 512-character decoded preview are displayed. Family totals
 are whole-report metadata, not invented explanations for a selected replacement.
 Classification is labelled as a heuristic, not a probability or equivalence proof.
 Missing legacy change metadata is shown as unavailable; code-point maps do not
@@ -2308,23 +2312,26 @@ matching rules are in the
 ## Captured JavaScript facts
 
 In **Sources**, select a captured JavaScript artifact and choose **Facts**.
-The existing Rust/Oxc worker returns bounded lexical scopes, declarations,
-callables, regions and operations for that exact session, artifact and SHA-256.
-This is an explicit, inert analysis action. Derived text is not accepted. The Details pane shows complete-within-profile, partial,
-unavailable and truncated states, diagnostics and unknown-effect frontiers.
-Each category displays 100 rows per page; fact details are capped at 4,096
-characters. In **Bindings**, search declaration names and choose **Find lexical
-operations** to inspect exact-ID references, reads, writes, calls and constructs.
-The kind filter and paging keep long reports bounded. Same-name declarations in
-different scopes remain distinct; operation rows can return to their declaration
-explorer. Ambiguous targets offer an explicit candidate chooser and remain
-candidate links. Unresolved/dynamic names and property targets never become
-binding links. Counts describe static operations, which can share one source
-occurrence, not runtime uses or dataflow. Call targets remain unknown.
-This panel always analyzes the whole selected artifact; the API's
-`region_start_byte`/`region_end_byte` scope is not exposed here, so a bundle
-that reports a reached budget is narrowed through `reb-api call
-get_source_facts` instead.
+The existing Rust/Oxc worker analyzes the whole artifact, whatever its size, and
+returns every lexical scope, declaration, callable, region and operation for
+that exact session, artifact and SHA-256. This is an explicit, inert analysis
+action. Derived text is not accepted. While it runs the status shows the elapsed
+seconds, and **Cancel** stops the worker; there is no deadline. A 9 MB bundle
+analyzes in about two seconds, and analyzing the same bytes again reuses the
+backend's report. The Details pane shows complete-within-profile, partial and
+unavailable states, diagnostics and unknown-effect frontiers. The category menu
+counts each table, and each category reads 100 rows per page from the backend.
+In **Bindings**, search declaration names and choose **Find lexical
+operations** to inspect exact-ID references, reads, writes, calls and constructs;
+the backend answers both, so a report of a million rows is never sent to the
+page. Same-name declarations in different scopes remain distinct; operation rows
+can return to their declaration explorer, and **Back** returns to the list it
+came from. Ambiguous targets offer an explicit candidate chooser listing every
+duplicate declaration and remain candidate links. Unresolved/dynamic names and
+property targets never become binding links. Counts describe static operations,
+which can share one source occurrence, not runtime uses or dataflow. Call
+targets remain unknown. This panel always analyzes the whole selected artifact;
+the API's `region_start_byte`/`region_end_byte` scope is not exposed here.
 **Reveal declaration** and operation **Original bytes** actions use the same
 verified UTF-8 reader. Changing the explorer selection cancels its pending
 reveal. Source identity changes and successful reanalysis clear selected fact
@@ -2335,7 +2342,7 @@ remain candidates. Neither is proof of initialized values, dataflow or runtime
 call targets; region-local order is conditional on entry and normal completion.
 
 An **Original bytes** link loads the complete original artifact through the
-existing verified 2 MiB chunk endpoint (at most 4 MiB total), checks its SHA-256,
+existing verified 2 MiB chunk endpoint, checks its SHA-256,
 and strictly decodes UTF-8 while retaining a byte-order mark. It then switches
 the existing editor to original source and reveals the selected half-open byte
 range. The start-line span is highlighted when browser highlights are available;
@@ -2345,22 +2352,22 @@ a different session, changed hash or derived representation is never used as a
 byte-coordinate substitute.
 
 Cancel, closing Facts, source changes and leaving Sources discard pending
-responses. An already started bounded worker may finish, but its result is not
-applied. Response readers own a bounded byte buffer: at most 33 MiB for facts
-and 2 MiB per original-source chunk. They reject more than 65,536 stream chunks,
-including empty chunks, and yield every 256 chunks so fragmented responses cannot
-starve cancellation or deadlines. Cancelling does not wait for producer cleanup.
-Requests have a ten-second deadline including response-body reads;
-retries are explicit, and a failed retry preserves the last successful report
-for the same exact source. Only one report and one verified original source are
-retained by this view.
+responses, and a request that goes away stops its worker. A newer page retires
+the older page read, and a cancelled page leaves the view on the rows it shows.
+Response readers copy each body into one buffer that grows with it; an
+original-source chunk must be exactly its declared length. They yield every 256
+chunks so fragmented responses cannot starve cancellation, and cancelling does
+not wait for producer cleanup. Retries are explicit, and a failed retry
+preserves the last successful report for the same exact source. Only one
+report summary, one page and one verified original source are retained by this
+view.
 
 The native app's live workspace loads the bundled Rust HTTP backend and shares
 this feature with browser development. The separate `reb://` stored-evidence
 native interface does not have the reviewed adapter: Facts is disabled with a
 visible explanation in Details, and direct requests return structured HTTP 503
 `dependency_unavailable`. No Swift parser or duplicate validator is substituted.
-See [JavaScript source facts v1](../../protocol/javascript-source-facts-v1.md).
+See [JavaScript source facts v2](../../protocol/javascript-source-facts-v2.md).
 
 ## Programmatic HTTP access
 

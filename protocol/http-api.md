@@ -46,12 +46,15 @@ apps/origin-trace-backend/target/debug/reb-api call get_artifact_content \
 Immutable JavaScript lexical facts are available as `get_source_facts`:
 `reb-api call get_source_facts --endpoint-file /tmp/reb-api-endpoint
 --param session_id=1 --param artifact_id=2`. Both identifiers must match the
-stored artifact; no live/URL/derived-source fallback is supported. The optional
-`region_start_byte`/`region_end_byte` pair narrows analysis to the innermost
-callable body containing that original byte range, so a bundle that reaches a
-whole-program budget can still produce facts for one callable. See
-[JavaScript source facts v1](javascript-source-facts-v1.md) for exact-byte ranges,
-limits, `coverage.analyzed_range`, and partial/unavailable coverage semantics.
+stored artifact; no live/URL/derived-source fallback is supported. The whole
+artifact is analyzed whatever its size, and the summary reports how many rows
+each table holds; `list_source_fact_rows` reads them in pages, filtered by
+binding, operation kind, declaration name or an ambiguous operation's
+candidates. The optional `region_start_byte`/`region_end_byte` pair narrows
+analysis to the innermost callable body containing that original byte range.
+See [JavaScript source facts v2](javascript-source-facts-v2.md) for exact-byte
+ranges, row pages, caching, `coverage.analyzed_range`, and partial/unavailable
+coverage semantics.
 
 `get_source_format` returns the same exact JavaScript artifact, or JavaScript or
 JSON body, laid out like Prettier, with only whitespace changed: `reb-api call
@@ -60,7 +63,7 @@ get_source_format --endpoint-file /tmp/reb-api-endpoint --param session_id=1
 a large layout; `anchors` map whole 1,000-line windows to original offsets. It
 runs the contained formatter worker, so it is listed only with
 `--allow-effects`, and MCP refuses a request or response body. See
-[Source format v1](source-format-v1.md).
+[Source format v2](source-format-v2.md).
 
 `spec` prints the complete embedded OpenAPI document for validators and client
 generators without contacting a server. `describe` is an operation-detail
@@ -761,7 +764,8 @@ plus a `js-invocation-sites-v1.labels.json` sidecar with each label, source URL
 and session, which the browser never reads. Both are written atomically with
 user-only permissions. An empty set has no site file. The list and resolve
 routes are read-only; resolve runs the analysis worker, so like
-`get_source_facts` it is listed only with `--allow-effects`, as is the action
+`get_source_facts` and `list_source_fact_rows` it is listed only with
+`--allow-effects`, as is the action
 route.
 
 ## Error reasons and uncertain outcomes

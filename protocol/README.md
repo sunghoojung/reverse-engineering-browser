@@ -31,10 +31,11 @@ or function index on the instance dispatch capture is already attached to.
 [Paused import-object map v1](paused-import-object-v1.md) (retired with CDP)
 defined the getProperties-only host import map.
 
-[JavaScript Source Facts v1](javascript-source-facts-v1.md) defines exact-artifact
-lexical binding/effect analysis, original-byte ranges and explicit unknown coverage.
+[JavaScript Source Facts v2](javascript-source-facts-v2.md) defines exact-artifact
+lexical binding/effect analysis of a whole artifact of any size, its paged and
+filtered rows, original-byte ranges and explicit unknown coverage.
 
-[Source format v1](source-format-v1.md) defines the Prettier-style JavaScript
+[Source format v2](source-format-v2.md) defines the Prettier-style JavaScript
 layout that changes only whitespace, its fidelity checks and limits.
 
 [Native Console v2](native-console-v2.md) defines the opt-in mutable console,

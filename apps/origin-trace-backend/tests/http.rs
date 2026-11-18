@@ -731,7 +731,7 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 66, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 67, "Review route coverage when the API changes");
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
@@ -826,7 +826,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 66);
+    assert_eq!(operation_count, 67);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -7764,16 +7764,36 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
 
 fn source_facts_document(source: &str) -> Value {
     json!({
-        "schema":"reb-javascript-source-facts-v1", "ok":true,
+        "schema":"reb-javascript-source-facts-v2", "ok":true,
         "source_bytes":source.len(), "offset_unit":"utf-8-byte", "profile":"lexical-effects-v1",
-        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[],
+        "coverage":{"status":"complete","diagnostics":[],"frontiers":[],
             "analyzed_range":{"start":0,"end":source.len()}},
         "scopes":[{"id":0,"parent_id":null,"range":{"start":0,"end":source.len()},"kind":"program"}],
         "bindings":[], "callables":[],
         "regions":[{"id":0,"parent_id":null,"callable_id":null,"range":{"start":0,"end":source.len()},"kind":"program","entry_order":0}],
-        "operations":[],
-        "limits":{"max_source_bytes":4194304,"max_ast_nodes":262144,"max_facts":16384,"max_frontiers":256,"max_binding_candidates":64,"preflight_depth":128,"preflight_nodes":2097152,"preflight_parse_heap_bytes":402653184}
+        "operations":[]
     })
+}
+
+/// A summary or rows response without `cached`, which only says whether
+/// an earlier request already analyzed these bytes.
+fn uncached(mut value: Value) -> Value {
+    value.as_object_mut().unwrap().remove("cached");
+    value
+}
+
+async fn source_fact_rows(server: &Server, query: &str, status: u16) -> Value {
+    let route = "/api/source-facts/rows";
+    let bytes = assert_contract_response(
+        server
+            .get(&format!("{route}?session_id=11&artifact_id=7{query}"))
+            .await,
+        "get",
+        route,
+        status,
+    )
+    .await;
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 fn put_source_facts_artifact(server: &Server, bytes: &[u8], kind: &str) -> Value {
@@ -7982,8 +8002,57 @@ async fn source_facts_http_and_cli_preserve_exact_identity_and_coverage() {
         .remove("content_path");
     assert_eq!(result["source"], expected_identity);
     assert_eq!(result["source_bytes"], source.len());
-    assert_eq!(result["bindings"], document["bindings"]);
-    assert_eq!(result["operations"], document["operations"]);
+    assert_eq!(result["cached"], false);
+    assert_eq!(
+        result["counts"],
+        json!({"scopes":1,"bindings":1,"callables":0,"regions":1,"operations":1,"frontiers":0})
+    );
+    // Rows come in pages from the admitted report, which a second request
+    // for the same bytes reuses.
+    let bindings = source_fact_rows(&server, "&table=bindings", 200).await;
+    assert_eq!(bindings["rows"], document["bindings"]);
+    assert_eq!(bindings["total"], 1);
+    assert_eq!(bindings["source"], expected_identity);
+    let operations = source_fact_rows(&server, "&table=operations", 200).await;
+    assert_eq!(operations["rows"], document["operations"]);
+    assert_eq!(operations["bindings"], document["bindings"]);
+    for (query, total) in [
+        ("&table=operations&binding_id=0", 1),
+        ("&table=operations&binding_id=0&kind=read", 1),
+        ("&table=operations&binding_id=0&kind=write", 0),
+        ("&table=operations&kind=read", 1),
+        ("&table=operations&offset=1", 1),
+        ("&table=bindings&name=CAF", 1),
+        ("&table=bindings&name=zzz", 0),
+        ("&table=frontiers", 0),
+    ] {
+        let page = source_fact_rows(&server, query, 200).await;
+        assert_eq!(page["total"], total, "{query}");
+    }
+    assert!(
+        source_fact_rows(&server, "&table=operations&offset=1", 200).await["rows"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    for query in [
+        "",
+        "&table=nope",
+        "&table=operations&binding_id=9",
+        "&table=operations&name=a",
+        "&table=bindings&kind=read",
+        "&table=bindings&candidates_of=0",
+        "&table=operations&limit=x",
+        "&table=operations&offset=01",
+        "&table=operations&extra=1",
+    ] {
+        source_fact_rows(&server, query, 400).await;
+    }
+    let again =
+        assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+    let again: Value = serde_json::from_slice(&again).unwrap();
+    assert_eq!(again["cached"], true);
+    assert_eq!(uncached(again), uncached(result.clone()));
     assert_eq!(
         std::fs::read(server.root.path().join(format!(
             "artifacts/blobs/{}.bin",
@@ -8033,13 +8102,21 @@ async fn source_facts_http_and_cli_preserve_exact_identity_and_coverage() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        result
+        uncached(serde_json::from_slice::<Value>(&output.stdout).unwrap()),
+        uncached(result.clone())
     );
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args(["describe", "list_source_fact_rows"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
 
-    for (status, ok, truncated) in [("partial", true, true), ("unavailable", false, false)] {
-        let mut partial = source_facts_document(source);
-        partial["coverage"] = json!({"status":status,"truncated":truncated,"diagnostics":["Synthetic coverage limit"],"frontiers":[{"range":{"start":0,"end":source.len()},"reason":"unsupported-expression-effects"}],"analyzed_range":{"start":0,"end":source.len()}});
+    // Each case has its own bytes: the same bytes would reuse the report.
+    for (status, ok) in [("partial", true), ("unavailable", false)] {
+        let variant = format!("{source}{}", " ".repeat(if ok { 1 } else { 2 }));
+        put_source_facts_artifact(&server, variant.as_bytes(), "javascript");
+        let mut partial = source_facts_document(&variant);
+        partial["coverage"] = json!({"status":status,"diagnostics":["Synthetic coverage limit"],"frontiers":[{"range":{"start":0,"end":variant.len()},"reason":"unsupported-expression-effects"}],"analyzed_range":{"start":0,"end":variant.len()}});
         partial["ok"] = json!(ok);
         if status == "unavailable" {
             for table in ["scopes", "bindings", "callables", "regions", "operations"] {
@@ -8050,9 +8127,16 @@ async fn source_facts_http_and_cli_preserve_exact_identity_and_coverage() {
         let bytes =
             assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
         let result: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(result["coverage"], partial["coverage"]);
+        assert_eq!(
+            result["coverage"],
+            json!({"status":status,"diagnostics":["Synthetic coverage limit"],"analyzed_range":{"start":0,"end":variant.len()}})
+        );
+        assert_eq!(result["counts"]["frontiers"], 1);
         assert_eq!(result["ok"], ok);
+        let frontiers = source_fact_rows(&server, "&table=frontiers", 200).await;
+        assert_eq!(frontiers["rows"], partial["coverage"]["frontiers"]);
     }
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
     for query in [
         "",
         "?artifact_id=7",
@@ -8087,16 +8171,14 @@ async fn source_facts_http_and_cli_preserve_exact_identity_and_coverage() {
     assert_eq!(server.get(path).await.status(), 400);
     put_source_facts_artifact(&server, b"const invalid=\xff;", "javascript");
     assert_eq!(server.get(path).await.status(), 400);
-    put_source_facts_artifact(&server, &vec![b' '; 4 * 1024 * 1024 + 1], "javascript");
-    assert_eq!(server.get(path).await.status(), 400);
-    let exact_limit = " ".repeat(4 * 1024 * 1024);
-    put_source_facts_artifact(&server, exact_limit.as_bytes(), "javascript");
-    std::fs::write(
-        &response_path,
-        source_facts_document(&exact_limit).to_string(),
-    )
-    .unwrap();
-    assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+    // No size bound: a source past the old 4 MiB cap is analyzed.
+    let large = " ".repeat(24 * 1024 * 1024 + 1);
+    put_source_facts_artifact(&server, large.as_bytes(), "javascript");
+    std::fs::write(&response_path, source_facts_document(&large).to_string()).unwrap();
+    let bytes =
+        assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["source_bytes"], large.len());
     let artifact = put_source_facts_artifact(&server, source.as_bytes(), "javascript");
     server.file(
         "artifacts/manifest.jsonl",
@@ -8275,7 +8357,7 @@ async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
     // prefix is an explicit frontier, and `o` never resolves against the glue
     // scope this report did not analyze.
     let mut scoped = source_facts_document(source);
-    scoped["coverage"] = json!({"status":"partial","truncated":false,
+    scoped["coverage"] = json!({"status":"partial",
         "diagnostics":["analysis covered coverage.analyzed_range only; omitted syntax remains unknown"],
         "frontiers":[{"range":{"start":0,"end":declaration},"reason":"outside-analyzed-region"}],
         "analyzed_range":{"start":body,"end":source.len()}});
@@ -8309,8 +8391,22 @@ async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
     )
     .await;
     let result: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(result["coverage"], scoped["coverage"]);
+    let mut coverage = scoped["coverage"].clone();
+    coverage.as_object_mut().unwrap().remove("frontiers");
+    assert_eq!(result["coverage"], coverage);
+    assert_eq!(result["counts"]["frontiers"], 1);
     assert_eq!(result["ok"], true);
+    let region = format!(
+        "&region_start_byte={}&region_end_byte={}",
+        body + 9,
+        body + 10
+    );
+    let operations = source_fact_rows(&server, &format!("{region}&table=operations"), 200).await;
+    assert_eq!(operations["rows"], scoped["operations"]);
+    assert_eq!(
+        operations["analyzed_range"],
+        json!({"start":body,"end":source.len()})
+    );
     // The requested range reaches the worker unchanged and selects nothing else.
     let forwarded: Value = serde_json::from_slice(&std::fs::read(&request_path).unwrap()).unwrap();
     assert_eq!(
@@ -8342,8 +8438,8 @@ async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        result
+        uncached(serde_json::from_slice::<Value>(&output.stdout).unwrap()),
+        uncached(result)
     );
 
     // An unscoped request against the same worker response is refused: the
@@ -8372,9 +8468,14 @@ async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
     complete["coverage"]["diagnostics"] = json!([]);
     complete["coverage"]["frontiers"] = json!([]);
     std::fs::write(&response_path, complete.to_string()).unwrap();
+    // Another range in the same body, so the admitted report above is not reused.
     assert_eq!(
         server
-            .get(&format!("/api/source-facts{query}"))
+            .get(&format!(
+                "/api/source-facts?session_id=11&artifact_id=7&region_start_byte={}&region_end_byte={}",
+                body + 11,
+                body + 12
+            ))
             .await
             .status(),
         502
@@ -8425,12 +8526,65 @@ async fn source_facts_region_narrows_analysis_without_weakening_coverage() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn source_facts_share_worker_lock_and_deadline() {
+async fn deobfuscation_reuses_the_analysis_of_identical_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let runs = directory.path().join("runs");
+    let worker = directory.path().join("deobfuscation-worker");
+    let source = "const value=1;";
+    let reply = json!({
+        "schema": "reb-deobfuscator-worker-v1",
+        "ok": true,
+        "parsed": true,
+        "derived_source": source,
+        "transformations": [],
+        "transformations_truncated": false,
+        "assumptions": [],
+    });
+    std::fs::write(
+        &worker,
+        format!(
+            "#!/bin/sh\nIFS= read -r request\necho run >> '{}'\nprintf '%s\\n' '{reply}'\n",
+            runs.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server =
+        Server::start_with_args(&["--deobfuscator".into(), worker.display().to_string()]).await;
+    put_source_facts_artifact(&server, source.as_bytes(), "javascript");
+    let get = |mode: &'static str| {
+        let server = &server;
+        async move {
+            let path = format!("/api/deobfuscation?artifact_id=7&mode={mode}");
+            let bytes =
+                assert_contract_response(server.get(&path).await, "get", "/api/deobfuscation", 200)
+                    .await;
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        }
+    };
+    let analysis = get("analysis").await;
+    let derived = get("derived").await;
+    let again = get("analysis").await;
+    assert!(analysis.get("representation").is_none());
+    assert_eq!(derived["representation"]["text"], source);
+    assert_eq!(analysis, again);
+    assert_eq!(analysis["analysis"], derived["analysis"]);
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap(),
+        "run\n",
+        "identical bytes are analyzed once"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn source_facts_queue_behind_the_worker_and_stop_when_the_request_goes_away() {
     let directory = tempfile::tempdir().unwrap();
     let started = directory.path().join("started");
     let worker = source_facts_worker(
         directory.path(),
-        &format!("printf started > '{}'; /bin/sleep 60", started.display()),
+        &format!("printf $$ > '{}'; /bin/sleep 60", started.display()),
     );
     let server =
         Server::start_with_args(&["--deobfuscator".into(), worker.display().to_string()]).await;
@@ -8440,34 +8594,47 @@ async fn source_facts_share_worker_lock_and_deadline() {
         "{}/api/source-facts?session_id=11&artifact_id=7",
         server.url
     );
-    let task = tokio::spawn(async move { client.get(url).send().await.unwrap() });
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !started.exists() {
+    let facts = tokio::spawn(async move { client.get(url).send().await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(pid) = std::fs::read_to_string(&started)
+            && !pid.is_empty()
+        {
+            break pid;
+        }
         assert!(
             Instant::now() < deadline,
             "Source facts worker did not start"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    // A second analysis waits for the worker instead of being refused.
+    let client = server.client.clone();
+    let url = format!("{}/api/deobfuscation?artifact_id=7", server.url);
+    let queued = tokio::spawn(async move { client.get(url).send().await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!queued.is_finished());
+    // There is no deadline: the analysis runs until its request goes away,
+    // which stops the worker and lets the queue move on.
+    facts.abort();
+    let alive = |pid: &str| {
+        Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(&pid) {
+        assert!(
+            Instant::now() < deadline,
+            "The abandoned facts worker kept running"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(
-        server
-            .get("/api/deobfuscation?artifact_id=7")
-            .await
-            .status(),
-        409
-    );
-    assert_eq!(
-        server
-            .get("/api/source-facts?session_id=11&artifact_id=7")
-            .await
-            .status(),
-        409
-    );
-    let bytes =
-        assert_contract_response(task.await.unwrap(), "get", "/api/source-facts", 408).await;
-    let error: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(error["code"], "timeout");
-    assert_eq!(error["details"]["phase"], "worker");
+    // The fake worker answers nothing but facts, so the queued request ends.
+    assert_eq!(queued.await.unwrap().status(), 502);
 }
 
 #[tokio::test]
@@ -8480,21 +8647,73 @@ async fn source_facts_real_worker_http_and_cli() {
         "Build the Rust/Oxc worker first"
     );
     let server = Server::start_with_args(&["--deobfuscator".into(), worker]).await;
-    let source = "const café = 1; function f(value) { if (value) return café; return; } const g = () => f(café); g();";
+    let source = "const café = 1; function f(value) { if (value) return café; return; } const g = () => f(café); g(); var dup; var dup; dup();";
     put_source_facts_artifact(&server, source.as_bytes(), "javascript");
     let path = "/api/source-facts?session_id=11&artifact_id=7";
     let bytes =
         assert_contract_response(server.get(path).await, "get", "/api/source-facts", 200).await;
     let value: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(value["ok"], true);
+    assert_eq!(value["counts"]["callables"], 2);
+    let named = source_fact_rows(&server, "&table=bindings&name=CAFÉ", 200).await;
+    assert_eq!(named["total"], 1);
+    let café = named["rows"][0]["id"].as_u64().unwrap();
+    let reads = source_fact_rows(
+        &server,
+        &format!("&table=operations&binding_id={café}&kind=read"),
+        200,
+    )
+    .await;
+    assert_eq!(reads["total"], 2);
     assert!(
-        value["bindings"]
+        reads["bindings"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|binding| binding["name"] == "café")
+            .any(|b| b["name"] == "café")
     );
-    assert_eq!(value["callables"].as_array().unwrap().len(), 2);
+    // Duplicate declarations stay candidates: the call names both, and each
+    // one's operations include it.
+    let duplicates = source_fact_rows(&server, "&table=bindings&name=dup", 200).await;
+    let ids: Vec<u64> = duplicates["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    let calls = source_fact_rows(&server, "&table=operations&kind=call&limit=1000", 200).await;
+    let call = calls["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["detail"]["target"]["kind"] == "ambiguous")
+        .expect("the duplicate call names its candidates")["id"]
+        .as_u64()
+        .unwrap();
+    let candidates = source_fact_rows(
+        &server,
+        &format!("&table=bindings&candidates_of={call}"),
+        200,
+    )
+    .await;
+    let candidate_ids: Vec<u64> = candidates["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(candidate_ids, ids);
+    for id in ids {
+        let uses = source_fact_rows(
+            &server,
+            &format!("&table=operations&binding_id={id}&kind=call"),
+            200,
+        )
+        .await;
+        assert_eq!(uses["total"], 1);
+        assert_eq!(uses["rows"][0]["id"], call);
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
         .args([
             "call",
@@ -8514,8 +8733,8 @@ async fn source_facts_real_worker_http_and_cli() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-        value
+        uncached(serde_json::from_slice::<Value>(&output.stdout).unwrap()),
+        uncached(value)
     );
     // The same verified bytes, scoped to the innermost callable body holding a
     // cursor. The worker selects the analysis unit; the adapter checks the claim.
@@ -8534,25 +8753,27 @@ async fn source_facts_real_worker_http_and_cli() {
     let scoped: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(scoped["ok"], true);
     assert_eq!(scoped["coverage"]["status"], "partial");
-    assert_eq!(scoped["coverage"]["truncated"], false);
     let analyzed = &scoped["coverage"]["analyzed_range"];
     assert_eq!(
         &source[analyzed["start"].as_u64().unwrap() as usize
             ..analyzed["end"].as_u64().unwrap() as usize],
         "{ if (value) return café; return; }"
     );
-    assert_eq!(scoped["callables"].as_array().unwrap().len(), 1);
-    assert!(
-        scoped["bindings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|binding| binding["name"] == "value")
-    );
+    assert_eq!(scoped["counts"]["callables"], 1);
+    let region = format!("&region_start_byte={cursor}&region_end_byte={cursor}");
+    let bindings =
+        source_fact_rows(&server, &format!("{region}&table=bindings&name=value"), 200).await;
+    assert_eq!(bindings["total"], 1);
+    let operations = source_fact_rows(
+        &server,
+        &format!("{region}&table=operations&limit=1000"),
+        200,
+    )
+    .await;
     // The closed table of the selected body resolves its own parameter; the
     // outer declaration this report skipped stays an explicit unknown.
     let resolution = |name: &str| {
-        scoped["operations"]
+        operations["rows"]
             .as_array()
             .unwrap()
             .iter()
@@ -8576,7 +8797,7 @@ async fn source_facts_real_worker_http_and_cli() {
     assert_eq!(value["ok"], false);
     assert_eq!(value["coverage"]["status"], "unavailable");
     for table in ["scopes", "bindings", "callables", "regions", "operations"] {
-        assert!(value[table].as_array().unwrap().is_empty());
+        assert_eq!(value["counts"][table], 0);
     }
 }
 
@@ -9553,6 +9774,7 @@ fn cli_read_only_rejects_mutation_unknowns_and_effectful_gets_before_dispatch() 
         "get_debugger_source",
         "get_deobfuscation",
         "get_source_facts",
+        "list_source_fact_rows",
         "unknown_operation",
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))

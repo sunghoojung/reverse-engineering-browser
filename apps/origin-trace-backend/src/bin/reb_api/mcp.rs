@@ -2255,7 +2255,7 @@ mod tests {
         let identity = json!({"session_id": "11", "artifact_id": "7"});
         for kind in ["request_body", "response_body", "stack"] {
             let base = serve_once(json!({
-                "schema": "source-format-v1", "status": "formatted",
+                "schema": "source-format-v2", "status": "formatted",
                 "source": {"kind": kind}, "text": "{ \"access_token\": \"SECRET\" }"
             }));
             let refused = call(&base, identity.clone()).await;
@@ -2271,7 +2271,7 @@ mod tests {
         assert!(!refused.to_string().contains("SECRET"));
 
         let base = serve_once(json!({
-            "schema": "source-format-v1", "status": "formatted",
+            "schema": "source-format-v2", "status": "formatted",
             "source": {"kind": "javascript"}, "text": "var a = 1;\n"
         }));
         let laid = call(&base, identity.clone()).await;

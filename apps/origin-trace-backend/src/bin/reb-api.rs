@@ -1474,6 +1474,7 @@ mod tests {
             "run_wasm_function",
             "get_vm_analysis",
             "get_source_facts",
+            "list_source_fact_rows",
             "get_deobfuscation",
         ] {
             assert!(!read_only_eligible(&spec, &ops[id].2), "{id}");

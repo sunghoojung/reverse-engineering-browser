@@ -136,12 +136,12 @@ impl Decoder {
                 .env("LC_ALL", "C")
                 .env("PATH", "/usr/bin:/bin"),
             &input,
-            if action == "transform" {
+            Some(if action == "transform" {
                 1048576
             } else {
                 262144
-            },
-            Duration::from_secs(2),
+            }),
+            Some(Duration::from_secs(2)),
         )
         .await?;
         if !output.success {

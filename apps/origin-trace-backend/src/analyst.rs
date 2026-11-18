@@ -167,8 +167,8 @@ impl Analyst {
         let result = worker::run_cancel(
             &mut command,
             &encoded,
-            128 * 1024,
-            Duration::from_millis(2500),
+            Some(128 * 1024),
+            Some(Duration::from_millis(2500)),
             Some(&mut receiver),
         )
         .await;

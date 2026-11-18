@@ -44,11 +44,10 @@ labelled Python lexical fallback when it is not built. Rust does not classify
 obfuscation. Unknown decoder operations remain unresolved. Modeled prototype-dependent
 coercions require the explicit standard-intrinsics assumption.
 
-Requests are read with bounded buffers. An oversized record is drained through
-the next newline, rejected, and flushed before reading another record. The
-request cap allows JSON escaping of a 4 MiB source. At most 4,096 rewrites and
-64 syntax diagnostics are retained. Further rewrites set
-`transformations_truncated`; the remaining source is preserved unchanged.
+A request record is as long as the source it carries; there is no request,
+source or rewrite cap. At most 64 syntax diagnostics of a source Oxc rejects are
+returned. `transformations_truncated` reports that some expression ran out of
+its own evaluation allowance below; the rest of the source is still folded.
 
 Each request is exactly one operation. Untagged records are deobfuscation
 (`source`, optional `assume_intrinsics`) or, when they carry
@@ -58,68 +57,42 @@ optional `candidate_end_byte`); `source_facts`, `invocation_site` and
 are refused with `error_kind: "invalid-request"`, and every other refusal names
 its kind too. See [the response contract](../../protocol/deobfuscation-v1.md).
 
-Before recursive Oxc parsing, a heap-backed Tree-sitter preflight admits only
-error-free JavaScript trees with depth at most 128, at most 2,097,152 nodes, and
-a parse that asks its allocator for at most 384 MiB. Excessive nesting returns a
-recoverable diagnostic and leaves the next JSON-line request usable. Both
-grammars must support the input syntax.
+No source is refused for its size, nesting or node count. Oxc's parser and the
+passes over its tree recurse on the native stack, so before parsing the worker
+measures the source's lexical nesting with `reb-js-lexer`, a parser-free token
+pass that never recurses, and runs the request on a stack of 32 MiB plus 16 KiB
+per nesting level. The stack is mapped rather than committed, so only the depth
+a pass reaches costs memory. Real bundles nest 150 to 200 levels; a 196,608-deep
+sequence expression is parsed and analyzed. Both grammars must support the
+input syntax; malformed syntax is the only refusal.
 
-That node bound is one tree-sitter node per two bytes of the 4 MiB source cap,
-and it is shared by every operation here: deobfuscation, derived-text
-validation, `source_facts`, and the `function_at_byte` and candidate queries.
-Nothing behind it runs until it passes, so it decides whether a large
-obfuscated bundle can be analyzed at all. The grammar cannot exceed two nodes
-per byte, so a source up to 1,048,576 bytes is admitted whatever its shape;
-above that, admission depends on density, and real minifier output measures
-about 1.09 nodes per byte, which puts the practical ceiling near 1.9 MB of
-minified code. The 4 MiB byte cap is still unreachable for the densest sources.
+The `function_at_byte` and candidate queries and `invocation_site` read a
+Tree-sitter tree. Tree-sitter builds it on the heap and every walk uses a cursor
+or parent links, so neither the parse nor a query recurses, and a tree with an
+error node is refused rather than queried.
 
-The depth and node bounds read a finished tree, so neither can bound what
-building that tree costs. The parse heap ceiling is the bound that runs inside
-the parse: tree-sitter's allocator is counted, and the parse is stopped from its
-progress callback once the count passes 384 MiB. Without it a refused source was
-paid for in full first, up to a measured 2,011.7 MiB on a 4 MiB source of nested
-sequence expressions; with it that source is refused at 441.2 MiB. The ceiling is
-192 bytes of parser heap per admissible node, against a densest admissible tree
-that measures 136 and real minifier output that measures 118, so it clears the
-whole realistic admission range. It does narrow the pathological end: a source
-built from parser-stack-splitting shapes larger than about 1.2 MB is refused
-here instead of by node count, and a deeply nested source above roughly 690 KB
-now reports the memory ceiling rather than the depth bound. Both were refusals
-before.
-
-Admission depends only on the supplied bytes. The traversal is bounded by node
-count and tree depth and never consults a clock, and the parse heap count is a
-byte total whose allocation sizes and order follow the grammar and the source,
-so the same source is admitted or refused identically on a slow machine and on
-an unoptimized build, with the same diagnostic and the same peak. Only the
-tree-sitter parse keeps a wall-clock backstop, four seconds, sized well above
-the measured parse cost at the node bound so it cannot decide admission for a
-source that bound admits; it exists for pathological grammar behavior and stays
-inside the five-second process deadline so the refusal is still a recoverable
-diagnostic rather than a killed worker. Every pathological shape measured now
-reaches the heap ceiling well before that clock in either profile, so the
-refusal diagnostic for a 4 MiB source of empty statements, which used to be the
-complexity budget optimized and the time budget unoptimized, is the parse
-memory budget in both.
-
-Before accepting rewrites, the complete derived text passes the same bounded
-preflight and Oxc parser with the original parse goal. Derived text is capped at
-4 MiB plus the 512 KiB replacement budget, so a rewrite that grows a source
-already near the node bound can be refused by it; that returns
-`error_kind: "derived-validation"`, preserves the original text, and discards
-all rewrite receipts. This establishes syntax acceptance, not semantic equivalence.
+Before accepting rewrites, the complete derived text passes the same Oxc parser
+with the original parse goal. Replacement text may grow the source to at most
+eight times its size, which a proportional rewrite never approaches; past that
+the remaining calls are preserved and `transformations_truncated` is set. A
+derived text Oxc rejects returns `error_kind: "derived-validation"`, preserves
+the original text, and discards all rewrite receipts. This establishes syntax
+acceptance, not semantic equivalence.
 Object shorthand properties retain their original spelling and are not folded.
 
-All modeled values share a monotonic 8 MiB allocation-work allowance and
-250,000-node allowance across the whole analysis, including closed decoder
-calls. Owned arrays cache their full clone cost and depth; copies reserve the
+Each top-level evaluation (a constant initializer, a branch test, an
+expression, one decoder table element) starts with its own allowance: 250,000
+interpreter steps, 8 MiB of allocation work and 250,000 value nodes, including
+the closed decoder calls it makes. A whole bundle therefore folds as far as any
+one of its expressions can, instead of stopping once a file-wide budget is
+spent. Owned arrays cache their full clone cost and depth; copies reserve the
 complete cost before allocation and have no unrestricted `Clone` implementation.
 Array slots, string copies/coercions, primitive spelling, and nested value copies
-consume the allowance, and dropping a temporary does not refund it. Value depth
-is capped at 64. These are conservative model-work limits, not a measured process
-RSS ceiling; parser, source, mapping and transport bounds remain separate.
-Exhaustion preserves unresolved calls and sets `transformations_truncated`.
+consume the allowance, and dropping a temporary does not refund it. Value and
+expression depth are capped at 64 and an inline replacement at 16 KiB. These
+bound one modeled expression, never which sources or how many expressions are
+analyzed. Exhaustion preserves that expression's unresolved call and sets
+`transformations_truncated`.
 
 Intrinsic modeling is suppressed for member updates, deletion, exposed
 prototype/constructor paths, `Reflect`/`Proxy`/`Function` references and unmodeled
@@ -169,18 +142,18 @@ original bytes, and child peak RSS includes both Node and worker processes.
 
 ## Inert source facts
 
-The `source_facts` operation reuses this worker's preflight and Oxc parser to
-return bounded lexical declarations, callable ranges and evaluation-region
-facts over the exact supplied bytes. The public API binds them to a verified
-immutable artifact; worker-local IDs alone are not cross-source identities.
-An optional `region` narrows the work to the innermost callable body containing
-that original byte range, which is how a bundle too large for the whole-program
-budgets still yields facts for one callable. The range is resolved inside the
-parse of the complete source; a byte slice is never parsed on its own, and
-scopes holding syntax the report skipped stop resolving names instead of
-guessing at them.
-See [JavaScript source facts v1](../../protocol/javascript-source-facts-v1.md)
-for the API/CLI, byte coordinates, budgets, unknown frontiers and deliberately
+The `source_facts` operation reuses this worker's Oxc parser to return every
+lexical declaration, callable range, evaluation region and operation of the
+exact supplied bytes, with no fact, node or frontier budget. It writes each row
+as compact JSON straight to stdout, so a whole-bundle report is never built as
+a second JSON tree. The public API binds the report to a verified immutable
+artifact; worker-local IDs alone are not cross-source identities. An optional
+`region` narrows the work to the innermost callable body containing that
+original byte range. The range is resolved inside the parse of the complete
+source; a byte slice is never parsed on its own, and scopes holding syntax the
+report skipped stop resolving names instead of guessing at them.
+See [JavaScript source facts v2](../../protocol/javascript-source-facts-v2.md)
+for the API/CLI, byte coordinates, row pages, unknown frontiers and deliberately
 limited meaning of ordering and binding resolution. The operation does not
 rewrite source, resolve values, follow imports, or execute analyzed code.
 
@@ -191,7 +164,7 @@ The `invocation_site` operation finds the function a
 names, for `GET /api/js-invocation-sites/resolve` and the saved-site actions.
 A request carries the BOM-free script text and exactly one of `name`, a dotted
 name of 1 to 8 identifiers, or `byte_offset`, a UTF-8 offset in that text. It
-walks the same bounded tree-sitter preflight tree, so text in strings,
+walks the same Tree-sitter syntax tree, so text in strings,
 templates and comments never matches, and replies
 `reb-invocation-site-worker-v1` with byte offsets and syntax facts only: for a
 name, at most 32 matching definitions and 32 with the same final segment, each

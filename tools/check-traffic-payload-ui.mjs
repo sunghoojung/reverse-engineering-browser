@@ -199,7 +199,7 @@ console.log('PASS Payload find: counts, next and previous, reveals collapsed tre
   const sha = 'cd'.repeat(32), body = '{"a":[1,2],"b":{"c":"d"}}', laid = '{ "a": [1, 2], "b": { "c": "d" } }';
   const artifact = {artifact_id: '902', session_id: '7', kind: 'request_body', mime_type: 'application/json', url: 'https://api.test/collect',
     sha256: sha, byte_size: body.length};
-  const document = (extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only',
+  const document = (extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only',
     source: {artifact_id: '902', sha256: sha}, language: 'json', ...extra})});
   formatReplies.push(document({status: 'formatted', text: laid}));
   const oxcRequest = request(record({artifactId: '902', bodyLength: String(body.length), capturedLength: String(body.length)}));
@@ -218,7 +218,7 @@ console.log('PASS Payload find: counts, next and previous, reveals collapsed tre
   await settle();
   assert.match(text('[data-section="payload"]'), /Formatter response does not match this artifact/);
   const refused = {...artifact, artifact_id: '904', sha256: '12'.repeat(32)};
-  formatReplies.push(url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only',
+  formatReplies.push(url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only',
     source: {artifact_id: '904', sha256: refused.sha256}, status: 'unavailable', reason: 'parse-failed', text: null})}));
   render(request(record({artifactId: '904'})), ready(body, {artifact: refused}));
   await settle();

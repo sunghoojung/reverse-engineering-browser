@@ -83,7 +83,7 @@ enum StoredEvidenceBackendChecks {
       precondition(call(request(path)).status == 200, path)
     }
     let layout = call(request("/api/source-format?session_id=1&artifact_id=1"))
-    precondition(layout.status == 200 && layout.json["schema"] as? String == "source-format-v1"
+    precondition(layout.status == 200 && layout.json["schema"] as? String == "source-format-v2"
       && layout.json["status"] as? String == "formatted", "\(layout)")
     let debugger = call(request("/api/native-debugger"))
     precondition(debugger.status == 200 && debugger.json["availability"] as? String == "unsupported", "\(debugger)")

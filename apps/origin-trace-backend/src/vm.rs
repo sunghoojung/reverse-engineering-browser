@@ -16,8 +16,7 @@ use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
 pub(crate) mod capture_mode;
 #[path = "vm_dispatch_shape.rs"]
 pub(crate) mod dispatch_shape;
-#[path = "vm_js_lexer.rs"]
-pub(crate) mod js_lexer;
+pub(crate) use reb_js_lexer as js_lexer;
 #[cfg(test)]
 #[path = "vm_review_inputs.rs"]
 pub(crate) mod review_inputs;

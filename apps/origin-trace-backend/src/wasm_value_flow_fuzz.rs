@@ -1,4 +1,4 @@
-//! Property test for `wasm-value-flow-v1`: a typed generator of valid modules
+//! Property test for `wasm-value-flow-v2`: a typed generator of valid modules
 //! and an independent flow-sensitive reference.
 //!
 //! The reference tracks, for every value, the set of leaves it is built from

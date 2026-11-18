@@ -1,4 +1,4 @@
-//! Extended property test for `wasm-value-flow-v1`, beside the i32 one in
+//! Extended property test for `wasm-value-flow-v2`, beside the i32 one in
 //! `wasm_value_flow_fuzz.rs`: the same kind of typed generator and
 //! flow-sensitive reference over typed values (i32, i64, f32, f64, funcref,
 //! exnref), multi-value blocks and calls, block and loop params, try_table with

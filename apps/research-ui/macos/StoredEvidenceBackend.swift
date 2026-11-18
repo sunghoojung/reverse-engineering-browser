@@ -9,7 +9,7 @@ final class StoredEvidenceBackend {
     "/api/requests", "/api/request-headers", "/api/request-cookies", "/api/cookie-provenance",
     "/api/request-stack", "/api/native-debugger", "/api/source-format", "/api/source-facts",
     "/api/source-facts/rows", "/api/deobfuscation", "/api/artifact-map", "/api/wasm", "/api/wasm/search", "/api/wasm/functions",
-    "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow", "/api/wasm/diff",
+    "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow", "/api/wasm/call-sites", "/api/wasm/diff",
     "/api/artifacts/search",
   ]
   static let postRoutes: Set<String> = ["/api/native-debugger/actions"]

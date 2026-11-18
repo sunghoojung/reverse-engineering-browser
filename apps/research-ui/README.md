@@ -2535,7 +2535,7 @@ one operand, a direction, then **Trace value**. Instructions with a fixed
 stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
 operands as soon as the row is chosen; calls and branches list theirs after
 the first trace, from its `operand_count`. The panel reads one
-[`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
+[`wasm-value-flow-v2`](../../protocol/wasm-value-flow-v2.md) slice from
 `/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and no
 deadline: while it runs the status counts elapsed seconds and **Trace value**
 becomes **Cancel**, which stops the request and its backend analysis. A

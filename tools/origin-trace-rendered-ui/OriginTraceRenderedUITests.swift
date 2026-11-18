@@ -3033,9 +3033,43 @@ final class OriginTraceRenderedUITests: XCTestCase {
           XCTAssertLessThanOrEqual(median, 50, "\(context) \(view): panning is not smooth: \(result)")
         }
         print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
+        if name == "dispatch256" { try await assertEdgeKey(ui, context) }
         try await ui.click("#source-graph")
       }
     }
+  }
+
+  // The footer's key names the edge kinds drawn, here the loop's table edges,
+  // beside the graph and linear divider. Where the footer is too narrow to
+  // show it inline, Space on Key opens it whole and Escape returns a visible
+  // focus ring to Key, clear of the divider. A short window opens the graph
+  // without Linear; it is shown for the check and hidden again, so the
+  // shapes after this one draw as before.
+  @MainActor
+  private func assertEdgeKey(_ ui: Harness, _ context: String) async throws {
+    let linearHidden = try await ui.value("document.querySelector('.sources-editor').hasAttribute('data-graph-linear-hidden')") as? Bool == true
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
+    try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(context): the graph and linear split has no divider")
+    let kinds = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+    XCTAssertTrue(kinds.contains("table"), "\(context): the key names table edges: \(kinds)")
+    let key = "#source-graph-host .block-graph-key-toggle"
+    if try await ui.value("getComputedStyle(document.querySelector('\(key)')).display === 'none'") as? Bool == true {
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-legend", "\(context) inline edge key")
+    } else {
+      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(context): Space did not open the edge key")
+      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(context) edge key")
+      try await ui.screenshot("block-graph-edge-key-\(context.replacingOccurrences(of: " ", with: "-"))")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
+        "\(context): Escape did not close the edge key onto Key")
+      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(context): Key shows keyboard focus: \(keyFocus)")
+      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(context): Key draws a focus ring: \(keyFocus)")
+    }
+    try await assertGraphDividerClear(ui, "\(context) Key beside the divider")
+    if linearHidden { try await ui.click("#source-graph-host .block-graph-tool", containing: "Linear") }
   }
 
   // Run offline: the dialog names the local sandbox above every field, sends
@@ -3188,20 +3222,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("!document.querySelector('#pane-divider-source-graph').hidden", "\(size.name): the graph and linear split has no divider")
       try await assertGraphDividerClear(ui, "\(size.name) wasm identification divider")
       try await ui.screenshot("wasm-identification-divider-\(size.name)")
-      // Key sits in the footer beside the divider. Space opens the edge key
-      // and Escape returns a visible focus ring to Key, clear of the divider.
-      let key = "#source-graph-host .block-graph-key-toggle"
-      _ = try await ui.value("(document.querySelector('\(key)').focus(), 1)")
-      try await ui.key(49, " ")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'true'", "\(size.name): Space did not open the edge key")
-      try await assertFullyVisible(ui, "#source-graph-host .block-graph-foot[data-key-open] > .block-graph-legend", "\(size.name) edge key")
-      try await ui.key(53, "\u{1B}")
-      try await ui.waitUntil("document.querySelector('\(key)').getAttribute('aria-expanded') === 'false' && document.activeElement === document.querySelector('\(key)')",
-        "\(size.name): Escape did not close the edge key onto Key")
-      let keyFocus = try await ui.json("__rebUiProbe.focusState()")
-      XCTAssertEqual(keyFocus["focusVisible"] as? Bool, true, "\(size.name): Key shows keyboard focus: \(keyFocus)")
-      XCTAssertNotEqual(keyFocus["indicator"] as? String, "none", "\(size.name): Key draws a focus ring: \(keyFocus)")
-      try await assertGraphDividerClear(ui, "\(size.name) Key focused beside the divider")
+      // The key names the edge kinds a drawing has. This module's functions
+      // are single blocks, so with no edge drawn the footer offers no Key
+      // (test25b opens it on the interpreter loop's table edges).
+      let footer = try await ui.json("(() => { const host = document.querySelector('#source-graph-host'); return {key: host.querySelector('.block-graph-key-toggle').hidden, kinds: host.querySelectorAll('.block-graph-legend .block-graph-key').length}; })()")
+      XCTAssertEqual(footer["key"] as? Bool, true, "\(size.name): a drawing without edges offers no Key: \(footer)")
+      XCTAssertEqual(footer["kinds"] as? Int, 0, "\(size.name): a drawing without edges names no edge kind: \(footer)")
       // Drag the divider with the pointer to the graph's minimum, where the
       // Functions menu must still open whole, and then to the linear view's
       // minimum. Home on the divider restores the default split and forgets

@@ -210,8 +210,8 @@ while the summary steps aside for the graph. With **Linear** shown (pressed at
 narrow, where it starts hidden), no control may meet the graph and linear
 divider while the linear view sweeps one row height of scroll offsets, so a
 row's sliver cannot pass under it at whatever offset the display height leaves.
-Space on the footer's **Key** opens the whole edge key and Escape returns a
-visible focus ring to Key. A native pointer drag then takes the divider to the
+The module's functions are single blocks, so the footer must offer no **Key**
+and name no edge kind. A native pointer drag then takes the divider to the
 graph's minimum, where the Functions menu must open whole, and to the linear
 view's minimum, repeating the sweep at each, and Home on the divider forgets
 the drag.
@@ -222,7 +222,11 @@ both sizes and at 1440 by 900: a 1,000-case switch ladder (341), a 256-arm
 interpreter loop (342), two nests of eight loops (343), the exception fixture (344)
 and a 19,459-block interpreter loop (345). Each must draw without an error state
 and without layout defects or clipped text, the exception function's key must
-name exception and unresolved edges, and each is photographed at its opening
+name exception and unresolved edges, and the interpreter loop's must name table
+edges. Where the footer folds the key behind **Key**, Space on Key opens it
+whole and Escape returns a visible focus ring to Key, with no control on the
+graph and linear divider (Linear is shown for that check and hidden again where
+the window starts without it). Each shape is photographed at its opening
 zoom and fitted whole with `0`, where the graph's canvas must hold only its
 background under the overview cue and the minimap. It prints a `RENDERED_UI_GRAPH` line per shape
 and size: the time from the native click on Graph to the frame after the first

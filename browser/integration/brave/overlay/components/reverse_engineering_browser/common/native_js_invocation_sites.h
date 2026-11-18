@@ -15,7 +15,7 @@
 namespace reb {
 // Parses native-js-invocation-sites-v1 (protocol/native-js-invocation-v1.md):
 // the native-js-dispatch-sites-v1 form with every shape "function-entry",
-// exact compact canonical JSON, 1 to 8 unique sites. Returns the fixed 44-byte
+// exact compact canonical JSON, 1 to 256 unique sites. Returns the fixed 44-byte
 // renderer records, or an empty vector for any refusal. Provenance fields are
 // validated for format and not used for matching.
 inline std::vector<std::uint8_t> ParseNativeJsInvocationSites(std::string_view json) {

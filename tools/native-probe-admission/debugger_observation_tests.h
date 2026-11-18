@@ -87,10 +87,23 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   assert(rules.request_count == 1 && rules.event_count == 1);
   assert(!rules.AddDom(0, true, false, false) && !rules.AddDom(5, false, false, false));
   assert(rules.AddDom(5, true, true, false) && !rules.AddDom(5, false, false, true));
-  for (int id = 6; id < 9; ++id) {
+  for (int id = 6; id < 5 + static_cast<int>(reb::kNativeWatchDomNodes); ++id) {
     assert(rules.AddDom(id, false, false, true));
   }
-  assert(!rules.AddDom(9, true, false, false) && rules.dom_count == 4);
+  assert(!rules.AddDom(1000, true, false, false) && rules.dom_count == reb::kNativeWatchDomNodes);
+  {
+    // The rule tables hold 32 request rules and 64 event types, then refuse.
+    reb::NativeWatchRules full;
+    for (std::size_t i = 0; i < reb::kNativeWatchRequestRules; ++i) {
+      assert(full.AddRequest("/api/" + std::to_string(i), ""));
+    }
+    for (std::size_t i = 0; i < reb::kNativeWatchEventRules; ++i) {
+      assert(full.AddEvent("event" + std::to_string(i)));
+    }
+    assert(!full.AddRequest("/api/more", "") && !full.AddEvent("more"));
+    static_assert(reb::kNativeWatchRequestRules <= 256 && reb::kNativeWatchEventRules <= 256 &&
+                  reb::kNativeWatchDomNodes <= 256);
+  }
   rules.timers = rules.csp = rules.uncaught = rules.caught = true;
   {
     // Disarmed, every hook is one relaxed load: no walk, no record, no allocation.
@@ -195,22 +208,119 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   reb::NativeDebuggerWatch::Mutation(9, reb::kNativeWatchAttribute, 0, 1, "");
   assert(Drain(queue) == 0);
 
-  // The 1,024-record budget refuses the next record and leaves one gap.
+  // No record count: 6,000 timers on one armed document are all recorded,
+  // with no gap, and the rules stay armed.
   {
     assert(reb::NativeDebuggerWatch::Arm(9, rules));
-    std::uint32_t admitted = 0;
-    while (reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers)) {
-      reb::NativeDebuggerWatch::Timer(9, false, false, false, admitted + 1, 0, NativeStackFrame{});
+    constexpr std::uint32_t kTimers = 6000;
+    for (std::uint32_t id = 1; id <= kTimers; ++id) {
+      assert(reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers));
+      reb::NativeDebuggerWatch::Timer(9, false, false, false, id, 0, NativeStackFrame{});
       const NativeProbeEvent next = Pop(queue);
-      if (next.header.type == NativeProbeType::kGap) {
-        assert(admitted == reb::kNativeWatchBudget);
-        break;
-      }
-      ++admitted;
+      assert(next.header.type == NativeProbeType::kTimerObservation);
+      std::uint32_t timer = 0;
+      std::memcpy(&timer, ObservationPayload(next).reserved1.data() + 4, sizeof(timer));
+      assert(timer == id);
     }
-    assert(!reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers));
-    reb::NativeDebuggerWatch::Timer(9, false, false, false, 1, 0, NativeStackFrame{});
+    assert(reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers));
     assert(Drain(queue) == 0);
+  }
+
+  // A kept scope arms each later document of its exact origin and frame kind,
+  // beside the Console's own arm, and every document matches only its own
+  // frame's records.
+  {
+    using Watch = reb::NativeDebuggerWatch;
+    reb::NativeWatchScope scope;
+    scope.serial = 1;
+    scope.origin = "https://a.test";
+    scope.top_frame = true;
+    assert(scope.rules.AddEvent("click"));
+    scope.rules.timers = true;
+    Watch::SetScope(scope);
+    assert(Watch::HasScope());
+    assert(!Watch::ArmScope(11, "https://b.test", true) &&
+           !Watch::ArmScope(11, "https://a.test", false) &&
+           !Watch::ArmScope(11, "https://a.test:8443", true) &&
+           !Watch::ArmScope(0, "https://a.test", true));
+    assert(Watch::ArmScope(11, "https://a.test", true) &&
+           Watch::ArmScope(12, "https://a.test", true));
+    for (const std::uint64_t frame : {11U, 12U, 9U}) {
+      Watch::Timer(frame, false, false, false, 5, 0, NativeStackFrame{});
+      assert(Pop(queue).header.frame_id == frame);
+    }
+    Watch::Timer(13, false, false, false, 5, 0, NativeStackFrame{});
+    Watch::Listener(11, "click", 1, 1, NativeStackFrame{});
+    assert(Pop(queue).header.frame_id == 11);
+    // The scope has no CSP rule; the Console's arm on 9 does.
+    Watch::Csp(11, 20, false, "cdn.example.test");
+    Watch::Listener(11, "scroll", 1, 1, NativeStackFrame{});
+    assert(Drain(queue) == 0);
+    Watch::Csp(9, 20, false, "cdn.example.test");
+    assert(Pop(queue).header.frame_id == 9);
+    // DOM rules stay with the Console's own document.
+    assert(Watch::DomSlot(5, reb::kNativeWatchAttribute) == 0);
+    Watch::Mutation(11, reb::kNativeWatchAttribute, 0, 1, "class");
+    assert(Drain(queue) == 0);
+
+    // The same origin and kind again: the documents it armed take the new rules.
+    scope.serial = 2;
+    scope.rules = {};
+    assert(scope.rules.AddEvent("scroll"));
+    Watch::SetScope(scope);
+    Watch::Listener(11, "click", 1, 1, NativeStackFrame{});
+    Watch::Timer(12, false, false, false, 5, 0, NativeStackFrame{});
+    assert(Drain(queue) == 0);
+    Watch::Listener(12, "scroll", 1, 1, NativeStackFrame{});
+    assert(Pop(queue).header.frame_id == 12);
+    // Another origin disarms them and leaves the Console's arm.
+    scope.serial = 3;
+    scope.origin = "https://b.test";
+    Watch::SetScope(scope);
+    assert(!Watch::Wants(11, reb::kNativeWatchListeners) &&
+           !Watch::Wants(12, reb::kNativeWatchListeners) &&
+           Watch::Wants(9, reb::kNativeWatchTimers));
+    // A scope holding DOM rules, or no rule, is refused whole.
+    reb::NativeWatchScope dom = scope;
+    dom.serial = 4;
+    assert(dom.rules.AddDom(5, true, false, false));
+    Watch::SetScope(dom);
+    assert(!Watch::HasScope());
+    reb::NativeWatchScope empty;
+    empty.serial = 5;
+    empty.origin = "https://a.test";
+    Watch::SetScope(empty);
+    assert(!Watch::HasScope());
+
+    // The transport rebuilds a scope and refuses one with any rule this
+    // renderer cannot hold exactly.
+    auto sent = std::make_unique<reb::mojom::NativeWatchScope>();
+    sent->serial = 6;
+    sent->origin = "https://a.test";
+    sent->top_frame = true;
+    sent->requests.push_back(
+        std::make_unique<reb::mojom::NativeWatchRequestRule>("/api/x", "POST"));
+    sent->events = {"click"};
+    sent->caught = true;
+    transport.SetDebuggerWatchScope(std::move(sent));
+    assert(Watch::HasScope() && Watch::ArmScope(11, "https://a.test", true) &&
+           Watch::Wants(11, reb::kNativeWatchUncaught | reb::kNativeWatchCaught) &&
+           Watch::Wants(11, reb::kNativeWatchRequests));
+    // The Console's own arm moves to frame 10 and leaves the scope's documents.
+    assert(Watch::Arm(10, rules));
+    assert(!Watch::Wants(9, reb::kNativeWatchTimers) && Watch::Wants(10, reb::kNativeWatchTimers) &&
+           Watch::Wants(11, reb::kNativeWatchListeners));
+    auto refused = std::make_unique<reb::mojom::NativeWatchScope>();
+    refused->serial = 7;
+    refused->origin = "https://a.test";
+    refused->top_frame = true;
+    refused->events = {"click", "cl ick"};
+    transport.SetDebuggerWatchScope(std::move(refused));
+    assert(!Watch::HasScope() && !Watch::Wants(11, reb::kNativeWatchListeners));
+    transport.SetDebuggerWatchScope(nullptr);
+    Watch::Disarm(10);
+    assert(Drain(queue) == 0);
+    assert(Watch::Arm(9, rules));
   }
 
   reb::NativeDebuggerWatch::Disarm(9);
@@ -224,6 +334,7 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   scenario = {};
   std::cout << "PASS debugger observations: inactive, captured stack and tail, request match "
                "identity, no-script stack, rule bounds, disarmed cost, per-hook tails, frame "
-               "filtering, budget gap and disarm\n";
+               "filtering, 6,000 records without a count, a kept scope arming several documents "
+               "beside the Console's own, scope replacement and refusal, and disarm\n";
 }
 }  // namespace

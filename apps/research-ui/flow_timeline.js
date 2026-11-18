@@ -82,6 +82,8 @@ const FLOW_GAP_BUDGETS = {calls: 'a call budget filled; later calls were not rec
 function flowGapMeaning(reason) {
   const slot = /^native_js_invocation_site_(\d+)_(compiled_before_arming|unsupported_function)$/.exec(reason);
   if (slot) return slot[2] === 'compiled_before_arming' ? `site slot ${slot[1]} compiled before arming, so its calls were not recorded` : `site slot ${slot[1]} is a generator, constructor or initializer, so it was not tracked`;
+  if (reason === 'native_js_invocation_ids_exhausted') return 'V8 used every invocation ID of this renderer process, so its later calls were not recorded';
+  if (reason === 'native_js_dispatch_ids_exhausted') return 'V8 used every dispatch activation ID of this renderer process, so its later activations were not recorded';
   if (samplePolicyFilterGapLabels.has(reason) || reason.includes('filtered')) return 'the sample policy excluded these executions before they took a sample slot';
   if (reason.includes('limit_or_invalid') || reason.includes('module_invalid')) return 'records were refused as malformed or outside a structural bound';
   if (samplingBudgetGapLabels.has(reason)) return `the ${samplingBudgetGapLabels.get(reason)} sampling budget filled; later executions were not sampled`;

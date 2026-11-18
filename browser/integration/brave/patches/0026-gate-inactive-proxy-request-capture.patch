@@ -1,0 +1,154 @@
+diff --git a/browser/brave_content_browser_client.cc b/browser/brave_content_browser_client.cc
+index 106f5b8..9b70679 100644
+--- a/browser/brave_content_browser_client.cc
++++ b/browser/brave_content_browser_client.cc
+@@ -1343,7 +1343,11 @@ void BraveContentBrowserClient::WillCreateURLLoaderFactory(
+   // runs for the owned profile only the observing proxy is attached, and
+   // otherwise the factory is left as it was.
+   if (type == URLLoaderFactoryType::kEarlyHints) {
+-    if ((reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
++    // The static armed loads first: outside a session the factory is built
++    // as stock after them alone.
++    if ((reb::NativeNetworkCaptureSink::IsArmed() ||
++         reb::NativeArtifactCaptureSink::IsArmed()) &&
++        (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
+          reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
+         reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)) {
+       if (base::FeatureList::IsEnabled(features::kBraveRequestInfoUniquePtr)) {
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+index 341b359..baa7193 100644
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -128,6 +128,16 @@ std::uint32_t TabId(
+                                                 FrameId(render_frame_token));
+ }
+ 
++// Whether native capture runs for this profile's requests. Outside a session
++// it is each sink's static armed load and no call.
++bool NativeCaptureRunsFor(content::BrowserContext* browser_context) {
++  return (reb::NativeNetworkCaptureSink::IsArmed() ||
++          reb::NativeArtifactCaptureSink::IsArmed()) &&
++         (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
++          reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
++         reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context);
++}
++
+ // Helper struct for crafting responses.
+ struct WriteData {
+   base::WeakPtr<network::mojom::URLLoaderClient> client;
+@@ -207,10 +217,9 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+       // Capture state first, so a profile outside capture costs the sink
+       // checks alone. A renderer-issued service-worker request takes the
+       // class 68 answer its renderer record shares.
++      native_capture_runs_(NativeCaptureRunsFor(browser_context)),
+       native_exclusion_(
+-          (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
+-           reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
+-                  reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)
++          native_capture_runs_
+               ? reb::NativeProxyRequestExclusion(
+                     factory.native_scope_,
+                     static_cast<int>(factory.url_loader_factory_type_),
+@@ -219,10 +228,7 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+                      static_cast<uint32_t>(network_service_request_id)})
+               : reb::NativeRequestExclusion{}),
+       native_capture_lifecycle_(
+-          (reb::NativeNetworkCaptureSink::Get().IsEnabled() ||
+-           reb::NativeArtifactCaptureSink::Get().IsEnabled()) &&
+-                  native_exclusion_.exclusion_class == 0 &&
+-                  reb::NativeNetworkCaptureSink::Get().IsOwnedContext(browser_context)
++          native_capture_runs_ && native_exclusion_.exclusion_class == 0
+               ? reb::NativeNetworkCaptureSink::Get().generation()
+               : 0),
+       options_(options),
+@@ -235,7 +241,10 @@ BraveProxyingURLLoaderFactory<T>::InProgressRequest::InProgressRequest(
+       proxied_client_receiver_(this),
+       navigation_response_task_runner_(navigation_response_task_runner),
+       weak_factory_(this) {
+-  if (native_capture_lifecycle_.IsCurrent(
++  // From here on, a request outside capture reads only its own lifecycle and
++  // exclusion.
++  if (native_capture_lifecycle_.Open() &&
++      native_capture_lifecycle_.IsCurrent(
+           reb::NativeNetworkCaptureSink::Get().generation())) {
+     EnsureNativeCaptureIdentity();
+     reb::NativeNetworkCaptureSink::Get().RecordRequestStarted(
+@@ -313,6 +322,9 @@ void BraveProxyingURLLoaderFactory<
+ 
+ template <template <typename> class T>
+ bool BraveProxyingURLLoaderFactory<T>::InProgressRequest::NativeCaptureIsCurrent() const {
++  if (!native_capture_lifecycle_.Open()) {
++    return false;
++  }
+   const auto& sink = reb::NativeNetworkCaptureSink::Get();
+   return native_capture_lifecycle_.IsCurrent(sink.generation()) && sink.IsEnabled();
+ }
+@@ -321,6 +333,10 @@ template <template <typename> class T>
+ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::FinishNativeCapture(
+     const network::URLLoaderCompletionStatus& status,
+     std::string_view disposition) {
++  // A lifecycle that never opened, or already finished, records nothing.
++  if (!native_capture_lifecycle_.Open()) {
++    return;
++  }
+   auto& sink = reb::NativeNetworkCaptureSink::Get();
+   if (native_capture_lifecycle_.Finish(sink.generation()) && sink.IsEnabled()) {
+     sink.RecordRequestCompleted(
+@@ -887,19 +903,22 @@ void BraveProxyingURLLoaderFactory<
+   }
+ 
+   std::uint64_t creator_event_id = 0;
+-  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
+   if (NativeCaptureIsCurrent()) {
+-    creator_event_id = network_capture.RecordResponseStarted(
+-        request_id_, native_initiator_request_id_, initiator_process_id_,
+-        tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+-        *current_response_head_, false, network_headers.get());
++    creator_event_id =
++        reb::NativeNetworkCaptureSink::Get().RecordResponseStarted(
++            request_id_, native_initiator_request_id_, initiator_process_id_,
++            tab_id_, frame_id_, browser_context_id_high_,
++            browser_context_id_low_, *current_response_head_, false,
++            network_headers.get());
+   }
+-  auto& artifact_capture = reb::NativeArtifactCaptureSink::Get();
+-  if (native_capture_lifecycle_.IsCurrent(network_capture.generation()) &&
+-      artifact_capture.IsEnabled()) {
+-    current_response_body_ = artifact_capture.MaybeCaptureResponse(
+-        request_id_, frame_id_, creator_event_id, request_,
+-        *current_response_head_, std::move(current_response_body_));
++  if (native_capture_lifecycle_.Open() &&
++      native_capture_lifecycle_.IsCurrent(
++          reb::NativeNetworkCaptureSink::Get().generation()) &&
++      reb::NativeArtifactCaptureSink::Get().IsEnabled()) {
++    current_response_body_ =
++        reb::NativeArtifactCaptureSink::Get().MaybeCaptureResponse(
++            request_id_, frame_id_, creator_event_id, request_,
++            *current_response_head_, std::move(current_response_body_));
+   }
+ 
+   proxied_client_receiver_.Resume();
+@@ -926,9 +945,8 @@ void BraveProxyingURLLoaderFactory<T>::InProgressRequest::
+   } else {
+     ctx_->set_redirect_source(request_.url);
+   }
+-  auto& network_capture = reb::NativeNetworkCaptureSink::Get();
+   if (NativeCaptureIsCurrent()) {
+-    network_capture.RecordRequestRedirected(
++    reb::NativeNetworkCaptureSink::Get().RecordRequestRedirected(
+         request_id_, native_initiator_request_id_, initiator_process_id_,
+         tab_id_, frame_id_, browser_context_id_high_, browser_context_id_low_,
+         redirect_info, *current_response_head_);
+diff --git a/browser/net/brave_proxying_url_loader_factory.h b/browser/net/brave_proxying_url_loader_factory.h
+index 4480681..76429e4 100644
+--- a/browser/net/brave_proxying_url_loader_factory.h
++++ b/browser/net/brave_proxying_url_loader_factory.h
+@@ -176,6 +176,8 @@ class BraveProxyingURLLoaderFactory : public network::mojom::URLLoaderFactory {
+     uint64_t browser_context_id_high_ = 0;
+     uint64_t browser_context_id_low_ = 0;
+     bool native_capture_identity_initialized_ = false;
++    // Decided once, when the request starts; the two members below follow it.
++    const bool native_capture_runs_;
+     // What capture leaves out of this request, decided once while capture
+     // runs for the profile; protocol/native-network-v3.md.
+     const reb::NativeRequestExclusion native_exclusion_;

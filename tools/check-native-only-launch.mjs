@@ -187,11 +187,11 @@ try {
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, /REB_NATIVE_JS_DISPATCH_SITES/);
   }
-  for (const size of [0,4097]) {
+  for (const size of [0,131073]) {
     await writeFile(sitesPath, Buffer.alloc(size,32));
     const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_DISPATCH_SITES:sitesPath},encoding:'utf8'});
     assert.equal(result.status,2,result.stderr);
-    assert.match(result.stderr,/between 1 and 4096/);
+    assert.match(result.stderr,/between 1 and 131072/);
   }
   // Native browser code owns canonical site-file validation; the shell gates
   // the opt-in and file bounds and passes the path as one argument.
@@ -228,11 +228,11 @@ try {
     assert.equal(result.status, 2, result.stderr);
     assert.match(result.stderr, message);
   }
-  for (const size of [0, 4097]) {
+  for (const size of [0, 131073]) {
     await writeFile(invocationPath, Buffer.alloc(size, 32));
     const result = spawnSync(shell, [join(root,'scripts/run-live-session.sh')], {env:{...process.env,REB_NATIVE_WASM_DISPATCH:'0',REB_NATIVE_JS_INVOCATION_SITES:invocationPath},encoding:'utf8'});
     assert.equal(result.status, 2, result.stderr);
-    assert.match(result.stderr, /between 1 and 4096/);
+    assert.match(result.stderr, /between 1 and 131072/);
   }
   await writeFile(invocationPath, '{}');
   for (const [digests, tail] of [[0, []], [1, ['--reb-js-invocation-digests']]]) {
@@ -469,6 +469,23 @@ exec ${quote(systemGrep)} "$@"
   assert.equal(badSwitch.status, 2);
   assert.match(badSwitch.stderr, /REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1/);
   console.log('PASS saved invocation sites start without invocation capture on a Brave that lacks it; explicit sites and other flags stay strict');
+
+  // The packaged app's request and promise stacks defaults: a Brave without
+  // promise registration stacks starts with request stacks alone, and one
+  // with both arms both. An explicit request stays strict.
+  const stackDefaults = {...switches.packaged, REB_NATIVE_REQUEST_STACKS:'1', REB_NATIVE_PROMISE_STACKS:'1',
+    REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'1'};
+  const prePromise = await braveApp({framework: [...allNames, 'reb_request_stacks']});
+  accepted(await launchWith(prePromise.executable, stackDefaults),
+    [...packaged, '--reb-request-stacks', '--reb-request-stacks', '--reb-promise-stacks'], prePromise.framework);
+  const withPromise = await braveApp({framework: [...allNames, 'reb_request_stacks', 'reb_promise_stacks']});
+  accepted(await launchWith(withPromise.executable, stackDefaults),
+    [...packaged, '--reb-request-stacks', '--reb-request-stacks', '--reb-promise-stacks', '--reb-promise-stacks'],
+    withPromise.framework);
+  const strictPromise = await launchWith(prePromise.executable, {...stackDefaults, REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'0'});
+  assert.equal(strictPromise.status, 1, strictPromise.stderr);
+  assert.match(strictPromise.stderr, /does not define the requested V8 flag --reb-promise-stacks \(from REB_NATIVE_PROMISE_STACKS=1\)/);
+  console.log('PASS packaged request and promise stacks defaults drop promise stacks from a Brave that lacks them; an explicit request stays strict');
 
   // Request content capture is a Chromium switch, not a V8 flag. Invalid values
   // and masks without Network and Artifact refuse before any helper starts.

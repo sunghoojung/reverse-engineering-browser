@@ -20,16 +20,27 @@ NativeJsDispatchSite JsSite(std::uint8_t seed, std::uint32_t anchor, NativeJsDis
   site.shape = shape;
   return site;
 }
-const std::array<NativeJsDispatchSite, 8> kJsSites{
-    JsSite(1, 10, NativeJsDispatchShape::kSwitch),
-    JsSite(1, 20, NativeJsDispatchShape::kIndexedCall),
-    JsSite(2, 10, NativeJsDispatchShape::kSwitch),
-    JsSite(3, 30, NativeJsDispatchShape::kIndexedCall),
-    JsSite(4, 40, NativeJsDispatchShape::kSwitch),
-    JsSite(5, 50, NativeJsDispatchShape::kSwitch),
-    JsSite(6, 60, NativeJsDispatchShape::kIndexedCall),
-    JsSite(7, 70, NativeJsDispatchShape::kSwitch),
-};
+using JsSiteTable = std::array<NativeJsDispatchSite, reb::kNativeJsDispatchSiteLimit>;
+// A full table: the same anchor in other text is another site, and every
+// one-byte slot is armed.
+JsSiteTable MakeJsSites() {
+  JsSiteTable sites{
+      JsSite(1, 10, NativeJsDispatchShape::kSwitch),
+      JsSite(1, 20, NativeJsDispatchShape::kIndexedCall),
+      JsSite(2, 10, NativeJsDispatchShape::kSwitch),
+      JsSite(3, 30, NativeJsDispatchShape::kIndexedCall),
+      JsSite(4, 40, NativeJsDispatchShape::kSwitch),
+      JsSite(5, 50, NativeJsDispatchShape::kSwitch),
+      JsSite(6, 60, NativeJsDispatchShape::kIndexedCall),
+      JsSite(7, 70, NativeJsDispatchShape::kSwitch),
+  };
+  for (std::size_t slot = 8; slot < sites.size(); ++slot)
+    sites[slot] =
+        JsSite(static_cast<std::uint8_t>(8 + slot / 64), static_cast<std::uint32_t>(100 + slot),
+               slot % 2 ? NativeJsDispatchShape::kIndexedCall : NativeJsDispatchShape::kSwitch);
+  return sites;
+}
+const JsSiteTable kJsSites = MakeJsSites();
 std::vector<std::uint8_t> JsSiteRecords(std::span<const NativeJsDispatchSite> sites) {
   std::vector<std::uint8_t> records;
   for (const auto& site : sites) {
@@ -84,7 +95,7 @@ void ConfigureJs(NativeProbeQueue& queue,
   NativeJsDispatchObservationPayload value;
   value.shape = 2;
   value.selector_kind = 1;
-  value.site_slot = 7;
+  value.site_slot = 255;
   value.flags = reb::kNativeJsDispatchNewActivation | reb::kNativeJsDispatchHandlerSpan;
   value.script_id = 0x01020304U;
   value.anchor_offset = 0x05060708U;
@@ -95,17 +106,16 @@ void ConfigureJs(NativeProbeQueue& queue,
   value.handler_end = 0x191A1B1CU;
   value.activation_id = 0x21222324U;
   value.parent_activation_id = 0x1D1E1F20U;
-  value.site_sample_index = 63;
-  value.sample_index = 255;
+  value.site_ordinal = 0x25262728U;
   for (std::size_t i = 0; i < 32; ++i)
     value.source_sha256[i] = static_cast<std::uint8_t>(0xA0U + i);
   assert(reb::IsValidNativeJsDispatchObservationPayload(value));
   const auto bytes = reb::EncodeNativeJsDispatchObservationPayload(value);
   constexpr std::array<std::uint8_t, 48> head{
-      1,    0,    128,  0,    2,    1,    7,    9,    4,    3,    2,    1,
+      2,    0,    128,  0,    2,    1,    255,  9,    4,    3,    2,    1,
       8,    7,    6,    5,    0x0C, 0x0B, 0x0A, 9,    0x10, 0x0F, 0x0E, 0x0D,
       0x14, 0x13, 0x12, 0x11, 0x18, 0x17, 0x16, 0x15, 0x1C, 0x1B, 0x1A, 0x19,
-      0x24, 0x23, 0x22, 0x21, 0x20, 0x1F, 0x1E, 0x1D, 63,   0,    255,  0};
+      0x24, 0x23, 0x22, 0x21, 0x20, 0x1F, 0x1E, 0x1D, 0x28, 0x27, 0x26, 0x25};
   for (std::size_t i = 0; i < head.size(); ++i)
     assert(std::to_integer<std::uint8_t>(bytes[i]) == head[i]);
   for (std::size_t i = 0; i < 32; ++i)
@@ -123,20 +133,21 @@ void ConfigureJs(NativeProbeQueue& queue,
     return !reb::IsValidNativeJsDispatchObservationPayload(copy);
   };
   using P = NativeJsDispatchObservationPayload;
-  assert(rejected([](P& p) { p.protocol_version = 2; }));
+  // The renderer writes only version 2; consumers also read version 1.
+  assert(rejected([](P& p) { p.protocol_version = 1; }));
+  assert(rejected([](P& p) { p.protocol_version = 3; }));
   assert(rejected([](P& p) { p.payload_size = 127; }));
   assert(rejected([](P& p) { p.shape = 0; }));
   assert(rejected([](P& p) { p.shape = 3; }));
   assert(rejected([](P& p) { p.selector_kind = 0; }));
   assert(rejected([](P& p) { p.selector_kind = 10; }));
-  assert(rejected([](P& p) { p.site_slot = 8; }));
+  assert(!rejected([](P& p) { p.site_slot = 0; }));
   assert(rejected([](P& p) { p.flags |= 16; }));
   assert(rejected([](P& p) { p.script_id = 0; }));
   assert(rejected([](P& p) { p.source_length = 0; }));
   assert(rejected([](P& p) { p.anchor_offset = p.source_length; }));
   assert(rejected([](P& p) { p.activation_id = 0; }));
-  assert(rejected([](P& p) { p.site_sample_index = 64; }));
-  assert(rejected([](P& p) { p.sample_index = 256; }));
+  assert(!rejected([](P& p) { p.site_ordinal = 0; }));
   assert(rejected([](P& p) { p.selector_kind = 7, p.selector_low32 = 2; }));
   assert(!rejected([](P& p) { p.selector_kind = 7, p.selector_low32 = 1; }));
   assert(rejected([](P& p) { p.selector_kind = 3, p.selector_low32 = 1; }));
@@ -175,19 +186,21 @@ void ConfigureJs(NativeProbeQueue& queue,
   header.flags = 1;
   assert(!reb::IsValidNativeJsDispatchHeader(header));
 
-  std::array<NativeJsDispatchSite, 8> out{};
+  JsSiteTable out{};
   const auto records = JsSiteRecords(kJsSites);
-  assert(records.size() == 8 * 44);
+  assert(records.size() == kJsSites.size() * 44);
   const auto record = reb::EncodeNativeJsDispatchSite(kJsSites[1]);
   assert(record[32] == 0xE8 && record[33] == 3 && record[36] == 20 && record[40] == 2 &&
          record[41] == 0 && record[42] == 0 && record[43] == 0);
-  assert(reb::DecodeNativeJsDispatchSites(records, out) == 8 &&
+  assert(reb::DecodeNativeJsDispatchSites(records, out) == kJsSites.size() &&
          std::equal(out.begin(), out.end(), kJsSites.begin()));
   assert(reb::DecodeNativeJsDispatchSites({}, out) == 0);
   assert(reb::DecodeNativeJsDispatchSites(std::span(records).first(43), out) == 0);
-  auto nine = records;
-  nine.insert(nine.end(), record.begin(), record.end());
-  assert(reb::DecodeNativeJsDispatchSites(nine, out) == 0);
+  auto past_the_limit = records;
+  const auto spare =
+      reb::EncodeNativeJsDispatchSite(JsSite(99, 99, NativeJsDispatchShape::kSwitch));
+  past_the_limit.insert(past_the_limit.end(), spare.begin(), spare.end());
+  assert(reb::DecodeNativeJsDispatchSites(past_the_limit, out) == 0);
   const auto mutated = [&](std::size_t offset, std::uint8_t value_byte) {
     auto copy = std::vector<std::uint8_t>(record.begin(), record.end());
     copy[offset] = value_byte;
@@ -205,8 +218,8 @@ void ConfigureJs(NativeProbeQueue& queue,
   assert(reb::DecodeNativeJsDispatchSites(duplicate, out) == 0);
   // Same anchor in different text is a different site.
   assert(reb::DecodeNativeJsDispatchSites(std::span(records).first(3 * 44), out) == 3);
-  std::cout << "PASS native JS dispatch wire: byte-exact payload, every validation rule, "
-               "envelope and 44-byte site records\n";
+  std::cout << "PASS native JS dispatch wire: byte-exact version 2 payload, every validation "
+               "rule, envelope and 44-byte site records for all 256 slots\n";
 }
 
 struct JsEmitter {
@@ -254,43 +267,36 @@ std::uint64_t CountJsFrameLookup() noexcept {
   ConfigureJs(queue);
   const auto epoch = sink.NativeJsDispatchEpoch();
   assert(epoch != 0 && (epoch & 1U) == 0);
-  std::array<NativeJsDispatchSite, 8> copied{};
-  assert(sink.CopyNativeJsDispatchSites(epoch, copied) == 8 &&
+  JsSiteTable copied{};
+  assert(sink.CopyNativeJsDispatchSites(epoch, copied) == kJsSites.size() &&
          std::equal(copied.begin(), copied.end(), kJsSites.begin()));
   assert(sink.CopyNativeJsDispatchSites(epoch - 2, copied) == 0);  // stale epoch
-  assert(sink.IsNativeJsDispatchEnabled(epoch, 7) && !sink.IsNativeJsDispatchEnabled(epoch, 8));
+  assert(sink.IsNativeJsDispatchEnabled(epoch, 255) && !sink.IsNativeJsDispatchEnabled(epoch, 256));
 
-  // 64 per site, then one coalesced site-budget gap; other sites continue.
-  for (std::size_t n = 0; n < 64; ++n) {
+  // Every dispatch is recorded with its site's next ordinal; no count per site
+  // or per configuration refuses one.
+  constexpr std::uint32_t kMany = 6000;
+  for (std::uint32_t n = 0; n < kMany; ++n) {
     record(0, epoch);
     const auto payload = JsDecoded(One(queue));
-    assert(payload.site_sample_index == n && payload.sample_index == n && payload.site_slot == 0);
+    assert(payload.site_ordinal == n && payload.site_slot == 0);
   }
-  record(0, epoch);
-  assert(JsGapReason(One(queue)) == "native_js_dispatch_site_budget_incomplete");
-  assert(!sink.IsNativeJsDispatchEnabled(epoch, 0) && sink.IsNativeJsDispatchEnabled(epoch, 1));
-  record(1, epoch);
-  auto payload = JsDecoded(One(queue));
-  assert(payload.site_sample_index == 0 && payload.sample_index == 64 &&
-         payload.handler_end == 140);
-  for (std::size_t n = 1; n < 64; ++n)
-    record(1, epoch);
-  record(1, epoch);  // the second capped site reuses the coalesced gap
-  assert(Drain(queue) == 63 && !sink.IsNativeJsDispatchEnabled(epoch, 1));
-  // 256 per configuration, then one budget gap and every site is refused.
-  for (std::size_t slot = 2; slot < 4; ++slot)
-    for (std::size_t n = 0; n < 64; ++n)
-      record(slot, epoch);
-  assert(Drain(queue) == 128);
-  record(4, epoch);
-  assert(JsGapReason(One(queue)) == "native_js_dispatch_budget_incomplete");
-  for (std::uint32_t slot = 0; slot < 8; ++slot)
-    assert(!sink.IsNativeJsDispatchEnabled(epoch, slot));
-  record(5, epoch);
+  assert(sink.IsNativeJsDispatchEnabled(epoch, 0));
+  for (std::size_t slot = 0; slot < kJsSites.size(); ++slot)
+    record(slot, epoch);
+  for (std::size_t slot = 0; slot < kJsSites.size(); ++slot) {
+    const auto payload = JsDecoded(Pop(queue));
+    assert(payload.site_slot == slot && payload.site_ordinal == (slot == 0 ? kMany : 0));
+  }
   assert(Drain(queue) == 0);
+  auto payload = JsDecoded([&] {
+    record(1, epoch);
+    return One(queue);
+  }());
+  assert(payload.site_ordinal == 1 && payload.handler_end == 140);
 
-  // A replacement configuration, even for the same session, has fresh budgets
-  // and refuses every record of the previous epoch.
+  // A replacement configuration, even for the same session, starts every
+  // ordinal again and refuses every record of the previous epoch.
   ConfigureJs(queue);
   const auto second = sink.NativeJsDispatchEpoch();
   assert(second > epoch && sink.IsNativeJsDispatchEnabled(second, 0));
@@ -299,9 +305,10 @@ std::uint64_t CountJsFrameLookup() noexcept {
   assert(Drain(queue) == 0);
   record(0, second);
   payload = JsDecoded(One(queue));
-  assert(payload.sample_index == 0 && payload.site_sample_index == 0);
+  assert(payload.site_ordinal == 0);
 
-  // A full ring counts its own drop and returns both claims.
+  // A full ring counts its own drop, and the dropped record's ordinal is
+  // missing from what follows.
   Fill(queue);
   const auto dropped = queue.DroppedCount();
   record(2, second);
@@ -309,7 +316,7 @@ std::uint64_t CountJsFrameLookup() noexcept {
   assert(Drain(queue) == reb::kNativeProbeQueueCapacity);
   record(2, second);
   payload = JsDecoded(One(queue));
-  assert(payload.sample_index == 1 && payload.site_sample_index == 0);
+  assert(payload.site_ordinal == 1);
 
   // Invalid records and non-document contexts are one coalesced input gap.
   auto wrong_key = JsPayload(3);
@@ -324,7 +331,7 @@ std::uint64_t CountJsFrameLookup() noexcept {
   assert(Drain(queue) == 0);
   record(3, second);
   payload = JsDecoded(One(queue));
-  assert(payload.sample_index == 2);  // refused records consumed no budget
+  assert(payload.site_ordinal == 0);  // refused records take no ordinal
 
   // Compiled before arming: one gap per configuration and slot.
   sink.NoteNativeJsDispatchStatus(second, 3,
@@ -338,12 +345,22 @@ std::uint64_t CountJsFrameLookup() noexcept {
   const auto status_gap = One(queue);
   assert(JsGapReason(status_gap) == "native_js_dispatch_site_5_compiled_before_arming" &&
          status_gap.header.frame_id == 0);
-  sink.NoteNativeJsDispatchStatus(second, 8,
+  sink.NoteNativeJsDispatchStatus(second, 255,
+                                  reb::NativeJsDispatchSiteStatus::kCompiledBeforeArming);
+  assert(JsGapReason(One(queue)) == "native_js_dispatch_site_255_compiled_before_arming");
+  sink.NoteNativeJsDispatchStatus(second, 256,
                                   reb::NativeJsDispatchSiteStatus::kCompiledBeforeArming);
   assert(Drain(queue) == 0);
+  // V8 running out of activation IDs: one gap per configuration, whichever
+  // slot reports it.
+  sink.NoteNativeJsDispatchStatus(second, 7, reb::NativeJsDispatchSiteStatus::kIdsExhausted);
+  assert(JsGapReason(One(queue)) == "native_js_dispatch_ids_exhausted");
+  sink.NoteNativeJsDispatchStatus(second, 8, reb::NativeJsDispatchSiteStatus::kIdsExhausted);
+  assert(Drain(queue) == 0);
 
-  // An emitter refusal returns both claims and is one coalesced transport gap.
-  // V8-facing calls never invoke the frame-id provider, which re-enters V8.
+  // An emitter refusal is one coalesced transport gap, and its records'
+  // ordinals stay missing. V8-facing calls never invoke the frame-id
+  // provider, which re-enters V8.
   JsEmitter::events.clear();
   sink.SetEmitters(&CaptureJsEvent, &CaptureRuntimeMetadata, 42, reb::kAllNativeProbeCategoryMask,
                    kForever, false, &CountJsFrameLookup);
@@ -360,8 +377,7 @@ std::uint64_t CountJsFrameLookup() noexcept {
   record(6, third);
   assert(JsEmitter::events.size() == 2);
   payload = JsDecoded(JsEmitter::events[1]);
-  assert(payload.sample_index == 0 && payload.site_sample_index == 0 &&
-         JsEmitter::events[1].header.frame_id == 8);
+  assert(payload.site_ordinal == 2 && JsEmitter::events[1].header.frame_id == 8);
   assert(JsEmitter::frame_lookups == 0);
 
   // The browser keeps the list fixed; a different list arms nothing.
@@ -377,8 +393,9 @@ std::uint64_t CountJsFrameLookup() noexcept {
   assert(sink.NativeJsDispatchEpoch() == 0);
   assert(JsGapReason(One(queue)) == "native_js_dispatch_input_unavailable");
   transport.Disable();
-  std::cout << "PASS native JS dispatch admission: disabled, expiry and category refusal, 64 per "
-               "site and 256 per configuration with coalesced gaps, ring-full release, transport "
-               "and input gaps, compiled-before-arming per slot, fixed site list\n";
+  std::cout << "PASS native JS dispatch admission: disabled, expiry and category refusal, 256 "
+               "sites, 6000 dispatches of one site with no count refusal, per-site ordinals that "
+               "restart per configuration and show ring drops, transport and input gaps, "
+               "compiled-before-arming per slot, ID exhaustion, fixed site list\n";
 }
 }  // namespace

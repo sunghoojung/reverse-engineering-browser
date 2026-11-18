@@ -79,6 +79,7 @@ TEST_NAMES = [
     "test-api/RebNativeJsDispatchRefusesCodeCache",
     "test-api/RebNativeJsDispatchSparkplugAndNoOptimization",
     "test-api/RebNativeJsDispatchParentActivation",
+    "test-api/RebNativeJsDispatchParentsAcrossManyFunctionsAndActivations",
     "test-api/RebNativeJsDispatchAdmissionAndSiteCap",
     "test-api/RebNativeJsInvocationDisabledAndUnarmedBytecodeIdentity",
     "test-api/RebNativeJsInvocationArgumentsAndSynchronousSettlement",
@@ -87,6 +88,7 @@ TEST_NAMES = [
     "test-api/RebNativeJsInvocationPreservesEmbedderData",
     "test-api/RebNativeJsInvocationLeavesUnhandledRejectionVisible",
     "test-api/RebNativeJsInvocationAdmissionAndUnsupportedKinds",
+    "test-api/RebNativeJsInvocationArmsEverySiteUpToTheLimit",
 ]
 
 

@@ -343,7 +343,13 @@ void RuntimeCreatorAdmission() {
 
 void RuntimeScriptProvenance() {
   NativeProbeQueue queue;
+  const auto& gate = sink.RuntimeBufferGate();
+  Configure(queue, 42, kForever,
+            reb::kAllNativeProbeCategoryMask &
+                ~reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kVm));
+  assert(gate.load() == 0);
   Configure(queue);
+  assert(gate.load() == 1);
   std::array<std::uint8_t, 32> bytes{};
   constexpr std::array<std::uint8_t, 4> source{'v', 'm', '(', ')'};
   const auto before = reb::mojom::NativeProbeHost::artifacts.load();
@@ -373,14 +379,15 @@ void RuntimeScriptProvenance() {
   sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, script);
   assert(Drain(queue) == 0);
   transport.Disable();
+  assert(gate.load() == 0);
   const auto allocation_count = allocations.load();
   const auto clock_reads = base::test_clock_reads.load();
   assert(sink.RuntimeCaptureGeneration() == 0);
   assert(base::test_clock_reads == clock_reads);
   sink.CaptureRuntimeTypedArray(7, 8, "fixture://owned/script.js", bytes, script);
   assert(allocations == allocation_count && Drain(queue) == 0);
-  std::cout << "PASS runtime script provenance, missing source, context/session isolation and "
-               "inactive path\n";
+  std::cout << "PASS runtime script provenance, missing source, context/session isolation, "
+               "buffer gate and inactive path\n";
 }
 
 std::string captured_runtime_url;
@@ -2234,6 +2241,42 @@ void NativeWasmExecutionOutcomes() {
 #include "request_stack_tests.h"
 #include "script_cookie_tests.h"
 
+// With no session the per-event hooks a renderer thread reaches make no
+// thread state: nothing is allocated on a thread that never saw capture.
+void InactiveHooksAllocateNothing() {
+  transport.Disable();
+  std::atomic<std::uint64_t> observed{0};
+  std::thread([&] {
+    constexpr std::array<std::uint8_t, 8> module{0, 97, 115, 109, 1, 0, 0, 0};
+    const reb::NativeWasmGuestStateView view{7, 11, 414, 8, 0, 0, nullptr, nullptr, nullptr};
+    const auto before = allocations.load();
+    sink.RecordApiCall(kRuntime, "Math.acos");
+    sink.RecordApiCallOnce(kRuntime, "Math.acos", observed);
+    sink.RecordPropertyRead(kRuntime, "navigator.userAgent");
+    sink.RecordWebAudioCall("AudioContext.createOscillator");
+    sink.RecordNativeJsInvocationRequest(1);
+    sink.ObserveCapturedWasmModule(module);
+    sink.PublishVmDispatchBudgetGap();
+    assert(!sink.IsCaptureArmed() && !sink.IsArtifactCaptureEnabled() &&
+           !sink.IsVmCaptureEnabled() && !sink.IsCanvasImageCaptureEnabled() &&
+           sink.RuntimeCaptureGeneration() == 0 && sink.RuntimeScriptSourceNeeded(1, 2) &&
+           !sink.RecordRequestInitiated(1, "GET", "https", "a.example.test").recorded() &&
+           !reb::NativeScriptCookieSink::IsEnabled() && sink.RuntimeBufferGate().load() == 0);
+    assert(!sink.IsWasmHostCallOpen() && !sink.NoteWasmHostCallEntered(true, true, 4));
+    sink.NoteWasmHostCallReturned();
+    sink.NoteWasmTailCall();
+    sink.ReportWasmTrap(reb::NativeWasmExecutionReason::kSignatureMismatch,
+                        reb::NativeWasmExecutionBounds::kNone, true, 4, true, 8, 7, 8,
+                        "https://owned.test/module.wasm", 9, 10, module);
+    assert(sink.WasmExecutionNudgeDelayNs() == reb::kNativeWasmExecutionNoNudge &&
+           sink.PollWasmExecutionHeartbeat() == reb::NativeWasmExecutionHeartbeat::kContinue);
+    sink.InvalidateNativeWasmGuest(view);
+    sink.RecordNativeWasmGuest(7, 8, "https://owned.test/module.wasm", module, view, 9, 10);
+    assert(allocations.load() == before);
+  }).join();
+  std::puts("PASS inactive hooks on a fresh thread allocate nothing and make no thread state");
+}
+
 // Each test keeps a multi-megabyte ring on its own stack. Inlining every test
 // into main can exceed the default 8 MiB main-thread stack, so each runs in
 // its own frame.
@@ -2245,6 +2288,7 @@ template <auto Test>
 int main() {
   reb::mojom::NativeProbeHost host;
   transport.Connect(mojo::PendingRemote<reb::mojom::NativeProbeHost>(&host));
+  Run<&InactiveHooksAllocateNothing>();
   Run<&NativeGuestAdmission>();
   Run<&NativeGuestModuleVerdictsAndHostBudget>();
   Run<&NativeGuestParentDispatch>();
@@ -2261,16 +2305,16 @@ int main() {
   Run<&NativeJsDispatchAdmission>();
   Run<&NativeJsInvocationAdmission>();
   Run<&NativeJsInvocationOpenStarts>();
-  Run<&NativeJsInvocationBudgetCaps>();
+  Run<&NativeJsInvocationHeldGaps>();
   Run<&NativeRequestStacks>();
   Run<&NativeTaskChainsAndNavigations>();
   Run<&NativeAsyncSegmentNotAdmitted>();
   Run<&NativeAsyncSegmentArtifactRefused>();
-  Run<&NativeRefusedStackBudgets>();
+  Run<&NativeRefusedStacksResend>();
   Run<&NativeWorkerRequestStacks>();
   Run<&NativeMessageOrigins>();
   Run<&NativePromiseRegistrations>();
-  Run<&NativeStackThreadLimit>();
+  Run<&NativeStackManyWorkers>();
   Run<&NativeRefusalRouting>();
   Run<&NativeRefusalConcurrency>();
   Run<&NativeDebuggerObservations>();

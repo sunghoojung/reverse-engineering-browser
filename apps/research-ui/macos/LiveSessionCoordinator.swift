@@ -235,7 +235,7 @@ struct LiveCaptureContent: Equatable {
 
 // The app's saved native JavaScript invocation sites, which every capture it
 // starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
-// is exactly the browser's native-js-invocation-sites-v1 form with 1 to 8
+// is exactly the browser's native-js-invocation-sites-v1 form with 1 to 256
 // sites; a sidecar the browser never reads keeps each label, source URL and
 // session. The backend's routes add sites from Sources, the start panel lists
 // and removes them, and each capture arms a private copy, because the browser
@@ -271,8 +271,8 @@ struct InvocationSiteSet: Equatable {
     case unreadable
   }
 
-  static let limit = 8
-  static let fileLimit = 4096
+  static let limit = 256
+  static let fileLimit = 128 * 1024
   static let fileName = "js-invocation-sites-v1.json"
 
   // An explicit REB_JS_INVOCATION_SITE_STORE wins, as for the other app stores.
@@ -297,7 +297,7 @@ struct InvocationSiteSet: Equatable {
     return text.utf8.count <= fileLimit ? text : nil
   }
 
-  // Accepts exactly what the browser accepts: the canonical text of 1 to 8
+  // Accepts exactly what the browser accepts: the canonical text of 1 to 256
   // distinct valid sites. Rebuilding the text rejects every other spelling.
   static func parse(_ text: String) -> [Site]? {
     guard !text.isEmpty, text.utf8.count <= fileLimit,
@@ -807,11 +807,15 @@ final class LiveSessionCoordinator {
     for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
       environment[name] = environment[name] ?? (allows(1536) ? "1" : "0")
     }
-    // Request call stacks need Network (256) and Artifact (1024). The default
-    // is dropped, with a launch log line, by a Brave that predates the flag.
+    // Request call stacks need Network (256) and Artifact (1024). Promise
+    // registration stacks ride on them, so the chain through a .then or await
+    // names the call that registered it. Each default is dropped, with a
+    // launch log line, by a Brave that predates its flag.
     if environment["REB_NATIVE_REQUEST_STACKS"] == nil {
-      environment["REB_NATIVE_REQUEST_STACKS"] = allows(1280) ? "1" : "0"
+      let stacks = allows(1280)
+      environment["REB_NATIVE_REQUEST_STACKS"] = stacks ? "1" : "0"
       environment["REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED"] = "1"
+      environment["REB_NATIVE_PROMISE_STACKS"] = environment["REB_NATIVE_PROMISE_STACKS"] ?? (stacks ? "1" : "0")
     }
     // Permission only: the capture browser may later arm a document-start
     // Console script, which still needs a live Console connection to a selected

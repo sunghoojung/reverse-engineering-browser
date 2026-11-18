@@ -47,6 +47,29 @@ TEST(NativeJsInvocationSites, RejectsOtherShapesAndMalformedInputs) {
   auto records = ParseNativeJsInvocationSites(kSites);
   records[40] = 1;  // a switch record is not a function-entry record
   EXPECT_EQ(DecodeNativeJsInvocationSites(records, sites), 0U);
+  EXPECT_TRUE(ParseNativeJsInvocationSites(std::string(kNativeJsInvocationSitesFileLimit + 1, ' '))
+                  .empty());
+}
+// Every one-byte slot is armable, and a full list of the longest canonical
+// sites fits the file limit.
+std::string ManySites(std::size_t count) {
+  std::string json = R"({"sites":[)";
+  for (std::size_t n = 0; n < count; ++n) {
+    json +=
+        std::string(n ? "," : "") + R"({"anchor_offset":)" + std::to_string(10 + n) +
+        R"(,"artifact_id":"18446744073709551615","artifact_sha256":"00000000000000000000000000000000000000000000000000000000000000ab","byte_offset":2147483647,"shape":"function-entry","source_length":2147483647,"source_sha256":"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"})";
+  }
+  return json + R"(],"version":1})";
+}
+TEST(NativeJsInvocationSites, EverySlotUpToTheLimit) {
+  const auto full = ManySites(kNativeJsInvocationSiteLimit);
+  ASSERT_LE(full.size(), kNativeJsInvocationSitesFileLimit);
+  const auto records = ParseNativeJsInvocationSites(full);
+  ASSERT_EQ(records.size(), kNativeJsInvocationSiteLimit * kNativeJsInvocationSiteRecordSize);
+  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
+  ASSERT_EQ(DecodeNativeJsInvocationSites(records, sites), kNativeJsInvocationSiteLimit);
+  EXPECT_EQ(sites.back().anchor_offset, 10U + kNativeJsInvocationSiteLimit - 1);
+  EXPECT_TRUE(ParseNativeJsInvocationSites(ManySites(kNativeJsInvocationSiteLimit + 1)).empty());
 }
 }  // namespace
 }  // namespace reb

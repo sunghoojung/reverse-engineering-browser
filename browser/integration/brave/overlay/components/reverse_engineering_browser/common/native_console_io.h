@@ -19,6 +19,14 @@ using NativeConsoleDeadline = std::chrono::steady_clock::time_point;
 [[nodiscard]] bool NativeConsoleWrite(int socket,
                                       std::span<const std::byte> bytes,
                                       NativeConsoleDeadline deadline) noexcept;
+// A record that keeps moving never times out, however large; one that makes no
+// progress for `stall` does. For payloads, whose size their header bounded.
+[[nodiscard]] bool NativeConsoleRead(int socket,
+                                     std::span<std::byte> bytes,
+                                     std::chrono::milliseconds stall) noexcept;
+[[nodiscard]] bool NativeConsoleWrite(int socket,
+                                      std::span<const std::byte> bytes,
+                                      std::chrono::milliseconds stall) noexcept;
 
 template <typename T>
 [[nodiscard]] auto NativeConsoleBytes(T& value) noexcept {

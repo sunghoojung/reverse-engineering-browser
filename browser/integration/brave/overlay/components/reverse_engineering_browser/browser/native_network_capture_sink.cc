@@ -402,6 +402,8 @@ NativeRequestBodyKind KindOf(const network::DataElement& element) noexcept {
 
 }  // namespace
 
+std::atomic<NativeProbeEmitter> NativeNetworkCaptureSink::emitter_{nullptr};
+
 NativeNetworkCaptureSink::NativeNetworkCaptureSink() = default;
 
 NativeNetworkCaptureSink::~NativeNetworkCaptureSink() = default;
@@ -427,7 +429,7 @@ void NativeNetworkCaptureSink::SetOwnedProfilePath(base::FilePath path) {
 }
 
 bool NativeNetworkCaptureSink::IsOwnedContext(content::BrowserContext* context) const {
-  return context && !context->IsOffTheRecord() && !owned_profile_path_.empty() &&
+  return !owned_profile_path_.empty() && context && !context->IsOffTheRecord() &&
          context->GetPath() == owned_profile_path_;
 }
 
@@ -619,6 +621,24 @@ void NativeNetworkCaptureSink::EndHeaderHop(TrackedHeaders& tracked,
   if (emitted_extra_info && !tracked.open_received && tracked.awaiting.size() < 21) {
     tracked.awaiting.push_back(tracked.open);
   }
+}
+
+void NativeNetworkCaptureSink::RetainRendererTarget(NativeProbeEvent& event,
+                                                    NativeRequestTarget target,
+                                                    std::string origin,
+                                                    std::string text) noexcept {
+  const std::size_t size = text.size();
+  target.retention = RetentionOf(NativeArtifactCaptureSink::Get().CaptureRequestContent(
+      {.kind = NativeArtifactKind::kRequestTarget,
+       .request_id = event.header.request_id,
+       .frame_id = event.header.frame_id,
+       .creator_event_id = event.header.sequence_number,
+       .url = std::move(origin),
+       .mime_type = "text/plain",
+       .size = size,
+       .text = std::move(text)},
+      event.header.artifact_id));
+  event.inline_payload = EncodeNativeRequestTargetPayload(target);
 }
 
 void NativeNetworkCaptureSink::EmitRequestTarget(const NativeProbeEmitter emitter,

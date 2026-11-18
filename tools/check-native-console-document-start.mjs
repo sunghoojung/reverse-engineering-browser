@@ -92,7 +92,7 @@ export async function checkNativeConsoleDocumentStart(root) {
   const calls = [];
   const reads = [];
   let session = null, permitted = false, generation = 0, armed = [], output = [], nextSequence = 1;
-  let readFails = false, malformed = false, armRefused = false, stopUnconfirmed = false, unconfirmed = false, refusedProcesses = 0;
+  let readFails = false, malformed = false, armRefused = false, stopUnconfirmed = false, unconfirmed = false, pendingProcesses = 0;
   // A live capture's binding as /api/native-console lists it before any Console
   // connection: the browser's own report of its launch-time permission.
   let liveSupported = null;
@@ -103,14 +103,16 @@ export async function checkNativeConsoleDocumentStart(root) {
   });
   const documentStartState = after => ({
     status: permitted ? 'ok' : 'unavailable', permitted, generation: String(generation),
-    renderer_processes: permitted ? 1 : 0, pending_renderer_processes: armed.length ? refusedProcesses : 0,
-    refused_renderer_processes: refusedProcesses,
+    renderer_processes: permitted ? 1 : 0, pending_renderer_processes: armed.length ? pendingProcesses : 0,
     scripts: armed,
     message: permitted ? undefined : 'Rebuild the pinned browser, then start a session with document_start enabled, or relaunch the live capture with REB_CONSOLE_DOCUMENT_START=1.',
     output: {
-      records: output.filter(entry => Number(entry.sequence) > Number(after)).slice(0, 32),
+      // Every retained record after the cursor: a page is bounded by the reply,
+      // not by a record count.
+      records: output.filter(entry => Number(entry.sequence) > Number(after)),
       next_sequence: String(nextSequence), oldest_sequence: output[0]?.sequence || '0',
-      retained: output.length, dropped: 0, unattributed: 0, stale: 0,
+      retained: output.length, retained_bytes: output.reduce((sum, entry) => sum + 96 + entry.text.length, 0),
+      dropped: 0, unattributed: 0, stale: 0,
     },
   });
   const fetch = async (path, options) => {
@@ -126,8 +128,8 @@ export async function checkNativeConsoleDocumentStart(root) {
       if (malformed) value.output.records = [{...record(nextSequence, 'report', 'x'), provenance: 'native-capture'}];
       return {ok: true, status: 200, json: async () => ({contract_version: 3, available: true,
         state: session ? 'ready' : 'idle', session_id: session, document_start: value,
-        limits: {scripts: 4, source_bytes: 4096, total_source_bytes: 8192, rule_bytes: 256, report_bytes: 512,
-          records_per_document: 64, retained_records: 128, records_per_read: 32, execution_millis: 50},
+        limits: {command_bytes: 67108864, rule_bytes: 256, report_bytes: 8192, retained_bytes: 67108864,
+          reply_bytes: 67108864, listing_bytes: 33554432},
         unsupported: [{context: 'service_worker', reason: 'The injector observes documents only.'},
           {context: 'already_open_document', reason: 'Reload a document that was open when the set was armed.'}]})};
     }
@@ -291,13 +293,13 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.equal(first[1].querySelector('img'), null, 'captured text is never parsed as markup');
   assert.equal(first[0].dataset.level, 'info');
 
-  // A renderer refused at the process limit is never reported as ready.
-  refusedProcesses = 1;
+  // A renderer that has not applied the set yet is never reported as ready,
+  // and no renderer is ever named as over a process limit.
+  pendingProcesses = 1;
   await context.testConsole.documentStart.refresh(true); await settle();
   assert.match(ds('counters').textContent, /1 renderer processes not ready yet/);
-  assert.match(ds('counters').textContent, /1 renderer processes over the 64-process limit never receive a set/);
-  assert.doesNotMatch(ds('counters').textContent, /every renderer holds this set/);
-  refusedProcesses = 0;
+  assert.doesNotMatch(ds('counters').textContent, /every renderer holds this set|limit/);
+  pendingProcesses = 0;
   await context.testConsole.documentStart.refresh(true); await settle();
 
   // Reads are non-draining and cursor-based: no record is replayed or lost.
@@ -334,6 +336,19 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.match(ds('armed').textContent, /http:\/\/127\.0\.0\.1:8080/, 'a refusal preserves the armed rule');
   assert.equal(rows().length, 2, 'a refusal must not re-render retained records');
   armRefused = false;
+
+  // A document has no record budget and a read no record count: a burst of
+  // reports, including one at the 8192-byte text bound, is accepted in one
+  // read. The transcript then keeps its own visible eviction count.
+  for (let index = 0; index < 300; index += 1) output.push(record(nextSequence++, 'report', `burst=${index}`));
+  output.push(record(nextSequence++, 'report', 'x'.repeat(8192)));
+  await context.testConsole.documentStart.refresh(true); await settle();
+  assert.equal(rows().at(-1).querySelector('pre').textContent.length, 8192, 'the largest record renders whole');
+  assert.match(rows().at(-2).textContent, /burst=299/);
+  assert.match(get('output-count').textContent, /older removed/, 'transcript eviction is visible');
+  await context.testConsole.documentStart.refresh(true); await settle();
+  assert.equal(reads.at(-1), `/api/native-console/document-start?after_sequence=${nextSequence - 1}`,
+    'one read accepted the whole burst, so the next read starts after its last record');
 
   // The badge is a keyboard-reachable route into the experiment settings.
   await ds('badge').click();
@@ -382,7 +397,6 @@ export async function checkNativeConsoleDocumentStart(root) {
   // driven against a synthetic window. It must observe the definition it was
   // installed before, and report only kinds, lengths and a digest.
   const example = await readFile(join(root, 'tools/fixtures/console-document-start/observe-synthetic-transform.js'), 'utf8');
-  assert.ok(new TextEncoder().encode(example).length <= 4096, 'the example snippet fits the per-script limit');
   const reports = [];
   const sandbox = {window: {}, report: value => reports.push(value)};
   runInNewContext(`(function(report){"use strict";\n${example}\n})(report)`, sandbox);

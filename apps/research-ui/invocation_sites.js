@@ -4,7 +4,8 @@
  * app's site set, which the next capture Origin Trace starts arms. Nothing here
  * changes the open page or the running capture. Captured context lines and
  * labels are inserted as text only. */
-const INVOCATION_SITE_LIMIT = 8;
+// The backend's set document names its limit; this is every one-byte site slot.
+const INVOCATION_SITE_LIMIT = 256;
 const INVOCATION_SITE_NEXT_CAPTURE = 'Tracking starts with the next capture Origin Trace starts, not the open page: a function the page already compiled cannot gain tracking.';
 
 // UTF-8 byte offset of a UTF-16 offset in the original text Sources shows:
@@ -258,7 +259,8 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
 
   function renderList() {
     const sites = model.set?.sites ?? [];
-    heading.textContent = `Saved for the next capture (${sites.length} of ${INVOCATION_SITE_LIMIT})`;
+    const limit = Number.isSafeInteger(model.set?.limit) && model.set.limit > 0 ? model.set.limit : INVOCATION_SITE_LIMIT;
+    heading.textContent = `Saved for the next capture (${sites.length} of ${limit})`;
     list.replaceChildren(...sites.map(site => {
       const item = node('li', '', 'invocation-site');
       item.dataset.retained = site.retained?.state ?? 'not_retained';

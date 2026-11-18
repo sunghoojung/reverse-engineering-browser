@@ -23,9 +23,11 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "base/compiler_specific.h"
+#include "base/memory/raw_ref.h"
 #include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
@@ -35,6 +37,37 @@
 namespace reb {
 
 namespace {
+
+// prefix, the decimal slot and suffix in buffer: the per-site reason of a
+// JavaScript dispatch or invocation gap.
+std::string_view NativeJsSiteReason(std::array<char, 64>& buffer,
+                                    const std::string_view prefix,
+                                    const std::size_t slot,
+                                    const std::string_view suffix) noexcept {
+  std::array<char, 20> digits{};
+  std::size_t count = 0;
+  for (std::size_t value = slot; count == 0 || value != 0; value /= 10)
+    digits[count++] = static_cast<char>('0' + value % 10);
+  if (prefix.size() + count + suffix.size() > buffer.size())
+    return {};
+  std::size_t length = 0;
+  for (const char c : prefix)
+    buffer[length++] = c;
+  while (count != 0)
+    buffer[length++] = digits[--count];
+  for (const char c : suffix)
+    buffer[length++] = c;
+  return {buffer.data(), length};
+}
+
+// The next ordinal of a site's records, saturating rather than wrapping.
+std::uint32_t NextNativeJsOrdinal(std::atomic<std::uint32_t>& next) noexcept {
+  std::uint32_t ordinal = next.load(std::memory_order_relaxed);
+  while (ordinal != std::numeric_limits<std::uint32_t>::max() &&
+         !next.compare_exchange_weak(ordinal, ordinal + 1, std::memory_order_relaxed)) {
+  }
+  return ordinal;
+}
 
 std::uint64_t MonotonicTimeNs() noexcept {
   return static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -73,7 +106,6 @@ struct RuntimeScriptCache final {
   std::array<std::pair<std::uint64_t, std::uint64_t>, kRuntimeTypedArrayMaxSnapshots> keys{};
   std::size_t count = 0;
 };
-thread_local RuntimeScriptCache runtime_script_cache;
 
 struct RuntimeObservation final {
   std::uint64_t context = 0;
@@ -94,7 +126,79 @@ struct RuntimeObservationCache final {
   bool classification_unavailable_reported = false;
   bool snapshot_limit_reported = false;
 };
-thread_local RuntimeObservationCache runtime_observations;
+
+struct RuntimeThreadState final {
+  RuntimeScriptCache scripts;
+  RuntimeObservationCache observations;
+};
+struct WasmHostCall;
+struct GuestThreadState;
+
+// A thread's sink state beyond a few words. Each part is made by the first
+// active-path use that writes it and freed when the thread exits; a read
+// finds null on a thread no active path reached. Darwin's dyld mallocs and
+// fills an image's whole thread_local block on a thread's first touch of any
+// thread_local in it, so state this size never lives in that block.
+struct SinkThreadState final {
+  SinkThreadState();
+  ~SinkThreadState();
+  SinkThreadState(const SinkThreadState&) = delete;
+  SinkThreadState& operator=(const SinkThreadState&) = delete;
+  std::unique_ptr<RuntimeThreadState> runtime;
+  std::unique_ptr<WasmHostCall> wasm;
+  std::unique_ptr<GuestThreadState> guest;
+};
+
+// A thread_local unique_ptr would need an exit-time destructor, which
+// Chromium refuses; the slot frees each thread's state at its exit.
+base::ThreadLocalOwnedPointer<SinkThreadState>& SinkThreadStates() {
+  static base::NoDestructor<base::ThreadLocalOwnedPointer<SinkThreadState>> states;
+  return *states;
+}
+
+// Never allocates: null on a thread without state.
+SinkThreadState* FindSinkThreadState() noexcept {
+  return SinkThreadStates().Get();
+}
+
+SinkThreadState& EnsureSinkThreadState() {
+  SinkThreadState* state = SinkThreadStates().Get();
+  if (!state) {
+    auto fresh = std::make_unique<SinkThreadState>();
+    state = fresh.get();
+    SinkThreadStates().Set(std::move(fresh));
+  }
+  return *state;
+}
+
+const RuntimeThreadState* FindRuntimeThreadState() noexcept {
+  const SinkThreadState* const state = FindSinkThreadState();
+  return state ? state->runtime.get() : nullptr;
+}
+
+RuntimeThreadState& EnsureRuntimeThreadState() {
+  SinkThreadState& state = EnsureSinkThreadState();
+  if (!state.runtime) {
+    state.runtime = std::make_unique<RuntimeThreadState>();
+  }
+  return *state.runtime;
+}
+
+// This thread's observations of `generation`, emptied when it changes.
+RuntimeObservationCache& RuntimeObservationsFor(const std::uint64_t generation) {
+  RuntimeObservationCache& observations = EnsureRuntimeThreadState().observations;
+  if (observations.generation != generation) {
+    observations = {};
+    observations.generation = generation;
+  }
+  return observations;
+}
+
+// This thread's observations of `generation`, or null without any.
+const RuntimeObservationCache* FindRuntimeObservations(const std::uint64_t generation) noexcept {
+  const RuntimeThreadState* const state = FindRuntimeThreadState();
+  return state && state->observations.generation == generation ? &state->observations : nullptr;
+}
 
 inline constexpr std::size_t kCompiledScriptTableSlots = 4096;
 
@@ -147,18 +251,28 @@ std::size_t CompiledScriptDigestSlot(const std::array<std::uint8_t, 32>& digest)
 // (including retries after allocation failure) per generation and thread.
 constexpr std::size_t kRuntimeScriptScanLimit = 256;
 
-RuntimeObservation* FindRuntimeObservation(const std::uint64_t context,
-                                           const std::uint64_t script) noexcept {
+// The index of the observation of (context, script), or count without one.
+std::size_t RuntimeObservationIndex(const RuntimeObservationCache& runtime_observations,
+                                    const std::uint64_t context,
+                                    const std::uint64_t script) noexcept {
   for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-    auto& entry = runtime_observations.observations[index];
+    const auto& entry = runtime_observations.observations[index];
     if (entry.context == context && entry.script == script) {
-      return &entry;
+      return index;
     }
   }
-  return nullptr;
+  return runtime_observations.count;
 }
 
-bool RuntimeObservationHasCapacity() noexcept {
+const RuntimeObservation* FindRuntimeObservation(
+    const RuntimeObservationCache& runtime_observations,
+    const std::uint64_t context,
+    const std::uint64_t script) noexcept {
+  const std::size_t index = RuntimeObservationIndex(runtime_observations, context, script);
+  return index < runtime_observations.count ? &runtime_observations.observations[index] : nullptr;
+}
+
+bool RuntimeObservationHasCapacity(const RuntimeObservationCache& runtime_observations) noexcept {
   if (runtime_observations.count < runtime_observations.observations.size()) {
     return true;
   }
@@ -170,10 +284,12 @@ bool RuntimeObservationHasCapacity() noexcept {
   return false;
 }
 
-RuntimeObservation* ClaimRuntimeObservation(const std::uint64_t context,
+RuntimeObservation* ClaimRuntimeObservation(RuntimeObservationCache& runtime_observations,
+                                            const std::uint64_t context,
                                             const std::uint64_t script) noexcept {
-  if (auto* entry = FindRuntimeObservation(context, script)) {
-    return entry;
+  if (const std::size_t index = RuntimeObservationIndex(runtime_observations, context, script);
+      index < runtime_observations.count) {
+    return &runtime_observations.observations[index];
   }
   auto* entry = static_cast<RuntimeObservation*>(nullptr);
   if (runtime_observations.count < runtime_observations.observations.size()) {
@@ -1242,13 +1358,12 @@ NativeFetchOwner NativeFetchOwnerScope::Current() noexcept {
   return g_fetch_owner;
 }
 
-NativeProbeSink::NativeProbeSink() noexcept = default;
-
-NativeProbeSink& NativeProbeSink::Get() {
-  // Probe hooks on any thread may still run during process exit.
-  static base::NoDestructor<NativeProbeSink> sink;
-  return *sink;
-}
+// Constant-initialized, so no constructor runs before a hook can reach it,
+// and trivially destructible, so hooks still running during process exit
+// find it intact.
+constexpr NativeProbeSink::NativeProbeSink() noexcept = default;
+constinit NativeProbeSink NativeProbeSink::instance_;
+static_assert(std::is_trivially_destructible_v<NativeProbeSink>);
 
 void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const NativeGeneratedArtifactEmitter artifact_emitter,
@@ -1275,6 +1390,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   // generation.
   emitter_.store(nullptr, std::memory_order_release);
   artifact_emitter_.store(nullptr, std::memory_order_release);
+  runtime_buffer_gate_.store(0, std::memory_order_relaxed);
   // A request belongs to one configuration. The next session must not
   // inherit an interrupt aimed at the one being replaced.
   wasm_execution_interrupt_generation_.store(0, std::memory_order_release);
@@ -1311,6 +1427,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   std::memory_order_relaxed);
   exclusion_counter_.store(active ? network_scope.exclusion_counter : nullptr,
                            std::memory_order_relaxed);
+  target_emitter_.store(active ? network_scope.target_emitter : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
   // A replacement configuration starts both Wasm sample indexes at 0. The
@@ -1321,6 +1438,14 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
       wasm_budget_epoch <= std::numeric_limits<std::uint64_t>::max() - 2) {
     native_wasm_budget_epoch_.store(wasm_budget_epoch + 2, std::memory_order_relaxed);
   }
+  // A filter in front of the runtime buffer callback, which still checks the
+  // whole configuration. It opens before the release below, so a thread that
+  // acquires the new generation also sees it open: no construction after the
+  // session's first recorded event is skipped. Until that release the
+  // generation is odd and the callback rejects.
+  runtime_buffer_gate_.store(
+      active && (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) != 0 ? 1 : 0,
+      std::memory_order_relaxed);
   config_generation_.fetch_add(1, std::memory_order_release);
 }
 
@@ -1341,14 +1466,7 @@ bool NativeProbeSink::CanAdmitEvent(const NativeProbeEvent& event,
          MonotonicTimeNs() < expires_at;
 }
 
-bool NativeProbeSink::IsCaptureArmed() const noexcept {
-  return emitter_.load(std::memory_order_acquire) != nullptr;
-}
-
-bool NativeProbeSink::IsCanvasImageCaptureEnabled() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return false;
-  }
+bool NativeProbeSink::IsCanvasImageCaptureEnabledSlow() const noexcept {
   // The opt-in is read inside the same stable generation as the policy it
   // belongs to, never paired with a replacement configuration's.
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
@@ -1367,10 +1485,7 @@ bool NativeProbeSink::IsCanvasImageCaptureEnabled() const noexcept {
          MonotonicTimeNs() < expires_at;
 }
 
-bool NativeProbeSink::IsArtifactCaptureEnabled() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return false;
-  }
+bool NativeProbeSink::IsArtifactCaptureEnabledSlow() const noexcept {
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
   if ((generation & 1U) != 0) {
     return false;
@@ -1385,10 +1500,7 @@ bool NativeProbeSink::IsArtifactCaptureEnabled() const noexcept {
          MonotonicTimeNs() < expires_at;
 }
 
-bool NativeProbeSink::IsVmCaptureEnabled() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return false;
-  }
+bool NativeProbeSink::IsVmCaptureEnabledSlow() const noexcept {
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
   if ((generation & 1U) != 0) {
     return false;
@@ -1405,22 +1517,18 @@ bool NativeProbeSink::IsVmCaptureEnabled() const noexcept {
 
 bool NativeProbeSink::RuntimeScriptSourceNeeded(const std::uint64_t execution_context_id,
                                                 const std::uint64_t script_id) const noexcept {
-  const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (runtime_script_cache.generation != generation) {
-    runtime_script_cache = {};
-    runtime_script_cache.generation = generation;
+  // A cache of another generation, or none, holds no script of this one.
+  const RuntimeThreadState* const state = FindRuntimeThreadState();
+  if (!state || state->scripts.generation != config_generation_.load(std::memory_order_acquire)) {
+    return true;
   }
+  const RuntimeScriptCache& cache = state->scripts;
   const auto key = std::pair{execution_context_id, script_id};
-  return std::find(runtime_script_cache.keys.begin(),
-                   runtime_script_cache.keys.begin() +
-                       static_cast<std::ptrdiff_t>(runtime_script_cache.count),
-                   key) == runtime_script_cache.keys.begin() +
-                               static_cast<std::ptrdiff_t>(runtime_script_cache.count);
+  const auto end = cache.keys.begin() + static_cast<std::ptrdiff_t>(cache.count);
+  return std::find(cache.keys.begin(), end, key) == end;
 }
 
-std::uint64_t NativeProbeSink::RuntimeCaptureGeneration() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]]
-    return 0;
+std::uint64_t NativeProbeSink::RuntimeCaptureGenerationSlow() const noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
   return IsVmCaptureEnabled() && config_generation_.load(std::memory_order_acquire) == generation
              ? generation
@@ -1439,11 +1547,8 @@ bool NativeProbeSink::RegisterRuntimeScriptObservation(
       observation != NativeRuntimeScriptObservation::kCapturedLikelyVm &&
       observation != NativeRuntimeScriptObservation::kStaticDispatchLoop)
     return false;
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
-  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  auto* entry =
+      ClaimRuntimeObservation(RuntimeObservationsFor(generation), execution_context_id, script_id);
   if (!entry)
     return false;
   if (observation == NativeRuntimeScriptObservation::kStaticDispatchLoop)
@@ -1458,10 +1563,12 @@ bool NativeProbeSink::RegisterRuntimeScriptObservation(
 bool NativeProbeSink::RuntimeScriptSourceNoted(const std::uint64_t generation,
                                                const std::uint64_t execution_context_id,
                                                const std::uint64_t script_id) const noexcept {
-  if (generation == 0 || runtime_observations.generation != generation ||
-      execution_context_id == 0 || script_id == 0)
+  if (generation == 0 || execution_context_id == 0 || script_id == 0)
     return false;
-  const auto* entry = FindRuntimeObservation(execution_context_id, script_id);
+  const RuntimeObservationCache* const observations = FindRuntimeObservations(generation);
+  const auto* entry = observations
+                          ? FindRuntimeObservation(*observations, execution_context_id, script_id)
+                          : nullptr;
   return entry && entry->examined;
 }
 
@@ -1472,12 +1579,14 @@ bool NativeProbeSink::RuntimeScriptNoteAccepts(const std::uint64_t generation,
       script_id == 0) {
     return false;
   }
-  if (runtime_observations.generation != generation) {
+  const RuntimeObservationCache* const runtime_observations = FindRuntimeObservations(generation);
+  if (!runtime_observations) {
     return true;
   }
-  const auto* entry = FindRuntimeObservation(execution_context_id, script_id);
-  return (!entry || !entry->examined) && runtime_observations.scans < kRuntimeScriptScanLimit &&
-         (entry || RuntimeObservationHasCapacity());
+  const auto* entry =
+      FindRuntimeObservation(*runtime_observations, execution_context_id, script_id);
+  return (!entry || !entry->examined) && runtime_observations->scans < kRuntimeScriptScanLimit &&
+         (entry || RuntimeObservationHasCapacity(*runtime_observations));
 }
 
 bool NativeProbeSink::RememberRuntimeScriptMiss(const std::uint64_t generation,
@@ -1487,15 +1596,12 @@ bool NativeProbeSink::RememberRuntimeScriptMiss(const std::uint64_t generation,
       script_id == 0) {
     return false;
   }
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
+  RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
   if (!RuntimeScriptNoteAccepts(generation, execution_context_id, script_id)) {
     return false;
   }
   ++runtime_observations.scans;
-  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  auto* entry = ClaimRuntimeObservation(runtime_observations, execution_context_id, script_id);
   if (entry) {
     entry->examined = true;
     entry->unavailable = true;
@@ -1511,11 +1617,9 @@ bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
   if (generation == 0 || generation != RuntimeCaptureGeneration() || execution_context_id == 0 ||
       script_id == 0 || source.empty())
     return false;
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
-  const auto* existing = FindRuntimeObservation(execution_context_id, script_id);
+  RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
+  const auto* existing =
+      FindRuntimeObservation(runtime_observations, execution_context_id, script_id);
   if (existing && existing->examined)
     return existing->candidate || existing->dispatch;
   if (!RuntimeScriptNoteAccepts(generation, execution_context_id, script_id)) {
@@ -1526,7 +1630,7 @@ bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
   if (!tier.scanned) {
     return false;
   }
-  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  auto* entry = ClaimRuntimeObservation(runtime_observations, execution_context_id, script_id);
   if (!entry) {
     return false;
   }
@@ -1547,17 +1651,15 @@ bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,
   if (generation == 0 || generation != RuntimeCaptureGeneration() || bytes < 32 ||
       bytes > kNativeArtifactMaxContentBytes || execution_context_id == 0 || script_id == 0)
     return false;
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
-  const auto* observation = FindRuntimeObservation(execution_context_id, script_id);
+  RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
+  const auto* observation =
+      FindRuntimeObservation(runtime_observations, execution_context_id, script_id);
   const bool candidate = observation && observation->candidate;
   const bool dispatch = observation && observation->dispatch;
   if (!candidate && !is_eval && !(bytes >= 256 && dispatch)) {
     if (!observation || !observation->examined || observation->unavailable) {
       const bool limited = !observation && (runtime_observations.scans >= kRuntimeScriptScanLimit ||
-                                            !RuntimeObservationHasCapacity());
+                                            !RuntimeObservationHasCapacity(runtime_observations));
       auto& reported = limited ? runtime_observations.classification_limit_reported
                                : runtime_observations.classification_unavailable_reported;
       if (!reported) {
@@ -1694,10 +1796,17 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   if (RuntimeCaptureGeneration() != generation) {
     return;
   }
-  if (!script.source.empty() && RuntimeScriptSourceNeeded(execution_context_id, script.script_id) &&
-      runtime_script_cache.count < runtime_script_cache.keys.size()) {
-    runtime_script_cache.keys[runtime_script_cache.count++] = {execution_context_id,
-                                                               script.script_id};
+  if (!script.source.empty() && RuntimeScriptSourceNeeded(execution_context_id, script.script_id)) {
+    RuntimeScriptCache& cache = EnsureRuntimeThreadState().scripts;
+    // RuntimeScriptSourceNeeded read every other generation's cache as empty.
+    if (const auto current = config_generation_.load(std::memory_order_acquire);
+        cache.generation != current) {
+      cache = {};
+      cache.generation = current;
+    }
+    if (cache.count < cache.keys.size()) {
+      cache.keys[cache.count++] = {execution_context_id, script.script_id};
+    }
   }
 }
 
@@ -1904,31 +2013,6 @@ void NativeProbeSink::CaptureGeneratedArtifact(
                    source_url, content, {});
 }
 
-void NativeProbeSink::RecordApiCall(const NativeProbeCategory category,
-                                    const std::string_view operation) noexcept {
-  static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation));
-}
-
-void NativeProbeSink::RecordPropertyRead(const NativeProbeCategory category,
-                                         const std::string_view operation) noexcept {
-  static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kPropertyRead, operation));
-}
-
-void NativeProbeSink::RecordApiCallOnce(const NativeProbeCategory category,
-                                        const std::string_view operation,
-                                        std::atomic<std::uint64_t>& observed_generation) noexcept {
-  static_cast<void>(
-      RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation, &observed_generation));
-}
-
-void NativeProbeSink::RecordPropertyReadOnce(
-    const NativeProbeCategory category,
-    const std::string_view operation,
-    std::atomic<std::uint64_t>& observed_generation) noexcept {
-  static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kPropertyRead, operation,
-                                           &observed_generation));
-}
-
 std::uint64_t NativeProbeSink::RecordSurfaceOperation(
     const NativeProbeCategory category,
     const NativeProbeType type,
@@ -2023,18 +2107,11 @@ void NativeProbeSink::RecordCanvasToDataUrl(const std::string_view data_url) noe
           std::span(reinterpret_cast<const std::uint8_t*>(data_url.data()), data_url.size())));
 }
 
-void NativeProbeSink::RecordWebAudioCall(const std::string_view operation) noexcept {
-  RecordApiCall(NativeProbeCategory::kWebAudio, operation);
-}
-
-NativeRendererRequest NativeProbeSink::RecordRequestInitiated(
+NativeRendererRequest NativeProbeSink::RecordRequestInitiatedSlow(
     const std::int32_t request_id,
     const std::string_view method,
     const std::string_view scheme,
     const std::string_view host) noexcept {
-  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return {};
-  }
   const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
   if ((config_generation & 1U) != 0) {
     return {};
@@ -2124,11 +2201,12 @@ void NativeProbeSink::NameRequestOwner(NativeProbeHeader& header,
 }
 
 void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
-                                         const std::string_view target_prefix,
+                                         const std::string_view target_text,
                                          const std::size_t target_length,
                                          const int port,
                                          const std::uint64_t config_generation,
-                                         const NativeRendererProbeEmitter emitter) noexcept {
+                                         const NativeRendererProbeEmitter emitter,
+                                         const std::string_view host) noexcept {
   // The same child the browser records after request_started, here of the
   // renderer's own start record.
   NativeRequestTarget target;
@@ -2140,14 +2218,47 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   target.port = port > 0 && port <= 65535 ? static_cast<std::uint16_t>(port) : 0;
   target.target_length = static_cast<std::uint32_t>(
       std::min<std::size_t>(target_length, std::numeric_limits<std::uint32_t>::max()));
-  std::copy_n(target_prefix.begin(),
-              std::min({target_prefix.size(), target_length, target.prefix.size()}),
+  std::copy_n(target_text.begin(),
+              std::min({target_text.size(), target_length, target.prefix.size()}),
               target.prefix.begin());
-  // The renderer has no artifact channel for the rest of a long target.
+  // The scheme, host and explicit port that name a long target's artifact,
+  // as the browser names its own (an origin, never user info).
+  std::array<char, kNativeArtifactMaxUrlBytes> origin_bytes;
+  std::size_t origin_length = 0;
   if (target_length > target.prefix.size()) {
-    target.retention = target.scheme == NativeRequestScheme::kOther
-                           ? NativeRequestTargetRetention::kNotRetainedUrl
-                           : NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    // As the browser decides for its own requests: no origin or a target past
+    // what an artifact keeps is not retained.
+    const std::string_view scheme = target.scheme == NativeRequestScheme::kHttps  ? "https://"
+                                    : target.scheme == NativeRequestScheme::kHttp ? "http://"
+                                    : target.scheme == NativeRequestScheme::kWss  ? "wss://"
+                                    : target.scheme == NativeRequestScheme::kWs   ? "ws://"
+                                                                                  : "";
+    std::array<char, 8> port_text{};
+    std::size_t port_length = 0;
+    if (target.port != 0) {
+      port_text[0] = ':';
+      std::array<char, 5> digits{};
+      std::size_t count = 0;
+      for (std::uint16_t value = target.port; value != 0; value /= 10) {
+        digits[count++] = static_cast<char>('0' + value % 10);
+      }
+      for (port_length = 1; count != 0; ++port_length) {
+        port_text[port_length] = digits[--count];
+      }
+    }
+    if (scheme.empty() || target_length > kNativeRequestTargetMaxBytes ||
+        scheme.size() + host.size() + port_length > origin_bytes.size()) {
+      target.retention = NativeRequestTargetRetention::kNotRetainedUrl;
+    } else if (host.empty() || target_text.size() != target_length) {
+      // A row whose caller converted only the prefix.
+      target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    } else {
+      origin_length = scheme.size() + host.size() + port_length;
+      std::copy(scheme.begin(), scheme.end(), origin_bytes.begin());
+      std::copy(host.begin(), host.end(), origin_bytes.begin() + scheme.size());
+      std::copy_n(port_text.begin(), port_length,
+                  origin_bytes.begin() + scheme.size() + host.size());
+    }
   }
   NativeProbeEvent child;
   child.header.category = NativeProbeCategory::kNetwork;
@@ -2161,11 +2272,23 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   child.header.request_id = start.request_id;
   child.header.parent_event_id = start.initiated_sequence;
   child.header.payload_size = static_cast<std::uint32_t>(kNativeRequestPayloadSize);
+  if (origin_length != 0) {
+    // The browser fills in the retention and artifact it keeps.
+    child.inline_payload = EncodeNativeRequestTargetPayload(target);
+    const NativeRendererTargetEmitter target_emitter =
+        target_emitter_.load(std::memory_order_relaxed);
+    if (target_emitter &&
+        target_emitter(child, std::string_view(origin_bytes.data(), origin_length), target_text,
+                       config_generation)) {
+      return;
+    }
+    target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+  }
   child.inline_payload = EncodeNativeRequestTargetPayload(target);
   static_cast<void>(emitter(child, config_generation));
 }
 
-void NativeProbeSink::RecordRendererRequestComplete(
+void NativeProbeSink::RecordRendererRequestCompleteSlow(
     const NativeRendererRequest& request,
     const std::string_view target_prefix,
     const std::size_t target_length,
@@ -2173,7 +2296,7 @@ void NativeProbeSink::RecordRendererRequestComplete(
     const std::int32_t error_code,
     const std::int64_t encoded_data_length,
     const std::int64_t decoded_body_length) noexcept {
-  if (!request.AnsweredInRenderer() || !emitter_.load(std::memory_order_acquire)) {
+  if (!emitter_.load(std::memory_order_acquire)) {
     return;
   }
   // A request belongs to the configuration that recorded its start.
@@ -2218,14 +2341,11 @@ void NativeProbeSink::RecordRendererRequestComplete(
   static_cast<void>(emitter(event, config_generation));
 }
 
-void NativeProbeSink::RecordServiceWorkerRequestEnd(const std::int32_t request_id,
-                                                    const std::string_view target,
-                                                    const std::size_t target_length,
-                                                    const int port,
-                                                    const std::int32_t error_code) noexcept {
-  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return;
-  }
+void NativeProbeSink::RecordServiceWorkerRequestEndSlow(const std::int32_t request_id,
+                                                        const std::string_view target,
+                                                        const std::size_t target_length,
+                                                        const int port,
+                                                        const std::int32_t error_code) noexcept {
   const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
   if ((config_generation & 1U) != 0) {
     return;
@@ -2286,37 +2406,15 @@ NativeMemoryCacheAdmission NativeProbeSink::AdmitMemoryCacheReuse(
       monotonic_time_ns >= expires_at_monotonic_ns) {
     return {};
   }
-  const auto count_not_recorded = [&](const std::uint8_t exclusion_class) {
-    if (exclusion_counter) {
-      exclusion_counter(exclusion_class, session_id, config_generation);
-    }
-  };
-  // An SVG image's own document or a page popup belongs to no tab, so its
-  // count is kept apart from the budget's overflow.
+  // An SVG image's own document or a page popup belongs to no tab, so it is
+  // counted instead of recorded.
   if (!ordinary_page) {
-    count_not_recorded(kNativeNonOrdinaryPageReuseExclusion);
+    if (exclusion_counter) {
+      exclusion_counter(kNativeNonOrdinaryPageReuseExclusion, session_id, config_generation);
+    }
     return {};
   }
-  // Reuses can be frequent, so a configuration records a bounded number and
-  // counts the rest. The count is tagged with its generation.
-  const auto tag = static_cast<std::uint32_t>(config_generation);
-  std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
-  for (;;) {
-    const auto word_tag = static_cast<std::uint32_t>(word >> 32U);
-    if (word_tag != tag && static_cast<std::int32_t>(word_tag - tag) > 0) {
-      // A newer configuration owns the budget; this one was replaced.
-      return {};
-    }
-    const std::uint32_t used = word_tag == tag ? static_cast<std::uint32_t>(word) : 0;
-    if (used >= kNativeMemoryCacheReuseBudget) {
-      count_not_recorded(kNativeMemoryCacheReuseExclusion);
-      return {};
-    }
-    if (memory_cache_budget_.compare_exchange_weak(word, (std::uint64_t{tag} << 32U) | (used + 1U),
-                                                   std::memory_order_relaxed)) {
-      return {.generation = config_generation, .capture_request_content = capture_request_content};
-    }
-  }
+  return {.generation = config_generation, .capture_request_content = capture_request_content};
 }
 
 void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& admission,
@@ -2340,13 +2438,7 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& a
   }
   const NativeSchemeClass scheme_class = ClassifyNativeScheme(reuse.scheme);
   if (IsBrowserInternalSchemeClass(scheme_class) && !capture_browser_internal) {
-    // Counted as the scheme class a request would be, not against the budget.
-    const auto tag = static_cast<std::uint32_t>(config_generation);
-    std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
-    while (static_cast<std::uint32_t>(word >> 32U) == tag &&
-           static_cast<std::uint32_t>(word) != 0 &&
-           !memory_cache_budget_.compare_exchange_weak(word, word - 1, std::memory_order_relaxed)) {
-    }
+    // Counted as the scheme class a request would be.
     if (exclusion_counter) {
       exclusion_counter(static_cast<std::uint8_t>(scheme_class), session_id, config_generation);
     }
@@ -2389,8 +2481,8 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& a
   row.thread_id = event.header.thread_id;
   row.request_id = static_cast<std::uint32_t>(event.header.request_id);
   row.scheme_class = scheme_class;
-  EmitRendererTarget(row, reuse.target, reuse.target_length, reuse.port, config_generation,
-                     emitter);
+  EmitRendererTarget(row, reuse.target, reuse.target_length, reuse.port, config_generation, emitter,
+                     reuse.host);
 }
 
 void NativeProbeSink::NoteVmDispatchLoss(const std::uint64_t generation,
@@ -2429,13 +2521,13 @@ NativeProbeEmitStatus NativeProbeSink::EmitStatus(const NativeProbeEvent& event,
 }
 
 void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
+  if (!emitter_.load(std::memory_order_acquire)) {
+    return;
+  }
   // EmitEvent publishes pending losses before a normal event. The gap emit
   // re-enters EmitEvent, which must not publish again on this thread.
   thread_local bool publishing = false;
   if (publishing) {
-    return;
-  }
-  if (!emitter_.load(std::memory_order_acquire)) {
     return;
   }
   publishing = true;
@@ -2806,11 +2898,6 @@ void NativeProbeSink::ObservePageGuest(const bool javascript,
 void NativeProbeSink::ObserveCapturedJavaScriptSwitchProgram(
     const std::span<const std::uint8_t> program) noexcept {
   ObservePageGuest(true, program);
-}
-
-void NativeProbeSink::ObserveCapturedWasmModule(
-    const std::span<const std::uint8_t> module) noexcept {
-  ObservePageGuest(false, module);
 }
 
 void IngestOwnedRegisterInvocationThunk(const std::uint64_t invocation_id,
@@ -3565,16 +3652,23 @@ struct WasmHostCall {
   std::uint64_t document_token_low = 0;
   std::array<char, kNativeArtifactMaxUrlBytes> url{};
   std::uint32_t url_size = 0;
+  // The thread's next invocation ID; CloseHostCall keeps it.
+  std::uint32_t next_invocation_id = 1;
 };
 
-WasmHostCall& HostCall() noexcept {
-  thread_local WasmHostCall call;
-  return call;
+// Null on a thread that never opened a host call while capture was active.
+WasmHostCall* FindHostCall() noexcept {
+  SinkThreadState* const state = FindSinkThreadState();
+  return state ? state->wasm.get() : nullptr;
 }
 
-std::uint32_t& NextWasmInvocationId() noexcept {
-  thread_local std::uint32_t next = 1;
-  return next;
+// Made by the first host call a thread opens while capture is active.
+WasmHostCall& EnsureHostCall() {
+  SinkThreadState& state = EnsureSinkThreadState();
+  if (!state.wasm) {
+    state.wasm = std::make_unique<WasmHostCall>();
+  }
+  return *state.wasm;
 }
 
 void CloseHostCall(WasmHostCall& call) noexcept {
@@ -3594,7 +3688,7 @@ void OpenHostCall(WasmHostCall& call,
                   const std::uint64_t now,
                   const bool function_known,
                   const std::uint32_t function_index) noexcept {
-  auto& next = NextWasmInvocationId();
+  auto& next = call.next_invocation_id;
   const std::uint32_t id = next == 0 ? 1U : next;
   next = id == 0xffffffffu ? 1U : id + 1U;
   CloseHostCall(call);
@@ -3680,12 +3774,14 @@ bool NativeProbeSink::NoteNativeWasmExecutionOmission(const VmAdmission& admissi
 bool NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
                                               const bool function_known,
                                               std::uint32_t function_index) noexcept {
-  auto& call = HostCall();
+  // A call left open by an earlier configuration stays until the next use
+  // while capture is active: every reader compares its generation first.
+  if (!IsNativeWasmExecutionEnabled())
+    return false;
+  auto& call = EnsureHostCall();
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
-  if (!IsNativeWasmExecutionEnabled())
-    return false;
   if (!function_known)
     function_index = 0;
   if (!outermost) {
@@ -3714,7 +3810,10 @@ bool NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
 void NativeProbeSink::NoteWasmHostCallReturned() noexcept {
   if (!IsNativeWasmExecutionEnabled())
     return;
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.generation != generation) {
     CloseHostCall(call);
@@ -3731,7 +3830,10 @@ void NativeProbeSink::NoteWasmHostCallReturned() noexcept {
 void NativeProbeSink::NoteWasmTailCall() noexcept {
   if (!IsNativeWasmExecutionEnabled())
     return;
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.generation != generation) {
     CloseHostCall(call);
@@ -3760,7 +3862,7 @@ void NativeProbeSink::NoteWasmInstrumentedSite(const std::uint64_t generation,
   if (!IsNativeWasmExecutionEnabled() || source_url.empty() ||
       source_url.size() > kNativeArtifactMaxUrlBytes)
     return;
-  auto& call = HostCall();
+  auto& call = EnsureHostCall();
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
   // No prologue was reported. The deadline starts at this instruction.
@@ -3802,9 +3904,10 @@ bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
   if (!SnapshotWasmExecutionAdmission(admission))
     return false;
   admission.frame_id = frame_id;
-  const auto& call = HostCall();
-  if (call.invocation_id == 0 || call.generation != admission.generation)
+  const WasmHostCall* const open = FindHostCall();
+  if (!open || open->invocation_id == 0 || open->generation != admission.generation)
     return false;
+  const auto& call = *open;
   NativeWasmExecutionObservation observation;
   observation.header.category = NativeProbeCategory::kVm;
   observation.header.type = NativeProbeType::kWasmExecutionOutcome;
@@ -3870,6 +3973,12 @@ bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
   return false;
 }
 
+bool NativeProbeSink::IsWasmHostCallOpen() const noexcept {
+  const WasmHostCall* const call = FindHostCall();
+  return call && call->depth != 0 &&
+         call->generation == config_generation_.load(std::memory_order_acquire);
+}
+
 void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
                                      const NativeWasmExecutionBounds bounds,
                                      const bool function_known,
@@ -3882,7 +3991,10 @@ void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
                                      const std::uint64_t document_token_high,
                                      const std::uint64_t document_token_low,
                                      const std::span<const std::uint8_t> module_bytes) noexcept {
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.depth == 0 || call.generation != generation) {
     if (call.generation != generation)
@@ -3906,7 +4018,10 @@ void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
 
 std::uint64_t NativeProbeSink::WasmExecutionNudgeDelayNs() const noexcept {
   constexpr std::uint64_t kRetryNs = 50'000'000ULL;
-  const auto& call = HostCall();
+  const WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return kNativeWasmExecutionNoNudge;
+  const auto& call = *open;
   if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0)
     return kNativeWasmExecutionNoNudge;
   const auto generation = config_generation_.load(std::memory_order_acquire);
@@ -3926,7 +4041,10 @@ void NativeProbeSink::SetNativeWasmExecutionNudge(const NativeWasmExecutionNudge
 }
 
 NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexcept {
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return NativeWasmExecutionHeartbeat::kContinue;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
@@ -4005,6 +4123,8 @@ void NativeProbeSink::ConfigureNativeJsDispatch(
     NoteNativeJsDispatchOmission(generation, 0, kNativeJsInputGap);
     return;
   }
+  for (auto& ordinal : native_js_site_ordinals_)
+    ordinal.store(0, std::memory_order_relaxed);
   native_js_generation_.store(generation, std::memory_order_release);
 }
 
@@ -4043,8 +4163,6 @@ std::size_t NativeProbeSink::CopyNativeJsDispatchSites(
 bool NativeProbeSink::IsNativeJsDispatchEnabled(const std::uint64_t epoch,
                                                 const std::uint32_t slot) const noexcept {
   return slot < native_js_site_count_.load(std::memory_order_acquire) &&
-         native_js_capped_generation_.load(std::memory_order_acquire) < epoch &&
-         native_js_site_capped_generations_[slot].load(std::memory_order_acquire) < epoch &&
          NativeJsDispatchActive(epoch);
 }
 
@@ -4053,27 +4171,22 @@ bool NativeProbeSink::NoteNativeJsDispatchOmission(const std::uint64_t generatio
                                                    const std::size_t gap) noexcept {
   if (generation == 0 || (generation & 1U) != 0 || gap >= native_js_gap_generations_.size())
     return false;
-  static constexpr std::array<std::string_view,
-                              kNativeJsCompiledBeforeArmingGap + kNativeJsDispatchSiteLimit>
-      kReasons{"native_js_dispatch_budget_incomplete",
-               "native_js_dispatch_site_budget_incomplete",
-               "native_js_dispatch_transport_unavailable",
-               "native_js_dispatch_input_unavailable",
-               "native_js_dispatch_site_0_compiled_before_arming",
-               "native_js_dispatch_site_1_compiled_before_arming",
-               "native_js_dispatch_site_2_compiled_before_arming",
-               "native_js_dispatch_site_3_compiled_before_arming",
-               "native_js_dispatch_site_4_compiled_before_arming",
-               "native_js_dispatch_site_5_compiled_before_arming",
-               "native_js_dispatch_site_6_compiled_before_arming",
-               "native_js_dispatch_site_7_compiled_before_arming"};
+  static constexpr std::array<std::string_view, kNativeJsCompiledBeforeArmingGap> kReasons{
+      "native_js_dispatch_transport_unavailable", "native_js_dispatch_input_unavailable",
+      "native_js_dispatch_ids_exhausted"};
+  std::array<char, 64> text{};
+  const std::string_view reason =
+      gap < kNativeJsCompiledBeforeArmingGap
+          ? kReasons[gap]
+          : NativeJsSiteReason(text, "native_js_dispatch_site_",
+                               gap - kNativeJsCompiledBeforeArmingGap, "_compiled_before_arming");
   auto& slot = native_js_gap_generations_[gap];
   auto previous = slot.load(std::memory_order_acquire);
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
   while (previous < generation - 1) {
     if (slot.compare_exchange_weak(previous, generation - 1, std::memory_order_acq_rel)) {
       const bool retained =
-          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, kReasons[gap], generation) != 0;
+          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, reason, generation) != 0;
       auto claimed = generation - 1;
       slot.compare_exchange_strong(claimed, retained ? generation : previous,
                                    std::memory_order_acq_rel);
@@ -4084,30 +4197,6 @@ bool NativeProbeSink::NoteNativeJsDispatchOmission(const std::uint64_t generatio
 }
 
 namespace {
-// Claims the first slot not yet held by this generation.
-template <std::size_t N>
-bool ClaimNativeJsSlot(std::array<std::atomic<std::uint64_t>, N>& slots,
-                       const std::uint64_t generation,
-                       std::size_t& index,
-                       std::uint64_t& previous_value) noexcept {
-  for (std::size_t i = 0; i < N; ++i) {
-    auto previous = slots[i].load(std::memory_order_acquire);
-    while (previous < generation) {
-      if (slots[i].compare_exchange_weak(previous, generation, std::memory_order_acq_rel)) {
-        index = i;
-        previous_value = previous;
-        return true;
-      }
-    }
-  }
-  return false;
-}
-void ReleaseNativeJsSlot(std::atomic<std::uint64_t>& slot,
-                         const std::uint64_t generation,
-                         const std::uint64_t previous) noexcept {
-  auto claimed = generation;
-  slot.compare_exchange_strong(claimed, previous, std::memory_order_acq_rel);
-}
 void CapNativeJsGeneration(std::atomic<std::uint64_t>& capped,
                            const std::uint64_t generation) noexcept {
   auto previous = capped.load(std::memory_order_acquire);
@@ -4129,9 +4218,8 @@ void NativeProbeSink::RecordNativeJsDispatch(const std::uint64_t epoch,
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
-  // Sample indices are assigned below; the caller's values are not trusted.
-  payload.site_sample_index = 0;
-  payload.sample_index = 0;
+  // The ordinal is assigned below; the caller's value is not trusted.
+  payload.site_ordinal = 0;
   const std::size_t site_slot = payload.site_slot;
   bool matches = frame_id != 0 && site_slot < native_js_site_count_.load(std::memory_order_acquire);
   if (matches) {
@@ -4145,22 +4233,9 @@ void NativeProbeSink::RecordNativeJsDispatch(const std::uint64_t epoch,
     NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsInputGap);
     return;
   }
-  auto& site_slots = native_js_site_slots_[site_slot];
-  std::size_t site_index = 0, index = 0;
-  std::uint64_t site_previous = 0, previous = 0;
-  if (!ClaimNativeJsSlot(site_slots, epoch, site_index, site_previous)) {
-    if (NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsSiteBudgetGap))
-      CapNativeJsGeneration(native_js_site_capped_generations_[site_slot], epoch);
-    return;
-  }
-  if (!ClaimNativeJsSlot(native_js_slots_, epoch, index, previous)) {
-    ReleaseNativeJsSlot(site_slots[site_index], epoch, site_previous);
-    if (NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsBudgetGap))
-      CapNativeJsGeneration(native_js_capped_generation_, epoch);
-    return;
-  }
-  payload.site_sample_index = static_cast<std::uint16_t>(site_index);
-  payload.sample_index = static_cast<std::uint16_t>(index);
+  // Every dispatch takes the next ordinal, so a dropped record leaves a
+  // missing ordinal beside the ring's drop count.
+  payload.site_ordinal = NextNativeJsOrdinal(native_js_site_ordinals_[site_slot]);
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kVm;
   event.header.type = NativeProbeType::kJsDispatchObservation;
@@ -4173,25 +4248,22 @@ void NativeProbeSink::RecordNativeJsDispatch(const std::uint64_t epoch,
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   const auto bytes = EncodeNativeJsDispatchObservationPayload(payload);
   std::copy(bytes.begin(), bytes.end(), event.inline_payload.begin());
-  const auto status = EmitStatus(event, epoch);
-  if (status == NativeProbeEmitStatus::kAdmitted)
-    return;
-  // A full ring counts its own drop; both claims return so a later dispatch
-  // can be retained. Any other refusal is an explicit transport gap.
-  ReleaseNativeJsSlot(native_js_slots_[index], epoch, previous);
-  ReleaseNativeJsSlot(site_slots[site_index], epoch, site_previous);
-  if (status == NativeProbeEmitStatus::kRejected)
+  // A full ring counts its own drop. Any other refusal is an explicit
+  // transport gap.
+  if (EmitStatus(event, epoch) == NativeProbeEmitStatus::kRejected)
     NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsTransportGap);
 }
 
 void NativeProbeSink::NoteNativeJsDispatchStatus(const std::uint64_t epoch,
                                                  const std::uint32_t slot,
                                                  const NativeJsDispatchSiteStatus status) noexcept {
-  if (status != NativeJsDispatchSiteStatus::kCompiledBeforeArming ||
-      slot >= native_js_site_count_.load(std::memory_order_acquire) ||
+  if (slot >= native_js_site_count_.load(std::memory_order_acquire) ||
       !NativeJsDispatchActive(epoch))
     return;
-  NoteNativeJsDispatchOmission(epoch, 0, kNativeJsCompiledBeforeArmingGap + slot);
+  if (status == NativeJsDispatchSiteStatus::kCompiledBeforeArming)
+    NoteNativeJsDispatchOmission(epoch, 0, kNativeJsCompiledBeforeArmingGap + slot);
+  else if (status == NativeJsDispatchSiteStatus::kIdsExhausted)
+    NoteNativeJsDispatchOmission(epoch, 0, kNativeJsIdsGap);
 }
 
 void NativeProbeSink::NoteNativeJsDispatchInputUnavailable(const std::uint64_t epoch,
@@ -4221,6 +4293,9 @@ void NativeProbeSink::ConfigureNativeJsInvocation(
     NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
     return;
   }
+  for (auto& ordinal : native_invocation_site_ordinals_)
+    ordinal.store(0, std::memory_order_relaxed);
+  native_invocation_request_ordinal_.store(0, std::memory_order_relaxed);
   native_invocation_open_.store(0, std::memory_order_relaxed);
   native_invocation_open_generation_.store(generation, std::memory_order_release);
   native_invocation_digest_generation_.store(digests ? generation : 0, std::memory_order_release);
@@ -4263,8 +4338,6 @@ std::size_t NativeProbeSink::CopyNativeJsInvocationSites(
 bool NativeProbeSink::IsNativeJsInvocationEnabled(const std::uint64_t epoch,
                                                   const std::uint32_t slot) const noexcept {
   return slot < native_invocation_site_count_.load(std::memory_order_acquire) &&
-         native_invocation_capped_generation_.load(std::memory_order_acquire) < epoch &&
-         native_invocation_site_capped_generations_[slot].load(std::memory_order_acquire) < epoch &&
          NativeJsInvocationActive(epoch);
 }
 
@@ -4278,36 +4351,24 @@ bool NativeProbeSink::NoteNativeJsInvocationOmission(const std::uint64_t generat
                                                      const std::size_t gap) noexcept {
   if (generation == 0 || (generation & 1U) != 0 || gap >= native_invocation_gap_generations_.size())
     return false;
-  static constexpr std::array<std::string_view, kInvocationGapCount> kReasons{
-      "native_js_invocation_budget_incomplete",
-      "native_js_invocation_site_budget_incomplete",
-      "native_js_invocation_request_budget_incomplete",
-      "native_js_invocation_transport_unavailable",
-      "native_js_invocation_input_unavailable",
-      "native_js_invocation_settle_unavailable",
-      "native_js_invocation_site_0_compiled_before_arming",
-      "native_js_invocation_site_1_compiled_before_arming",
-      "native_js_invocation_site_2_compiled_before_arming",
-      "native_js_invocation_site_3_compiled_before_arming",
-      "native_js_invocation_site_4_compiled_before_arming",
-      "native_js_invocation_site_5_compiled_before_arming",
-      "native_js_invocation_site_6_compiled_before_arming",
-      "native_js_invocation_site_7_compiled_before_arming",
-      "native_js_invocation_site_0_unsupported_function",
-      "native_js_invocation_site_1_unsupported_function",
-      "native_js_invocation_site_2_unsupported_function",
-      "native_js_invocation_site_3_unsupported_function",
-      "native_js_invocation_site_4_unsupported_function",
-      "native_js_invocation_site_5_unsupported_function",
-      "native_js_invocation_site_6_unsupported_function",
-      "native_js_invocation_site_7_unsupported_function"};
+  static constexpr std::array<std::string_view, kInvocationCompiledGap> kReasons{
+      "native_js_invocation_transport_unavailable", "native_js_invocation_input_unavailable",
+      "native_js_invocation_settle_unavailable", "native_js_invocation_ids_exhausted"};
+  std::array<char, 64> text{};
+  const std::string_view reason =
+      gap < kInvocationCompiledGap ? kReasons[gap]
+      : gap < kInvocationUnsupportedGap
+          ? NativeJsSiteReason(text, "native_js_invocation_site_", gap - kInvocationCompiledGap,
+                               "_compiled_before_arming")
+          : NativeJsSiteReason(text, "native_js_invocation_site_", gap - kInvocationUnsupportedGap,
+                               "_unsupported_function");
   auto& slot = native_invocation_gap_generations_[gap];
   auto previous = slot.load(std::memory_order_acquire);
   // Odd generation is an in-flight claim; never overwrite a newer configuration.
   while (previous < generation - 1) {
     if (slot.compare_exchange_weak(previous, generation - 1, std::memory_order_acq_rel)) {
       const bool retained =
-          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, kReasons[gap], generation) != 0;
+          RecordRuntimeBufferEvent(NativeProbeType::kGap, frame_id, reason, generation) != 0;
       auto claimed = generation - 1;
       slot.compare_exchange_strong(claimed, retained ? generation : previous,
                                    std::memory_order_acq_rel);
@@ -4338,46 +4399,25 @@ void NativeProbeSink::PublishNativeJsInvocationGaps(const std::uint64_t generati
   }
 }
 
-void NativeProbeSink::RecordNativeJsInvocationStart(
+bool NativeProbeSink::RecordNativeJsInvocationStart(
     const std::uint64_t epoch,
     const std::uint64_t frame_id,
     NativeJsInvocationStartPayload payload) noexcept {
   // No frame-id provider: Blink supplies the frame, and the provider would
   // re-enter V8 inside its runtime call.
   if (!NativeJsInvocationActive(epoch))
-    return;
+    return false;
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
   const std::uint64_t monotonic_time_ns = MonotonicTimeNs();
   std::atomic_thread_fence(std::memory_order_acquire);
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
-    return;
+    return false;
   PublishNativeJsInvocationGaps(epoch);
-  payload.site_sample_index = 0;
-  payload.sample_index = 0;
-  // V8 has already given this call an ID, a wrapper and a coming settle, so
-  // every reported start spends its claims whether or not it is retained, and
-  // a spent budget stops admission at once even when the ring cannot take its
-  // gap yet. Refused calls therefore never keep V8 wrapping past the budget.
+  // The ordinal is assigned below; the caller's value is not trusted.
+  payload.site_ordinal = 0;
   const std::size_t site_slot = payload.site_slot;
-  const bool known_site = site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
-  std::size_t site_index = 0, index = 0;
-  std::uint64_t site_previous = 0, previous = 0;
-  if (known_site && !ClaimNativeJsSlot(native_invocation_site_slots_[site_slot], epoch, site_index,
-                                       site_previous)) {
-    CapNativeJsGeneration(native_invocation_site_capped_generations_[site_slot], epoch);
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSiteBudgetGap);
-    return;
-  }
-  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
-    if (known_site)
-      ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch,
-                          site_previous);
-    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
-    return;
-  }
-  native_invocation_open_starts_[index].store(0, std::memory_order_release);
-  bool matches = known_site && frame_id != 0;
+  bool matches =
+      frame_id != 0 && site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
   if (matches) {
     const auto& site = native_invocation_sites_[site_slot];
     matches = payload.source_length == site.source_length &&
@@ -4386,10 +4426,11 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
   }
   if (!matches || !IsValidNativeJsInvocationStartPayload(payload)) {
     NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
-    return;
+    return false;
   }
-  payload.site_sample_index = static_cast<std::uint16_t>(site_index);
-  payload.sample_index = static_cast<std::uint16_t>(index);
+  // Every reported start takes the next ordinal, so a dropped start leaves a
+  // missing ordinal beside the ring's drop count.
+  payload.site_ordinal = NextNativeJsOrdinal(native_invocation_site_ordinals_[site_slot]);
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kVm;
   event.header.type = NativeProbeType::kJsInvocationStart;
@@ -4403,21 +4444,15 @@ void NativeProbeSink::RecordNativeJsInvocationStart(
   event.inline_payload = EncodeNativeJsInvocationStartPayload(payload);
   const auto status = EmitStatus(event, epoch);
   if (status == NativeProbeEmitStatus::kAdmitted) {
-    native_invocation_open_starts_[index].store(
-        (static_cast<std::uint64_t>(payload.invocation_id) << 8) | site_slot,
-        std::memory_order_release);
     if (native_invocation_open_generation_.load(std::memory_order_acquire) == epoch)
       native_invocation_open_.fetch_add(1, std::memory_order_relaxed);
-    return;
+    return true;
   }
-  // A full ring counts its own drop and drains, so it returns both claims for
-  // a later call. Any other refusal keeps them and is a transport gap.
-  if (status == NativeProbeEmitStatus::kQueueFull) {
-    ReleaseNativeJsSlot(native_invocation_slots_[index], epoch, previous);
-    ReleaseNativeJsSlot(native_invocation_site_slots_[site_slot][site_index], epoch, site_previous);
-    return;
-  }
-  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+  // A full ring counts its own drop. Any other refusal is a transport gap.
+  // Either way V8 neither wraps nor settles the call.
+  if (status == NativeProbeEmitStatus::kRejected)
+    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
+  return false;
 }
 
 void NativeProbeSink::RecordNativeJsInvocationSettle(
@@ -4432,17 +4467,15 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
   if (config_generation_.load(std::memory_order_acquire) != epoch || session_id == 0)
     return;
   PublishNativeJsInvocationGaps(epoch);
-  // Each admitted call settles once. The settle closes its start before its
-  // own record is attempted, so a refused or dropped settle record never
-  // leaves the start open. A settle whose start was refused or dropped is not
-  // recorded: that start's loss is already a gap or a ring drop.
-  std::uint8_t site_slot = 0;
-  if (!CloseNativeJsInvocation(epoch, payload.invocation_id, site_slot))
-    return;
+  // V8 settles only a start this sink recorded, and each at most once. The
+  // settle closes its start before its own record is attempted, so a refused
+  // or dropped settle record never leaves the start open.
+  CloseNativeJsInvocation(epoch);
   // A digest without the session's opt-in is refused, never stored.
   const bool digests =
       native_invocation_digest_generation_.load(std::memory_order_acquire) == epoch;
-  if (frame_id == 0 || payload.site_slot != site_slot ||
+  if (frame_id == 0 ||
+      payload.site_slot >= native_invocation_site_count_.load(std::memory_order_acquire) ||
       !IsValidNativeJsInvocationSettlePayload(payload) ||
       (!digests && payload.digest_state !=
                        static_cast<std::uint8_t>(NativeJsInvocationDigestState::kNotRequested))) {
@@ -4464,27 +4497,13 @@ void NativeProbeSink::RecordNativeJsInvocationSettle(
     NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationTransportGap);
 }
 
-bool NativeProbeSink::CloseNativeJsInvocation(const std::uint64_t generation,
-                                              const std::uint32_t invocation_id,
-                                              std::uint8_t& site_slot) noexcept {
-  if (invocation_id == 0)
-    return false;
-  for (std::size_t i = 0; i < native_invocation_open_starts_.size(); ++i) {
-    auto open = native_invocation_open_starts_[i].load(std::memory_order_acquire);
-    if ((open >> 8) != invocation_id ||
-        native_invocation_slots_[i].load(std::memory_order_acquire) != generation)
-      continue;
-    // IDs are unique per isolate, so a lost exchange is the same call's
-    // second settle and closes nothing.
-    if (!native_invocation_open_starts_[i].compare_exchange_strong(open, 0,
-                                                                   std::memory_order_acq_rel))
-      return false;
-    site_slot = static_cast<std::uint8_t>(open & 0xFF);
-    if (native_invocation_open_generation_.load(std::memory_order_acquire) == generation)
-      native_invocation_open_.fetch_sub(1, std::memory_order_relaxed);
-    return true;
+void NativeProbeSink::CloseNativeJsInvocation(const std::uint64_t generation) noexcept {
+  if (native_invocation_open_generation_.load(std::memory_order_acquire) != generation)
+    return;
+  auto open = native_invocation_open_.load(std::memory_order_relaxed);
+  while (open > 0 && !native_invocation_open_.compare_exchange_weak(open, open - 1,
+                                                                    std::memory_order_relaxed)) {
   }
-  return false;
 }
 
 void NativeProbeSink::NoteNativeJsInvocationStatus(
@@ -4498,6 +4517,8 @@ void NativeProbeSink::NoteNativeJsInvocationStatus(
     NoteNativeJsInvocationOmission(epoch, 0, kInvocationCompiledGap + slot);
   else if (status == NativeJsInvocationSiteStatus::kUnsupportedFunction)
     NoteNativeJsInvocationOmission(epoch, 0, kInvocationUnsupportedGap + slot);
+  else if (status == NativeJsInvocationSiteStatus::kIdsExhausted)
+    NoteNativeJsInvocationOmission(epoch, 0, kInvocationIdsGap);
 }
 
 void NativeProbeSink::NoteNativeJsInvocationInputUnavailable(
@@ -4506,16 +4527,6 @@ void NativeProbeSink::NoteNativeJsInvocationInputUnavailable(
   if (!NativeJsInvocationActive(epoch))
     return;
   PublishNativeJsInvocationGaps(epoch);
-  // V8 already wrapped this call, so its refusal spends a start like any
-  // other; calls from a detached document stop at the budget.
-  std::size_t index = 0;
-  std::uint64_t previous = 0;
-  if (!ClaimNativeJsSlot(native_invocation_slots_, epoch, index, previous)) {
-    CapNativeJsGeneration(native_invocation_capped_generation_, epoch);
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationBudgetGap);
-    return;
-  }
-  native_invocation_open_starts_[index].store(0, std::memory_order_release);
   NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationInputGap);
 }
 
@@ -4523,9 +4534,10 @@ void NativeProbeSink::NoteNativeJsInvocationSettleUnavailable(
     const std::uint64_t epoch,
     const std::uint64_t frame_id,
     const std::uint32_t invocation_id) noexcept {
-  std::uint8_t site_slot = 0;
-  if (NativeJsInvocationActive(epoch) && CloseNativeJsInvocation(epoch, invocation_id, site_slot))
-    NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSettleGap);
+  if (invocation_id == 0 || !NativeJsInvocationActive(epoch))
+    return;
+  CloseNativeJsInvocation(epoch);
+  NoteNativeJsInvocationOmission(epoch, frame_id, kInvocationSettleGap);
 }
 
 void NativeProbeSink::SetNativeJsInvocationContextProvider(
@@ -4545,15 +4557,11 @@ NativeJsInvocationContext NativeProbeSink::CurrentNativeJsInvocation() const noe
   return context;
 }
 
-void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request_id) noexcept {
+void NativeProbeSink::RecordNativeJsInvocationRequestSlow(const std::int32_t request_id) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (request_id == 0 || !NativeJsInvocationActive(generation) ||
       (category_mask_.load(std::memory_order_relaxed) &
        NativeProbeCategoryMask(NativeProbeCategory::kNetwork)) == 0)
-    return;
-  // After the request budget no loader start pays for the context read, which
-  // enters V8, or the frame lookup.
-  if (native_invocation_request_capped_generation_.load(std::memory_order_acquire) >= generation)
     return;
   const auto provider = native_invocation_context_provider_.load(std::memory_order_acquire);
   if (!provider)
@@ -4577,20 +4585,11 @@ void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request
   const NativeProbeFrameIdProvider frame_id_provider =
       frame_id_provider_.load(std::memory_order_relaxed);
   const std::uint64_t frame_id = frame_id_provider ? frame_id_provider() : 0;
-  std::size_t index = 0;
-  std::uint64_t previous = 0;
-  if (!ClaimNativeJsSlot(native_invocation_request_slots_, generation, index, previous)) {
-    // Capped even when the ring cannot take the gap yet; the gap is held.
-    CapNativeJsGeneration(native_invocation_request_capped_generation_, generation);
-    NoteNativeJsInvocationOmission(generation, frame_id, kInvocationRequestBudgetGap);
-    return;
-  }
-  payload.sample_index = static_cast<std::uint16_t>(index);
   if (!IsValidNativeJsInvocationRequestPayload(payload)) {
-    ReleaseNativeJsSlot(native_invocation_request_slots_[index], generation, previous);
     NoteNativeJsInvocationOmission(generation, frame_id, kInvocationInputGap);
     return;
   }
+  payload.ordinal = NextNativeJsOrdinal(native_invocation_request_ordinal_);
   const std::uint64_t session_id = session_id_.load(std::memory_order_relaxed);
   NativeProbeEvent event;
   event.header.category = NativeProbeCategory::kVm;
@@ -4604,11 +4603,7 @@ void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request
   event.header.request_id = static_cast<std::uint64_t>(static_cast<std::uint32_t>(request_id));
   event.header.sequence_number = next_sequence_.fetch_add(1, std::memory_order_relaxed);
   event.inline_payload = EncodeNativeJsInvocationRequestPayload(payload);
-  const auto status = EmitStatus(event, generation);
-  if (status == NativeProbeEmitStatus::kAdmitted)
-    return;
-  ReleaseNativeJsSlot(native_invocation_request_slots_[index], generation, previous);
-  if (status == NativeProbeEmitStatus::kRejected)
+  if (EmitStatus(event, generation) == NativeProbeEmitStatus::kRejected)
     NoteNativeJsInvocationOmission(generation, frame_id, kInvocationTransportGap);
 }
 
@@ -4646,21 +4641,25 @@ struct GuestThreadState final {
   std::uint64_t use_clock = 0;
   std::array<GuestInvocationState, kGuestInvocationLimit> invocations{};
   std::array<GuestDocumentBinding, kGuestDocumentLimit> documents{};
+  // The guest state RecordNativeWasmGuest resolves into, and its reentry
+  // flags. A configuration reset leaves them to the sample that holds them.
+  NativeGuestSnapshot snapshot{};
+  bool snapshot_busy = false;
+  bool snapshot_cancelled = false;
 };
-thread_local GuestThreadState guest_thread;
-thread_local NativeGuestSnapshot guest_snapshot;
-thread_local bool guest_snapshot_busy = false;
-thread_local bool guest_snapshot_cancelled = false;
 struct GuestSnapshotGuard final {
-  GuestSnapshotGuard() noexcept {
-    guest_snapshot_busy = true;
-    guest_snapshot_cancelled = false;
+  explicit GuestSnapshotGuard(GuestThreadState& guest) noexcept : guest_(guest) {
+    guest_->snapshot_busy = true;
+    guest_->snapshot_cancelled = false;
   }
-  ~GuestSnapshotGuard() { guest_snapshot_busy = false; }
+  ~GuestSnapshotGuard() { guest_->snapshot_busy = false; }
   GuestSnapshotGuard(const GuestSnapshotGuard&) = delete;
   GuestSnapshotGuard& operator=(const GuestSnapshotGuard&) = delete;
+
+ private:
+  const raw_ref<GuestThreadState> guest_;
 };
-void ResetGuestThread(std::uint64_t generation) noexcept {
+void ResetGuestThread(GuestThreadState& guest_thread, std::uint64_t generation) noexcept {
   // Reset one small record at a time, not a 42 KiB aggregate stack temporary.
   for (auto& state : guest_thread.invocations)
     state = {};
@@ -4669,11 +4668,31 @@ void ResetGuestThread(std::uint64_t generation) noexcept {
   guest_thread.use_clock = 0;
   guest_thread.generation = generation;
 }
+// This thread's guest state of `generation`, or null without any: a read
+// never allocates or resets.
+GuestThreadState* FindGuestThread(std::uint64_t generation) noexcept {
+  SinkThreadState* const state = FindSinkThreadState();
+  GuestThreadState* const guest = state ? state->guest.get() : nullptr;
+  return guest && guest->generation == generation ? guest : nullptr;
+}
+// Made by a thread's first guest sample admitted while capture is active,
+// and reset when the configuration changes.
+GuestThreadState& EnsureGuestThread(std::uint64_t generation) {
+  SinkThreadState& state = EnsureSinkThreadState();
+  if (!state.guest) {
+    state.guest = std::make_unique<GuestThreadState>();
+  }
+  if (state.guest->generation != generation) {
+    ResetGuestThread(*state.guest, generation);
+  }
+  return *state.guest;
+}
 // A binding caches only what the browser holds for its document, so a full
 // table replaces the least recently sampled binding (an unused one first)
 // instead of refusing a new document. A replaced document that is still
 // live resends its module once and the browser answers from its own binding.
-GuestDocumentBinding& ClaimGuestDocument(std::uint64_t frame,
+GuestDocumentBinding& ClaimGuestDocument(GuestThreadState& guest_thread,
+                                         std::uint64_t frame,
                                          std::uint64_t context,
                                          std::uint64_t high,
                                          std::uint64_t low) noexcept {
@@ -4700,7 +4719,8 @@ GuestDocumentBinding& ClaimGuestDocument(std::uint64_t frame,
 // invocation IDs grow with entry. Without stack switching, every other entry
 // has returned. One still running above an unresolved parent is sampled as a
 // new activation if it reaches another boundary. Null when all are ancestors.
-GuestInvocationState* ClaimGuestInvocation(const NativeWasmGuestStateView& view) noexcept {
+GuestInvocationState* ClaimGuestInvocation(GuestThreadState& guest_thread,
+                                           const NativeWasmGuestStateView& view) noexcept {
   auto& invocations = guest_thread.invocations;
   std::array<bool, kGuestInvocationLimit> ancestor{};
   for (std::uint64_t id =
@@ -4735,7 +4755,8 @@ struct GuestParentLink final {
 // is still current: the same value host records use as their parent. Every
 // later boundary of the parent, and every boundary without identity, revokes
 // it, so a missing value is reported rather than replaced by an older one.
-GuestParentLink ResolveGuestParent(const NativeWasmGuestStateView& view,
+GuestParentLink ResolveGuestParent(const GuestThreadState& guest_thread,
+                                   const NativeWasmGuestStateView& view,
                                    std::uint64_t frame,
                                    std::uint64_t document_high,
                                    std::uint64_t document_low) noexcept {
@@ -4751,6 +4772,9 @@ GuestParentLink ResolveGuestParent(const NativeWasmGuestStateView& view,
       return {view.parent_invocation_id, state.dispatch_sequence, false};
   return {view.parent_invocation_id, 0, true};
 }
+
+SinkThreadState::SinkThreadState() = default;
+SinkThreadState::~SinkThreadState() = default;
 
 }  // namespace
 void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
@@ -4773,23 +4797,24 @@ void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
   }
 }
 void NativeProbeSink::InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept {
-  const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (guest_thread.generation != generation) {
-    ResetGuestThread(generation);
-  }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   if (!adapter || !FindNativeGuestSite(*adapter, view.function_index, view.module_byte_offset))
     return;
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  // Another configuration's state, or none, holds no dispatch to revoke.
+  GuestThreadState* const guest_thread = FindGuestThread(generation);
   if (!view.instance_id || !view.invocation_id) {
-    for (auto& state : guest_thread.invocations)
-      state.dispatch_sequence = 0;
+    if (guest_thread)
+      for (auto& state : guest_thread->invocations)
+        state.dispatch_sequence = 0;
     NoteNativeGuestOmission(generation, 0, kGuestRuntimeIdentityGap,
                             "native_guest_runtime_identity_unavailable");
     return;
   }
-  for (auto& state : guest_thread.invocations)
-    if (state.instance == view.instance_id && state.invocation == view.invocation_id)
-      state.dispatch_sequence = 0;
+  if (guest_thread)
+    for (auto& state : guest_thread->invocations)
+      if (state.instance == view.instance_id && state.invocation == view.invocation_id)
+        state.dispatch_sequence = 0;
 }
 void NativeProbeSink::ConfigureNativeWasmGuest(
     std::shared_ptr<const NativeWasmGuestAdapter> adapter,
@@ -4803,15 +4828,20 @@ void NativeProbeSink::ConfigureNativeWasmGuest(
   }
   // One immutable startup recipe intentionally retained for process lifetime:
   // hot callback loads cannot block on an atomic shared_ptr implementation.
-  if (!native_guest_retained_adapter_)
-    native_guest_retained_adapter_ = new NativeWasmGuestAdapter(*adapter);
-  if (native_guest_retained_adapter_->json != adapter->json) {
+  // Only this serialized control sequence reads or writes the retained copy.
+  const NativeWasmGuestAdapter* retained =
+      native_guest_retained_adapter_.load(std::memory_order_relaxed);
+  if (!retained) {
+    retained = new NativeWasmGuestAdapter(*adapter);
+    native_guest_retained_adapter_.store(retained, std::memory_order_relaxed);
+  }
+  if (retained->json != adapter->json) {
     native_guest_adapter_.store(nullptr, std::memory_order_release);
     NoteNativeGuestOmission(config_generation_.load(std::memory_order_acquire), 0,
                             kGuestAdapterRestartGap, "native_guest_adapter_restart_required");
     return;
   }
-  native_guest_adapter_.store(native_guest_retained_adapter_, std::memory_order_release);
+  native_guest_adapter_.store(retained, std::memory_order_release);
 }
 void NativeProbeSink::NoteNativeGuestModuleStatus(std::uint64_t module_token,
                                                   bool accepted) noexcept {
@@ -4907,9 +4937,6 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                                             std::uint64_t document_token_high,
                                             std::uint64_t document_token_low) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (guest_thread.generation != generation) {
-    ResetGuestThread(generation);
-  }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   // A helper br_table in an opcode handler is not a guest instruction boundary.
   std::uint32_t site_index = 0;
@@ -4918,19 +4945,23 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                              : nullptr;
   if (!site)
     return;
+  // Another configuration's state, or none, holds no activation of this one.
+  GuestThreadState* const current = FindGuestThread(generation);
   if (!view.instance_id || !view.invocation_id) {
-    for (auto& state : guest_thread.invocations)
-      state.dispatch_sequence = 0;
+    if (current)
+      for (auto& state : current->invocations)
+        state.dispatch_sequence = 0;
     NoteNativeGuestOmission(generation, frame_id, kGuestRuntimeIdentityGap,
                             "native_guest_runtime_identity_unavailable");
     return;
   }
   GuestInvocationState* state = nullptr;
-  for (auto& slot : guest_thread.invocations)
-    if (slot.instance == view.instance_id && slot.invocation == view.invocation_id) {
-      state = &slot;
-      break;
-    }
+  if (current)
+    for (auto& slot : current->invocations)
+      if (slot.instance == view.instance_id && slot.invocation == view.invocation_id) {
+        state = &slot;
+        break;
+      }
   if (state)
     state->dispatch_sequence = 0;
   if (!IsNativeWasmGuestEnabled() || module_bytes.empty() ||
@@ -4947,8 +4978,10 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                             "native_guest_sample_limit");
     return;
   }
-  auto* document =
-      &ClaimGuestDocument(frame_id, execution_context_id, document_token_high, document_token_low);
+  // The same state `state` points into when it was found above.
+  GuestThreadState& guest_thread = EnsureGuestThread(generation);
+  auto* document = &ClaimGuestDocument(guest_thread, frame_id, execution_context_id,
+                                       document_token_high, document_token_low);
   if (document->module == GuestModuleState::kPending) {
     switch (NativeGuestModuleVerdict(document->module_token, document->module_writes_before_send)) {
       case GuestModuleVerdict::kAccepted:
@@ -4978,7 +5011,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   if (!state) {
     if (NativeGuestDigest(module_bytes) != adapter->module_sha256)
       return;
-    state = ClaimGuestInvocation(view);
+    state = ClaimGuestInvocation(guest_thread, view);
     if (!state) {
       NoteNativeGuestOmission(generation, frame_id, kGuestInvocationLimitGap,
                               "native_guest_invocation_limit");
@@ -4996,15 +5029,15 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
       state->document_low != document_token_low || state->site != site_index)
     return;
   state->last_use = ++guest_thread.use_clock;
-  if (guest_snapshot_busy) {
-    guest_snapshot_cancelled = true;
+  if (guest_thread.snapshot_busy) {
+    guest_thread.snapshot_cancelled = true;
     NoteNativeGuestOmission(generation, frame_id, kGuestSnapshotGap,
                             "native_guest_snapshot_reentry");
     return;
   }
-  GuestSnapshotGuard snapshot_guard;
-  auto& snapshot = guest_snapshot;
-  if (!ResolveNativeGuestSnapshot(*site, view, snapshot) || guest_snapshot_cancelled) {
+  GuestSnapshotGuard snapshot_guard(guest_thread);
+  auto& snapshot = guest_thread.snapshot;
+  if (!ResolveNativeGuestSnapshot(*site, view, snapshot) || guest_thread.snapshot_cancelled) {
     NoteNativeGuestOmission(generation, frame_id, kGuestSnapshotGap,
                             "native_guest_state_unavailable");
     return;
@@ -5055,7 +5088,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     payload.function_index = view.function_index;
     payload.instance_id = view.instance_id;
     payload.invocation_id = view.invocation_id;
-    const auto parent = ResolveGuestParent(view, frame_id, document_token_high, document_token_low);
+    const auto parent =
+        ResolveGuestParent(guest_thread, view, frame_id, document_token_high, document_token_low);
     payload.parent_invocation_id = parent.invocation;
     payload.parent_dispatch_sequence_number = parent.dispatch;
     if (parent.unresolved)
@@ -5102,7 +5136,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   const auto writes_before_send =
       send_module ? native_guest_module_status_next_.load(std::memory_order_acquire) : 0;
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
-  if (guest_snapshot_cancelled ||
+  if (guest_thread.snapshot_cancelled ||
       config_generation_.load(std::memory_order_acquire) != generation || !emit ||
       !emit(capture, generation)) {
     // Nothing reached the browser. The sample index is free again, and each
@@ -5133,7 +5167,10 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   const auto context_provider = native_guest_context_.load(std::memory_order_acquire);
   const auto emit = native_guest_host_.load(std::memory_order_acquire);
-  if (!adapter || !context_provider || !emit || guest_thread.generation != generation)
+  if (!adapter || !context_provider || !emit)
+    return false;
+  GuestThreadState* const guest_thread = FindGuestThread(generation);
+  if (!guest_thread)
     return false;
   // An empty import list proves no host association, so it needs no walk.
   if (std::none_of(adapter->sites.begin(),
@@ -5164,7 +5201,7 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
       site->import_call_offsets.begin() + static_cast<std::ptrdiff_t>(site->import_call_count);
   if (std::find(site->import_call_offsets.begin(), end, context.import_module_byte_offset) == end)
     return false;
-  for (auto& state : guest_thread.invocations) {
+  for (auto& state : guest_thread->invocations) {
     if (state.instance != context.instance_id || state.invocation != context.invocation_id ||
         state.frame != event.header.frame_id || !state.dispatch_sequence)
       continue;

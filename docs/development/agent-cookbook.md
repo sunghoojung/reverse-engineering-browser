@@ -65,8 +65,9 @@ checks:
   Its `reason` says why; `from_cache`, `service_worker`, `download` and
   `failed` are expected, `not_reported` is a capture gap. `get_request_headers`
   names the reason per hop as `network_block_missing`.
-- `memory_cache_reuse_not_recorded`: a renderer passed its 4,096 memory-cache
-  rows for the capture; later reuses were counted, not recorded. Reuses in a
+- `memory_cache_reuse_not_recorded`: a renderer from an earlier build passed
+  its 4,096 memory-cache rows for the capture; later reuses were counted, not
+  recorded. Current renderers record every reuse. Reuses in a
   page that is not ordinary (an SVG image's own document), which no tab owns,
   are the separate `non_ordinary_page_reuse` exclusion.
 - `response_bodies_not_observed`: some responses never reached the browser
@@ -604,13 +605,18 @@ record's `stack_read`, which also scans the store's newest identities.
 `status: invalid` is a record the core refuses, with no fields.
 
 A timeout does not mean nothing happened. Rules match only the main thread of
-the document they were armed on, never a worker, another frame or a
-same-process iframe, and one document is armed at a time. A navigation clears
-them, and they cannot be armed ahead of a page load, so what a new page does
-before you arm it again is not recorded. `get_native_debugger` `watch` says
-what the renderer has armed now (`--permission ask` and up). A renderer
-stops after 1,024 records per capture configuration and leaves one
-`debugger_observation_budget` gap; `get_session_summary` lists it. Disarm with
+the documents they are armed on, never a worker or a document they are not
+armed on. A navigation clears them, so what a new page does before you arm it
+again is not recorded, unless the watch kept them: add `"keep": true` beside
+`rules` and every later document of the armed document's origin and frame
+kind (top or child), in any tab, is armed before its own scripts run, so a
+reload is observed from its first script. Documents already open are not
+armed. The reply's `runtime.kept` names the origin and frame kept, or is null
+when only DOM rules were armed, since those name one document's nodes. `get_native_debugger` `watch` says
+what the renderer has armed now (`--permission ask` and up). Every match is
+recorded while the rules stay armed; only a renderer from an earlier build
+stopped after 1,024 records per capture configuration and left one
+`debugger_observation_budget` gap, which `get_session_summary` lists. Disarm with
 `{"operation": "unwatch"}`; `stop` disarms too.
 
 These fields carry identities, kinds, positions and names only (a rule's

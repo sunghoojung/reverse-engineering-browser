@@ -149,7 +149,7 @@ EVENT_TYPES = {
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
 SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed",
                       "memory_cache_reuse"}
-# 70 and 71 are memory-cache reuses past the budget and in pages that are not ordinary.
+# 70 is earlier renderers' memory-cache reuses past their budget, 71 those in pages that are not ordinary.
 EXCLUSION_CLASSES = {*range(16, 21), *range(64, 72)}
 # Loader kinds, shared with include/reb/tab_link.hpp.
 LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 23),
@@ -189,10 +189,13 @@ def valid_js_dispatch(event: dict, payload: bytes) -> bool:
     shape, kind, slot, flags = payload[4], payload[5], payload[6], payload[7]
     selector, activation, parent = at(20, 4), at(36, 4), at(40, 4)
     handler = (at(24, 4), at(28, 4), at(32, 4))
-    if (at(0, 2) != 1 or at(2, 2) != 128 or shape not in (1, 2) or not 1 <= kind <= 9
-            or slot >= 8 or flags & ~0x0F or at(8, 4) == 0 or at(16, 4) == 0
-            or at(12, 4) >= at(16, 4) or activation == 0 or at(44, 2) >= 64
-            or at(46, 2) >= 256 or any(payload[80:])):
+    # Version 2 has a u32 site ordinal at 44 and any one-byte slot. Version 1,
+    # from earlier builds, had 8 slots and u16 indexes below 64 and 256.
+    version = at(0, 2)
+    if (version not in (1, 2) or at(2, 2) != 128 or shape not in (1, 2) or not 1 <= kind <= 9
+            or (version == 1 and (slot >= 8 or at(44, 2) >= 64 or at(46, 2) >= 256))
+            or flags & ~0x0F or at(8, 4) == 0 or at(16, 4) == 0
+            or at(12, 4) >= at(16, 4) or activation == 0 or any(payload[80:])):
         return False
     if (kind == 7 and selector > 1) or (kind not in (1, 7) and selector != 0):
         return False
@@ -755,23 +758,28 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
     def at(offset: int, size: int) -> int:
         return int.from_bytes(payload[offset:offset + size], "little")
 
-    if at(0, 2) != 1 or at(2, 2) != 128:
+    # Version 2 records every call of up to 256 sites with u32 ordinals.
+    # Version 1, from earlier builds, had 8 sites and sampled indexes.
+    version = at(0, 2)
+    if version not in (1, 2) or at(2, 2) != 128:
         return False
+    v1 = version == 1
     kind = event["type"]
     if kind == "js_invocation_request":
         state = payload[4]
         return (event["request_id"] != "0" and int(event["request_id"]) <= 0xFFFFFFFF
                 and state in (2, 3) and valid_invocation_context(state, at(8, 4))
-                and at(12, 2) < 256 and not any(payload[5:8]) and at(14, 2) == 0
-                and not any(payload[16:]))
+                and (not v1 or (at(12, 2) < 256 and at(14, 2) == 0))
+                and not any(payload[5:8]) and not any(payload[16:]))
     if event["frame_id"] == "0" or event["request_id"] != "0":
         return False
     if kind == "js_invocation_start":
         slot, flags, argc = payload[4], payload[5], at(6, 2)
         invocation, parent = at(20, 4), at(24, 4)
-        if (slot >= 8 or flags & ~0x03 or at(8, 4) == 0 or at(16, 4) == 0
-                or at(12, 4) >= at(16, 4) or invocation == 0 or at(28, 2) >= 64
-                or at(30, 2) >= 256 or at(104, 8) == 0 or any(payload[112:])):
+        if ((v1 and (slot >= 8 or at(28, 2) >= 64 or at(30, 2) >= 256))
+                or flags & ~0x03 or at(8, 4) == 0 or at(16, 4) == 0
+                or at(12, 4) >= at(16, 4) or invocation == 0 or at(104, 8) == 0
+                or any(payload[112:])):
             return False
         if parent != 0 and (parent >= invocation or flags & 0x01):
             return False
@@ -790,7 +798,7 @@ def valid_js_invocation(event: dict, payload: bytes) -> bool:
     length, state, encoding, flags = at(12, 4), payload[16], payload[17], payload[18]
     byte_length, rolling = at(20, 4), at(24, 8)
     fulfilled, rejected = outcome == 1, outcome == 2
-    if (slot >= 8 or not (fulfilled or rejected) or not 1 <= value_kind <= 14
+    if ((v1 and slot >= 8) or not (fulfilled or rejected) or not 1 <= value_kind <= 14
             or at(8, 4) == 0 or at(64, 8) == 0 or payload[19] != 0 or flags & ~0x01
             or any(payload[72:])):
         return False

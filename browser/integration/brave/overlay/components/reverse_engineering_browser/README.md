@@ -20,6 +20,48 @@ never retains arguments, text, pixels, or return values. The inactive sink path
 performs one atomic emitter check and returns without allocating, blocking, or
 changing the surface result.
 
+## Inactive path
+
+While no session is active, no hook allocates, locks, makes a system call, or
+calls into V8 or the embedder, except on the paths the launch-time choices
+below keep. Every other first check reads static, constant-initialized state,
+and no other per-event hook touches a thread-local.
+Per-thread sink state larger than a pointer is allocated on a thread's first
+active use and freed when the thread exits, so the sink image's thread-local
+block is 81 bytes on arm64 (it was 131 KiB). The only write to it without a
+session is a V8 thread's scope, once when the thread starts. In a static build
+those bytes are part of the image's one block, which every thread allocates
+anyway; in a component build that store makes dyld allocate the sink
+library's block for the thread.
+
+| Hook | Cost with no session |
+| --- | --- |
+| Renderer sink checks, generated binding, Canvas, Web Audio and runtime operation records | One atomic load of the exported sink's field, inline |
+| Renderer request start | The same load, before the URL's scheme or host is read |
+| Script cookie access | One atomic load of a static member, inline |
+| `TypedArray` and `ArrayBuffer` construction | Three loads in the `TypedArray` builtin (the external reference, the gate pointer, its byte) and two in the `ArrayBuffer` builtin; no runtime call or callback |
+| Wasm trap | Two V8 flag tests without `--reb-wasm-br-table-dispatch` or `--reb-wasm-call-indirect-dispatch`; with either, see the launch-time choices below |
+| Blink async task run and navigation kind scope | One atomic load without `--reb-request-stacks` |
+| Proxied browser request | Two atomic loads when it starts; later events read only the request's own fields |
+| Early-hints loader factory | Two atomic loads; the factory is built as stock |
+| Factory owner scope | One atomic load in a browser that did not start capture from its command line |
+| V8 thread start (document and dedicated, shared or service worker) | One thread-local store of the thread's scope, once per thread |
+
+Three launch-time choices keep work on these paths without a session. With
+`--reb-wasm-br-table-dispatch` or `--reb-wasm-call-indirect-dispatch`, which
+the packaged app passes whenever the VM and Artifact categories are on, every
+Liftoff function entry, return and tail call still calls a builtin, the
+runtime and Blink's enabled check, and every trap walks the stack and calls
+into Blink. Blink's trap and heartbeat checks then read this thread's state
+slot: a function-local static, created under base's thread-local lock on the
+process's first call, then a thread-local lookup. The other two keep work
+because evidence from before a session depends on it. With `--reb-request-stacks` the
+stack provider is installed at renderer start and never removed, so a task
+run with a carried segment exchanges one thread-local word on entry and exit.
+A browser the launcher starts arms the factory owner scope before its profile
+exists, so each scope exchanges one thread-local owner record. Requests made
+before a session still name their owner.
+
 While capture is active, renderer operations resolve the current Blink frame
 token only after the policy check. The browser-process host maps that token to
 its top-level tab through live frames, then through `browser/native_tab_resolver.h`
@@ -137,12 +179,15 @@ response, race network requests included, through
 recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
 `0040-record-memory-cache-reuse` records each
 `ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
-`memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
-with the rest counted in the queue (version 4) as class 70 and those of pages
-that are not ordinary as class 71. Chromium patch
-`0062-name-memory-cache-reuse-sources` passes the reused resource's
-`ResourceResponse::RequestId()`, the renderer request that loaded it, which the
-record (payload version 2) names through its initiator fields.
+`memory_cache_reuse` record once the sink admits it, every one, with those of
+pages that are not ordinary counted in the queue (version 4) as class 71.
+Chromium patch `0062-name-memory-cache-reuse-sources` passes the reused
+resource's `ResourceResponse::RequestId()`, the renderer request that loaded
+it, which the record (payload version 2) names through its initiator fields.
+Chromium patch `0065-record-whole-memory-cache-targets` converts the whole
+http(s) target in a content session; the sink sends a target past the inline
+prefix to the browser over `NativeProbeHost.CaptureRendererTarget`, which
+drains the parent first and keeps the target as the child's artifact.
 See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch
@@ -283,19 +328,20 @@ use `common/native_js_dispatch.h` for the 128-byte payload and the fixed 44-byte
 site records, and `common/native_js_dispatch_sites.h` for the browser-side
 canonical site file. The renderer sink exposes a pulled epoch and an
 allocation-free admission predicate to V8, never calls the frame-id provider on
-that path, and claims one of 256 configuration samples and one of 64 site samples
-before emitting through the ordinary ring. A full ring returns both claims and
-keeps its drop count; budget, emitter, invalid-input and compiled-before-arming
-refusals are coalesced gaps. See the
+that path, and gives every dispatch of up to 256 sites its site's next ordinal
+before emitting through the ordinary ring. A full ring keeps its drop count and
+leaves the ordinal missing; emitter, invalid-input, compiled-before-arming and
+activation-ID refusals are coalesced gaps. See the
 [contract](../../../../../../protocol/native-js-dispatch-v1.md).
 
 Native JavaScript invocation records (`js_invocation_start`,
 `js_invocation_settle` and `js_invocation_request`, events 24 to 26) use
 `common/native_js_invocation.h` for the payloads and the 44-byte
 function-entry site records (shape 3), and `common/native_js_invocation_sites.h`
-for the browser-side site file. The sink claims one of 256 starts per
-configuration and one of 64 per site, and one of 256 request records; settles
-carry a digest only under the session's opt-in. It reads the current
+for the browser-side site file. The sink records every start of up to 256
+sites with its site's next ordinal, tells V8 whether it recorded each start so
+V8 settles only those, and gives each request record the configuration's next
+ordinal; settles carry a digest only under the session's opt-in. It reads the current
 invocation through a provider Blink installs, for Wasm `br_table` and
 `call_indirect` observations, guest invocation markers and loader requests.
 See the [contract](../../../../../../protocol/native-js-invocation-v1.md).
@@ -311,8 +357,8 @@ hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
 renderer stack to the browser link (event 47). Every table belongs to one
 thread: the document main thread and each dedicated, shared and service worker
 are named without allocating, and get their own tables at their first walk
-or message receipt while capture is active (at most 32 workers per renderer;
-a schedule or post with no script running makes none), so later walks take
+or message receipt while capture is active (every worker its own; a
+schedule or post with no script running makes none), so later walks take
 no lock; only the call that makes the tables, detach and the transport's
 routing of a browser refusal to its owning thread take the registry lock.
 `common/native_request_stack.h` also defines the task origin a posted message

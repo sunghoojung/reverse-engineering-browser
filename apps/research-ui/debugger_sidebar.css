@@ -91,6 +91,10 @@
 .debugger-select { height: 26px; padding-top: 0; padding-bottom: 0; font-family: var(--sans); }
 .debugger-watch-switches { display: flex; flex-wrap: wrap; align-items: end; gap: 6px 14px; }
 .debugger-check { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; color: var(--text); font-size: 11px; }
+.debugger-keep { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 2px 6px; color: var(--text); font-size: 11px; }
+.debugger-keep input { margin: 2px 0 0; }
+.debugger-keep-text { overflow-wrap: anywhere; }
+.debugger-keep .debugger-field-hint { grid-column: 2; }
 .debugger-watch-form .debugger-note { padding: 0; }
 .debugger-watch-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .debugger-watch-actions .secondary-button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

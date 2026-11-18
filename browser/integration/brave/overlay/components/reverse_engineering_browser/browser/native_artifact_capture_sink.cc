@@ -108,6 +108,8 @@ NativeArtifactCaptureSink& NativeArtifactCaptureSink::Get() {
   return *sink;
 }
 
+std::atomic<NativeProbeEmitter> NativeArtifactCaptureSink::emitter_{nullptr};
+
 NativeArtifactCaptureSink::NativeArtifactCaptureSink() = default;
 NativeArtifactCaptureSink::~NativeArtifactCaptureSink() = default;
 

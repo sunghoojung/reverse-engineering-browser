@@ -8,11 +8,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include "base/compiler_specific.h"
-#include "base/process/process_handle.h"
+#include "base/no_destructor.h"
 #include "base/threading/platform_thread.h"
-#include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
@@ -24,18 +25,81 @@ namespace reb {
 
 namespace {
 
-// One armed rule set per renderer. The current live Console binds one
-// document; a second Arm replaces the first. Published generation guards it.
-struct ArmedWatch final {
-  std::uint64_t generation = 0;
+// One armed document. Its configuration generation guards it, so a new
+// capture configuration ends it without touching the table.
+struct ArmedFrame final {
   std::uint64_t frame_id = 0;
+  std::uint64_t generation = 0;
+  // The kept scope's serial for a document that scope armed; 0 for the
+  // Console's own arm.
+  std::uint64_t scope = 0;
+  std::uint32_t mask = 0;
   NativeWatchRules rules;
-  std::uint32_t budget = 0;
-  bool budget_gap = false;
 };
-ArmedWatch g_watch;
-// Arm's thread, the main thread; no other thread reads g_watch.
+
+// Sorted by frame id, so a hook finds its document in O(log n) of the
+// renderer's armed documents. Main thread only: arming, disarming and every
+// lookup run there, and the thread check comes before any read.
+std::vector<ArmedFrame>& Frames() {
+  static base::NoDestructor<std::vector<ArmedFrame>> frames;
+  return *frames;
+}
+std::optional<NativeWatchScope>& KeptScope() {
+  static base::NoDestructor<std::optional<NativeWatchScope>> scope;
+  return *scope;
+}
+bool g_has_scope = false;
+// The frame the Console's own arm holds, or 0. Its entry has scope 0.
+std::uint64_t g_console_frame = 0;
+void (*g_kinds_changed)() = nullptr;
+// Arm's thread, the main thread; no other thread reads the table.
 std::atomic<decltype(base::PlatformThread::CurrentId().raw())> g_watch_thread{0};
+
+std::uint32_t MaskOf(const NativeWatchRules& rules) noexcept {
+  std::uint32_t mask = 0;
+  mask |= rules.request_count != 0 ? kNativeWatchRequests : 0;
+  mask |= rules.event_count != 0 ? kNativeWatchListeners : 0;
+  mask |= rules.timers ? kNativeWatchTimers : 0;
+  mask |= rules.csp ? kNativeWatchCsp : 0;
+  mask |= rules.uncaught ? kNativeWatchUncaught : 0;
+  mask |= rules.caught ? kNativeWatchCaught : 0;
+  mask |= rules.dom_count != 0 ? kNativeWatchDom : 0;
+  return mask;
+}
+
+bool OnWatchThread() noexcept {
+  return base::PlatformThread::CurrentId().raw() == g_watch_thread.load(std::memory_order_relaxed);
+}
+
+std::vector<ArmedFrame>::iterator Position(const std::uint64_t frame_id) {
+  return std::lower_bound(
+      Frames().begin(), Frames().end(), frame_id,
+      [](const ArmedFrame& armed, const std::uint64_t id) { return armed.frame_id < id; });
+}
+
+ArmedFrame* Find(const std::uint64_t frame_id) {
+  const auto at = Position(frame_id);
+  return at != Frames().end() && at->frame_id == frame_id ? &*at : nullptr;
+}
+
+void Put(const std::uint64_t frame_id,
+         const std::uint64_t generation,
+         const std::uint64_t scope,
+         const NativeWatchRules& rules) {
+  g_watch_thread.store(base::PlatformThread::CurrentId().raw(), std::memory_order_relaxed);
+  auto at = Position(frame_id);
+  if (at == Frames().end() || at->frame_id != frame_id) {
+    at = Frames().insert(at, ArmedFrame{});
+  }
+  at->frame_id = frame_id;
+  at->generation = generation;
+  at->scope = scope;
+  at->mask = MaskOf(rules);
+  at->rules = rules;
+  if (scope != 0 && g_console_frame == frame_id) {
+    g_console_frame = 0;
+  }
+}
 
 std::array<std::uint8_t, 48> Tail() noexcept {
   return {};
@@ -61,35 +125,43 @@ void PutName(std::array<std::uint8_t, 48>& tail,
 
 std::atomic<std::uint32_t> NativeDebuggerWatch::mask_{0};
 
-bool NativeDebuggerWatch::Charge() noexcept {
+bool NativeDebuggerWatch::Charge(const std::uint64_t armed_generation) noexcept {
+  const std::uint64_t generation =
+      NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
+  return (generation & 1U) == 0 && generation == armed_generation;
+}
+
+std::uint64_t NativeDebuggerWatch::ArmableGeneration() noexcept {
   NativeProbeSink& sink = NativeProbeSink::Get();
   const std::uint64_t generation = sink.config_generation_.load(std::memory_order_acquire);
-  if ((generation & 1U) != 0 || generation != g_watch.generation) {
-    return false;
+  return (generation & 1U) == 0 && sink.emitter_.load(std::memory_order_acquire) ? generation : 0;
+}
+
+const NativeWatchRules* NativeDebuggerWatch::Admitted(const std::uint64_t frame_id,
+                                                      const std::uint32_t kinds,
+                                                      std::uint64_t& generation) noexcept {
+  if (!Armed(kinds) || frame_id == 0 || !OnWatchThread()) {
+    return nullptr;
   }
-  if (g_watch.budget >= kNativeWatchBudget) {
-    if (!g_watch.budget_gap) {
-      g_watch.budget_gap = true;
-      NativeProbeEvent gap;
-      gap.header.category = NativeProbeCategory::kRuntime;
-      gap.header.type = NativeProbeType::kGap;
-      gap.header.session_id = sink.session_id_.load(std::memory_order_relaxed);
-      gap.header.monotonic_time_ns =
-          static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
-      gap.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
-      gap.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
-      gap.header.frame_id = g_watch.frame_id;
-      constexpr std::string_view kReason = "debugger_observation_budget";
-      gap.header.payload_size = static_cast<std::uint32_t>(kReason.size());
-      std::transform(kReason.begin(), kReason.end(), gap.inline_payload.begin(),
-                     [](const char c) { return static_cast<std::byte>(c); });
-      gap.header.sequence_number = sink.next_sequence_.fetch_add(1, std::memory_order_relaxed);
-      static_cast<void>(sink.EmitStatus(gap, generation));
-    }
-    return false;
+  const ArmedFrame* const armed = Find(frame_id);
+  if (!armed || (armed->mask & kinds) == 0 ||
+      NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire) !=
+          armed->generation) {
+    return nullptr;
   }
-  ++g_watch.budget;
-  return true;
+  generation = armed->generation;
+  return &armed->rules;
+}
+
+void NativeDebuggerWatch::Publish() noexcept {
+  std::uint32_t mask = 0;
+  for (const ArmedFrame& armed : Frames()) {
+    mask |= armed.mask;
+  }
+  mask_.store(mask, std::memory_order_relaxed);
+  if (g_kinds_changed) {
+    g_kinds_changed();
+  }
 }
 
 bool NativeWatchRules::AddRequest(const std::string_view url_contains,
@@ -145,48 +217,81 @@ bool NativeWatchRules::AddDom(const std::int32_t node_id,
 
 bool NativeDebuggerWatch::Arm(const std::uint64_t frame_id,
                               const NativeWatchRules& rules) noexcept {
-  NativeProbeSink& sink = NativeProbeSink::Get();
-  const std::uint64_t generation = sink.config_generation_.load(std::memory_order_acquire);
-  if (frame_id == 0 || (generation & 1U) != 0 || !sink.emitter_.load(std::memory_order_acquire)) {
-    mask_.store(0, std::memory_order_relaxed);
-    g_watch = ArmedWatch{};
+  const std::uint64_t generation = ArmableGeneration();
+  if (frame_id == 0 || generation == 0) {
     return false;
   }
-  g_watch.generation = generation;
-  g_watch.frame_id = frame_id;
-  g_watch.rules = rules;
-  g_watch.budget = 0;
-  g_watch.budget_gap = false;
-  g_watch_thread.store(base::PlatformThread::CurrentId().raw(), std::memory_order_relaxed);
-  std::uint32_t mask = 0;
-  mask |= rules.request_count != 0 ? kNativeWatchRequests : 0;
-  mask |= rules.event_count != 0 ? kNativeWatchListeners : 0;
-  mask |= rules.timers ? kNativeWatchTimers : 0;
-  mask |= rules.csp ? kNativeWatchCsp : 0;
-  mask |= rules.uncaught ? kNativeWatchUncaught : 0;
-  mask |= rules.caught ? kNativeWatchCaught : 0;
-  mask |= rules.dom_count != 0 ? kNativeWatchDom : 0;
-  mask_.store(mask, std::memory_order_relaxed);
+  if (g_console_frame != 0 && g_console_frame != frame_id) {
+    Disarm(g_console_frame);
+  }
+  Put(frame_id, generation, 0, rules);
+  g_console_frame = frame_id;
+  Publish();
   return true;
 }
 
 void NativeDebuggerWatch::Disarm(const std::uint64_t frame_id) noexcept {
-  if (g_watch.frame_id == frame_id) {
-    mask_.store(0, std::memory_order_relaxed);
-    g_watch = ArmedWatch{};
+  const auto at = Position(frame_id);
+  if (frame_id == 0 || at == Frames().end() || at->frame_id != frame_id) {
+    return;
   }
+  Frames().erase(at);
+  if (g_console_frame == frame_id) {
+    g_console_frame = 0;
+  }
+  Publish();
 }
 
 bool NativeDebuggerWatch::Wants(const std::uint64_t frame_id, const std::uint32_t kinds) noexcept {
-  if (!Armed(kinds) || frame_id == 0 ||
-      base::PlatformThread::CurrentId().raw() != g_watch_thread.load(std::memory_order_relaxed) ||
-      frame_id != g_watch.frame_id) {
+  std::uint64_t generation = 0;
+  return Admitted(frame_id, kinds, generation) != nullptr;
+}
+
+void NativeDebuggerWatch::SetScope(std::optional<NativeWatchScope> scope) {
+  if (scope && (scope->serial == 0 || scope->rules.dom_count != 0 || MaskOf(scope->rules) == 0)) {
+    scope.reset();
+  }
+  std::optional<NativeWatchScope>& kept = KeptScope();
+  const bool same =
+      kept && scope && kept->origin == scope->origin && kept->top_frame == scope->top_frame;
+  if (same) {
+    for (ArmedFrame& armed : Frames()) {
+      if (armed.scope != 0) {
+        armed.scope = scope->serial;
+        armed.mask = MaskOf(scope->rules);
+        armed.rules = scope->rules;
+      }
+    }
+  } else {
+    std::erase_if(Frames(), [](const ArmedFrame& armed) { return armed.scope != 0; });
+  }
+  kept = std::move(scope);
+  g_has_scope = kept.has_value();
+  Publish();
+}
+
+bool NativeDebuggerWatch::HasScope() noexcept {
+  return g_has_scope;
+}
+
+bool NativeDebuggerWatch::ArmScope(const std::uint64_t frame_id,
+                                   const std::string_view origin,
+                                   const bool top_frame) {
+  const std::optional<NativeWatchScope>& kept = KeptScope();
+  if (!kept || frame_id == 0 || kept->top_frame != top_frame || kept->origin != origin) {
     return false;
   }
-  const std::uint64_t generation =
-      NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
-  return generation == g_watch.generation &&
-         (g_watch.budget < kNativeWatchBudget || !g_watch.budget_gap);
+  const std::uint64_t generation = ArmableGeneration();
+  if (generation == 0) {
+    return false;
+  }
+  Put(frame_id, generation, kept->serial, kept->rules);
+  Publish();
+  return true;
+}
+
+void NativeDebuggerWatch::SetKindsChanged(void (*changed)()) noexcept {
+  g_kinds_changed = changed;
 }
 
 void NativeDebuggerWatch::Request(const std::int32_t request_id,
@@ -195,11 +300,13 @@ void NativeDebuggerWatch::Request(const std::int32_t request_id,
                                   const std::string_view url) noexcept {
   const std::uint64_t frame_id =
       Armed(kNativeWatchRequests) ? NativeRequestStackWalk::RequestFrameId() : 0;
-  if (!Wants(frame_id, kNativeWatchRequests)) {
+  std::uint64_t generation = 0;
+  const NativeWatchRules* const rules = Admitted(frame_id, kNativeWatchRequests, generation);
+  if (!rules) {
     return;
   }
-  for (std::size_t slot = 0; slot < g_watch.rules.request_count; ++slot) {
-    const NativeWatchRequestRule& rule = g_watch.rules.requests[slot];
+  for (std::size_t slot = 0; slot < rules->request_count; ++slot) {
+    const NativeWatchRequestRule& rule = rules->requests[slot];
     const std::string_view want(rule.url.data(), rule.url_length);
     if (url.find(want) == std::string_view::npos) {
       continue;
@@ -208,7 +315,7 @@ void NativeDebuggerWatch::Request(const std::int32_t request_id,
     if (rule.method_length != 0 && method != want_method) {
       continue;
     }
-    if (!Charge()) {
+    if (!Charge(generation)) {
       return;
     }
     std::array<std::uint8_t, 48> tail = Tail();
@@ -225,18 +332,20 @@ void NativeDebuggerWatch::Listener(const std::uint64_t frame_id,
                                    const std::uint8_t target_kind,
                                    const std::uint16_t node_type,
                                    const NativeStackFrame& listener) noexcept {
-  if (!Wants(frame_id, kNativeWatchListeners)) {
+  std::uint64_t generation = 0;
+  const NativeWatchRules* const armed = Admitted(frame_id, kNativeWatchListeners, generation);
+  if (!armed) {
     return;
   }
-  std::size_t slot = g_watch.rules.event_count;
-  for (std::size_t i = 0; i < g_watch.rules.event_count; ++i) {
-    if (std::string_view(g_watch.rules.events[i].data(), g_watch.rules.event_lengths[i]) ==
-        event_type) {
+  const NativeWatchRules& rules = *armed;
+  std::size_t slot = rules.event_count;
+  for (std::size_t i = 0; i < rules.event_count; ++i) {
+    if (std::string_view(rules.events[i].data(), rules.event_lengths[i]) == event_type) {
       slot = i;
       break;
     }
   }
-  if (slot == g_watch.rules.event_count || target_kind < 1 || target_kind > 5 || !Charge()) {
+  if (slot == rules.event_count || target_kind < 1 || target_kind > 5 || !Charge(generation)) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
@@ -256,7 +365,8 @@ void NativeDebuggerWatch::Timer(const std::uint64_t frame_id,
                                 const std::uint32_t timer_id,
                                 const std::uint32_t delay_ms,
                                 const NativeStackFrame& callback) noexcept {
-  if (!Wants(frame_id, kNativeWatchTimers) || !Charge()) {
+  std::uint64_t generation = 0;
+  if (!Admitted(frame_id, kNativeWatchTimers, generation) || !Charge(generation)) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
@@ -277,7 +387,8 @@ void NativeDebuggerWatch::Csp(const std::uint64_t frame_id,
                               const std::string_view host) noexcept {
   const bool ascii =
       std::all_of(host.begin(), host.end(), [](const char c) { return c > 0x20 && c < 0x7f; });
-  if (!Wants(frame_id, kNativeWatchCsp) || !Charge()) {
+  std::uint64_t generation = 0;
+  if (!Admitted(frame_id, kNativeWatchCsp, generation) || !Charge(generation)) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
@@ -293,8 +404,12 @@ void NativeDebuggerWatch::Csp(const std::uint64_t frame_id,
 void NativeDebuggerWatch::Exception(const std::uint64_t frame_id,
                                     const std::uint8_t kind,
                                     const NativeStackFrame& site) noexcept {
-  if (kind < 1 || kind > 3 ||
-      !Wants(frame_id, kind == 2 ? kNativeWatchCaught : kNativeWatchUncaught) || !Charge()) {
+  if (kind < 1 || kind > 3) {
+    return;
+  }
+  std::uint64_t generation = 0;
+  if (!Admitted(frame_id, kind == 2 ? kNativeWatchCaught : kNativeWatchUncaught, generation) ||
+      !Charge(generation)) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();
@@ -305,12 +420,13 @@ void NativeDebuggerWatch::Exception(const std::uint64_t frame_id,
 }
 
 int NativeDebuggerWatch::DomSlot(const std::int32_t node_id, const std::uint8_t kind) noexcept {
-  if (!Armed(kNativeWatchDom) || node_id <= 0 ||
-      base::PlatformThread::CurrentId().raw() != g_watch_thread.load(std::memory_order_relaxed)) {
+  // Only the Console's own arm holds DOM rules: a node id names one document.
+  if (!Armed(kNativeWatchDom) || node_id <= 0 || !OnWatchThread() || g_console_frame == 0) {
     return -1;
   }
-  for (std::size_t i = 0; i < g_watch.rules.dom_count; ++i) {
-    const NativeWatchDomNode& node = g_watch.rules.dom[i];
+  const ArmedFrame* const console = Find(g_console_frame);
+  for (std::size_t i = 0; console && i < console->rules.dom_count; ++i) {
+    const NativeWatchDomNode& node = console->rules.dom[i];
     const bool wanted = (kind == kNativeWatchAttribute && node.attributes) ||
                         (kind == kNativeWatchSubtree && node.subtree) ||
                         (kind == kNativeWatchRemoval && node.removal);
@@ -326,14 +442,15 @@ void NativeDebuggerWatch::Mutation(const std::uint64_t frame_id,
                                    const int slot,
                                    const std::uint16_t node_type,
                                    const std::string_view attribute) noexcept {
-  if (!Wants(frame_id, kNativeWatchDom) || slot < 0 ||
-      static_cast<std::size_t>(slot) >= g_watch.rules.dom_count ||
-      DomSlot(g_watch.rules.dom[static_cast<std::size_t>(slot)].node_id, kind) != slot) {
+  std::uint64_t generation = 0;
+  const NativeWatchRules* const rules = Admitted(frame_id, kNativeWatchDom, generation);
+  if (!rules || slot < 0 || static_cast<std::size_t>(slot) >= rules->dom_count ||
+      DomSlot(rules->dom[static_cast<std::size_t>(slot)].node_id, kind) != slot) {
     return;
   }
   const bool ascii = std::all_of(attribute.begin(), attribute.end(),
                                  [](const char c) { return c > 0x20 && c < 0x7f; });
-  if ((kind == kNativeWatchAttribute && (attribute.empty() || !ascii)) || !Charge()) {
+  if ((kind == kNativeWatchAttribute && (attribute.empty() || !ascii)) || !Charge(generation)) {
     return;
   }
   std::array<std::uint8_t, 48> tail = Tail();

@@ -49,18 +49,18 @@ it.
   snapshots that the recipe names. Recipes are evidence inputs, not proof of
   guest semantics. Guest capture is native only; no debugger protocol is used.
   Native JavaScript dispatch-site capture is a separate opt-in: it needs a
-  rebuilt browser and a researcher-supplied site file, observes at most 8
-  sites, and records only selector kinds and integer low bits, V8 script IDs,
-  source positions and the armed site's source digest, never argument,
-  receiver or string contents.
+  rebuilt browser and a researcher-supplied site file, observes up to 256
+  sites and every dispatch of them, and records only selector kinds and
+  integer low bits, V8 script IDs, source positions and the armed site's
+  source digest, never argument, receiver or string contents.
   Native JavaScript invocation identity is a separate opt-in with the same
   rebuilt-browser and site-file requirements (`REB_NATIVE_JS_INVOCATION_SITES`,
-  at most 8 functions). It records, per admitted call (at most 256 per
-  configuration), argument kinds and integer low bits, the result's kind and
-  length, the frame and a digest of the document token, and which Wasm
-  records and loader requests ran inside the call. It never records argument,
+  up to 256 functions). It records, for every call of a tracked function,
+  argument kinds and integer low bits, the result's kind and length, the
+  frame and a digest of the document token, and which Wasm records and
+  loader requests ran inside the call. It never records argument,
   receiver, return or exception contents. Captures the packaged app starts arm
-  its saved site set (at most 8 functions, saved from Sources with **Track
+  its saved site set (up to 256 functions, saved from Sources with **Track
   calls**), which the start panel lists and the titlebar names while the
   session runs. Saving a site changes nothing in the open page or the running
   capture; tracking starts with the next capture. Each saved site keeps its
@@ -77,8 +77,8 @@ it.
   script navigation, and of the stack that scheduled each async task it came
   from, including the stack that posted a message to a port, a broadcast
   channel or a worker, never names or values. `REB_NATIVE_PROMISE_STACKS=1`,
-  off by default everywhere, also records the stack of each promise
-  registration. Content capture sessions also retain the source of
+  on with request stacks in the packaged app and off by default in
+  `make live`, also records the stack of each promise registration. Content capture sessions also retain the source of
   each script a stack names as an artifact; metadata-only sessions do not.
   Agent-started sessions record them only when the start names
   `request_stacks`.
@@ -161,10 +161,10 @@ it.
   and is still recorded as one row: its host, status, decoded size, Blink
   resource type, frame and the ID of the renderer request that loaded it
   always, and its path and query only in content
-  capture and only as a 116-byte prefix, which for a `data:` URL is the start
-  of the data itself. At most 4,096 are recorded per renderer configuration;
-  the rest, and those in pages that are not ordinary, such as an SVG image's
-  own document, are counted
+  capture: an http(s) path and query whole, the part past a 116-byte prefix as
+  the row's `request_target` artifact, and a `data:` URL only as its first 116
+  bytes, the start of the data itself. Every reuse is recorded; those in pages
+  that are not ordinary, such as an SVG image's own document, are counted
   ([Native network v3](protocol/native-network-v3.md#memory-cache-reuse)).
 - Browser-internal pages (WebUI, DevTools) and extension background workers are
   counted, not recorded. `REB_CAPTURE_BROWSER_INTERNAL=1` and

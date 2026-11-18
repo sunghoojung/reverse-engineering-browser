@@ -1242,7 +1242,8 @@ int main() {
   auto start = [&] { sink.RecordRequestStarted(17, 9, 42, 3, 5, 11, 12, request); };
   start();
   assert(events.empty() && base::test_clock_reads == 0);
-  assert(!sink.IsEnabled() && base::test_clock_reads == 0);
+  assert(!sink.IsEnabled() && !reb::NativeNetworkCaptureSink::IsArmed() &&
+         base::test_clock_reads == 0);
   content::BrowserContext owned(base::FilePath("/owned/Default"), false);
   content::BrowserContext other(base::FilePath("/other/Default"), false);
   content::BrowserContext system(base::FilePath("/owned/System Profile"), false);
@@ -1254,9 +1255,10 @@ int main() {
   assert(!sink.IsOwnedContext(nullptr));
   const auto mask = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork);
   sink.SetEmitter(Emit, 22, mask, 200);
+  assert(reb::NativeNetworkCaptureSink::IsArmed());
   reb::NativeNetworkLifecycle active(sink.generation());
   reb::NativeNetworkLifecycle disabled;
-  assert(!disabled.IsCurrent(sink.generation()));
+  assert(active.Open() && !disabled.Open() && !disabled.IsCurrent(sink.generation()));
   start();
   const auto* started = &Last(reb::NativeProbeType::kRequestStarted);
   assert(started->header.session_id == 22 && started->header.request_id == 17);
@@ -1293,7 +1295,8 @@ int main() {
     sink.RecordRequestCompleted(17, 9, 42, 3, 5, 11, 12, status, "proxy_destroyed");
   assert(Payload(events.back()) == "proxy_destroyed" && events.back().header.error_code == -3);
   assert(events.back().header.type == reb::NativeProbeType::kRequestFailed);
-  assert(!active.Finish(sink.generation()) && !active.IsCurrent(sink.generation()));
+  assert(!active.Open() && !active.Finish(sink.generation()) &&
+         !active.IsCurrent(sink.generation()));
   reb::NativeNetworkLifecycle old(sink.generation());
   sink.SetEmitter(Emit, 22, mask, 200);
   assert(!old.IsCurrent(sink.generation()) && !old.Finish(sink.generation()));

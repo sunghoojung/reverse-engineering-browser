@@ -97,14 +97,14 @@ enum LiveSessionFailureChecks {
     }
     let names = [
       "REB_CAPTURE_CANVAS_IMAGES", "REB_CAPTURE_REQUEST_CONTENT", "REB_NATIVE_WASM_DISPATCH",
-      "REB_NATIVE_WASM_CALL_INDIRECT", "REB_NATIVE_REQUEST_STACKS",
+      "REB_NATIVE_WASM_CALL_INDIRECT", "REB_NATIVE_REQUEST_STACKS", "REB_NATIVE_PROMISE_STACKS",
     ]
     let defaultCases: [(String?, Bool, [String])] = [
-      (nil, true, ["1", "1", "1", "1", "1"]), (nil, false, ["0", "0", "1", "1", "1"]),
-      ("0x500", true, ["0", "1", "0", "0", "1"]), ("0x300", true, ["0", "0", "0", "0", "0"]),
-      ("768", true, ["0", "0", "0", "0", "0"]), ("1025", true, ["1", "0", "0", "0", "0"]),
-      ("0x7ff", true, ["1", "1", "1", "1", "1"]), ("0xzz", true, ["0", "0", "0", "0", "0"]),
-      (" 4095", true, ["0", "0", "0", "0", "0"]),
+      (nil, true, ["1", "1", "1", "1", "1", "1"]), (nil, false, ["0", "0", "1", "1", "1", "1"]),
+      ("0x500", true, ["0", "1", "0", "0", "1", "1"]), ("0x300", true, ["0", "0", "0", "0", "0", "0"]),
+      ("768", true, ["0", "0", "0", "0", "0", "0"]), ("1025", true, ["1", "0", "0", "0", "0", "0"]),
+      ("0x7ff", true, ["1", "1", "1", "1", "1", "1"]), ("0xzz", true, ["0", "0", "0", "0", "0", "0"]),
+      (" 4095", true, ["0", "0", "0", "0", "0", "0"]),
     ]
     for (mask, content, expected) in defaultCases {
       let environment = defaults(mask, content)
@@ -115,6 +115,9 @@ enum LiveSessionFailureChecks {
     let explicit = launch(
       ["REB_CAPTURE_CATEGORY_MASK": "256", "REB_CAPTURE_REQUEST_CONTENT": "1", "REB_NATIVE_WASM_DISPATCH": "0"], content: true)
     precondition(explicit["REB_CAPTURE_REQUEST_CONTENT"] == "1" && explicit["REB_NATIVE_WASM_DISPATCH"] == "0", "explicit values")
+    // An explicit promise stacks choice wins; explicit request stacks leave it to the launcher's default.
+    precondition(launch(["REB_NATIVE_PROMISE_STACKS": "0"], content: true)["REB_NATIVE_PROMISE_STACKS"] == "0", "explicit promise stacks")
+    precondition(launch(["REB_NATIVE_REQUEST_STACKS": "0"], content: true)["REB_NATIVE_PROMISE_STACKS"] == nil, "promise stacks follow request stacks")
     print("PASS native live category mask: the launcher's decimal and 0x grammar, content defaults only where the mask allows, no 4095 fallback for unreadable text")
 
     // Content is the default for app-started captures. Metadata is the opt-out,

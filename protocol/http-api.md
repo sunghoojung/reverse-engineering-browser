@@ -629,7 +629,12 @@ state lasts until `stop` or the next `connect_live`. A command for any other
 `status: stale_target`, `code: target_unavailable` and text that names the next
 step, and nothing is sent to the browser. A second `connect_live` while one is
 open, a stale `session_id` and a stale `binding_id` are 409 refusals that say
-what to read or send next. Document-start rules for a child frame name that
+what to read or send next. A command runs until it returns, with no execution
+budget, and its request waits that long; a client that stops waiting leaves it
+running. Meanwhile `get_native_console` answers at once with `command`, other
+actions are 409 refusals, and `interrupt` (`session_id`) stops it: the command
+answers `status: stopped`, `code: cancelled`, and keeps the changes it already
+made. Document-start rules for a child frame name that
 frame's exact origin with `frame: child`; see
 [Native Console v3](native-console-v3.md).
 
@@ -663,7 +668,7 @@ plain message:
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
-| `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
+| `memory_cache_reuse_not_recorded` | Renderers from an earlier build counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Current renderers record every reuse, so it appears only for such evidence. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
 | `response_bodies_not_observed` | `count` responses never reached the browser proxy, so their bodies are not retained under their own request: the message counts those a service worker served, those reused from the memory cache and those answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, where those were retained. |
 | `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: their snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
@@ -710,7 +715,7 @@ read mid-store never revalidates as the complete one.
 
 ## Saved JavaScript invocation sites
 
-The Origin Trace app keeps one saved set of at most 8
+The Origin Trace app keeps one saved set of at most 256
 [native JavaScript invocation sites](native-js-invocation-v1.md#site-file)
 and arms it in the next capture it starts. These routes name, save and list
 those sites; none of them changes the open page or a running capture.
@@ -1172,7 +1177,7 @@ include `js_invocation` beside the hex `payload`, decoded with the rules of
 
 | `kind` | Fields |
 | --- | --- |
-| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index`, `sample_index`, `document_id` |
+| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index` (the call's ordinal among its site's calls; a version 1 record's budget index), `sample_index` (null for version 2), `document_id` |
 | `settle` | `site_slot`, `invocation_id`, `fulfilled`, `via` (`sync_return`, `sync_throw` or `promise`), `value_kind`, `value_length`, `digest_state` (`not_requested`, `present`, `not_digestible`, `too_large` or `unavailable`), `document_id` |
 | `request` | `inside`, `invocation_id` (0 exactly when `inside` is false), `request_id` |
 

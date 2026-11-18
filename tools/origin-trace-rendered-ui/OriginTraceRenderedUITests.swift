@@ -4881,8 +4881,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
         (() => { const note = document.querySelector('#debugger-sidebar .debugger-watch-limits');
           note.scrollIntoView({block: 'center'}); return note.innerText; })()
         """) as? String ?? ""
-      for said in ["only this document's main thread", "workers, other frames or same-process iframes", "navigation clears the rules",
-                   "cannot be armed ahead of a page load"] {
+      for said in ["main thread of the documents it is armed on", "never workers or other documents", "navigation clears its rules",
+                   "not documents that are already open"] {
         XCTAssertTrue(limits.contains(said), "\(size.name): the form says \(said): \(limits)")
       }
       try await assertLayout(ui, "#debugger-sidebar", "\(size.name) watch limits")

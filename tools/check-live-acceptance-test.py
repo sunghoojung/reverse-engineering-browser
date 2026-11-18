@@ -773,6 +773,12 @@ class Evidence(unittest.TestCase):
         self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, "captured"], "captured"))
         self.assertTrue(budget.ordered(["captured"], "captured"))
         self.assertTrue(budget.ordered(["captured", "malformed", budget.BUDGET_CASE], "captured"))
+        refused = (budget.TRANSFER_REFUSED,)
+        self.assertEqual(budget.ordered(["captured", budget.TRANSFER_REFUSED, "captured", budget.BUDGET_CASE],
+                                        "captured", refused), [])
+        self.assertTrue(budget.ordered(["captured", budget.TRANSFER_REFUSED, budget.BUDGET_CASE], "captured"))
+        self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, budget.TRANSFER_REFUSED],
+                                       "captured", refused))
         for index in range(budget.RESPONSES):
             row = self.build.row(f"/budget/response?i={index}")
             if index < 7:
@@ -784,16 +790,25 @@ class Evidence(unittest.TestCase):
             data = f"reb-post-{index}-".encode() + b"p" * 400
             connection.request("POST", "/budget/post", body=data)
             connection.getresponse().read()
-            self.build.request_body(self.build.row("/budget/post", "POST"), 4 if index < 2000 else 10, data)
+            # Two bodies the artifact queue refused before the budget ran out.
+            state = 8 if index in (100, 101) else 4 if index < 2000 else 10
+            self.build.request_body(self.build.row("/budget/post", "POST"), state, data)
         connection.close()
         self.backend.summary = {"checks": [
             {"code": "request_content_not_retained", "category": category, "reason": budget.BUDGET_CASE,
              "budget_mib": 1, "retained_bytes": "1000000", "count": "3"}
-            for category in ("response_body", "request_body")]}
+            for category in ("response_body", "request_body")] + [
+            {"code": "request_content_not_retained", "category": "request_body",
+             "reason": budget.TRANSFER_REFUSED, "count": "2"}]}
         budget.verify(self.run_)
-        self.assertEqual(self.statuses(), {"response budget shown when it runs out": "PASS",
-                                           f"{budget.POSTS} small POSTs until the request budget runs out": "PASS"},
+        posts = f"{budget.POSTS} small POSTs until the request budget runs out"
+        self.assertEqual(self.statuses(), {"response budget shown when it runs out": "PASS", posts: "PASS"},
                          self.report.lines)
+        # A refusal the summary does not count was lost from view.
+        self.backend.summary["checks"][-1]["count"] = "1"
+        self.report.lines.clear()
+        budget.verify(self.run_)
+        self.assertEqual(self.statuses()[posts], "FAIL", self.report.lines)
 
     def test_tabs_unresolved_fails_and_nothing_passes_without_rows(self):
         self.backend.summary = {"checks": [], "request_tabs": {"unresolved": "2", "unresolved_reasons": {"worker": "2"}}}
@@ -866,14 +881,89 @@ class Evidence(unittest.TestCase):
             "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src", "blocked_host": "localhost"}}},
         }
         debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+        self.keep(debugger.STATE)
         debugger.verify(self.run_)
         self.assertEqual(set(self.statuses().values()), {"PASS"}, self.report.lines)
-        self.assertEqual(len(self.report.lines), 3)
+        self.assertEqual(len(self.report.lines), 6)
         self.report.lines.clear()
         debugger.STATE = debugger.State()
         debugger.STATE.error = "get_native_console never listed the page"
         debugger.verify(self.run_)
         self.assertEqual(self.statuses(), {"arm a watch": "FAIL"})
+
+    def keep(self, state):
+        """Kept-rule evidence that matches the kept page."""
+        state.kept_reply = {"origin": self.fx.origin, "frame": "top"}
+        state.kept_state = {"session_id": "5", "target_id": "22", "origin": self.fx.origin, "frame": "top",
+                            "rules": {"requests": [{"url_contains": "/api/kept"}], "events": ["click"]}}
+        state.kept_records = [
+            ("request_watch_match", frame(0, "/debugger/kept.html?n=1",
+                                          line_of(debugger.KEPT_PAGE, "fetch('/api/kept"))["resolution"]),
+            ("listener_dispatch", frame(0, "/debugger/kept.html?n=1",
+                                        line_of(debugger.KEPT_PAGE, "function onKeptClick"))["resolution"])]
+        state.cleared_state = None
+        state.after_clear = []
+
+    def test_debugger_kept_rules_fail_on_each_difference(self):
+        page = debugger.index_page(self.fx.cross_site_origin)
+        cases = {
+            "keep the rules for later documents of the origin": [
+                lambda s: setattr(s, "kept_reply", None),
+                lambda s: setattr(s, "kept_reply", {"origin": self.fx.origin, "frame": "child"}),
+                lambda s: s.kept_state["rules"].update(dom=[{"element": 1}]),
+                lambda s: setattr(s, "kept_error", "watch with keep was not armed")],
+            "kept rules arm a new tab's document before its own scripts": [
+                lambda s: s.kept_records.pop(0),
+                lambda s: s.kept_records.append(("request_watch_match", frame(
+                    0, "/debugger/kept-child.html", line_of(debugger.KEPT_CHILD, "fetch('/api/kept"))["resolution"])),
+                lambda s: s.kept_records.append(("listener_dispatch", {"status": "unresolved",
+                                                                       "reason": "source_artifact_missing"})),
+                lambda s: s.kept_records.append(s.kept_records[0][:1] + ({**s.kept_records[0][1], "line": 1},))],
+            "unwatch forgets the kept rules": [
+                lambda s: setattr(s, "cleared_state", {"origin": self.fx.origin, "frame": "top"}),
+                lambda s: setattr(s, "cleared_state", "not read"),
+                lambda s: s.after_clear.append({"type": "listener_dispatch"})],
+        }
+        for case, changes in cases.items():
+            for change in changes:
+                self.report.lines.clear()
+                debugger.STATE = debugger.State()
+                debugger.STATE.observed = {
+                    "request_watch_match": {"debugger_observation": {"status": "decoded"}},
+                    "listener_dispatch": {"debugger_observation": {"detail": {"event_type": "click"}, "site": {
+                        "resolution": {"status": "resolved", "line": line_of(page, "function onWatchedClick")}}}},
+                    "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src",
+                                                                          "blocked_host": "localhost"}}},
+                }
+                debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+                self.keep(debugger.STATE)
+                change(debugger.STATE)
+                debugger.verify(self.run_)
+                failed = {name for name, status in self.statuses().items() if status != "PASS"}
+                self.assertEqual(failed, {case}, self.report.lines)
+
+    def test_kept_pages_trigger_their_rules_from_the_first_script(self):
+        for name, text in (("/debugger/kept.html", debugger.KEPT_PAGE),
+                           ("/debugger/kept-child.html", debugger.KEPT_CHILD)):
+            status, _, body = self.get(name)
+            self.assertEqual((status, body.decode()), (200, text))
+            first = text.index("<script>\n")
+            self.assertLess(first, text.index(".click();"))
+            self.assertLess(first, text.index("fetch('/api/kept"))
+        self.assertIn('<iframe src="/debugger/kept-child.html">', debugger.KEPT_PAGE)
+
+    def test_debugger_settle_waits_only_for_a_pending_source(self):
+        waiting = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_artifact_missing"}}]}
+        resolved = {"frames": [{"resolution": {"status": "resolved", "line": 14}}]}
+        reads = iter([waiting, waiting, resolved])
+        self.assertIs(debugger.settle(lambda: next(reads), debugger.top_frame, 5, 0), resolved)
+        never = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_not_retained"}}]}
+        calls = []
+        self.assertIs(debugger.settle(lambda: calls.append(1) or never, debugger.top_frame, 5, 0), never)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(debugger.settle(lambda: waiting, debugger.top_frame, 0, 0), waiting)
+        site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
+        self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
 
     def test_report_never_passes_a_manual_or_skipped_case(self):
         report = Report("x")

@@ -1,7 +1,7 @@
 (() => {
   const root = document.querySelector('#native-console-panel');
   const element = name => document.querySelector(`#native-console-${name}`);
-  const controls = Object.fromEntries(['url', 'start', 'stop', 'notice', 'target', 'refresh', 'clear', 'output', 'scroll', 'connection', 'form', 'source', 'run', 'filter', 'level', 'mode', 'live-consent'].map(name => [name, element(name)]));
+  const controls = Object.fromEntries(['url', 'start', 'stop', 'notice', 'target', 'refresh', 'clear', 'output', 'scroll', 'connection', 'form', 'source', 'run', 'interrupt', 'filter', 'level', 'mode', 'live-consent'].map(name => [name, element(name)]));
   const toggle = element('toggle');
   const encoder = new TextEncoder();
   const history = [];
@@ -14,6 +14,20 @@
   let outputBytes = 0, outputNodes = 0, removed = 0, partialTargets = false, outputGeneration = 0;
   let queue = Promise.resolve(), generation = 0, pollRunning = false;
   let checking = false, submitting = false, commandNumber = 0, unread = 0;
+  // A command runs in the page until it returns; Stop ends it there.
+  let commandsRunning = 0, stopping = false;
+  // One command record carries at most 64 MiB, its JSON escapes included.
+  const commandLimit = 64 * 1024 * 1024;
+  // The transcript and its search show a command's opening; history keeps it whole.
+  const commandPreview = 4096;
+  const previewCommand = source => source.length > commandPreview ? source.slice(0, commandPreview) : source;
+  let sizedSource = '', sourceBytes = 0;
+  const sourceSize = () => {
+    const value = controls.source.value;
+    if (value !== sizedSource) { sizedSource = value; sourceBytes = encoder.encode(value).length; }
+    return sourceBytes;
+  };
+  const formatBytes = n => n < 1024 ? `${n} bytes` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
   const numberId = value => typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value) && BigInt(value) <= 18446744073709551615n;
   const documentStartActions = ['arm_document_start', 'clear_document_start'];
   const validState = (value, version = 2) => value?.contract_version === version && ['ready', 'idle'].includes(value.state) &&
@@ -47,8 +61,12 @@
     controls.source.disabled = disconnected || !session || !selectedDocument();
     controls.run.disabled = !!busy || controls.source.disabled || !controls.source.value.trim();
     controls.run.textContent = submitting ? 'Running…' : 'Run';
+    const commandRunning = commandsRunning > 0 && !!session;
+    if (!commandRunning && document.activeElement === controls.interrupt) controls.source.focus();
+    controls.run.hidden = commandRunning; controls.interrupt.hidden = !commandRunning;
+    controls.interrupt.disabled = stopping; controls.interrupt.textContent = stopping ? 'Stopping…' : 'Stop';
     const liveNotice = 'These documents come from the live capture. Select one, explicitly authorize mutation, then connect. Commands can change that captured page. This console cannot set breakpoints, step, or inspect paused frames.';
-    element('composer-status').textContent = submitting ? 'Running · next draft stays editable' : disconnected ? 'Connection lost · refresh documents to recover' : !session ? (live ? (controls.target.value ? 'Connect to evaluate in the selected live document' : 'Select a live capture document') : 'Connect a disposable browser to begin') : !controls.target.value ? 'Select the document to execute in' : `Document ${controls.target.value} · ${encoder.encode(controls.source.value).length} / 8192 bytes`;
+    element('composer-status').textContent = commandRunning ? (stopping ? 'Stopping · changes already made stay' : 'Running until it returns · Stop ends it · next draft stays editable') : submitting ? 'Running · next draft stays editable' : disconnected ? 'Connection lost · refresh documents to recover' : !session ? (live ? (controls.target.value ? 'Connect to evaluate in the selected live document' : 'Select a live capture document') : 'Connect a disposable browser to begin') : !controls.target.value ? 'Select the document to execute in' : `Document ${controls.target.value} · ${formatBytes(sourceSize())}`;
     const emptyTitle = element('empty-title'), emptyText = element('empty-text'), emptyAction = element('empty-action');
     emptyTitle.textContent = checking ? 'Checking native Console' : disconnected ? 'Connection interrupted' : !available && initialized && !live ? 'Native Console unavailable' : !session ? (live ? (controls.target.value ? 'Connect to the live capture' : 'Select a live capture document') : 'Connect a disposable browser') : !controls.target.value ? 'Choose an execution document' : 'Ready for your first command';
     emptyText.textContent = disconnected ? 'Your output and draft are preserved. Refresh the document list before continuing; commands are never retried.' : !available && initialized && !live ? 'A rebuilt custom Brave and live backend are required. Check availability after they are ready.' : !session ? (live ? liveNotice : 'Enter an authorized page in Session settings. Commands run in a separate disposable profile.') : !controls.target.value ? 'Select a document above. If the page just opened or navigated, refresh the document list.' : 'Enter an expression below. Expand returned objects to inspect bounded native properties; getters remain unevaluated.';
@@ -145,7 +163,7 @@
           return null;
         }
         if (!quiet && !stop) { ++pending; counted = true; renderControls(); }
-        const value = await request(action, fields, identity);
+        const value = await (action === 'runtime' ? running(() => request(action, fields, identity), quiet) : request(action, fields, identity));
         if (!stop && epoch !== generation) return null;
         disconnected = false; return apply ? apply(value) : value;
       } catch (error) {
@@ -155,6 +173,29 @@
     };
     const result = queue.then(execute); queue = result.catch(() => {}); return result;
   }
+  // Stop shows at once for an explicit command, and for a background one
+  // (completion, polling) only once it is slow, so routine requests never
+  // flash it.
+  async function running(send, quiet) {
+    let shown = false;
+    const show = () => { shown = true; ++commandsRunning; renderControls(); };
+    const slow = quiet ? setTimeout(show, 1000) : (show(), null);
+    try { return await send(); }
+    finally {
+      clearTimeout(slow);
+      if (shown) { if (!--commandsRunning) stopping = false; renderControls(); }
+    }
+  }
+  // Bypasses the queue, which the running command holds.
+  controls.interrupt.addEventListener('click', async () => {
+    if (!session || stopping || !commandsRunning) return;
+    stopping = true; renderControls();
+    try {
+      const value = await request('interrupt', {}, session);
+      if (value.command !== 'stopping') { stopping = false; notice('The command had already returned. Nothing was stopped.'); }
+    } catch (error) { stopping = false; notice(`${error.message}. Stop was not retried.`, true); }
+    renderControls();
+  });
   function runtime(command, target = controls.target.value, quiet = false, identity = session, epoch = generation) {
     if (epoch !== generation) return Promise.resolve({status: 'error', text: 'This value belongs to an earlier document selection. Run a new command to inspect a current value.'});
     if (identity !== session) return Promise.resolve({status: 'error', text: 'This value belongs to a disconnected console session.'});
@@ -396,7 +437,7 @@
   }
   function result(value, source, scope) {
     const row = document.createElement('article'); row.className = 'native-console-result'; row.dataset.status = value.status; row.dataset.requestId = value.request_id || '';
-    row.dataset.level = value.status === 'ok' ? 'result' : 'error'; row.dataset.command = source; row.dataset.commandId = scope.command; row.dataset.commandNumber = scope.command; row.dataset.consoleSession = scope.session; row.dataset.consoleDocument = scope.target;
+    row.dataset.level = value.status === 'ok' ? 'result' : 'error'; row.dataset.command = previewCommand(source); row.dataset.commandId = scope.command; row.dataset.commandNumber = scope.command; row.dataset.consoleSession = scope.session; row.dataset.consoleDocument = scope.target;
     row.setAttribute('aria-label', `Result for command ${scope.command}: ${value.status}`);
     const output = document.createElement('div'); output.className = 'native-console-value';
     row.append(output);
@@ -501,24 +542,23 @@
       }
       const output = view?.document_start?.output;
       const pendingProcesses = view?.document_start?.pending_renderer_processes;
-      // A refused renderer never receives a set, so it is named on its own
-      // rather than folded into a count that reads as "not ready yet".
-      const refusedProcesses = view?.document_start?.refused_renderer_processes;
       ds('counters').textContent = !output ? '' :
-        `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}${refusedProcesses ? ` · ${refusedProcesses} renderer processes over the 64-process limit never receive a set` : ''}`;
+        `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}`;
     }
     function reset() {
       view = null; cursor = '0'; failed = false; lastGeneration = null;
       ds('consent').checked = false; message(''); render();
     }
     function check(records) {
-      if (!Array.isArray(records) || records.length > 32) throw new TypeError('Malformed document-start output');
+      // A read returns every retained record after the cursor that fits one
+      // reply, so there is no count to check, only each record's shape.
+      if (!Array.isArray(records)) throw new TypeError('Malformed document-start output');
       for (const record of records) {
         if (!record || !sequence(record.sequence) || record.provenance !== 'console-document-start-script' ||
             !['injected', 'report', 'script_error', 'refused'].includes(record.record) ||
             !numberId(record.script_id) || !sequence(record.document_id) || !sequence(record.frame_id) ||
             typeof record.top_frame !== 'boolean' || typeof record.truncated !== 'boolean' ||
-            typeof record.text !== 'string' || encoder.encode(record.text).length > 2048 ||
+            typeof record.text !== 'string' || encoder.encode(record.text).length > 8192 ||
             typeof record.time !== 'number' || !Number.isFinite(record.time) || Math.abs(record.time) > 8640000000000000) {
           throw new TypeError('Malformed document-start record');
         }
@@ -555,7 +595,7 @@
         throw new TypeError('Malformed document-start state');
       }
       const next = value.document_start;
-      if (!Array.isArray(next.scripts) || next.scripts.length > 4) throw new TypeError('Malformed armed set');
+      if (!Array.isArray(next.scripts)) throw new TypeError('Malformed armed set');
       for (const script of next.scripts) {
         if (!numberId(script?.script_id) || typeof script.rule?.origin !== 'string' ||
             !['top', 'child'].includes(script.rule.frame) || !/^[0-9a-f]{16}$/.test(script.digest || '') ||
@@ -604,6 +644,12 @@
       const script = {origin: ds('origin').value.trim(), frame: ds('frame').value, source: ds('source').value};
       const prefix = ds('path').value.trim();
       if (prefix) script.path_prefix = prefix;
+      // The same bound the backend applies: one arm command is one Console
+      // payload. A snippet has no size budget of its own.
+      if (encoder.encode(JSON.stringify({operation: 'arm', scripts: [script]})).length > commandLimit) {
+        message('A document-start command can be at most 64 MiB, counting its JSON escapes. Nothing was armed.', true);
+        return;
+      }
       enqueue('arm_document_start', {scripts: [script], confirm_document_start: true}, value => {
         const armed = value?.document_start?.status === 'ok';
         // Only a replaced set discards the previous generation's records. A
@@ -776,7 +822,9 @@
   }
   function colorInput() {
     const mirror = element('highlight');
-    mirror.replaceChildren(); appendCommandColors(mirror, controls.source.value);
+    // Coloring costs work per keystroke, so a very long input is shown plain.
+    const value = controls.source.value;
+    mirror.replaceChildren(); if (value.length > 65536) mirror.append(document.createTextNode(value)); else appendCommandColors(mirror, value);
     // Preserve the last empty line's geometry and native textarea wrapping.
     mirror.append(document.createTextNode('\n')); syncInputMirror();
   }
@@ -807,7 +855,8 @@
   const snippets = [];
   function saveSnippet(source) {
     if (!snippets.includes(source)) snippets.push(source);
-    while (snippets.length > 16 || snippets.reduce((bytes, value) => bytes + encoder.encode(value).length, 0) > 65536) snippets.shift();
+    // The newest snippet always stays, however large.
+    while (snippets.length > 16 || snippets.length > 1 && snippets.reduce((bytes, value) => bytes + encoder.encode(value).length, 0) > 65536) snippets.shift();
     const select = element('snippets'); select.replaceChildren();
     snippets.forEach((text, index) => { const option = document.createElement('option'); option.value = index; option.textContent = text.split('\n')[0].slice(0, 64); select.append(option); });
     select.disabled = !snippets.length; notice('Snippet saved in this app session.');
@@ -816,25 +865,29 @@
   function remember(source) {
     if (history.at(-1) === source) return;
     history.push(source); historyBytes += encoder.encode(source).length;
-    while (history.length > 128 || historyBytes > 262144) historyBytes -= encoder.encode(history.shift()).length;
+    // The newest command always stays recallable, however large.
+    while (history.length > 128 || history.length > 1 && historyBytes > 262144) historyBytes -= encoder.encode(history.shift()).length;
   }
   controls.form.addEventListener('submit', async event => {
     event.preventDefault(); if (submitting || pending || !session || disconnected || !selectedDocument()) return;
     const source = controls.source.value;
-    if (!source.trim() || encoder.encode(source).length > 8192) { notice('Enter 1 to 8192 UTF-8 bytes of JavaScript.', true); return; }
+    if (!source.trim()) { notice('Enter JavaScript to run.', true); return; }
+    if (encoder.encode(JSON.stringify({operation: 'evaluate', source})).length > commandLimit) { notice('A command can be at most 64 MiB, counting its JSON escapes. Nothing ran.', true); return; }
     const helper = source.trim().match(/^(copy|inspect|getEventListeners|monitorEvents|unmonitorEvents)\(([\s\S]*)\)\s*;?$/);
     if (helper && !helper[2].trim()) { notice('Enter an expression inside the console utility.', true); return; }
     submitting = true; renderControls();
     completion.close(); historyIndex = null; remember(source); notice(partialTargets ? 'Document listing is partial.' : '');
     const scope = {session, generation, command: ++commandNumber, target: controls.target.value, url: controls.target.selectedOptions[0]?.dataset.url || '', live: documentSource === 'live_capture'};
     controls.source.value = ''; sizeInput(); controls.source.focus();
-    const commandRow = document.createElement('article'); commandRow.className = 'native-console-result native-console-command'; commandRow.dataset.level = 'result'; commandRow.dataset.command = source; commandRow.dataset.commandId = scope.command; commandRow.dataset.commandNumber = scope.command; commandRow.dataset.consoleSession = scope.session; commandRow.dataset.consoleDocument = scope.target;
+    const commandRow = document.createElement('article'); commandRow.className = 'native-console-result native-console-command'; commandRow.dataset.level = 'result'; commandRow.dataset.command = previewCommand(source); commandRow.dataset.commandId = scope.command; commandRow.dataset.commandNumber = scope.command; commandRow.dataset.consoleSession = scope.session; commandRow.dataset.consoleDocument = scope.target;
     const commandStatus = document.createElement('span'); commandStatus.className = 'native-console-command-status'; commandStatus.textContent = `#${scope.command} · Running`; commandStatus.setAttribute('role', 'status'); commandRow.append(commandStatus);
-    const expression = document.createElement('pre'); expression.className = 'native-console-expression'; expression.append(document.createTextNode('> ')); appendCommandColors(expression, source); commandRow.append(expression); appendRow(commandRow);
+    const expression = document.createElement('pre'); expression.className = 'native-console-expression'; expression.append(document.createTextNode('> ')); appendCommandColors(expression, previewCommand(source)); commandRow.append(expression);
+    if (source.length > commandPreview) { const rest = document.createElement('p'); rest.className = 'native-console-command-rest'; rest.textContent = `… ${(source.length - commandPreview).toLocaleString()} more characters not shown · ${formatBytes(encoder.encode(source).length)} in all · ↑ recalls it whole`; commandRow.append(rest); }
+    appendRow(commandRow);
     try {
       const value = await runtime({operation: 'evaluate', source: helper ? helper[2] : source}, scope.target, false, scope.session, scope.generation);
       if (value) {
-        commandStatus.textContent = `#${scope.command} · ${value.status === 'ok' ? 'Complete' : value.status}`;
+        commandStatus.textContent = `#${scope.command} · ${value.status === 'ok' ? 'Complete' : value.status === 'stopped' ? 'Stopped' : value.status}`;
         commandRow.dataset.requestId = value.request_id || '';
         commandRow.dataset.level = value.status === 'ok' ? 'result' : 'error';
         await poll();
@@ -941,9 +994,11 @@
       if (!session || disconnected || documentSource !== 'live_capture' || !selectedDocument()) return null;
       return {session_id: session, target_id: controls.target.value, label: controls.target.selectedOptions[0]?.textContent ?? ''};
     },
-    watch(rules) {
+    // keep also keeps the rules for later documents of this document's origin
+    // and frame kind (protocol/native-debugger-observation-v1.md).
+    watch(rules, keep = false) {
       if (!this.liveDocument()) return Promise.resolve({status: 'error', text: 'No live Console connection to a selected document'});
-      return runtime(rules ? {operation: 'watch', rules} : {operation: 'unwatch'});
+      return runtime(rules ? {operation: 'watch', rules, ...(keep ? {keep: true} : {})} : {operation: 'unwatch'});
     }
   });
   renderControls();

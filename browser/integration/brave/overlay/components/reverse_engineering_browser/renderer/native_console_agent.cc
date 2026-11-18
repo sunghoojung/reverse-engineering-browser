@@ -18,8 +18,8 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
-#include "brave/components/reverse_engineering_browser/renderer/native_console_deadline.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_console_execution.h"
 #include "content/public/renderer/render_frame.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
 #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
@@ -127,6 +127,9 @@ void NativeConsoleAgent::Bind(mojo::PendingAssociatedReceiver<mojom::NativeConso
   receiver_.reset();
   receiver_.Bind(std::move(receiver));
 }
+void NativeConsoleAgent::BindControl(mojo::PendingReceiver<mojom::NativeConsoleControl> control) {
+  BindNativeConsoleControl(std::move(control));
+}
 void NativeConsoleAgent::Describe(DescribeCallback callback) {
   const auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
   std::move(callback).Run(frame && !frame->IsProvisional()
@@ -138,8 +141,14 @@ void NativeConsoleAgent::Describe(DescribeCallback callback) {
 // matching snippet observes this document before its own scripts. Nothing runs
 // here unless the separate document-start experiment is armed.
 void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, int world_id) {
-  if (world_id == 0)
-    InjectNativeConsoleDocumentStart(render_frame(), context, document_start_);
+  if (world_id != 0)
+    return;
+  InjectNativeConsoleDocumentStart(render_frame(), context, document_start_);
+  // After any document-start snippet, so a kept watch scope observes the
+  // page's own scripts rather than the researcher's.
+  auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
+  if (frame && !frame->IsProvisional())
+    runtime_.DocumentStarted(frame->GetAgentGroupScheduler()->Isolate(), frame);
 }
 
 // A same-origin commit from the initial empty document keeps that window and
@@ -149,12 +158,15 @@ void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, 
 // before its parser runs, which is where that document is matched instead.
 void NativeConsoleAgent::DidClearWindowObject() {
   InjectNativeConsoleDocumentStartIntoReusedWindow(render_frame(), document_start_);
+  auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
+  if (document_start_.context && frame && !frame->IsProvisional())
+    runtime_.WindowCleared(frame->GetAgentGroupScheduler()->Isolate(), frame);
 }
 
 void NativeConsoleAgent::WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) {
   if (world_id == 0) {
     runtime_.Reset();
-    runtime_.Unwatch();
+    runtime_.DocumentEnded();
     document_start_.context = false;
   }
 }
@@ -169,6 +181,7 @@ void NativeConsoleAgent::DetailedConsoleMessageAdded(const std::u16string& messa
                    message.size() > 2048 || source.size() > 512 || stack.size() > 2048);
 }
 void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
+                                 std::uint64_t request_id,
                                  std::uint64_t expires_at_monotonic_us,
                                  const std::string& command,
                                  RuntimeCallback callback) {
@@ -195,24 +208,20 @@ void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
     return;
   }
   v8::Context::Scope entered(context);
-  auto& deadline = NativeConsoleDeadline::Get();
-  if (!deadline.Begin(isolate, kNativeConsoleExecutionMillis)) {
-    reply(NativeConsoleStatus::kForbidden, "Watchdog unavailable");
-    return;
-  }
+  auto& execution = NativeConsoleExecution::Get();
+  execution.Begin(isolate, request_id);
   v8::TryCatch terminated(isolate);
   std::string result;
   {
     // Explicit commands can schedule promise continuations. Run their checkpoint
-    // inside the synchronous watchdog, rather than outside its 200 ms budget.
+    // inside the command, so Stop also ends them.
     v8::MicrotasksScope microtasks(isolate, context->GetMicrotaskQueue(),
                                    v8::MicrotasksScope::kRunMicrotasks);
     result = runtime_.Run(isolate, context, frame, command);
   }
-  if (deadline.Finish()) {
+  if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
     terminated.Reset();
-    reply(NativeConsoleStatus::kTimeout,
-          "Synchronous execution exceeded 200 ms; changes are not rolled back");
+    reply(NativeConsoleStatus::kStopped, "Stopped; changes are not rolled back");
     return;
   }
   std::move(callback).Run(static_cast<uint16_t>(NativeConsoleStatus::kOk),
@@ -220,6 +229,7 @@ void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
 }
 
 void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
+                                  std::uint64_t request_id,
                                   std::uint64_t expires_at_monotonic_us,
                                   const std::string& source,
                                   EvaluateCallback callback) {
@@ -240,7 +250,7 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
   }
   if (source.empty() || source.size() > kNativeConsoleSourceLimit || !base::IsStringUTF8(source) ||
       source.find('\0') != std::string::npos) {
-    reply(NativeConsoleStatus::kMalformed, "JavaScript must be 1 to 8192 bytes of valid UTF-8");
+    reply(NativeConsoleStatus::kMalformed, "JavaScript must be non-empty valid UTF-8");
     return;
   }
   v8::Isolate* isolate = frame->GetAgentGroupScheduler()->Isolate();
@@ -254,11 +264,8 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
   v8::MicrotasksScope microtasks(isolate, context->GetMicrotaskQueue(),
                                  v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::TryCatch exception(isolate);
-  auto& deadline = NativeConsoleDeadline::Get();
-  if (!deadline.Begin(isolate, kNativeConsoleExecutionMillis)) {
-    reply(NativeConsoleStatus::kForbidden, "Execution watchdog is unavailable");
-    return;
-  }
+  auto& execution = NativeConsoleExecution::Get();
+  execution.Begin(isolate, request_id);
   v8::Local<v8::String> code;
   v8::Local<v8::Script> script;
   v8::Local<v8::Value> value;
@@ -272,11 +279,9 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
   NativeConsoleType type = NativeConsoleType::kUndefined;
   if (success)
     type = Preview(isolate, context, value, text, truncated);
-  const bool timed_out = deadline.Finish();
-  if (timed_out) {
+  if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
     exception.Reset();
-    reply(NativeConsoleStatus::kTimeout,
-          "Synchronous execution exceeded its 200 ms budget; changes are not rolled back");
+    reply(NativeConsoleStatus::kStopped, "Stopped; changes are not rolled back");
     return;
   }
   if (!success) {

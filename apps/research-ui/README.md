@@ -282,10 +282,15 @@ Each section is a collapsible pane:
   retried. Without a live connection the section says how to get one and
   shows no form. The form and the armed set say what a rule cannot observe,
   because a wait for it would then find nothing with nothing missing: only
-  the armed document's main thread records, never its workers, other frames
-  or same-process iframes; its navigation clears the rules; and they cannot
-  be armed ahead of a page load, so what a page does while it loads is not
-  observed.
+  the main thread of the documents a rule is armed on records, never their
+  workers or other documents; and this document's navigation clears its
+  rules. **Keep for every later** *origin frame kind* **document**, which
+  names this document's origin and frame kind, also keeps the rules other
+  than DOM ones for every later such document, in any tab: each one is armed
+  from its first script, so a reload is observed
+  while it loads, but documents that are already open are not armed. The
+  armed set names the kept origin and frame kind and lists the kept rules,
+  and Clear rules forgets them, even after this document navigated.
 - **Observations**: the newest records, 128 at a time and up to 4,096 with
   **Show older records**, filtered by kind. A note says how much of the store
   the rows were read from: the whole store, or its newest bytes and why the
@@ -311,7 +316,7 @@ Each section is a collapsible pane:
   **Show newest** returns to the newest page. Past 4,096 rows the oldest are
   dropped, and the list says how many. A failed read changes neither the rows
   nor their note. Malformed
-  records, a renderer's `debugger_observation_budget` gap and store sequence
+  records, an earlier build's `debugger_observation_budget` gap and store sequence
   gaps are stated above the list, which is as tall as its rows up to a cap.
   Traffic's **Show in debugger** on a watched request calls
   `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests
@@ -880,7 +885,13 @@ Each submitted command has a numbered running/completed/error state. A transport
 failure marks its outcome unavailable, preserves the next draft and delivered
 output, and never automatically retries the command. Use Session settings to
 refresh documents explicitly, or disconnect and start a fresh disposable session.
-The Run button and Enter both submit; the composer also shows its UTF-8 byte count.
+The Run button and Enter both submit; the composer also shows its UTF-8 size.
+A command runs until it returns: while it runs, Run becomes **Stop**, which ends
+it in the page and marks it Stopped, keeping the changes it already made. Input
+of any size up to the 64 MiB command record is accepted. The transcript shows a
+long command's first 4096 characters with its full size, and history keeps the
+newest command whole however large; inputs over 64 KiB are shown uncolored so
+typing stays fast.
 An empty prompt has no placeholder text. Fully typed built-in names do not open
 automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
 their completions explicitly.
@@ -918,11 +929,13 @@ unchanged; Ctrl+Space explicitly requests completion.
 
 Results expand into property pages, DOM element previews, function source and
 source locations. Getters remain labeled, proxies are opaque, and retained values
-expire after 60 seconds. Explicit actions copy bounded property previews, store a
+stay until they are released, the output is cleared or the page navigates.
+Explicit actions copy bounded property previews, store a
 value as `window.tempN`, or release it. `$_` reads the previous result. `copy(value)`,
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
-argument once. Event monitoring is explicit and lasts at most 60 seconds.
+argument once. Event monitoring is explicit and lasts until
+`unmonitorEvents(element)` or the page navigates.
 `getEventListeners` also takes `window` and `document`, and an element, `window`
 or `document` result offers **Event listeners** among its value actions. The
 runtime describes `window` and `document` as a plain `Object`, so a plain
@@ -2324,7 +2337,7 @@ the calls' settled-value digests; Metadata mode does not. The titlebar names
 what the running capture tracks, says when its Brave predates invocation
 capture and started without the sites, and warns when this session retained
 another version of a saved script, which the saved site will not match. At
-most 8 functions are saved, in
+most 256 functions are saved, the most one capture can arm, in
 `~/Library/Application Support/Origin Trace/js-invocation-sites-v1.json` with a
 label sidecar; `REB_JS_INVOCATION_SITE_STORE` names another file. Stored-evidence
 native mode has no backend for these routes and says so. The routes and

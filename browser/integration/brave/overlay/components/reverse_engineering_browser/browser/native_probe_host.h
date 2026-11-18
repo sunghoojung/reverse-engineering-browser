@@ -126,6 +126,9 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                           mojo_base::BigBuffer bytecode) override;
   void CaptureNativeGuestHost(std::uint64_t capture_epoch,
                               const std::vector<std::uint8_t>& event_record) override;
+  void CaptureRendererTarget(const std::vector<std::uint8_t>& event_record,
+                             const std::string& origin,
+                             const std::string& target) override;
   void CaptureGeneratedArtifact(std::uint16_t kind,
                                 std::uint16_t capture_origin,
                                 std::uint64_t creator_event_id,
@@ -147,6 +150,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // Zeros this renderer's stream counters and asks the renderer to restart
   // sample indexes. The queue and capture epoch stay.
   void ResetWasmSampleBudgets();
+  // Sends the session's kept debugger watch scope, or its absence.
+  void SendDebuggerWatchScope();
 
  private:
   void Drain();

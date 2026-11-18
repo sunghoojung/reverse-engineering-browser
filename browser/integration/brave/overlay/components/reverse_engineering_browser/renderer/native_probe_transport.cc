@@ -9,6 +9,7 @@
 #include <atomic>
 #include <bit>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
@@ -18,6 +19,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_position.h"
@@ -114,7 +116,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
       category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId,
       {.capture_request_content = capture_request_content,
        .capture_browser_internal = capture_browser_internal,
-       .exclusion_counter = &NativeProbeTransport::CountExclusion});
+       .exclusion_counter = &NativeProbeTransport::CountExclusion,
+       .target_emitter = &NativeProbeTransport::EmitRendererTarget});
   NativeScriptCookieSink::Get().Configure(capture_request_content, &CurrentNativeScriptFrame);
   if (!guest_adapter_json.empty())
     NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
@@ -148,6 +151,32 @@ void NativeProbeTransport::SetWasmSampleBudget(const std::vector<std::uint8_t>& 
 
 void NativeProbeTransport::ResetWasmSampleBudgets() {
   NativeProbeSink::Get().ResetNativeWasmSampleBudgets();
+}
+
+void NativeProbeTransport::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {
+  std::optional<NativeWatchScope> kept;
+  if (scope) {
+    NativeWatchScope rebuilt;
+    rebuilt.serial = scope->serial;
+    rebuilt.origin = scope->origin;
+    rebuilt.top_frame = scope->top_frame;
+    // A rule this renderer cannot hold exactly refuses the whole scope.
+    bool held = true;
+    for (const auto& rule : scope->requests) {
+      held = held && rule && rebuilt.rules.AddRequest(rule->url_contains, rule->method);
+    }
+    for (const auto& type : scope->events) {
+      held = held && rebuilt.rules.AddEvent(type);
+    }
+    rebuilt.rules.timers = scope->timers;
+    rebuilt.rules.csp = scope->csp;
+    rebuilt.rules.uncaught = scope->uncaught || scope->caught;
+    rebuilt.rules.caught = scope->caught;
+    if (held) {
+      kept = std::move(rebuilt);
+    }
+  }
+  NativeDebuggerWatch::SetScope(std::move(kept));
 }
 
 void NativeProbeTransport::Disable() {
@@ -289,6 +318,25 @@ bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,
       !NativeProbeSink::Get().CanAdmitEvent(event, generation))
     return false;
   (*host)->CaptureNativeGuestHost(epoch, EventRecordBytes(event));
+  return true;
+}
+
+// The renderer took the child's sequence; the browser emits the record with
+// its target artifact after draining the parent from the ring.
+bool NativeProbeTransport::EmitRendererTarget(const NativeProbeEvent& child,
+                                              const std::string_view origin,
+                                              const std::string_view target,
+                                              const std::uint64_t generation) noexcept {
+  auto& transport = Get();
+  if (!transport.queue_.load(std::memory_order_acquire) ||
+      !NativeProbeSink::Get().CanAdmitEvent(child, generation)) {
+    return false;
+  }
+  auto* host = transport.HostForCurrentSequence();
+  if (!*host) {
+    return false;
+  }
+  (*host)->CaptureRendererTarget(EventRecordBytes(child), std::string(origin), std::string(target));
   return true;
 }
 

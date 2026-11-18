@@ -57,8 +57,7 @@ reb::NativeJsDispatchObservationPayload ToOverlay(const reb::JsDispatchObservati
   o.handler_end = v.handler_end;
   o.activation_id = v.activation_id;
   o.parent_activation_id = v.parent_activation_id;
-  o.site_sample_index = v.site_sample_index;
-  o.sample_index = v.sample_index;
+  o.site_ordinal = v.site_ordinal;
   for (std::size_t i = 0; i < 32; ++i)
     o.source_sha256[i] =
         static_cast<std::remove_cvref_t<decltype(o.source_sha256[i])>>(v.source_sha256[i]);
@@ -121,8 +120,7 @@ int main(int argc, char** argv) {
   payload.flags = reb::kJsDispatchNewActivation;
   const auto indexed = [] {
     auto p = Indexed(2, kExtendedAnchor, 3, 961, 990);
-    p.site_sample_index = 1;
-    p.sample_index = 1;
+    p.site_ordinal = 1;
     return p;
   };
   const auto nested = [] {
@@ -130,14 +128,12 @@ int main(int argc, char** argv) {
     p.flags |= reb::kJsDispatchNewActivation;
     p.activation_id = 2;
     p.parent_activation_id = 1;
-    p.sample_index = 2;
     return p;
   };
   const auto string_selector = [] {
     auto p = Switch(0);
     p.selector_kind = static_cast<std::uint8_t>(Kind::kString);
-    p.site_sample_index = 1;
-    p.sample_index = 3;
+    p.site_ordinal = 1;
     return p;
   };
   bool valid = true;
@@ -158,10 +154,17 @@ int main(int argc, char** argv) {
     payload = Indexed(1, kInnerAnchor, 3, 588, 612);
     payload.flags |= reb::kJsDispatchNewActivation | reb::kJsDispatchParentUnknown;
     payload.activation_id = 3;
-    payload.site_sample_index = 1;
-    payload.sample_index = 4;
+    payload.site_ordinal = 1;
     native.header.sequence_number = 205;
     native.header.monotonic_time_ns = 59;
+  } else if (mode == "last-slot") {
+    // Every one-byte slot and u32 ordinal is a version 2 value.
+    payload.site_slot = static_cast<std::uint8_t>(reb::kJsDispatchSiteLimit - 1);
+    payload.site_ordinal = std::numeric_limits<std::uint32_t>::max();
+  } else if (mode == "version-1") {
+    // Evidence from an earlier build: slot 0, site index 1, index 5.
+    payload.protocol_version = 1;
+    payload.site_ordinal = 1U | (5U << 16U);
   } else if (mode == "wide-identities") {
     native.header.session_id = native.header.sequence_number = native.header.monotonic_time_ns =
         native.header.frame_id = std::numeric_limits<std::uint64_t>::max();
@@ -172,7 +175,7 @@ int main(int argc, char** argv) {
     if (mode == "reserved")
       payload.reserved[0] = std::byte{1};
     else if (mode == "version")
-      payload.protocol_version = 2;
+      payload.protocol_version = 3;
     else if (mode == "size")
       payload.payload_size = 127;
     else if (mode == "truncated")
@@ -181,9 +184,10 @@ int main(int argc, char** argv) {
       payload.shape = 3;
     else if (mode == "kind")
       payload.selector_kind = 10;
-    else if (mode == "slot")
-      payload.site_slot = reb::kJsDispatchSiteLimit;
-    else if (mode == "flags")
+    else if (mode == "version-1-slot") {
+      payload.protocol_version = 1;
+      payload.site_slot = reb::kJsDispatchV1SiteLimit;
+    } else if (mode == "flags")
       payload.flags |= 1U << 4U;
     else if (mode == "parent-order") {
       payload = nested();
@@ -199,11 +203,13 @@ int main(int argc, char** argv) {
     } else if (mode == "non-integer-bits") {
       payload = string_selector();
       payload.selector_low32 = 1;
-    } else if (mode == "sample-index")
-      payload.sample_index = reb::kJsDispatchSampleBudget;
-    else if (mode == "site-sample-index")
-      payload.site_sample_index = reb::kJsDispatchSiteSampleBudget;
-    else if (mode == "anchor")
+    } else if (mode == "version-1-sample-index") {
+      payload.protocol_version = 1;
+      payload.site_ordinal = static_cast<std::uint32_t>(reb::kJsDispatchV1SampleBudget) << 16U;
+    } else if (mode == "version-1-site-sample-index") {
+      payload.protocol_version = 1;
+      payload.site_ordinal = static_cast<std::uint32_t>(reb::kJsDispatchV1SiteSampleBudget);
+    } else if (mode == "anchor")
       payload.anchor_offset = payload.source_length;
     // Further rules beyond the shared case list.
     else if (mode == "boolean-bits") {

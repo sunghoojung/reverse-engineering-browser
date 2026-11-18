@@ -1714,7 +1714,7 @@ mod tests {
             let row = guest
                 .artifacts
                 .iter()
-                .find(|a| a["artifact_id"] == id)
+                .find(|a| a["artifact_id"].as_str().and_then(|text| text.parse().ok()) == Some(id))
                 .unwrap();
             serde_json::from_slice(
                 &fs::read(

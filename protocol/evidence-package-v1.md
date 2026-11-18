@@ -101,8 +101,9 @@ cancellation and bounded work are not a hard cancellation guarantee.
 
 - Events: 64 MiB complete scan, 100000 nonempty rows, 4096 bytes per row including
   its separator. Manifest: 16 MiB, 10000 rows, 8192 bytes per row.
-- Each selected blob: 16 MiB; distinct verified bytes: 128 MiB; fixed 64 KiB read
-  buffer. Zero-byte artifacts still require their empty-content hash.
+- Each selected blob is hashed whole, whatever its size or the sum of them, in
+  a fixed 64 KiB read buffer. Zero-byte artifacts still require their
+  empty-content hash.
 - Retained source indexes/projections: 32 MiB with conservative preallocation
   accounting. Relationships and gaps: 4096 each. Package bytes: 4 MiB.
 - The same parsed-node, depth, string and cardinality bounds apply to source
@@ -207,7 +208,8 @@ Artifact metadata contains the schema whitelist, including a nonzero key,
 protocol 1, native IDs, nullable execution context, capture origin/kind,
 canonical decimal byte size, lowercase SHA-256, sensitivity,
 `verification: sha256_verified_at_export`, and `content: omitted`. Byte size is
-at most 16777216. Legacy absent provenance is null execution context plus
+any canonical unsigned 64-bit decimal; packages up to this revision named at
+most 16777216. Legacy absent provenance is null execution context plus
 `capture_origin: unknown`. Kind/sensitivity/origin/context combinations must
 match the native artifact contract. URL, MIME, content path, arbitrary metadata,
 and bytes are forbidden. Verification is only an untrusted exporter assertion.

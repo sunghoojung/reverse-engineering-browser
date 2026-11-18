@@ -718,17 +718,6 @@ pub(crate) mod frozen {
     };
 
     pub const GUARD_MARKER: &[u8] = b"REB_EVIDENCE_GUARD_V1\n";
-    pub const MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024;
-    pub const MAX_VERIFIED_BYTES: u64 = 128 * 1024 * 1024;
-    pub fn verified_total(total: u64, next: u64) -> Result<u64> {
-        if next > MAX_BLOB_BYTES {
-            return Err(limit());
-        }
-        total
-            .checked_add(next)
-            .filter(|n| *n <= MAX_VERIFIED_BYTES)
-            .ok_or_else(limit)
-    }
     pub fn unavailable() -> Error {
         Error::new(
             503,
@@ -987,6 +976,8 @@ pub(crate) mod frozen {
             check(cancelled)?;
             self.verify()
         }
+        /// Hashes a blob of any size in 64 KiB blocks, stopping between
+        /// blocks once `cancelled` is set.
         pub fn hash(
             &mut self,
             expected: u64,
@@ -994,9 +985,6 @@ pub(crate) mod frozen {
             cancelled: &AtomicBool,
         ) -> Result<()> {
             check(cancelled)?;
-            if expected > MAX_BLOB_BYTES {
-                return Err(limit());
-            }
             if self.stamp.size != expected {
                 return Err(Error::protocol(
                     "The selected artifact byte count or hash is inconsistent",
@@ -1363,13 +1351,16 @@ mod frozen_tests {
                 .status,
             422
         );
-        let mut file = store.root.file(&basename, false).unwrap();
-        assert_eq!(
-            file.hash(MAX_BLOB_BYTES + 1, &hash, &AtomicBool::new(false))
-                .unwrap_err()
-                .status,
-            413
-        );
+        // A blob past the 16 MiB that used to be refused hashes whole.
+        let large = vec![7u8; (16 << 20) + 1];
+        fs::write(root.path().join("large.bin"), &large).unwrap();
+        let mut file = store.root.file("large.bin", false).unwrap();
+        file.hash(
+            large.len() as u64,
+            &hex::encode(Sha256::digest(&large)),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
     }
 }
 

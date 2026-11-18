@@ -7853,13 +7853,32 @@ async fn guarded_export_verifies_full_blobs_safe_paths_shared_hashes_and_zero_by
         422,
     )
     .await;
-    manifest[0]["byte_size"] = json!(16 * 1024 * 1024 + 1);
-    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
-    error(
-        server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await,
-        413,
-    )
-    .await;
+    // A blob past the 16 MiB that used to be refused is hashed whole and
+    // named at its size.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let large = vec![b'x'; 16 * 1024 * 1024 + 1];
+        let hash = hex::encode(Sha256::digest(&large));
+        let mut record = manifest.clone();
+        record[0]["byte_size"] = json!(large.len());
+        record[0]["sha256"] = json!(hash);
+        record[0]["content_path"] = json!(format!("blobs/{hash}.bin"));
+        let path = server
+            .root
+            .path()
+            .join(format!("artifacts/blobs/{hash}.bin"));
+        fs::write(&path, &large).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        server.file("artifacts/manifest.jsonl", &jsonl(&record));
+        let response = server.action(EXPORT_PACKAGE_ROUTE, selection.clone()).await;
+        let bytes = assert_contract_response(response, "post", EXPORT_PACKAGE_ROUTE, 200).await;
+        let package: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            package["records"]["artifacts"][0]["byte_size"],
+            (16 * 1024 * 1024 + 1).to_string()
+        );
+        fs::remove_file(&path).unwrap();
+    }
     manifest[0]["byte_size"] = json!(original.len());
     for path in [
         "../CANARY_ESCAPE",

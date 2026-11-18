@@ -487,7 +487,6 @@ fn identities<'a>(
                         && (kind != "wasm" || context.is_none_or(|id| id == 0)))
                     || (origin == "canvas_to_data_url"
                         && (kind != "canvas_data_url" || context != Some(0)))
-                    || unsigned(&value["byte_size"], false).is_some_and(|n| n > 16 * 1024 * 1024)
                 {
                     report.issue("invalid_shape", section, Some(i));
                     report.check("metadata_profile", false);
@@ -1581,14 +1580,10 @@ fn stored_export(
     let mut blobs_directory = None;
     if let Some(store) = &artifacts_store {
         let blobs = store.root.child("blobs")?;
-        let mut verified_bytes = 0u64;
         for value in records(&package, "artifacts") {
             frozen::check(&budget.cancelled)?;
             let expected = unsigned(&value["byte_size"], false).unwrap();
             let hash = value["sha256"].as_str().unwrap();
-            if expected > frozen::MAX_BLOB_BYTES {
-                return Err(frozen::limit());
-            }
             if let Some((size, _)) = verified.get(hash) {
                 if *size != expected {
                     return Err(Error::protocol(
@@ -1597,7 +1592,7 @@ fn stored_export(
                 }
                 continue;
             }
-            verified_bytes = frozen::verified_total(verified_bytes, expected)?;
+            // Every blob is hashed whole, whatever its size or their sum.
             let mut blob = blobs.file(&format!("{hash}.bin"), false)?;
             blob.hash(expected, hash, &budget.cancelled)?;
             verified.insert(hash.to_owned(), (expected, blob));
@@ -2600,23 +2595,6 @@ mod tests {
         };
         memory.charge(31 * 1024 * 1024).unwrap();
         assert_eq!(memory.charge(1).unwrap_err().status, 413);
-        let mut total = 0;
-        for _ in 0..8 {
-            total = crate::evidence::frozen::verified_total(total, 16 * 1024 * 1024).unwrap();
-        }
-        assert_eq!(total, 128 * 1024 * 1024);
-        assert_eq!(
-            crate::evidence::frozen::verified_total(total, 1)
-                .unwrap_err()
-                .status,
-            413
-        );
-        assert_eq!(
-            crate::evidence::frozen::verified_total(0, 16 * 1024 * 1024 + 1)
-                .unwrap_err()
-                .status,
-            413
-        );
     }
     #[cfg(unix)]
     #[test]

@@ -413,12 +413,18 @@ See [WASM module diff v1](wasm-module-diff-v1.md).
 
 ## WASM value flow
 
-`get_wasm_value_flow` projects `GET /api/wasm/value-flow`: a bounded static
-slice of where one instruction operand or one local of a defined function comes
-from and where it goes, with joins at structured merges and one optional step
-to direct call sites. It is read-only and refuses unknown or repeated
-parameters. `text` and `expression` are content and are omitted below Full
-access. See [WASM value flow](wasm-value-flow-v1.md).
+`get_wasm_value_flow` projects `GET /api/wasm/value-flow`: the complete static
+slice of where one instruction operand or one local of a defined function
+comes from and where it goes, with joins at structured merges, memory cells,
+control dependence on request, and calls entered through function summaries.
+It has no node, depth or byte cap: the document is paged (`node_offset`,
+`node_limit`, `source_*`, `sink_*`, `join_*`), and `reb-api mcp` halves the
+page parameters an operation declares under `x-reb-mcp-page` until a result
+fits the inline limit. `get_wasm_call_sites` projects
+`GET /api/wasm/call-sites`: every direct call site of one function, paged.
+Both are read-only and refuse unknown or repeated parameters. `text` and
+`expression` are content and are omitted below Full access. See
+[WASM value flow v2](wasm-value-flow-v2.md).
 
 ## Compact session context
 

@@ -2,16 +2,23 @@
 //! exact value search behind `invocation_value_flow`. Every rule here mirrors
 //! protocol/native-js-invocation-v1.md and the C++, Python and JavaScript
 //! readers; a record any of them refuses is never read as evidence.
-use crate::{evidence, vm_opcode::native_js::SELECTOR_KINDS};
+use crate::{
+    error::{Result, check_cancelled},
+    evidence,
+    vm_opcode::native_js::SELECTOR_KINDS,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::BuildHasherDefault,
+    sync::atomic::AtomicBool,
+};
 
 /// Base of the 64-bit polynomial rolling hash, `h = h * base + byte`.
 pub const ROLLING_BASE: u64 = 0x0000_0100_0000_01b3;
 /// Encoded bytes a settle digest may cover.
 pub const DIGEST_BYTE_LIMIT: u32 = 1 << 20;
-/// Bytes hashed by one value search; a body over it is reported unsearched.
-pub const SEARCH_BYTE_LIMIT: usize = 16 << 20;
 
 pub fn rolling_hash(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0u64, |hash, byte| {
@@ -357,42 +364,100 @@ pub(crate) fn annotate(events: &mut [Value]) {
     }
 }
 
-/// Whether the exact digested bytes occur in `body`. The rolling hash selects
-/// candidate windows in one pass and SHA-256 alone confirms each; the window
-/// length is the stated encoded length, so a shorter or longer occurrence of
-/// the same text never matches. `None` when the search would exceed its byte
-/// bound and was not run.
-pub fn body_contains(body: &[u8], digest: &Digest32) -> Option<bool> {
-    let length = digest.byte_length as usize;
-    if length == 0 || length > body.len() {
-        return Some(false);
+/// A hasher for rolling hash values, which are already mixed: the map keyed
+/// by them needs no second hash.
+#[derive(Default)]
+struct Identity(u64);
+
+impl std::hash::Hasher for Identity {
+    fn finish(&self) -> u64 {
+        self.0
     }
-    let mut power = 1u64;
-    for _ in 1..length {
-        power = power.wrapping_mul(ROLLING_BASE);
-    }
-    let mut hash = rolling_hash(&body[..length]);
-    let mut hashed = 0usize;
-    for start in 0..=body.len() - length {
-        if start > 0 {
-            let out = u64::from(body[start - 1]);
-            let incoming = u64::from(body[start + length - 1]);
-            hash = hash
-                .wrapping_sub(out.wrapping_mul(power))
-                .wrapping_mul(ROLLING_BASE)
-                .wrapping_add(incoming);
-        }
-        if hash == digest.rolling {
-            hashed += length;
-            if hashed > SEARCH_BYTE_LIMIT {
-                return None;
-            }
-            if Sha256::digest(&body[start..start + length]).as_slice() == digest.sha256 {
-                return Some(true);
-            }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(*byte);
         }
     }
-    Some(false)
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
+
+/// Positions polled for cancellation between, per rolling pass.
+const POLL_POSITIONS: usize = 1 << 16;
+
+/// Which of `digests` occur in `body` as exact byte sequences. Digests are
+/// grouped by byte length, one rolling pass over the body per distinct
+/// length: a window's rolling hash selects the digests of that length it may
+/// match, in a map keyed by the rolling value, and SHA-256 of the window
+/// confirms each once. The window length is the stated encoded length, so a
+/// shorter or longer occurrence of the same text never matches. There is no
+/// byte bound: the search runs to the end of the body unless the request is
+/// cancelled, which stops it with 499.
+pub fn find_values(body: &[u8], digests: &[Digest32], cancelled: &AtomicBool) -> Result<Vec<bool>> {
+    const WHAT: &str = "Value flow search";
+    let mut found = vec![false; digests.len()];
+    let mut by_length: BTreeMap<usize, HashMap<u64, Vec<usize>, BuildHasherDefault<Identity>>> =
+        BTreeMap::new();
+    for (index, digest) in digests.iter().enumerate() {
+        let length = digest.byte_length as usize;
+        if length == 0 || length > body.len() {
+            continue;
+        }
+        by_length
+            .entry(length)
+            .or_default()
+            .entry(digest.rolling)
+            .or_default()
+            .push(index);
+    }
+    for (length, candidates) in by_length {
+        let mut power = 1u64;
+        for _ in 1..length {
+            power = power.wrapping_mul(ROLLING_BASE);
+        }
+        let mut hash = rolling_hash(&body[..length]);
+        let mut remaining = candidates.values().map(Vec::len).sum::<usize>();
+        for start in 0..=body.len() - length {
+            if start % POLL_POSITIONS == 0 {
+                check_cancelled(cancelled, WHAT)?;
+            }
+            if start > 0 {
+                let out = u64::from(body[start - 1]);
+                let incoming = u64::from(body[start + length - 1]);
+                hash = hash
+                    .wrapping_sub(out.wrapping_mul(power))
+                    .wrapping_mul(ROLLING_BASE)
+                    .wrapping_add(incoming);
+            }
+            let Some(indices) = candidates.get(&hash) else {
+                continue;
+            };
+            if indices.iter().all(|index| found[*index]) {
+                continue;
+            }
+            let window = Sha256::digest(&body[start..start + length]);
+            for index in indices {
+                if !found[*index] && window.as_slice() == digests[*index].sha256 {
+                    found[*index] = true;
+                    remaining -= 1;
+                }
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Whether the exact digested bytes occur in `body`: [`find_values`] for one
+/// digest, never cancelled.
+#[cfg(test)]
+pub fn body_contains(body: &[u8], digest: &Digest32) -> bool {
+    find_values(body, std::slice::from_ref(digest), &AtomicBool::new(false))
+        .map(|found| found[0])
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -455,6 +520,55 @@ pub(crate) mod tests {
         p[4] = state;
         p[8..12].copy_from_slice(&id.to_le_bytes());
         p
+    }
+
+    #[test]
+    fn values_of_every_length_are_found_in_one_pass_each_and_the_search_cancels() {
+        let digest = |value: &[u8]| Digest32 {
+            sha256: Sha256::digest(value).into(),
+            rolling: rolling_hash(value),
+            byte_length: value.len() as u32,
+        };
+        let body = b"a=P1_token-a&b=ab&c=P1_token-c&d=xyz".to_vec();
+        let digests = [
+            digest(b"P1_token-a"),
+            digest(b"P1_token-c"),
+            digest(b"P1_token-b"),
+            digest(b"ab"),
+            digest(b"zz"),
+            digest(b""),
+            digest(&vec![b'q'; body.len() + 1]),
+        ];
+        let found = find_values(&body, &digests, &AtomicBool::new(false)).unwrap();
+        assert_eq!(found, vec![true, true, false, true, false, false, false]);
+        // A forged rolling value selects a window; SHA-256 refuses it.
+        let mut forged = digest(b"P1_token-a");
+        forged.sha256 = [0; 32];
+        assert_eq!(
+            find_values(&body, &[forged], &AtomicBool::new(false)).unwrap(),
+            vec![false]
+        );
+        // Two digests of one value both match; the same window is hashed once.
+        let twice = [digest(b"ab"), digest(b"ab")];
+        assert_eq!(
+            find_values(&body, &twice, &AtomicBool::new(false)).unwrap(),
+            vec![true, true]
+        );
+        // No byte bound: a large body is searched whole; a cancelled request stops it.
+        let large = vec![b'x'; (1 << 20) + 7];
+        let needle = digest(b"xx");
+        assert_eq!(
+            find_values(
+                &large,
+                std::slice::from_ref(&needle),
+                &AtomicBool::new(false)
+            )
+            .unwrap(),
+            vec![true]
+        );
+        let error =
+            find_values(&large, &[digest(b"not here")], &AtomicBool::new(true)).unwrap_err();
+        assert_eq!(error.status, 499);
     }
 
     #[test]
@@ -723,10 +837,10 @@ pub(crate) mod tests {
         let mut body = b"v=1&n=".to_vec();
         body.extend_from_slice(token);
         body.extend_from_slice(b"&c=x");
-        assert_eq!(body_contains(&body, &digest), Some(true));
-        assert_eq!(body_contains(token, &digest), Some(true));
+        assert!(body_contains(&body, &digest));
+        assert!(body_contains(token, &digest));
         // One byte short, transformed or absent: no match, never a guess.
-        assert_eq!(body_contains(&token[1..], &digest), Some(false));
+        assert!(!body_contains(&token[1..], &digest));
         let escaped: Vec<u8> = token
             .iter()
             .flat_map(|b| {
@@ -737,13 +851,13 @@ pub(crate) mod tests {
                 }
             })
             .collect();
-        assert_eq!(body_contains(&escaped, &digest), Some(false));
-        assert_eq!(body_contains(b"", &digest), Some(false));
+        assert!(!body_contains(&escaped, &digest));
+        assert!(!body_contains(b"", &digest));
         // A rolling-hash collision alone never confirms a match.
         let forged = Digest32 {
             sha256: [0; 32],
             ..digest
         };
-        assert_eq!(body_contains(&body, &forged), Some(false));
+        assert!(!body_contains(&body, &forged));
     }
 }

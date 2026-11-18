@@ -2548,7 +2548,11 @@ fn session_start_cli_switches_name_or_leave_their_defaults() {
         // The budgets and the media switch are gone, so no switch still
         // requires request content.
         (
-            &["--request-content=false", "--response-body-budget-mib", "64"][..],
+            &[
+                "--request-content=false",
+                "--response-body-budget-mib",
+                "64",
+            ][..],
             "unexpected argument '--response-body-budget-mib'",
         ),
         (

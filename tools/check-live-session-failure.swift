@@ -177,7 +177,7 @@ enum LiveSessionFailureChecks {
     // every body whole, so the removed budget and media keys are refused as
     // any other key is.
     let parse = { (body: [String: Any]) in LivePanelStart.parse(["op": "start"].merging(body) { _, given in given }) }
-    let yes = NSNumber(value: true)
+    let yes = NSNumber(value: true), no = NSNumber(value: false)
     precondition(parse(["mode": "metadata"]) == .success(LivePanelStart(mode: .metadata)), "metadata start")
     precondition(parse(["mode": "content"]) == .success(LivePanelStart(mode: .content)), "content start")
     let onlyMode = "The start panel offers only the capture mode."

@@ -11475,7 +11475,7 @@ fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"invocation_site\"'*) ;; *) exit 2;; esac\nkey=$(printf '%s' \"$request\" | /usr/bin/sed -n 's/.*\"byte_offset\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$key\" ] || key=name\nexec /bin/cat '{}/reply-'\"$key\"'.json'\n",
+            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"invocation_site_index\"'*) ;; *) exit 2;; esac\nprintf x >> '{0}/index-requests'\nexec /bin/cat '{0}/index.json'\n",
             directory.display()
         ),
     )
@@ -11484,19 +11484,25 @@ fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
     worker
 }
 
-/// What the worker reports for the function whose `(` is at `anchor`.
-fn invocation_site_reply(source: &str, anchor: Option<usize>, by_name: bool) -> Value {
-    let candidate = anchor.map(|anchor| {
-        json!({"kind":"function","anchor_byte":anchor,"start":anchor.saturating_sub(8),
-            "end":anchor + 3,"binding":"window.hsw","unsupported":null})
-    });
-    json!({"schema":"reb-invocation-site-worker-v1","ok":true,"error":null,
+/// What the worker indexes in `source`: a function whose `(` is at each
+/// anchor, the first bound to `window.hsw`.
+fn invocation_site_index(source: &str, anchors: &[usize]) -> Value {
+    let functions = anchors
+        .iter()
+        .enumerate()
+        .map(|(index, &anchor)| {
+            let bindings = if index == 0 {
+                json!([{"global":true,"segments":["hsw"],"text":"window.hsw"}])
+            } else {
+                json!([])
+            };
+            json!({"kind":"function","anchor_byte":anchor,"start":anchor - 8,"end":anchor + 3,
+                "definition_start":anchor - 8,"unsupported":null,"bindings":bindings})
+        })
+        .collect::<Vec<_>>();
+    json!({"schema":"reb-invocation-site-index-v1","ok":true,"error":null,
         "source_bytes":source.len(),
-        "matches": if by_name { candidate.clone().into_iter().collect::<Vec<_>>() } else { vec![] },
-        "match_count": usize::from(by_name && candidate.is_some()),
-        "related":[],"related_count":0,
-        "selected": if by_name { Value::Null } else { candidate.clone().unwrap_or(Value::Null) },
-        "reason": if by_name || candidate.is_some() { Value::Null } else { json!("no_function") }})
+        "index":{"source_bytes":source.len(),"functions":functions,"initializers":[]}})
 }
 
 #[cfg(unix)]
@@ -11521,24 +11527,11 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         .match_indices('(')
         .map(|(offset, _)| offset)
         .collect::<Vec<_>>();
-    for &anchor in &anchors {
-        std::fs::write(
-            directory.path().join(format!("reply-{anchor}.json")),
-            invocation_site_reply(&source, Some(anchor), false).to_string(),
-        )
-        .unwrap();
-    }
-    let reply = |name: &str, value: Value| {
-        std::fs::write(
-            directory.path().join(format!("reply-{name}.json")),
-            value.to_string(),
-        )
-        .unwrap();
-    };
-    reply(
-        "name",
-        invocation_site_reply(&source, Some(anchors[0]), true),
-    );
+    std::fs::write(
+        directory.path().join("index.json"),
+        invocation_site_index(&source, &anchors).to_string(),
+    )
+    .unwrap();
     let set = |bytes: Vec<u8>| serde_json::from_slice::<Value>(&bytes).unwrap();
     let list = set(assert_contract_response(
         server.get("/api/js-invocation-sites").await,
@@ -11652,11 +11645,6 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         assert_contract_response(ninth, "post", "/api/js-invocation-sites/actions", 409).await;
     assert!(String::from_utf8_lossy(&bytes).contains("8 functions"));
     // A refused resolution saves nothing and returns its reason.
-    std::fs::write(
-        directory.path().join("reply-1.json"),
-        invocation_site_reply(&source, None, false).to_string(),
-    )
-    .unwrap();
     let refused = set(assert_contract_response(
         action(json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":1})).await,
         "post",
@@ -11672,6 +11660,11 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         (Some(false), Some("no_function"))
     );
     assert_eq!(refused["set"]["count"], 8);
+    // Every query above was answered from one index of these bytes.
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("index-requests")).unwrap(),
+        "x"
+    );
 
     let sha = entry["site"]["source_sha256"].clone();
     let removed =

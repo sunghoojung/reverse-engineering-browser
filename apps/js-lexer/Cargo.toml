@@ -4,5 +4,9 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# One parser-free JavaScript token pass shared by the Origin Trace backend and
-# the deobfuscation worker. It has no dependencies so either can build it.
+# One parser-free JavaScript token pass and the invocation site index, shared
+# by the Origin Trace backend and the deobfuscation worker. Its one
+# dependency, serde, is one both already build at the same version.
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }

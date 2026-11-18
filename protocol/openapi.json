@@ -10517,7 +10517,7 @@
             },
             {
               "path": "apps/origin-trace-backend/src/deobfuscation.rs",
-              "symbol": "Deobfuscator::invocation_site"
+              "symbol": "Deobfuscator::invocation_index"
             }
           ]
         },

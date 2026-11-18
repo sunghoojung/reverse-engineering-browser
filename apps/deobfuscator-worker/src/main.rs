@@ -36,6 +36,7 @@ enum Operation {
     FunctionLookup(FunctionLookup),
     SourceFacts(source_facts::Request),
     InvocationSite(invocation_site::Request),
+    InvocationSiteIndex(invocation_site::IndexRequest),
     RequestField(request_field::Request),
 }
 
@@ -263,6 +264,7 @@ enum Rejected {
     Request(String),
     SourceFacts,
     InvocationSite,
+    InvocationSiteIndex,
     RequestField,
 }
 
@@ -284,6 +286,9 @@ fn operation(line: &[u8]) -> Result<Operation, Rejected> {
         Some(Some("invocation_site")) => serde_json::from_value(value)
             .map(Operation::InvocationSite)
             .map_err(|_| Rejected::InvocationSite),
+        Some(Some("invocation_site_index")) => serde_json::from_value(value)
+            .map(Operation::InvocationSiteIndex)
+            .map_err(|_| Rejected::InvocationSiteIndex),
         Some(Some("request_field")) => serde_json::from_value(value)
             .map(Operation::RequestField)
             .map_err(|_| Rejected::RequestField),
@@ -335,6 +340,9 @@ fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
             Ok(Operation::InvocationSite(request)) => {
                 reply(writer, &invocation_site::analyze(request))?
             }
+            Ok(Operation::InvocationSiteIndex(request)) => {
+                reply(writer, &invocation_site::index_response(&request))?
+            }
             Ok(Operation::RequestField(request)) => {
                 reply(writer, &request_field::extract(request))?
             }
@@ -349,6 +357,7 @@ fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
                 writer,
                 &invocation_site::invalid("invalid invocation site request", 0),
             )?,
+            Err(Rejected::InvocationSiteIndex) => reply(writer, &invocation_site::index_refused())?,
             Err(Rejected::RequestField) => reply(
                 writer,
                 &request_field::extract(request_field::Request {

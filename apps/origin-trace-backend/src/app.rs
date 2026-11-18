@@ -2109,8 +2109,16 @@ impl App {
         let raw = self
             .blocking(move || evidence::read(&root, &record))
             .await?;
-        let request = js_invocation_sites::worker_request(&raw, target)?;
-        let response = self.deobfuscator.invocation_site(request).await?;
+        // The verified bytes' SHA-256 keys the kept index, so a later query
+        // over the same artifact is answered without parsing it again.
+        let index = self
+            .deobfuscator
+            .invocation_index(
+                artifact["sha256"].as_str().unwrap_or_default(),
+                js_invocation_sites::indexed_text(&raw)?,
+            )
+            .await?;
+        let response = js_invocation_sites::answer(&raw, target, &index)?;
         js_invocation_sites::validate_worker(&raw, target, &response)?;
         let store = self.invocation_sites.clone();
         let saved = tokio::task::spawn_blocking(move || store.load())

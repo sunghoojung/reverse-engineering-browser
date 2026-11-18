@@ -3,6 +3,7 @@ use crate::{
     worker,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use reb_js_lexer::invocation_site::Index;
 use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -16,6 +17,12 @@ use tokio::{process::Command, sync::Mutex};
 /// Analyses kept by source SHA-256 and intrinsic assumption.
 const CACHE_ENTRIES: usize = 4;
 type Analysis = (String, bool);
+/// Invocation site indexes kept by source SHA-256. An index is a few hundred
+/// bytes per function, so even a large bundle's is a small part of its source.
+const INDEX_ENTRIES: usize = 8;
+/// A source's index, or the worker's reason it could not index it. Both are
+/// a function of the bytes.
+pub type Indexed = std::result::Result<Index, String>;
 
 pub struct Deobfuscator {
     path: PathBuf,
@@ -24,6 +31,10 @@ pub struct Deobfuscator {
     /// for the same bytes share one worker run.
     analysis: Mutex<()>,
     cache: std::sync::Mutex<VecDeque<(Analysis, Arc<Value>, usize)>>,
+    /// Held while one index is built, so two queries over the same new
+    /// bytes share one parse.
+    indexing: Mutex<()>,
+    indexes: std::sync::Mutex<VecDeque<(String, Arc<Indexed>)>>,
 }
 impl Deobfuscator {
     pub fn new(path: PathBuf) -> Self {
@@ -32,6 +43,8 @@ impl Deobfuscator {
             lock: Mutex::new(()),
             analysis: Mutex::new(()),
             cache: Default::default(),
+            indexing: Mutex::new(()),
+            indexes: Default::default(),
         }
     }
     /// The analysis of these exact bytes, from the cache when the same bytes
@@ -122,15 +135,60 @@ impl Deobfuscator {
         self.reply(&request).await
     }
 
-    /// Finds the function an invocation site names, in the BOM-free script
-    /// text that `request` carries. The reply is checked by the caller.
-    pub async fn invocation_site(&self, request: Value) -> Result<Value> {
-        if !request["source"].is_string() {
-            return Err(Error::bad(
-                "An invocation site query carries its source text",
-            ));
+    /// The invocation site index of `text`, the BOM-free script text of the
+    /// verified artifact whose SHA-256 is `sha256`. The worker parses a
+    /// source once; later queries over the same bytes are answered from the
+    /// kept index, which every caller checks against the text like a reply.
+    pub async fn invocation_index(&self, sha256: &str, text: &str) -> Result<Arc<Indexed>> {
+        if let Some(found) = self.indexed(sha256) {
+            return Ok(found);
         }
-        self.request(request).await
+        let _build = self.indexing.lock().await;
+        if let Some(found) = self.indexed(sha256) {
+            return Ok(found);
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Reply {
+            schema: String,
+            ok: bool,
+            error: Option<String>,
+            source_bytes: usize,
+            index: Option<Index>,
+        }
+        let malformed = || {
+            Error::new(
+                502,
+                "The JavaScript analysis worker returned an invalid invocation site index",
+            )
+        };
+        let reply: Reply = serde_json::from_slice(
+            &self
+                .reply(&json!({"operation":"invocation_site_index","source":text}))
+                .await?,
+        )
+        .map_err(|_| malformed())?;
+        if reply.schema != "reb-invocation-site-index-v1" || reply.source_bytes != text.len() {
+            return Err(malformed());
+        }
+        let indexed = Arc::new(match (reply.ok, reply.index, reply.error) {
+            (true, Some(index), None) if index.source_bytes == text.len() => Ok(index),
+            (false, None, Some(error)) => Err(error),
+            _ => return Err(malformed()),
+        });
+        let mut indexes = self.indexes.lock().unwrap();
+        indexes.push_front((sha256.to_owned(), indexed.clone()));
+        indexes.truncate(INDEX_ENTRIES);
+        Ok(indexed)
+    }
+
+    fn indexed(&self, sha256: &str) -> Option<Arc<Indexed>> {
+        let mut indexes = self.indexes.lock().unwrap();
+        let at = indexes.iter().position(|(key, _)| key == sha256)?;
+        let entry = indexes.remove(at)?;
+        let found = entry.1.clone();
+        indexes.push_front(entry);
+        Some(found)
     }
 
     async fn request(&self, request: Value) -> Result<Value> {

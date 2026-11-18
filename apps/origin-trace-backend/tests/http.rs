@@ -3408,6 +3408,45 @@ async fn vm_full_read_streams_every_result_and_findings_view_counts_the_rest() {
         streamed,
         origin_trace_backend::vm::canonical(&full).unwrap()
     );
+    // reb-api streams the body whole into a new private file or stdout,
+    // prints serde_json's pretty form, and never replaces a file.
+    let call = |output: Option<&std::ffi::OsStr>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+        command.args(["call", "get_vm_analysis", "--base-url", &server.url]);
+        if let Some(output) = output {
+            command.arg("--output").arg(output);
+        }
+        command.output().unwrap()
+    };
+    let saved = server.root.path().join("cli").join("vm.json");
+    std::fs::create_dir(saved.parent().unwrap()).unwrap();
+    let written = call(Some(saved.as_os_str()));
+    assert!(written.status.success(), "{written:?}");
+    assert!(written.stdout.is_empty());
+    assert_eq!(std::fs::read(&saved).unwrap(), streamed);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&saved).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let refused = call(Some(saved.as_os_str()));
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(std::fs::read(&saved).unwrap(), streamed);
+    assert_eq!(
+        std::fs::read_dir(saved.parent().unwrap()).unwrap().count(),
+        1,
+        "no temporary file is left beside the output"
+    );
+    let piped = call(Some(std::ffi::OsStr::new("-")));
+    assert!(piped.status.success(), "{piped:?}");
+    assert_eq!(piped.stdout, streamed);
+    let printed = call(None);
+    assert!(printed.status.success(), "{printed:?}");
+    assert_eq!(
+        String::from_utf8(printed.stdout).unwrap(),
+        format!("{}\n", serde_json::to_string_pretty(&full).unwrap())
+    );
     let tiers = full["results"]
         .as_array()
         .unwrap()

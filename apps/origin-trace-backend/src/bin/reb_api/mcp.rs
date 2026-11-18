@@ -1227,13 +1227,14 @@ async fn call_tool(
         json_errors: true,
         missing_body: "Operation requires a JSON object body",
         expected_instance,
+        spool: None,
     })
     .await
     {
         Ok(completed) => completed,
         Err(error) => return tool_message(error.to_string(), true),
     };
-    if let Some(error) = super::ignored_filters(definition, &call_params, &completed) {
+    if let Some(error) = super::ignored_filters(definition, &call_params, &completed, None) {
         return tool_message(error, true);
     }
     if name == "get_source_format"

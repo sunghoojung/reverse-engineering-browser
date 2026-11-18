@@ -83,6 +83,10 @@ stderr. HTTP errors exit nonzero and show the server's error text. Binary
 content requires `--output PATH` (or explicit `--output -` for stdout), and a
 file path is never overwritten. JSON also accepts optional `--output`; file
 publication uses a synced mode-0600 temporary and atomic no-clobber persistence.
+A successful body of any size streams into that temporary, or for stdout into
+an unnamed private file, and is published only once it is complete and, unless
+binary, valid JSON; the printed form is reindented as it streams. Memory stays
+constant: a 477 MB VM analysis document saves in about 2 s within 20 MB.
 Exported evidence packages must validate before publication. The CLI does not provide additional permissions
 on its own.
 
@@ -188,7 +192,10 @@ Strings longer than `summary_string_chars` are replaced with character and byte
 counts. Fields that carry source, bytecode, derived text, or disassembly
 (`original_source`, `representation`, `text`, `body`, `raw`, `value`, and the
 other content names in the adapter) are omitted even when short. The summary is
-not the OpenAPI response document.
+not the OpenAPI response document. The projection parses a result whole to omit
+content and summarize it, so a success body over 64 MiB is a tool error that
+names the narrower read: the operation's view, filter, limit or paging
+parameters, such as `get_vm_analysis` with `view` `findings`.
 
 Each tool `inputSchema` is a closed JSON Schema. Component `$ref` values are
 inlined, and OpenAPI extension keywords are omitted, so a client does not need
@@ -835,7 +842,8 @@ safe JSON diagnostic and keep exit 2. Preflight/connection failures before
 headers retain ordinary CLI diagnostics and exit 2, with no invented status.
 The flag conflicts with `--show-headers`; neither headers nor arbitrary body
 fields are included. HTTP 200 application failures still use stdout and exit 0.
-Response reads remain capped at 64 MiB; commands are never automatically retried.
+Error bodies are read up to 64 MiB, and successful bodies stream whole;
+commands are never automatically retried.
 
 ## Analysis definitions and reviewed sources
 

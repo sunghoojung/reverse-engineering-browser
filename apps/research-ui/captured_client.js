@@ -17,17 +17,19 @@ function capturedClientIssues(request) {
     if (typeof request.url !== 'string' || bytes(request.url) > 8192 || !wellFormed(request.url) || request.url.trim() !== request.url || /[\u0000-\u0020\u007f]/.test(request.url) ||
         !['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.hash) throw new Error();
   } catch { problems.push('URL must be complete HTTP(S), at most 8 KiB, without credentials, fragments or controls.'); }
-  const forbidden = new Set(['authorization','proxy-authorization','cookie','cookie2','set-cookie','host','content-length','connection','transfer-encoding',
-    'accept-charset','accept-encoding','access-control-request-headers','access-control-request-method','date','dnt','expect','keep-alive','origin','referer','te','trailer','upgrade','user-agent','via']);
-  const seen = new Set(); let total = 0;
+  // The HTTP client computes framing and connection headers itself. Every other
+  // captured header, credentials, cookies and browser headers included, is sent
+  // as captured.
+  const framing = new Set(['host','content-length','connection','transfer-encoding','keep-alive','proxy-connection','te','trailer','upgrade']);
+  const seen = new Set();
   if (!Array.isArray(request.headers) || request.headers.length > 64) problems.push('At most 64 complete header pairs are supported.');
   else for (const pair of request.headers) {
     if (!Array.isArray(pair) || pair.length !== 2 || pair.some(value => !wellFormed(value))) { problems.push('A header pair is malformed.'); continue; }
-    const [name,value] = pair, lower = name.toLowerCase(); total += bytes(name) + bytes(value);
-    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || bytes(name) > 128 || bytes(value) > 2048 || /[\u0000-\u001f\u007f\u0100-\uffff]/.test(value) || value.trim() !== value) problems.push('A header exceeds supported token, value or control-character limits.');
+    const [name,value] = pair, lower = name.toLowerCase();
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || bytes(name) > 128 || bytes(value) > 65536 || /[\u0000-\u001f\u007f\u0100-\uffff]/.test(value) || value.trim() !== value) problems.push('A header exceeds supported token, value or control-character limits.');
     if (seen.has(lower)) problems.push('Duplicate header names cannot be represented faithfully by Repeater.');
     seen.add(lower);
-    if (forbidden.has(lower) || lower.startsWith('sec-') || lower.startsWith('proxy-')) problems.push('A credential, transport or browser-controlled header requires explicit manual editing; it is not silently removed.');
+    if (framing.has(lower)) problems.push('A framing or connection header (Host, Content-Length, Connection, Transfer-Encoding or a hop-by-hop header) is computed by the HTTP client; remove it from the reviewed request. It is not silently removed.');
     if (['x-http-method','x-http-method-override','x-method-override'].includes(lower) && value.split(',').some(method => ['CONNECT','TRACE','TRACK'].includes(method.trim().toUpperCase()))) problems.push('This method-override header is forbidden by browser Fetch.');
     if (lower === 'content-encoding') problems.push('Encoded request bodies require manual reconstruction from original bytes.');
     if (lower === 'content-type') {
@@ -51,7 +53,6 @@ function capturedClientIssues(request) {
       }
     }
   }
-  if (total > 16384) problems.push('Header text exceeds 16 KiB.');
   if (!wellFormed(request.body) || bytes(request.body) > 65536) problems.push('A complete UTF-8 text body of at most 64 KiB is required.');
   if (['GET','HEAD'].includes(request.method) && request.body !== '') problems.push('GET and HEAD bodies cannot be replayed by this HTTP client.');
   if (!Number.isInteger(request.timeout_ms) || request.timeout_ms < 100 || request.timeout_ms > 30000) problems.push('Timeout must be between 100 and 30000 ms.');
@@ -717,13 +718,10 @@ func ReadJSON(path string, target any) error {
 var token = regexp.MustCompile("^[!#$%&'*+.^_${'`'}|~0-9A-Za-z-]+$")
 var method = regexp.MustCompile("^[A-Z][A-Z0-9!#$%&'*+.^_${'`'}|~-]{0,31}$")
 var textMedia = regexp.MustCompile("^(text/[a-z0-9.+-]+|application/(json|[a-z0-9.-]+\\+json|xml|[a-z0-9.-]+\\+xml|x-www-form-urlencoded|graphql|x-ndjson|ndjson))$")
-var forbidden = map[string]bool{
-    "authorization":true, "proxy-authorization":true, "cookie":true, "cookie2":true, "set-cookie":true,
+// Headers net/http computes; every other captured header is sent as captured.
+var framing = map[string]bool{
     "host":true, "content-length":true, "connection":true, "transfer-encoding":true,
-    "accept-charset":true, "accept-encoding":true, "access-control-request-headers":true,
-    "access-control-request-method":true, "date":true, "dnt":true, "expect":true,
-    "keep-alive":true, "origin":true, "referer":true, "te":true, "trailer":true,
-    "upgrade":true, "user-agent":true, "via":true, "content-encoding":true,
+    "keep-alive":true, "proxy-connection":true, "te":true, "trailer":true, "upgrade":true,
 }
 func printableASCII(value string) bool {
     for _, character := range value { if character < 32 || character > 126 { return false } }
@@ -750,13 +748,14 @@ func Issues(input Request) []string {
     if !method.MatchString(input.Method) || forbiddenMethod(input.Method) { problems=append(problems,"Unsupported uppercase HTTP method") }
     if _,err:=requestURL(input.URL);err!=nil { problems=append(problems,err.Error()) }
     if input.Headers==nil || len(input.Headers)>64 { problems=append(problems,"At most 64 complete header pairs are required") }
-    seen,total:=map[string]bool{},0
+    seen:=map[string]bool{}
     for _,pair:=range input.Headers {
         if len(pair)!=2 { problems=append(problems,"Malformed header pair");continue }
-        name,value:=pair[0],pair[1];lower:=strings.ToLower(name);total+=len(name)+len(value)
-        if !token.MatchString(name) || len(name)>128 || len(value)>2048 || !printableASCII(value) || strings.TrimSpace(value)!=value { problems=append(problems,"Go supports only bounded ASCII header values without surrounding whitespace or controls") }
+        name,value:=pair[0],pair[1];lower:=strings.ToLower(name)
+        if !token.MatchString(name) || len(name)>128 || len(value)>65536 || !printableASCII(value) || strings.TrimSpace(value)!=value { problems=append(problems,"Go supports only bounded ASCII header values without surrounding whitespace or controls") }
         if seen[lower] { problems=append(problems,"Duplicate header names are unsupported") };seen[lower]=true
-        if forbidden[lower] || strings.HasPrefix(lower,"sec-") || strings.HasPrefix(lower,"proxy-") { problems=append(problems,"Credential, transport, browser-controlled or encoded-body header requires manual reconstruction") }
+        if framing[lower] { problems=append(problems,"Framing and connection headers are computed by net/http; remove them from the reviewed request") }
+        if lower=="content-encoding" { problems=append(problems,"Encoded request bodies require manual reconstruction from original bytes") }
         if lower=="x-http-method" || lower=="x-http-method-override" || lower=="x-method-override" {
             for _,part:=range strings.Split(value,",") { if forbiddenMethod(strings.ToUpper(strings.TrimSpace(part))) { problems=append(problems,"Unsupported method override") } }
         }
@@ -767,7 +766,6 @@ func Issues(input Request) []string {
             if charset!="" && charset!="utf-8" && charset!="utf8" { problems=append(problems,"Only UTF-8 request bodies are supported") }
         }
     }
-    if total>16384 { problems=append(problems,"Headers exceed 16 KiB") }
     if input.Body==nil || !utf8.ValidString(*input.Body) || len(*input.Body)>65536 { problems=append(problems,"Complete UTF-8 body of at most 64 KiB is required") }
     if (input.Method=="GET" || input.Method=="HEAD") && input.Body!=nil && *input.Body!="" { problems=append(problems,"GET/HEAD bodies are unsupported") }
     if input.TimeoutMS<100 || input.TimeoutMS>30000 { problems=append(problems,"Timeout must be 100-30000 ms") }
@@ -906,7 +904,7 @@ This is a dry run and sends nothing. Review the shared root request, provenance 
 
     go run ./cmd/request-001 --send
 
-Run from go/ so shared JSON paths resolve to the parent folder. For redacted or unsupported exports, supply a complete reviewed config.request with method, url, headers (pairs), body and timeout_ms. Evidence files remain unchanged. Never paste credentials into this credential-omitting client. Mutating methods can change server state.
+Run from go/ so shared JSON paths resolve to the parent folder. For redacted or unsupported exports, supply a complete reviewed config.request with method, url, headers (pairs), body and timeout_ms. Evidence files remain unchanged. Captured Authorization, Cookie and other headers are sent exactly as reviewed; the client keeps no cookie jar and adds no ambient credentials or proxy. Mutating methods can change server state.
 
 ## Shared configuration and response checks
 
@@ -1007,7 +1005,7 @@ function capturedClientProject(source, mode) {
       'Retained CDP representations are not original HTTP wire bytes; duplicate wire headers, original casing/order and extra-info headers may be absent.',
       'HTTP clients normalize URLs and headers. TLS, compression, CORS, storage and cookies differ from the original browser.',
       'Default Go uses standard HTTP/1.1; an optional pinned Mimic build has one explicit Chrome133/Linux profile, with unverified browser equivalence. No ambient proxy, cookie jar, certificate bypass or automatic decompression.',
-      'Both clients omit credentials and stop redirects; optional response checks must be configured explicitly. Repeater follows redirects.',
+      'Both clients send only the reviewed headers, credentials and cookies included, keep no cookie jar and stop redirects; optional response checks must be configured explicitly. Repeater follows redirects.',
       'Missing, binary, multipart or truncated request representations require explicit configuration; no prefix is claimed complete.',
       'Raw files can contain credentials or personal data. Redacted names, paths and provenance can still be sensitive. Review before sharing.']};
   const files = [], add = (path,text) => files.push({path:'reb-client-project/'+path,text}), json = value => JSON.stringify(value,null,2)+'\n';

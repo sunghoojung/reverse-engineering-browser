@@ -497,12 +497,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     guard let values = value as? [[String: Any]], values.count <= 64 else {
       throw LocalHTTPError(status: 400, message: "API Collection request headers are invalid")
     }
-    let forbidden = Set([
-      "authorization", "connection", "content-length", "cookie", "host",
-      "proxy-authorization", "set-cookie", "transfer-encoding",
+    // The HTTP client computes framing and connection headers; credentials and
+    // cookies are kept as the researcher wrote them.
+    let framing = Set([
+      "connection", "content-length", "host", "keep-alive", "proxy-connection",
+      "te", "trailer", "transfer-encoding", "upgrade",
     ])
     var names = Set<String>()
-    var totalBytes = 0
     var normalized: [[String: Any]] = []
     normalized.reserveCapacity(values.count)
     for header in values {
@@ -517,18 +518,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let headerValue = try apiCollectionText(
         header["value"],
         label: "API Collection request header value",
-        maximumBytes: 2 * 1_024,
+        maximumBytes: 64 * 1_024,
         allowEmpty: true
       )
       let lowerName = name.lowercased()
       guard name.range(of: #"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"#, options: .regularExpression) != nil,
-        !forbidden.contains(lowerName), names.insert(lowerName).inserted
+        !framing.contains(lowerName), names.insert(lowerName).inserted
       else {
-        throw LocalHTTPError(status: 400, message: "API Collection request header is forbidden or invalid")
-      }
-      totalBytes += name.utf8.count + headerValue.utf8.count
-      guard totalBytes <= 16 * 1_024 else {
-        throw LocalHTTPError(status: 400, message: "API Collection request headers exceed 16 KiB")
+        throw LocalHTTPError(status: 400, message: "API Collection request header is a framing header or invalid")
       }
       normalized.append(["name": name, "value": headerValue])
     }

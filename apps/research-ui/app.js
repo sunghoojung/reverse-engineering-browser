@@ -4973,16 +4973,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           throw new TypeError('Request headers must map names to text values.');
         }
 
-        const forbidden = new Set(['authorization', 'connection', 'content-length', 'cookie', 'host',
-          'proxy-authorization', 'set-cookie', 'transfer-encoding']);
+        // The HTTP client computes framing and connection headers; credentials,
+        // cookies and browser headers are kept as the researcher wrote them.
+        const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
+          'te', 'trailer', 'transfer-encoding', 'upgrade']);
         const entries = Object.entries(headers);
-        let bytes = 0;
-        if (entries.length > 64 || entries.some(([name, headerValue]) => {
-          bytes += utf8ByteLength(name) + utf8ByteLength(headerValue);
-          return !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || forbidden.has(name.toLowerCase()) ||
-            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 2 * 1024 ||
-            /[\x00-\x1f\x7f]/u.test(headerValue) || bytes > 16 * 1024;
-        })) throw new TypeError('Request headers are forbidden, invalid, or exceed 16 KiB.');
+        if (entries.length > 64 || entries.some(([name, headerValue]) =>
+          !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || framing.has(name.toLowerCase()) ||
+            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 64 * 1024 ||
+            /[\x00-\x1f\x7f]/u.test(headerValue)
+        )) throw new TypeError('Request headers must be at most 64 valid names with values of at most 64 KiB; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
         return entries.map(([name, headerValue]) => ({name, value: headerValue}));
       }
 

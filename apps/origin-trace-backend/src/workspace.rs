@@ -236,38 +236,36 @@ pub fn variables(
         ))
     }
 }
+/// The HTTP client computes framing and connection headers; credentials and
+/// cookies are kept as the researcher wrote them.
 pub fn headers(value: &Value) -> Result<Value> {
-    const FORBIDDEN: [&str; 8] = [
-        "authorization",
+    const FRAMING: [&str; 9] = [
         "connection",
         "content-length",
-        "cookie",
         "host",
-        "proxy-authorization",
-        "set-cookie",
+        "keep-alive",
+        "proxy-connection",
+        "te",
+        "trailer",
         "transfer-encoding",
+        "upgrade",
     ];
     let mut seen = BTreeSet::new();
-    let mut total = 0;
     let mut output = Vec::new();
     for v in array(value, 64, "Request headers")? {
         validation::fields(v, &["name", "value"], "Request header")?;
         let name = validation::text(&v["name"], "Request header name", 128, false, false)?;
-        let value = validation::text(&v["value"], "Request header value", 2048, true, false)?;
+        let value = validation::text(&v["value"], "Request header value", 65_536, true, false)?;
         let lower = name.to_ascii_lowercase();
         if !name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-            || FORBIDDEN.contains(&lower.as_str())
+            || FRAMING.contains(&lower.as_str())
             || !seen.insert(lower)
         {
             return Err(Error::bad(
-                "Request header is forbidden, invalid, or duplicated",
+                "Request header is a framing header, invalid, or duplicated",
             ));
-        }
-        total += name.len() + value.len();
-        if total > 16384 {
-            return Err(Error::bad("Request headers exceed 16 KiB"));
         }
         output.push(json!({"name":name,"value":value}));
     }

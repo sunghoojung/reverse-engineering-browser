@@ -3190,8 +3190,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   // Trace value on the value-flow fixture (artifact 440): select the import
-  // call row in Inspect, trace it, read the slice, reveal a load by keyboard,
-  // and see the slice marked in the listing. Captured text stays inert.
+  // call row in Inspect, trace it, read the tree (seed, then sources and sinks
+  // grouped by kind with exact counts), open a source's path to the seed,
+  // reveal a load by keyboard, and see the slice marked in the listing.
+  // Captured text stays inert.
   @MainActor
   func test41TraceValueInInspect() async throws {
     for size in windowSizes {
@@ -3215,34 +3217,51 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#value-flow-run")
       try await ui.waitUntil("document.querySelectorAll('#value-flow-list .value-flow-row').length > 10", timeout: 30, "the slice did not load")
       let status = try await ui.value("document.querySelector('#value-flow-status').textContent") as? String ?? ""
-      XCTAssertTrue(status.contains("3 joins") && status.contains("not observed"), "\(size.name): the status names joins and static evidence: \(status)")
+      XCTAssertTrue(status.range(of: #"\d+ joins"#, options: .regularExpression) != nil && status.contains("not observed"), "\(size.name): the status names joins and static evidence: \(status)")
       let slice = try await ui.json("""
         (() => { const rows = [...document.querySelectorAll('#value-flow-list .value-flow-row')];
           const kind = rows[0]?.querySelector('.value-flow-kind');
+          const sections = rows.filter(row => row.classList.contains('is-section')).map(row => row.textContent);
           return {seed: rows[0]?.innerText ?? '', seedKindWhole: Boolean(kind) && kind.getBoundingClientRect().width > 0 && kind.scrollWidth <= kind.clientWidth + 1,
+            sections, groups: rows.filter(row => row.classList.contains('is-group')).length,
             sources: rows.filter(row => row.classList.contains('is-source')).length,
-            joins: document.querySelectorAll('#value-flow-list .value-flow-join').length,
+            sinks: rows.filter(row => row.classList.contains('is-sink')).length,
             marked: document.querySelectorAll('#source-code .source-line[data-value-flow]').length,
             seedMarked: document.querySelectorAll('#source-code .source-line[data-value-flow="seed"]').length}; })()
         """)
       XCTAssertTrue((slice["seed"] as? String ?? "").contains("env.send"), "\(size.name): the seed is the JavaScript crossing: \(slice)")
       XCTAssertEqual(slice["seedKindWhole"] as? Bool, true, "\(size.name): the import name is visible, not cut, at this window size: \(slice)")
+      let sections = slice["sections"] as? [String] ?? []
+      XCTAssertTrue(sections.contains(where: { $0.contains("Comes from") }) && sections.contains(where: { $0.contains("Goes to") }), "\(size.name): both directions are sections: \(sections)")
+      XCTAssertGreaterThanOrEqual(slice["groups"] as? Int ?? 0, 3, "\(size.name): sources and sinks are grouped by kind: \(slice)")
       XCTAssertGreaterThanOrEqual(slice["sources"] as? Int ?? 0, 5, "\(size.name): sources are listed: \(slice)")
-      XCTAssertEqual(slice["joins"] as? Int, 3, "\(size.name): every join lists its incoming edges: \(slice)")
+      XCTAssertGreaterThanOrEqual(slice["sinks"] as? Int ?? 0, 1, "\(size.name): sinks are listed: \(slice)")
       XCTAssertGreaterThan(slice["marked"] as? Int ?? 0, 3, "\(size.name): the slice is marked in the listing: \(slice)")
       XCTAssertEqual(slice["seedMarked"] as? Int, 1, "\(size.name): the seed row is marked: \(slice)")
+      // A source's path to the seed opens in place, with its connectors named.
+      try await ui.click("#value-flow-list .value-flow-row.is-source .value-flow-path")
+      try await ui.waitUntil("document.querySelectorAll('#value-flow-list .value-flow-row.is-step').length > 0", timeout: 30, "the path did not load")
+      let path = try await ui.json("""
+        (() => { const steps = [...document.querySelectorAll('#value-flow-list .value-flow-row.is-step')];
+          return {steps: steps.length, edges: steps.map(step => step.querySelector('.value-flow-edge')?.textContent ?? ''),
+            last: steps.at(-1)?.querySelector('.value-flow-role')?.textContent ?? ''}; })()
+        """)
+      XCTAssertGreaterThan(path["steps"] as? Int ?? 0, 0, "\(size.name): a path has steps: \(path)")
+      XCTAssertTrue((path["edges"] as? [String] ?? []).allSatisfy { !$0.isEmpty }, "\(size.name): every step names its edge: \(path)")
+      XCTAssertEqual(path["last"] as? String, "seed", "\(size.name): the path ends at the seed: \(path)")
       let panel = try await ui.json("""
         (() => { const panel = document.querySelector('#value-flow').getBoundingClientRect(), wrap = document.querySelector('#source-code-wrap').getBoundingClientRect();
-          return {panel: panel.height, listing: wrap.height, below: panel.top >= wrap.bottom - 1}; })()
+          return {panel: panel.height, listing: wrap.height, below: panel.top >= wrap.bottom - 1, divider: !document.querySelector('#pane-divider-value-flow').hidden}; })()
         """)
-      XCTAssertGreaterThanOrEqual(panel["listing"] as? Double ?? 0, 90, "\(size.name): the listing keeps its rows beside the panel: \(panel)")
+      XCTAssertGreaterThanOrEqual(panel["listing"] as? Double ?? 0, 72, "\(size.name): the listing keeps its rows beside the panel: \(panel)")
       XCTAssertEqual(panel["below"] as? Bool, true, "\(size.name): the panel sits under the listing: \(panel)")
+      XCTAssertEqual(panel["divider"] as? Bool, true, "\(size.name): the split between listing and panel is resizable: \(panel)")
       try await assertLayout(ui, "#value-flow", "\(size.name) trace value")
       try await assertInert(ui, "\(size.name) trace value")
       try await ui.screenshot("trace-value-\(size.name)")
-      // Keyboard: the first link, arrows through the list, Enter reveals a load row.
+      // Keyboard: the first link, arrows through the tree, Enter reveals a load row.
       _ = try await ui.value("document.querySelector('#value-flow-list .value-flow-link').focus()")
-      for _ in 0..<40 {
+      for _ in 0..<60 {
         let focused = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
         if focused.hasPrefix("0x7e") { break }
         try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])

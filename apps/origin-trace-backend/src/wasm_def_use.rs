@@ -1022,7 +1022,7 @@ pub fn simulate_with(
                 Ok(done) => ended = done,
                 Err(Stop::Unsupported(what)) => {
                     sim.omissions.push(format!(
-                        "{what} at byte {offset} is not modeled; value flow after it is not computed."
+                        "{what} at byte 0x{offset:x} is not modeled; value flow after it is not computed."
                     ));
                     stopped_at = Some(offset as u32);
                     break;
@@ -1048,7 +1048,7 @@ pub fn simulate_with(
                 .chain(frame.state.loop_local_phis.iter().map(|(_, phi)| phi));
             open_joins.extend(phis.copied());
             sim.omissions.push(format!(
-                "The loop at byte {} was still open where simulation stopped at byte {stop}; values read in it may also arrive by back edges after the stop, and its header joins are incomplete.",
+                "The loop at byte 0x{:x} was still open where simulation stopped at byte 0x{stop:x}; values read in it may also arrive by back edges after the stop, and its header joins are incomplete.",
                 frame.state.offset
             ));
         }
@@ -1410,7 +1410,7 @@ impl Sim<'_, '_> {
         if self.reachable && !self.underflow_noted {
             self.underflow_noted = true;
             self.omissions.push(format!(
-                "The operand stack is empty at byte {offset}; the module may not validate, and the missing operand is an unknown value."
+                "The operand stack is empty at byte 0x{offset:x}; the module may not validate, and the missing operand is an unknown value."
             ));
         }
         self.unknown_value()
@@ -1440,7 +1440,7 @@ impl Sim<'_, '_> {
                 .copied()
                 .unwrap_or(self.body_offset);
             self.omissions.push(format!(
-                "The instruction at byte {offset} carries {wanted} values but the operand stack holds {available}; the module may not validate, and the missing values are unknown."
+                "The instruction at byte 0x{offset:x} carries {wanted} values but the operand stack holds {available}; the module may not validate, and the missing values are unknown."
             ));
         }
     }
@@ -1631,7 +1631,7 @@ impl Sim<'_, '_> {
         }
         let Some(target) = self.control.target(depth) else {
             self.omissions.push(format!(
-                "A branch at byte {offset} names a label past the open frames; its values are not followed."
+                "A branch at byte 0x{offset:x} names a label past the open frames; its values are not followed."
             ));
             return;
         };
@@ -1916,7 +1916,7 @@ impl Sim<'_, '_> {
             }
             let from = incoming.via_offset;
             self.omissions.push(format!(
-                "At byte {offset} a path from byte {from} carries {carried} values where the block declares {results}; the module may not validate, and missing values are unknown."
+                "At byte 0x{offset:x} a path from byte 0x{from:x} carries {carried} values where the block declares {results}; the module may not validate, and missing values are unknown."
             ));
             incoming.values.resize(results as usize, unknown);
         }
@@ -2017,7 +2017,7 @@ impl Sim<'_, '_> {
         let extra = self.stack.len().saturating_sub(height + results as usize);
         if extra > 0 {
             self.omissions.push(format!(
-                "{extra} values are left on the operand stack at the end at byte {offset}; the module may not validate, and they flow nowhere."
+                "{extra} values are left on the operand stack at the end at byte 0x{offset:x}; the module may not validate, and they flow nowhere."
             ));
         }
     }
@@ -2339,7 +2339,7 @@ impl Sim<'_, '_> {
                 let derived = Value::of(node);
                 let Some(target) = self.control.target(depth) else {
                     self.omissions.push(format!(
-                        "A branch at byte {offset} names a label past the open frames; its values are not followed."
+                        "A branch at byte 0x{offset:x} names a label past the open frames; its values are not followed."
                     ));
                     return Ok(false);
                 };
@@ -2384,7 +2384,7 @@ impl Sim<'_, '_> {
             let clause = Clause::of(catch, &self.module.types, &self.control);
             let Some(target) = clause.target else {
                 self.omissions.push(format!(
-                    "A try_table catch at byte {offset} names a label past the open frames; it is not followed."
+                    "A try_table catch at byte 0x{offset:x} names a label past the open frames; it is not followed."
                 ));
                 continue;
             };

@@ -4,7 +4,6 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
-#include "brave/components/reverse_engineering_browser/common/native_artifact_queue_limits.h"
 
 #include "build/build_config.h"
 
@@ -17,7 +16,6 @@
 #include <array>
 #include <cerrno>
 #include <cstddef>
-#include <limits>
 #include <span>
 #include <utility>
 
@@ -38,7 +36,7 @@ constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
 constexpr char kBrokerTokenFileSwitch[] = "reb-broker-token-file";
 constexpr int kTransferTimeoutSeconds = 30;
 // A local receiver that refuses every connection for about three seconds is
-// gone for the session; transfers wait in the bounded queue meanwhile.
+// gone for the session; transfers wait in the queue meanwhile.
 constexpr std::array<int, 5> kReconnectDelaysMs = {100, 200, 400, 800, 1600};
 
 using State = NativeArtifactChannelState;
@@ -168,13 +166,6 @@ TransferOutcome SendTransfer(const int descriptor,
   return TransferOutcome::kAcknowledged;
 }
 
-std::size_t TransferSize(const NativeArtifactTransfer& transfer) noexcept {
-  const std::size_t metadata_size = transfer.url.size() + transfer.mime_type.size();
-  return metadata_size > std::numeric_limits<std::size_t>::max() - transfer.content.size()
-             ? std::numeric_limits<std::size_t>::max()
-             : metadata_size + transfer.content.size();
-}
-
 }  // namespace
 
 NativeArtifactSocketClient& NativeArtifactSocketClient::Get() {
@@ -238,23 +229,13 @@ bool NativeArtifactSocketClient::Enqueue(
   if (!transfer || !AcceptsTransfers(state_.load(std::memory_order_acquire))) {
     return false;
   }
-  const std::size_t transfer_size = TransferSize(*transfer);
-  const bool stream_frame = IsStreamFrame(*transfer);
-  const bool data = stream_frame && transfer->frame.op == NativeArtifactStreamOp::kData;
+  // The queue has no limit of its own: every queued byte holds an in-flight
+  // pool share, which is the bound. Control frames carry none, so an admitted
+  // stream can always be closed.
   base::AutoLock lock(lock_);
   if (!AcceptsTransfers(state_.load(std::memory_order_relaxed))) {
     return false;
   }
-  // End, abort and checkpoint frames always fit, so an admitted stream can
-  // always be closed.
-  if (data ? queued_stream_frames_ >= kNativeArtifactMaxQueuedStreamFrames ||
-                 !CanQueueNativeArtifact(0, queued_bytes_, transfer_size)
-           : !stream_frame && !CanQueueNativeArtifact(queue_.size() - queued_stream_frames_,
-                                                      queued_bytes_, transfer_size)) {
-    return false;
-  }
-  queued_bytes_ += transfer_size;
-  queued_stream_frames_ += stream_frame ? 1U : 0U;
   queue_.push_back(std::move(transfer));
   wakeup_.Signal();
   return true;
@@ -361,8 +342,6 @@ void NativeArtifactSocketClient::Run() {
       }
       transfer = std::move(queue_.front());
       queue_.pop_front();
-      queued_bytes_ -= TransferSize(*transfer);
-      queued_stream_frames_ -= IsStreamFrame(*transfer) ? 1U : 0U;
       descriptor = socket_descriptor_;
     }
 
@@ -456,8 +435,6 @@ void NativeArtifactSocketClient::DisconnectPending(const NativeArtifactReceiveSt
   {
     base::AutoLock lock(lock_);
     pending.swap(queue_);
-    queued_bytes_ = 0;
-    queued_stream_frames_ = 0;
   }
   LoseOpenStreams(status);
   for (const auto& transfer : pending) {

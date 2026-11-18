@@ -5,6 +5,7 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -92,7 +93,7 @@ void NativeArtifactBodyTee::Start() {
 }
 
 void NativeArtifactBodyTee::OnReadable(const MojoResult result, const mojo::HandleSignalsState&) {
-  if (write_pending_ || !completion_) {
+  if (write_pending_ || waiting_ || !completion_) {
     return;
   }
   if (result != MOJO_RESULT_OK) {
@@ -115,9 +116,17 @@ void NativeArtifactBodyTee::OnReadable(const MojoResult result, const mojo::Hand
     return;
   }
 
-  observer_.Run(std::span<const std::uint8_t>(data.data(), data.size()));
-  write_buffer_.assign(base::as_string_view(data));
-  source_->EndReadData(data.size());
+  const std::size_t taken = std::min(
+      data.size(), observer_.Run(std::span<const std::uint8_t>(data.data(), data.size()),
+                                 base::BindOnce(&NativeArtifactBodyTee::Resume,
+                                                weak_factory_.GetWeakPtr())));
+  waiting_ = taken < data.size();
+  if (taken == 0) {
+    source_->EndReadData(0);
+    return;
+  }
+  write_buffer_.assign(base::as_string_view(data.first(taken)));
+  source_->EndReadData(taken);
   write_pending_ = true;
   target_->Write(std::make_unique<mojo::StringDataSource>(
                      write_buffer_,
@@ -132,7 +141,16 @@ void NativeArtifactBodyTee::OnDataWritten(const MojoResult result) {
     Finish(NativeArtifactBodyEnd::kTargetClosed);
     return;
   }
-  source_watcher_.ArmOrNotify();
+  if (!waiting_) {
+    source_watcher_.ArmOrNotify();
+  }
+}
+
+void NativeArtifactBodyTee::Resume() {
+  waiting_ = false;
+  if (!write_pending_ && completion_) {
+    source_watcher_.ArmOrNotify();
+  }
 }
 
 void NativeArtifactBodyTee::Finish(const NativeArtifactBodyEnd end) {

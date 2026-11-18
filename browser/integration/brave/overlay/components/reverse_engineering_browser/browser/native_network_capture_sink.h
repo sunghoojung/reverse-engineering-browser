@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "base/files/file_path.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
 #include "base/synchronization/lock.h"
 
@@ -42,6 +43,7 @@ struct RedirectInfo;
 }  // namespace net
 
 namespace network {
+class ResourceRequestBody;
 struct ResourceRequest;
 struct URLLoaderCompletionStatus;
 namespace mojom {
@@ -102,7 +104,7 @@ class NativeNetworkCaptureSink final {
   // headers it sends (protocol/native-network-v3.md). No request byte changes.
   // The receiver's verdict on a queued header block or cookie list. Only an
   // accepted one can be shared by later requests. A refused block, or a copy of
-  // one already accepted, returns its bytes to the session budget.
+  // one already accepted, is not shared.
   void HeaderBlockSettled(std::uint64_t artifact_id, bool accepted) noexcept;
   // Records every deferred body while the session can still record them.
   void FlushDeferredBodies() noexcept;
@@ -110,7 +112,8 @@ class NativeNetworkCaptureSink final {
   // Content sessions only, right after AssignNetworkHeadersId: reads a body
   // with file, blob or stream parts, whose request_body record then follows
   // when the read ends (protocol/native-network-v3.md). Only a stream part's
-  // getter changes, to one that forwards every byte unchanged.
+  // getter changes, to one that forwards every byte unchanged. In-memory
+  // bodies are read as soon as the request starts.
   void TeeRequestBody(std::uint64_t request_id, network::ResourceRequest& request) noexcept;
   void RecordRequestRedirected(std::uint64_t request_id,
                                std::int32_t initiator_request_id,
@@ -171,13 +174,25 @@ class NativeNetworkCaptureSink final {
                           const NativeProbeHeader& parent,
                           std::string_view devtools_request_id) noexcept;
 
-  // A body record waiting for its read.
+  // A body record waiting for its read or digest.
   struct DeferredBody final {
     NativeProbeHeader parent{};
     NativeRequestBodySummary summary;
     std::string url;
     std::string mime_type;
+    // Its state if capture ends before the read does.
+    NativeRequestBodyState flushed_state = NativeRequestBodyState::kNotCapturedReadIncomplete;
   };
+  // Content sessions: reads the body whole off this sequence; its record
+  // follows the read.
+  void ReadBody(NativeProbeEmitter emitter,
+                DeferredBody body,
+                network::ResourceRequestBody& request_body) noexcept;
+  // Metadata only sessions: hashes an in-memory body off this sequence; its
+  // record follows with the digest.
+  void HashRequestBody(NativeProbeEmitter emitter,
+                       DeferredBody body,
+                       scoped_refptr<network::ResourceRequestBody> bytes);
   void EmitDeferredBody(NativeProbeEmitter emitter,
                         const DeferredBody& body,
                         NativeRequestBodyState state) noexcept;
@@ -219,7 +234,7 @@ class NativeNetworkCaptureSink final {
                       std::string_view url,
                       ForEach for_each);
   // Shares an identical block or retains this one as an artifact the event
-  // creates, within the header budget. Requires header_lock_.
+  // creates. Requires header_lock_.
   [[nodiscard]] NativeHeaderState RetainBlock(NativeArtifactKind kind,
                                               std::uint8_t share_kind,
                                               const NativeProbeHeader& parent,
@@ -241,13 +256,9 @@ class NativeNetworkCaptureSink final {
   std::unordered_map<std::uint64_t, TrackedHeaders> tracked_headers_;
   // Blocks the receiver accepted, by kind, length and digest.
   std::map<std::array<std::uint8_t, 37>, std::uint64_t> shared_header_blocks_;
-  // Queued blocks awaiting an ACK; the artifact queue bounds their number.
-  struct InFlightHeaderBlock final {
-    std::array<std::uint8_t, 37> key{};
-    std::size_t size = 0;
-  };
-  std::map<std::uint64_t, InFlightHeaderBlock> in_flight_header_blocks_;
-  std::size_t header_bytes_ = 0;
+  // Queued blocks awaiting an ACK, by share key; the in-flight pool bounds
+  // their number.
+  std::map<std::uint64_t, std::array<std::uint8_t, 37>> in_flight_header_blocks_;
   std::uint32_t unattributed_header_blocks_ = 0;
   std::uint32_t unattributed_cookie_lists_ = 0;
   // Hashed DevTools IDs of the newest finished requests, so a late block for one is counted.

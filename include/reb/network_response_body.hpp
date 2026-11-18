@@ -13,11 +13,15 @@ namespace reb {
 // The response_body record, see protocol/native-network-v3.md. The Brave
 // overlay's common/native_network_response_body.h is the producer half.
 // Version 2 adds flag bit 7; version 1 records stay valid without it.
-inline constexpr std::uint16_t kResponseBodyPayloadVersion = 2;
+// Version 3 keeps every body whole: no captured_truncated, no session budget,
+// and a partial or stopped body keeps every byte that arrived.
+inline constexpr std::uint16_t kResponseBodyPayloadVersion = 3;
+// Versions 1 and 2 only: a body kept at most this prefix.
 inline constexpr std::uint64_t kResponseBodyCaptureBytes = 16ULL * 1024ULL * 1024ULL;
 
 enum class ResponseBodyState : std::uint8_t {
   kCaptured = 1,
+  // Versions 1 and 2 only: the body passed the 16 MiB limit.
   kCapturedTruncated = 2,
   kPartial = 3,
   kAborted = 4,
@@ -28,7 +32,7 @@ enum class ResponseBodyState : std::uint8_t {
   kNotCapturedType = 9,
   kNotCapturedArtifactUnavailable = 10,
   kNotCapturedTransferRefused = 11,
-  // Older sessions only: the per-session response body budget was used.
+  // Versions 1 and 2 only: the per-session response body budget was used.
   kNotCapturedSessionBudget = 12,
   // The receiver's disk reserve refused the body while it arrived.
   kNotCapturedDiskReserve = 13,
@@ -42,8 +46,8 @@ inline constexpr std::uint8_t kResponseBodyCodingsOmitted = 1U << 4U;
 inline constexpr std::uint8_t kResponseBodyCompletionUnobserved = 1U << 5U;
 inline constexpr std::uint8_t kResponseBodyContentTypePresent = 1U << 6U;
 // Version 2: a snapshot the schedule's spacing allowed was withheld by a byte
-// bound: the body's snapshot allowance, or in older sessions the session's
-// snapshot share or response body budget.
+// bound: from version 3 the body's copy bound, before it the body's snapshot
+// allowance, the session's snapshot share or the response body budget.
 inline constexpr std::uint8_t kResponseBodySnapshotsWithheld = 1U << 7U;
 inline constexpr std::uint8_t kResponseBodyKnownFlags = 0x7FU;
 
@@ -138,7 +142,9 @@ static_assert(offsetof(ResponseBodyPayload, content_type) == 64);
   const bool digest =
       std::any_of(value.sha256.begin(), value.sha256.end(), [](std::uint8_t b) { return b != 0; });
   const bool retained = value.captured_length != 0;
-  const std::uint64_t whole = std::min(value.body_length, kResponseBodyCaptureBytes);
+  const bool limited = value.protocol_version < 3;
+  const std::uint64_t whole =
+      limited ? std::min(value.body_length, kResponseBodyCaptureBytes) : value.body_length;
   if (value.captured_length > value.body_length || has_artifact != retained || digest != retained ||
       ((value.flags & kResponseBodyShared) != 0 && !retained) ||
       (value.partial_index != 0) != (state == kPartial) ||
@@ -150,7 +156,7 @@ static_assert(offsetof(ResponseBodyPayload, content_type) == 64);
     case kCaptured:
       return value.body_length != 0 && value.captured_length == value.body_length;
     case kCapturedTruncated:
-      return value.body_length > kResponseBodyCaptureBytes &&
+      return limited && value.body_length > kResponseBodyCaptureBytes &&
              value.captured_length == kResponseBodyCaptureBytes;
     case kPartial:
       return value.body_length != 0 && value.captured_length == whole;
@@ -162,9 +168,10 @@ static_assert(offsetof(ResponseBodyPayload, content_type) == 64);
     case kRedirected:
     case kNotCapturedType:
       return value.body_length == 0;
+    case kNotCapturedSessionBudget:
+      return limited && !retained;
     case kNotCapturedArtifactUnavailable:
     case kNotCapturedTransferRefused:
-    case kNotCapturedSessionBudget:
     case kNotCapturedDiskReserve:
       return !retained;
   }

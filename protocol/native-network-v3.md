@@ -1016,71 +1016,67 @@ all of these hold:
    snapshot n (since the body opened, for the first). A body open for an hour
    is snapshotted at most about 180 times, a day about 300, so the 16-bit
    partial index is never reached.
-3. The copy fits the body's allowance, an eighth of the session's response body
-   budget (64 MiB of the default 512 MiB). A quarter of it may be spent at
-   once; of the rest, the share spendable so far is the larger of the share of
-   the session left when the body opened that has passed, and the share of the
-   16 MiB limit the body has filled. So a body spends its allowance evenly over
-   the session, or faster when it fills toward the limit.
-4. All snapshots of the session together stay within a quarter of the budget
-   (128 MiB by default), so whole bodies always keep three quarters, and the
-   copy fits what is left of the budget. Snapshots are charged to the budget;
-   a receiver refusal refunds them.
+3. The copy fits the body's bound: all its snapshots together copy at most
+   four times the bytes it has kept so far, plus 64 MiB.
 
-A snapshot the spacing holds back, or one only the body's paced allowance
-holds back, is not left waiting for the next chunk: the first chunk that
-arrives too soon posts one delayed task on the capture's sequence for the time
-the spacing, or the pace, allows. The task takes the snapshot then if the body
-is still open and the byte bounds allow it, or posts again for the next such
-time; a body has at most one pending. It finds the body by key and capture ID,
-as the completion wait does, so a body that ended or a new configuration
-leaves it nothing to do. A burst followed by silence is therefore published
-within the spacing, or once the session has run long enough for the body's
-pace to allow it. A snapshot the session quarter or the budget withholds waits
-for the next chunk, because time alone frees neither.
+The bound is the body's own, not a session budget, so one stream never takes
+room from another and nothing a session already kept counts against a later
+body. It exists because the receiver writes each snapshot as a copy of the
+whole prefix: spacing by age alone lets a steadily growing body copy about 32
+times its size, which for a fast stream open for an hour is several GiB of
+disk the researcher never asked for. Four times the body plus 64 MiB keeps
+that disk cost proportional to the body, and the 64 MiB lets every small or
+medium stream follow the age spacing exactly. Once a fast stream reaches the
+bound, its next snapshot waits until the body has grown by a quarter of what
+the copies cost, so the newest snapshot is at most about a quarter of the
+body's age old. The ended body is always kept whole: the bound limits only
+how fresh the intermediate snapshots are.
 
-A snapshot the spacing allows but a byte bound withholds (the body's
-allowance, the session's quarter, or the budget) is not taken, and the
-session quarter goes to whichever bodies asked first. That is a counted limit:
-every later record of that body carries flag bit 7, `snapshots_withheld`
-(payload version 2), Traffic says the newest snapshot is older than the
-schedule would make it, and `get_session_summary` counts such bodies in
+A snapshot the spacing holds back is not left waiting for the next chunk: the
+first chunk that arrives too soon posts one delayed task on the capture's
+sequence for the time the spacing allows. The task takes the snapshot then if
+the body is still open and the bound allows it; a body has at most one
+pending. It finds the body by key and capture ID, as the completion wait does,
+so a body that ended or a new configuration leaves it nothing to do. A burst
+followed by silence is therefore published within the spacing.
+
+A snapshot the spacing allows but the bound withholds is not taken, and no
+timer waits for it, because only more kept bytes raise the bound. That is a
+counted limit: every later record of that body carries flag bit 7,
+`snapshots_withheld`, Traffic says the newest snapshot is older than the
+spacing would make it, and `get_session_summary` counts such bodies in
 `response_bodies.snapshots_withheld` with a `response_snapshots_withheld`
 check. The receiver keeps every snapshot it accepted, so a superseded one
 cannot be released to make room.
-
-A body whose kept prefix reaches the 16 MiB limit is sealed: those bytes can no
-longer change, so its stream ends there and a `partial` record names that
-artifact at once, without a copy. Later bytes are counted, and every later
-record of the body, including its end, names the sealed artifact.
 
 The bounds come from real streams. Wikimedia's public `recentchange` event
 stream ran at about 60 KB/s (42 events a second) and its `page-create` stream at
 about 3.6 KB/s (two 1.3 KB events a second); a chat completion streams 1 to
 20 KB/s for under a minute, and a notification channel sends a heartbeat of a
-few bytes every 15 to 30 s. In a one-hour session with the default budget:
+few bytes every 15 to 30 s. In a one-hour session:
 
 | Stream | Snapshots | Copied | Newest snapshot at most |
 | --- | ---: | ---: | --- |
-| 60 KB/s | 33 | 58 MiB | 82 s old, then sealed after 279 s |
-| 3.6 KB/s | 97 | 62 MiB | 888 s old |
+| 60 KB/s | 65 | 873 MiB | 884 s old, snapshots withheld |
+| 3.6 KB/s | 134 | 110 MiB | 842 s old, snapshots withheld |
 | 10 KB/s for 60 s | 51 | 13 MiB | 1 s old |
 | a heartbeat every 15 s | 95 | 0 MiB | 110 s old |
 
-Snapshots count `partial` records, the seal included; copied counts the
-receiver checkpoints, so not the seal. `make native-artifact-capture-check`
-replays these streams through the capture itself (chunks every 250 ms for the
-fast and chat streams, every 500 ms for the medium one, each posted timer run
-at its due time) and fails when this table differs from the replay. The newest
-snapshot's age is sampled just before each chunk and just before each timer
-runs, where it peaks.
+Snapshots count `partial` records and copied counts the receiver checkpoints;
+each stream ends captured whole (205 MiB for the fastest).
+`make native-artifact-capture-check` replays these streams through the capture
+itself (chunks every 250 ms for the fast and chat streams, every 500 ms for
+the medium one, each posted timer run at its due time, the writer keeping up)
+and fails when this table differs from the replay. The newest snapshot's age
+is sampled just before each chunk and just before each timer runs, where it
+peaks. The same check drives a two-hour stream past the old limit of 15
+snapshots and checks the spacing, the bound and its withheld flag, a declared
+length, and a 40 MiB body snapshotted and kept whole.
 
-A larger budget (`REB_RESPONSE_BODY_BUDGET_MIB`) keeps a medium stream
-fresher, because its allowance grows with it; the 1 MiB minimum budget leaves
-a body 128 KiB of snapshots, so a stream past that is read when it ends.
-`make native-artifact-capture-check` drives a two-hour stream past the old
-limit of 15 snapshots and checks the spacing, the allowance, the session share
-and its refund, a declared length, and the seal.
+Sessions recorded before payload version 3 used a different schedule: each
+body's snapshots shared an eighth of the session's response body budget, all
+snapshots together a quarter of it, and a body that reached the 16 MiB capture
+limit was sealed there. Their records keep the meaning they had.
 
 ### `response_body` (type 33)
 

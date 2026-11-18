@@ -29,7 +29,6 @@ inline constexpr std::uint16_t kNativeArtifactStreamProtocolVersion = 2;
 inline constexpr std::uint32_t kNativeArtifactStreamMagic = 0x53424552U;
 inline constexpr std::size_t kNativeArtifactStreamFrameSize = 80;
 inline constexpr std::size_t kNativeArtifactStreamChunkBytes = 64U * 1024U;
-inline constexpr std::size_t kNativeArtifactMaxOpenStreams = 128;
 
 enum class NativeArtifactKind : std::uint16_t {
   kUnknown = 0,

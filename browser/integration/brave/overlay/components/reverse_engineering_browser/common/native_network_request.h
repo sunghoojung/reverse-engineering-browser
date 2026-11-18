@@ -15,6 +15,9 @@ namespace reb {
 // Browser-side producer half of protocol/native-network-v2.md. The core mirror
 // in include/reb/network_request.hpp decodes and validates the same bytes.
 inline constexpr std::uint16_t kNativeRequestPayloadVersion = 1;
+// Version 2 bodies (native-network-v3.md) are read whole off the UI thread:
+// no truncation or digest size limit, and flag bit 7 marks a credential form.
+inline constexpr std::uint16_t kNativeRequestBodyPayloadVersion = 2;
 // Version 2 adds the full-target retention byte; see native-network-v2.md.
 inline constexpr std::uint16_t kNativeRequestTargetPayloadVersion = 2;
 inline constexpr std::size_t kNativeRequestPayloadSize = 128;
@@ -49,11 +52,6 @@ struct NativeTargetRange final {
 // url::kMaxURLChars at the pin.
 inline constexpr std::size_t kNativeRequestTargetMaxBytes = 2U * 1024U * 1024U;
 inline constexpr std::size_t kNativeRequestContentTypeBytes = 64;
-// The artifact cap. Larger bodies keep this prefix and their original length.
-inline constexpr std::size_t kNativeRequestBodyCaptureBytes = 16U * 1024U * 1024U;
-// Bounds the synchronous UI-thread digest. Larger in-memory bodies are marked
-// instead of hashed; their artifact digest is computed off the UI thread.
-inline constexpr std::size_t kNativeRequestBodyDigestBytes = 4U * 1024U * 1024U;
 
 enum class NativeRequestBodyKind : std::uint8_t {
   kNone = 0,
@@ -70,6 +68,7 @@ enum class NativeRequestBodyState : std::uint8_t {
   kEmpty = 2,
   kMetadataOnly = 3,
   kCaptured = 4,
+  // Retired: older sessions' 16 MiB capture limit. Never emitted.
   kCapturedTruncated = 5,
   kNotCapturedBodyKind = 6,
   kNotCapturedArtifactUnavailable = 7,
@@ -86,12 +85,16 @@ enum class NativeRequestBodyState : std::uint8_t {
 
 inline constexpr std::uint8_t kNativeRequestBodyContentCapture = 1U << 0U;
 inline constexpr std::uint8_t kNativeRequestBodyDigestPresent = 1U << 1U;
+// Retired: older sessions' 4 MiB digest limit. Never set.
 inline constexpr std::uint8_t kNativeRequestBodyDigestSizeLimit = 1U << 2U;
 inline constexpr std::uint8_t kNativeRequestBodyLengthPartial = 1U << 3U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypePresent = 1U << 4U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypeOmitted = 1U << 5U;
-// The browser read the file, blob or stream parts (native-network-v3.md).
+// The record follows a read or digest of the body off the UI thread
+// (native-network-v3.md).
 inline constexpr std::uint8_t kNativeRequestBodyRead = 1U << 6U;
+// Version 2: Chromium marked the body a password form post.
+inline constexpr std::uint8_t kNativeRequestBodyCredentialForm = 1U << 7U;
 
 enum class NativeRequestScheme : std::uint8_t {
   kOther = 0,
@@ -196,7 +199,7 @@ constexpr bool IsTokenCharacter(const char c) noexcept {
 EncodeNativeRequestBodyPayload(const NativeRequestBodySummary& value) noexcept {
   using native_request_detail::Put;
   std::array<std::byte, kNativeRequestPayloadSize> out{};
-  Put(out, 0, kNativeRequestPayloadVersion, 2);
+  Put(out, 0, kNativeRequestBodyPayloadVersion, 2);
   Put(out, 2, kNativeRequestPayloadSize, 2);
   Put(out, 4, static_cast<std::uint8_t>(value.kind), 1);
   Put(out, 5, static_cast<std::uint8_t>(value.state), 1);

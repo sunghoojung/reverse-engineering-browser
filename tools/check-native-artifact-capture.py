@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OVERLAY = ROOT / "browser/integration/brave/overlay"
 HEADERS = (
     "base/containers/span.h",
+    "base/thread_annotations.h",
     "base/no_destructor.h",
     "base/location.h",
     "base/task/sequenced_task_runner.h",
@@ -129,11 +130,8 @@ def check_schedule_table(replays: list[dict]) -> None:
         actual = (replay["snapshots"], replay["copied_bytes"] // mib, replay["stale_ns"] // second)
         if expected != actual:
             raise SystemExit(f"native-network-v3.md sizing row {replay['name']} says {expected}, the replay {actual}")
-        sealed = re.search(r"sealed after (\d+) s", row[4])
-        if (replay["sealed_ns"] is None) != (sealed is None) or (
-            sealed and int(sealed[1]) != replay["sealed_ns"] // second
-        ):
-            raise SystemExit(f"native-network-v3.md sizing row {replay['name']} names the seal wrongly")
+        if replay["withheld"] != ("snapshots withheld" in row[4]):
+            raise SystemExit(f"native-network-v3.md sizing row {replay['name']} names withheld snapshots wrongly")
     print(f"PASS partial body sizing table matches the replay of {len(replays)} streams")
 
 
@@ -176,6 +174,10 @@ def compile_driver(build: Path) -> Path:
         f"-I{ROOT / 'tools/native-test-support'}",
         f"-I{include}",
         f"-I{ROOT / 'include'}",
+        # The adapter includes native_artifact_stream.h after the base types
+        # it needs, so every unit reads it first, even the stream's own.
+        "-include",
+        str(fixture / "chromium_stubs.h"),
         str(fixture / "main.cc"),
         str(sources / "browser/native_network_capture_sink.cc"),
         str(sources / "common/native_network_headers_hook.cc"),

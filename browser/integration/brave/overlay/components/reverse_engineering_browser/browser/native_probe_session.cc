@@ -253,10 +253,9 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   NativeNetworkCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
                                              category_mask, expires_at_monotonic_ns,
                                              capture_request_content_.load());
-  // Response bodies follow the same content gate as request content.
-  const NativeResponseBodyPolicy response_bodies{
-      .enabled = capture_request_content_.load(),
-      .media = command_line->HasSwitch("reb-capture-response-media")};
+  // Response bodies, media and fonts included, follow the same content gate as
+  // request content.
+  const NativeResponseBodyPolicy response_bodies{.enabled = capture_request_content_.load()};
   NativeArtifactCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
                                               category_mask, expires_at_monotonic_ns,
                                               response_bodies);

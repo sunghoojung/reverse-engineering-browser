@@ -2480,66 +2480,103 @@ px high). Neither pane keeps a control or a scrolled row under the divider
 (see [Pane sizes](#pane-sizes)). The text view's line window and search
 notice are hidden while Graph is active. A graph opens at actual size, centered
 on the entry block (or the whole graph when it fits), and **Fit** or `0` shows
-all of it. Below the zoom where rows are readable, cards keep a screen-size
-label and an overview cue says rows are hidden. The footer is one line: the
-limits, then the edge legend, which folds behind **Key** in a narrow pane. Selecting a block with the pointer or Enter scrolls the disassembly or hex
-to its offset. **Graph** in Static bytecode draws the same view for a decoded
-image. Declared flow and an imported **Observed path** are separate layers,
-never one graph: the observed layer's cards are retained steps, and a sequence
-gap is a card with no edge on either side.
+all of it in the part of the stage the minimap and the status line leave
+clear. Zoom goes out as far as Fit needs, at any size. Below the zoom where
+rows are readable, cards keep a screen-size label and an overview cue says
+rows are hidden; further out, cards are filled boxes drawn one path per kind,
+so a graph of any size stays a few fills, and the selection and the shown Find
+match keep a ring of ten pixels. The zoom controls and the cue are shown only
+over a drawing. The footer is one line: the limits, then the key for the edge
+kinds this graph has, which folds behind **Key** in a narrow pane. Selecting
+a block with the pointer or Enter scrolls the disassembly or hex to its
+offset. **Graph** in Static bytecode draws the same view for a decoded image.
+Declared flow and an imported **Observed path** are separate layers, never one
+graph: the observed layer's cards are retained steps, and a sequence gap is a
+card with no edge on either side.
 
 The header gives the name, block count, instruction count and `declared` (or
 `observed`). Each block shows its first byte offset as `loc_<hex>`, an
 instruction-count badge and rows of offset, mnemonic and operands. A run of
 identical `block` openers is one row with a count; the badge still counts every
-instruction. Edge kind is never color alone: taken is solid, false is dashed,
-table arms are dotted with their case numbers, exception edges are long-dashed,
-and an unresolved target is a labeled stub that adds no block. The footer keeps
-the limits on screen: declared reachability is not observed execution, and a
-complete drawing is not a proof. Nothing here sets `cfg.complete`.
+instruction. A block of only `end`, `block`, `loop`, `try`, `try_table`,
+`delegate` or `nop` runs nothing: it is drawn as the first row of the block it
+falls into, on a tinted band that names what it held (`end ×3, block`), and
+the header counts it, as in `120 blocks (60 folded)`. The folded block keeps
+its first offset, where branches land, and every row stays in the document.
+Edge kind is never color alone: true is solid, false is dashed, table arms are
+dotted, exception edges are long-dashed, calls are dotted, and an unresolved
+target is a labeled stub that adds no block. The selection owns the accent
+color, which no edge kind uses. A label is a chip beside its stroke where the
+edge arrives, never over it: case lists, exception, call and unresolved labels
+always, true and false only for the selected block's edges, since the stroke
+already says which. The footer keeps the limits on screen: declared
+reachability is not observed execution, and a complete drawing is not a proof.
+Nothing here sets `cfg.complete`.
 
 Keyboard: arrows move to the nearest block in that direction, `[` and `]` step
 in byte order, Home returns to the entry, Enter shows the block in the
 disassembly and hex, `+`, `-` and `0` zoom and fit, and Shift+arrows pan.
+Alt+Left and Alt+Right pick one of the selected block's edges, which is drawn
+with a halo and named in the status line; Alt+Down follows an outgoing edge to
+its target and Alt+Up an incoming one to its source, and the edge followed
+stays picked, so the opposite key returns. A click on an edge, or its chip,
+goes to its far end: the target when the click was nearer the source, else the
+source. A stub's chip goes to the block the stub reaches.
 
-The layout runs in a Web Worker. When the backend serves
-`POST /api/graph-layout` ([HTTP API](../../protocol/http-api.md#graph-layout)),
-the function is laid out by [Triskel](https://github.com/triskellib/triskel), a
-CFG layout engine built on single-entry single-exit regions. It is vendored in
-the backend and runs in a separate worker process, with no size limit or
-deadline. While it runs, the view counts its seconds and offers **Use the
-region layout**, which stops it. The project-authored region layout in
-`block_graph_layout.js` draws any function, and stays in four cases:
-- Triskel would draw the function more than 1.6 times wider and over 1,400 px.
-  A flattened dispatcher's fan is the usual case: the region layout stacks it
-  into a grid, where Triskel puts every arm in one row.
-- The function has more than 2,000 blocks or 8,000 edges. Triskel is not run
-  unasked there: on structured control flow it takes about 10 s at 8,000
-  blocks and a minute at 16,000, and at this revision it places nodes on top
-  of each other in most functions over about 1,000 blocks. The region layout,
-  close to linear in the block count, is drawn at once and the header offers **Lay
-  out with Triskel**, which runs it on the drawn function with no size limit.
-  The drawing stays while it runs, the header counts its seconds, and the
-  button becomes **Cancel**.
-- Triskel's answer does not match the function.
-- The route is missing or fails, as in the stored-evidence window.
+**Find** (Cmd+F) searches the drawn function's rows while Graph is open, as a
+case-insensitive, single-line literal. Matched blocks are outlined, matched
+rows banded and each match boxed, in the overview and the minimap too. Typing
+shows the first matched block at or after the selection; Enter and
+Shift+Enter step through the matched blocks and wrap. The status line and the
+graph say `3 of 14 blocks · 52 rows match`. A Find typed before a function is
+drawn runs when it is.
 
-The header says `Triskel layout` when Triskel was used, `region layout` with
-the reason otherwise (stopped, failed, wider or taller), and hovering the
-counts says why the region layout stayed. The region layout also stays when
-Triskel's drawing would be more than 1.6 times taller and over 1,600 px
-taller, as nested loops can make it. Both layout workers reach the route
-through `graph_layout_client.js`, which holds the size Triskel runs on unasked,
-the answer check and this acceptance rule, and gives each graph it does not lay
-out a reason code that each view words for itself. It sets no timeout: the
-caller's signal stops a request, and the backend then stops its worker. Triskel's and fmt's licence
-texts ship as `Contents/Resources/GraphLayoutLicenses.txt`.
+Unreached code never changes how reachable code is drawn: dominators come from
+the blocks the declared entries reach. Each set of connected unreached blocks
+is drawn below the reachable graph, and an edge from it into reachable code is
+a short stub under its block whose chip names the block it reaches (`→
+loc_1a2`).
+
+The layout runs in a Web Worker, and the region layout in
+`block_graph_layout.js` is always what is drawn first, at any size. When the
+backend serves `POST /api/graph-layout` ([HTTP
+API](../../protocol/http-api.md#graph-layout)), the header offers **Lay out
+with Triskel** for any drawn graph of two or more blocks.
+[Triskel](https://github.com/triskellib/triskel) is a CFG layout engine built
+on single-entry single-exit regions, vendored in the backend and run in a
+separate worker process with no size limit or deadline: on structured control
+flow it takes about 10 s at 8,000 blocks and a minute at 16,000. The worker
+sends it only the graph's edges and the drawn cards' sizes. The region layout
+stays drawn while it runs, the header counts its seconds, and the button
+becomes **Cancel**. Its answer is drawn whatever its size, with how it compares
+(`Triskel layout · 2.4× as wide, 0.8× as tall`); both drawings are kept, each
+at the view it was left at, and the button switches between them (**Show
+region layout**, **Show Triskel layout**). A stopped run says `Triskel
+stopped`, and a failure says `Triskel failed` with its reason on hover; both
+can be run again. Both layout workers reach the route through
+`graph_layout_client.js`, which checks each answer's shape and gives each graph
+it does not lay out a reason code that each view words for itself; the block
+graph asks it to keep any well-formed drawing (`keep`). It sets no timeout:
+the caller's signal stops a request, and the backend then stops its worker.
+Triskel's and fmt's licence texts ship as
+`Contents/Resources/GraphLayoutLicenses.txt`.
 
 The region layout uses dominator regions: each subtree is entered once, so it
 lays out alone and only its members' sizes reach its parent. A layer of one
-continues the spine. A wider layer becomes side-by-side boxes and wraps into a
-grid past six. Arms with no way out stack on the spine. Edges leaving a box
-share a bottom port, and every back edge to a loop shares one rail.
+continues the spine. When one member of a layer holds four times the blocks of
+the rest, as the rest of a switch ladder or an else-if chain outweighs its
+case, it continues the spine and the rest sit beside it, so a chain of any
+length stays one column. A wider layer becomes side-by-side boxes, ordered by
+where their edges come from so few cross, and wraps into a grid past six; a
+`br_table`'s arms are ordered by case. Arms with no way out stack on the spine. Edges leaving a
+box share a bottom port, and every back edge to a loop shares one rail. The
+dominator tree is computed with Semi-NCA in close to linear time, and rails
+reuse columns, so even a function of 100,000 blocks lays out in seconds.
+
+A failure says why. Retry is offered only when trying again can help: the
+evidence service unreachable or busy, or the layout worker stopped. A refused
+read, an invalid document, or a graph past the memory the layout could
+allocate says so without it.
 
 Memory: one function is decoded on demand, layout runs in one worker per view
 that stays between jobs and is terminated when a job is replaced or the view
@@ -2547,7 +2584,6 @@ closes, and laid-out graphs stay in a
 16 MiB least-recently-used cache that is cleared when the view closes, the
 artifact changes or the screen leaves. The canvas is one bounded backing store
 that does not grow with graph size, and only visible cards and edges are drawn.
-A byte budget cuts row text before structure and labels what it cut.
 
 ## Trace value
 

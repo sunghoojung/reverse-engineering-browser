@@ -11,7 +11,7 @@ const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))(
 // The layout worker loads the Triskel client with importScripts; here it is a global first.
 runInThisContext(await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8'));
 const layoutModule = require('../apps/research-ui/block_graph_layout.js');
-const {vmStaticBlockGraph, vmObservedBlockGraph, BLOCK_GRAPH_KIND: KIND} = require('../apps/research-ui/block_graph.js');
+const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure} = require('../apps/research-ui/block_graph.js');
 const vmStatic = require('../apps/research-ui/vm_static.js');
 const {vmStaticOwnedExample} = require('../apps/research-ui/vm_static_view.js');
 const semantics = require('../apps/research-ui/vm_semantics.js');
@@ -104,13 +104,69 @@ const pointsOf = (layout, edge) => {
   assert.equal(stub.length, 2, 'stub edge has its own short segment');
   assert.equal(graph.count, 1, 'an unresolved target adds no block');
 }
+{
+  // Dominators come from the reachable blocks only: dead code that jumps into
+  // live code is a stub below, and never moves the live drawing.
+  const live = [[0, 1], [1, 2, KIND.taken], [1, 3, KIND.not_taken], [2, 3]];
+  const alone = lay(fixture(4, live)), dead = fixture(6, [...live, [4, 5], [5, 2, KIND.branch]]);
+  dead.flags[4] = dead.flags[5] = 0;
+  const withDead = lay(dead);
+  for (let block = 0; block < 4; block += 1) assert.equal(withDead.y[block], alone.y[block], `live block ${block} keeps its row`);
+  assert(withDead.y[4] > withDead.y[3] && withDead.y[5] > withDead.y[3], 'unreached blocks sit below the reachable graph');
+  assert.equal(withDead.stub[5], 1, 'an edge from dead code into live code is a stub');
+  assert.equal(pointsOf(withDead, 5).length, 2, 'drawn as a short stub under its block, not a route');
+  assert.equal(withDead.stub[4], 0, 'an edge inside the dead component is routed');
+}
+{
+  // A switch ladder (a guard per case, each case leaving to one exit) is one
+  // column: the rest of the ladder outweighs each case, so it continues the
+  // spine and the case sits beside it.
+  const depth = 400, edges = [], exit = depth * 2;
+  for (let level = 0; level < depth; level += 1) {
+    const guard = level * 2, arm = guard + 1, next = level + 1 < depth ? guard + 2 : exit;
+    edges.push([guard, arm, KIND.taken], [guard, next, KIND.not_taken], [arm, exit]);
+  }
+  const count = exit + 1, layout = lay(fixture(count, edges));
+  assert.equal(overlaps(layout, count), 0, 'no card overlaps in a ladder');
+  // The last guard's rest is one case, no heavier than its own, so it sits beside.
+  const guards = new Set(Array.from({length: depth - 1}, (_, level) => layout.x[level * 2] + layout.w[level * 2] / 2));
+  assert.equal(guards.size, 1, `every guard is on one spine: ${guards.size} columns`);
+  assert(layout.width < 1200, `a ladder stays narrow: ${layout.width}`);
+  let bends = 0;
+  for (let edge = 0; edge < edges.length; edge += 1) bends += pointsOf(layout, edge).length - 2;
+  assert(bends / edges.length < 3, `a ladder's edges bend little: ${(bends / edges.length).toFixed(2)} per edge`);
+}
+{
+  // Blocks of only end, block, loop or similar run nothing: each folds into
+  // the block it falls into as one summary row; the document keeps its rows.
+  const rows = '0 block\n1 loop\n2 i32.const 1\n4 br_if 0\n6 end\n7 end\n8 return\n';
+  const doc = {schema: 'wasm-block-graph-v1', function_index: 3, byte_offset: 100, byte_end: 109, status: 'decoded', instruction_count: 7, omissions: [], notice: '',
+    edge_kinds: ['fallthrough', 'branch', 'taken', 'not_taken', 'table', 'table_default', 'exception', 'unresolved'],
+    blocks: [[0, 2, 0, 2, 2, 3], [2, 6, 2, 2, 2, 2], [6, 8, 4, 2, 2, 2], [8, 9, 6, 1, 1, 6]],
+    edges: [[0, 1, 0, null], [1, 1, 2, null], [1, 2, 3, null], [2, 3, 0, null]], rows};
+  const graph = layoutModule.wasmGraph(doc);
+  assert.equal(graph.count, 2, 'two structural blocks fold away');
+  assert.equal(graph.foldedBlocks, 2);
+  assert.deepEqual([...graph.offsets], [0, 6], 'a folded block keeps the first offset, where branches land');
+  assert.deepEqual([...graph.firstRow], [0, 4]); assert.deepEqual([...graph.rowCount], [4, 3], 'and every row');
+  assert.deepEqual([...graph.instructionCount], [4, 3]); assert.deepEqual([...graph.folded], [2, 2]);
+  assert.deepEqual(graph.foldNote, ['block, loop', 'end \u00d72'], 'its summary row says what folded');
+  assert.equal(graph.flags[0] & 1, 1, 'the entry stays the entry');
+  assert.deepEqual([[...graph.from], [...graph.to], [...graph.kind]], [[0, 0], [0, 1], [KIND.taken, KIND.not_taken]], 'edges join the folded blocks');
+  assert.deepEqual([0, 1].map(block => layoutModule.shownRows(graph, block)), [3, 2], 'a card draws the summary and its own rows');
+  const layout = lay(graph);
+  assert.equal(overlaps(layout, 2), 0);
+  // A block with real work, or with any other edge, is never folded.
+  const kept = layoutModule.wasmGraph({...doc, rows: rows.replace('0 block', '0 nop').replace('1 loop', '1 drop')});
+  assert.equal(kept.count, 3, 'only rows that run nothing fold');
+}
 assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document/, 'an unknown provider document is refused');
 {
   // VM adapter: same drawing, still declared, cfg.complete untouched.
   const {definition, image} = vmStaticOwnedExample();
   const report = await vmStatic.analyze(JSON.stringify(definition), JSON.stringify(image));
   assert.equal(report.cfg.complete, false);
-  const graph = vmStaticBlockGraph(report);
+  const graph = layoutModule.vmStaticGraph(report);
   assert.equal(report.cfg.complete, false, 'the adapter never touches cfg.complete');
   assert.equal(graph.evidence, 'declared');
   assert.equal(graph.instructions, 16);
@@ -122,14 +178,14 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   // Unresolved flow stays a labeled stub.
   const altered = JSON.parse(JSON.stringify(report));
   altered.cfg.edges.push({from_offset: report.instructions.at(-1).offset, to_offset: null, kind: 'unknown', status: 'unknown', evidence: 'declared_static'});
-  const stubbed = vmStaticBlockGraph(altered);
+  const stubbed = layoutModule.vmStaticGraph(altered);
   assert([...stubbed.to].includes(-1) && stubbed.labels.includes('unknown target'), 'an unknown destination is labeled, not invented');
 }
 {
   // Observed layer: retained occurrences, no edge across a gap, and no static block identity.
   const step = (sequence, pc) => ({sequence, opcode: '01', operands: [0], instruction_size: 1, before: {pc, halted: false, registers: [0], stack: [], memory: []}, after: {pc: pc + 1, halted: false, registers: [0], stack: [], memory: []}, evidence_refs: ['fixture']});
   const trace = {format: 'reb-vm-trace-v1', identity: {trace_id: 'owned-trace', investigation_id: 'owned-investigation', finding_id: 'owned-finding', artifact_id: 'owned-artifact', artifact_sha256: 'a'.repeat(64), scope_id: 'owned-scope', backend: 'fixture'}, architecture: 'register', coverage: {complete: false, dropped_steps: 3, limitations: []}, steps: [step(1, 0), step(2, 1), step(6, 40), step(7, 41)]};
-  const path = semantics.observedPath(trace), graph = vmObservedBlockGraph(path);
+  const path = semantics.observedPath(trace), graph = layoutModule.vmObservedGraph(path);
   assert.equal(graph.evidence, 'observed');
   assert.equal(graph.count, 5, 'four occurrences and one gap card');
   assert.equal(graph.from.length, 2, 'edges join consecutive recorded sequences only');
@@ -156,11 +212,27 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   assert(/function start\(\)[\s\S]{0,200}view\.z = 1;/.test(view), 'a graph opens at actual size, not at Fit');
   assert(/:is\(#source-window, #source-search-status\) \{ display: none/.test(css), 'text-window rows are hidden while Graph is active');
   assert(/BLOCK_GRAPH_ROW_ZOOM/.test(view) && /drawScreenLabels/.test(view), 'below row zoom, cards keep screen-size labels');
+  assert(!/--graph-edge-[a-z-]+: var\(--accent\)/.test(css) && /--graph-selection: var\(--accent\)/.test(css), 'the selection owns the accent; no edge kind is drawn in it');
+  const container = css.indexOf('@container (max-height: 280px)');
+  for (const base of ['.block-graph-minimap {', '.block-graph-minimap-canvas {', '.block-graph-hud {', '@media (max-width: 720px)'])
+    assert(container > css.indexOf(base), `the small-stage rules follow ${base}, so they win the cascade`);
+  assert(/new Path2D\(\)/.test(view) && /drawOverview/.test(view), 'overview cards and edges are drawn one path per kind');
 }
 {
-  // Triskel through the backend route: its coordinates and waypoints replace
-  // the region layout, an unresolved edge keeps its stub, and the region
-  // layout stays when Triskel would draw much wider or the route fails.
+  // Failures say why, and offer Retry only where trying again can help.
+  const memory = blockGraphFailure(Object.assign(Error('Invalid typed array length: 4294967296'), {name: 'RangeError'}));
+  assert.equal(memory.retry, false); assert.match(memory.message, /more memory than the layout could allocate \(Invalid typed array length/);
+  assert.equal(blockGraphFailure(new TypeError('Load failed')).retry, true, 'an unreachable service can come back');
+  assert.equal(blockGraphFailure(Object.assign(Error('busy'), {status: 503})).retry, true);
+  assert.equal(blockGraphFailure(Object.assign(Error('no such function'), {status: 404})).retry, false, 'a refused read is refused again');
+  assert.equal(blockGraphFailure(Error('The WASM graph provider returned an invalid document.')).retry, false);
+  assert.equal(blockGraphFailure(Object.assign(Error('The layout worker stopped before it answered.'), {transient: true})).retry, true);
+}
+{
+  // Triskel through the backend route: its coordinates and waypoints make a
+  // second drawing, kept whatever its size with how it compares, an
+  // unresolved edge keeps its stub, and the region layout stays when the
+  // route fails.
   const graph = fixture(4, [[0, 1, KIND.taken], [0, 2, KIND.not_taken], [1, 3], [2, 3], [3, -1, KIND.unresolved, 'unknown target']]);
   const starts = layoutModule.rowStarts(graph.rows), sizes = layoutModule.nodeSizes(graph, starts, layoutModule.METRICS);
   // The client caches Triskel's answer per graph, so each case grows one block to be a new graph.
@@ -186,12 +258,14 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   const stub = pointsOf(result.layout, 4);
   assert.equal(stub.length, 2); assert.equal(stub[0][1], result.layout.y[3] + result.layout.h[3], 'an unresolved edge keeps its stub under its block');
   assert.equal(overlaps(result.layout, 4), 0);
+  const region = base(), regionWidth = region.layout.width - 2 * m;
   answers.push({body: laid(100000)});
-  result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
-  assert.equal(result.layout.engine.name, 'layered'); assert.equal(result.layout.engine.reason.code, 'wider', 'a much wider Triskel drawing keeps the region layout');
+  result = await layoutModule.withTriskel(region, layoutModule.METRICS);
+  assert.equal(result.layout.engine.name, 'triskel', 'a Triskel drawing asked for is kept however wide');
+  assert(Math.abs(result.layout.engine.ratio.width - 100000 / regionWidth) < 1e-6, 'and says how much wider it is');
   answers.push({body: {...laid(), graphs: [{...laid().graphs[0], height: 999999}]}});
   result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
-  assert.equal(result.layout.engine.reason.code, 'taller', 'a far taller Triskel drawing keeps the region layout');
+  assert.equal(result.layout.engine.name, 'triskel'); assert(result.layout.engine.ratio.height > 100, 'or how much taller');
   answers.push(new Error('connection refused'));
   result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
   assert.equal(result.layout.engine.reason.code, 'route_failed', 'a missing route keeps the region layout');
@@ -221,13 +295,14 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   answers.push({body: {...laid(), graphs: [{...laid().graphs[0], nodes: [[0, 0]]}]}});
   result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
   assert.equal(result.layout.engine.reason.code, 'mismatch', 'an answer of the wrong shape is never drawn');
-  result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS, engine: 'layered'});
-  assert.equal(result.layout.engine.name, 'layered', 'a shell without the route never calls it');
+  result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS});
+  assert.deepEqual(result.layout.engine, {name: 'layered'}, 'a region layout never calls the route');
   delete globalThis.fetch;
 }
 {
-  // Past the size Triskel lays out unasked the region layout is drawn at
-  // once with nothing sent; asked (`all`), a graph of any size is sent whole.
+  // The region layout is drawn first and alone, at any size; nothing is sent
+  // until Triskel is asked for. A Triskel job carries only the graph's count
+  // and edges and the drawn layout's sizes, and sends a graph of any size whole.
   const {AUTOMATIC} = graphLayoutClient;
   const count = AUTOMATIC.graphNodes + 1, edges = Array.from({length: count - 1}, (_, index) => [index, index + 1]);
   const graph = fixture(count, edges);
@@ -238,12 +313,13 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
     return {ok: true, status: 200, json: async () => ({schema: 'graph-layout-v1', engine: {name: 'triskel', revision: 'abc1234def'},
       graphs: [{status: 'failed', reason: 'Triskel placed nodes 7 and 8 on top of each other'}]})};
   };
-  let result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS, engine: 'triskel'});
-  assert.deepEqual(result.layout.engine, {name: 'layered', reason: {code: 'large'}}, 'a large graph keeps the region layout unasked');
+  const region = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS});
+  assert.deepEqual(region.layout.engine, {name: 'layered'}, 'a large graph is drawn in its region layout');
   assert.deepEqual(sent, [], 'and sends nothing');
-  result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS, engine: 'triskel', all: true});
+  const {w, h, width, height, stub} = region.layout;
+  const result = await layoutModule.runAsync({type: 'triskel', graph: {count, from: graph.from, to: graph.to}, layout: {w, h, width, height, stub}, metrics: layoutModule.METRICS});
   assert.deepEqual(sent, [count], 'asked, any size is sent');
-  assert.equal(result.layout.engine.reason.code, 'failed');
+  assert.deepEqual(result.layout.engine.reason, {code: 'failed', status: 'failed', detail: 'Triskel placed nodes 7 and 8 on top of each other'});
   delete globalThis.fetch;
   const client = await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8');
   assert(!/setTimeout|AbortSignal\.timeout|LIMITS|too_large|request_budget/.test(client), 'the layout client has no timeout and no size limit');
@@ -276,10 +352,10 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   assert(elapsed < 60000, `${count} blocks lay out in bounded time: ${elapsed}ms`);
 }
 {
-  // The view over a stand-in runner. Triskel has no deadline: while it lays
-  // out a graph not drawn yet, Use the region layout stops it; past the size
-  // it runs on unasked, Lay out with Triskel keeps the drawing while it runs,
-  // turns into Cancel, and draws its answer with the selection kept.
+  // The view over a stand-in runner. The region layout is drawn at once.
+  // Lay out with Triskel keeps it drawn while Triskel runs, is Cancel
+  // meanwhile, and draws the answer with the selection kept and how it
+  // compares; both drawings stay, one switch apart.
   const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="host"></div></body></html>');
   let frames = [];
   const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}),
@@ -287,44 +363,76 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
 ${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
 globalThis.create = createBlockGraphView;`, context);
-  const calls = [], skips = [];
+  const calls = [], skips = [], found = [];
   let answer = null;
   const runner = {run: (message, transfer, options) => { calls.push(message); return new Promise(resolve => { answer = resolve; }); }, skip: () => skips.push(true), cancel: () => {}};
   const host = document.querySelector('#host');
-  const view = context.create(host, {runner});
+  const view = context.create(host, {runner, onFind: status => found.push(status)});
   view.activate();
   const $ = selector => host.querySelector(selector);
   const shown = element => element && !element.hidden;
   view.setState('loading', 'Laying out the graph\u2026');
-  view.progress({stage: 'triskel'});
-  assert.match($('.block-graph-state p').textContent, /^Laying out with Triskel \u00b7 0 s$/);
-  const skip = [...host.querySelectorAll('.block-graph-state button')].find(item => item.textContent === 'Use the region layout');
-  assert(shown(skip), 'Triskel over no drawing offers the region layout');
-  skip.click();
-  assert.equal(skips.length, 1, 'which stops Triskel for the running job');
-  const graph = fixture(3, [[0, 1], [1, 2]], {title: 'func 1', status: 'decoded', instructions: 3, omissions: [], evidence: 'declared'});
-  const drawn = engine => ({graph, starts: layoutModule.rowStarts(graph.rows), layout: {...lay(graph), engine}});
-  view.setResult(drawn({name: 'layered', reason: {code: 'large'}}));
+  assert(!shown($('.block-graph-zoom-bar')) && !shown($('.block-graph-lod')), 'zoom and the overview cue wait for a drawing');
+  const graph = fixture(3, [[0, 1, KIND.taken], [1, 2]], {title: 'func 1', status: 'decoded', instructions: 3, omissions: [], evidence: 'declared'});
+  const drawn = () => ({graph, starts: layoutModule.rowStarts(graph.rows), layout: {...lay(graph), engine: {name: 'layered'}}});
+  view.setResult(drawn());
+  assert(shown($('.block-graph-zoom-bar')), 'a drawing has zoom');
   const triskel = $('.block-graph-triskel');
-  assert(shown(triskel) && triskel.textContent === 'Lay out with Triskel', 'a graph past the automatic size offers Triskel');
-  assert.match($('.block-graph-stats').textContent, /region layout$/);
+  assert(shown(triskel) && triskel.textContent === 'Lay out with Triskel', 'Triskel is offered for any drawn graph');
+  assert.equal($('.block-graph-stats').textContent, '3 blocks \u00b7 3 instructions', 'the region layout needs no note until there is another');
   view.select(1);
+  assert.match($('.block-graph-selection').textContent, /^loc_8 \u00b7 1 instruction \u00b7 1 successor$/, 'counts are singular when one');
   triskel.click();
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].all, true, 'asked, it is sent whatever its size');
-  assert.equal(calls[0].engine, 'triskel'); assert.equal(calls[0].graph, graph, 'the drawn graph itself');
+  assert.equal(calls[0].type, 'triskel');
+  assert.equal(calls[0].graph.count, 3); assert.equal(calls[0].graph.from, graph.from, 'the drawn graph\'s edges, not its rows');
+  assert.equal(calls[0].graph.rows, undefined);
   assert.equal(triskel.textContent, 'Cancel', 'while it runs the button stops it');
   assert(shown($('.block-graph-engine-run')) && $('.block-graph-engine-run').textContent.startsWith('Laying out with Triskel'), 'and the header counts its seconds');
   assert(!shown($('.block-graph-state')), 'the region layout stays drawn meanwhile');
   triskel.click();
-  assert.equal(skips.length, 2, 'Cancel stops Triskel');
-  answer(drawn({name: 'triskel', revision: '196ba112eba992c1460af3097c038defcf7a7e45'}));
+  assert.equal(skips.length, 1, 'Cancel stops Triskel');
+  answer({graph: {count: 3}, starts: null, layout: {...lay(graph), engine: {name: 'triskel', revision: '196ba112eba992c1460af3097c038defcf7a7e45', ratio: {width: 1.46, height: 0.8}}}});
   await new Promise(resolve => setImmediate(resolve));
-  assert.match($('.block-graph-stats').textContent, /Triskel layout$/);
-  assert(!shown(triskel) && !shown($('.block-graph-engine-run')), 'a Triskel drawing needs no offer');
+  assert.match($('.block-graph-stats').textContent, /Triskel layout \u00b7 1\.5\u00d7 as wide, 0\.8\u00d7 as tall$/, 'any Triskel answer is drawn, with how it compares');
+  assert.match($('.block-graph-stats').title, /Laid out by Triskel 196ba11/);
+  assert(!shown($('.block-graph-engine-run')));
   assert.match($('.block-graph-selection').textContent, /^loc_8 /, 'the selected block stays selected');
-  view.setResult(drawn({name: 'layered', reason: {code: 'cancelled'}}));
-  assert(shown(triskel) && /Triskel stopped$/.test($('.block-graph-stats').textContent), 'a stopped run is offered again');
+  assert.equal(triskel.textContent, 'Show region layout');
+  triskel.click();
+  assert.match($('.block-graph-stats').textContent, /region layout$/);
+  assert.equal(triskel.textContent, 'Show Triskel layout', 'both drawings stay');
+  assert.equal(calls.length, 1, 'switching runs nothing');
+  view.setResult(drawn());
+  triskel.click();
+  answer({graph: {count: 3}, starts: null, layout: {engine: {name: 'layered', reason: {code: 'cancelled'}}}});
+  await new Promise(resolve => setImmediate(resolve));
+  assert(shown(triskel) && triskel.textContent === 'Lay out with Triskel' && /Triskel stopped$/.test($('.block-graph-stats').textContent), 'a stopped run is offered again');
+  // Find in the drawn rows: a new query shows the first matched block, Enter
+  // steps on and wraps, and a Find typed before a graph runs once one is drawn.
+  assert.equal(view.search('i32.const 1'), '1 of 1 block \u00b7 1 row match');
+  assert.match($('.block-graph-selection').textContent, /^loc_8 /, 'the matched block is shown');
+  assert.equal(view.search('I32'), '2 of 3 blocks \u00b7 3 rows match', 'case-insensitive, from the first block at or after the selection');
+  assert.equal(view.search('I32', 1), '3 of 3 blocks \u00b7 3 rows match');
+  assert.equal(view.search('I32', 1), '1 of 3 blocks \u00b7 3 rows match', 'and wraps');
+  assert.equal(view.search('I32', -1), '3 of 3 blocks \u00b7 3 rows match', 'both ways');
+  assert.equal(view.search('nothing here'), 'No row matches in 3 blocks.');
+  assert.match($('.block-graph-find').textContent, /^Find: No row matches/);
+  view.setTitle('func 2');
+  view.search('const 2');
+  assert.equal(view.search('const 2'), 'Find runs once the graph is drawn.');
+  view.setResult(drawn());
+  assert.deepEqual(found, ['1 block \u00b7 1 row match'], 'and the host hears when it does');
+  // Alt+Arrow follows edges: Down to a successor, Up back along the same edge.
+  const canvas = $('.block-graph-canvas');
+  const press = (key, alt = true) => canvas.dispatchEvent(Object.assign(new Event('keydown', {bubbles: true, cancelable: true}), {key, altKey: alt, shiftKey: false, ctrlKey: false, metaKey: false}));
+  view.select(0);
+  press('ArrowDown');
+  assert.match($('.block-graph-selection').textContent, /^loc_8 .* edge \u2190 loc_0, Alt\+Up follows$/, 'Alt+Down follows an edge out');
+  press('ArrowUp');
+  assert.match($('.block-graph-selection').textContent, /^loc_0 .* edge \u2192 loc_8, Alt\+Down follows$/, 'Alt+Up returns along it');
+  press(']', false);
+  assert.match($('.block-graph-selection').textContent, /^loc_8 /, '] steps to the next block in address order');
   view.setState('loading', 'Decoding basic blocks\u2026');
   assert(!shown(triskel), 'never over a load in progress');
   frames = [];

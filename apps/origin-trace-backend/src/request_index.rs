@@ -4252,12 +4252,32 @@ mod tests {
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
     }
+    /// A read folds for READ_FOLD and answers what is indexed. These tests
+    /// have no background indexer, so on a loaded machine one read can stop
+    /// short of even a small store's end; they read until it is covered.
     fn page(index: &mut RequestIndex, raw: &str) -> Value {
         let query = RequestQuery::parse(&Query::new(raw), raw).unwrap();
-        match index.respond(&query, None).unwrap() {
-            Answer::Document(document, _) => document,
-            Answer::Unchanged(_) => panic!("unexpected 304"),
+        for _ in 0..600 {
+            match index.respond(&query, None).unwrap() {
+                Answer::Document(document, _) if document["index"]["complete"] == true => {
+                    return document;
+                }
+                Answer::Document(..) => {}
+                Answer::Unchanged(_) => panic!("unexpected 304"),
+            }
         }
+        panic!("the request index never reached the store's end");
+    }
+    /// Folds to the store's end, as `page` reads, for a test that asks
+    /// another question of the index.
+    fn fold(index: &mut RequestIndex) {
+        for _ in 0..600 {
+            index.refresh(Instant::now() + READ_FOLD).unwrap();
+            if index.is_caught_up() {
+                return;
+            }
+        }
+        panic!("the request index never reached the store's end");
     }
     fn ids(document: &Value) -> Vec<String> {
         document["requests"]
@@ -5095,6 +5115,7 @@ mod tests {
         );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
+        fold(&mut index);
         let range = index.member_range(Some("1"), None, "5").unwrap().unwrap();
         assert!(
             range.first >= renderer_end,
@@ -5290,6 +5311,7 @@ mod tests {
         response_bodies(&mut store);
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
+        fold(&mut index);
         let counts = index.response_bodies().unwrap();
         assert_eq!(counts["complete"], true);
         let cases = counts["cases"].as_object().unwrap();

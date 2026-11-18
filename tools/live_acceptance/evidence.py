@@ -8,6 +8,7 @@ protocol/native-network-v2.md.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -26,7 +27,7 @@ REQUEST_BODY_STATES = {
     1: "no_body", 2: "empty", 3: "metadata_only", 4: "captured", 5: "captured_truncated",
     6: "not_captured_body_kind", 7: "not_captured_artifact_unavailable",
     8: "not_captured_transfer_refused", 9: "not_captured_url", 10: "not_captured_session_budget",
-    11: "not_captured_credential_form", 12: "not_captured_read_incomplete",
+    11: "not_captured_credential_form", 12: "not_captured_read_incomplete", 13: "not_captured_disk_reserve",
 }
 REQUEST_TARGET_RETENTION = {
     0: "complete", 1: "retained", 2: "not_retained_artifact_unavailable",
@@ -88,6 +89,18 @@ class Api:
             offset += len(chunk)
             if not chunk or offset >= total or (limit is not None and offset >= limit):
                 return b"".join(parts)
+
+    def content_digest(self, artifact_id: str) -> tuple[int, str]:
+        """An artifact's length and SHA-256, read in ranges without holding it whole."""
+        digest, offset = hashlib.sha256(), 0
+        while True:
+            with self._open(f"/api/artifacts/{artifact_id}/content?offset={offset}&limit={ARTIFACT_RANGE}") as response:
+                chunk = response.read()
+                total = int(response.headers.get("x-artifact-total-bytes", "0"))
+            digest.update(chunk)
+            offset += len(chunk)
+            if not chunk or offset >= total:
+                return offset, digest.hexdigest()
 
     def artifact(self, artifact_id: str) -> dict | None:
         found = self.get("/api/artifacts", artifact_id=artifact_id)["artifacts"]
@@ -219,6 +232,7 @@ def per_request(api: Api, path: str, row: dict) -> dict:
 
 @dataclass(frozen=True)
 class RequestBody:
+    version: int
     sequence: str
     process_id: int
     request_id: str
@@ -233,6 +247,11 @@ class RequestBody:
     @property
     def read(self) -> bool:
         return bool(self.flags & 0x40)
+
+    @property
+    def credential_form(self) -> bool:
+        """Payload version 2: Chromium marked the body as a password form post."""
+        return self.version >= 2 and bool(self.flags & 0x80)
 
 
 @dataclass(frozen=True)
@@ -251,7 +270,7 @@ def decode_request_body(event: dict) -> RequestBody:
     flags = payload[6]
     digest = payload[32:64]
     return RequestBody(
-        event["sequence_number"], event["process_id"], event["request_id"], event.get("artifact_id", "0"),
+        int.from_bytes(payload[0:2], "little"), event["sequence_number"], event["process_id"], event["request_id"], event.get("artifact_id", "0"),
         payload[4], REQUEST_BODY_STATES.get(payload[5], f"state_{payload[5]}"), flags,
         int.from_bytes(payload[8:16], "little"), int.from_bytes(payload[16:24], "little"),
         digest.hex() if any(digest) else None,

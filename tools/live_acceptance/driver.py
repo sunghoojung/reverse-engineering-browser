@@ -13,11 +13,12 @@ import tempfile
 import time
 import traceback
 from types import ModuleType
+from typing import Callable
 import urllib.error
 import urllib.request
 
-from live_acceptance import (baseline, bodies, budget, cookies, debugger, headers, limits, metadata, nostacks,
-                             stacks, tabs)
+from live_acceptance import (baseline, bodies, cookies, debugger, headers, limits, metadata, nostacks, reserve,
+                             stacks, tabs, volume)
 from live_acceptance.evidence import Session, StartError, start_session
 from live_acceptance.fixture import Fixture
 from live_acceptance.pages import document
@@ -43,14 +44,15 @@ class Kind:
     environment: dict[str, str]
     areas: list[ModuleType]
     duration: int
+    # More environment, from the directory that will hold the session.
+    prepare: Callable[[Path], dict[str, str]] | None = None
 
 
 KINDS = {
     "content": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"},
                     [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs], 3600),
-    "budget": Kind([*CONTENT_FLAGS, "--request-content-budget-mib", str(budget.BUDGET_MIB),
-                    "--response-body-budget-mib", str(budget.BUDGET_MIB)],
-                   {"REB_NATIVE_PROMISE_STACKS": "1"}, [budget], 1800),
+    "volume": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"}, [volume], 1800),
+    "reserve": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"}, [reserve], 900, reserve.environment),
     "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS],
                      {"REB_NATIVE_PROMISE_STACKS": "1"}, [metadata], 900),
     "no-stacks": Kind([flag for flag in CONTENT_FLAGS if flag != "--request-stacks"],
@@ -80,13 +82,9 @@ def check_context(run: Run) -> None:
             "request_stacks": run.kind != "no-stacks", "document_start": "permitted"}
     problems = [f"capture_options.{key} {options.get(key)!r}, expected {value!r}"
                 for key, value in want.items() if options.get(key) != value]
-    limits = options.get("content_limits")
-    if run.kind == "metadata" and limits is not None:
-        problems.append(f"content_limits {limits}, expected null")
-    if run.kind == "budget":
-        for key in ("request_content_budget_mib", "response_body_budget_mib"):
-            if (limits or {}).get(key) != budget.BUDGET_MIB:
-                problems.append(f"content_limits.{key} {(limits or {}).get(key)}, expected {budget.BUDGET_MIB}")
+    # Content capture has no limits to report; a backend that names them is stale.
+    if "content_limits" in options:
+        problems.append(f"capture_options.content_limits {options['content_limits']}, expected none")
     log = run.session.log_text
     promise = "promise_stacks=1" in log
     if run.kind != "no-stacks" and not promise:
@@ -135,8 +133,9 @@ def run_kind(name: str, args: argparse.Namespace, options: Options) -> Report:
         Path(root).mkdir(parents=True, exist_ok=True)
         arguments = ["--url", fixture.origin + "/", *kind.flags, "--brave-binary", str(args.brave),
                      "--sessions-root", str(Path(root).absolute()), "--duration-seconds", str(kind.duration)]
+        environment = {**kind.environment, **(kind.prepare(Path(root)) if kind.prepare else {})}
         try:
-            session = start_session(args.reb_api, arguments, kind.environment)
+            session = start_session(args.reb_api, arguments, environment)
         except (StartError, subprocess.TimeoutExpired, ValueError, KeyError) as error:
             report.failed("setup", "session start", str(error))
             fixture.stop()

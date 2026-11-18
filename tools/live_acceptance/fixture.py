@@ -21,7 +21,8 @@ from urllib.parse import parse_qs, urlsplit
 
 # Chromium stops reading a response header block at 256 KiB; the large-header
 # case stays below that, and request lines here are far below Python's 64 KiB.
-MAX_REQUEST_BODY = 64 * 1024 * 1024
+# A guard against a runaway request, well above the volume case's largest body.
+MAX_REQUEST_BODY = 512 * 1024 * 1024
 CONTROL_PREFIX = "/__"
 # How often a server checks for stop(); stop() waits up to this long per server.
 POLL_SECONDS = 0.05
@@ -60,6 +61,9 @@ class Request:
     headers: list[tuple[str, str]]
     body: bytes
     chunked: bool
+    # The received body's length and SHA-256, kept when a route keeps no bytes.
+    length: int = 0
+    sha256: str = ""
 
     def header(self, name: str) -> str | None:
         lowered = name.lower()
@@ -95,10 +99,17 @@ class Receipt:
     decoded_body: bytes = b""
     completed: bool = False
     aborted: bool = False
+    # Set when a route keeps no bytes: the decoded body's length and SHA-256.
+    kept_length: int | None = None
+    kept_sha256: str = ""
+
+    @property
+    def decoded_length(self) -> int:
+        return len(self.decoded_body) if self.kept_length is None else self.kept_length
 
     @property
     def decoded_sha256(self) -> str:
-        return sha256(self.decoded_body)
+        return self.kept_sha256 or sha256(self.decoded_body)
 
 
 Handler = Callable[[Request], Response]
@@ -109,6 +120,9 @@ class Fixture:
 
     def __init__(self) -> None:
         self._routes: dict[str, Handler] = {}
+        # Routes whose receipts keep only lengths and digests, so a volume case
+        # does not hold every body it moved in this process.
+        self._digests_only: set[str] = set()
         self._prefixes: list[tuple[str, Handler]] = []
         self._receipts: list[Receipt] = []
         self._beacons: dict[str, list[object]] = {}
@@ -119,10 +133,12 @@ class Fixture:
 
     # Routing -----------------------------------------------------------------
 
-    def route(self, path: str, handler: Handler) -> None:
+    def route(self, path: str, handler: Handler, keep_bodies: bool = True) -> None:
         if path in self._routes:
             raise ValueError(f"duplicate fixture route {path}")
         self._routes[path] = handler
+        if not keep_bodies:
+            self._digests_only.add(path)
 
     def route_prefix(self, prefix: str, handler: Handler) -> None:
         self._prefixes.append((prefix, handler))
@@ -286,13 +302,18 @@ def _handler_class(fixture: Fixture) -> type[http.server.BaseHTTPRequestHandler]
             target = self.path
             parts = urlsplit(target)
             query = {key: values[0] for key, values in parse_qs(parts.query, keep_blank_values=True).items()}
-            request = Request(self.command, target, parts.path, query, list(self.headers.items()), body, chunked)
+            request = Request(self.command, target, parts.path, query, list(self.headers.items()), body, chunked,
+                              len(body), sha256(body))
             receipt = fixture._begin(request)
             try:
                 response = fixture.handle(request)
             except Exception as error:  # A fixture bug must still answer the page.
                 response = text_response(f"fixture error: {error!r}\n", "text/plain", status=500)
             self._send(receipt, response)
+            if parts.path in fixture._digests_only:
+                receipt.kept_length, receipt.kept_sha256 = len(receipt.decoded_body), receipt.decoded_sha256
+                request.body = b""
+                receipt.decoded_body = b""
 
         do_GET = do_POST = do_PUT = do_OPTIONS = do_DELETE = _serve
 

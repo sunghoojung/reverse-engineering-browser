@@ -6,7 +6,7 @@ import gzip
 import json
 import time
 
-from live_acceptance.binary import png
+from live_acceptance.binary import png, wav
 from live_acceptance.evidence import find_rows, members
 from live_acceptance.fixture import (Fixture, Gate, Pause, Request, Response, bytes_response,
                                      payload, redirect, sha256, text_response)
@@ -34,6 +34,10 @@ JSON_BODY = json.dumps({"case": "json", "items": [{"i": i, "v": payload(f"json{i
                                                  for i in range(400)]}).encode()
 HTML_BODY = document("html body", "<p>" + text_body("html", 16000) + "</p>").encode()
 IMAGE = png(64, 64, "bodies")
+# Bytes no sanitizer accepts as a font: the browser still fetches them whole as
+# a font load, which is what the capture keeps.
+FONT = payload("bodies-font", 4096)
+AUDIO = wav(8000, "bodies")
 GZIP_TEXT = text_body("gzip", 64 * 1024).encode()
 BROTLI_TEXT = text_body("brotli", 64 * 1024).encode()
 CHUNKS = [payload(f"chunk{index}", 16 * 1024) for index in range(5)]
@@ -75,6 +79,23 @@ function frame(src) {
     image.src = '/bodies/image.png?r=element';
     return image.decode().then(() => image.naturalWidth);
   });
+  await REB.run('bodies:font', async () => {
+    const face = new FontFace('RebFont', 'url(/bodies/font.woff2?r=1)');
+    try {
+      await face.load();
+      return 'loaded';
+    } catch (error) {
+      return 'rejected: ' + error.message;
+    }
+  });
+  await REB.run('bodies:audio', () => new Promise((resolve, reject) => {
+    const audio = document.createElement('audio');
+    audio.preload = 'auto';
+    audio.onloadeddata = () => resolve(audio.duration);
+    audio.onerror = () => reject(new Error('audio failed: ' + (audio.error && audio.error.code)));
+    audio.src = '/bodies/audio.wav?r=1';
+    document.body.append(audio);
+  }));
   await REB.run('bodies:gzip', () => read('/bodies/gzip?r=1'));
   if (BROTLI) await REB.run('bodies:brotli', () => read('/bodies/brotli?r=1'));
   await REB.run('bodies:chunked', () => read('/bodies/chunked?r=1'));
@@ -161,6 +182,8 @@ def install(fx: Fixture, options: Options) -> None:
     fx.route("/bodies/json", lambda _r: bytes_response(JSON_BODY, "application/json"))
     fx.route("/bodies/html", lambda _r: bytes_response(HTML_BODY, "text/html; charset=utf-8"))
     fx.route("/bodies/image.png", lambda _r: bytes_response(IMAGE, "image/png"))
+    fx.route("/bodies/font.woff2", lambda _r: bytes_response(FONT, "font/woff2"))
+    fx.route("/bodies/audio.wav", lambda _r: bytes_response(AUDIO, "audio/wav"))
     fx.route("/bodies/gzip", lambda _r: Response(200, [("Content-Type", "text/plain"), ("Content-Encoding", "gzip"),
                                                        ("Cache-Control", "no-store")],
                                                  gzip.compress(GZIP_TEXT, mtime=0), decoded=GZIP_TEXT))
@@ -205,7 +228,8 @@ STATE = State()
 
 def drive(run: Run) -> None:
     STATE.partial = None
-    names = ["bodies:json", "bodies:html", "bodies:image-fetch", "bodies:image-element", "bodies:gzip",
+    names = ["bodies:json", "bodies:html", "bodies:image-fetch", "bodies:image-element", "bodies:font",
+             "bodies:audio", "bodies:gzip",
              "bodies:chunked", "bodies:sse", "bodies:redirect", "bodies:etag-first", "bodies:etag-revalidated",
              "bodies:etag-conditional", "bodies:parallel", "bodies:download", "bodies:sw", "bodies:sw-answer", "bodies:preload"]
     if run.options.brotli:
@@ -259,10 +283,11 @@ def verify(run: Run) -> None:
     report.check(ISSUE, "JSON, HTML and image bodies", problems, "each kept with the server's bytes and digest")
 
     problems = []
-    element = case_of(run, "/bodies/image.png?r=element")
-    if element != ["not_captured_type"]:
-        problems.append(f"an <img> load without response_media is {element}, expected not_captured_type")
-    report.check(ISSUE, "image element without media capture", problems, "carries not_captured_type")
+    kept(run, "/bodies/image.png?r=element", IMAGE, problems, "image element")
+    kept(run, "/bodies/font.woff2?r=1", FONT, problems, "web font")
+    kept(run, "/bodies/audio.wav?r=1", AUDIO, problems, "audio element")
+    report.check(ISSUE, "image element, web font and audio element", problems,
+                 "each kept with the server's bytes and digest; content sessions keep media and fonts")
 
     problems = []
     kept(run, "/bodies/gzip?r=1", GZIP_TEXT, problems, "gzip")

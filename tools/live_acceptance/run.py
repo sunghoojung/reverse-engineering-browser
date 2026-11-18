@@ -46,6 +46,8 @@ class Run:
     _records: tuple | None = None
     click_unavailable: str | None = None
     notes: list[str] = field(default_factory=list)
+    # What a drive measured for its verify, by area name.
+    measurements: dict[str, object] = field(default_factory=dict)
 
     @property
     def api(self):

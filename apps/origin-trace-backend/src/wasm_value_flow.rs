@@ -428,25 +428,30 @@ fn call_index(module: &Module<'_>, sha256: &str, cancelled: &AtomicBool) -> Resu
     )
 }
 
-/// Instruction text for the requested instruction indices, decoded again from
-/// the original body so no text is retained for nodes outside the page.
+/// Instruction text for the requested instruction indices, each decoded from
+/// its own byte offset in the original module, so a page costs its own rows
+/// and not the body before them, and no text is retained for nodes outside
+/// the page.
 fn instruction_text(
+    bytes: &[u8],
     body: &wasmparser::FunctionBody<'_>,
+    sim: &Simulation,
     wanted: &HashSet<u32>,
 ) -> Result<HashMap<u32, String>> {
-    let mut texts = HashMap::new();
-    if wanted.is_empty() {
-        return Ok(texts);
-    }
-    let last = wanted.iter().copied().max().unwrap_or(0);
-    let mut reader = body.get_operators_reader().map_err(wasm_def_use::bad)?;
-    let mut index = 0u32;
-    while !reader.eof() && index <= last {
+    let mut texts = HashMap::with_capacity(wanted.len());
+    let end = body.range().end;
+    for index in wanted {
+        let Some(offset) = sim.instructions.get(*index as usize) else {
+            continue;
+        };
+        let offset = *offset as usize;
+        let Some(window) = bytes.get(offset..end) else {
+            continue;
+        };
+        let mut reader =
+            wasmparser::OperatorsReader::new(wasmparser::BinaryReader::new(window, offset));
         let op = reader.read().map_err(wasm_def_use::bad)?;
-        if wanted.contains(&index) {
-            texts.insert(index, operator_text(&op));
-        }
-        index += 1;
+        texts.insert(*index, operator_text(&op));
     }
     Ok(texts)
 }
@@ -1089,9 +1094,12 @@ impl PageTexts {
         }
         let mut by_function = HashMap::new();
         for (function, instructions) in wanted {
-            let index = slice.functions[function as usize].index;
-            let body = document.functions.body(index)?;
-            by_function.insert(function, instruction_text(body, &instructions)?);
+            let entry = &slice.functions[function as usize];
+            let body = document.functions.body(entry.index)?;
+            by_function.insert(
+                function,
+                instruction_text(&document.artifact.bytes, body, &entry.sim, &instructions)?,
+            );
         }
         Ok(Self { by_function })
     }

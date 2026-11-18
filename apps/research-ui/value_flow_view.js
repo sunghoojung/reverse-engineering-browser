@@ -607,12 +607,20 @@
     const total = allRows.length;
     const height = elements.scroll.clientHeight || ROW * 12;
     const top = elements.scroll.scrollTop || 0;
-    const first = Math.max(0, Math.floor(top / ROW) - OVERSCAN);
-    const last = Math.min(total, Math.ceil((top + height) / ROW) + OVERSCAN);
-    elements.list.style.paddingTop = `${first * ROW}px`;
-    elements.list.style.paddingBottom = `${Math.max(0, total - last) * ROW}px`;
+    let first = Math.max(0, Math.floor(top / ROW) - OVERSCAN);
+    let last = Math.min(total, Math.ceil((top + height) / ROW) + OVERSCAN);
     const focused = document.activeElement?.closest?.('.value-flow-row');
     const focusedButton = focused ? String(document.activeElement.className).split(' ')[0] : '';
+    // The focused row stays drawn whatever the scroller's size or position
+    // is at this moment (a transient layout can report a sliver), so the
+    // keyboard never loses its place in the tree.
+    const focusedIndex = focused ? Number(focused.dataset.index) : NaN;
+    if (Number.isSafeInteger(focusedIndex) && focusedIndex < total) {
+      first = Math.min(first, focusedIndex);
+      last = Math.max(last, focusedIndex + 1);
+    }
+    elements.list.style.paddingTop = `${first * ROW}px`;
+    elements.list.style.paddingBottom = `${Math.max(0, total - last) * ROW}px`;
     const keep = new Map();
     let cursor = elements.list.firstElementChild;
     let refocus = null;
@@ -637,9 +645,10 @@
       if (element.isConnected) element.remove();
     }
     if (focused && !focused.isConnected && keep.size && !refocus) {
-      // A focused row left the window: keep the keyboard in the tree.
-      const again = elements.list.querySelector(`[data-index="${focused.dataset.index}"]`) ?? elements.list.firstElementChild;
-      refocus = again;
+      // The focused row is gone from the tree (it folded away): keep the
+      // keyboard in the tree, at the nearest row that remains.
+      const wanted = Math.min(focusedIndex, total - 1);
+      refocus = elements.list.querySelector(`[data-index="${wanted}"]`) ?? elements.list.lastElementChild;
     }
     if (refocus) (refocus.querySelector(focusedButton ? `.${focusedButton}` : 'button') ?? refocus.querySelector('button'))?.focus?.({preventScroll: true});
     drawn = keep;

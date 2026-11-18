@@ -34,14 +34,18 @@ rule or waits on one states them:
 
 | Rule | Bound |
 | --- | --- |
-| `requests`: `url_contains` (1-256 bytes) and optional `method` | 8 |
-| `events`: event type names (1-27 bytes, ASCII) | 16 |
+| `requests`: `url_contains` (1-256 bytes) and optional `method` | 32 |
+| `events`: event type names (1-27 bytes, ASCII) | 64 |
 | `timers`, `csp`: on or off | - |
 | `exceptions`: `uncaught` or `all` | - |
-| `dom`: element handle with `attributes`, `subtree`, `removal` | 4 nodes, by Blink `DOMNodeId` |
+| `dom`: element handle with `attributes`, `subtree`, `removal` | 32 nodes, by Blink `DOMNodeId` |
 
-Each configuration admits at most 1,024 observation records per renderer;
-the next refused record leaves one `debugger_observation_budget` gap.
+These bound the renderer's rule tables, and a set they cannot hold is refused
+at arming. Records have no count: every match of an armed rule is recorded
+for as long as the rules stay armed, and a full probe queue counts its drops
+like any other record. Renderers from earlier builds admitted at most 1,024
+observation records per configuration and left one
+`debugger_observation_budget` gap for the rest; such gaps are still read.
 
 ## Reading observations
 
@@ -54,7 +58,7 @@ scope names a `threads.observed` frame: the session, renderer and frame of the
 observation records among the newest 2,048 records that are observations or
 gaps of any kind, within the newest 64 MiB of the store, at most 64.
 `observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
-(above) in that scan, at most 16.
+(above, earlier builds only) in that scan, at most 16.
 
 A filtered or cursor `get_events` read and every `wait_for_events` put
 `debugger_observation` beside the hex payload of each record of types 40 to

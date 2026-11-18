@@ -934,10 +934,10 @@ function debuggerParseRules(form, carried) {
     if (bytes < 1 || bytes > 256) return {error: 'Each request rule is 1 to 256 bytes of URL text, after an optional uppercase method.'};
     requests.push(rule);
   }
-  if (requests.length > 8) return {error: 'At most 8 request rules.'};
+  if (requests.length > 32) return {error: 'At most 32 request rules.'};
   const events = [...new Set(form.events.value.split(/[\s,]+/).filter(Boolean))];
-  if (events.length > 16 || events.some(name => name.length > 27 || !/^[!-~]+$/.test(name))) {
-    return {error: 'At most 16 event types, each 1 to 27 printable ASCII characters.'};
+  if (events.length > 64 || events.some(name => name.length > 27 || !/^[!-~]+$/.test(name))) {
+    return {error: 'At most 64 event types, each 1 to 27 printable ASCII characters.'};
   }
   const rules = {requests, events, timers: form.timers.checked, csp: form.csp.checked, exceptions: form.exceptions.value, dom: carried};
   if (!requests.length && !events.length && !rules.timers && !rules.csp && rules.exceptions === 'off' && !carried.length) {
@@ -969,9 +969,9 @@ function debuggerWatchSection() {
       return wrap;
     };
     const requests = debuggerNode('textarea', 'debugger-input');
-    requests.rows = 2; requests.maxLength = 2200; requests.spellcheck = false; requests.placeholder = 'POST /api/login';
+    requests.rows = 2; requests.maxLength = 8800; requests.spellcheck = false; requests.placeholder = 'POST /api/login';
     const events = debuggerNode('input', 'debugger-input');
-    events.type = 'text'; events.maxLength = 460; events.spellcheck = false; events.autocomplete = 'off'; events.placeholder = 'click, submit';
+    events.type = 'text'; events.maxLength = 1860; events.spellcheck = false; events.autocomplete = 'off'; events.placeholder = 'click, submit';
     const check = text => { const label = debuggerNode('label', 'debugger-check'); const box = debuggerNode('input'); box.type = 'checkbox'; label.append(box, ` ${text}`); return {label, box}; };
     const timers = check('Timers'), csp = check('CSP violations');
     const exceptions = debuggerNode('select', 'debugger-select');
@@ -1396,7 +1396,7 @@ function debuggerObservationsSection() {
       const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
       if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
       for (const gap of answer.observation_budget_gaps.slice(0, 2)) {
-        notes.push(debuggerNote(`Renderer ${gap.process_id} reached 1,024 observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
+        notes.push(debuggerNote(`Renderer ${gap.process_id}, from an earlier build, reached its 1,024 observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
       }
       const gap = debuggerGapNote(view);
       if (gap) notes.push(gap);

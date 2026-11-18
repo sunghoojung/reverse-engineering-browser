@@ -25,15 +25,15 @@ inline constexpr std::uint32_t kNativeWatchCsp = 1U << 3U;
 inline constexpr std::uint32_t kNativeWatchUncaught = 1U << 4U;
 inline constexpr std::uint32_t kNativeWatchCaught = 1U << 5U;
 inline constexpr std::uint32_t kNativeWatchDom = 1U << 6U;
-inline constexpr std::size_t kNativeWatchRequestRules = 8;
-inline constexpr std::size_t kNativeWatchEventRules = 16;
-inline constexpr std::size_t kNativeWatchDomNodes = 4;
+// Rule tables, not record counts: a set the tables cannot hold is refused at
+// arming. Each slot index fits the record's u8 slot field.
+inline constexpr std::size_t kNativeWatchRequestRules = 32;
+inline constexpr std::size_t kNativeWatchEventRules = 64;
+inline constexpr std::size_t kNativeWatchDomNodes = 32;
 inline constexpr std::size_t kNativeWatchUrlBytes = 256;
 inline constexpr std::size_t kNativeWatchEventBytes = 27;
 inline constexpr std::size_t kNativeWatchHostBytes = 45;
 inline constexpr std::size_t kNativeWatchAttributeBytes = 32;
-inline constexpr std::uint32_t kNativeWatchBudget = 1024;
-
 inline constexpr std::size_t kNativeWatchAncestorLimit = 1024;
 inline constexpr std::uint8_t kNativeWatchAttribute = 1;
 inline constexpr std::uint8_t kNativeWatchSubtree = 2;
@@ -129,7 +129,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeDebuggerWatch final {
                                                       int position = -1) noexcept;
 
  private:
-  // Charges the per-configuration budget; leaves one gap on first refusal.
+  // Whether the armed configuration is still the published one. Every record
+  // it admits is recorded; a full queue counts its drops.
   [[nodiscard]] static bool Charge() noexcept;
   static std::atomic<std::uint32_t> mask_;
 };

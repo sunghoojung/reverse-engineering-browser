@@ -10,9 +10,7 @@
 #include <cstring>
 
 #include "base/compiler_specific.h"
-#include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
-#include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_request_stack.h"
@@ -30,8 +28,6 @@ struct ArmedWatch final {
   std::uint64_t generation = 0;
   std::uint64_t frame_id = 0;
   NativeWatchRules rules;
-  std::uint32_t budget = 0;
-  bool budget_gap = false;
 };
 ArmedWatch g_watch;
 // Arm's thread, the main thread; no other thread reads g_watch.
@@ -62,34 +58,9 @@ void PutName(std::array<std::uint8_t, 48>& tail,
 std::atomic<std::uint32_t> NativeDebuggerWatch::mask_{0};
 
 bool NativeDebuggerWatch::Charge() noexcept {
-  NativeProbeSink& sink = NativeProbeSink::Get();
-  const std::uint64_t generation = sink.config_generation_.load(std::memory_order_acquire);
-  if ((generation & 1U) != 0 || generation != g_watch.generation) {
-    return false;
-  }
-  if (g_watch.budget >= kNativeWatchBudget) {
-    if (!g_watch.budget_gap) {
-      g_watch.budget_gap = true;
-      NativeProbeEvent gap;
-      gap.header.category = NativeProbeCategory::kRuntime;
-      gap.header.type = NativeProbeType::kGap;
-      gap.header.session_id = sink.session_id_.load(std::memory_order_relaxed);
-      gap.header.monotonic_time_ns =
-          static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
-      gap.header.process_id = static_cast<std::uint32_t>(base::GetCurrentProcId());
-      gap.header.thread_id = static_cast<std::uint32_t>(base::PlatformThread::CurrentId().raw());
-      gap.header.frame_id = g_watch.frame_id;
-      constexpr std::string_view kReason = "debugger_observation_budget";
-      gap.header.payload_size = static_cast<std::uint32_t>(kReason.size());
-      std::transform(kReason.begin(), kReason.end(), gap.inline_payload.begin(),
-                     [](const char c) { return static_cast<std::byte>(c); });
-      gap.header.sequence_number = sink.next_sequence_.fetch_add(1, std::memory_order_relaxed);
-      static_cast<void>(sink.EmitStatus(gap, generation));
-    }
-    return false;
-  }
-  ++g_watch.budget;
-  return true;
+  const std::uint64_t generation =
+      NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
+  return (generation & 1U) == 0 && generation == g_watch.generation;
 }
 
 bool NativeWatchRules::AddRequest(const std::string_view url_contains,
@@ -155,8 +126,6 @@ bool NativeDebuggerWatch::Arm(const std::uint64_t frame_id,
   g_watch.generation = generation;
   g_watch.frame_id = frame_id;
   g_watch.rules = rules;
-  g_watch.budget = 0;
-  g_watch.budget_gap = false;
   g_watch_thread.store(base::PlatformThread::CurrentId().raw(), std::memory_order_relaxed);
   std::uint32_t mask = 0;
   mask |= rules.request_count != 0 ? kNativeWatchRequests : 0;
@@ -185,8 +154,7 @@ bool NativeDebuggerWatch::Wants(const std::uint64_t frame_id, const std::uint32_
   }
   const std::uint64_t generation =
       NativeProbeSink::Get().config_generation_.load(std::memory_order_acquire);
-  return generation == g_watch.generation &&
-         (g_watch.budget < kNativeWatchBudget || !g_watch.budget_gap);
+  return generation == g_watch.generation;
 }
 
 void NativeDebuggerWatch::Request(const std::int32_t request_id,

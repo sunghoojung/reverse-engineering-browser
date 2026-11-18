@@ -521,7 +521,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(rows[0].getAttribute('aria-setsize'), '127');
   assert(rows.some(row => row.textContent.includes('<img/src=x/onerror=f()> listener on element')), 'a captured event type renders as text');
   assert.equal(sidebar.querySelector('img'), null, 'captured names never become elements');
-  for (const text of [/3 records in these reads were malformed/, /Renderer 42 reached 1,024 observation records in frame 7101/]) {
+  for (const text of [/3 records in these reads were malformed/, /Renderer 42, from an earlier build, reached its 1,024 observation records in frame 7101/]) {
     assert.match(sidebar.querySelector('.debugger-observation-notes').textContent, text);
   }
   const threadRows = sidebar.querySelectorAll('#debugger-threads .debugger-list-row');
@@ -628,7 +628,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   form.dispatchEvent(new window.Event('submit', {cancelable: true}));
   await settle();
   assert.equal(context.__watchCalls.length, 1, 'invalid rules send nothing');
-  assert.match(form.querySelector('.debugger-watch-result').textContent, /At most 16 event types/);
+  assert.match(form.querySelector('.debugger-watch-result').textContent, /At most 64 event types/);
   runInContext(`delete globalThis.RebNativeConsole;`, context);
   // The registry: later sections join in order; malformed ones are refused.
   assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'Bad id', title: 'x', order: 1, render() {}})`, context), /lowercase/);

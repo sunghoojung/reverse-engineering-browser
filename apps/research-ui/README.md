@@ -311,7 +311,7 @@ Each section is a collapsible pane:
   **Show newest** returns to the newest page. Past 4,096 rows the oldest are
   dropped, and the list says how many. A failed read changes neither the rows
   nor their note. Malformed
-  records, a renderer's `debugger_observation_budget` gap and store sequence
+  records, an earlier build's `debugger_observation_budget` gap and store sequence
   gaps are stated above the list, which is as tall as its rows up to a cap.
   Traffic's **Show in debugger** on a watched request calls
   `RebDebuggerSidebar.showObservation`: the sidebar opens on the Requests

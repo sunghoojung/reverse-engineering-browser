@@ -608,9 +608,10 @@ the document they were armed on, never a worker, another frame or a
 same-process iframe, and one document is armed at a time. A navigation clears
 them, and they cannot be armed ahead of a page load, so what a new page does
 before you arm it again is not recorded. `get_native_debugger` `watch` says
-what the renderer has armed now (`--permission ask` and up). A renderer
-stops after 1,024 records per capture configuration and leaves one
-`debugger_observation_budget` gap; `get_session_summary` lists it. Disarm with
+what the renderer has armed now (`--permission ask` and up). Every match is
+recorded while the rules stay armed; only a renderer from an earlier build
+stopped after 1,024 records per capture configuration and left one
+`debugger_observation_budget` gap, which `get_session_summary` lists. Disarm with
 `{"operation": "unwatch"}`; `stop` disarms too.
 
 These fields carry identities, kinds, positions and names only (a rule's

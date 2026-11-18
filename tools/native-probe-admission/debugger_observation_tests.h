@@ -87,10 +87,23 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   assert(rules.request_count == 1 && rules.event_count == 1);
   assert(!rules.AddDom(0, true, false, false) && !rules.AddDom(5, false, false, false));
   assert(rules.AddDom(5, true, true, false) && !rules.AddDom(5, false, false, true));
-  for (int id = 6; id < 9; ++id) {
+  for (int id = 6; id < 5 + static_cast<int>(reb::kNativeWatchDomNodes); ++id) {
     assert(rules.AddDom(id, false, false, true));
   }
-  assert(!rules.AddDom(9, true, false, false) && rules.dom_count == 4);
+  assert(!rules.AddDom(1000, true, false, false) && rules.dom_count == reb::kNativeWatchDomNodes);
+  {
+    // The rule tables hold 32 request rules and 64 event types, then refuse.
+    reb::NativeWatchRules full;
+    for (std::size_t i = 0; i < reb::kNativeWatchRequestRules; ++i) {
+      assert(full.AddRequest("/api/" + std::to_string(i), ""));
+    }
+    for (std::size_t i = 0; i < reb::kNativeWatchEventRules; ++i) {
+      assert(full.AddEvent("event" + std::to_string(i)));
+    }
+    assert(!full.AddRequest("/api/more", "") && !full.AddEvent("more"));
+    static_assert(reb::kNativeWatchRequestRules <= 256 && reb::kNativeWatchEventRules <= 256 &&
+                  reb::kNativeWatchDomNodes <= 256);
+  }
   rules.timers = rules.csp = rules.uncaught = rules.caught = true;
   {
     // Disarmed, every hook is one relaxed load: no walk, no record, no allocation.
@@ -195,21 +208,21 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   reb::NativeDebuggerWatch::Mutation(9, reb::kNativeWatchAttribute, 0, 1, "");
   assert(Drain(queue) == 0);
 
-  // The 1,024-record budget refuses the next record and leaves one gap.
+  // No record count: 6,000 timers on one armed document are all recorded,
+  // with no gap, and the rules stay armed.
   {
     assert(reb::NativeDebuggerWatch::Arm(9, rules));
-    std::uint32_t admitted = 0;
-    while (reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers)) {
-      reb::NativeDebuggerWatch::Timer(9, false, false, false, admitted + 1, 0, NativeStackFrame{});
+    constexpr std::uint32_t kTimers = 6000;
+    for (std::uint32_t id = 1; id <= kTimers; ++id) {
+      assert(reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers));
+      reb::NativeDebuggerWatch::Timer(9, false, false, false, id, 0, NativeStackFrame{});
       const NativeProbeEvent next = Pop(queue);
-      if (next.header.type == NativeProbeType::kGap) {
-        assert(admitted == reb::kNativeWatchBudget);
-        break;
-      }
-      ++admitted;
+      assert(next.header.type == NativeProbeType::kTimerObservation);
+      std::uint32_t timer = 0;
+      std::memcpy(&timer, ObservationPayload(next).reserved1.data() + 4, sizeof(timer));
+      assert(timer == id);
     }
-    assert(!reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers));
-    reb::NativeDebuggerWatch::Timer(9, false, false, false, 1, 0, NativeStackFrame{});
+    assert(reb::NativeDebuggerWatch::Wants(9, reb::kNativeWatchTimers));
     assert(Drain(queue) == 0);
   }
 
@@ -224,6 +237,6 @@ NativeRequestStackPayload ObservationPayload(const NativeProbeEvent& event) {
   scenario = {};
   std::cout << "PASS debugger observations: inactive, captured stack and tail, request match "
                "identity, no-script stack, rule bounds, disarmed cost, per-hook tails, frame "
-               "filtering, budget gap and disarm\n";
+               "filtering, 6,000 records without a count, and disarm\n";
 }
 }  // namespace

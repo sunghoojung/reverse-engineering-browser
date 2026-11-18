@@ -204,12 +204,12 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
     const auto* url = rule ? rule->FindString("url_contains") : nullptr;
     const auto* method = rule ? rule->FindString("method") : nullptr;
     if (!url || !armed.AddRequest(*url, method ? *method : std::string()))
-      return Failure("Request rules are url_contains of 1 to 256 bytes and an uppercase method");
+      return Failure("At most 32 request rules, each url_contains of 1 to 256 bytes and an uppercase method");
   }
   const auto* events = rules->FindList("events");
   for (std::size_t i = 0; events && i < events->size(); ++i) {
     if (!(*events)[i].is_string() || !armed.AddEvent((*events)[i].GetString()))
-      return Failure("Event rules are 1 to 27 printable ASCII bytes, each once, at most 16");
+      return Failure("Event rules are 1 to 27 printable ASCII bytes, each once, at most 64");
   }
   armed.timers = rules->FindBool("timers").value_or(false);
   armed.csp = rules->FindBool("csp").value_or(false);
@@ -230,7 +230,7 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
     if (!armed.AddDom(element.GetDomNodeId(), rule->FindBool("attributes").value_or(false),
                       rule->FindBool("subtree").value_or(false),
                       rule->FindBool("removal").value_or(false)))
-      return Failure("At most 4 distinct elements, each watching attributes, subtree or removal");
+      return Failure("At most 32 distinct elements, each watching attributes, subtree or removal");
   }
   const std::uint64_t frame_id = FrameId(frame);
   if (!NativeDebuggerWatch::Arm(frame_id, armed))

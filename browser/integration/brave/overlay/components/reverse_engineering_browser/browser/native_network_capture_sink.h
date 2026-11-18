@@ -178,8 +178,9 @@ class NativeNetworkCaptureSink final {
   struct DeferredBody final {
     NativeProbeHeader parent{};
     NativeRequestBodySummary summary;
-    std::string url;
-    std::string mime_type;
+    // Empty for a Metadata only hash, which keeps no bytes.
+    std::string url{};
+    std::string mime_type{};
     // Its state if capture ends before the read does.
     NativeRequestBodyState flushed_state = NativeRequestBodyState::kNotCapturedReadIncomplete;
   };

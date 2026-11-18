@@ -757,10 +757,10 @@ void NativeNetworkCaptureSink::HashRequestBody(const NativeProbeEmitter emitter,
   const bool posted = base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, {base::TaskPriority::USER_VISIBLE, base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
       base::BindOnce(
-          [](scoped_refptr<network::ResourceRequestBody> body) {
+          [](scoped_refptr<network::ResourceRequestBody> held) {
             std::array<std::uint8_t, 32> digest{};
             crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
-            for (const network::DataElement& element : *body->elements()) {
+            for (const network::DataElement& element : *held->elements()) {
               hasher.Update(element.As<network::DataElementBytes>().bytes());
             }
             hasher.Finish(digest);
@@ -768,12 +768,12 @@ void NativeNetworkCaptureSink::HashRequestBody(const NativeProbeEmitter emitter,
           },
           std::move(bytes)),
       base::BindOnce(
-          [](const std::uint64_t generation, const std::uint64_t read_id,
-             const std::uint64_t body_length, const std::array<std::uint8_t, 32>& digest) {
+          [](const std::uint64_t for_generation, const std::uint64_t id, const std::uint64_t length,
+             const std::array<std::uint8_t, 32>& digest) {
             static_cast<void>(Get().RecordBodyRead(
-                generation, read_id,
+                for_generation, id,
                 NativeRequestBodyReadOutcome{.state = NativeRequestBodyState::kMetadataOnly,
-                                             .body_length = body_length,
+                                             .body_length = length,
                                              .sha256 = digest}));
           },
           generation(), read_id, body_length));

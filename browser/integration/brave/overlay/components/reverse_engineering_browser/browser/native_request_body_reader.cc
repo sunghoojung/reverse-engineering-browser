@@ -381,7 +381,7 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
     static_cast<void>(NativeArtifactBodyTee::Forward(
         std::move(consumer), std::move(pipe),
         base::BindOnce(&ChunkedTee::OnEnd, weak_factory_.GetWeakPtr()),
-        base::BindRepeating(&ChunkedTee::OnData, weak_factory_.GetWeakPtr())));
+        base::BindRepeating(&ChunkedTee::ObserveData, weak_factory_.GetWeakPtr())));
   }
 
  private:
@@ -398,6 +398,15 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
     size_known_ = true;
     std::move(callback).Run(status, size);
     MaybeFinish();
+  }
+
+  // A WeakPtr cannot bind a method that returns a value, so the tee's observer
+  // checks it here: once the getter is gone, the rest of the upload passes
+  // unobserved.
+  static std::size_t ObserveData(const base::WeakPtr<ChunkedTee>& tee,
+                                 const std::span<const std::uint8_t> chunk,
+                                 base::OnceClosure resume) {
+    return tee ? tee->OnData(chunk, std::move(resume)) : chunk.size();
   }
 
   std::size_t OnData(const std::span<const std::uint8_t> chunk, base::OnceClosure resume) {

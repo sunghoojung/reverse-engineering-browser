@@ -44,6 +44,14 @@ reb::NativeFactoryScope ScopeOf(content::BrowserContext& context,
 }
 
 void OwnerHook() {
+  {
+    const reb::ScopedNativeFactoryOwner unarmed({.frame_process_id = 1, .frame_routing_id = 2});
+    Check(!reb::ScopedNativeFactoryOwner::Armed() &&
+              reb::CurrentNativeFactoryOwner().frame_process_id == -1 &&
+              reb::ScopedNativeFactoryOwner::Current().frame_process_id == -1,
+          "Before the browser arms the hook a scope sets no owner");
+  }
+  reb::ScopedNativeFactoryOwner::Arm();
   Check(reb::CurrentNativeFactoryOwner().frame_process_id == -1 &&
             reb::CurrentNativeFactoryOwner().cause == Cause::kNamed,
         "With no scope the owner names nothing");
@@ -59,7 +67,7 @@ void OwnerHook() {
           "Leaving a scope restores the outer owner");
   }
   Check(reb::CurrentNativeFactoryOwner().frame_routing_id == -2, "The thread owner is reset");
-  std::cout << "PASS factory owner hook: scopes nest and restore\n";
+  std::cout << "PASS factory owner hook: inert until armed, then scopes nest and restore\n";
 }
 
 void Factories() {

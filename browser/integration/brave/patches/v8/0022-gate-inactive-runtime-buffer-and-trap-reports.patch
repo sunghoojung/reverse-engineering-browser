@@ -1,0 +1,204 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 0d913c0..b68dcd0 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -3902,6 +3902,7 @@ v8_header_set("v8_headers") {
+     "include/v8-microtask-queue.h",
+     "include/v8-microtask.h",
+     "include/v8-native-console.h",
++    "include/v8-native-runtime-buffer.h",
+     "include/v8-native-stack.h",
+     "include/v8-object.h",
+     "include/v8-persistent-handle.h",
+diff --git a/include/v8-native-runtime-buffer.h b/include/v8-native-runtime-buffer.h
+new file mode 100644
+index 0000000..0d8d0b9
+--- /dev/null
++++ b/include/v8-native-runtime-buffer.h
+@@ -0,0 +1,26 @@
++// Copyright (c) 2026 The Brave Authors. All rights reserved.
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
++
++#ifndef INCLUDE_V8_NATIVE_RUNTIME_BUFFER_H_
++#define INCLUDE_V8_NATIVE_RUNTIME_BUFFER_H_
++
++#include <stdint.h>
++
++#include <atomic>
++
++#include "v8config.h"
++
++namespace v8 {
++
++// REB runtime buffer capture: the gate in front of
++// Isolate::SetRuntimeBufferCallback. Process-wide, for every isolate. While
++// the byte `gate` points to is 0, a supported construction loads it and makes
++// no runtime call or callback. Null, the default, calls on every
++// construction. The byte must outlive V8.
++V8_EXPORT void SetRuntimeBufferCallbackGate(const std::atomic<uint8_t>* gate);
++
++}  // namespace v8
++
++#endif  // INCLUDE_V8_NATIVE_RUNTIME_BUFFER_H_
+diff --git a/src/api/api.cc b/src/api/api.cc
+index 05c8f03..7249852 100644
+--- a/src/api/api.cc
++++ b/src/api/api.cc
+@@ -26,6 +26,7 @@
+ #include "include/v8-function.h"
+ #include "include/v8-json.h"
+ #include "include/v8-locker.h"
++#include "include/v8-native-runtime-buffer.h"
+ #include "include/v8-platform.h"
+ #include "include/v8-primitive-object.h"
+ #include "include/v8-profiler.h"
+@@ -11204,6 +11205,10 @@ CALLBACK_SETTER(WasmStreamingCallback, WasmStreamingCallback,
+ CALLBACK_SETTER(RuntimeBufferCallback, RuntimeBufferCallback,
+                 runtime_buffer_callback)
+ 
++void SetRuntimeBufferCallbackGate(const std::atomic<uint8_t>* gate) {
++  i::Isolate::set_runtime_buffer_gate(gate);
++}
++
+ bool Isolate::GetRuntimeBufferAllocatingScript(RuntimeBufferScript* result) {
+   if (result == nullptr)
+     return false;
+diff --git a/src/builtins/builtins-arraybuffer.cc b/src/builtins/builtins-arraybuffer.cc
+index fadb490..6b9379d 100644
+--- a/src/builtins/builtins-arraybuffer.cc
++++ b/src/builtins/builtins-arraybuffer.cc
+@@ -20,6 +20,9 @@ namespace internal {
+ namespace {
+ 
+ void NotifyRuntimeArrayBuffer(Isolate* isolate, Tagged<Object> value) {
++  if (!Isolate::runtime_buffer_gate_open()) {
++    return;
++  }
+   RuntimeBufferCallback callback = isolate->runtime_buffer_callback();
+   if (!callback || !IsJSArrayBuffer(value)) {
+     return;
+diff --git a/src/builtins/builtins-typed-array-gen.cc b/src/builtins/builtins-typed-array-gen.cc
+index cf10dbc..5e4bc40 100644
+--- a/src/builtins/builtins-typed-array-gen.cc
++++ b/src/builtins/builtins-typed-array-gen.cc
+@@ -123,7 +123,17 @@ TF_BUILTIN(TypedArrayConstructor, TypedArrayBuiltinsAssembler) {
+   TNode<JSAny> result =
+       CallBuiltin<JSAny>(Builtin::kCreateTypedArray, context, target,
+                          new_target, arg1, arg2, arg3);
++  // Isolate::runtime_buffer_gate_open: while the embedder's capture is
++  // inactive a construction costs three loads (the external reference, the
++  // gate pointer and its byte), not a runtime call.
++  Label capture(this, Label::kDeferred), done(this);
++  const TNode<RawPtrT> gate = Load<RawPtrT>(
++      ExternalConstant(ExternalReference::address_of_runtime_buffer_gate()));
++  Branch(Word32Equal(Load<Uint8T>(gate), Int32Constant(0)), &done, &capture);
++  BIND(&capture);
+   CallRuntime(Runtime::kRebCaptureRuntimeBuffer, context, result);
++  Goto(&done);
++  BIND(&done);
+   args.PopAndReturn(result);
+ 
+   BIND(&throwtypeerror);
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index ef30dfc..5415ab0 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -849,6 +849,10 @@ ExternalReference ExternalReference::address_of_js_pr_3883_flag() {
+   return ExternalReference(&v8_flags.js_pr_3883);
+ }
+ 
++ExternalReference ExternalReference::address_of_runtime_buffer_gate() {
++  return ExternalReference(Isolate::runtime_buffer_gate_address());
++}
++
+ ExternalReference ExternalReference::address_of_runtime_stats_flag() {
+   return ExternalReference(&TracingFlags::runtime_stats);
+ }
+diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
+index 7cdd490..a8960ba 100644
+--- a/src/codegen/external-reference.h
++++ b/src/codegen/external-reference.h
+@@ -111,6 +111,7 @@ enum class IsolateFieldId : uint8_t;
+   V(address_of_mock_arraybuffer_allocator_flag,                                \
+     "v8_flags.mock_arraybuffer_allocator")                                     \
+   V(address_of_one_half, "LDoubleConstant::one_half")                          \
++  V(address_of_runtime_buffer_gate, "Isolate::runtime_buffer_gate")            \
+   V(address_of_runtime_stats_flag, "TracingFlags::runtime_stats")              \
+   V(address_of_shared_string_table_flag, "v8_flags.shared_string_table")       \
+   V(address_of_the_hole_nan, "the_hole_nan")                                   \
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 8d0ec81..f202410 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -601,6 +601,10 @@ V8_TLS_DEFINE_GETTER(Isolate::TryGetCurrent, Isolate*, g_current_isolate_)
+ // static
+ void Isolate::SetCurrent(Isolate* isolate) { g_current_isolate_ = isolate; }
+ 
++const std::atomic<uint8_t> Isolate::kRuntimeBufferGateOpen V8_CONSTINIT{1};
++std::atomic<const std::atomic<uint8_t>*> Isolate::runtime_buffer_gate_
++    V8_CONSTINIT{&Isolate::kRuntimeBufferGateOpen};
++
+ namespace {
+ // A global counter for all generated Isolates, might overflow.
+ std::atomic<int> isolate_counter{0};
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 5d1c726..c7e4b36 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -2013,6 +2013,23 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+     return reinterpret_cast<Address>(&async_event_delegate_);
+   }
+ 
++  // Process-wide, for every isolate. A supported construction calls
++  // runtime_buffer_callback only while the byte it points to is nonzero, so
++  // TypedArrayConstructor loads the pointer and the byte instead of making a
++  // runtime call. Until an embedder installs its own, it points to a
++  // constant 1.
++  static void set_runtime_buffer_gate(const std::atomic<uint8_t>* gate) {
++    runtime_buffer_gate_.store(gate ? gate : &kRuntimeBufferGateOpen,
++                               std::memory_order_relaxed);
++  }
++  static bool runtime_buffer_gate_open() {
++    return runtime_buffer_gate_.load(std::memory_order_relaxed)
++               ->load(std::memory_order_relaxed) != 0;
++  }
++  static Address runtime_buffer_gate_address() {
++    return reinterpret_cast<Address>(&runtime_buffer_gate_);
++  }
++
+   Address javascript_execution_assert_address() {
+     return reinterpret_cast<Address>(&javascript_execution_assert_);
+   }
+@@ -3034,6 +3051,13 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+ 
+   debug::AsyncEventDelegate* async_event_delegate_ = nullptr;
+   const v8::NativePromiseCallbacks* reb_promise_callbacks_ = nullptr;
++  static const std::atomic<uint8_t> kRuntimeBufferGateOpen;
++  // Builtins load it as a raw pointer.
++  static std::atomic<const std::atomic<uint8_t>*> runtime_buffer_gate_;
++  static_assert(sizeof(runtime_buffer_gate_) == sizeof(Address) &&
++                std::atomic<const std::atomic<uint8_t>*>::is_always_lock_free);
++  static_assert(sizeof(kRuntimeBufferGateOpen) == 1 &&
++                std::atomic<uint8_t>::is_always_lock_free);
+   uint32_t promise_hook_flags_ = 0;
+   uint32_t current_async_task_id_ = 0;
+ 
+diff --git a/src/runtime/runtime-wasm.cc b/src/runtime/runtime-wasm.cc
+index 44bc131..80160f9 100644
+--- a/src/runtime/runtime-wasm.cc
++++ b/src/runtime/runtime-wasm.cc
+@@ -181,6 +181,12 @@ bool RebWasmTrapReason(MessageTemplate message, uint8_t* reason,
+ }
+ 
+ void ReportRebWasmTrap(Isolate* isolate, MessageTemplate message) {
++  // Only Liftoff code compiled under these flags enters a host call for the
++  // embedder to close, so without them a trap walks no stack.
++  if (!v8_flags.reb_wasm_br_table_dispatch &&
++      !v8_flags.reb_wasm_call_indirect_dispatch) {
++    return;
++  }
+   uint8_t reason = 0;
+   uint8_t bounds = 0;
+   if (!RebWasmTrapReason(message, &reason, &bounds)) return;

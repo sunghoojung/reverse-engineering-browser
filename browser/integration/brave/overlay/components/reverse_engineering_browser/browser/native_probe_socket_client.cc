@@ -37,6 +37,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
+#include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 namespace reb {
@@ -159,6 +160,8 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
     return false;
   }
   NativeNetworkCaptureSink::Get().SetOwnedProfilePath(user_data_root.AppendASCII("Default"));
+  // Before the profile exists, so its first frameless factory names its owner.
+  ScopedNativeFactoryOwner::Arm();
 
   const base::FilePath token_path = command_line.GetSwitchValuePath(kBrokerTokenFileSwitch);
   socket_descriptor_ = ConnectNativeLocalIpc(command_line.GetSwitchValueASCII(kBrokerSocketSwitch),

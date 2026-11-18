@@ -773,6 +773,12 @@ class Evidence(unittest.TestCase):
         self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, "captured"], "captured"))
         self.assertTrue(budget.ordered(["captured"], "captured"))
         self.assertTrue(budget.ordered(["captured", "malformed", budget.BUDGET_CASE], "captured"))
+        refused = (budget.TRANSFER_REFUSED,)
+        self.assertEqual(budget.ordered(["captured", budget.TRANSFER_REFUSED, "captured", budget.BUDGET_CASE],
+                                        "captured", refused), [])
+        self.assertTrue(budget.ordered(["captured", budget.TRANSFER_REFUSED, budget.BUDGET_CASE], "captured"))
+        self.assertTrue(budget.ordered(["captured", budget.BUDGET_CASE, budget.TRANSFER_REFUSED],
+                                       "captured", refused))
         for index in range(budget.RESPONSES):
             row = self.build.row(f"/budget/response?i={index}")
             if index < 7:
@@ -784,16 +790,25 @@ class Evidence(unittest.TestCase):
             data = f"reb-post-{index}-".encode() + b"p" * 400
             connection.request("POST", "/budget/post", body=data)
             connection.getresponse().read()
-            self.build.request_body(self.build.row("/budget/post", "POST"), 4 if index < 2000 else 10, data)
+            # Two bodies the artifact queue refused before the budget ran out.
+            state = 8 if index in (100, 101) else 4 if index < 2000 else 10
+            self.build.request_body(self.build.row("/budget/post", "POST"), state, data)
         connection.close()
         self.backend.summary = {"checks": [
             {"code": "request_content_not_retained", "category": category, "reason": budget.BUDGET_CASE,
              "budget_mib": 1, "retained_bytes": "1000000", "count": "3"}
-            for category in ("response_body", "request_body")]}
+            for category in ("response_body", "request_body")] + [
+            {"code": "request_content_not_retained", "category": "request_body",
+             "reason": budget.TRANSFER_REFUSED, "count": "2"}]}
         budget.verify(self.run_)
-        self.assertEqual(self.statuses(), {"response budget shown when it runs out": "PASS",
-                                           f"{budget.POSTS} small POSTs until the request budget runs out": "PASS"},
+        posts = f"{budget.POSTS} small POSTs until the request budget runs out"
+        self.assertEqual(self.statuses(), {"response budget shown when it runs out": "PASS", posts: "PASS"},
                          self.report.lines)
+        # A refusal the summary does not count was lost from view.
+        self.backend.summary["checks"][-1]["count"] = "1"
+        self.report.lines.clear()
+        budget.verify(self.run_)
+        self.assertEqual(self.statuses()[posts], "FAIL", self.report.lines)
 
     def test_tabs_unresolved_fails_and_nothing_passes_without_rows(self):
         self.backend.summary = {"checks": [], "request_tabs": {"unresolved": "2", "unresolved_reasons": {"worker": "2"}}}
@@ -874,6 +889,19 @@ class Evidence(unittest.TestCase):
         debugger.STATE.error = "get_native_console never listed the page"
         debugger.verify(self.run_)
         self.assertEqual(self.statuses(), {"arm a watch": "FAIL"})
+
+    def test_debugger_settle_waits_only_for_a_pending_source(self):
+        waiting = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_artifact_missing"}}]}
+        resolved = {"frames": [{"resolution": {"status": "resolved", "line": 14}}]}
+        reads = iter([waiting, waiting, resolved])
+        self.assertIs(debugger.settle(lambda: next(reads), debugger.top_frame, 5, 0), resolved)
+        never = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_not_retained"}}]}
+        calls = []
+        self.assertIs(debugger.settle(lambda: calls.append(1) or never, debugger.top_frame, 5, 0), never)
+        self.assertEqual(len(calls), 1)
+        self.assertIs(debugger.settle(lambda: waiting, debugger.top_frame, 0, 0), waiting)
+        site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
+        self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
 
     def test_report_never_passes_a_manual_or_skipped_case(self):
         report = Report("x")

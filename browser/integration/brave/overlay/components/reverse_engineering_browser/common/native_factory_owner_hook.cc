@@ -13,17 +13,20 @@ constinit thread_local NativeFactoryOwner g_owner;
 constinit NativeServiceWorkerVersionObserver g_version_observer = nullptr;
 }  // namespace
 
-ScopedNativeFactoryOwner::ScopedNativeFactoryOwner(const NativeFactoryOwner& owner) noexcept
-    : previous_(g_owner) {
+std::atomic<bool> ScopedNativeFactoryOwner::armed_owners_{false};
+
+NativeFactoryOwner ScopedNativeFactoryOwner::Exchange(const NativeFactoryOwner& owner) noexcept {
+  const NativeFactoryOwner previous = g_owner;
   g_owner = owner;
+  return previous;
 }
 
-ScopedNativeFactoryOwner::~ScopedNativeFactoryOwner() {
-  g_owner = previous_;
-}
-
-NativeFactoryOwner CurrentNativeFactoryOwner() noexcept {
+NativeFactoryOwner ScopedNativeFactoryOwner::Current() noexcept {
   return g_owner;
+}
+
+void ScopedNativeFactoryOwner::Arm() noexcept {
+  armed_owners_.store(true, std::memory_order_relaxed);
 }
 
 void SetNativeServiceWorkerVersionObserver(

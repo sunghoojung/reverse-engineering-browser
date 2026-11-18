@@ -23,9 +23,11 @@
 #include <memory>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "base/compiler_specific.h"
+#include "base/memory/raw_ref.h"
 #include "base/no_destructor.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
@@ -73,7 +75,6 @@ struct RuntimeScriptCache final {
   std::array<std::pair<std::uint64_t, std::uint64_t>, kRuntimeTypedArrayMaxSnapshots> keys{};
   std::size_t count = 0;
 };
-thread_local RuntimeScriptCache runtime_script_cache;
 
 struct RuntimeObservation final {
   std::uint64_t context = 0;
@@ -94,7 +95,79 @@ struct RuntimeObservationCache final {
   bool classification_unavailable_reported = false;
   bool snapshot_limit_reported = false;
 };
-thread_local RuntimeObservationCache runtime_observations;
+
+struct RuntimeThreadState final {
+  RuntimeScriptCache scripts;
+  RuntimeObservationCache observations;
+};
+struct WasmHostCall;
+struct GuestThreadState;
+
+// A thread's sink state beyond a few words. Each part is made by the first
+// active-path use that writes it and freed when the thread exits; a read
+// finds null on a thread no active path reached. Darwin's dyld mallocs and
+// fills an image's whole thread_local block on a thread's first touch of any
+// thread_local in it, so state this size never lives in that block.
+struct SinkThreadState final {
+  SinkThreadState();
+  ~SinkThreadState();
+  SinkThreadState(const SinkThreadState&) = delete;
+  SinkThreadState& operator=(const SinkThreadState&) = delete;
+  std::unique_ptr<RuntimeThreadState> runtime;
+  std::unique_ptr<WasmHostCall> wasm;
+  std::unique_ptr<GuestThreadState> guest;
+};
+
+// A thread_local unique_ptr would need an exit-time destructor, which
+// Chromium refuses; the slot frees each thread's state at its exit.
+base::ThreadLocalOwnedPointer<SinkThreadState>& SinkThreadStates() {
+  static base::NoDestructor<base::ThreadLocalOwnedPointer<SinkThreadState>> states;
+  return *states;
+}
+
+// Never allocates: null on a thread without state.
+SinkThreadState* FindSinkThreadState() noexcept {
+  return SinkThreadStates().Get();
+}
+
+SinkThreadState& EnsureSinkThreadState() {
+  SinkThreadState* state = SinkThreadStates().Get();
+  if (!state) {
+    auto fresh = std::make_unique<SinkThreadState>();
+    state = fresh.get();
+    SinkThreadStates().Set(std::move(fresh));
+  }
+  return *state;
+}
+
+const RuntimeThreadState* FindRuntimeThreadState() noexcept {
+  const SinkThreadState* const state = FindSinkThreadState();
+  return state ? state->runtime.get() : nullptr;
+}
+
+RuntimeThreadState& EnsureRuntimeThreadState() {
+  SinkThreadState& state = EnsureSinkThreadState();
+  if (!state.runtime) {
+    state.runtime = std::make_unique<RuntimeThreadState>();
+  }
+  return *state.runtime;
+}
+
+// This thread's observations of `generation`, emptied when it changes.
+RuntimeObservationCache& RuntimeObservationsFor(const std::uint64_t generation) {
+  RuntimeObservationCache& observations = EnsureRuntimeThreadState().observations;
+  if (observations.generation != generation) {
+    observations = {};
+    observations.generation = generation;
+  }
+  return observations;
+}
+
+// This thread's observations of `generation`, or null without any.
+const RuntimeObservationCache* FindRuntimeObservations(const std::uint64_t generation) noexcept {
+  const RuntimeThreadState* const state = FindRuntimeThreadState();
+  return state && state->observations.generation == generation ? &state->observations : nullptr;
+}
 
 inline constexpr std::size_t kCompiledScriptTableSlots = 4096;
 
@@ -147,18 +220,28 @@ std::size_t CompiledScriptDigestSlot(const std::array<std::uint8_t, 32>& digest)
 // (including retries after allocation failure) per generation and thread.
 constexpr std::size_t kRuntimeScriptScanLimit = 256;
 
-RuntimeObservation* FindRuntimeObservation(const std::uint64_t context,
-                                           const std::uint64_t script) noexcept {
+// The index of the observation of (context, script), or count without one.
+std::size_t RuntimeObservationIndex(const RuntimeObservationCache& runtime_observations,
+                                    const std::uint64_t context,
+                                    const std::uint64_t script) noexcept {
   for (std::size_t index = 0; index < runtime_observations.count; ++index) {
-    auto& entry = runtime_observations.observations[index];
+    const auto& entry = runtime_observations.observations[index];
     if (entry.context == context && entry.script == script) {
-      return &entry;
+      return index;
     }
   }
-  return nullptr;
+  return runtime_observations.count;
 }
 
-bool RuntimeObservationHasCapacity() noexcept {
+const RuntimeObservation* FindRuntimeObservation(
+    const RuntimeObservationCache& runtime_observations,
+    const std::uint64_t context,
+    const std::uint64_t script) noexcept {
+  const std::size_t index = RuntimeObservationIndex(runtime_observations, context, script);
+  return index < runtime_observations.count ? &runtime_observations.observations[index] : nullptr;
+}
+
+bool RuntimeObservationHasCapacity(const RuntimeObservationCache& runtime_observations) noexcept {
   if (runtime_observations.count < runtime_observations.observations.size()) {
     return true;
   }
@@ -170,10 +253,12 @@ bool RuntimeObservationHasCapacity() noexcept {
   return false;
 }
 
-RuntimeObservation* ClaimRuntimeObservation(const std::uint64_t context,
+RuntimeObservation* ClaimRuntimeObservation(RuntimeObservationCache& runtime_observations,
+                                            const std::uint64_t context,
                                             const std::uint64_t script) noexcept {
-  if (auto* entry = FindRuntimeObservation(context, script)) {
-    return entry;
+  if (const std::size_t index = RuntimeObservationIndex(runtime_observations, context, script);
+      index < runtime_observations.count) {
+    return &runtime_observations.observations[index];
   }
   auto* entry = static_cast<RuntimeObservation*>(nullptr);
   if (runtime_observations.count < runtime_observations.observations.size()) {
@@ -1242,13 +1327,12 @@ NativeFetchOwner NativeFetchOwnerScope::Current() noexcept {
   return g_fetch_owner;
 }
 
-NativeProbeSink::NativeProbeSink() noexcept = default;
-
-NativeProbeSink& NativeProbeSink::Get() {
-  // Probe hooks on any thread may still run during process exit.
-  static base::NoDestructor<NativeProbeSink> sink;
-  return *sink;
-}
+// Constant-initialized, so no constructor runs before a hook can reach it,
+// and trivially destructible, so hooks still running during process exit
+// find it intact.
+constexpr NativeProbeSink::NativeProbeSink() noexcept = default;
+constinit NativeProbeSink NativeProbeSink::instance_;
+static_assert(std::is_trivially_destructible_v<NativeProbeSink>);
 
 void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   const NativeGeneratedArtifactEmitter artifact_emitter,
@@ -1275,6 +1359,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
   // generation.
   emitter_.store(nullptr, std::memory_order_release);
   artifact_emitter_.store(nullptr, std::memory_order_release);
+  runtime_buffer_gate_.store(0, std::memory_order_relaxed);
   // A request belongs to one configuration. The next session must not
   // inherit an interrupt aimed at the one being replaced.
   wasm_execution_interrupt_generation_.store(0, std::memory_order_release);
@@ -1321,6 +1406,14 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
       wasm_budget_epoch <= std::numeric_limits<std::uint64_t>::max() - 2) {
     native_wasm_budget_epoch_.store(wasm_budget_epoch + 2, std::memory_order_relaxed);
   }
+  // A filter in front of the runtime buffer callback, which still checks the
+  // whole configuration. It opens before the release below, so a thread that
+  // acquires the new generation also sees it open: no construction after the
+  // session's first recorded event is skipped. Until that release the
+  // generation is odd and the callback rejects.
+  runtime_buffer_gate_.store(
+      active && (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) != 0 ? 1 : 0,
+      std::memory_order_relaxed);
   config_generation_.fetch_add(1, std::memory_order_release);
 }
 
@@ -1341,14 +1434,7 @@ bool NativeProbeSink::CanAdmitEvent(const NativeProbeEvent& event,
          MonotonicTimeNs() < expires_at;
 }
 
-bool NativeProbeSink::IsCaptureArmed() const noexcept {
-  return emitter_.load(std::memory_order_acquire) != nullptr;
-}
-
-bool NativeProbeSink::IsCanvasImageCaptureEnabled() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return false;
-  }
+bool NativeProbeSink::IsCanvasImageCaptureEnabledSlow() const noexcept {
   // The opt-in is read inside the same stable generation as the policy it
   // belongs to, never paired with a replacement configuration's.
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
@@ -1367,10 +1453,7 @@ bool NativeProbeSink::IsCanvasImageCaptureEnabled() const noexcept {
          MonotonicTimeNs() < expires_at;
 }
 
-bool NativeProbeSink::IsArtifactCaptureEnabled() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return false;
-  }
+bool NativeProbeSink::IsArtifactCaptureEnabledSlow() const noexcept {
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
   if ((generation & 1U) != 0) {
     return false;
@@ -1385,10 +1468,7 @@ bool NativeProbeSink::IsArtifactCaptureEnabled() const noexcept {
          MonotonicTimeNs() < expires_at;
 }
 
-bool NativeProbeSink::IsVmCaptureEnabled() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return false;
-  }
+bool NativeProbeSink::IsVmCaptureEnabledSlow() const noexcept {
   const std::uint64_t generation = config_generation_.load(std::memory_order_acquire);
   if ((generation & 1U) != 0) {
     return false;
@@ -1405,22 +1485,18 @@ bool NativeProbeSink::IsVmCaptureEnabled() const noexcept {
 
 bool NativeProbeSink::RuntimeScriptSourceNeeded(const std::uint64_t execution_context_id,
                                                 const std::uint64_t script_id) const noexcept {
-  const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (runtime_script_cache.generation != generation) {
-    runtime_script_cache = {};
-    runtime_script_cache.generation = generation;
+  // A cache of another generation, or none, holds no script of this one.
+  const RuntimeThreadState* const state = FindRuntimeThreadState();
+  if (!state || state->scripts.generation != config_generation_.load(std::memory_order_acquire)) {
+    return true;
   }
+  const RuntimeScriptCache& cache = state->scripts;
   const auto key = std::pair{execution_context_id, script_id};
-  return std::find(runtime_script_cache.keys.begin(),
-                   runtime_script_cache.keys.begin() +
-                       static_cast<std::ptrdiff_t>(runtime_script_cache.count),
-                   key) == runtime_script_cache.keys.begin() +
-                               static_cast<std::ptrdiff_t>(runtime_script_cache.count);
+  const auto end = cache.keys.begin() + static_cast<std::ptrdiff_t>(cache.count);
+  return std::find(cache.keys.begin(), end, key) == end;
 }
 
-std::uint64_t NativeProbeSink::RuntimeCaptureGeneration() const noexcept {
-  if (!artifact_emitter_.load(std::memory_order_acquire)) [[likely]]
-    return 0;
+std::uint64_t NativeProbeSink::RuntimeCaptureGenerationSlow() const noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
   return IsVmCaptureEnabled() && config_generation_.load(std::memory_order_acquire) == generation
              ? generation
@@ -1439,11 +1515,8 @@ bool NativeProbeSink::RegisterRuntimeScriptObservation(
       observation != NativeRuntimeScriptObservation::kCapturedLikelyVm &&
       observation != NativeRuntimeScriptObservation::kStaticDispatchLoop)
     return false;
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
-  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  auto* entry =
+      ClaimRuntimeObservation(RuntimeObservationsFor(generation), execution_context_id, script_id);
   if (!entry)
     return false;
   if (observation == NativeRuntimeScriptObservation::kStaticDispatchLoop)
@@ -1458,10 +1531,12 @@ bool NativeProbeSink::RegisterRuntimeScriptObservation(
 bool NativeProbeSink::RuntimeScriptSourceNoted(const std::uint64_t generation,
                                                const std::uint64_t execution_context_id,
                                                const std::uint64_t script_id) const noexcept {
-  if (generation == 0 || runtime_observations.generation != generation ||
-      execution_context_id == 0 || script_id == 0)
+  if (generation == 0 || execution_context_id == 0 || script_id == 0)
     return false;
-  const auto* entry = FindRuntimeObservation(execution_context_id, script_id);
+  const RuntimeObservationCache* const observations = FindRuntimeObservations(generation);
+  const auto* entry = observations
+                          ? FindRuntimeObservation(*observations, execution_context_id, script_id)
+                          : nullptr;
   return entry && entry->examined;
 }
 
@@ -1472,12 +1547,14 @@ bool NativeProbeSink::RuntimeScriptNoteAccepts(const std::uint64_t generation,
       script_id == 0) {
     return false;
   }
-  if (runtime_observations.generation != generation) {
+  const RuntimeObservationCache* const runtime_observations = FindRuntimeObservations(generation);
+  if (!runtime_observations) {
     return true;
   }
-  const auto* entry = FindRuntimeObservation(execution_context_id, script_id);
-  return (!entry || !entry->examined) && runtime_observations.scans < kRuntimeScriptScanLimit &&
-         (entry || RuntimeObservationHasCapacity());
+  const auto* entry =
+      FindRuntimeObservation(*runtime_observations, execution_context_id, script_id);
+  return (!entry || !entry->examined) && runtime_observations->scans < kRuntimeScriptScanLimit &&
+         (entry || RuntimeObservationHasCapacity(*runtime_observations));
 }
 
 bool NativeProbeSink::RememberRuntimeScriptMiss(const std::uint64_t generation,
@@ -1487,15 +1564,12 @@ bool NativeProbeSink::RememberRuntimeScriptMiss(const std::uint64_t generation,
       script_id == 0) {
     return false;
   }
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
+  RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
   if (!RuntimeScriptNoteAccepts(generation, execution_context_id, script_id)) {
     return false;
   }
   ++runtime_observations.scans;
-  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  auto* entry = ClaimRuntimeObservation(runtime_observations, execution_context_id, script_id);
   if (entry) {
     entry->examined = true;
     entry->unavailable = true;
@@ -1511,11 +1585,9 @@ bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
   if (generation == 0 || generation != RuntimeCaptureGeneration() || execution_context_id == 0 ||
       script_id == 0 || source.empty())
     return false;
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
-  const auto* existing = FindRuntimeObservation(execution_context_id, script_id);
+  RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
+  const auto* existing =
+      FindRuntimeObservation(runtime_observations, execution_context_id, script_id);
   if (existing && existing->examined)
     return existing->candidate || existing->dispatch;
   if (!RuntimeScriptNoteAccepts(generation, execution_context_id, script_id)) {
@@ -1526,7 +1598,7 @@ bool NativeProbeSink::NoteRuntimeScriptSource(const std::uint64_t generation,
   if (!tier.scanned) {
     return false;
   }
-  auto* entry = ClaimRuntimeObservation(execution_context_id, script_id);
+  auto* entry = ClaimRuntimeObservation(runtime_observations, execution_context_id, script_id);
   if (!entry) {
     return false;
   }
@@ -1547,17 +1619,15 @@ bool NativeProbeSink::RuntimeBufferHasSignal(const std::uint64_t generation,
   if (generation == 0 || generation != RuntimeCaptureGeneration() || bytes < 32 ||
       bytes > kNativeArtifactMaxContentBytes || execution_context_id == 0 || script_id == 0)
     return false;
-  if (runtime_observations.generation != generation) {
-    runtime_observations = {};
-    runtime_observations.generation = generation;
-  }
-  const auto* observation = FindRuntimeObservation(execution_context_id, script_id);
+  RuntimeObservationCache& runtime_observations = RuntimeObservationsFor(generation);
+  const auto* observation =
+      FindRuntimeObservation(runtime_observations, execution_context_id, script_id);
   const bool candidate = observation && observation->candidate;
   const bool dispatch = observation && observation->dispatch;
   if (!candidate && !is_eval && !(bytes >= 256 && dispatch)) {
     if (!observation || !observation->examined || observation->unavailable) {
       const bool limited = !observation && (runtime_observations.scans >= kRuntimeScriptScanLimit ||
-                                            !RuntimeObservationHasCapacity());
+                                            !RuntimeObservationHasCapacity(runtime_observations));
       auto& reported = limited ? runtime_observations.classification_limit_reported
                                : runtime_observations.classification_unavailable_reported;
       if (!reported) {
@@ -1694,10 +1764,17 @@ void NativeProbeSink::CaptureRuntimeTypedArray(const std::uint64_t execution_con
   if (RuntimeCaptureGeneration() != generation) {
     return;
   }
-  if (!script.source.empty() && RuntimeScriptSourceNeeded(execution_context_id, script.script_id) &&
-      runtime_script_cache.count < runtime_script_cache.keys.size()) {
-    runtime_script_cache.keys[runtime_script_cache.count++] = {execution_context_id,
-                                                               script.script_id};
+  if (!script.source.empty() && RuntimeScriptSourceNeeded(execution_context_id, script.script_id)) {
+    RuntimeScriptCache& cache = EnsureRuntimeThreadState().scripts;
+    // RuntimeScriptSourceNeeded read every other generation's cache as empty.
+    if (const auto current = config_generation_.load(std::memory_order_acquire);
+        cache.generation != current) {
+      cache = {};
+      cache.generation = current;
+    }
+    if (cache.count < cache.keys.size()) {
+      cache.keys[cache.count++] = {execution_context_id, script.script_id};
+    }
   }
 }
 
@@ -1904,31 +1981,6 @@ void NativeProbeSink::CaptureGeneratedArtifact(
                    source_url, content, {});
 }
 
-void NativeProbeSink::RecordApiCall(const NativeProbeCategory category,
-                                    const std::string_view operation) noexcept {
-  static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation));
-}
-
-void NativeProbeSink::RecordPropertyRead(const NativeProbeCategory category,
-                                         const std::string_view operation) noexcept {
-  static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kPropertyRead, operation));
-}
-
-void NativeProbeSink::RecordApiCallOnce(const NativeProbeCategory category,
-                                        const std::string_view operation,
-                                        std::atomic<std::uint64_t>& observed_generation) noexcept {
-  static_cast<void>(
-      RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation, &observed_generation));
-}
-
-void NativeProbeSink::RecordPropertyReadOnce(
-    const NativeProbeCategory category,
-    const std::string_view operation,
-    std::atomic<std::uint64_t>& observed_generation) noexcept {
-  static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kPropertyRead, operation,
-                                           &observed_generation));
-}
-
 std::uint64_t NativeProbeSink::RecordSurfaceOperation(
     const NativeProbeCategory category,
     const NativeProbeType type,
@@ -2023,18 +2075,11 @@ void NativeProbeSink::RecordCanvasToDataUrl(const std::string_view data_url) noe
           std::span(reinterpret_cast<const std::uint8_t*>(data_url.data()), data_url.size())));
 }
 
-void NativeProbeSink::RecordWebAudioCall(const std::string_view operation) noexcept {
-  RecordApiCall(NativeProbeCategory::kWebAudio, operation);
-}
-
-NativeRendererRequest NativeProbeSink::RecordRequestInitiated(
+NativeRendererRequest NativeProbeSink::RecordRequestInitiatedSlow(
     const std::int32_t request_id,
     const std::string_view method,
     const std::string_view scheme,
     const std::string_view host) noexcept {
-  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return {};
-  }
   const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
   if ((config_generation & 1U) != 0) {
     return {};
@@ -2165,7 +2210,7 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   static_cast<void>(emitter(child, config_generation));
 }
 
-void NativeProbeSink::RecordRendererRequestComplete(
+void NativeProbeSink::RecordRendererRequestCompleteSlow(
     const NativeRendererRequest& request,
     const std::string_view target_prefix,
     const std::size_t target_length,
@@ -2173,7 +2218,7 @@ void NativeProbeSink::RecordRendererRequestComplete(
     const std::int32_t error_code,
     const std::int64_t encoded_data_length,
     const std::int64_t decoded_body_length) noexcept {
-  if (!request.AnsweredInRenderer() || !emitter_.load(std::memory_order_acquire)) {
+  if (!emitter_.load(std::memory_order_acquire)) {
     return;
   }
   // A request belongs to the configuration that recorded its start.
@@ -2218,14 +2263,11 @@ void NativeProbeSink::RecordRendererRequestComplete(
   static_cast<void>(emitter(event, config_generation));
 }
 
-void NativeProbeSink::RecordServiceWorkerRequestEnd(const std::int32_t request_id,
-                                                    const std::string_view target,
-                                                    const std::size_t target_length,
-                                                    const int port,
-                                                    const std::int32_t error_code) noexcept {
-  if (!emitter_.load(std::memory_order_acquire)) [[likely]] {
-    return;
-  }
+void NativeProbeSink::RecordServiceWorkerRequestEndSlow(const std::int32_t request_id,
+                                                        const std::string_view target,
+                                                        const std::size_t target_length,
+                                                        const int port,
+                                                        const std::int32_t error_code) noexcept {
   const std::uint64_t config_generation = config_generation_.load(std::memory_order_acquire);
   if ((config_generation & 1U) != 0) {
     return;
@@ -2429,13 +2471,13 @@ NativeProbeEmitStatus NativeProbeSink::EmitStatus(const NativeProbeEvent& event,
 }
 
 void NativeProbeSink::PublishVmDispatchBudgetGap() noexcept {
+  if (!emitter_.load(std::memory_order_acquire)) {
+    return;
+  }
   // EmitEvent publishes pending losses before a normal event. The gap emit
   // re-enters EmitEvent, which must not publish again on this thread.
   thread_local bool publishing = false;
   if (publishing) {
-    return;
-  }
-  if (!emitter_.load(std::memory_order_acquire)) {
     return;
   }
   publishing = true;
@@ -2806,11 +2848,6 @@ void NativeProbeSink::ObservePageGuest(const bool javascript,
 void NativeProbeSink::ObserveCapturedJavaScriptSwitchProgram(
     const std::span<const std::uint8_t> program) noexcept {
   ObservePageGuest(true, program);
-}
-
-void NativeProbeSink::ObserveCapturedWasmModule(
-    const std::span<const std::uint8_t> module) noexcept {
-  ObservePageGuest(false, module);
 }
 
 void IngestOwnedRegisterInvocationThunk(const std::uint64_t invocation_id,
@@ -3565,16 +3602,23 @@ struct WasmHostCall {
   std::uint64_t document_token_low = 0;
   std::array<char, kNativeArtifactMaxUrlBytes> url{};
   std::uint32_t url_size = 0;
+  // The thread's next invocation ID; CloseHostCall keeps it.
+  std::uint32_t next_invocation_id = 1;
 };
 
-WasmHostCall& HostCall() noexcept {
-  thread_local WasmHostCall call;
-  return call;
+// Null on a thread that never opened a host call while capture was active.
+WasmHostCall* FindHostCall() noexcept {
+  SinkThreadState* const state = FindSinkThreadState();
+  return state ? state->wasm.get() : nullptr;
 }
 
-std::uint32_t& NextWasmInvocationId() noexcept {
-  thread_local std::uint32_t next = 1;
-  return next;
+// Made by the first host call a thread opens while capture is active.
+WasmHostCall& EnsureHostCall() {
+  SinkThreadState& state = EnsureSinkThreadState();
+  if (!state.wasm) {
+    state.wasm = std::make_unique<WasmHostCall>();
+  }
+  return *state.wasm;
 }
 
 void CloseHostCall(WasmHostCall& call) noexcept {
@@ -3594,7 +3638,7 @@ void OpenHostCall(WasmHostCall& call,
                   const std::uint64_t now,
                   const bool function_known,
                   const std::uint32_t function_index) noexcept {
-  auto& next = NextWasmInvocationId();
+  auto& next = call.next_invocation_id;
   const std::uint32_t id = next == 0 ? 1U : next;
   next = id == 0xffffffffu ? 1U : id + 1U;
   CloseHostCall(call);
@@ -3680,12 +3724,14 @@ bool NativeProbeSink::NoteNativeWasmExecutionOmission(const VmAdmission& admissi
 bool NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
                                               const bool function_known,
                                               std::uint32_t function_index) noexcept {
-  auto& call = HostCall();
+  // A call left open by an earlier configuration stays until the next use
+  // while capture is active: every reader compares its generation first.
+  if (!IsNativeWasmExecutionEnabled())
+    return false;
+  auto& call = EnsureHostCall();
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
-  if (!IsNativeWasmExecutionEnabled())
-    return false;
   if (!function_known)
     function_index = 0;
   if (!outermost) {
@@ -3714,7 +3760,10 @@ bool NativeProbeSink::NoteWasmHostCallEntered(const bool outermost,
 void NativeProbeSink::NoteWasmHostCallReturned() noexcept {
   if (!IsNativeWasmExecutionEnabled())
     return;
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.generation != generation) {
     CloseHostCall(call);
@@ -3731,7 +3780,10 @@ void NativeProbeSink::NoteWasmHostCallReturned() noexcept {
 void NativeProbeSink::NoteWasmTailCall() noexcept {
   if (!IsNativeWasmExecutionEnabled())
     return;
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.generation != generation) {
     CloseHostCall(call);
@@ -3760,7 +3812,7 @@ void NativeProbeSink::NoteWasmInstrumentedSite(const std::uint64_t generation,
   if (!IsNativeWasmExecutionEnabled() || source_url.empty() ||
       source_url.size() > kNativeArtifactMaxUrlBytes)
     return;
-  auto& call = HostCall();
+  auto& call = EnsureHostCall();
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
   // No prologue was reported. The deadline starts at this instruction.
@@ -3802,9 +3854,10 @@ bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
   if (!SnapshotWasmExecutionAdmission(admission))
     return false;
   admission.frame_id = frame_id;
-  const auto& call = HostCall();
-  if (call.invocation_id == 0 || call.generation != admission.generation)
+  const WasmHostCall* const open = FindHostCall();
+  if (!open || open->invocation_id == 0 || open->generation != admission.generation)
     return false;
+  const auto& call = *open;
   NativeWasmExecutionObservation observation;
   observation.header.category = NativeProbeCategory::kVm;
   observation.header.type = NativeProbeType::kWasmExecutionOutcome;
@@ -3870,6 +3923,12 @@ bool NativeProbeSink::EmitWasmExecution(const NativeWasmExecutionKind kind,
   return false;
 }
 
+bool NativeProbeSink::IsWasmHostCallOpen() const noexcept {
+  const WasmHostCall* const call = FindHostCall();
+  return call && call->depth != 0 &&
+         call->generation == config_generation_.load(std::memory_order_acquire);
+}
+
 void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
                                      const NativeWasmExecutionBounds bounds,
                                      const bool function_known,
@@ -3882,7 +3941,10 @@ void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
                                      const std::uint64_t document_token_high,
                                      const std::uint64_t document_token_low,
                                      const std::span<const std::uint8_t> module_bytes) noexcept {
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.depth == 0 || call.generation != generation) {
     if (call.generation != generation)
@@ -3906,7 +3968,10 @@ void NativeProbeSink::ReportWasmTrap(const NativeWasmExecutionReason reason,
 
 std::uint64_t NativeProbeSink::WasmExecutionNudgeDelayNs() const noexcept {
   constexpr std::uint64_t kRetryNs = 50'000'000ULL;
-  const auto& call = HostCall();
+  const WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return kNativeWasmExecutionNoNudge;
+  const auto& call = *open;
   if (call.depth == 0 || !call.has_site || call.still_emitted || call.url_size == 0)
     return kNativeWasmExecutionNoNudge;
   const auto generation = config_generation_.load(std::memory_order_acquire);
@@ -3926,7 +3991,10 @@ void NativeProbeSink::SetNativeWasmExecutionNudge(const NativeWasmExecutionNudge
 }
 
 NativeWasmExecutionHeartbeat NativeProbeSink::PollWasmExecutionHeartbeat() noexcept {
-  auto& call = HostCall();
+  WasmHostCall* const open = FindHostCall();
+  if (!open)
+    return NativeWasmExecutionHeartbeat::kContinue;
+  auto& call = *open;
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (call.depth != 0 && call.generation != generation)
     CloseHostCall(call);
@@ -4545,7 +4613,7 @@ NativeJsInvocationContext NativeProbeSink::CurrentNativeJsInvocation() const noe
   return context;
 }
 
-void NativeProbeSink::RecordNativeJsInvocationRequest(const std::int32_t request_id) noexcept {
+void NativeProbeSink::RecordNativeJsInvocationRequestSlow(const std::int32_t request_id) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
   if (request_id == 0 || !NativeJsInvocationActive(generation) ||
       (category_mask_.load(std::memory_order_relaxed) &
@@ -4646,21 +4714,25 @@ struct GuestThreadState final {
   std::uint64_t use_clock = 0;
   std::array<GuestInvocationState, kGuestInvocationLimit> invocations{};
   std::array<GuestDocumentBinding, kGuestDocumentLimit> documents{};
+  // The guest state RecordNativeWasmGuest resolves into, and its reentry
+  // flags. A configuration reset leaves them to the sample that holds them.
+  NativeGuestSnapshot snapshot{};
+  bool snapshot_busy = false;
+  bool snapshot_cancelled = false;
 };
-thread_local GuestThreadState guest_thread;
-thread_local NativeGuestSnapshot guest_snapshot;
-thread_local bool guest_snapshot_busy = false;
-thread_local bool guest_snapshot_cancelled = false;
 struct GuestSnapshotGuard final {
-  GuestSnapshotGuard() noexcept {
-    guest_snapshot_busy = true;
-    guest_snapshot_cancelled = false;
+  explicit GuestSnapshotGuard(GuestThreadState& guest) noexcept : guest_(guest) {
+    guest_->snapshot_busy = true;
+    guest_->snapshot_cancelled = false;
   }
-  ~GuestSnapshotGuard() { guest_snapshot_busy = false; }
+  ~GuestSnapshotGuard() { guest_->snapshot_busy = false; }
   GuestSnapshotGuard(const GuestSnapshotGuard&) = delete;
   GuestSnapshotGuard& operator=(const GuestSnapshotGuard&) = delete;
+
+ private:
+  const raw_ref<GuestThreadState> guest_;
 };
-void ResetGuestThread(std::uint64_t generation) noexcept {
+void ResetGuestThread(GuestThreadState& guest_thread, std::uint64_t generation) noexcept {
   // Reset one small record at a time, not a 42 KiB aggregate stack temporary.
   for (auto& state : guest_thread.invocations)
     state = {};
@@ -4669,11 +4741,31 @@ void ResetGuestThread(std::uint64_t generation) noexcept {
   guest_thread.use_clock = 0;
   guest_thread.generation = generation;
 }
+// This thread's guest state of `generation`, or null without any: a read
+// never allocates or resets.
+GuestThreadState* FindGuestThread(std::uint64_t generation) noexcept {
+  SinkThreadState* const state = FindSinkThreadState();
+  GuestThreadState* const guest = state ? state->guest.get() : nullptr;
+  return guest && guest->generation == generation ? guest : nullptr;
+}
+// Made by a thread's first guest sample admitted while capture is active,
+// and reset when the configuration changes.
+GuestThreadState& EnsureGuestThread(std::uint64_t generation) {
+  SinkThreadState& state = EnsureSinkThreadState();
+  if (!state.guest) {
+    state.guest = std::make_unique<GuestThreadState>();
+  }
+  if (state.guest->generation != generation) {
+    ResetGuestThread(*state.guest, generation);
+  }
+  return *state.guest;
+}
 // A binding caches only what the browser holds for its document, so a full
 // table replaces the least recently sampled binding (an unused one first)
 // instead of refusing a new document. A replaced document that is still
 // live resends its module once and the browser answers from its own binding.
-GuestDocumentBinding& ClaimGuestDocument(std::uint64_t frame,
+GuestDocumentBinding& ClaimGuestDocument(GuestThreadState& guest_thread,
+                                         std::uint64_t frame,
                                          std::uint64_t context,
                                          std::uint64_t high,
                                          std::uint64_t low) noexcept {
@@ -4700,7 +4792,8 @@ GuestDocumentBinding& ClaimGuestDocument(std::uint64_t frame,
 // invocation IDs grow with entry. Without stack switching, every other entry
 // has returned. One still running above an unresolved parent is sampled as a
 // new activation if it reaches another boundary. Null when all are ancestors.
-GuestInvocationState* ClaimGuestInvocation(const NativeWasmGuestStateView& view) noexcept {
+GuestInvocationState* ClaimGuestInvocation(GuestThreadState& guest_thread,
+                                           const NativeWasmGuestStateView& view) noexcept {
   auto& invocations = guest_thread.invocations;
   std::array<bool, kGuestInvocationLimit> ancestor{};
   for (std::uint64_t id =
@@ -4735,7 +4828,8 @@ struct GuestParentLink final {
 // is still current: the same value host records use as their parent. Every
 // later boundary of the parent, and every boundary without identity, revokes
 // it, so a missing value is reported rather than replaced by an older one.
-GuestParentLink ResolveGuestParent(const NativeWasmGuestStateView& view,
+GuestParentLink ResolveGuestParent(const GuestThreadState& guest_thread,
+                                   const NativeWasmGuestStateView& view,
                                    std::uint64_t frame,
                                    std::uint64_t document_high,
                                    std::uint64_t document_low) noexcept {
@@ -4751,6 +4845,9 @@ GuestParentLink ResolveGuestParent(const NativeWasmGuestStateView& view,
       return {view.parent_invocation_id, state.dispatch_sequence, false};
   return {view.parent_invocation_id, 0, true};
 }
+
+SinkThreadState::SinkThreadState() = default;
+SinkThreadState::~SinkThreadState() = default;
 
 }  // namespace
 void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
@@ -4773,23 +4870,24 @@ void NativeProbeSink::NoteNativeGuestOmission(std::uint64_t generation,
   }
 }
 void NativeProbeSink::InvalidateNativeWasmGuest(const NativeWasmGuestStateView& view) noexcept {
-  const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (guest_thread.generation != generation) {
-    ResetGuestThread(generation);
-  }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   if (!adapter || !FindNativeGuestSite(*adapter, view.function_index, view.module_byte_offset))
     return;
+  const auto generation = config_generation_.load(std::memory_order_acquire);
+  // Another configuration's state, or none, holds no dispatch to revoke.
+  GuestThreadState* const guest_thread = FindGuestThread(generation);
   if (!view.instance_id || !view.invocation_id) {
-    for (auto& state : guest_thread.invocations)
-      state.dispatch_sequence = 0;
+    if (guest_thread)
+      for (auto& state : guest_thread->invocations)
+        state.dispatch_sequence = 0;
     NoteNativeGuestOmission(generation, 0, kGuestRuntimeIdentityGap,
                             "native_guest_runtime_identity_unavailable");
     return;
   }
-  for (auto& state : guest_thread.invocations)
-    if (state.instance == view.instance_id && state.invocation == view.invocation_id)
-      state.dispatch_sequence = 0;
+  if (guest_thread)
+    for (auto& state : guest_thread->invocations)
+      if (state.instance == view.instance_id && state.invocation == view.invocation_id)
+        state.dispatch_sequence = 0;
 }
 void NativeProbeSink::ConfigureNativeWasmGuest(
     std::shared_ptr<const NativeWasmGuestAdapter> adapter,
@@ -4803,15 +4901,20 @@ void NativeProbeSink::ConfigureNativeWasmGuest(
   }
   // One immutable startup recipe intentionally retained for process lifetime:
   // hot callback loads cannot block on an atomic shared_ptr implementation.
-  if (!native_guest_retained_adapter_)
-    native_guest_retained_adapter_ = new NativeWasmGuestAdapter(*adapter);
-  if (native_guest_retained_adapter_->json != adapter->json) {
+  // Only this serialized control sequence reads or writes the retained copy.
+  const NativeWasmGuestAdapter* retained =
+      native_guest_retained_adapter_.load(std::memory_order_relaxed);
+  if (!retained) {
+    retained = new NativeWasmGuestAdapter(*adapter);
+    native_guest_retained_adapter_.store(retained, std::memory_order_relaxed);
+  }
+  if (retained->json != adapter->json) {
     native_guest_adapter_.store(nullptr, std::memory_order_release);
     NoteNativeGuestOmission(config_generation_.load(std::memory_order_acquire), 0,
                             kGuestAdapterRestartGap, "native_guest_adapter_restart_required");
     return;
   }
-  native_guest_adapter_.store(native_guest_retained_adapter_, std::memory_order_release);
+  native_guest_adapter_.store(retained, std::memory_order_release);
 }
 void NativeProbeSink::NoteNativeGuestModuleStatus(std::uint64_t module_token,
                                                   bool accepted) noexcept {
@@ -4907,9 +5010,6 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                                             std::uint64_t document_token_high,
                                             std::uint64_t document_token_low) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (guest_thread.generation != generation) {
-    ResetGuestThread(generation);
-  }
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   // A helper br_table in an opcode handler is not a guest instruction boundary.
   std::uint32_t site_index = 0;
@@ -4918,19 +5018,23 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                              : nullptr;
   if (!site)
     return;
+  // Another configuration's state, or none, holds no activation of this one.
+  GuestThreadState* const current = FindGuestThread(generation);
   if (!view.instance_id || !view.invocation_id) {
-    for (auto& state : guest_thread.invocations)
-      state.dispatch_sequence = 0;
+    if (current)
+      for (auto& state : current->invocations)
+        state.dispatch_sequence = 0;
     NoteNativeGuestOmission(generation, frame_id, kGuestRuntimeIdentityGap,
                             "native_guest_runtime_identity_unavailable");
     return;
   }
   GuestInvocationState* state = nullptr;
-  for (auto& slot : guest_thread.invocations)
-    if (slot.instance == view.instance_id && slot.invocation == view.invocation_id) {
-      state = &slot;
-      break;
-    }
+  if (current)
+    for (auto& slot : current->invocations)
+      if (slot.instance == view.instance_id && slot.invocation == view.invocation_id) {
+        state = &slot;
+        break;
+      }
   if (state)
     state->dispatch_sequence = 0;
   if (!IsNativeWasmGuestEnabled() || module_bytes.empty() ||
@@ -4947,8 +5051,10 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
                             "native_guest_sample_limit");
     return;
   }
-  auto* document =
-      &ClaimGuestDocument(frame_id, execution_context_id, document_token_high, document_token_low);
+  // The same state `state` points into when it was found above.
+  GuestThreadState& guest_thread = EnsureGuestThread(generation);
+  auto* document = &ClaimGuestDocument(guest_thread, frame_id, execution_context_id,
+                                       document_token_high, document_token_low);
   if (document->module == GuestModuleState::kPending) {
     switch (NativeGuestModuleVerdict(document->module_token, document->module_writes_before_send)) {
       case GuestModuleVerdict::kAccepted:
@@ -4978,7 +5084,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   if (!state) {
     if (NativeGuestDigest(module_bytes) != adapter->module_sha256)
       return;
-    state = ClaimGuestInvocation(view);
+    state = ClaimGuestInvocation(guest_thread, view);
     if (!state) {
       NoteNativeGuestOmission(generation, frame_id, kGuestInvocationLimitGap,
                               "native_guest_invocation_limit");
@@ -4996,15 +5102,15 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
       state->document_low != document_token_low || state->site != site_index)
     return;
   state->last_use = ++guest_thread.use_clock;
-  if (guest_snapshot_busy) {
-    guest_snapshot_cancelled = true;
+  if (guest_thread.snapshot_busy) {
+    guest_thread.snapshot_cancelled = true;
     NoteNativeGuestOmission(generation, frame_id, kGuestSnapshotGap,
                             "native_guest_snapshot_reentry");
     return;
   }
-  GuestSnapshotGuard snapshot_guard;
-  auto& snapshot = guest_snapshot;
-  if (!ResolveNativeGuestSnapshot(*site, view, snapshot) || guest_snapshot_cancelled) {
+  GuestSnapshotGuard snapshot_guard(guest_thread);
+  auto& snapshot = guest_thread.snapshot;
+  if (!ResolveNativeGuestSnapshot(*site, view, snapshot) || guest_thread.snapshot_cancelled) {
     NoteNativeGuestOmission(generation, frame_id, kGuestSnapshotGap,
                             "native_guest_state_unavailable");
     return;
@@ -5055,7 +5161,8 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
     payload.function_index = view.function_index;
     payload.instance_id = view.instance_id;
     payload.invocation_id = view.invocation_id;
-    const auto parent = ResolveGuestParent(view, frame_id, document_token_high, document_token_low);
+    const auto parent =
+        ResolveGuestParent(guest_thread, view, frame_id, document_token_high, document_token_low);
     payload.parent_invocation_id = parent.invocation;
     payload.parent_dispatch_sequence_number = parent.dispatch;
     if (parent.unresolved)
@@ -5102,7 +5209,7 @@ void NativeProbeSink::RecordNativeWasmGuest(std::uint64_t execution_context_id,
   const auto writes_before_send =
       send_module ? native_guest_module_status_next_.load(std::memory_order_acquire) : 0;
   const auto emit = native_guest_capture_.load(std::memory_order_acquire);
-  if (guest_snapshot_cancelled ||
+  if (guest_thread.snapshot_cancelled ||
       config_generation_.load(std::memory_order_acquire) != generation || !emit ||
       !emit(capture, generation)) {
     // Nothing reached the browser. The sample index is free again, and each
@@ -5133,7 +5240,10 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
   const auto* adapter = native_guest_adapter_.load(std::memory_order_acquire);
   const auto context_provider = native_guest_context_.load(std::memory_order_acquire);
   const auto emit = native_guest_host_.load(std::memory_order_acquire);
-  if (!adapter || !context_provider || !emit || guest_thread.generation != generation)
+  if (!adapter || !context_provider || !emit)
+    return false;
+  GuestThreadState* const guest_thread = FindGuestThread(generation);
+  if (!guest_thread)
     return false;
   // An empty import list proves no host association, so it needs no walk.
   if (std::none_of(adapter->sites.begin(),
@@ -5164,7 +5274,7 @@ bool NativeProbeSink::TryRecordNativeGuestHost(NativeProbeEvent& event,
       site->import_call_offsets.begin() + static_cast<std::ptrdiff_t>(site->import_call_count);
   if (std::find(site->import_call_offsets.begin(), end, context.import_module_byte_offset) == end)
     return false;
-  for (auto& state : guest_thread.invocations) {
+  for (auto& state : guest_thread->invocations) {
     if (state.instance != context.instance_id || state.invocation != context.invocation_id ||
         state.frame != event.header.frame_id || !state.dispatch_sequence)
       continue;

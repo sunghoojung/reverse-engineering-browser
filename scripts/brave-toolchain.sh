@@ -148,6 +148,7 @@ readonly probe_objects=(
   "obj/v8/v8_base_without_compiler/code-serializer.o"
   "obj/v8/v8_base_without_compiler/compiler.o"
   "obj/v8/v8_base_without_compiler/debug-interface.o"
+  "obj/v8/v8_base_without_compiler/external-reference.o"
   "obj/v8/v8_base_without_compiler/interpreter.o"
   "obj/v8/v8_base_without_compiler/liftoff-compiler.o"
   "obj/v8/v8_base_without_compiler/reb-js-dispatch.o"

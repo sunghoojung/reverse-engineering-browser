@@ -219,8 +219,11 @@ token, which disambiguates Brave request IDs generated independently per
 profile without exposing a profile path.
 
 All probes remain dormant until a session-scoped, non-blocking, non-throwing
-emitter is registered. Their inactive paths perform one atomic load and do not
-change browser behavior. Generated Blink Web IDL callbacks observe an explicit
+emitter is registered. Their inactive paths perform one atomic load, or the
+fixed bound the component README's
+[inactive path](overlay/components/reverse_engineering_browser/README.md#inactive-path)
+table lists, and do not change browser behavior. Generated Blink Web IDL
+callbacks observe an explicit
 90-interface allowlist across Canvas, WebGL, WebGPU, Web Audio, browser, layout,
 font, media, Permissions, Storage, and WebRTC surfaces. Generic DOM interfaces
 use member allowlists so routine rendering calls do not flood the evidence.

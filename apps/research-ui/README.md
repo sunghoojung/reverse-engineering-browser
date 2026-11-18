@@ -1754,9 +1754,9 @@ ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
 over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
-cancelled and cannot restore obsolete source text. Artifact loads have a
-10-second deadline, including body reads; a timed-out load can be retried
-explicitly.
+cancelled and cannot restore obsolete source text. Artifact loads, including
+Canvas previews, have no deadline: they show bytes read so far and can be
+stopped, and a stopped or failed load can be retried explicitly.
 
 ## Validate
 
@@ -1909,12 +1909,12 @@ reconstructs both images locally from its visible, bounded call sequence; it
 does not present those pixels as native capture. A live readback lists up to 128
 supported Canvas operation names observed earlier in the same renderer stream.
 When the session explicitly enables Canvas image capture, the exact bounded
-`toDataURL` result is shown as captured output. The UI keeps the newest 24
-readbacks. Only the visible Rendering gallery loads previews, scoped to its
-current readbacks. Canvas owns a separate maximum of 24 previews and 8 MiB of
-UTF-16 text reservations/retained text; each descriptor reserves twice its
-encoded byte size before admission (at most 2 MiB encoded bytes per preview).
-Newest previews have priority, and budget omissions remain labeled without
+`toDataURL` result is shown as captured output. The gallery lists every
+readback, newest first, 24 to a page; **Newer** and **Older** move between
+pages and keep focus on a page control. Only the visible Rendering gallery
+loads previews, and only for its current page, so retained preview text
+follows one page, not the session. A preview of any encoded size loads whole
+and is verified against its SHA-256. Omissions remain labeled without
 refetching on every refresh. Unchanged polling retains the same cards, native
 disclosure controls and admitted image nodes, including across pointer press
 and release. Changed render inputs or exact source ownership invalidate that
@@ -1922,12 +1922,12 @@ reuse; updated disclosures preserve their expanded state and focus.
 At most two unfinished preview reads are allowed,
 including retired reads whose fetch or response-body/reader cancellation has
 not settled. Header/body errors remain visible immediately; explicit retries
-do not bypass cancellation credits. Their bounded streaming
-read buffers total at most 4 MiB; transient text, hashing and image decoding are
-separate from the retained-text budget. A ten-second deadline aborts a read;
-failed reads expose an explicit Retry preview action.
+do not bypass cancellation credits. A read has no deadline: its card shows
+the bytes read so far and a **Stop** button, which keeps the read's slot until
+the fetch settles. Stopped and failed reads expose an explicit Retry preview
+action.
 
-Activity, leaving Signals, changing the visible readback scope, catalog
+Activity, leaving Signals, changing the visible page or readback scope, catalog
 replacement/emptying and catalog failures retire obsolete preview ownership,
 abort pending reads and remove image sources from the gallery DOM. Late
 responses cannot restore retired payloads. Artifact metadata and immutable

@@ -472,8 +472,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         ['storage', 'Storage'], ['webrtc', 'WebRTC'], ['runtime', 'Runtime']
       ]);
       const signalEventDisplayLimit = 500;
-      const nativeCanvasCaptureDisplayLimit = 24;
-      const canvasPreviewByteLimit = 8 * 1024 * 1024; // Reserved/retained UTF-16 text bytes, not decoded pixels.
+      const nativeCanvasCaptureDisplayLimit = 24; // Readbacks per Rendering gallery page.
       const canvasPreviewReadLimit = 2;
       const canvasPreviewAxisLimit = 4096;
       const canvasPreviewPixelLimit = 4 * 1024 * 1024;
@@ -499,8 +498,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // https://www.w3.org/TR/png-3/ sections 5 and 11. No compressed data is inflated.
       function inspectCanvasPng(content) {
         const reject = reason => ({reason: `${reason} Original evidence is unchanged.`});
-        if (typeof content !== 'string' || content.length > 2097152 || !canvasDataUrlPattern.test(content)) {
-          return reject('The retained bytes do not pass the bounded image data URL validator.');
+        if (typeof content !== 'string' || !canvasDataUrlPattern.test(content)) {
+          return reject('The retained bytes do not pass the image data URL validator.');
         }
         if (!content.startsWith('data:image/png;base64,')) return reject('Preview format is unsupported: only static PNG is admitted.');
         const encoded = content.slice('data:image/png;base64,'.length);
@@ -696,7 +695,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const delta = integerValue(left.evidenceEvent, 'monotonic_time_ns') -
             integerValue(right.evidenceEvent, 'monotonic_time_ns');
           return delta < 0n ? -1 : delta > 0n ? 1 : 0;
-        }).slice(-nativeCanvasCaptureDisplayLimit).reverse();
+        }).reverse();
       }
 
       function canvasGalleryVisible() {
@@ -738,23 +737,19 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         const previous = state.canvasPreviewOwners ?? new Map();
         const owners = new Map();
-        let reservedBytes = 0;
-        for (const capture of captures.slice(0, nativeCanvasCaptureDisplayLimit)) {
+        for (const capture of captures) {
           const artifact = capture.artifact;
           if (!artifact || artifact.kind !== 'canvas_data_url') continue;
           const identity = sourceIdentity(artifact);
           if (owners.has(identity)) continue;
           let reason = '';
           if (!sourceIsCurrent(artifact)) reason = 'The exact Canvas artifact identity is unavailable or ambiguous.';
-          else if (!Number.isSafeInteger(artifact.byte_size) || artifact.byte_size <= 0 || artifact.byte_size > 2097152) {
-            reason = 'Canvas preview exceeds the 2 MiB encoded-byte limit or has an invalid size.';
-          } else if (reservedBytes + artifact.byte_size * 2 > canvasPreviewByteLimit) {
-            reason = 'Canvas preview evicted by the 8 MiB gallery text budget. Original evidence is unchanged.';
+          else if (!Number.isSafeInteger(artifact.byte_size) || artifact.byte_size <= 0) {
+            reason = 'Canvas preview has an invalid size.';
           }
           if (reason) { releaseCanvasPreview(artifact, reason); continue; }
-          // Reserve the maximum UTF-16 cost before reading, so completion order
-          // cannot overcommit the cache or evict/reload the same 24 cards forever.
-          reservedBytes += artifact.byte_size * 2;
+          // Previews of any size: only the current page owns text, so memory
+          // follows the page, not the session.
           const prior = previous.get(identity);
           owners.set(identity, prior?.artifact === artifact ? prior : {artifact, identity});
           delete artifact.canvasPreviewNotice;
@@ -787,6 +782,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (canvasGalleryVisible()) renderFingerprintActivity();
           });
         }
+      }
+
+      // A preview read has no deadline. Stop keeps its read slot until the
+      // fetch settles, and the preview then waits for an explicit Retry.
+      function stopCanvasPreview(identity) {
+        const artifact = state.canvasPreviewOwners?.get(identity)?.artifact;
+        if (!artifact?.loading) return;
+        artifact.loadError = 'Preview read stopped. Original evidence is unchanged.';
+        artifact.controller?.abort();
+        renderFingerprintActivity();
+      }
+
+      function canvasPreviewProgress(artifact) {
+        return `Reading the retained Canvas preview · ${formatByteSize(artifact.loadedBytes ?? 0)} of ${formatByteSize(artifact.byte_size)}`;
+      }
+
+      function showCanvasGalleryPage(delta) {
+        state.canvasGalleryPage = Math.max(0, (state.canvasGalleryPage ?? 0) + delta);
+        renderFingerprintActivity();
       }
 
       function retryCanvasPreview(identity) {
@@ -828,14 +842,22 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             ? 'Image capture is off for this session. Restart with REB_CAPTURE_CANVAS_IMAGES=1 to retain sensitive Canvas output.'
             : capturedOutput && capture.artifact
               ? capture.artifact.canvasPreviewNotice || owner?.imageError || capture.previewReason || capture.artifact.loadError || (capture.artifact.loading
-                ? 'Loading the retained Canvas preview…' : 'Canvas preview is waiting for a bounded read slot.')
+                ? canvasPreviewProgress(capture.artifact) : 'Canvas preview is waiting for a read slot.')
               : capture.calls.length
                 ? 'Operation names were retained, but arguments were not, so a faithful local replay cannot be generated.'
                 : 'This capture retained the readback call, but no supported earlier drawing operations.';
-          frame.append(
-            textElement('strong', '', 'Preview unavailable'),
-            textElement('span', '', explanation)
-          );
+          const detail = textElement('span', '', explanation);
+          frame.append(textElement('strong', '', 'Preview unavailable'), detail);
+          const artifact = capture.artifact;
+          if (capturedOutput && artifact && owner?.artifact === artifact && artifact.loading && !artifact.loadError &&
+              !artifact.canvasPreviewNotice && !owner.imageError && !capture.previewReason) {
+            // The read reports its progress here without rebuilding the gallery.
+            owner.progress = detail;
+            const stop = textElement('button', 'secondary-button', 'Stop');
+            stop.type = 'button';
+            stop.addEventListener('click', stopCanvasPreview.bind(null, owner.identity));
+            frame.append(stop);
+          }
           if (capturedOutput && capture.artifact?.loadError && !capture.artifact.canvasPreviewNotice) {
             const retry = textElement('button', 'secondary-button', 'Retry preview');
             retry.type = 'button';
@@ -943,7 +965,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function renderFingerprintRendering(signalEvents) {
-        const captures = canvasRenderCaptures(signalEvents);
+        // Every readback, newest first, a page at a time.
+        const all = canvasRenderCaptures(signalEvents);
+        const pages = Math.max(1, Math.ceil(all.length / nativeCanvasCaptureDisplayLimit));
+        const page = state.canvasGalleryPage = Math.min(state.canvasGalleryPage ?? 0, pages - 1);
+        const first = page * nativeCanvasCaptureDisplayLimit;
+        const captures = all.slice(first, first + nativeCanvasCaptureDisplayLimit);
         syncCanvasPreviews(captures);
         if (!canvasGalleryVisible()) return;
         renderSignalSurfaceOverview(signalEvents);
@@ -964,14 +991,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           owner.mounted = true;
           capture.width = owner.imageInfo.width; capture.height = owner.imageInfo.height;
         }
-        const readbackCount = signalEvents.filter(event => event.category === 'canvas' &&
-          canvasReadbackName(decodePayload(event))).length;
-        elements.signalRenderCount.textContent = String(captures.length);
-        elements.signalRenderSummary.textContent = readbackCount
-          ? captures.length < readbackCount
-            ? `${captures.length} newest of ${readbackCount} canvas readbacks`
-            : `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
-          : 'No canvas readbacks';
+        const pageText = `Readbacks ${(first + 1).toLocaleString()}-${(first + captures.length).toLocaleString()} of ${all.length.toLocaleString()}, newest first`;
+        elements.signalRenderCount.textContent = String(all.length);
+        elements.signalRenderSummary.textContent = pages > 1 ? pageText : all.length
+          ? `${all.length} canvas ${all.length === 1 ? 'readback' : 'readbacks'}` : 'No canvas readbacks';
         // Keep the native activation target alive across unchanged polling,
         // including a refresh between pointer-down and pointer-up. The stamp
         // contains only bounded render inputs, never another copy of image text.
@@ -979,7 +1002,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // old image and handlers even when its visible metadata is unchanged.
         const owners = captures.map(capture => capture.artifact &&
           state.canvasPreviewOwners?.get(sourceIdentity(capture.artifact)));
-        const stamp = JSON.stringify([state.canvasImageCaptureEnabled, state.artifactReceiverError, captures.map((capture, index) => {
+        const stamp = JSON.stringify([state.canvasImageCaptureEnabled, state.artifactReceiverError, page, pages, all.length, captures.map((capture, index) => {
           const artifact = capture.artifact, owner = owners[index];
           return [capture.id, capture.context, capture.width, capture.height, capture.readback,
             capture.demo, capture.calls, capture.callsTruncated, capture.operationHash,
@@ -994,7 +1017,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             owners.every((owner, index) => owner === previous.owners[index] &&
               captures[index].artifact === previous.artifacts[index])) return;
         delete elements.signalRenderList.canvasRender;
-        for (const owner of state.canvasPreviewOwners?.values() ?? []) delete owner.image;
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) { delete owner.image; delete owner.progress; }
         if (!captures.length) {
           elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
           elements.signalRenderList.replaceChildren(textElement(
@@ -1008,8 +1031,29 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           .map(detail => detail.dataset.captureKey));
         const focused = document.activeElement?.matches('summary')
           ? document.activeElement.parentElement.dataset.captureKey : null;
+        const focusedPage = document.activeElement?.dataset?.canvasPage ?? null;
         elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
-        elements.signalRenderList.replaceChildren(...captures.map(renderCanvasCapture));
+        const pager = [];
+        if (pages > 1) {
+          const nav = document.createElement('nav');
+          nav.className = 'signal-render-pager';
+          nav.setAttribute('aria-label', 'Canvas readback pages');
+          const button = (label, direction, disabled) => {
+            const control = textElement('button', 'secondary-button signal-render-page', label);
+            control.type = 'button'; control.disabled = disabled; control.dataset.canvasPage = label.toLowerCase();
+            control.addEventListener('click', showCanvasGalleryPage.bind(null, direction));
+            return control;
+          };
+          nav.append(button('Newer', -1, page === 0), textElement('span', '', pageText), button('Older', 1, page === pages - 1));
+          pager.push(nav);
+        }
+        elements.signalRenderList.replaceChildren(...pager, ...captures.map(renderCanvasCapture));
+        if (focusedPage) {
+          // Paging replaces its buttons; keep focus on one the researcher can press.
+          const controls = [...elements.signalRenderList.querySelectorAll('.signal-render-page')];
+          (controls.find(control => control.dataset.canvasPage === focusedPage && !control.disabled) ??
+            controls.find(control => !control.disabled))?.focus({preventScroll: true});
+        }
         elements.signalRenderList.querySelectorAll('details').forEach(detail => {
           detail.open = expanded.has(detail.dataset.captureKey);
           if (focused && detail.dataset.captureKey === focused) detail.querySelector('summary').focus({preventScroll: true});
@@ -8800,9 +8844,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!sourceIsCurrent(artifact) || sourcePreviewLoaded(artifact) || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
-        // Sources reads every byte in one verified request (the backend hashes
-        // the whole file for any range). A canvas preview reads its first 2 MiB.
-        const wanted = canvasOwner ? Math.min(artifact.byte_size, 2097152) : artifact.byte_size;
+        // Sources and canvas previews read every byte in one verified request
+        // (the backend hashes the whole file for any range).
+        const wanted = artifact.byte_size;
         artifact.loading = true; artifact.loadError = null; artifact.controller = controller; artifact.loadedBytes = 0;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
         if (!canvasOwner) boundSourcePreviews(artifact);
@@ -8811,18 +8855,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         let painted = 0;
         const progress = bytes => {
           artifact.loadedBytes = bytes;
-          if (canvasOwner || (bytes < wanted && Date.now() - painted < 100) || !current()) return;
+          if (canvasOwner) {
+            if (canvasOwner.progress?.isConnected && current()) canvasOwner.progress.textContent = canvasPreviewProgress(artifact);
+            return;
+          }
+          if ((bytes < wanted && Date.now() - painted < 100) || !current()) return;
           painted = Date.now();
           renderSourceLoading(artifact, {create: false});
         };
-        // Only a gallery thumbnail still gives up on a read, so one stalled
-        // read cannot hold a gallery read credit.
-        const timeout = canvasOwner ? setTimeout(() => {
-          if (artifact.controller !== controller) return;
-          artifact.loading = false; artifact.loadError = 'Artifact loading timed out. Retry explicitly.';
-          delete artifact.controller; controller.abort();
-          if (canvasGalleryVisible()) renderFingerprintActivity();
-        }, 10000) : 0;
         if (!canvasOwner) renderSources();
         let responseCancellation = null;
         try {
@@ -8860,7 +8900,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             try {content = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(buffer); artifact.contentLossy = false;}
             catch {content = new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer); artifact.contentLossy = true;}
             if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
-              throw new Error('The retained bytes do not pass the bounded image data URL validator.');
+              throw new Error('The retained bytes do not pass the image data URL validator.');
             }
             if (canvasOwner) {
               const inspection = inspectCanvasPng(content);
@@ -8879,7 +8919,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
           }
         } finally {
-          clearTimeout(timeout);
           if (artifact.controller === controller) {artifact.loading = false; delete artifact.controller;}
           if (canvasOwner && responseCancellation) {
             // Expose the failure/retirement now, but do not refund its credit.

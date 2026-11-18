@@ -919,6 +919,8 @@ var(--panel);
       .signal-surface-card code { grid-column: 1 / 3; overflow: hidden; color: var(--muted); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
       .signal-canvas-intro { margin-top: 2px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
       .signal-render-list { max-width: 1080px; display: grid; gap: 14px; margin: 0 auto; }
+      .signal-render-pager { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .signal-render-pager > span { min-width: 0; overflow: hidden; color: var(--muted); font: 10px var(--mono); text-align: center; text-overflow: ellipsis; white-space: nowrap; }
       .signal-render-card {
         overflow: hidden;
         border: 1px solid var(--line);

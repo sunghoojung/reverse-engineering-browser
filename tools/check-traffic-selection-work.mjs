@@ -718,14 +718,19 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
       return {ok: answers.summary !== null, json: async () => answers.summary};
     };
     const clock = {now: 1_000_000};
-    const t = fixture(app, traffic, 40, {fetch, Date: {now: () => clock.now}, renderShellStatus() {}});
+    // The sentence's own layout: in the footer's flow, or fixed to a 760x560
+    // window in the short stacked layout (app.css).
+    const layout = {position: 'static'};
+    const t = fixture(app, traffic, 40, {fetch, Date: {now: () => clock.now}, renderShellStatus() {},
+      getComputedStyle: element => ({position: element === line ? layout.position : 'static'}), innerWidth: 760, innerHeight: 560});
     if (live) { t.state.sessionMode = 'live'; t.state.requestContentCaptureEnabled = true; t.state.eventEtag = '"store-1"'; }
     const notice = t.document.querySelector('#request-not-kept');
     const toggle = t.document.createElement('button'), line = t.document.createElement('span');
+    Object.defineProperties(line, {offsetWidth: {value: 300}, offsetHeight: {value: 74}});
     notice.querySelector = selector => ({'#request-not-kept-toggle': toggle, '#request-not-kept-text': line})[selector] ?? null;
     notice.dataset.expanded = 'false';
     const api = runInNewContext(`({renderTrafficNotKept, toggleTrafficNotKept})`, t.context);
-    return {t, api, reads, answers, clock, notice, toggle, line, hold: () => { let go; release = resume => { go = resume; }; return () => go(); }};
+    return {t, api, reads, answers, clock, notice, toggle, line, layout, hold: () => { let go; release = resume => { go = resume; }; return () => go(); }};
   };
   const disk = 'not stored, to keep the free-disk reserve. Free disk space to keep later bodies';
   const older = 'not kept by the browser that recorded this session. Current capture keeps every body whole';
@@ -755,7 +760,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   const f = footer({live: true,
     summary: {checks: [check('response_body', 'not_captured_disk_reserve', 2400), check('request_body', 'not_captured_disk_reserve', 30),
       check('response_body', 'not_captured_type', 7)]}});
-  const {t, api, reads, line, toggle, notice, clock} = f;
+  const {t, api, reads, line, toggle, notice, clock, layout} = f;
   // Two response refusals and one request refusal are loaded: a lower bound
   // until the summary answers.
   t.state.requests[3].responseBody = {state: 'not_captured_disk_reserve'};
@@ -807,8 +812,26 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   assert.equal(toggle.getAttribute('aria-expanded'), 'true');
   api.toggleTrafficNotKept(false);
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  // In the footer's flow the open sentence keeps no placement.
+  toggle.getBoundingClientRect = () => ({left: 480, right: 600, top: 245, bottom: 263});
+  api.toggleTrafficNotKept(true);
+  assert.deepEqual([line.style.left, line.style.top], ['', '']);
+  // Fixed to the window, it opens above its button, right edges aligned.
+  layout.position = 'fixed';
+  api.toggleTrafficNotKept(false); api.toggleTrafficNotKept(true);
+  assert.deepEqual([line.style.left, line.style.top], ['300px', '165px'], 'above the button when it fits');
+  // Too little room above and more below: it opens below the button.
+  toggle.getBoundingClientRect = () => ({left: 480, right: 600, top: 40, bottom: 58});
+  api.renderTrafficNotKept(); await settle();
+  assert.deepEqual([line.style.left, line.style.top], ['300px', '64px'], 'below the button, placed again on render');
+  // Never past the window's edges.
+  toggle.getBoundingClientRect = () => ({left: 20, right: 100, top: 540, bottom: 558});
+  api.toggleTrafficNotKept(false); api.toggleTrafficNotKept(true);
+  assert.deepEqual([line.style.left, line.style.top], ['4px', '460px'], 'inside the window');
+  api.toggleTrafficNotKept(false);
+  assert.deepEqual([line.style.left, line.style.top], ['', ''], 'closing clears the placement');
 }
-console.log('PASS Traffic footer not-kept notice: the summary read once in every session, its whole-session counts, at least the loaded rows\' until it answers, after the live store changed, after a failed read or when its scan was bounded, refusals outside the loaded rows, disk reserve refusals and an older browser\'s budget named without a control to raise, and the stacked layout\'s button');
+console.log('PASS Traffic footer not-kept notice: the summary read once in every session, its whole-session counts, at least the loaded rows\' until it answers, after the live store changed, after a failed read or when its scan was bounded, refusals outside the loaded rows, disk reserve refusals and an older browser\'s budget named without a control to raise, and the stacked layout\'s button and its sentence placed inside the window');
 
 const baseline = process.argv.find(value => value.startsWith('--baseline-ref='))?.slice('--baseline-ref='.length);
 if (baseline) {

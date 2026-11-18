@@ -1325,6 +1325,109 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // VM Lab names the Wasm sample policy the session context reports, and its
+  // Reset posts reset_wasm_sample_budgets from the keyboard. This backend is
+  // not live, so the page reads a stand-in context and action answer.
+  @MainActor
+  func test14bWasmSamplingStrip() async throws {
+    let policy = "Wasm sampling: br_table and call_indirect · up to 1,024 full records per stream each second · "
+      + "64 per function (browser default) · no per-call-site limit"
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "vm")
+      try await ui.waitUntil("!document.querySelector('#vm-notice').hidden", "\(size.name): VM Lab did not render")
+      let unnamed = try await ui.value("document.querySelector('#vm-wasm-sampling').hidden") as? Bool
+      XCTAssertEqual(unnamed, true, "\(size.name): a context without wasm_sampling hides the strip")
+      // `reset` is the context's reset field; `answer` the action's status and body.
+      let stand = { (reset: String, answer: String) in """
+        (() => { window.__rebSamplingFetch ??= window.fetch;
+          window.fetch = (input, init) => {
+            const path = String(input);
+            const json = (status, body) => Promise.resolve(new Response(JSON.stringify(body),
+              {status, headers: {'Content-Type': 'application/json'}}));
+            if (path.startsWith('/api/session/context')) return json(200, {capture_options: {wasm_sampling: {version: 1,
+              streams: ['br_table', 'call_indirect'], window_ms: 1000, records_per_window: 1024, samples_per_function: null,
+              samples_per_indirect_site: null, function_allow_count: 0, function_deny_count: 0, module_allowlist: false,
+              reset: '\(reset)'}}});
+            if (path.startsWith('/api/session/actions')) { const [status, body] = \(answer); return json(status, body); }
+            return window.__rebSamplingFetch(input, init);
+          };
+          state.vmWasmSamplingReset = null; state.vmWasmSamplingRead = null; refreshSessionWasmSampling(); return true; })()
+        """ }
+      _ = try await ui.value(stand("available", "[200, {ok: true, action: 'reset_wasm_sample_budgets', generation: 3}]"))
+      try await ui.waitUntil("!document.querySelector('#vm-wasm-sampling').hidden", "\(size.name): the strip did not show the context")
+      let named = try await ui.value("document.querySelector('#vm-wasm-sampling-policy').textContent") as? String
+      XCTAssertEqual(named, policy, "\(size.name): the strip names the policy")
+      // Each part is one unbroken line; the strip wraps only between parts.
+      let broken = try await ui.value("""
+        [...document.querySelectorAll('#vm-wasm-sampling-policy .vm-wasm-sampling-part')]
+          .filter(part => part.getBoundingClientRect().height > parseFloat(getComputedStyle(part).lineHeight) + 1)
+          .map(part => part.textContent)
+        """) as? [String]
+      XCTAssertEqual(broken, [], "\(size.name): policy parts broken across lines")
+      // Reset keeps its place whatever the strip says.
+      let place = "(box => [Math.round(box.top), Math.round(box.right)])(document.querySelector('#vm-wasm-sampling-reset').getBoundingClientRect())"
+      let idle = try await ui.value(place) as? [Int]
+      try await assertFullyVisible(ui, "#vm-wasm-sampling", "\(size.name) Wasm sampling")
+      try await assertFullyVisible(ui, "#vm-wasm-sampling-reset", "\(size.name) Wasm sampling reset")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) Wasm sampling")
+      try await ui.screenshot("vm-wasm-sampling-\(size.name)")
+
+      // Tab from the control before Reset, then Space, as a keyboard user would.
+      _ = try await ui.value("""
+        (() => { const all = [...document.querySelectorAll('button, a[href], input, select, textarea, [tabindex]')]
+            .filter(element => !element.disabled && element.tabIndex >= 0 && element.getClientRects().length);
+          const at = all.indexOf(document.querySelector('#vm-wasm-sampling-reset'));
+          all[at - 1].focus(); return at; })()
+        """)
+      try await ui.tab()
+      let focus = try await ui.json("__rebUiProbe.focusState()")
+      XCTAssertEqual(focus["id"] as? String, "vm-wasm-sampling-reset", "\(size.name): Tab reaches Reset: \(focus)")
+      XCTAssertEqual(focus["focusVisible"] as? Bool, true, "\(size.name): Reset shows keyboard focus: \(focus)")
+      XCTAssertNotEqual(focus["indicator"] as? String, "none", "\(size.name): Reset has a focus indicator: \(focus)")
+      try await ui.screenshot("vm-wasm-sampling-focus-\(size.name)")
+      try await ui.key(49, " ")
+      try await ui.waitUntil("document.querySelector('#vm-wasm-sampling-status').dataset.kind === 'done'", "\(size.name): Space did not reset")
+      let done = try await ui.json("""
+        ({text: document.querySelector('#vm-wasm-sampling-status').textContent, active: document.activeElement.id})
+        """)
+      XCTAssertEqual(done["text"] as? String,
+        "New sample window requested (reset 3). Renderers open it within about 250 ms; sample indexes keep counting.",
+        "\(size.name): the reset names its generation")
+      XCTAssertEqual(done["active"] as? String, "vm-wasm-sampling-reset", "\(size.name): focus stays on Reset")
+      let answered = try await ui.value(place) as? [Int]
+      XCTAssertEqual(answered, idle, "\(size.name): Reset moved when the answer showed")
+      try await assertFullyVisible(ui, "#vm-wasm-sampling-status", "\(size.name) Wasm sampling reset answer")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) Wasm sampling reset")
+      try await ui.screenshot("vm-wasm-sampling-reset-\(size.name)")
+      try await lightScreenshot(ui, "vm-wasm-sampling-reset", size.name, scope: "#screen-vm")
+
+      // A refused reset says why in the strip.
+      _ = try await ui.value(stand("available", "[409, {ok: false, error: 'No live session is running.'}]"))
+      try await ui.waitUntil("document.querySelector('#vm-wasm-sampling-status').dataset.kind === 'idle'", "\(size.name): the strip did not reread")
+      try await ui.click("#vm-wasm-sampling-reset")
+      try await ui.waitUntil("document.querySelector('#vm-wasm-sampling-status').dataset.kind === 'failed'", "\(size.name): a refused reset did not show")
+      let refusal = try await ui.value("document.querySelector('#vm-wasm-sampling-status').textContent") as? String
+      XCTAssertEqual(refusal, "No live session is running.", "\(size.name): the refusal is the backend's")
+      let refused = try await ui.value(place) as? [Int]
+      XCTAssertEqual(refused, idle, "\(size.name): Reset moved when the refusal showed")
+      try await assertFullyVisible(ui, "#vm-wasm-sampling-status", "\(size.name) Wasm sampling refusal")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) Wasm sampling refusal")
+      try await ui.screenshot("vm-wasm-sampling-failed-\(size.name)")
+
+      // A session without a reset file disables Reset and says so.
+      _ = try await ui.value(stand("unavailable", "[500, {}]"))
+      try await ui.waitUntil("document.querySelector('#vm-wasm-sampling-status').dataset.kind === 'unavailable'", "\(size.name): no reset did not show")
+      let disabled = try await ui.value("document.querySelector('#vm-wasm-sampling-reset').disabled") as? Bool
+      XCTAssertEqual(disabled, true, "\(size.name): Reset is disabled without a reset file")
+      try await assertFullyVisible(ui, "#vm-wasm-sampling", "\(size.name) Wasm sampling without reset")
+      try await assertLayout(ui, "#screen-vm", "\(size.name) Wasm sampling without reset")
+      try await assertInert(ui, "\(size.name) Wasm sampling")
+      try await ui.screenshot("vm-wasm-sampling-unavailable-\(size.name)")
+      _ = try await ui.value("(() => { window.fetch = window.__rebSamplingFetch; delete window.__rebSamplingFetch; return true; })()")
+    }
+  }
+
   // The dock follows the selection, lists recorded links only and is keyboard
   // reachable. Long values stay inert text and truncate with an ellipsis.
   @MainActor

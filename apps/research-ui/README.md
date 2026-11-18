@@ -1554,9 +1554,11 @@ records each window keeps, the per-function and per-call-site allowances (an
 unnamed per-function allowance is the browser's 64), and the function and
 module filters. Its Reset sample budgets button posts
 `reset_wasm_sample_budgets` and shows the new reset generation or the
-backend's refusal, for example while capture is stopped. It is disabled when
-the session has no reset file, and a malformed label is named rather than
-shown. The strip is hidden for every other session.
+backend's refusal, for example while capture is stopped, under the policy;
+the button keeps its place at the end of the first line, and a narrow strip
+wraps only between the policy's parts. It is disabled when the session has no
+reset file, and a malformed label is named rather than shown. The strip is
+hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
 execution was not sampled and did not consume a sample slot. The notice and

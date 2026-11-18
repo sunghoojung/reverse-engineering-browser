@@ -2966,7 +2966,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       // The browser applies 64 per function when the launcher names no
       // allowance (protocol/native-wasm-dispatch-v1.md), and no per-site limit.
-      function vmWasmSamplingPolicy(sampling) {
+      function vmWasmSamplingPolicyParts(sampling) {
         const count = value => value.toLocaleString('en-US');
         const plural = (value, noun) => `${count(value)} ${noun}${value === 1 ? '' : 's'}`;
         // An allowance of a whole window removes that limit.
@@ -2982,7 +2982,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (sampling.function_allow_count) parts.push(plural(sampling.function_allow_count, 'allowed function'));
         if (sampling.function_deny_count) parts.push(plural(sampling.function_deny_count, 'denied function'));
         if (sampling.module_allowlist) parts.push('module allowlist');
-        return parts.join(' · ');
+        return parts;
       }
 
       function renderVmWasmSampling() {
@@ -2993,9 +2993,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!sampling) return;
         const reset = state.vmWasmSamplingReset;
         const available = !sampling.malformed && sampling.reset === 'available';
-        elements.vmWasmSamplingPolicy.textContent = sampling.malformed
-          ? 'Wasm sampling labels from this backend were malformed and are not shown. Retained samples remain visible.'
-          : vmWasmSamplingPolicy(sampling);
+        if (sampling.malformed) {
+          elements.vmWasmSamplingPolicy.textContent = 'Wasm sampling labels from this backend were malformed and are not shown. Retained samples remain visible.';
+        } else {
+          // Each part wraps as a unit, so a narrow strip breaks between parts.
+          elements.vmWasmSamplingPolicy.replaceChildren(...vmWasmSamplingPolicyParts(sampling).flatMap((text, index) => {
+            const part = document.createElement('span');
+            part.className = 'vm-wasm-sampling-part';
+            part.textContent = text;
+            if (index === 0) return [part];
+            const separator = document.createElement('span');
+            separator.textContent = ' · ';
+            return [separator, part];
+          }));
+        }
         let kind = reset?.status ?? 'idle', message = '';
         if (sampling.malformed) kind = 'idle';
         else if (!available) { kind = 'unavailable'; message = 'This session has no sample-budget reset file.'; }

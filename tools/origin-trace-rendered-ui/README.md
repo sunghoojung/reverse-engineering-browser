@@ -223,12 +223,14 @@ interpreter loop (342), two nests of eight loops (343), the exception fixture (3
 and a 19,459-block interpreter loop (345). Each must draw without an error state
 and without layout defects or clipped text, the exception function's key must
 name exception and unresolved edges, and each is photographed at its opening
-zoom and fitted whole with `0`. It prints a `RENDERED_UI_GRAPH` line per shape
+zoom and fitted whole with `0`, where the graph's canvas must hold only its
+background under the overview cue and the minimap. It prints a `RENDERED_UI_GRAPH` line per shape
 and size: the time from the native click on Graph to the frame after the first
-drawing, which spans decode, transfer, layout and draw, and the median, 95th
-percentile and slowest frame while Shift+Arrow pans once a frame at each zoom.
-Only a frame slower than a second fails, because a hosted test window's frame
-rate is not the display's.
+drawing, which spans decode, transfer, layout and draw, and, while Shift+Arrow
+pans once a frame at each zoom, the median, 95th percentile and slowest frame
+interval and the time each frame spends drawing the graph. A median interval
+over 50 ms fails; one long frame does not, because a hidden window or a
+sleeping display stops frames whatever the page does.
 
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that the session budget

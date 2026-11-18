@@ -2947,10 +2947,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
   // The block graph shapes of artifacts 341 to 345, cold at each size: the
   // time from the native click on Graph to the frame after the first drawing
-  // (decode, transfer, layout and draw), and frame times while Shift+Arrow
-  // pans at the opening zoom and fitted whole. The numbers are printed as
-  // RENDERED_UI_GRAPH lines; only a frame past a second fails, since the
-  // frame rate of a hosted test window is not the display's.
+  // (decode, transfer, layout and draw), and frames while Shift+Arrow pans at
+  // the opening zoom and fitted whole: the interval between frames, and the
+  // time a frame spent before this test's callback, which is the graph's
+  // draw. The numbers are printed as RENDERED_UI_GRAPH lines. A median
+  // interval past three display frames fails; a single long frame does not,
+  // since a hidden or sleeping display stops frames whatever the page does.
   @MainActor
   func test25bBlockGraphShapes() async throws {
     let shapes = [("341", "ladder"), ("342", "dispatch256"), ("343", "loops"), ("344", "exceptions"), ("345", "large")]
@@ -2991,23 +2993,44 @@ final class OriginTraceRenderedUITests: XCTestCase {
         for view in ["open", "fit"] {
           if view == "fit" {
             _ = try await ui.value("document.querySelector('#source-graph-host .block-graph-canvas').dispatchEvent(new KeyboardEvent('keydown', {key: '0', bubbles: true, cancelable: true}))")
+            try await ui.settle()
+            // Fit leaves the overlays clear: under the overview cue and the
+            // minimap the graph's canvas holds only its background. The CSS
+            // pixel at each side is skipped, where a card that ends on the
+            // clear area's edge may antialias.
+            let covered = try await ui.json("""
+              (() => { const host = document.querySelector('#source-graph-host'), canvas = host.querySelector('.block-graph-canvas'), box = canvas.getBoundingClientRect();
+                const sx = canvas.width / box.width, sy = canvas.height / box.height, context = canvas.getContext('2d');
+                const drawn = selector => { const element = host.querySelector(selector); if (!element || element.hidden) return -1;
+                  const r = element.getBoundingClientRect(), x = Math.max(0, Math.ceil((r.left - box.left + 1) * sx)), y = Math.max(0, Math.ceil((r.top - box.top + 1) * sy));
+                  const w = Math.min(canvas.width, Math.floor((r.right - box.left - 1) * sx)) - x, h = Math.min(canvas.height, Math.floor((r.bottom - box.top - 1) * sy)) - y;
+                  if (w <= 0 || h <= 0) return -1;
+                  const data = context.getImageData(x, y, w, h).data; let other = 0;
+                  for (let i = 4; i < data.length; i += 4) if (data[i] !== data[0] || data[i + 1] !== data[1] || data[i + 2] !== data[2]) other += 1;
+                  return other; };
+                return {cue: drawn('.block-graph-lod'), minimap: drawn('.block-graph-minimap')}; })()
+              """)
+            XCTAssertLessThanOrEqual(covered["cue"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the overview cue: \(covered)")
+            XCTAssertLessThanOrEqual(covered["minimap"] as? Int ?? 1, 0, "\(context): Fit draws nothing under the minimap: \(covered)")
             try await assertLayout(ui, "#screen-sources", "\(context) fitted")
             try await ui.screenshot("block-graph-\(name)-fit-\(size.name)")
           }
-          // Shift+Arrow is dispatched once a frame, so each frame draws the last pan.
+          // Shift+Arrow is dispatched once a frame, after this callback asks
+          // for the next one, so the graph draws each pan first in the next frame.
           let result = try await ui.json("""
             (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
               const press = key => canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
-              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, times = [];
+              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, intervals = [], draws = [];
               await new Promise(done => { let last = 0, count = 0;
-                const tick = now => { if (last) times.push(now - last); last = now;
+                const tick = now => { if (last) { intervals.push(now - last); draws.push(performance.now() - now); } last = now;
                   if (count++ === 90) { done(); return; } press(count % 2 ? 'ArrowRight' : 'ArrowDown'); requestAnimationFrame(tick); };
                 requestAnimationFrame(tick); });
-              times.sort((a, b) => a - b);
-              return {zoom, p50: times[times.length >> 1], p95: times[Math.floor(times.length * 0.95)], max: times[times.length - 1]}; })()
+              const stats = list => { list.sort((a, b) => a - b); return {p50: Math.round(list[list.length >> 1]), p95: Math.round(list[Math.floor(list.length * 0.95)]), max: Math.round(list[list.length - 1])}; };
+              return {zoom, interval: stats(intervals), draw: stats(draws)}; })()
             """)
           frames[view] = result
-          XCTAssertLessThan(result["max"] as? Double ?? .infinity, 1000, "\(context) \(view): a pan frame took over a second: \(result)")
+          let median = (result["interval"] as? [String: Any])?["p50"] as? Double ?? .infinity
+          XCTAssertLessThanOrEqual(median, 50, "\(context) \(view): panning is not smooth: \(result)")
         }
         print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
         try await ui.click("#source-graph")

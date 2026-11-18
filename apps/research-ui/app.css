@@ -3926,14 +3926,17 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #vm-findings-workspace > .vm-wasm-sampling { grid-row: 2; }
 #vm-findings-workspace > .vm-grid { grid-row: 3; }
 #vm-findings-workspace > .vm-program-example { grid-row: 4; }
-/* The Wasm sample policy this session runs with, beside its window reset. */
-.vm-wasm-sampling { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); color: var(--muted); font-size: 10px; line-height: 1.4; }
-.vm-wasm-sampling-policy { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
-.vm-wasm-sampling-status { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* The Wasm sample policy this session runs with, beside its window reset.
+   Reset keeps its place at the end of the first line in every state, and a
+   reset's answer goes under the policy. */
+.vm-wasm-sampling { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); color: var(--muted); font-size: 10px; line-height: 1.4; }
+.vm-wasm-sampling-policy { grid-column: 1; grid-row: 1; min-width: 0; }
+.vm-wasm-sampling-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.vm-wasm-sampling-status { grid-column: 1; grid-row: 2; min-width: 0; overflow-wrap: anywhere; }
 .vm-wasm-sampling-status:empty { display: none; }
 .vm-wasm-sampling-status[data-kind="failed"] { color: var(--red); }
 .vm-wasm-sampling-status[data-kind="done"] { color: var(--text); }
-.vm-wasm-sampling > .secondary-button { flex: 0 0 auto; min-height: 22px; padding: 0 8px; font-size: 10px; }
+.vm-wasm-sampling > .secondary-button { grid-column: 2; grid-row: 1; min-height: 22px; padding: 0 8px; font-size: 10px; white-space: nowrap; }
 .vm-wasm-sampling > .secondary-button[aria-disabled="true"] { cursor: progress; opacity: .45; }
 #vm-analysis-toggle { display: none; }
 #screen-vm .vm-list-pane { background: var(--chrome); }

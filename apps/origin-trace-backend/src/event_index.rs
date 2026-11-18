@@ -21,7 +21,7 @@ use crate::{
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     fs::File,
     path::Path,
     time::{Duration, Instant},
@@ -167,31 +167,30 @@ struct EventFold {
 
 impl EventFold {
     fn stream(&mut self, transaction: &Transaction<'_>, key: (i64, i64)) -> Result<&mut Stream> {
-        if !self.streams.contains_key(&key) {
-            let stored = transaction
-                .prepare_cached(
-                    "SELECT low, high, seen FROM streams WHERE session = ?1 AND process = ?2",
-                )
-                .sql()?
-                .query_row(params![key.0, key.1], |row| {
-                    Ok(Stream {
-                        low: row.get::<_, i64>(0)? as u64,
-                        high: row.get::<_, i64>(1)? as u64,
-                        seen: row.get::<_, i64>(2)? as u64,
+        Ok(match self.streams.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let stored = transaction
+                    .prepare_cached(
+                        "SELECT low, high, seen FROM streams WHERE session = ?1 AND process = ?2",
+                    )
+                    .sql()?
+                    .query_row(params![key.0, key.1], |row| {
+                        Ok(Stream {
+                            low: row.get::<_, i64>(0)? as u64,
+                            high: row.get::<_, i64>(1)? as u64,
+                            seen: row.get::<_, i64>(2)? as u64,
+                        })
                     })
-                })
-                .optional()
-                .sql()?;
-            self.streams.insert(
-                key,
-                stored.unwrap_or(Stream {
+                    .optional()
+                    .sql()?;
+                entry.insert(stored.unwrap_or(Stream {
                     low: u64::MAX,
                     high: 0,
                     seen: 0,
-                }),
-            );
-        }
-        Ok(self.streams.get_mut(&key).expect("loaded stream"))
+                }))
+            }
+        })
     }
 
     /// Counts one sequence of a stream as the window does: bounds widen, and

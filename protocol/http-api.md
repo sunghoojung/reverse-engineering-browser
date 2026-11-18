@@ -1079,7 +1079,9 @@ and the unreadable-line count, so a poll reads them without scanning the
 store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
 `"0"` and `scan_end` is where the index ends, which can be far past
 `scan_limit`; both windows then end at that same record boundary, so a record
-counted is a record the windows could show. While the index catches up, the
+counted is a record the windows could show. The index reads only complete
+lines, as the request list does, so a final record without its newline is
+still being written and appears once the newline is. While the index catches up, the
 summaries cover the scanned tail: `"bounded_tail"` excludes an older prefix, even
 if fewer than 5,000 rows remain. A store no larger than `scan_limit` is
 `"store"` either way. `next_before` is the start of the oldest event the answer

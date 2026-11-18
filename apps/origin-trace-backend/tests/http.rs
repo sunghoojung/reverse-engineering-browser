@@ -1474,12 +1474,16 @@ async fn assert_poll_response(server: &Server, path: &str, expected: Value) {
     assert_eq!(unchanged.status(), 304);
     assert!(unchanged.bytes().await.unwrap().is_empty());
 }
-fn event_response(events: &[Value], scan_end: usize, limited: bool) -> Value {
+/// `older` is the byte offset of the oldest returned event when the window
+/// left older events out: the `before` cursor that reads them.
+fn event_response(events: &[Value], scan_end: usize, older: Option<usize>) -> Value {
+    let limited = older.is_some();
     json!({
         "count": events.len(),
         "events": events,
         "network_events": events,
-        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited, "malformed_lines":0},
+        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited, "malformed_lines":0,
+            "next_before": older.map(|offset| offset.to_string())},
         "broker_connected": true,
         "capture_mode": "idle",
         "capture_state": "not_live",
@@ -2285,36 +2289,47 @@ async fn event_waits_return_new_matches_or_time_out() {
 #[tokio::test]
 async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     let server = Server::start().await;
-    assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
+    assert_poll_response(&server, "/api/events", event_response(&[], 0, None)).await;
     let mut events: Vec<_> = (1..=5001).map(metadata_event).collect();
     server.file("events.jsonl", &jsonl(&events));
     assert_poll_response(
         &server,
         "/api/events?limit=2",
-        event_response(&events[4999..], jsonl(&events).len(), true),
+        event_response(
+            &events[4999..],
+            jsonl(&events).len(),
+            Some(jsonl(&events[..4999]).len()),
+        ),
     )
     .await;
     assert_poll_response(
         &server,
         "/api/events?limit=9999",
-        event_response(&events[1..], jsonl(&events).len(), true),
+        event_response(
+            &events[1..],
+            jsonl(&events).len(),
+            Some(jsonl(&events[..1]).len()),
+        ),
     )
     .await;
     let response = server.get("/api/events?limit=2").await;
     let previous_etag = response.headers()["etag"].clone();
     drop(response);
-    // The next poll sees appended evidence, including a complete final record
-    // without a newline, rather than retaining an earlier response tree.
+    // The next poll sees appended evidence rather than retaining an earlier
+    // response tree. Once the event index has caught up, the window ends where
+    // it does, at the last complete line: a final record without its newline
+    // is a record still being written, as it is to the request list.
     events.push(metadata_event(5002));
-    {
+    let append = |bytes: &[u8]| {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .append(true)
             .open(server.root.path().join("events.jsonl"))
+            .unwrap()
+            .write_all(bytes)
             .unwrap();
-        file.write_all(&serde_json::to_vec(events.last().unwrap()).unwrap())
-            .unwrap();
-    }
+    };
+    append(&serde_json::to_vec(events.last().unwrap()).unwrap());
     let response = server
         .client
         .get(format!("{}/api/events?limit=2", server.url))
@@ -2326,12 +2341,23 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     assert_eq!(
         response.bytes().await.unwrap().as_ref(),
         serde_json::to_vec(&event_response(
-            &events[5000..],
-            jsonl(&events).len() - 1,
-            true
+            &events[4999..5001],
+            jsonl(&events[..5001]).len(),
+            Some(jsonl(&events[..4999]).len())
         ))
         .unwrap()
     );
+    append(b"\n");
+    assert_poll_response(
+        &server,
+        "/api/events?limit=2",
+        event_response(
+            &events[5000..],
+            jsonl(&events).len(),
+            Some(jsonl(&events[..5000]).len()),
+        ),
+    )
+    .await;
     server.file("rotated.jsonl", &jsonl(&[metadata_event(9000)]));
     std::fs::rename(
         server.root.path().join("rotated.jsonl"),
@@ -2344,12 +2370,12 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
         event_response(
             &[metadata_event(9000)],
             jsonl(&[metadata_event(9000)]).len(),
-            false,
+            None,
         ),
     )
     .await;
     server.file("events.jsonl", b"");
-    assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
+    assert_poll_response(&server, "/api/events", event_response(&[], 0, None)).await;
     // One damaged line is skipped and counted, so it cannot fail every poll.
     let mut invalid = metadata_event(1);
     invalid["payload"] = json!("not-hex");
@@ -2373,7 +2399,7 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
         event_response(
             &[metadata_event(2)],
             jsonl(&[metadata_event(2)]).len(),
-            false,
+            None,
         ),
     )
     .await;

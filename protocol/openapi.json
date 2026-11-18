@@ -108,7 +108,8 @@
         "get_request_cookies",
         "get_cookie_provenance",
         "get_artifact_text",
-        "search_artifact_text"
+        "search_artifact_text",
+        "export_requests_har"
       ],
       "description": "Credential header values, cookie values and received Set-Cookie lines, and the header blocks and cookie lists that hold them, are returned only when a request passes credential_values=1. The projection never lists that parameter in a tool's input schema, so a model cannot ask for it, and passes credential_values=1 on these operations with --allow-content, which --permission full implies. Below Full access they stay withheld. A header document larger than the inline limit returns a structural summary; get_artifact_text then reads each block or list it names by artifact_id in bounded pages."
     },
@@ -135,7 +136,8 @@
         "get_artifact_text",
         "search_artifact_text",
         "run_wasm_function",
-        "get_wasm_runs"
+        "get_wasm_runs",
+        "export_requests_har"
       ],
       "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
     },
@@ -2810,6 +2812,324 @@
             {
               "path": "apps/origin-trace-backend/src/request_index.rs",
               "symbol": "respond"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/requests/har": {
+      "get": {
+        "operationId": "export_requests_har",
+        "summary": "Export the selected Traffic rows as one HAR archive",
+        "description": "Every Traffic row the query selects, in list order with no row limit, as one HAR 1.2 archive (protocol/http-api.md, Request HAR export). It is streamed with one batch of rows and one row's records in memory, so a session of any length exports whole. Each hop is one entry: a redirect keeps its own entry with its status and redirectURL, and a request that failed, was interrupted or is still open keeps its entry with status 0. Each entry's _reb names its row, hop and outcome (redirect, failed, incomplete, pending, complete or unlinked) and which header block it wrote; the log's _reb gives the row and entry counts, the outcomes, the index state the rows came from, and complete false with the error when the export stopped after it began. Headers come from the hop's header blocks, the sent (network) block over the browser's provisional one. The request body and the final response body are written when their artifacts were retained whole and verify; a response body that is not UTF-8 is base64 (content.encoding) and a request body that is not is in postData._reb_base64. Native capture keeps a monotonic clock only: startedDateTime is that clock written as an offset from the Unix epoch, exact in order and spacing and not a calendar date. Takes the get_requests filter and sort parameters, with no page, or rows with the exact row IDs to export in their order. Through MCP it is a content read, listed only with --allow-content, and a large archive returns a structural summary.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "through",
+            "in": "query",
+            "required": false,
+            "description": "Only requests indexed before this count. A previous answer's through keeps later pages to the same requests; their fields stay live, so while capture runs a sort or filter on a changing field (status, size, type) can move rows across pages. Capture order does not move.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "Sort key. size is the transferred size, start the first record's time, initiator and protocol their labels. Rows that tie, and rows without a value, keep capture order; rows without a value sort last.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "capture",
+                "name",
+                "status",
+                "type",
+                "method",
+                "time",
+                "size",
+                "initiator",
+                "start",
+                "protocol"
+              ],
+              "default": "capture"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "description": "asc or desc.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Traffic filter text, case-insensitive. Words match method, path and status; -word excludes them. domain:host (* is a wildcard), method:, status-code:, larger-than:N (k and m are 1,024 multiples, of the transferred size) and mime-type: match exactly, and a leading - negates them.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "tab_id",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one browser tab, extension:<id> for the extension traffic one extension made, or unattributed for requests without an owner.",
+            "schema": {
+              "type": "string",
+              "pattern": "^(unattributed|[1-9][0-9]{0,9}|extension:[a-p]{32})$"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "required": false,
+            "description": "Requests whose domain, as listed in facets.domains, is exactly this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Requests of one Traffic resource type.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "xhr",
+                "doc",
+                "css",
+                "js",
+                "font",
+                "img",
+                "media",
+                "socket",
+                "wasm",
+                "other"
+              ]
+            }
+          },
+          {
+            "name": "named",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated session:process:sequence root events, at most 64, that match q as well: researcher names live in the UI, not the index.",
+            "schema": {
+              "type": "string",
+              "maxLength": 4096
+            }
+          },
+          {
+            "name": "failed",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps only failed requests.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "invert",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps the requests the q filter does not match; without q it has no effect.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "hide_internal",
+            "in": "query",
+            "required": false,
+            "description": "1 hides browser-internal requests (browser_internal) and counts them in hidden_internal.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "third_party",
+            "in": "query",
+            "required": false,
+            "description": "1 keeps requests whose site differs from their tab's latest top-level document at their start. Sites are the last two host labels, or three after a short second level and a two-letter country code; there is no public suffix list.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
+            "name": "from_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose last record is at or after this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "to_ns",
+            "in": "query",
+            "required": false,
+            "description": "Keeps requests whose first record is at or before this monotonic time.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "rows",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated row IDs (get_requests id) to export, in this order, in place of a selection: Traffic's selected request. No other selection parameter may be passed with it; an ID no row has is 404.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 writes credential header values and cookie values as captured. Default 0 writes each such header with an empty value marked _reb_withheld and its byte length, and leaves its cookies out. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full) (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archive, streamed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequestHar"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "const": "attachment; filename=\"origin-trace.har\"",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid, duplicate or unknown query parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A rows ID names no request row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Two request exports are already running. Retry when one ends.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure before the archive began.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Folds new records into the in-memory request index as get_requests does, then reads each row's byte range of the event store and the artifacts it names. At most two exports run at once. Stored events and artifacts are never changed. No browser mutation is requested.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/request_har.rs",
+              "symbol": "export"
             }
           ]
         },
@@ -20233,6 +20553,452 @@
           "browser_internal": {
             "type": "boolean",
             "description": "Its scheme class is browser-internal (protocol/native-network-v3.md); recorded before scheme classes, only the renderer recorded it and it names a single-label host other than localhost, as WebUI loads do."
+          }
+        }
+      },
+      "RequestHar": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "log"
+        ],
+        "description": "HAR 1.2 (export_requests_har). Custom fields start with _reb.",
+        "properties": {
+          "log": {
+            "type": "object",
+            "required": [
+              "version",
+              "creator",
+              "comment",
+              "pages",
+              "entries",
+              "_reb"
+            ],
+            "properties": {
+              "version": {
+                "const": "1.2"
+              },
+              "creator": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "version"
+                ]
+              },
+              "comment": {
+                "type": "string"
+              },
+              "pages": {
+                "type": "array",
+                "maxItems": 0
+              },
+              "entries": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RequestHarEntry"
+                }
+              },
+              "_reb": {
+                "type": "object",
+                "required": [
+                  "format",
+                  "complete",
+                  "error",
+                  "rows",
+                  "entries",
+                  "outcomes",
+                  "index",
+                  "credential_values"
+                ],
+                "properties": {
+                  "format": {
+                    "const": "reb-request-har-v1"
+                  },
+                  "complete": {
+                    "type": "boolean"
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "entries": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "outcomes": {
+                    "type": "object",
+                    "propertyNames": {
+                      "enum": [
+                        "redirect",
+                        "failed",
+                        "incomplete",
+                        "pending",
+                        "complete",
+                        "unlinked"
+                      ]
+                    },
+                    "additionalProperties": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "index": {
+                    "type": "object",
+                    "required": [
+                      "epoch",
+                      "indexed_end",
+                      "store_end",
+                      "complete",
+                      "through"
+                    ]
+                  },
+                  "credential_values": {
+                    "enum": [
+                      "returned",
+                      "withheld"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "RequestHarEntry": {
+        "type": "object",
+        "description": "One hop of one Traffic row, as HAR 1.2 entry fields plus _reb.",
+        "required": [
+          "startedDateTime",
+          "time",
+          "request",
+          "response",
+          "cache",
+          "timings",
+          "_reb"
+        ],
+        "properties": {
+          "startedDateTime": {
+            "type": "string",
+            "description": "The hop's monotonic start as an offset from the Unix epoch, ISO 8601 UTC with milliseconds."
+          },
+          "time": {
+            "type": "number",
+            "minimum": 0
+          },
+          "serverIPAddress": {
+            "type": "string"
+          },
+          "request": {
+            "type": "object",
+            "required": [
+              "method",
+              "url",
+              "httpVersion",
+              "cookies",
+              "headers",
+              "queryString",
+              "headersSize",
+              "bodySize"
+            ],
+            "properties": {
+              "method": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "httpVersion": {
+                "type": "string"
+              },
+              "cookies": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "queryString": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "headersSize": {
+                "const": -1
+              },
+              "bodySize": {
+                "type": "integer",
+                "minimum": -1
+              },
+              "postData": {
+                "type": "object",
+                "required": [
+                  "mimeType",
+                  "text",
+                  "_reb_state"
+                ],
+                "properties": {
+                  "mimeType": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "comment": {
+                    "type": "string"
+                  },
+                  "_reb_state": {
+                    "type": "string"
+                  },
+                  "_reb_base64": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "response": {
+            "type": "object",
+            "required": [
+              "status",
+              "statusText",
+              "httpVersion",
+              "cookies",
+              "headers",
+              "content",
+              "redirectURL",
+              "headersSize",
+              "bodySize"
+            ],
+            "properties": {
+              "status": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "statusText": {
+                "type": "string"
+              },
+              "httpVersion": {
+                "type": "string"
+              },
+              "cookies": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "headers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    },
+                    "_reb_withheld": {
+                      "const": true
+                    },
+                    "_reb_value_bytes": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "content": {
+                "type": "object",
+                "required": [
+                  "size",
+                  "mimeType"
+                ],
+                "properties": {
+                  "size": {
+                    "type": "integer"
+                  },
+                  "mimeType": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "encoding": {
+                    "const": "base64"
+                  }
+                }
+              },
+              "redirectURL": {
+                "type": "string"
+              },
+              "headersSize": {
+                "const": -1
+              },
+              "bodySize": {
+                "const": -1
+              }
+            }
+          },
+          "cache": {
+            "type": "object"
+          },
+          "timings": {
+            "type": "object",
+            "required": [
+              "send",
+              "wait",
+              "receive"
+            ],
+            "properties": {
+              "send": {
+                "type": "number"
+              },
+              "wait": {
+                "type": "number"
+              },
+              "receive": {
+                "type": "number"
+              }
+            }
+          },
+          "_reb": {
+            "type": "object",
+            "required": [
+              "row_id",
+              "hop",
+              "hops",
+              "outcome",
+              "monotonic_time_ns",
+              "url_complete"
+            ],
+            "properties": {
+              "row_id": {
+                "type": "string"
+              },
+              "hop": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "hops": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "outcome": {
+                "enum": [
+                  "redirect",
+                  "failed",
+                  "incomplete",
+                  "pending",
+                  "complete",
+                  "unlinked"
+                ]
+              },
+              "monotonic_time_ns": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "url_complete": {
+                "type": "boolean",
+                "description": "false when the URL is a host or a target prefix: the session kept no request content, or no verified full-target artifact."
+              },
+              "credential_values": {
+                "enum": [
+                  "returned",
+                  "withheld"
+                ]
+              }
+            }
           }
         }
       },

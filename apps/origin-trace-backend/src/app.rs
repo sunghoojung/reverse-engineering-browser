@@ -15,7 +15,7 @@ use crate::{
     native_debugger_pause::NativeDebuggerPause,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
-    request_cookies, request_headers,
+    request_cookies, request_har, request_headers,
     request_index::{self, RequestIndex},
     session_context, session_summary, source_facts, source_format, validation, vm, wasm, wasm_diff,
     wasm_graph, wasm_identification, wasm_pseudocode, wasm_value_flow,
@@ -187,6 +187,8 @@ pub struct App {
     capture: Mutex<()>,
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
+    /// Streamed request exports, which run for as long as their client reads.
+    exports: Arc<Semaphore>,
     analysis: Mutex<Option<VmDocumentsCache>>,
     /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
@@ -302,6 +304,7 @@ impl App {
             capture: Mutex::new(()),
             io: Arc::new(Semaphore::new(4)),
             package_io: Arc::new(Semaphore::new(2)),
+            exports: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
             gaps: Arc::default(),
@@ -1184,6 +1187,15 @@ impl App {
                     }
                 };
             }
+            "/api/requests/har" => {
+                let credentials = q.credentials()?;
+                let query = request_index::RequestQuery::parse_export(
+                    &q,
+                    raw_query,
+                    &["credential_values"],
+                )?;
+                return self.requests_har(query, credentials).await;
+            }
             "/api/artifacts" => {
                 q.only(&artifact_query::ARTIFACT_QUERY_KEYS, &["limit"])?;
                 let limit = q.limit(500, 5000)?;
@@ -1395,8 +1407,19 @@ impl App {
                         requests
                             .blocking_lock()
                             .member_range(Some(&session), None, &request)?;
-                    let detail =
-                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
+                    // A located request is read whole; until the index names
+                    // it, the newest bytes of the store within the scan budget.
+                    let detail = match range {
+                        Some(range) => {
+                            event_query::read_request_range(&options.store, range, &filter)?
+                        }
+                        None => event_query::read_request_records(
+                            &options.store,
+                            None,
+                            usize::MAX,
+                            &filter,
+                        )?,
+                    };
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
                     let drops = gaps.drops(&options.store, &session)?;
@@ -1443,8 +1466,19 @@ impl App {
                         requests
                             .blocking_lock()
                             .member_range(Some(&session), None, &request)?;
-                    let detail =
-                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
+                    // A located request is read whole; until the index names
+                    // it, the newest bytes of the store within the scan budget.
+                    let detail = match range {
+                        Some(range) => {
+                            event_query::read_request_range(&options.store, range, &filter)?
+                        }
+                        None => event_query::read_request_records(
+                            &options.store,
+                            None,
+                            usize::MAX,
+                            &filter,
+                        )?,
+                    };
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
                     let drops = gaps.drops(&options.store, &session)?;
@@ -1969,6 +2003,56 @@ impl App {
     /// Returns as soon as a record after the cursor matches, or when the
     /// timeout passes. Without `after`, only records written after the call
     /// count. No reader permit is held between polls.
+    /// Streams the HAR of every row `query` selects (request_har.rs). The rows
+    /// are fixed when the export starts; each batch is read as it is then, so
+    /// memory holds one batch of rows and one row's records at a time.
+    async fn requests_har(
+        &self,
+        query: request_index::RequestQuery,
+        credentials: request_headers::Credentials,
+    ) -> Result<Response> {
+        let permit = self.exports.clone().try_acquire_owned().map_err(|_| {
+            Error::new(
+                429,
+                "Two request exports are already running; retry when one ends",
+            )
+        })?;
+        let requests = self.requests.clone();
+        let (rows, index) = self
+            .blocking(move || requests.blocking_lock().export_rows(&query))
+            .await?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let (requests, gaps, options) = (
+            self.requests.clone(),
+            self.gaps.clone(),
+            self.options.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut sink = request_har::Sink::new(sender);
+            request_har::export(
+                &mut sink,
+                &rows,
+                index,
+                &request_har::Export {
+                    requests: &requests,
+                    gaps: &gaps,
+                    store: &options.store,
+                    artifacts: &options.artifacts,
+                    credentials,
+                },
+            );
+        });
+        let mut response = Response::new(Body::from_stream(request_har::Chunks(receiver)));
+        let headers = response.headers_mut();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+        headers.insert(
+            "content-disposition",
+            HeaderValue::from_static("attachment; filename=\"origin-trace.har\""),
+        );
+        Ok(response)
+    }
     async fn wait_for_events(&self, q: &Query) -> Result<Response> {
         let mut filter = event_query::event_filter(q)?;
         let timeout = event_query::wait_timeout(q)?;

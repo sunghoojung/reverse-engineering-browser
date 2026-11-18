@@ -775,7 +775,8 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             "get_artifact_text",
             "search_artifact_text",
             "run_wasm_function",
-            "get_wasm_runs"
+            "get_wasm_runs",
+            "export_requests_har"
         ])
     );
     let mut mcp = Mcp::start(&server.url, false);

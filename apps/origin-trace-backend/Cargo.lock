@@ -1101,6 +1101,7 @@ dependencies = [
  "base64 0.22.1",
  "cc",
  "clap",
+ "futures-core",
  "hex",
  "jsonschema",
  "libc",

@@ -247,7 +247,8 @@ enum AgentToolGate {
   // content read: a run's outcome, fuel, import calls and timing disclose
   // values the code computed.
   static let fullOnly: Set<String> = [
-    "get_artifact_text", "search_artifact_text", "run_wasm_function", "get_wasm_runs", "start_live_session", "session_action",
+    "get_artifact_text", "search_artifact_text", "export_requests_har", "run_wasm_function", "get_wasm_runs",
+    "start_live_session", "session_action",
   ]
   static let sensitiveStartOptions = ["canvas_images", "request_content", "response_media", "js_invocation_digests", "confirm_sensitive_capture"]
 

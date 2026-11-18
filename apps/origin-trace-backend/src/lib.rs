@@ -36,6 +36,7 @@ mod native_guest_binding;
 mod origin_trace;
 mod owned_vm_debugger;
 mod request_cookies;
+mod request_har;
 mod request_headers;
 mod request_index;
 mod request_stack;

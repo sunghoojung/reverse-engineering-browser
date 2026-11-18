@@ -731,7 +731,8 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 66, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 67, "Review route coverage when the API changes");
+    assert!(ids.contains("export_requests_har"));
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
@@ -826,7 +827,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 66);
+    assert_eq!(operation_count, 67);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -11303,6 +11304,154 @@ async fn request_detail_routes_report_what_their_read_covered() {
     .await;
     assert_eq!(stack["status"], "not_recorded", "{stack}");
     assert_eq!(stack["coverage"]["scope"], "request_range");
+}
+
+/// The HAR export writes every hop of every selected row: a redirect keeps
+/// its own entry pointing at the next hop, a failed request keeps an entry
+/// with status 0, and header values come from the hop's verified block, with
+/// credential values only when asked for.
+#[tokio::test]
+async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
+    let server = Server::start().await;
+    let event = |sequence: u64, request: u64, kind: &str, parent: u64, payload: &[u8]| {
+        json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1_000_000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":parent.to_string(),"request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false})
+    };
+    // A version 2 request_target: https, no port, the path and query whole.
+    let target = |text: &[u8]| {
+        let mut out = vec![0u8; 128];
+        (out[0], out[2], out[8]) = (2, 128, 2);
+        out[4..8].copy_from_slice(&(text.len() as u32).to_le_bytes());
+        out[12..12 + text.len()].copy_from_slice(text);
+        out
+    };
+    let block = b"Accept: */*\r\nAuthorization: Bearer har-SECRET\r\n";
+    let mut headers = vec![0u8; 128];
+    (headers[0], headers[2], headers[4], headers[5]) = (1, 128, 2, 1);
+    headers[8..12].copy_from_slice(&2u32.to_le_bytes());
+    headers[12..16].copy_from_slice(&(block.len() as u32).to_le_bytes());
+    headers[48..80].copy_from_slice(&Sha256::digest(block));
+    let mut sent = event(3, 17, "request_headers", 1, &headers);
+    sent["artifact_id"] = json!("5");
+    let mut redirected = event(4, 17, "request_redirected", 1, b"GET example.test");
+    redirected["status_code"] = json!(302);
+    let mut response = event(6, 17, "response_started", 4, b"GET example.test");
+    response["status_code"] = json!(200);
+    let mut failed = event(9, 18, "request_failed", 8, b"");
+    failed["error_code"] = json!(-105);
+    let events = vec![
+        event(1, 17, "request_started", 0, b"GET example.test"),
+        event(2, 17, "request_target", 1, &target(b"/start?x=1")),
+        sent,
+        redirected,
+        event(5, 17, "request_target", 4, &target(b"/next")),
+        response,
+        event(7, 17, "request_completed", 6, b""),
+        event(8, 18, "request_started", 0, b"POST unreachable.test"),
+        failed,
+    ];
+    server.file("events.jsonl", &jsonl(&events));
+    let hash = hex::encode(Sha256::digest(block));
+    let artifact = json!({"protocol_version":1,"artifact_id":"5","session_id":"1","navigation_id":"0",
+        "frame_id":"9","parent_artifact_id":"0","creator_event_id":"3","execution_context_id":"0",
+        "capture_origin":"network_request","kind":"request_headers","url":"https://example.test/start",
+        "mime_type":"text/plain","byte_size":block.len(),"sha256":hash,"sensitive":true,
+        "content_path":format!("blobs/{hash}.bin")});
+    server.file(&format!("artifacts/blobs/{hash}.bin"), block);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    let route = "/api/requests/har";
+    let read = async |query: &str| -> Value {
+        let response = server.get(&format!("{route}?{query}")).await;
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"origin-trace.har\""
+        );
+        let bytes = assert_contract_response(response, "get", route, 200).await;
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    let har = read("").await;
+    let log = &har["log"];
+    assert_eq!(log["version"], "1.2");
+    assert_eq!(log["_reb"]["complete"], true, "{log}");
+    assert_eq!(log["_reb"]["rows"], 2);
+    assert_eq!(log["_reb"]["entries"], 3);
+    assert_eq!(
+        log["_reb"]["outcomes"],
+        json!({"redirect": 1, "complete": 1, "failed": 1})
+    );
+    let entries = log["entries"].as_array().unwrap();
+    let (first, second, third) = (&entries[0], &entries[1], &entries[2]);
+    assert_eq!(first["request"]["url"], "https://example.test/start?x=1");
+    assert_eq!(
+        first["request"]["queryString"],
+        json!([{"name": "x", "value": "1"}])
+    );
+    assert_eq!(first["response"]["status"], 302);
+    assert_eq!(
+        first["response"]["redirectURL"],
+        "https://example.test/next"
+    );
+    assert_eq!(first["_reb"]["outcome"], "redirect");
+    assert_eq!(first["_reb"]["url_complete"], true);
+    assert_eq!(first["startedDateTime"], "1970-01-01T00:00:00.001Z");
+    assert_eq!(first["time"], 3.0);
+    assert_eq!(
+        first["request"]["headers"],
+        json!([{"name": "Accept", "value": "*/*"},
+            {"name": "Authorization", "value": "", "_reb_withheld": true, "_reb_value_bytes": 17}])
+    );
+    assert_eq!(first["_reb"]["request_headers"]["source"], "network");
+    assert_eq!(second["request"]["url"], "https://example.test/next");
+    assert_eq!(second["response"]["status"], 200);
+    assert_eq!(second["_reb"]["outcome"], "complete");
+    assert_eq!(second["_reb"]["hop"], 1);
+    assert_eq!(third["request"]["method"], "POST");
+    assert_eq!(third["response"]["status"], 0);
+    assert_eq!(third["_reb"]["outcome"], "failed");
+    assert_eq!(third["_reb"]["error_code"], -105);
+    assert_eq!(third["_reb"]["url_complete"], false);
+    assert!(!har.to_string().contains("har-SECRET"));
+    // Asked for, the same entry carries the captured credential value.
+    let returned = read("credential_values=1").await;
+    assert_eq!(
+        returned["log"]["entries"][0]["request"]["headers"][1],
+        json!({"name": "Authorization", "value": "Bearer har-SECRET"})
+    );
+    assert_eq!(returned["log"]["_reb"]["credential_values"], "returned");
+    // The list's filters select the rows; a page is never one.
+    let failed_only = read("failed=1").await;
+    assert_eq!(failed_only["log"]["_reb"]["rows"], 1);
+    assert_eq!(
+        failed_only["log"]["entries"][0]["_reb"]["outcome"],
+        "failed"
+    );
+    // Traffic's selection: the exact rows, in the order named.
+    let ids = [&third, &first].map(|entry| entry["_reb"]["row_id"].as_str().unwrap().to_owned());
+    let selected = read(&format!("rows={}", ids.join(","))).await;
+    let selected = selected["log"]["entries"].as_array().unwrap();
+    assert_eq!(selected.len(), 3);
+    assert_eq!(selected[0]["_reb"]["outcome"], "failed");
+    assert_eq!(selected[1]["_reb"]["hop"], 0);
+    for (query, status) in [
+        ("limit=1", 400),
+        ("rows=nope", 404),
+        ("rows=a&failed=1", 400),
+    ] {
+        assert_contract_response(
+            server.get(&format!("{route}?{query}")).await,
+            "get",
+            route,
+            status,
+        )
+        .await;
+    }
 }
 
 /// A cookie spans the session: a script write older than provenance's newest

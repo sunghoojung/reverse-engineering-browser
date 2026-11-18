@@ -235,6 +235,17 @@ pub fn read_request_records(
     read_detail(store, range, limit, filter, SCAN_BYTES, false)
 }
 
+/// Every record of one request in its whole indexed byte range, oldest first,
+/// with no record count or byte budget: an export reads all of it, and one
+/// request's records are what it holds.
+pub fn read_request_range(
+    store: &Path,
+    range: RecordRange,
+    filter: &EventFilter,
+) -> Result<Detail> {
+    read_detail(store, Some(range), usize::MAX, filter, u64::MAX, false)
+}
+
 /// The records at byte ranges the request index located, each one whole
 /// line, that `keep` selects, read with one open file instead of a scan; and
 /// how many ranges no longer held a valid record.

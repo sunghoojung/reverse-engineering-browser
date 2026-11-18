@@ -168,9 +168,9 @@ legacy `--allow-session-start` keeps accepting them with
 `confirm_sensitive_capture`. None of these flags is authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
-content, `get_artifact_text` and `search_artifact_text`, and the offline Wasm
-runs `run_wasm_function` and `get_wasm_runs`, since running captured code
-discloses what it computes. They are listed only
+content, `get_artifact_text`, `search_artifact_text` and
+`export_requests_har`, and the offline Wasm runs `run_wasm_function` and
+`get_wasm_runs`, since running captured code discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
 it, `get_source_format` also lays out request and response bodies. Content is
@@ -1248,6 +1248,47 @@ timeline. Each row names its root event and the
 contract, bounds and invalidation rules are in
 [request-index-v2.md](request-index-v2.md). The `reb://` stored-evidence
 workspace answers it through the bundled backend.
+
+### Request HAR export
+
+`GET /api/requests/har` (`export_requests_har`) writes every row a
+`get_requests` selection holds, in its order and with no row limit, as one HAR
+1.2 archive (format `reb-request-har-v1` in `log._reb`). It takes the same
+filter and sort parameters and no page, or `rows` with the exact row IDs to
+export in their order (Traffic's selected request); `limit`, `offset`,
+`since` and `locate` are refused. The rows are fixed when
+the export starts. The archive is streamed while each batch of 64 rows and
+then each row's byte range of the event store is read, so memory holds one
+batch and one row's records however long the session is. At most two exports
+run at once; a third is refused with 429.
+
+- Each hop is one entry. A redirect keeps its own entry with the redirect
+  status and `redirectURL`, the next hop's URL. A request that failed, was
+  interrupted or is still open keeps its entry with status 0. `_reb.outcome`
+  says which: `redirect`, `failed`, `incomplete`, `pending`, `complete`, or
+  `unlinked` for a row with no request start to join hops to, such as a
+  memory-cache reuse.
+- A hop's URL is its `request_target` child, read whole from its verified
+  artifact past 116 bytes. Without request content the session kept only the
+  host, and `_reb.url_complete` is false.
+- Headers come from the hop's header blocks (`get_request_headers`): the
+  `network` block that was sent, else the browser's provisional block,
+  named in `_reb.request_headers`. Credential values are written only with
+  `credential_values=1`. Below it such a header has an empty value,
+  `_reb_withheld` and its byte length, and its cookies are left out.
+- The request body and the final response body are written when their
+  artifacts were retained whole and verify. A response body that is not
+  UTF-8 is base64 (`content.encoding`), and a request body that is not is in
+  `postData._reb_base64`. `_reb.response_body` keeps the body's case.
+- Native capture keeps a monotonic clock only. `startedDateTime` is that
+  clock written as an offset from the Unix epoch, exact in order and spacing
+  and not a calendar date, and `log.comment` says so.
+- The status line is sent before the rows are read. A failure after it closes
+  the archive as valid JSON with `log._reb.complete` false and the error.
+
+Through MCP it is a content read, listed only with `--allow-content`, which
+also passes `credential_values=1`. A large archive returns a structural
+summary, so a model narrows it with `rows` or the filters.
 
 ## Cross-references
 

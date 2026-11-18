@@ -150,11 +150,11 @@ struct Member {
     records: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct Target {
-    scheme: Option<String>,
-    port: u16,
-    length: u32,
-    text: String,
+pub(crate) struct Target {
+    pub(crate) scheme: Option<String>,
+    pub(crate) port: u16,
+    pub(crate) length: u32,
+    pub(crate) text: String,
 }
 /// A `response_body` child (protocol/native-network-v3.md), decoded as
 /// `decodeResponseBodyRecord` does.
@@ -365,6 +365,8 @@ pub struct RequestQuery {
     third_party: bool,
     from: u64,
     to: u64,
+    /// An export's exact rows by ID, in their order, in place of a selection.
+    rows: Vec<String>,
     raw: String,
 }
 /// The `q` grammar Traffic search uses; port of `trafficParseFilter`.
@@ -453,9 +455,56 @@ fn glob(pattern: &str, text: &str) -> bool {
     }
     text.len() >= at + last.len() && text.ends_with(last)
 }
+/// The keys an export takes: a whole selection in list order, never a page.
+pub const EXPORT_KEYS: [&str; 14] = [
+    "through",
+    "sort",
+    "order",
+    "q",
+    "tab_id",
+    "domain",
+    "type",
+    "named",
+    "failed",
+    "invert",
+    "hide_internal",
+    "third_party",
+    "from_ns",
+    "to_ns",
+];
 impl RequestQuery {
     pub fn parse(q: &Query, raw: &str) -> Result<Self> {
         q.only(&QUERY_KEYS, &[])?;
+        Self::read(q, raw)
+    }
+    /// The selection of an export, which also takes `extra` keys of its own,
+    /// or with `rows` the exact rows it names, in that order.
+    pub fn parse_export(q: &Query, raw: &str, extra: &[&str]) -> Result<Self> {
+        let mut keys = extra.to_vec();
+        keys.push("rows");
+        q.only(&EXPORT_KEYS, &keys)?;
+        let mut query = Self::read(q, raw)?;
+        if let Some(list) = q.one("rows")? {
+            if EXPORT_KEYS
+                .iter()
+                .any(|key| q.one(key).is_ok_and(|value| value.is_some()))
+            {
+                return Err(Error::bad(
+                    "rows names the exact rows to export; pass no selection parameter with it",
+                ));
+            }
+            query.rows = list.split(',').map(str::to_owned).collect();
+            if query
+                .rows
+                .iter()
+                .any(|id| id.is_empty() || id.len() > MAX_TEXT)
+            {
+                return Err(Error::bad("rows lists request row IDs separated by commas"));
+            }
+        }
+        Ok(query)
+    }
+    fn read(q: &Query, raw: &str) -> Result<Self> {
         let count = |key: &str| -> Result<Option<usize>> {
             q.one(key)?
                 .map(|_| q.number(key, None, 64, false).map(|n| n as usize))
@@ -568,6 +617,7 @@ impl RequestQuery {
                     ids
                 }
             },
+            rows: Vec::new(),
             raw: raw.into(),
         })
     }
@@ -1246,7 +1296,7 @@ fn body_document(row: &Row) -> Value {
                 "sha256": snapshot.sha256, "record_sequence": sequence.to_string(), "record_time_ns": time.to_string()})),
     })
 }
-fn decode_target(event: &Value) -> Option<Target> {
+pub(crate) fn decode_target(event: &Value) -> Option<Target> {
     let payload = event["payload"].as_str()?;
     let (sequence, parent) = (
         canonical(&event["sequence_number"], true)?,
@@ -3142,6 +3192,52 @@ impl RequestIndex {
         }))
     }
 
+    /// Every row `query` selects, in its order with no page bound, as the
+    /// ordinals an export reads in batches; and the index state they are from.
+    pub fn export_rows(&mut self, query: &RequestQuery) -> Result<(Vec<i64>, Value)> {
+        self.read()?;
+        let position = self.position.clone().expect("a refreshed index");
+        let through = query.through.unwrap_or(self.total).min(self.total);
+        let ordinals = if query.rows.is_empty() {
+            self.select(query, through)?;
+            collect(
+                self.db()
+                    .prepare_cached("SELECT ordinal FROM temp.selection ORDER BY position")
+                    .sql()?
+                    .query_map([], |row| row.get::<_, i64>(0)),
+            )?
+        } else {
+            let mut statement = self
+                .db()
+                .prepare_cached("SELECT ordinal FROM rows WHERE id = ?1")
+                .sql()?;
+            let mut ordinals = Vec::with_capacity(query.rows.len());
+            for id in &query.rows {
+                let ordinal: Option<i64> = statement
+                    .query_row([id], |row| row.get(0))
+                    .optional()
+                    .sql()?;
+                ordinals.push(
+                    ordinal
+                        .ok_or_else(|| Error::new(404, format!("No request row has ID {id}")))?,
+                );
+            }
+            ordinals
+        };
+        let index = json!({
+            "epoch": position.epoch, "indexed_end": position.indexed_to.to_string(),
+            "store_end": position.file_end.to_string(), "complete": self.is_caught_up(),
+            "through": through,
+        });
+        Ok((ordinals, index))
+    }
+    /// The `get_requests` documents of these rows, read as they are now.
+    pub fn export_documents(&mut self, ordinals: &[i64]) -> Result<Vec<Value>> {
+        ordinals
+            .iter()
+            .map(|ordinal| self.row_document(*ordinal))
+            .collect()
+    }
     pub fn respond(&mut self, query: &RequestQuery, etag: Option<&str>) -> Result<Answer> {
         self.read()?;
         let position = self.position.clone().expect("a refreshed index");

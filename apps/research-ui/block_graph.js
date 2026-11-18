@@ -231,7 +231,7 @@ function createBlockGraphView(root, options = {}) {
   let frame = 0, active = false, cssW = 0, cssH = 0, dpr = 1, miniDirty = true, miniImage = null, onError = null, needsFit = false, fitted = false;
   // Per graph: edges out of and into each block, blocks in address order, and
   // each stub's slot under its block, so a key press never scans the graph.
-  let outs = null, ins = null, order = null, rank = null, byFirstRow = null, stubSlot = null, lowerRows = null;
+  let outs = null, ins = null, order = null, rank = null, byFirstRow = null, exits = null, lowerRows = null;
   // The Find in the drawn rows: matched rows and blocks, and the one shown.
   let find = null;
   // Label chips drawn in the last frame, in graph units, for pointer hits.
@@ -365,7 +365,7 @@ function createBlockGraphView(root, options = {}) {
     for (let edge = 0; edge < count; edge += 1) {
       if (box[edge * 4] > rv || box[edge * 4 + 2] < view.x || box[edge * 4 + 1] > bv || box[edge * 4 + 3] < view.y) continue;
       const kind = graph.kind[edge], near = touches(edge);
-      if (lod === 2 && chipText(edge) && (near || edge === focusEdge || isStub(edge) || BLOCK_GRAPH_LABELED.has(kind))) labeled.push(edge);
+      if (lod === 2 && !isStub(edge) && chipText(edge) && (near || edge === focusEdge || BLOCK_GRAPH_LABELED.has(kind))) labeled.push(edge);
       if (edge === focusEdge) { focused = true; continue; }
       const entry = batch(near ? picked : plain, kind);
       trace(entry.path, edge, corner);
@@ -391,17 +391,14 @@ function createBlockGraphView(root, options = {}) {
     }
     return labeled;
   }
-  /** What an edge's chip says: a stub names the block it reaches. */
-  function chipText(edge) {
-    const label = graph.labels[edge];
-    if (graph.to[edge] >= 0 && layout.stub?.[edge]) return `→ ${blockLabel(graph.to[edge])}${label ? ` (${label})` : ''}`;
-    if (graph.to[edge] < 0) return label || 'unresolved';
-    return label || '';
-  }
-  /** Each label is a chip beside its stroke, never over it: a stub's below
-   * the stub, any other where the edge arrives, beside its last segment and
-   * clear of the card it enters. Edges arriving at one point stack their
-   * chips away from the card. */
+  /** What an edge's chip says. */
+  const chipText = edge => graph.labels[edge] || '';
+  /** An exit row, in the words the layout sized it with. */
+  const exitText = edge => blockGraphLayout.exitText(graph, edge);
+  /** Each label is a chip beside its stroke, never over it: where the edge
+   * arrives, beside its last segment and clear of the card it enters. Edges
+   * arriving at one point stack their chips away from the card. Exits are
+   * labeled in their cards. */
   function drawChips(edges, rv, bv) {
     ctx.setLineDash([]); ctx.font = `10px ${tokens.mono}`; ctx.textBaseline = 'middle';
     const h = 14, taken = new Map(), pts = layout.points;
@@ -409,13 +406,10 @@ function createBlockGraphView(root, options = {}) {
     for (const edge of edges) {
       const full = chipText(edge), text = full.length > 32 ? `${full.slice(0, 31)}…` : full, w = text.length * chipCharW + 8;
       const end = layout.pointStart[edge + 1] - 1, kind = graph.kind[edge], tx = pts[end * 2], ty = pts[end * 2 + 1];
+      const dx = tx - pts[end * 2 - 2], dy = ty - pts[end * 2 - 1], shift = stack(`${tx},${ty}`);
       let x, y;
-      if (isStub(edge)) { x = tx - w / 2; y = ty + 4 + stubSlot[edge] * (h + 2); }
-      else {
-        const dx = tx - pts[end * 2 - 2], dy = ty - pts[end * 2 - 1], shift = stack(`${tx},${ty}`);
-        if (Math.abs(dy) >= Math.abs(dx)) { x = tx + 5; y = dy >= 0 ? ty - h - 4 - shift : ty + 4 + shift; }
-        else { x = dx > 0 ? tx - w - 6 : tx + 6; y = ty - h - 3 - shift; }
-      }
+      if (Math.abs(dy) >= Math.abs(dx)) { x = tx + 5; y = dy >= 0 ? ty - h - 4 - shift : ty + 4 + shift; }
+      else { x = dx > 0 ? tx - w - 6 : tx + 6; y = ty - h - 3 - shift; }
       if (x > rv || y > bv || x + w < view.x || y + h < view.y) continue;
       const near = touches(edge) || edge === focusEdge;
       ctx.fillStyle = tokens.card; ctx.strokeStyle = near ? tokens.selection : tokens[styleOf(kind)[0]]; ctx.lineWidth = near ? 1.5 : 1;
@@ -512,9 +506,27 @@ function createBlockGraphView(root, options = {}) {
       ctx.fillText(mnemonic, mnemonicX, line);
       if (rest) { ctx.fillStyle = tokens.muted; ctx.fillText(rest, restX, line); }
     }
-    if (graph.flags[block] & 32) { ctx.fillStyle = tokens.faint; ctx.fillText(count ? 'more rows past the byte budget' : 'rows past the byte budget', x + m.padX, top + count * m.rowH + m.rowH - 4); }
+    drawExits(block, x, top + count * m.rowH + m.padY, w);
   }
-  const blockLabel = block => graph.flags[block] & 16 ? 'gap' : options.blockLabel?.(graph, block) ?? `loc_${graph.offsets[block].toString(16)}`;
+  /** A block's exits under a hairline, each a row a click follows: the
+   * arrow in its edge's color, the text bright when the edge is the selected
+   * block's or focused. */
+  function drawExits(block, x, top, w) {
+    const first = exits.start[block], last = exits.start[block + 1];
+    if (first === last) return;
+    ctx.fillStyle = tokens.line; ctx.fillRect(x + m.padX, top - m.padY / 2 - 0.5, w - m.padX * 2, 1);
+    const room = Math.max(4, Math.floor((w - m.padX * 2) / m.charW));
+    for (let i = first; i < last; i += 1) {
+      const edge = exits.list[i], ry = top + (i - first) * m.rowH, line = ry + m.rowH - 4, full = exitText(edge);
+      const text = full.length > room ? `${full.slice(0, room - 1)}…` : full, near = edge === focusEdge || touches(edge);
+      if (edge === focusEdge) { ctx.fillStyle = tokens.selectionSoft; ctx.fillRect(x + 1, ry, w - 2, m.rowH); }
+      ctx.fillStyle = near ? tokens.selection : tokens[styleOf(graph.kind[edge])[0]]; ctx.fillText(text.slice(0, 1), x + m.padX, line);
+      ctx.fillStyle = near ? tokens.text : tokens.muted; ctx.fillText(text.slice(1), x + m.padX + m.charW, line);
+      chips.push({x: x + 1, y: ry, w: w - 2, h: m.rowH, edge});
+    }
+  }
+  // The layout's names, which it also sizes exit rows with.
+  const blockLabel = block => blockGraphLayout.blockName(graph, block);
   function drawMinimap() {
     if (!miniCtx) return;
     miniWrap.hidden = !layout;
@@ -669,9 +681,9 @@ function createBlockGraphView(root, options = {}) {
     order = Int32Array.from({length: n}, (_, i) => i).sort((a, b) => graph.offsets[a] - graph.offsets[b] || a - b);
     rank = new Int32Array(n); order.forEach((block, i) => { rank[block] = i; });
     byFirstRow = Int32Array.from({length: n}, (_, i) => i).sort((a, b) => graph.firstRow[a] - graph.firstRow[b] || a - b);
-    // A block's stubs sit side by side in edge order, as the layout placed them.
-    stubSlot = new Int32Array(edges); const slots = new Int32Array(n);
-    for (let e = 0; e < edges; e += 1) if (graph.to[e] < 0 || current.layout.stub?.[e]) stubSlot[e] = slots[graph.from[e]]++;
+    // A block's exits are rows under its instructions, in edge order, as the
+    // layout sized and placed them.
+    exits = blockGraphGroups(n, edges, e => (graph.to[e] < 0 || current.layout.stub?.[e] ? graph.from[e] : -1));
     lowerRows = null;
   }
   /** The key lists the edge kinds this graph has, in this graph's words. */
@@ -776,8 +788,8 @@ function createBlockGraphView(root, options = {}) {
     return best;
   }
   /** A click on an edge goes to its far end: the target when the click was
-   * nearer the source, else the source. A stub's chip goes to the block the
-   * stub reaches; an unresolved edge has only its source. */
+   * nearer the source, else the source. A stub's exit row goes to the block
+   * the stub reaches; an unresolved edge has only its source. */
   function followClick(edge, gx, gy, chip = false) {
     const from = graph.from[edge], to = graph.to[edge];
     if (to < 0) { select(from, -1, {reveal: true, edge}); return; }
@@ -965,7 +977,7 @@ function createBlockGraphView(root, options = {}) {
       active = false; root.hidden = true;
       if (frame) { cancelAnimationFrame(frame); frame = 0; }
       observer?.disconnect(); observer = null; themeObserver?.disconnect();
-      current = graph = starts = layout = null; outs = ins = order = rank = byFirstRow = stubSlot = lowerRows = find = null; miniImage = null; selectedBlock = -1; focusEdge = -1;
+      current = graph = starts = layout = null; outs = ins = order = rank = byFirstRow = exits = lowerRows = find = null; miniImage = null; selectedBlock = -1; focusEdge = -1;
       triskelJob = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true; renderFind();
       canvas.width = 0; canvas.height = 0; minimap.width = 300; minimap.height = 220;
       setState('empty', '');
@@ -1312,8 +1324,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset, fi
  * share a renderer and never a node set, so they cannot merge into one CFG. */
 function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}) {
   const runner = createBlockGraphRunner();
-  const view = createBlockGraphView(host, {runner, onReveal: offset => onReveal?.(offset), onSelect: offset => onReveal?.(offset), retry: () => render(), titleOf: graph => graph.title,
-    blockLabel: (graph, block) => graph.evidence === 'observed' ? `step ${graph.offsets[block]}` : `loc_${graph.offsets[block].toString(16)}`});
+  const view = createBlockGraphView(host, {runner, onReveal: offset => onReveal?.(offset), onSelect: offset => onReveal?.(offset), retry: () => render(), titleOf: graph => graph.title});
   host.hidden = true;
   let isOpen = false, layer = 'declared', generation = 0;
   const switcher = document.createElement('div'); switcher.className = 'block-graph-layers'; switcher.setAttribute('role', 'group'); switcher.setAttribute('aria-label', 'Graph layer');

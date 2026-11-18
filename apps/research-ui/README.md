@@ -2504,12 +2504,17 @@ falls into, on a tinted band that names what it held (`end ×3, block`), and
 the header counts it, as in `120 blocks (60 folded)`. The folded block keeps
 its first offset, where branches land, and every row stays in the document.
 Edge kind is never color alone: true is solid, false is dashed, table arms are
-dotted, exception edges are long-dashed, calls are dotted, and an unresolved
-target is a labeled stub that adds no block. The selection owns the accent
-color, which no edge kind uses. A label is a chip beside its stroke where the
-edge arrives, never over it: case lists, exception, call and unresolved labels
-always, true and false only for the selected block's edges, since the stroke
-already says which. The footer keeps the limits on screen: declared
+dotted, exception edges are long-dashed and calls are dotted. A transfer with
+no target in the function (a tail call, an exception that may leave it, a
+label past the decoded frames) adds no block: it is an exit row at the foot of
+its card, under a hairline, such as `→ throw: may escape`, with a short tick
+out of the card's right side at that row, and the card is sized to hold it.
+Exception edges run from each block that may throw to every handler that may
+catch it, named by the clause (`catch 0`, `catch_all`); a call that may throw
+says `call: catch 0`. The selection owns the accent color, which no edge kind
+uses. A label is a chip beside its stroke where the edge arrives, never over
+it: case lists, exception and call labels always, true and false only for the
+selected block's edges, since the stroke already says which. The footer keeps the limits on screen: declared
 reachability is not observed execution, and a complete drawing is not a proof.
 Nothing here sets `cfg.complete`.
 
@@ -2521,7 +2526,8 @@ with a halo and named in the status line; Alt+Down follows an outgoing edge to
 its target and Alt+Up an incoming one to its source, and the edge followed
 stays picked, so the opposite key returns. A click on an edge, or its chip,
 goes to its far end: the target when the click was nearer the source, else the
-source. A stub's chip goes to the block the stub reaches.
+source. An exit row is picked like an edge, and goes to the block it names
+when it names one.
 
 **Find** (Cmd+F) searches the drawn function's rows while Graph is open, as a
 case-insensitive, single-line literal. Matched blocks are outlined, matched
@@ -2534,8 +2540,11 @@ drawn runs when it is.
 Unreached code never changes how reachable code is drawn: dominators come from
 the blocks the declared entries reach. Each set of connected unreached blocks
 is drawn below the reachable graph, and an edge from it into reachable code is
-a short stub under its block whose chip names the block it reaches (`→
-loc_1a2`).
+an exit row of its card that names the block it reaches (`→ loc_1a2`). A set
+with several entries, such as a dead switch whose unchosen arms have no
+predecessor, nests as its text does: each later entry hangs under the set's
+last block before it, so the joins its arms share stay inside the switch
+instead of the whole set laying out flat.
 
 The layout runs in a Web Worker, and the region layout in
 `block_graph_layout.js` is always what is drawn first, at any size. When the
@@ -2569,9 +2578,11 @@ case, it continues the spine and the rest sit beside it, so a chain of any
 length stays one column. A wider layer becomes side-by-side boxes, ordered by
 where their edges come from so few cross, and wraps into a grid past six; a
 `br_table`'s arms are ordered by case. Arms with no way out stack on the spine. Edges leaving a
-box share a bottom port, and every back edge to a loop shares one rail. The
-dominator tree is computed with Semi-NCA in close to linear time, and rails
-reuse columns, so even a function of 100,000 blocks lays out in seconds.
+box share a bottom port, and every back edge to a loop shares one rail. Rails
+reuse columns, but a rail inside another's rows always takes a column inside
+it, so nested rails never cross; two that only overlap cross once, whichever
+way they sit. The dominator tree is computed with Semi-NCA in close to linear
+time, so even a function of 100,000 blocks lays out in about a second.
 
 A failure says why. Retry is offered only when trying again can help: the
 evidence service unreachable or busy, or the layout worker stopped. A refused

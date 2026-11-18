@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Block graph model and layout. Offline: no rendered layout or focus is claimed.
-// Rendered acceptance is test25BlockGraphInSources in the packaged-app gate.
+// Rendered acceptance is test25BlockGraphInSources and, for the measured
+// shapes, test25bBlockGraphShapes in the packaged-app gate.
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
@@ -98,15 +99,22 @@ const pointsOf = (layout, edge) => {
   assert(unreached.y[2] > unreached.y[0], 'unreached blocks sit below the reachable graph');
 }
 {
-  // An unresolved target is a labeled stub, never a node or an invented target.
-  const graph = fixture(1, [[0, -1, KIND.unresolved, 'indirect tail call']]);
-  const layout = lay(graph), stub = pointsOf(layout, 0);
-  assert.equal(stub.length, 2, 'stub edge has its own short segment');
-  assert.equal(graph.count, 1, 'an unresolved target adds no block');
+  // An unresolved target is a labeled exit, never a node or an invented
+  // target: a row in its card, sized there, with a short tick out of the
+  // card's right side at that row.
+  const graph = fixture(2, [[0, 1], [0, -1, KIND.unresolved, 'indirect tail call'], [0, -1, KIND.unresolved, 'throw: may escape']]);
+  const starts = layoutModule.rowStarts(graph.rows), sizes = layoutModule.nodeSizes(graph, starts, layoutModule.METRICS), M = layoutModule.METRICS;
+  assert.deepEqual([...sizes.exits], [2, 0], 'a card counts its exits');
+  assert.equal(sizes.h[0], sizes.h[1] + M.padY + 2 * M.rowH, 'and its height holds a row for each under a separator');
+  assert(sizes.w[0] >= '→ throw: may escape'.length * M.charW + 2 * M.padX, 'and its width the widest exit');
+  const layout = layoutModule.layoutGraph(graph, sizes, M), right = layout.x[0] + layout.w[0], bottom = layout.y[0] + layout.h[0] - M.padY;
+  assert.deepEqual(pointsOf(layout, 1), [[right, bottom - 1.5 * M.rowH], [right + 8, bottom - 1.5 * M.rowH]], 'the first exit leaves at its row');
+  assert.deepEqual(pointsOf(layout, 2), [[right, bottom - 0.5 * M.rowH], [right + 8, bottom - 0.5 * M.rowH]], 'the second at the row below');
+  assert.equal(graph.count, 2, 'an unresolved target adds no block');
 }
 {
   // Dominators come from the reachable blocks only: dead code that jumps into
-  // live code is a stub below, and never moves the live drawing.
+  // live code is an exit of its card, and never moves the live drawing.
   const live = [[0, 1], [1, 2, KIND.taken], [1, 3, KIND.not_taken], [2, 3]];
   const alone = lay(fixture(4, live)), dead = fixture(6, [...live, [4, 5], [5, 2, KIND.branch]]);
   dead.flags[4] = dead.flags[5] = 0;
@@ -114,8 +122,18 @@ const pointsOf = (layout, edge) => {
   for (let block = 0; block < 4; block += 1) assert.equal(withDead.y[block], alone.y[block], `live block ${block} keeps its row`);
   assert(withDead.y[4] > withDead.y[3] && withDead.y[5] > withDead.y[3], 'unreached blocks sit below the reachable graph');
   assert.equal(withDead.stub[5], 1, 'an edge from dead code into live code is a stub');
-  assert.equal(pointsOf(withDead, 5).length, 2, 'drawn as a short stub under its block, not a route');
+  assert.equal(pointsOf(withDead, 5)[0][0], withDead.x[5] + withDead.w[5], 'drawn as an exit of its card, not a route');
   assert.equal(withDead.stub[4], 0, 'an edge inside the dead component is routed');
+  // A dead switch whose unchosen arm (6) is an entry of its own: that entry
+  // is entered from the block before it, so the join the arms share (8)
+  // stays under the switch instead of every entry hanging from the root.
+  const deadSwitch = fixture(10, [[0, 1], [1, 2], [2, 3], [4, 5, KIND.table, '0'], [4, 7, KIND.table_default], [5, 8, KIND.branch], [6, 8, KIND.branch], [7, 8, KIND.branch], [8, 9]]);
+  for (let block = 4; block < 10; block += 1) deadSwitch.flags[block] = 0;
+  const nested = lay(deadSwitch);
+  assert.equal(overlaps(nested, 10), 0, 'no card of a dead switch overlaps');
+  assert(nested.y[6] >= nested.y[5] + nested.h[5], 'a later entry sits under the block before it, as its text nests');
+  assert(nested.y[8] >= Math.max(...[5, 6, 7].map(arm => nested.y[arm] + nested.h[arm])), 'the join its arms share sits below all of them');
+  assert(nested.y[9] > nested.y[8], 'and the rest of the arm follows it');
 }
 {
   // A switch ladder (a guard per case, each case leaving to one exit) is one
@@ -231,7 +249,7 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
 {
   // Triskel through the backend route: its coordinates and waypoints make a
   // second drawing, kept whatever its size with how it compares, an
-  // unresolved edge keeps its stub, and the region layout stays when the
+  // unresolved edge keeps its exit row, and the region layout stays when the
   // route fails.
   const graph = fixture(4, [[0, 1, KIND.taken], [0, 2, KIND.not_taken], [1, 3], [2, 3], [3, -1, KIND.unresolved, 'unknown target']]);
   const starts = layoutModule.rowStarts(graph.rows), sizes = layoutModule.nodeSizes(graph, starts, layoutModule.METRICS);
@@ -256,7 +274,8 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   assert.deepEqual([result.layout.x[0], result.layout.y[0]], [m + 100, m], 'Triskel places the blocks');
   assert.deepEqual(pointsOf(result.layout, 0).at(-1), [m + 50, m + 100], 'and routes the edges');
   const stub = pointsOf(result.layout, 4);
-  assert.equal(stub.length, 2); assert.equal(stub[0][1], result.layout.y[3] + result.layout.h[3], 'an unresolved edge keeps its stub under its block');
+  assert.equal(stub.length, 2); const {padY, rowH} = layoutModule.METRICS;
+  assert.deepEqual(stub[0], [result.layout.x[3] + result.layout.w[3], result.layout.y[3] + result.layout.h[3] - padY - rowH / 2], 'an unresolved edge keeps its exit row');
   assert.equal(overlaps(result.layout, 4), 0);
   const region = base(), regionWidth = region.layout.width - 2 * m;
   answers.push({body: laid(100000)});
@@ -361,6 +380,7 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}),
     requestAnimationFrame: fn => { frames.push(fn); return frames.length; }, cancelAnimationFrame: () => {}, devicePixelRatio: 1, console};
   runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph_layout.js', import.meta.url), 'utf8')}
 ${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
 globalThis.create = createBlockGraphView;`, context);
   const calls = [], skips = [], found = [];
@@ -435,6 +455,48 @@ globalThis.create = createBlockGraphView;`, context);
   assert.match($('.block-graph-selection').textContent, /^loc_8 /, '] steps to the next block in address order');
   view.setState('loading', 'Decoding basic blocks\u2026');
   assert(!shown(triskel), 'never over a load in progress');
+  frames = [];
+}
+{
+  // Exits drawn in their cards: a click on a stub's row goes to the block it
+  // reaches, a click on an unresolved one focuses that edge. A no-op 2D
+  // context lets the view draw, so the rows it hits are the ones it drew.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="host"></div></body></html>');
+  const noop = new Proxy({}, {get: (_, key) => (key === 'measureText' ? () => ({width: 6.6}) : () => {}), set: () => true});
+  window.HTMLCanvasElement.prototype.getContext = () => noop;
+  const rect = {left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700};
+  let frames = [];
+  const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}), Path2D: class { rect() {} moveTo() {} lineTo() {} arcTo() {} closePath() {} },
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; }, cancelAnimationFrame: () => {}, devicePixelRatio: 1, console, ResizeObserver: class { observe() {} disconnect() {} }};
+  runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph_layout.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
+globalThis.create = createBlockGraphView;`, context);
+  const host = document.querySelector('#host');
+  host.getBoundingClientRect = () => rect;
+  const view = context.create(host, {runner: {run: async () => null, skip() {}, cancel() {}}});
+  for (const element of host.querySelectorAll('*')) element.getBoundingClientRect = () => (element.matches('.block-graph-stage, .block-graph-canvas') ? rect : {left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0});
+  view.activate();
+  const graph = fixture(4, [[0, 1], [1, -1, KIND.unresolved, 'throw'], [2, 3], [3, 1, KIND.exception, 'catch 0']], {title: 'func 1', status: 'decoded', instructions: 4, omissions: [], evidence: 'declared'});
+  graph.flags[2] = graph.flags[3] = 0;
+  const layout = {...lay(graph), engine: {name: 'layered'}};
+  view.setResult({graph, starts: layoutModule.rowStarts(graph.rows), layout});
+  const flush = () => { while (frames.length) frames.shift()(); };
+  flush();
+  const {padY, rowH} = layoutModule.METRICS, ox = layout.width / 2 - rect.width / 2, oy = layout.height / 2 - rect.height / 2;
+  const canvas = host.querySelector('.block-graph-canvas');
+  // linkedom has no :focus-visible; a pointer press never selects through it.
+  canvas.focus = () => {};
+  const click = (gx, gy) => {
+    canvas.dispatchEvent(Object.assign(new Event('pointerdown'), {clientX: gx - ox, clientY: gy - oy, pointerId: 1}));
+    canvas.dispatchEvent(Object.assign(new Event('pointerup'), {clientX: gx - ox, clientY: gy - oy, pointerId: 1}));
+    flush();
+  };
+  const exitRow = block => [layout.x[block] + layout.w[block] / 2, layout.y[block] + layout.h[block] - padY - rowH / 2];
+  click(...exitRow(3));
+  assert.match(host.querySelector('.block-graph-selection').textContent, /^loc_8 .*edge \u2190 loc_18/, 'a stub\'s row goes to the block it reaches');
+  click(...exitRow(1));
+  assert.match(host.querySelector('.block-graph-selection').textContent, /^loc_8 .*edge \u2192 unresolved/, 'an unresolved row focuses its edge');
   frames = [];
 }
 {

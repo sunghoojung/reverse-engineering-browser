@@ -1,5 +1,6 @@
 /* Layered single-entry-region layout for basic-block graphs. Runs off the main
- * thread as a Web Worker; also loads as CommonJS for the offline check, which
+ * thread as a Web Worker; the page loads it too, for the block and exit-row
+ * names the view draws, and it loads as CommonJS for the offline check, which
  * loads graph_layout_client.js first.
  *
  * A dominator subtree is entered only at its root, so each subtree becomes a
@@ -15,8 +16,9 @@
  *
  * Dominance is computed over the blocks reachable from the declared entries
  * only. Each set of connected unreachable blocks is its own component below the
- * reachable graph, and an edge from it into reachable code is a labeled stub:
- * dead code never changes how live code is drawn. */
+ * reachable graph, nested as its text is, and an edge from it into reachable
+ * code is an exit row of its card: dead code never changes how live code is
+ * drawn. */
 'use strict';
 
 const blockGraphLayout = (() => {
@@ -32,7 +34,10 @@ const blockGraphLayout = (() => {
    * runs no instruction, so the drawing folds it into the block it falls into
    * and shows its rows as one summary row; the document keeps every block. */
   const STRUCTURAL = new Set(['end', 'block', 'loop', 'nop', 'try', 'try_table', 'delegate']);
-  const REACHABLE = 2, EXIT = 4, TRAP = 8, GAP = 16, ROWS_CUT = 32;
+  const REACHABLE = 2, EXIT = 4, TRAP = 8, GAP = 16;
+  /** How far an exit's stroke leaves its card: inside the 32 px column gap and
+   * short of the innermost rail, 14 px out. */
+  const EXIT_TICK = 8;
 
   /** Normalizes a `wasm-block-graph-v1` document. Refuses an unknown shape. */
   function wasmGraph(doc, starts = null) {
@@ -56,7 +61,7 @@ const blockGraphLayout = (() => {
     const folds = new Uint8Array(total);
     for (let index = 0; index + 1 < total; index += 1) {
       const [, byteEnd, first, count, , flags] = block[index], next = block[index + 1];
-      if (degree[index] !== 1 || !count || flags & (EXIT | TRAP | ROWS_CUT)) continue;
+      if (degree[index] !== 1 || !count || flags & (EXIT | TRAP)) continue;
       const edge = doc.edges[only[index]];
       if (edge[1] !== index + 1 || kindOf(edge) !== KIND.fallthrough || (flags & REACHABLE) !== (next[5] & REACHABLE)) continue;
       if (first + count !== next[2] || byteEnd !== next[0]) continue;
@@ -206,10 +211,45 @@ const blockGraphLayout = (() => {
   /** Rows a card draws: a folded run is one summary row above the block's own. */
   const shownRows = (graph, node) => graph.rowCount[node] - (graph.folded?.[node] ?? 0) + (graph.folded?.[node] ? 1 : 0);
 
+  /** The name a card header shows; an exit row names its target with it. */
+  const blockName = (graph, block) => (graph.flags[block] & GAP ? 'gap' : graph.evidence === 'observed' ? `step ${graph.offsets[block]}` : `loc_${graph.offsets[block].toString(16)}`);
+  /** An exit row: `→ loc_1f · catch 0` for a stub, `→ throw` for a transfer
+   * with no resolved target. */
+  const exitText = (graph, edge) => {
+    const label = graph.labels[edge];
+    return graph.to[edge] >= 0 ? `→ ${blockName(graph, graph.to[edge])}${label ? ` · ${label}` : ''}` : `→ ${label || 'unresolved'}`;
+  };
+  /** Edges a card lists under its rows, its exits: a transfer with no
+   * resolved target, and a stub, an edge from a block the entries never reach
+   * into one they do. Listed in the card, an exit's label takes room in the
+   * layout and never sits over another edge. */
+  function exitEdges(graph) {
+    const n = graph.count, edges = graph.from.length, out = grouped(n, edges, e => graph.from[e]), live = new Uint8Array(n), stack = [];
+    for (const root of graph.roots ?? [0]) if (root >= 0 && root < n && !live[root]) { live[root] = 1; stack.push(root); }
+    while (stack.length) {
+      const node = stack.pop();
+      for (let i = out.start[node]; i < out.start[node + 1]; i += 1) {
+        const target = graph.to[out.list[i]];
+        if (target >= 0 && !live[target]) { live[target] = 1; stack.push(target); }
+      }
+    }
+    const exit = new Uint8Array(edges);
+    for (let e = 0; e < edges; e += 1) exit[e] = graph.to[e] < 0 || (!live[graph.from[e]] && live[graph.to[e]]) ? 1 : 0;
+    return exit;
+  }
+
+  /** Card sizes: the widest row, or exit row, and every row's height. Exit
+   * rows sit under the instruction rows after a padY separator. */
   function nodeSizes(graph, starts, m) {
     const w = new Float32Array(graph.count), h = new Float32Array(graph.count);
+    const exit = exitEdges(graph), exits = new Int32Array(graph.count), exitChars = new Int32Array(graph.count);
+    for (let e = 0; e < exit.length; e += 1) {
+      if (!exit[e]) continue;
+      const from = graph.from[e];
+      exits[from] += 1; exitChars[from] = Math.max(exitChars[from], exitText(graph, e).length);
+    }
     for (let node = 0; node < graph.count; node += 1) {
-      let chars = 0;
+      let chars = exitChars[node];
       const folded = graph.folded?.[node] ?? 0, first = graph.firstRow[node] + folded, last = graph.firstRow[node] + graph.rowCount[node];
       if (folded) {
         const start = starts[graph.firstRow[node]];
@@ -226,9 +266,9 @@ const blockGraphLayout = (() => {
       }
       const label = 9 + Math.ceil(Math.log10(Math.max(graph.offsets[node], 1) + 1));
       w[node] = Math.max(m.minW, Math.ceil(Math.min(chars, MAX_ROW_CHARS) * m.charW + m.padX * 2), Math.ceil(label * m.charW + 44));
-      h[node] = m.headerH + m.padY * 2 + Math.max(1, shownRows(graph, node)) * m.rowH;
+      h[node] = m.headerH + m.padY * 2 + Math.max(1, shownRows(graph, node)) * m.rowH + (exits[node] ? m.padY + exits[node] * m.rowH : 0);
     }
-    return {w, h};
+    return {w, h, exits};
   }
 
   /** Edge indices grouped by `key(e)`, which skips an edge by returning -1. */
@@ -269,6 +309,60 @@ const blockGraphLayout = (() => {
     };
   }
 
+  /** `count` slots holding -1 or a value, and the largest value from a slot
+   * to the end, each in O(log count). */
+  function maxTree(count) {
+    let size = 1;
+    while (size < count) size *= 2;
+    const tree = new Int32Array(2 * size).fill(-1);
+    return {
+      set(index, value) {
+        let i = index + size; tree[i] = value;
+        for (i >>= 1; i; i >>= 1) tree[i] = Math.max(tree[2 * i], tree[2 * i + 1]);
+      },
+      max(from) {
+        let best = -1;
+        for (let l = from + size, r = 2 * size; l < r; l >>= 1, r >>= 1) {
+          if (l & 1) best = Math.max(best, tree[l++]);
+          if (r & 1) best = Math.max(best, tree[--r]);
+        }
+        return best;
+      }
+    };
+  }
+
+  /** `count` columns, all free at first: `take(min)` claims the lowest free
+   * one at or after `min` and `release` frees one, each in O(log count). */
+  function freeTree(count) {
+    let size = 1;
+    while (size < count) size *= 2;
+    const tree = new Int32Array(2 * size);
+    tree.fill(1, size, size + count);
+    for (let i = size - 1; i; i -= 1) tree[i] = tree[2 * i] + tree[2 * i + 1];
+    const update = (column, value) => {
+      let i = column + size; tree[i] = value;
+      for (i >>= 1; i; i >>= 1) tree[i] = tree[2 * i] + tree[2 * i + 1];
+    };
+    return {
+      take(min) {
+        let i = min + size;
+        if (!tree[i]) {
+          // Up to the first right sibling with a free column, then down to it.
+          while (i > 1 && ((i & 1) || !tree[i + 1])) i >>= 1;
+          if (i <= 1) throw new RangeError('No free rail column.');
+          for (i += 1; i < size;) i = tree[2 * i] ? 2 * i : 2 * i + 1;
+        }
+        update(i - size, 0);
+        return i - size;
+      },
+      release(column) { update(column, 1); }
+    };
+  }
+
+  /** The middle of exit row `slot` of a card at `top`, `height` tall, with
+   * `count` exits: they end padY above the card's bottom. */
+  const exitY = (top, height, count, slot, m) => top + height - m.padY - (count - slot - 0.5) * m.rowH;
+
   const emptyLayout = () => ({x: new Float32Array(0), y: new Float32Array(0), w: new Float32Array(0), h: new Float32Array(0), pointStart: new Uint32Array(1), points: new Float32Array(0),
     box: new Float32Array(0), back: new Uint8Array(0), stub: new Uint8Array(0), direct: 0, width: 0, height: 0});
 
@@ -285,12 +379,14 @@ const blockGraphLayout = (() => {
     // dominators; an edge to a block still on the stack is a retreat edge.
     const pre = new Int32Array(N).fill(-1), vertex = new Int32Array(N), parent = new Int32Array(N), post = new Int32Array(n);
     const retreat = new Uint8Array(edgeCount), onStack = new Uint8Array(n), live = new Uint8Array(n), isRoot = new Uint8Array(n);
-    const stackNode = new Int32Array(n), stackEdge = new Int32Array(n);
+    const stackNode = new Int32Array(n), stackEdge = new Int32Array(n), entered = new Int32Array(n).fill(-1);
     let clock = 1, finished = 0;
     pre[V] = 0; vertex[0] = V;
-    const walk = root => {
-      isRoot[root] = 1;
-      pre[root] = clock; vertex[clock] = root; parent[clock] = 0; clock += 1;
+    // `via` enters a root from an earlier block for dominance only; no edge
+    // is drawn for it.
+    const walk = (root, via = -1) => {
+      if (via < 0) isRoot[root] = 1; else entered[root] = via;
+      pre[root] = clock; vertex[clock] = root; parent[clock] = via < 0 ? 0 : pre[via]; clock += 1;
       let top = 0; stackNode[0] = root; stackEdge[0] = out.start[root]; onStack[root] = 1;
       while (top >= 0) {
         const node = stackNode[top];
@@ -306,11 +402,30 @@ const blockGraphLayout = (() => {
     };
     for (const root of graph.roots ?? [0]) if (root >= 0 && root < n && pre[root] < 0) walk(root);
     for (let v = 0; v < n; v += 1) if (pre[v] >= 0) live[v] = 1;
-    for (let v = 0; v < n; v += 1) if (pre[v] < 0) walk(v);
     // An edge from unreachable code into reachable code is a stub.
     const stub = new Uint8Array(edgeCount);
     for (let e = 0; e < edgeCount; e += 1) if (to[e] >= 0 && !live[from[e]] && live[to[e]]) stub[e] = 1;
     const counted = e => to[e] >= 0 && !stub[e];
+    // Unreached code splits into components by the edges among it. One with
+    // several entries, such as a dead switch whose unchosen arms are entries
+    // of their own, would hang every join they share from V and lay out flat.
+    // Instead each later entry is entered from the component's last block
+    // before it, as its text nests. Every block that reaches an entry is
+    // walked after it, so this is still a depth-first tree for Semi-NCA.
+    const component = new Int32Array(n).map((_, index) => index);
+    const componentOf = v => { while (component[v] !== v) { component[v] = component[component[v]]; v = component[v]; } return v; };
+    for (let e = 0; e < edgeCount; e += 1) {
+      if (!counted(e) || live[from[e]]) continue;
+      const a = componentOf(from[e]), b = componentOf(to[e]);
+      if (a !== b) component[Math.max(a, b)] = Math.min(a, b);
+    }
+    const lastIn = new Int32Array(n).fill(-1);
+    for (let v = 0; v < n; v += 1) {
+      if (live[v]) continue;
+      const id = componentOf(v);
+      if (pre[v] < 0) walk(v, lastIn[id]);
+      lastIn[id] = v;
+    }
 
     // Semi-NCA dominators (Georgiadis): semidominators by path-compressed
     // evaluation, then each immediate dominator as the nearest common ancestor
@@ -331,7 +446,7 @@ const blockGraphLayout = (() => {
     };
     for (let i = N - 1; i >= 1; i -= 1) {
       const w = vertex[i];
-      let s = isRoot[w] ? 0 : semi[i];
+      let s = isRoot[w] ? 0 : entered[w] >= 0 ? semi[evaluate(pre[entered[w]])] : semi[i];
       for (let k = into.start[w]; k < into.start[w + 1]; k += 1) {
         const c = semi[evaluate(pre[from[into.list[k]]])];
         if (c < s) s = c;
@@ -457,8 +572,8 @@ const blockGraphLayout = (() => {
       return shaped;
     };
     // The virtual root's reachable children lay out like any parent's, the
-    // entry first; observed runs stack in order. Unreachable children are
-    // grouped into components by the edges among them, one box each.
+    // entry first; observed runs stack in order. Each unreached component
+    // has one: the first entry walked, its lowest block. Each is a box.
     const rootLayers = () => {
       const kids = kidsOf(V), reached = kids.filter(kid => live[kid]), dead = kids.filter(kid => !live[kid]);
       // Declared entries come first, in the order they are declared.
@@ -469,13 +584,8 @@ const blockGraphLayout = (() => {
         ? reached.sort((a, b) => (entries.get(a) ?? n) - (entries.get(b) ?? n) || pos[a] - pos[b]).map(kid => [kid])
         : layersOf(reached);
       if (!dead.length) return layers;
-      const find = new Int32Array(n).map((_, index) => index);
-      const root = v => { while (find[v] !== v) { find[v] = find[find[v]]; v = find[v]; } return v; };
-      for (let e = 0; e < edgeCount; e += 1) if (counted(e) && !live[from[e]]) { const a = root(from[e]), b = root(to[e]); if (a !== b) find[Math.max(a, b)] = Math.min(a, b); }
-      const components = new Map();
-      for (const kid of dead) { const id = root(kid); if (!components.has(id)) components.set(id, []); components.get(id).push(kid); }
       // In block order: the component of the lowest block first.
-      layers.push({components: [...components.entries()].sort((a, b) => a[0] - b[0]).map(entry => entry[1])});
+      layers.push({components: dead.sort((a, b) => a - b).map(kid => [kid])});
       return layers;
     };
 
@@ -695,18 +805,34 @@ const blockGraphLayout = (() => {
           if (known) { known.low = Math.min(known.low, span.low); known.high = Math.max(known.high, span.high); known.routes.push(r); }
           else spans.set(key, {low: span.low, high: span.high, routes: [r]});
         }
-        // Greedy interval coloring with the lowest free column, in O(k log k).
-        // Column 0 is outermost, and of two spans from one row the longer
-        // takes it, so nested spans nest their rails.
-        const sorted = [...spans.values()].sort((a, b) => a.low - b.low || b.high - a.high);
-        const busy = heap((a, b) => a.high - b.high || a.column - b.column), free = heap((a, b) => a - b);
-        let columns = 0;
-        for (const span of sorted) {
-          while (busy.size && busy.peek().high < span.low) free.push(busy.pop().column);
-          span.column = free.size ? free.pop() : columns++;
-          busy.push(span);
-          for (const r of span.routes) r.rail = span.column;
+        // Greedy interval coloring, in O(k log k). Column 0 is outermost. A
+        // span takes the lowest free column inside every active span that
+        // holds its rows, so a nested rail never crosses the one around it;
+        // two spans that only overlap cross once whichever way they sit.
+        if (spans.size < 2) {
+          for (const span of spans.values()) for (const r of span.routes) r.rail = 0;
+          return spans.size;
         }
+        const sorted = [...spans.values()].sort((a, b) => a.low - b.low || b.high - a.high);
+        const byHigh = sorted.map((_, index) => index).sort((a, b) => sorted[a].high - sorted[b].high || a - b);
+        const rank = new Int32Array(sorted.length);
+        byHigh.forEach((index, at) => { rank[index] = at; });
+        const holding = maxTree(sorted.length), free = freeTree(sorted.length);
+        const busy = heap((a, b) => sorted[a].high - sorted[b].high);
+        let columns = 0;
+        sorted.forEach((span, index) => {
+          while (busy.size && sorted[busy.peek()].high < span.low) {
+            const done = busy.pop();
+            free.release(sorted[done].column); holding.set(rank[done], -1);
+          }
+          // Active spans ending at or after this one's end hold it.
+          let first = 0, last = byHigh.length;
+          while (first < last) { const mid = (first + last) >> 1; if (sorted[byHigh[mid]].high < span.high) first = mid + 1; else last = mid; }
+          span.column = free.take(holding.max(first) + 1);
+          columns = Math.max(columns, span.column + 1);
+          holding.set(rank[index], span.column); busy.push(index);
+          for (const r of span.routes) r.rail = span.column;
+        });
         return columns;
       };
       box.hasForwardExit = routes.some(r => r.code === DEST_T);
@@ -840,7 +966,8 @@ const blockGraphLayout = (() => {
         r.points = points;
       }
     }
-    const stubCount = new Int32Array(n);
+    const exitCount = new Int32Array(n), exitSlot = new Int32Array(n);
+    for (let e = 0; e < edgeCount; e += 1) if (to[e] < 0 || stub[e]) exitCount[from[e]] += 1;
     const pointStart = new Uint32Array(edgeCount + 1);
     const flat = [];
     const bounds = new Float32Array(edgeCount * 4);
@@ -859,9 +986,8 @@ const blockGraphLayout = (() => {
       const u = from[e], v = to[e];
       const anchor = edgeAnchor = flat.length;
       if (v < 0 || stub[e]) {
-        const slotIndex = stubCount[u]++;
-        const sx = x[u] + nodeW[u] / 2 + (slotIndex === 0 ? 0 : (slotIndex % 2 ? 1 : -1) * Math.ceil(slotIndex / 2) * 28);
-        pushPoint(sx, y[u] + nodeH[u]); pushPoint(sx, y[u] + nodeH[u] + 18);
+        const ey = exitY(y[u], nodeH[u], exitCount[u], exitSlot[u]++, m);
+        pushPoint(x[u] + nodeW[u], ey); pushPoint(x[u] + nodeW[u] + EXIT_TICK, ey);
       } else if (!edgeRoutes[e]) {
         pushPoint(x[u] + nodeW[u] / 2, y[u] + nodeH[u]);
         pushPoint(x[v] + nodeW[v] / 2, y[v]);
@@ -923,15 +1049,17 @@ const blockGraphLayout = (() => {
     const laid = outcome.result, x = new Float32Array(n), y = new Float32Array(n);
     for (let v = 0; v < n; v += 1) { x[v] = m.margin + laid.nodes[v][0]; y[v] = m.margin + laid.nodes[v][1]; }
     const routeOf = new Map(resolved.map((e, i) => [e, laid.edges[i]]));
-    const edgeCount = graph.from.length, pointStart = new Uint32Array(edgeCount + 1), flat = [], bounds = new Float32Array(edgeCount * 4), stubs = new Int32Array(n);
+    const edgeCount = graph.from.length, pointStart = new Uint32Array(edgeCount + 1), flat = [], bounds = new Float32Array(edgeCount * 4);
+    const exitCount = new Int32Array(n), exitSlot = new Int32Array(n);
+    for (let e = 0; e < edgeCount; e += 1) if (!routeOf.has(e)) exitCount[graph.from[e]] += 1;
     let maxX = m.margin + laid.width, maxY = m.margin + laid.height;
     for (let e = 0; e < edgeCount; e += 1) {
       pointStart[e] = flat.length / 2;
       const anchor = flat.length, from = graph.from[e];
       if (!routeOf.has(e)) {
-        // An edge with no resolved target, or from unreachable code, keeps its stub under the block.
-        const slot = stubs[from]++, sx = x[from] + layout.w[from] / 2 + (slot === 0 ? 0 : (slot % 2 ? 1 : -1) * Math.ceil(slot / 2) * 28);
-        flat.push(sx, y[from] + layout.h[from], sx, y[from] + layout.h[from] + 18);
+        // An exit keeps its row in the card and its tick beside it.
+        const ey = exitY(y[from], layout.h[from], exitCount[from], exitSlot[from]++, m);
+        flat.push(x[from] + layout.w[from], ey, x[from] + layout.w[from] + EXIT_TICK, ey);
       } else flat.push(...graphLayoutClient.routePoints(routeOf.get(e), m.margin, m.margin));
       let minX = Infinity, minY = Infinity, hiX = -Infinity, hiY = -Infinity;
       for (let i = anchor; i < flat.length; i += 2) { minX = Math.min(minX, flat[i]); hiX = Math.max(hiX, flat[i]); minY = Math.min(minY, flat[i + 1]); hiY = Math.max(hiY, flat[i + 1]); }
@@ -955,7 +1083,7 @@ const blockGraphLayout = (() => {
   const transfer = ({graph, starts, layout}) => [graph.offsets, graph.ends, graph.firstRow, graph.rowCount, graph.instructionCount, graph.flags, graph.folded, graph.from, graph.to, graph.kind,
     starts, layout.x, layout.y, layout.w, layout.h, layout.pointStart, layout.points, layout.box, layout.back, layout.stub].filter(Boolean).map(array => array.buffer);
 
-  return {METRICS, wasmGraph, vmStaticGraph, vmObservedGraph, rowStarts, nodeSizes, shownRows, layoutGraph, runAsync, withTriskel, transfer};
+  return {METRICS, wasmGraph, vmStaticGraph, vmObservedGraph, rowStarts, nodeSizes, shownRows, blockName, exitText, layoutGraph, runAsync, withTriskel, transfer};
 })();
 
 if (typeof module === 'object' && module?.exports) module.exports = blockGraphLayout;

@@ -157,34 +157,34 @@ const capturedExportFormats = (() => {
     "        _url(request[\"url\"])\n",
     "    except (ValueError, TypeError):\n",
     "        issues.append(\"Python requires a complete ASCII HTTP(S) URL without credentials, fragment or controls.\")\n",
-    "    forbidden = {\n",
-    "        \"authorization\", \"proxy-authorization\", \"cookie\", \"cookie2\", \"set-cookie\",\n",
-    "        \"host\", \"content-length\", \"connection\", \"transfer-encoding\", \"accept-charset\",\n",
-    "        \"accept-encoding\", \"access-control-request-headers\", \"access-control-request-method\",\n",
-    "        \"date\", \"dnt\", \"expect\", \"keep-alive\", \"origin\", \"referer\", \"te\", \"trailer\",\n",
-    "        \"upgrade\", \"user-agent\", \"via\", \"content-encoding\",\n",
+    "    # The HTTP client computes framing and connection headers; every other\n",
+    "    # captured header is sent as captured.\n",
+    "    framing = {\n",
+    "        \"host\", \"content-length\", \"connection\", \"transfer-encoding\", \"keep-alive\",\n",
+    "        \"proxy-connection\", \"te\", \"trailer\", \"upgrade\",\n",
     "    }\n",
     "    headers = request[\"headers\"]\n",
     "    if not isinstance(headers, list) or len(headers) > 64:\n",
     "        issues.append(\"At most 64 complete header pairs are required.\")\n",
     "    else:\n",
-    "        seen, total = set(), 0\n",
+    "        seen = set()\n",
     "        for pair in headers:\n",
     "            if not isinstance(pair, list) or len(pair) != 2 or any(type(v) is not str for v in pair):\n",
     "                issues.append(\"Malformed header pair.\")\n",
     "                continue\n",
     "            name, value = pair\n",
     "            lower = name.lower()\n",
-    "            total += len(name.encode(\"utf-8\")) + len(value.encode(\"utf-8\"))\n",
     "            if (not re.fullmatch(r\"[!#$%&'*+.^_`|~0-9A-Za-z-]+\", name) or len(name) > 128 or\n",
-    "                    len(value) > 2048 or value.strip() != value or\n",
+    "                    len(value) > 65536 or value.strip() != value or\n",
     "                    any(ord(char) < 32 or ord(char) > 126 for char in value)):\n",
     "                issues.append(\"Only bounded ASCII header values without surrounding whitespace or controls are supported.\")\n",
     "            if lower in seen:\n",
     "                issues.append(\"Duplicate header names are unsupported.\")\n",
     "            seen.add(lower)\n",
-    "            if lower in forbidden or lower.startswith((\"sec-\", \"proxy-\")):\n",
-    "                issues.append(\"Credential, transport, browser-controlled or encoded-body headers require manual reconstruction.\")\n",
+    "            if lower in framing:\n",
+    "                issues.append(\"Framing and connection headers are computed by the HTTP client; remove them from the reviewed request.\")\n",
+    "            if lower == \"content-encoding\":\n",
+    "                issues.append(\"Encoded request bodies require manual reconstruction from original bytes.\")\n",
     "            if lower in [\"x-http-method\", \"x-http-method-override\", \"x-method-override\"]:\n",
     "                if any(part.strip().upper() in [\"CONNECT\", \"TRACE\", \"TRACK\"] for part in value.split(\",\")):\n",
     "                    issues.append(\"Unsupported method override.\")\n",
@@ -209,8 +209,6 @@ const capturedExportFormats = (() => {
     "                        charset_seen = True\n",
     "                    elif name.startswith(\"charset*\"):\n",
     "                        issues.append(\"Extended or segmented charset declarations are unsupported.\")\n",
-    "        if total > 16384:\n",
-    "            issues.append(\"Header text exceeds 16 KiB.\")\n",
     "    body = request[\"body\"]\n",
     "    if not isinstance(body, str) or len(body.encode(\"utf-8\")) > 65536:\n",
     "        issues.append(\"A complete UTF-8 text body of at most 64 KiB is required.\")\n",
@@ -362,7 +360,7 @@ const capturedExportFormats = (() => {
     "    if HTTP_CLIENT not in [\"requests\", \"httpx\"]:\n",
     "        raise ClientError(\"unsupported_transport\", \"Unsupported Python HTTP client.\")\n",
     "    if os.environ.get(\"SSLKEYLOGFILE\"):\n",
-    "        raise ClientError(\"unsupported_environment\", \"Disable TLS key logging before using this credential-omitting client.\")\n",
+    "        raise ClientError(\"unsupported_environment\", \"Disable TLS key logging before sending captured headers, which can hold credentials.\")\n",
     "    seconds = policy[\"timeoutMs\"] / 1000\n",
     "    payload = request[\"body\"].encode(\"utf-8\")\n",
     "    expected_target = _url(request[\"url\"])[1]\n",
@@ -500,7 +498,7 @@ function pythonProject(source, mode, httpClient) {
   // Keep the shared evidence/privacy warnings, but describe this archive's transport.
   project.provenance.limitations=project.provenance.limitations.map(value =>
     value.startsWith('Default Go uses ') ? 'Python uses standard '+httpClient+' with certificate verification and per-operation timeouts, not an overall deadline. No browser profile, ambient proxy, cookie carryover or automatic decompression.' :
-    value.startsWith('Both clients omit ') ? 'This Python client omits browser credentials and stops redirects; optional response checks must be configured explicitly.' : value);
+    value.startsWith('Both clients send ') ? 'This Python client sends only the reviewed headers, credentials and cookies included, keeps no cookie jar and stops redirects; optional response checks must be configured explicitly.' : value);
   project.provenance.client_capabilities={language:'python',http_client:httpClient,dependency_version:versions[httpClient],
     timeout_scope:'per-operation',overall_deadline:false,redirect_following:false,ambient_proxy:false,cookies:'omit',browser_profile:false};
   files.find(file=>file.path===prefix+'provenance.json').text=JSON.stringify(project.provenance,null,2)+'\n';
@@ -525,7 +523,7 @@ The remaining request, origin, redirectPolicy, cookiePolicy, standard transport 
 
 ## Bounds and limitations
 
-Inputs/configuration are at most 1 MiB and JSON depth 64. Request text is at most 64 KiB; headers at most 64 pairs/16 KiB. Python requires ASCII URLs and header values. Preparation that changes the captured URL path/query is rejected; supply a deliberately reviewed URL rather than assuming equivalence. Encoded query spellings may therefore require manual reconstruction, especially with Requests. Multipart, binary, truncated and credential-bearing inputs remain evidence, not runnable defaults. Responses retain at most 64 KiB body and 128 headers/64 KiB header text. Configured checks cannot pass truncated responses.
+Inputs/configuration are at most 1 MiB and JSON depth 64. Request text is at most 64 KiB; headers at most 64 pairs with values of at most 64 KiB, sent as reviewed: Authorization, Cookie, Origin, Referer and User-Agent included, framing and hop-by-hop headers excluded. Python requires ASCII URLs and header values. Preparation that changes the captured URL path/query is rejected; supply a deliberately reviewed URL rather than assuming equivalence. Encoded query spellings may therefore require manual reconstruction, especially with Requests. Multipart, binary, truncated and credential-bearing inputs remain evidence, not runnable defaults. Responses retain at most 64 KiB body and 128 headers/64 KiB header text. Configured checks cannot pass truncated responses.
 
 Header casing/order, automatic headers, TLS, compression, CORS and browser state differ. Neither provider implements the optional Go browser-profile adapter or browser fingerprint parity. Error reports preserve an unknown server outcome after an attempted send; inspect state before another deliberate request. There is no response persistence, streaming API or login/credential acquisition.
 

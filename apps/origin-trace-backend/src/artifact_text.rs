@@ -13,6 +13,7 @@ use crate::{
     artifact_query::ArtifactFilter,
     error::{Code, Error, Result, check_cancelled},
     evidence,
+    request_headers::Credentials,
     result_cache::{Cache, kept},
 };
 use base64::Engine;
@@ -30,14 +31,16 @@ use std::{
 
 /// Header blocks and cookie lists hold `Cookie`, `Set-Cookie`, `Authorization`
 /// and cookie values, which `get_request_headers` and `get_request_cookies`
-/// withhold by name. Text pages and search never return them, so those values
-/// stay withheld at every permission level, Full access included.
+/// withhold by name unless the caller asks for them. Text pages and search
+/// return them only on that same request, so below Full access, where
+/// `reb-api mcp` never asks, those values stay withheld.
 pub const WITHHELD_KINDS: [&str; 3] = ["request_headers", "response_headers", "cookie_list"];
 
-fn withheld(artifact: &Value) -> bool {
-    artifact["kind"]
-        .as_str()
-        .is_some_and(|kind| WITHHELD_KINDS.contains(&kind))
+fn withheld(artifact: &Value, credentials: Credentials) -> bool {
+    credentials == Credentials::Withheld
+        && artifact["kind"]
+            .as_str()
+            .is_some_and(|kind| WITHHELD_KINDS.contains(&kind))
 }
 
 /// The largest page in source bytes, before the escaped-size budget applies.
@@ -167,14 +170,15 @@ pub fn page(
     offset: usize,
     length: usize,
     encoding: Encoding,
+    credentials: Credentials,
 ) -> Result<Value> {
     let total = artifact["byte_size"]
         .as_u64()
         .ok_or_else(|| Error::new(500, "Artifact content byte size is invalid"))?
         as usize;
-    if withheld(artifact) {
+    if withheld(artifact, credentials) {
         return Err(Error::bad(
-            "Header blocks and cookie lists are not returned as text. Read them with get_request_headers or get_request_cookies, which withhold credential and cookie values.",
+            "Header blocks and cookie lists are returned as text only with credential_values=1, which reb-api mcp passes only with --allow-content. Read them with get_request_headers or get_request_cookies, which withhold credential and cookie values otherwise.",
         ));
     }
     if offset > total {
@@ -248,6 +252,7 @@ pub struct SearchRequest {
     pub filter: ArtifactFilter,
     pub offset: u64,
     pub limit: usize,
+    pub credentials: Credentials,
 }
 
 impl SearchRequest {
@@ -561,10 +566,11 @@ pub fn search(root: &Path, request: &SearchRequest, cancelled: &AtomicBool) -> R
     type Key = (String, bool, bool, Vec<(String, String)>);
     static SEARCHES: Cache<Key, Tally> = Mutex::new(Vec::new());
     let pattern = request.pattern()?;
-    // Header blocks and cookie lists are never searched, so a match can
-    // never show a credential or cookie value.
+    // Header blocks and cookie lists are searched only when credential
+    // values were asked for, so no other match can show one.
     let selected = evidence::select_artifacts(root, |artifact| {
-        !withheld(artifact) && request.filter.matches(&evidence::public_artifact(artifact))
+        !withheld(artifact, request.credentials)
+            && request.filter.matches(&evidence::public_artifact(artifact))
     })?;
     let set = selected
         .iter()
@@ -693,6 +699,7 @@ mod tests {
             filter: ArtifactFilter::default(),
             offset: 0,
             limit: SEARCH_MAX_LIMIT,
+            credentials: Credentials::Withheld,
         }
     }
 

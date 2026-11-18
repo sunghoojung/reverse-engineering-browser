@@ -1,7 +1,6 @@
 use crate::{
     analysis_catalog,
     analyst::Analyst,
-    artifact_lookup::ArtifactLookupCache,
     artifact_map, artifact_query, artifact_text,
     capture::{self, Capture, StopRefusal},
     config::{CaptureMode, Options},
@@ -16,7 +15,7 @@ use crate::{
     native_debugger_pause::NativeDebuggerPause,
     origin_trace,
     owned_vm_debugger::OwnedVmDebugger,
-    request_cookies, request_headers,
+    request_cookies, request_har, request_headers,
     request_index::{self, RequestIndex},
     session_context, session_summary, source_facts, source_format, validation, vm, wasm, wasm_diff,
     wasm_graph, wasm_identification, wasm_pseudocode, wasm_value_flow,
@@ -37,9 +36,9 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
-use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 83] = [
+const UI_ASSETS: [&str; 84] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -98,6 +97,7 @@ const UI_ASSETS: [&str; 83] = [
     "traffic_filter.js",
     "traffic_columns.js",
     "traffic_overview.js",
+    "traffic_copy.js",
     "captured_client.js",
     "captured_export_formats.js",
     "vm_semantics.js",
@@ -190,6 +190,8 @@ pub struct App {
     capture: Mutex<()>,
     io: Arc<Semaphore>,
     package_io: Arc<Semaphore>,
+    /// Streamed request exports, which run for as long as their client reads.
+    exports: Arc<Semaphore>,
     analysis: Mutex<Option<VmDocumentsCache>>,
     /// Cursors of the current cross-reference selection; one entry only.
     xrefs: Arc<crate::xrefs::Cursors>,
@@ -206,7 +208,11 @@ pub struct App {
     requests: Arc<Mutex<RequestIndex>>,
     initiator_frames: Arc<std::sync::Mutex<crate::request_stack::InitiatorFrames>>,
     observation_sites: Arc<std::sync::Mutex<crate::request_stack::ObservationSites>>,
-    artifact_lookup: Arc<Mutex<ArtifactLookupCache>>,
+    /// Serializes artifact lookups before they take a shared reader slot, so
+    /// callers waiting on the manifest index cannot hold every slot.
+    artifact_lookup: Arc<Mutex<()>>,
+    /// Identity indexes of the event and edge stores, which Origin Trace walks.
+    indexes: Arc<std::sync::Mutex<crate::event_index::Indexes>>,
     /// Bounds concurrent `/api/events/wait` callers; a full pool refuses.
     event_waiters: Arc<Semaphore>,
     live_browser: LiveBrowser,
@@ -215,27 +221,14 @@ pub struct App {
     /// Script-text digests of immutable artifacts, by artifact SHA-256.
     text_digests: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
-fn cached_artifact_lookup(
-    mut cache: OwnedMutexGuard<ArtifactLookupCache>,
-    root: &Path,
-    id: &str,
-    stream: impl FnOnce(std::time::Instant) -> Result<Value>,
-) -> Result<Value> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let indexed = cache.find_until(root, id, deadline);
-    // Noncacheable full scans retain their reader permit and deadline,
-    // but must not serialize unrelated lookups behind this cache guard.
-    drop(cache);
-    match indexed? {
-        Some(value) => Ok(value),
-        None => stream(deadline),
-    }
-}
+/// How often, and for how long at a time, the background indexer folds.
+const INDEX_INTERVAL: Duration = Duration::from_secs(1);
+/// How long an event poll folds appended records into the gap totals; the
+/// background fold keeps the index within a second of the store.
+const EVENT_TOTALS_FOLD: Duration = Duration::from_millis(100);
 
 impl App {
     pub async fn stop(&self) {
-        let mut index = self.requests.clone().lock_owned().await;
-        let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
         self.analyst.stop();
         self.native_console.stop().await;
         if self.owned_vm_debugger.stop().await.is_err() {
@@ -302,6 +295,10 @@ impl App {
             live_browser: LiveBrowser::new(&options),
             lifecycle: Capture::new(&options),
             requests: Arc::new(Mutex::new(RequestIndex::new(&options.store))),
+            indexes: Arc::new(std::sync::Mutex::new(crate::event_index::Indexes::new(
+                &options.store,
+                &options.trace_store,
+            ))),
             initiator_frames: Arc::default(),
             observation_sites: Arc::default(),
             invocation_sites,
@@ -311,6 +308,7 @@ impl App {
             capture: Mutex::new(()),
             io: Arc::new(Semaphore::new(4)),
             package_io: Arc::new(Semaphore::new(2)),
+            exports: Arc::new(Semaphore::new(2)),
             analysis: Mutex::new(None),
             xrefs: Arc::default(),
             gaps: Arc::default(),
@@ -318,17 +316,55 @@ impl App {
             wasm_names: Arc::default(),
             analyst_etag: Arc::default(),
             events: Arc::new(Mutex::new(event_window::EventWindowCache::default())),
-            artifact_lookup: Arc::new(Mutex::new(ArtifactLookupCache::default())),
+            artifact_lookup: Arc::default(),
             event_waiters: Arc::new(Semaphore::new(event_query::MAX_WAITERS)),
         });
         app.native_console.arm_live_bridge().await;
-        let index = app.requests.clone();
+        // Keeps the disk indexes up with their stores, so a lookup in a long
+        // session reads an index instead of building one, and opening stored
+        // evidence indexes it once in the background.
+        let weak = Arc::downgrade(&app);
         tokio::spawn(async move {
-            let mut ticks = tokio::time::interval(request_index::PERSIST_INTERVAL);
+            let mut ticks = tokio::time::interval(INDEX_INTERVAL);
             loop {
                 ticks.tick().await;
-                let mut index = index.clone().lock_owned().await;
-                let _ = tokio::task::spawn_blocking(move || index.maintain()).await;
+                let Some(app) = weak.upgrade() else {
+                    break;
+                };
+                let (root, indexes) = (app.options.artifacts.clone(), app.indexes.clone());
+                drop(app);
+                let _ = tokio::task::spawn_blocking(move || {
+                    let deadline = std::time::Instant::now() + INDEX_INTERVAL;
+                    let _ = crate::artifact_lookup::catch_up(&root, deadline);
+                    indexes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .catch_up(deadline)
+                })
+                .await;
+            }
+        });
+        // The request index folds in slices, so a Traffic read waits for the
+        // lock at most one slice while a long store is first indexed.
+        let weak = Arc::downgrade(&app);
+        tokio::spawn(async move {
+            loop {
+                let Some(app) = weak.upgrade() else {
+                    break;
+                };
+                let index = app.requests.clone();
+                drop(app);
+                let mut index = index.lock_owned().await;
+                let behind = tokio::task::spawn_blocking(move || {
+                    let folded =
+                        index.refresh(std::time::Instant::now() + request_index::FOLD_SLICE);
+                    folded.is_ok() && !index.is_caught_up()
+                })
+                .await
+                .unwrap_or(false);
+                if !behind {
+                    tokio::time::sleep(INDEX_INTERVAL).await;
+                }
             }
         });
         app
@@ -336,13 +372,31 @@ impl App {
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new().fallback(handle).with_state(self.clone())
     }
-    async fn read_event_window(&self, limit: usize) -> Result<event_window::EventWindow> {
+    /// The newest events up to `end`, a record boundary, or the store's end.
+    async fn read_event_window(
+        &self,
+        limit: usize,
+        end: Option<u64>,
+    ) -> Result<event_window::EventWindow> {
         // Serialize cache owners before acquiring shared reader slots. Waiting
         // event polls cannot consume all four slots needed by other readers.
         let mut cache = self.events.clone().lock_owned().await;
         let path = self.options.store.clone();
-        self.blocking(move || cache.read(&path, limit, validate_event))
+        self.blocking(move || cache.read(&path, limit, validate_event, end))
             .await
+    }
+    /// The event store's gap totals, or None while its index catches up.
+    async fn event_totals(&self) -> Option<crate::event_index::Totals> {
+        let indexes = self.indexes.clone();
+        self.blocking(move || {
+            indexes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .event_totals(std::time::Instant::now() + EVENT_TOTALS_FOLD)
+        })
+        .await
+        .ok()
+        .flatten()
     }
     async fn blocking<T: Send + 'static>(
         &self,
@@ -1121,18 +1175,24 @@ impl App {
                     return self.filtered_events(&q, limit, headers).await;
                 }
                 let capture = self.capture_view();
-                etag = Some(event_window::etag(
-                    &self.options.store,
-                    &format!(
-                        "{}-{limit}-{}",
-                        capture.mode.as_str(),
-                        capture.state.as_str()
-                    ),
-                ));
-                if matches_etag(headers, etag.as_deref()) {
-                    return Ok(not_modified(etag.as_deref().unwrap()));
+                // Counts cover the whole store once its index has caught up,
+                // and the window then ends where the index does, so both
+                // describe the same bytes. Until then they are the scanned
+                // tail's, and say so.
+                let totals = self.event_totals().await;
+                let mut window = self
+                    .read_event_window(limit, totals.as_ref().map(|totals| totals.indexed_to))
+                    .await?;
+                if let Some(totals) = totals {
+                    window.sequence_gaps = totals.sequence_gaps;
+                    window.sequence_gaps_saturated = totals.sequence_gaps_saturated;
+                    window.queue_drops = totals.queue_drops;
+                    window.queue_drops_saturated = totals.queue_drops_saturated;
+                    window.named_gaps = totals.named_gaps;
+                    window.coverage["scope"] = json!("store");
+                    window.coverage["scan_start"] = json!("0");
+                    window.coverage["malformed_lines"] = json!(totals.malformed_lines);
                 }
-                let window = self.read_event_window(limit).await?;
                 let mut result = json!({
                     "count": window.events.len(),
                     "sequence_gaps": window.sequence_gaps.to_string(),
@@ -1158,7 +1218,7 @@ impl App {
                         serde_json::from_str(include_str!("../assets/demo-canvas.json"))
                             .expect("Demo canvas capture");
                 }
-                result
+                return Ok(tagged_json(&result, headers, ""));
             }
             "/api/requests" => {
                 let query = request_index::RequestQuery::parse(&q, raw_query)?;
@@ -1197,6 +1257,15 @@ impl App {
                         Ok(response)
                     }
                 };
+            }
+            "/api/requests/har" => {
+                let credentials = q.credentials()?;
+                let query = request_index::RequestQuery::parse_export(
+                    &q,
+                    raw_query,
+                    &["credential_values"],
+                )?;
+                return self.requests_har(query, credentials).await;
             }
             "/api/artifacts" => {
                 q.only(&artifact_query::ARTIFACT_QUERY_KEYS, &["limit"])?;
@@ -1269,45 +1338,27 @@ impl App {
                     self.receiver_connected().await,
                     capture.state.as_str(),
                 );
-                // The store's tag is taken before the request index reads it.
-                let before = event_window::etag(
-                    &self.options.store,
-                    &session_summary::etag_key(
-                        &format!("{state:?}"),
-                        &evidence::resource_etag(
-                            &self.options.artifacts.join("manifest.jsonl"),
-                            "",
-                        ),
-                    ),
-                );
                 // Per request, so they come from the request index's rows. The
                 // index is held only for its counts, and a failure leaves the
                 // rest of the summary standing.
                 let index = self.requests.clone().lock_owned().await;
-                let (counts, progress) = self
+                let counts = self
                     .blocking(move || {
                         let mut index = index;
-                        let counts = index.response_bodies().map_err(|error| error.message);
-                        Ok((counts, index.progress_marker()))
+                        Ok(index.response_bodies().map_err(|error| error.message))
                     })
                     .await?;
-                // The counts can be mid-store on an unchanged file, so the tag
-                // names the progress they were read at. An answer without them
-                // is not tagged, so a revalidation reads the index again.
-                etag = counts
-                    .is_ok()
-                    .then(|| session_summary::etag(&before, &progress));
-                if matches_etag(headers, etag.as_deref()) {
-                    return Ok(not_modified(etag.as_deref().unwrap()));
-                }
-                let store = self.options.store.clone();
+                let indexes = self.indexes.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
                 let content_limits = session_context::content_limits(&self.options);
                 let mut summary = self
                     .blocking(move || {
+                        let mut indexes = indexes
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let mut summary = session_summary::build(
-                            &store,
+                            &mut indexes,
                             &artifacts,
                             &session_summary::CaptureState {
                                 instance_id: &instance,
@@ -1318,13 +1369,17 @@ impl App {
                                 artifact_receiver_connected: state.4,
                                 content_limits,
                             },
+                            std::time::Instant::now() + session_summary::FOLD,
                         )?;
                         session_summary::add_response_bodies(&mut summary, counts);
                         Ok(summary)
                     })
                     .await?;
                 summary["capture_state"] = json!(state.5);
-                summary
+                // Read from the indexes in a few rows, so it is tagged by its
+                // bytes: an answer counted mid-store never revalidates as
+                // the complete one.
+                return Ok(tagged_json(&summary, headers, ""));
             }
             "/api/origin-trace" => {
                 let request = q.required("request_id")?.to_owned();
@@ -1362,27 +1417,31 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
+                let indexes = self.indexes.clone();
                 self.blocking(move || {
+                    let mut indexes = indexes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let deadline = std::time::Instant::now() + crate::event_index::TRACE_DEADLINE;
                     origin_trace::build(
-                        &evidence::recent(&options.store, 10000, 4096, "event")?,
-                        &evidence::recent(&options.trace_store, 30000, 4096, "origin trace edge")?,
-                        &evidence::artifacts(&options.artifacts, 10000)?,
+                        &mut indexes.trace(&options.artifacts, deadline)?,
                         &request,
                         session.as_deref(),
                         process,
                         sequence.as_deref(),
-                        Some(&options.artifacts),
+                        &options.artifacts,
                     )
                 })
                 .await?
             }
             "/api/request-headers" => {
-                q.only(&["session_id", "request_id"], &[])?;
+                q.only(&["session_id", "request_id", "credential_values"], &[])?;
                 let session = q.required("session_id")?.to_owned();
                 let request = q.required("request_id")?.to_owned();
                 for key in ["session_id", "request_id"] {
                     q.number(key, None, 64, true)?;
                 }
+                let credentials = q.credentials()?;
                 let filter = event_query::event_filter(&q)?;
                 let options = self.options.clone();
                 // Coverage also depends on how far the index has read, with no store change.
@@ -1390,8 +1449,9 @@ impl App {
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "{}:{session}:{request}:{progress}",
-                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                        "{}:{session}:{request}:{progress}:{}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), ""),
+                        credentials.name()
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -1404,8 +1464,19 @@ impl App {
                         requests
                             .blocking_lock()
                             .member_range(Some(&session), None, &request)?;
-                    let detail =
-                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
+                    // A located request is read whole; until the index names
+                    // it, the newest bytes of the store within the scan budget.
+                    let detail = match range {
+                        Some(range) => {
+                            event_query::read_request_range(&options.store, range, &filter)?
+                        }
+                        None => event_query::read_request_records(
+                            &options.store,
+                            None,
+                            usize::MAX,
+                            &filter,
+                        )?,
+                    };
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
                     let drops = gaps.drops(&options.store, &session)?;
@@ -1416,6 +1487,7 @@ impl App {
                         &options.artifacts,
                         &session,
                         &request,
+                        credentials,
                     );
                     document["coverage"] = detail.coverage.to_json();
                     Ok(document)
@@ -1423,20 +1495,22 @@ impl App {
                 .await?
             }
             "/api/request-cookies" => {
-                q.only(&["session_id", "request_id"], &[])?;
+                q.only(&["session_id", "request_id", "credential_values"], &[])?;
                 let session = q.required("session_id")?.to_owned();
                 let request = q.required("request_id")?.to_owned();
                 for key in ["session_id", "request_id"] {
                     q.number(key, None, 64, true)?;
                 }
+                let credentials = q.credentials()?;
                 let filter = event_query::event_filter(&q)?;
                 let options = self.options.clone();
                 let progress = self.requests.lock().await.progress_marker();
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "cookies:{}:{session}:{request}:{progress}",
-                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                        "cookies:{}:{session}:{request}:{progress}:{}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), ""),
+                        credentials.name()
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -1449,8 +1523,19 @@ impl App {
                         requests
                             .blocking_lock()
                             .member_range(Some(&session), None, &request)?;
-                    let detail =
-                        event_query::read_request_records(&options.store, range, 1024, &filter)?;
+                    // A located request is read whole; until the index names
+                    // it, the newest bytes of the store within the scan budget.
+                    let detail = match range {
+                        Some(range) => {
+                            event_query::read_request_range(&options.store, range, &filter)?
+                        }
+                        None => event_query::read_request_records(
+                            &options.store,
+                            None,
+                            usize::MAX,
+                            &filter,
+                        )?,
+                    };
                     let artifacts =
                         evidence::artifacts_named(&options.artifacts, &detail.records, |_| false)?;
                     let drops = gaps.drops(&options.store, &session)?;
@@ -1461,6 +1546,7 @@ impl App {
                         &options.artifacts,
                         &session,
                         &request,
+                        credentials,
                     );
                     document["coverage"] = detail.coverage.to_json();
                     Ok(document)
@@ -1468,9 +1554,10 @@ impl App {
                 .await?
             }
             "/api/cookie-provenance" => {
-                q.only(&["session_id", "name"], &[])?;
+                q.only(&["session_id", "name", "credential_values"], &[])?;
                 let session = q.required("session_id")?.to_owned();
                 q.number("session_id", None, 64, true)?;
+                let credentials = q.credentials()?;
                 let name = q.required("name")?.to_owned();
                 if name.len() > 4096 {
                     return Err(Error::bad("name is longer than 4096 bytes"));
@@ -1486,8 +1573,9 @@ impl App {
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "provenance:{}:{session}:{name}:{progress}",
-                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                        "provenance:{}:{session}:{name}:{progress}:{}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), ""),
+                        credentials.name()
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -1552,6 +1640,7 @@ impl App {
                         &session,
                         &name,
                         &identities,
+                        credentials,
                     );
                     document["coverage"] = detail.coverage.to_json();
                     document["script_coverage"] = script_coverage;
@@ -1735,7 +1824,7 @@ impl App {
             "/api/artifacts/search" => {
                 q.only(
                     &artifact_query::ARTIFACT_QUERY_KEYS[..8],
-                    &["q", "regex", "match_case", "offset", "limit"],
+                    &["q", "regex", "match_case", "offset", "limit", "credential_values"],
                 )?;
                 let text = artifact_text::SearchRequest::query(q.required("q")?)?;
                 let flag = |name: &str| match q.one(name)? {
@@ -1750,14 +1839,16 @@ impl App {
                     filter: artifact_query::ArtifactFilter::parse(&q)?,
                     offset: q.number("offset", Some("0"), 64, false)?,
                     limit: q.limit(50, artifact_text::SEARCH_MAX_LIMIT)?,
+                    credentials: q.credentials()?,
                 };
                 let root = self.options.artifacts.clone();
                 self.cancellable(move |cancelled| artifact_text::search(&root, &request, cancelled))
                     .await?
             }
             _ if path.starts_with("/api/artifacts/") && path.ends_with("/text") => {
-                q.only(&["offset", "length", "encoding"], &[])?;
+                q.only(&["offset", "length", "encoding", "credential_values"], &[])?;
                 let id = &path["/api/artifacts/".len()..path.len() - "/text".len()];
+                let credentials = q.credentials()?;
                 let artifact = self.find_artifact(id).await?;
                 let encoding = artifact_text::Encoding::parse(q.one("encoding")?)?;
                 let offset = q.number("offset", Some("0"), 64, false)? as usize;
@@ -1765,7 +1856,7 @@ impl App {
                 let length = q.number("length", Some(&default), 32, true)? as usize;
                 let root = self.options.artifacts.clone();
                 self.blocking(move || {
-                    artifact_text::page(&root, &artifact, offset, length, encoding)
+                    artifact_text::page(&root, &artifact, offset, length, encoding, credentials)
                 })
                 .await?
             }
@@ -1870,31 +1961,9 @@ impl App {
         let cursor = event_query::cursor(q)?;
         let capture = self.capture_view();
         let may_hold_sites = filter.may_hold_sites();
-        // The store's tag digests its whole contents, so it is computed once;
-        // what the page's sites depend on is folded into it.
-        let base = event_window::etag(
-            &self.options.store,
-            &format!(
-                "query:{}-{}-{limit}:{cursor:?}:{}",
-                capture.mode.as_str(),
-                capture.state.as_str(),
-                filter.echo()
-            ),
-        );
-        let tag = |sources: &str| {
-            if sources.is_empty() {
-                base.clone()
-            } else {
-                format!(
-                    "\"{}\"",
-                    hex::encode(sha2::Sha256::digest(format!("{base}{sources}")))
-                )
-            }
-        };
-        let etag = tag(&self.sites_tag(may_hold_sites));
-        if matches_etag(headers, Some(&etag)) {
-            return Ok(not_modified(&etag));
-        }
+        // What the page's sites depend on besides its records, taken before
+        // the read: whatever lands during it makes the next tag differ.
+        let sources = self.sites_tag(may_hold_sites);
         let (path, artifacts, requests, sites) = (
             self.options.store.clone(),
             self.options.artifacts.clone(),
@@ -1926,27 +1995,22 @@ impl App {
                 Ok(document)
             })
             .await?;
-        // The tag of the state before the read: whatever landed while the
-        // page was read makes the next read's tag differ, so it is never
-        // called unchanged. A read that resolved sites costs one more full
-        // answer. A page still holding a deferred site gets a tag no later
-        // read matches, since reading it again is its recourse.
+        // The page is tagged by its own bytes and the sites' sources. A read
+        // that resolved sites costs one more full answer. A page still holding
+        // a deferred site gets a tag no later read matches, since reading it
+        // again is its recourse.
         let deferred = document["events"].as_array().is_some_and(|events| {
             events.iter().any(|event| {
                 event["debugger_observation"]["site"]["resolution"]["status"] == "deferred"
             })
         });
-        let etag = if deferred {
-            tag(&format!(":deferred-{}", unique_token()))
-        } else {
-            etag
-        };
         self.event_state(&mut document, capture);
-        let mut response = axum::Json(document).into_response();
-        response
-            .headers_mut()
-            .insert("etag", HeaderValue::from_str(&etag).unwrap());
-        Ok(response)
+        let sources = if deferred {
+            format!("{sources}:deferred-{}", unique_token())
+        } else {
+            sources
+        };
+        Ok(tagged_json(&document, headers, &sources))
     }
     /// What a page's sites depend on besides the store, for its tag: the
     /// artifacts retained, the script identities indexed and what was resolved
@@ -1976,6 +2040,56 @@ impl App {
     /// Returns as soon as a record after the cursor matches, or when the
     /// timeout passes. Without `after`, only records written after the call
     /// count. No reader permit is held between polls.
+    /// Streams the HAR of every row `query` selects (request_har.rs). The rows
+    /// are fixed when the export starts; each batch is read as it is then, so
+    /// memory holds one batch of rows and one row's records at a time.
+    async fn requests_har(
+        &self,
+        query: request_index::RequestQuery,
+        credentials: request_headers::Credentials,
+    ) -> Result<Response> {
+        let permit = self.exports.clone().try_acquire_owned().map_err(|_| {
+            Error::new(
+                429,
+                "Two request exports are already running; retry when one ends",
+            )
+        })?;
+        let requests = self.requests.clone();
+        let (rows, index) = self
+            .blocking(move || requests.blocking_lock().export_rows(&query))
+            .await?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        let (requests, gaps, options) = (
+            self.requests.clone(),
+            self.gaps.clone(),
+            self.options.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut sink = request_har::Sink::new(sender);
+            request_har::export(
+                &mut sink,
+                &rows,
+                index,
+                &request_har::Export {
+                    requests: &requests,
+                    gaps: &gaps,
+                    store: &options.store,
+                    artifacts: &options.artifacts,
+                    credentials,
+                },
+            );
+        });
+        let mut response = Response::new(Body::from_stream(request_har::Chunks(receiver)));
+        let headers = response.headers_mut();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+        headers.insert(
+            "content-disposition",
+            HeaderValue::from_static("attachment; filename=\"origin-trace.har\""),
+        );
+        Ok(response)
+    }
     async fn wait_for_events(&self, q: &Query) -> Result<Response> {
         let mut filter = event_query::event_filter(q)?;
         let timeout = event_query::wait_timeout(q)?;
@@ -2265,12 +2379,11 @@ impl App {
         }
         let root = self.options.artifacts.clone();
         let id = id.to_owned();
-        // Wait for the cache before taking a shared reader permit.
-        let cache = self.artifact_lookup.clone().lock_owned().await;
+        // Wait for the index before taking a shared reader permit.
+        let gate = self.artifact_lookup.clone().lock_owned().await;
         self.blocking(move || {
-            cached_artifact_lookup(cache, &root, &id, |deadline| {
-                evidence::find_artifact_until(&root, &id, deadline)
-            })
+            let _gate = gate;
+            evidence::find_artifact(&root, &id)
         })
         .await
     }
@@ -2375,8 +2488,13 @@ impl App {
             ];
             let mut index = self.requests.clone().lock_owned().await;
             let (gaps, sites) = (self.gaps.clone(), self.observation_sites.clone());
+            let indexes = self.indexes.clone();
             self.blocking(move || {
                 index.discard()?;
+                indexes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .discard()?;
                 gaps.reset();
                 // Kept observation sites belong to the evidence being cleared.
                 sites
@@ -2794,6 +2912,22 @@ impl Query {
             key,
         )
     }
+    /// A 0 or 1 switch, off when absent.
+    pub(crate) fn flag(&self, key: &str) -> Result<bool> {
+        match self.one(key)? {
+            None | Some("0") => Ok(false),
+            Some("1") => Ok(true),
+            Some(_) => Err(Error::bad(format!("{key} must be 0 or 1"))),
+        }
+    }
+    /// The credential mode a header, cookie or text read asked for.
+    fn credentials(&self) -> Result<request_headers::Credentials> {
+        Ok(if self.flag("credential_values")? {
+            request_headers::Credentials::Returned
+        } else {
+            request_headers::Credentials::Withheld
+        })
+    }
     /// Rejects any key outside the listed ones.
     pub(crate) fn only(&self, keys: &[&str], extra: &[&str]) -> Result<()> {
         match self
@@ -2841,6 +2975,29 @@ fn analysis_input_signature(path: &Path) -> String {
     #[cfg(not(unix))]
     let identity = String::new();
     evidence::resource_etag(path, &identity)
+}
+/// A JSON answer tagged by the digest of its own bytes and of `sources`,
+/// whatever else the answer depends on. Two reads share a tag exactly when
+/// they would send the same bytes, so a store rewritten in place cannot be
+/// called unchanged, and the cost is the answer's size rather than the store's.
+fn tagged_json(value: &Value, headers: &HeaderMap, sources: &str) -> Response {
+    let body = serde_json::to_vec(value).expect("a JSON value serializes");
+    let mut digest = sha2::Sha256::new();
+    digest.update(&body);
+    digest.update(sources.as_bytes());
+    let etag = format!("\"{}\"", hex::encode(digest.finalize()));
+    if matches_etag(headers, Some(&etag)) {
+        return not_modified(&etag);
+    }
+    let mut response = (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert("etag", HeaderValue::from_str(&etag).unwrap());
+    response
 }
 fn matches_etag(headers: &HeaderMap, etag: Option<&str>) -> bool {
     etag.is_some_and(|tag| headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(tag))
@@ -2936,9 +3093,9 @@ mod tests {
         let mut tasks = Vec::new();
         for _ in 0..8 {
             let app = app.clone();
-            tasks.push(tokio::spawn(
-                async move { app.read_event_window(5000).await },
-            ));
+            tasks.push(tokio::spawn(async move {
+                app.read_event_window(5000, None).await
+            }));
         }
         // All polls can wait on the cache while unrelated artifact work retains
         // all four shared blocking-reader slots.
@@ -2956,42 +3113,6 @@ mod tests {
             assert!(task.await.unwrap().unwrap().events.is_empty());
         }
         app.stop().await;
-    }
-
-    #[tokio::test]
-    async fn artifact_streaming_fallback_releases_cache_but_retains_reader_permit() {
-        let root = tempfile::tempdir().unwrap();
-        // A sparse over-byte-cap manifest selects fallback without expensive reads.
-        std::fs::File::create(root.path().join("manifest.jsonl"))
-            .unwrap()
-            .set_len(256 * 1024 * 1024 + 1)
-            .unwrap();
-        let cache = Arc::new(Mutex::new(ArtifactLookupCache::default()));
-        let guard = cache.clone().lock_owned().await;
-        let io = Arc::new(Semaphore::new(1));
-        let permit = io.clone().acquire_owned().await.unwrap();
-        let started = std::time::Instant::now();
-        let result = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            cached_artifact_lookup(guard, root.path(), "1", |deadline| {
-                assert!(
-                    cache.try_lock().is_ok(),
-                    "streaming cannot hold the cache guard"
-                );
-                assert_eq!(
-                    io.available_permits(),
-                    0,
-                    "streaming must retain reader admission"
-                );
-                assert!(deadline >= started + Duration::from_secs(5));
-                assert!(deadline <= std::time::Instant::now() + Duration::from_secs(5));
-                Ok(json!("streamed"))
-            })
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(result, "streamed");
     }
 
     #[tokio::test]

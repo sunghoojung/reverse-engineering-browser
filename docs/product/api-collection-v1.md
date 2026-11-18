@@ -90,15 +90,19 @@ strictly validated before it replaces the last valid collection:
 - at most four nested folder levels;
 - unique case-insensitive sibling folder and request names;
 - at most 32 variables and 32 KiB of variable text per scope;
-- at most 64 headers and 16 KiB of header text per request;
+- at most 64 headers per request, each value at most 64 KiB;
 - at most 64 KiB per request body and 2 MiB for the complete document;
 - 100 millisecond to 30 second request timeouts;
 - no cycles, missing parents, duplicate IDs, controls in names, or malformed
   timestamps.
 
-Credential, cookie, connection, host, and transport framing headers are
-rejected. Collection data is user-authored state and never enters the evidence
-store.
+Credential, cookie and browser headers such as `Authorization`, `Cookie`,
+`Origin`, `Referer` and `User-Agent` are kept as written, so an authenticated
+recipe stays complete. Only the headers an HTTP client computes are rejected:
+`Host`, `Content-Length`, `Connection`, `Transfer-Encoding`, and the hop-by-hop
+`Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer` and `Upgrade`. Collection
+data is user-authored state and never enters the evidence store; the document
+is local, user-only, and holds those credentials in plain text.
 
 ## Scoped variables
 

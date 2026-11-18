@@ -2422,6 +2422,12 @@ var(--panel);
       .column-menu button:hover, .column-menu button:focus-visible { background: var(--panel-3); outline: 1px solid var(--accent); outline-offset: -1px; }
       .column-menu button:disabled { color: var(--faint); }
       .column-menu [role="menuitem"] { margin-top: 3px; border-top: 1px solid var(--line-soft); border-radius: 0 0 4px 4px; }
+      /* The Traffic row menu holds actions only: no check column, and one rule, above Export HAR. */
+      .traffic-row-menu { min-width: 160px; }
+      .traffic-row-menu button::before { display: none; }
+      .traffic-row-menu [role="menuitem"] { margin-top: 0; border-top: 0; border-radius: 4px; }
+      .traffic-row-menu [role="menuitem"][data-separated] { margin-top: 3px; border-top: 1px solid var(--line-soft); border-radius: 0 0 4px 4px; }
+      #request-copy-url::after { content: ""; width: 0; height: 0; margin-left: 5px; border: 3px solid transparent; border-top: 4px solid currentColor; border-bottom: 0; display: inline-block; vertical-align: 1px; opacity: .7; }
       /* Keep the phone footer to a full-width count row and one action row.
          Mixing shrinking counts with buttons steals height from the ledger. */
       @media (max-width: 480px) { .request-window > span { flex-basis: 100%; } }
@@ -3028,10 +3034,22 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .evidence-coverage details:not([open]) .evidence-coverage-popover { display: none; }
 .evidence-workspace-notice { padding: 8px 20px; color: var(--amber); border-bottom: 1px solid var(--line); font: 11px/1.6 var(--sans); overflow-wrap: anywhere; }
 .evidence-investigation-layout { min-height: 0; min-width: 0; display: grid; grid-template-columns: minmax(290px, 40%) minmax(0, 1fr); }
-.evidence-observations { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
+.evidence-observations { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
+/* Fixed rows, so a hidden range bar leaves an empty row rather than moving the list. */
+.evidence-observation-tools { grid-row: 1; }
+.evidence-range { grid-row: 2; }
+.evidence-list-caption { grid-row: 3; }
+.evidence-observation-list { grid-row: 4; }
+.evidence-list-footer { grid-row: 5; }
 .evidence-observation-tools { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(125px, auto); gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line-soft); }
 .evidence-observation-tools label { display: grid; gap: 6px; font: 10px/1.4 var(--sans); color: var(--muted); }
 .evidence-observation-tools input, .evidence-observation-tools select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); font: 11px var(--sans); }
+.evidence-range { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 10px; padding: 10px 16px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font: 10px/1.5 var(--sans); }
+.evidence-range[hidden] { display: none; }
+.evidence-range-label { min-width: 0; overflow-wrap: anywhere; }
+.evidence-range[aria-busy="true"] .evidence-range-label { color: var(--faint); }
+.evidence-range-moves { display: flex; flex-wrap: wrap; gap: 6px; }
+.evidence-range-moves button { padding: 4px 8px; font-size: 10px; }
 .evidence-list-caption { display: flex; justify-content: space-between; gap: 10px; padding: 10px 16px 4px; color: var(--muted); font: 10px/1.5 var(--sans); }
 .evidence-observation-list { min-height: 0; overflow: auto; padding: 0 8px 12px; overscroll-behavior: contain; }
 .evidence-observation-group h3 { margin: 16px 8px 3px; font: 600 11px/1.5 var(--sans); color: var(--text); }
@@ -3258,10 +3276,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .captured-export-header h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .captured-export-header > button { font-size: 18px; min-width: 30px; }
 .captured-export-body { padding: 16px 20px; min-height: 0; overflow: auto; font-size: 12px; }
-.captured-export-context { color: var(--muted); margin: 0 0 16px; }
+.captured-export-context { color: var(--muted); margin: 0 0 16px; overflow-wrap: anywhere; }
 .captured-export-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
 .captured-export-fields label { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; }
-.captured-export-fields label:first-child, .captured-export-fields [data-export-file-field] { grid-column: 1 / -1; }
+.captured-export-fields label:first-child, .captured-export-fields [data-export-file-field], .captured-export-fields [data-export-scope-field] { grid-column: 1 / -1; }
 .captured-export-fields [hidden] { display: none; }
 .captured-export-fields select, .captured-export-fields input { width: 100%; min-width: 0; max-width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--panel-2); font-size: 12px; }
 .captured-export-fields input { font-size: 11px; }

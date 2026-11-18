@@ -2,8 +2,9 @@
 //! and received cookie lists per hop for `get_request_cookies`, and everything
 //! that touched one cookie name for `get_cookie_provenance`. Records are
 //! validated again here and lists are read only after a size and SHA-256
-//! check. Values are withheld with their length and SHA-256, like credential
-//! headers; a script write links to a sent cookie by equal value digests.
+//! check. Values and received lines are withheld with their length and
+//! SHA-256 unless the caller asks for them, like credential headers; a script
+//! write links to a sent cookie by equal value digests either way.
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
@@ -13,7 +14,8 @@ use sha2::{Digest, Sha256};
 use crate::event_window;
 use crate::evidence;
 use crate::request_headers::{
-    Drops, STATES, child_payload, le, lifecycle_of, provisional_hops, qualified, span_of,
+    Credentials, Drops, STATES, child_payload, le, lifecycle_of, provisional_hops, qualified,
+    span_of,
 };
 use crate::request_stack;
 
@@ -228,9 +230,10 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-fn describe_cookie(cookie: &Cookie) -> Value {
+fn describe_cookie(cookie: &Cookie, credentials: Credentials) -> Value {
     let [name, value, domain, path, partition, line] = &cookie.strings;
     let parsed = cookie.flags & 1 != 0;
+    let returned = credentials == Credentials::Returned;
     let mut out = json!({
         "parsed": parsed,
         "blocked": cookie.exclusions != 0,
@@ -238,14 +241,22 @@ fn describe_cookie(cookie: &Cookie) -> Value {
         "warning_reasons": reasons(cookie.warnings, &WARNINGS),
     });
     if !line.is_empty() {
-        out["line_withheld"] = json!(true);
+        if returned {
+            out["line"] = json!(text(line));
+        } else {
+            out["line_withheld"] = json!(true);
+        }
         out["line_bytes"] = json!(line.len());
     }
     if !parsed {
         return out;
     }
     out["name"] = json!(text(name));
-    out["value_withheld"] = json!(true);
+    if returned {
+        out["value"] = json!(text(value));
+    } else {
+        out["value_withheld"] = json!(true);
+    }
     out["value_bytes"] = json!(value.len());
     out["value_sha256"] = json!(hex::encode(Sha256::digest(value)));
     out["size"] = json!(name.len() + value.len());
@@ -308,7 +319,13 @@ fn read_list(
     }
 }
 
-fn describe_list(event: &Value, list: &List, artifacts: &[Value], root: &Path) -> Value {
+fn describe_list(
+    event: &Value,
+    list: &List,
+    artifacts: &[Value],
+    root: &Path,
+    credentials: Credentials,
+) -> Value {
     let mut value = json!({
         "sequence_number": event["sequence_number"],
         "parent_event_id": event["parent_event_id"],
@@ -324,7 +341,12 @@ fn describe_list(event: &Value, list: &List, artifacts: &[Value], root: &Path) -
         match read_list(event, list, artifacts, root) {
             Ok(cookies) => {
                 value["artifact"] = json!("verified");
-                value["cookies"] = json!(cookies.iter().map(describe_cookie).collect::<Vec<_>>());
+                value["cookies"] = json!(
+                    cookies
+                        .iter()
+                        .map(|cookie| describe_cookie(cookie, credentials))
+                        .collect::<Vec<_>>()
+                );
             }
             Err(reason) => value["artifact"] = json!(reason),
         }
@@ -381,6 +403,7 @@ pub fn build(
     root: &Path,
     session: &str,
     request: &str,
+    credentials: Credentials,
 ) -> Value {
     let starts = hop_starts(events, session);
     let mut hops: BTreeMap<u32, (Vec<Value>, Vec<Value>)> = BTreeMap::new();
@@ -405,7 +428,7 @@ pub fn build(
             malformed.push(event["sequence_number"].clone());
             continue;
         };
-        let described = describe_list(event, &list, artifacts, root);
+        let described = describe_list(event, &list, artifacts, root, credentials);
         let entry = hops.entry(list.hop).or_default();
         if list.sent {
             entry.0.push(described);
@@ -461,6 +484,7 @@ pub fn build(
         "hops": hops,
         "malformed_records": malformed,
         "unattached_records": unattached,
+        "credential_values": credentials.name(),
     })
 }
 
@@ -658,6 +682,7 @@ pub type IndexedIdentities = (
 );
 
 /// Everything in `events` that touched cookie `name` in `session_id`.
+#[allow(clippy::too_many_arguments)]
 pub fn provenance(
     events: &[Value],
     drops: &Drops,
@@ -666,6 +691,7 @@ pub fn provenance(
     session: &str,
     name: &str,
     indexed_identities: &dyn Fn(u64) -> IndexedIdentities,
+    credentials: Credentials,
 ) -> Value {
     let wanted = name.as_bytes();
     let starts = hop_starts(events, session);
@@ -812,7 +838,7 @@ pub fn provenance(
                 for cookie in cookies.iter().filter(|cookie| {
                     cookie.flags & 1 != 0 && cookie.strings[0].as_slice() == wanted
                 }) {
-                    let mut item = describe_cookie(cookie);
+                    let mut item = describe_cookie(cookie, credentials);
                     item["request_id"] = json!(request);
                     item["hop"] = json!(list.hop);
                     item["sequence_number"] = event["sequence_number"].clone();
@@ -858,6 +884,7 @@ pub fn provenance(
             "records_dropped": records_dropped,
         },
         "malformed_records": malformed,
+        "credential_values": credentials.name(),
     })
 }
 
@@ -1043,7 +1070,15 @@ mod tests {
             ),
         ];
         events[1]["frame_id"] = json!("99");
-        let result = build(&events, &Drops::default(), &artifacts, &root, "7", "17");
+        let result = build(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Withheld,
+        );
         assert_eq!(result["unattached_records"], 1);
         assert_eq!(result["malformed_records"], json!(["15"]));
         let hop = &result["hops"][0];
@@ -1068,6 +1103,26 @@ mod tests {
         );
         assert_eq!(unparsed["line_bytes"], 6);
         assert!(!result.to_string().contains("token-"));
+        assert_eq!(result["credential_values"], "withheld");
+        // Asked for, values and received lines come back beside their digests.
+        let returned = build(
+            &events,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Returned,
+        );
+        assert_eq!(returned["credential_values"], "returned");
+        let shown = &returned["hops"][0]["sent"][0]["cookies"][0];
+        assert_eq!(shown["value"], "token-1");
+        assert_eq!(shown["value_withheld"], Value::Null);
+        assert_eq!(shown["value_sha256"], first["value_sha256"]);
+        let line = &returned["hops"][0]["received"][0]["cookies"][1];
+        assert_eq!(line["line_bytes"], 6);
+        assert_eq!(line["line"], "bad\u{1}=1");
+        assert_eq!(line["line_withheld"], Value::Null);
         assert_eq!(hop["sent_missing"], Value::Null);
         assert_eq!(hop["received_missing"], Value::Null);
         // A content session's hop with only a provisional block has no list,
@@ -1088,7 +1143,15 @@ mod tests {
         hops.push(record("request_headers", 22, 11, &provisional, "0"));
         hops.push(json!({"session_id":"7","request_id":"17","category":"network",
             "type":"request_failed","process_id":42,"sequence_number":"23","monotonic_time_ns":"23","flags":0}));
-        let missing = build(&hops, &Drops::default(), &artifacts, &root, "7", "17");
+        let missing = build(
+            &hops,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Withheld,
+        );
         assert_eq!(missing["hops"][1]["hop"], 1);
         assert_eq!(missing["hops"][1]["sent_missing"], "failed");
         assert_eq!(missing["hops"][1]["received_missing"], Value::Null);
@@ -1107,7 +1170,15 @@ mod tests {
             &list_payload(true, 3, b"", 0, 0, 1),
             "0",
         ));
-        let received = build(&sent_only, &Drops::default(), &artifacts, &root, "7", "17");
+        let received = build(
+            &sent_only,
+            &Drops::default(),
+            &artifacts,
+            &root,
+            "7",
+            "17",
+            Credentials::Withheld,
+        );
         assert_eq!(received["hops"][0]["received_missing"], "no_raw_response");
         // A drop while it ran makes the absent response list unsure.
         let gap = json!({"session_id":"7","type":"gap","category":"canvas","process_id":42,
@@ -1120,6 +1191,7 @@ mod tests {
             &root,
             "7",
             "17",
+            Credentials::Withheld,
         );
         assert_eq!(lossy["hops"][0]["received_missing"], "record_dropped");
         assert_eq!(lossy["hops"][1]["received_missing"], "failed");
@@ -1134,6 +1206,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(
             origin["set_by"][0]["exclusion_reasons"],
@@ -1158,6 +1231,7 @@ mod tests {
             "7",
             "pref",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(none["sent_with"][0]["blocked"], true);
         assert_eq!(none["script"], json!([]));
@@ -1231,6 +1305,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(origin["malformed_records"], json!([]));
         assert_eq!(origin["script"].as_array().unwrap().len(), 1);
@@ -1254,6 +1329,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(named["read_coverage"]["complete"], true);
         // cookieStore.getAll() and get({url}) name no cookie, so they may have
@@ -1273,13 +1349,23 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(coverage["malformed_records"], json!([]));
         assert_eq!(coverage["read_coverage"]["unnamed_store_reads"], 3);
         assert_eq!(coverage["read_coverage"]["complete"], false);
         assert_eq!(coverage["script"].as_array().unwrap().len(), 1);
         // ...and the empty name still lists it, as its own read.
-        let empty = provenance(&unnamed, &Drops::default(), &[], &root, "7", "", &no_index);
+        let empty = provenance(
+            &unnamed,
+            &Drops::default(),
+            &[],
+            &root,
+            "7",
+            "",
+            &no_index,
+            Credentials::Withheld,
+        );
         assert_eq!(empty["script"].as_array().unwrap().len(), 1);
         // A full queue may have dropped a record that named it, in a gap of any
         // category: a renderer's gap takes the category of the last record it
@@ -1302,6 +1388,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(lost["read_coverage"]["records_dropped"], 2);
         assert_eq!(lost["read_coverage"]["complete"], false);
@@ -1313,6 +1400,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(older["read_coverage"]["complete"], true);
         let reason = gap(11, "6", "network", "service_worker_end_lost");
@@ -1324,6 +1412,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(kept["read_coverage"]["complete"], true);
         let mut other = gap(11, "6", "canvas", "2");
@@ -1336,6 +1425,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(elsewhere["read_coverage"]["complete"], true);
         // Unrecorded names add up across read records.
@@ -1362,6 +1452,7 @@ mod tests {
             "7",
             "_abck",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(summed["read_coverage"]["reads_with_unrecorded_names"], 2);
         assert_eq!(summed["read_coverage"]["unrecorded_names"], 5);
@@ -1443,6 +1534,7 @@ mod tests {
             "7",
             "sid",
             &no_index,
+            Credentials::Withheld,
         );
         let stack = &origin["script"][0]["stack"];
         let digest = hex::encode(Sha256::digest(&walked));
@@ -1481,6 +1573,7 @@ mod tests {
             "7",
             "sid",
             &no_index,
+            Credentials::Withheld,
         );
         let stack = &origin["script"][0]["stack"];
         assert_eq!(
@@ -1511,6 +1604,7 @@ mod tests {
             "7",
             "sid",
             &from_index,
+            Credentials::Withheld,
         );
         assert_eq!(resolution_of(&found)["status"], "resolved");
         // An index that cannot answer for every identity leaves it unknown.
@@ -1522,6 +1616,7 @@ mod tests {
             "7",
             "sid",
             &|_| (HashMap::new(), false),
+            Credentials::Withheld,
         );
         assert_eq!(
             resolution_of(&unknown)["reason"],
@@ -1536,6 +1631,7 @@ mod tests {
             "7",
             "sid",
             &no_index,
+            Credentials::Withheld,
         );
         assert_eq!(resolution_of(&missing)["reason"], "script_identity_missing");
         let _ = std::fs::remove_dir_all(&root);
@@ -1594,6 +1690,7 @@ mod tests {
             "7",
             "sid",
             &no_index,
+            Credentials::Withheld,
         );
         let script = &origin["script"][0];
         assert_eq!(script["thread"], "service_worker");

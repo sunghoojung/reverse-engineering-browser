@@ -290,10 +290,97 @@ pub(crate) fn observed_identity(path: &Path, follow: bool) -> String {
     };
     let digest = match &metadata {
         Ok(metadata) if !follow && metadata.file_type().is_symlink() => "symlink".to_owned(),
-        Ok(_) => content_digest(path),
+        Ok(metadata) => remembered_digest(path, follow, &stat, metadata),
         Err(error) => format!("unreadable:{:?}", error.kind()),
     };
     format!("{stat}:{digest}")
+}
+
+/// Longer than the change-time granularity of any filesystem the store can
+/// live on (one second on HFS+ and ext3, nanoseconds on APFS and ext4).
+const SETTLED: std::time::Duration = std::time::Duration::from_secs(3);
+
+struct Remembered {
+    stat: String,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    // When the read that produced `digest` began.
+    read_at: std::time::SystemTime,
+    digest: String,
+}
+
+/// A store's content digest, read again only when it may have changed. A
+/// long session's store is hundreds of megabytes, and every poll and analysis
+/// read asks for it. A digest is reused only while the file keeps its
+/// identity, size, modification and change times, and only when its read
+/// began `SETTLED` after that change time, as git treats a racily clean index
+/// entry: any later write then lands in a later change-time tick and shows.
+fn remembered_digest(
+    path: &Path,
+    follow: bool,
+    stat: &str,
+    metadata: &std::fs::Metadata,
+) -> String {
+    static REMEMBERED: std::sync::Mutex<Vec<((std::path::PathBuf, bool), Remembered)>> =
+        std::sync::Mutex::new(Vec::new());
+    let (size, modified, changed) = (
+        metadata.len(),
+        metadata.modified().ok(),
+        change_time(metadata),
+    );
+    let key = (path.to_path_buf(), follow);
+    {
+        let remembered = REMEMBERED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, entry)) = remembered.iter().find(|(candidate, _)| *candidate == key)
+            && entry.stat == stat
+            && entry.size == size
+            && entry.modified == modified
+            && changed.is_some_and(|changed| changed + SETTLED <= entry.read_at)
+        {
+            return entry.digest.clone();
+        }
+    }
+    let read_at = std::time::SystemTime::now();
+    let digest = content_digest(path);
+    if digest.starts_with("unreadable:") {
+        return digest;
+    }
+    let mut remembered = REMEMBERED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    remembered.retain(|(candidate, _)| *candidate != key);
+    // A backend reads a handful of stores; the oldest entry goes first.
+    if remembered.len() >= 64 {
+        remembered.remove(0);
+    }
+    remembered.push((
+        key,
+        Remembered {
+            stat: stat.to_owned(),
+            size,
+            modified,
+            read_at,
+            digest: digest.clone(),
+        },
+    ));
+    digest
+}
+
+fn change_time(metadata: &std::fs::Metadata) -> Option<std::time::SystemTime> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let seconds = u64::try_from(metadata.ctime()).ok()?;
+        let nanos = u32::try_from(metadata.ctime_nsec()).ok()?;
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(seconds, nanos))
+    }
+    #[cfg(not(unix))]
+    {
+        // No change time: the latest of creation and modification stands in.
+        metadata.created().ok().max(metadata.modified().ok())
+    }
 }
 
 fn metadata_identity(metadata: &std::fs::Metadata) -> String {
@@ -314,7 +401,12 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> String {
     }
 }
 
+#[cfg(test)]
+static DIGEST_READS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 fn content_digest(path: &Path) -> String {
+    #[cfg(test)]
+    DIGEST_READS.lock().unwrap().push(path.to_path_buf());
     // O_NONBLOCK so a FIFO substituted for the store cannot stall the cache key.
     let mut options = OpenOptions::new();
     options.read(true);
@@ -508,40 +600,21 @@ pub fn validate_artifact(artifact: &mut Value) -> Result<()> {
     Ok(())
 }
 
+/// The validated manifest record of `id`, from the index of the whole
+/// manifest (`artifact_lookup`), so a record of any age is found.
 pub fn find_artifact(root: &Path, id: &str) -> Result<Value> {
-    find_artifact_bounded(root, id, usize::MAX, u64::MAX)
-}
-/// Same complete manifest validation with deterministic cold-path scan bounds.
-pub fn find_artifact_bounded(
-    root: &Path,
-    id: &str,
-    max_records: usize,
-    max_bytes: u64,
-) -> Result<Value> {
-    find_artifact_with_deadline(
+    crate::artifact_lookup::find(
         root,
         id,
-        max_records,
-        max_bytes,
-        std::time::Instant::now() + std::time::Duration::from_secs(5),
+        std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE,
     )
 }
-pub(crate) fn find_artifact_until(
-    root: &Path,
-    id: &str,
-    deadline: std::time::Instant,
-) -> Result<Value> {
-    find_artifact_with_deadline(root, id, usize::MAX, u64::MAX, deadline)
-}
-fn find_artifact_with_deadline(
-    root: &Path,
-    id: &str,
-    max_records: usize,
-    max_bytes: u64,
-    deadline: std::time::Instant,
-) -> Result<Value> {
+/// The same answer from a complete scan, which the index must match.
+#[cfg(test)]
+pub(crate) fn scan_find_artifact(root: &Path, id: &str) -> Result<Value> {
     let mut selected = None;
-    scan_manifest(root, max_records, max_bytes, deadline, |value| {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    scan_manifest(root, usize::MAX, u64::MAX, deadline, |value| {
         if value["artifact_id"] == id {
             selected = Some(value);
         }
@@ -1491,5 +1564,43 @@ mod tests {
         artifact["kind"] = json!("bytecode_buffer");
         artifact["execution_context_id"] = json!("0");
         assert!(validate_artifact(&mut artifact).is_err());
+    }
+
+    #[test]
+    fn a_settled_store_digest_is_read_once_and_any_change_reads_it_again() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("events.jsonl");
+        let reads = || {
+            DIGEST_READS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| **read == path)
+                .count()
+        };
+        std::fs::write(&path, b"one\n").unwrap();
+        let first = observed_identity(&path, true);
+        // Read within SETTLED of the last change: a write in the same
+        // change-time tick could follow, so the digest is read every time.
+        assert_eq!(observed_identity(&path, true), first);
+        assert_eq!(reads(), 2);
+        std::thread::sleep(SETTLED + std::time::Duration::from_millis(100));
+        assert_eq!(observed_identity(&path, true), first);
+        assert_eq!(reads(), 3);
+        // Settled: the same identity, size and times reuse it.
+        assert_eq!(observed_identity(&path, true), first);
+        assert_eq!(observed_identity(&path, true), first);
+        assert_eq!(reads(), 3);
+        // A same-size rewrite with the modification time restored.
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, b"two\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_ne!(observed_identity(&path, true), first);
+        assert_eq!(reads(), 4);
     }
 }

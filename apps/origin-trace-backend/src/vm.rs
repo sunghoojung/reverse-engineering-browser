@@ -1711,7 +1711,7 @@ mod chain_tests {
     }
     #[test]
     fn failed_chain_write_never_leaves_a_document_naming_a_replaced_source() {
-        for failing in 0..CHAIN.len() {
+        for (failing, failing_name) in CHAIN.iter().enumerate() {
             let root = tempfile::tempdir().unwrap();
             let store = inputs(root.path(), &[]);
             let first = store_documents(root.path(), &store).unwrap();
@@ -1723,7 +1723,7 @@ mod chain_tests {
                 first.analysis["document_digest"]
             );
             let result = publish(root.path(), &mut next, &mut |path, bytes| {
-                if path.ends_with(CHAIN[failing]) {
+                if path.ends_with(failing_name) {
                     Err(crate::error::Error::new(500, "Synthetic write failure"))
                 } else {
                     durable::write_private(path, bytes)

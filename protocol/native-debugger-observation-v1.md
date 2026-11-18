@@ -104,7 +104,7 @@ second look:
 | `source_limit` (deferred) | The page's sites name more than 4 scripts not yet resolved | Read the same cursor again: kept sites cost nothing, so the next 4 scripts are read, and the page's tag never matches a later read while it holds one. A smaller `limit` names fewer scripts. |
 | `site_read_failed` (deferred) | The script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read | Read again |
 | `source_artifact_missing` | The script's source is retained but its artifact has not landed, or never will (a lost artifact channel, a rejected frame) | Read again after the artifact lands; nothing is re-read until the manifest grows |
-| `script_identity_outside_scan` | The request index has not folded the script's identity yet, or holds its 16,384 identities and keeps no more | Read again once the index moves (it folds 64 MiB a step, and the backend's own schedule refreshes it every 30 seconds); `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
+| `script_identity_outside_scan` | The request index has not folded the script's identity yet: it is still catching up with the store | Read again once the index moves (the backend's indexer folds new records in the background); `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
 
 `stack_read` is exactly the arguments of the `get_request_stack` read named by
 `stack_read_operation`, passed as it is. That read covers the newest 64 MiB of

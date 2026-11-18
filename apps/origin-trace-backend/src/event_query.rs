@@ -235,6 +235,17 @@ pub fn read_request_records(
     read_detail(store, range, limit, filter, SCAN_BYTES, false)
 }
 
+/// Every record of one request in its whole indexed byte range, oldest first,
+/// with no record count or byte budget: an export reads all of it, and one
+/// request's records are what it holds.
+pub fn read_request_range(
+    store: &Path,
+    range: RecordRange,
+    filter: &EventFilter,
+) -> Result<Detail> {
+    read_detail(store, Some(range), usize::MAX, filter, u64::MAX, false)
+}
+
 /// The records at byte ranges the request index located, each one whole
 /// line, that `keep` selects, read with one open file instead of a scan; and
 /// how many ranges no longer held a valid record.
@@ -286,6 +297,7 @@ pub struct Tally {
     queue_drops: u64,
     queue_drops_saturated: bool,
     named_gaps: Vec<NamedGap>,
+    named_positions: HashMap<(String, String), usize>,
     malformed_lines: u64,
 }
 impl Tally {
@@ -312,19 +324,18 @@ impl Tally {
             event_window::drop_weight(event),
         );
         if let Some(named) = event_window::named_gap(event) {
-            let (category, reason) = *named;
-            if let Some(gap) = self
-                .named_gaps
-                .iter_mut()
-                .find(|gap| gap.category == category && gap.reason == reason)
-            {
-                gap.count += 1;
-            } else if self.named_gaps.len() < event_window::MAX_NAMED_GAPS {
-                self.named_gaps.push(NamedGap {
-                    category,
-                    reason,
-                    count: 1,
-                });
+            match self.named_positions.get(named.as_ref()) {
+                Some(&position) => self.named_gaps[position].count += 1,
+                None => {
+                    let (category, reason) = *named;
+                    self.named_positions
+                        .insert((category.clone(), reason.clone()), self.named_gaps.len());
+                    self.named_gaps.push(NamedGap {
+                        category,
+                        reason,
+                        count: 1,
+                    });
+                }
             }
         }
         Ok(())
@@ -333,9 +344,11 @@ impl Tally {
     pub fn malformed_lines(&self) -> u64 {
         self.malformed_lines
     }
+    #[cfg(test)]
     pub fn named_gaps(&self) -> &[NamedGap] {
         &self.named_gaps
     }
+    #[cfg(test)]
     pub fn queue_drops(&self) -> (u64, bool) {
         (self.queue_drops, self.queue_drops_saturated)
     }

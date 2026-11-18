@@ -110,10 +110,11 @@ is allowed. A start beyond total is rejected.
 
 - 65,536 samples / 262,144 bytes per input; at most two inputs
 - 2 MiB request body; 256 detail rows; 512 KiB serialized result
-- Artifact manifest: complete scan at most 8 MiB and 8,192 physical lines,
-  including blank lines, with the existing 8,192-byte line and 5-second
-  cooperative scan checks. This opt-in overload preserves the old loader's
-  default scan behavior for all existing callers.
+- Artifact manifest: the artifact is found by ID through the backend's
+  disk-backed manifest index (`manifest.jsonl.lookup-v1`), however long the
+  manifest is, with the 8,192-byte record limit. A lookup waits at most five
+  seconds for the index to reach the end of the manifest and returns `408`
+  past that, keeping its progress for the next read.
 - Existing four-slot blocking-I/O admission pool; one-second admission deadline.
   A dropped HTTP caller cannot release a running task's permit. Bounded work can
   finish after caller cancellation; there are no mutations to undo.

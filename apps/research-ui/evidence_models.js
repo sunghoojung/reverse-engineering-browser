@@ -216,10 +216,9 @@
         return drops;
       }
 
-      // Same identifier rule and 64-pair bound as both stored-window readers.
+      // Same identifier rule as both stored-window readers, which list every pair.
       const namedGapCategoryPattern = /^[a-z][a-z0-9_]{0,31}$/;
       const namedGapReasonPattern = /^[a-z][a-z0-9_]{0,127}$/;
-      const namedGapLimit = 64;
       // Configured per-configuration sampling caps in the native dispatch and
       // guest contracts: retained observations stay exact and later ones were
       // not sampled. Filter reasons are policy exclusions. Every other reason,
@@ -262,13 +261,13 @@
           if (!named) continue;
           const existing = gaps.find(gap => gap.category === named.category && gap.reason === named.reason);
           if (existing) existing.count += 1n;
-          else if (gaps.length < namedGapLimit) gaps.push({...named, count: 1n});
+          else gaps.push({...named, count: 1n});
         }
         return gaps;
       }
 
       function isNamedGapList(value) {
-        if (!Array.isArray(value) || value.length > namedGapLimit) return false;
+        if (!Array.isArray(value)) return false;
         const keys = new Set();
         return value.every(gap => isPlainObject(gap) && Object.keys(gap).length === 3 &&
           namedGapCategoryPattern.test(gap.category) && namedGapReasonPattern.test(gap.reason) &&
@@ -365,6 +364,9 @@
         state.eventCountScope = body.event_window?.scope ??
           (state.sequenceGaps !== null && state.queueDrops !== null ? 'store' : 'rendered_window');
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
+        // Evidence reads older records from these cursors (protocol/http-api.md).
+        state.eventNextBefore = body.event_window?.next_before ?? null;
+        state.eventStoreEnd = body.event_window?.scan_end ?? null;
         state.networkEventsAvailable = Array.isArray(body.network_events);
         state.networkEventsLimited = body.event_window?.network_events_limited === true;
         state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;
@@ -395,12 +397,16 @@
         return `Fingerprint activity is visible with partial coverage: ${limits.join('; ')}.`;
       }
 
+      // A store scope comes from the event index and can span more than the
+      // scan limit; a bounded tail is at most that limit and starts inside it.
       function isEventWindow(value) {
         return isPlainObject(value) && ['store', 'bounded_tail'].includes(value.scope) &&
           isCaptureTotal(value.scan_start) && isCaptureTotal(value.scan_end) &&
           BigInt(value.scan_start) <= BigInt(value.scan_end) && value.scan_limit === 64 * 1024 * 1024 &&
-          BigInt(value.scan_end) - BigInt(value.scan_start) <= BigInt(value.scan_limit) &&
+          (value.scope === 'store' || BigInt(value.scan_end) - BigInt(value.scan_start) <= BigInt(value.scan_limit)) &&
           (value.scope === 'store') === (value.scan_start === '0') &&
+          (value.next_before === undefined || value.next_before === null ||
+            (isCaptureTotal(value.next_before) && BigInt(value.next_before) <= BigInt(value.scan_end))) &&
           typeof value.events_limited === 'boolean' && typeof value.network_events_limited === 'boolean' &&
           (value.malformed_lines === undefined || (Number.isSafeInteger(value.malformed_lines) && value.malformed_lines >= 0));
       }

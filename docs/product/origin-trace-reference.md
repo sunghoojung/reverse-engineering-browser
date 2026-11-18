@@ -376,11 +376,11 @@ native helper built by `make debugger-transport`. Native quiet mode deliberately
 omits both options and does not start the helper.
 
 Pass `--trace-store /path/to/origin-trace.jsonl` when the edge sidecar is not
-next to the default demo store. The origin-trace endpoint reads at most 10,000
-events, 30,000 edges, and 10,000 artifact records, rejects oversized or
-malformed records, traverses at most 32 steps, and supports entity-tag
-revalidation. The native application
-uses the same limits and contract without a localhost server.
+next to the default demo store. The origin-trace endpoint reads the whole
+session through disk-backed indexes it keeps beside the event, edge and
+artifact stores, rejects oversized or malformed records, traverses at most 32
+steps, and supports entity-tag revalidation. The native application answers
+the same route through its bundled backend.
 
 Pass `--signal-store /path/to/request-signals.jsonl` when the request signal
 profile sidecar is not next to the default demo store. The endpoint selects an

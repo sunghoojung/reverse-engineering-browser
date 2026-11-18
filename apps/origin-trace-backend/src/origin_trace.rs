@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-type Reference = (String, u32, String);
+pub type Reference = (String, u32, String);
 /// Raw request body bytes keyed by the retained event that carries them.
 pub type RequestBodies = BTreeMap<Reference, Vec<u8>>;
 // Stored edge relations in priority order. The two invocation relations are
@@ -29,7 +29,7 @@ const SOURCES: [&str; 8] = [
     "webrtc",
     "runtime",
 ];
-fn reference(value: &Value) -> Result<Reference> {
+pub(crate) fn reference(value: &Value) -> Result<Reference> {
     validation::canonical(&value["session_id"], 64, true, "session_id")?;
     let pid =
         validation::integer(&value["process_id"], "process_id", 0, u64::from(u32::MAX))? as u32;
@@ -239,7 +239,7 @@ fn step(value: &Value, relation: &str, confidence: &str) -> Result<Value> {
 // Request target, body, response body, header and cookie records are fixed
 // binary layouts (protocol/native-network-v2.md and v3), not text. A step names
 // the record instead of decoding it, so no NUL or control byte reads as captured
-// text; Traffic decodes their fields. The Swift builder writes the same summary.
+// text; Traffic decodes their fields.
 fn binary_record_summary(value: &Value, size: usize) -> Option<String> {
     let operation = value["type"].as_str()?;
     let network = value["category"] == "network"
@@ -297,12 +297,13 @@ fn monotonic(value: &Value) -> Option<u64> {
 // function must not break; reporting the nearer one would present a choice
 // between guesses as evidence. A candidate must also sit at or before the
 // current event, so cross-process clock skew can drop a real pair but can never
-// invent an order.
-fn adjacent_candidate<'a>(
-    retained: &BTreeMap<Reference, &'a Value>,
+// invent an order. `siblings` are the events that carry the current event's
+// request ID.
+fn adjacent_candidate(
+    siblings: &[Value],
     visited: &BTreeSet<Reference>,
     current: &Value,
-) -> Option<&'a Value> {
+) -> Option<Value> {
     let now = monotonic(current)?;
     // Scoped to the network lifecycle record this class was measured on. An
     // artifact, VM or Wasm head keeps the bare gap rather than a claim no lane
@@ -311,8 +312,9 @@ fn adjacent_candidate<'a>(
         return None;
     }
     let mut found = None;
-    for (key, event) in retained {
-        if visited.contains(key)
+    for event in siblings {
+        if reference(event).is_ok_and(|key| visited.contains(&key))
+            || event["type"] == "gap"
             || event["session_id"] != current["session_id"]
             || event["category"] != "network"
             || event["request_id"] != current["request_id"]
@@ -326,11 +328,11 @@ fn adjacent_candidate<'a>(
         if then > now || now - then > ADJACENCY_WINDOW_NS {
             continue;
         }
-        if found.replace(*event).is_some() {
+        if found.replace(event).is_some() {
             return None;
         }
     }
-    found
+    found.cloned()
 }
 /// A request body is searched only as retained raw bytes, at most this many.
 const REQUEST_BODY_LIMIT: usize = 1 << 20;
@@ -342,9 +344,27 @@ const REQUEST_BODY_LIMIT: usize = 1 << 20;
 /// creator is that record. Only that exact pairing and verified bytes count;
 /// anything else is no body, never a guess. Without request content capture
 /// no body is retained and this is empty.
+#[cfg(test)]
 pub fn retained_request_bodies(
     events: &[Value],
     artifacts: &[Value],
+    request_id: &str,
+    root: &Path,
+) -> RequestBodies {
+    let by_id = |id: &Value| {
+        let mut matching = artifacts
+            .iter()
+            .filter(|artifact| artifact["artifact_id"] == *id);
+        match (matching.next(), matching.next()) {
+            (Some(artifact), None) => Some(artifact.clone()),
+            _ => None,
+        }
+    };
+    request_bodies(events, by_id, request_id, root)
+}
+fn request_bodies(
+    events: &[Value],
+    artifact: impl Fn(&Value) -> Option<Value>,
     request_id: &str,
     root: &Path,
 ) -> RequestBodies {
@@ -358,14 +378,12 @@ pub fn retained_request_bodies(
         {
             continue;
         }
-        let mut matching = artifacts.iter().filter(|artifact| {
-            artifact["artifact_id"] == event["artifact_id"]
-                && artifact["kind"] == "request_body"
+        let Some(artifact) = artifact(&event["artifact_id"]).filter(|artifact| {
+            artifact["kind"] == "request_body"
                 && artifact["capture_origin"] == "network_request"
                 && artifact["creator_event_id"] == event["sequence_number"]
                 && artifact["session_id"] == event["session_id"]
-        });
-        let (Some(artifact), None) = (matching.next(), matching.next()) else {
+        }) else {
             continue;
         };
         let (Some(session), Some(process), Some(parent)) = (
@@ -375,7 +393,7 @@ pub fn retained_request_bodies(
         ) else {
             continue;
         };
-        if let Ok(bytes) = evidence::content(root, artifact, REQUEST_BODY_LIMIT) {
+        if let Ok(bytes) = evidence::content(root, &artifact, REQUEST_BODY_LIMIT) {
             bodies.insert((session.into(), process as u32, parent.into()), bytes);
         }
     }
@@ -384,14 +402,15 @@ pub fn retained_request_bodies(
 /// The single settle record whose exact digested value occurs in `body`.
 /// Candidates share the session and the renderer process of `request`, and
 /// precede it in that process's sequence: causal order inside one stream, not
-/// a time window. `Err` names why no link is drawn when more than one matches
-/// or the search was not run.
-fn value_flow<'a>(
-    retained: &BTreeMap<Reference, &'a Value>,
+/// a time window. `settles` are that stream's `js_invocation_settle` records.
+/// `Err` names why no link is drawn when more than one matches or the search
+/// was not run.
+fn value_flow(
+    settles: &[Value],
     visited: &BTreeSet<Reference>,
     request: &Value,
     body: &[u8],
-) -> std::result::Result<Option<&'a Value>, (&'static str, String)> {
+) -> std::result::Result<Option<Value>, (&'static str, String)> {
     let Some(limit) = request["sequence_number"]
         .as_str()
         .and_then(|s| s.parse::<u64>().ok())
@@ -399,8 +418,11 @@ fn value_flow<'a>(
         return Ok(None);
     };
     let mut found: Vec<&Value> = Vec::new();
-    for (key, event) in retained {
-        if visited.contains(key)
+    for event in settles {
+        let Ok(key) = reference(event) else {
+            continue;
+        };
+        if visited.contains(&key)
             || event["type"] != "js_invocation_settle"
             || event["session_id"] != request["session_id"]
             || event["process_id"] != request["process_id"]
@@ -424,7 +446,7 @@ fn value_flow<'a>(
     }
     match found.len() {
         0 => Ok(None),
-        1 => Ok(Some(found[0])),
+        1 => Ok(Some(found[0].clone())),
         count => Err((
             "value_flow_ambiguous",
             format!(
@@ -433,31 +455,187 @@ fn value_flow<'a>(
         )),
     }
 }
-#[allow(clippy::too_many_arguments)]
-pub fn build(
-    events: &[Value],
-    edges: &[Value],
-    artifacts: &[Value],
-    request_id: &str,
-    session_id: Option<&str>,
-    root_process: Option<u32>,
-    root_sequence: Option<&str>,
-    artifact_root: Option<&Path>,
-) -> Result<Value> {
-    let bodies = artifact_root
-        .map(|root| retained_request_bodies(events, artifacts, request_id, root))
-        .unwrap_or_default();
-    build_with_bodies(
-        events,
-        edges,
-        artifacts,
-        &bodies,
-        request_id,
-        session_id,
-        root_process,
-        root_sequence,
-    )
+
+/// What a trace reads, by identity: the slices of a test or a shared case,
+/// or the indexes of a session's stores (`event_index`).
+pub trait Evidence {
+    /// Every event carrying this request ID, gap markers excluded.
+    fn request_events(&mut self, request_id: &str) -> Result<Vec<Value>>;
+    /// The event with this identity. An identity names one record, so more
+    /// than one is malformed evidence.
+    fn event(&mut self, reference: &Reference) -> Result<Option<Value>>;
+    /// The edges whose source is this identity, each validated.
+    fn edges_from(&mut self, reference: &Reference) -> Result<Vec<Value>>;
+    /// The `js_invocation_settle` events of one stream.
+    fn settles(&mut self, session: &str, process: u32) -> Result<Vec<Value>>;
+    /// Queue-drop markers recorded in one stream.
+    fn drop_markers(&mut self, session: &str, process: u32) -> Result<u64>;
+    /// The manifest record of one artifact.
+    fn artifact(&mut self, id: &str) -> Result<Option<Value>>;
 }
+
+/// Checks one stored edge record; a malformed edge refuses the trace.
+pub(crate) fn validate_edge(edge: &Value) -> Result<Reference> {
+    validation::fields(
+        edge,
+        &[
+            "protocol_version",
+            "session_id",
+            "from_process_id",
+            "from_sequence_number",
+            "to_process_id",
+            "to_sequence_number",
+            "relation",
+            "confidence",
+            "request_id",
+            "artifact_id",
+        ],
+        "Origin trace edge",
+    )?;
+    if edge["protocol_version"] != 1
+        || !RELATIONS.contains(&edge["relation"].as_str().unwrap_or(""))
+        || !["observed", "correlated"].contains(&edge["confidence"].as_str().unwrap_or(""))
+    {
+        return Err(Error::bad("Origin trace store contains a malformed edge"));
+    }
+    for field in ["session_id", "from_sequence_number", "to_sequence_number"] {
+        validation::canonical(&edge[field], 64, true, field)?;
+    }
+    for field in ["request_id", "artifact_id"] {
+        validation::canonical(&edge[field], 64, false, field)?;
+    }
+    let from = validation::integer(
+        &edge["from_process_id"],
+        "from_process_id",
+        0,
+        u64::from(u32::MAX),
+    )? as u32;
+    let to = validation::integer(
+        &edge["to_process_id"],
+        "to_process_id",
+        0,
+        u64::from(u32::MAX),
+    )? as u32;
+    if from == to && edge["from_sequence_number"] == edge["to_sequence_number"] {
+        return Err(Error::bad("Origin trace store contains a self edge"));
+    }
+    Ok((
+        edge["session_id"].as_str().unwrap().into(),
+        from,
+        edge["from_sequence_number"].as_str().unwrap().into(),
+    ))
+}
+
+/// Checks a queue-drop gap marker; a named capture-limit gap is not one. A
+/// named gap carries its reason, not a drop count, in its own sequence slot:
+/// a sampling limit of its own category that Traffic already leaves out, so a
+/// request trace neither counts it as queue loss nor refuses over it.
+pub(crate) fn drop_marker(event: &Value) -> Result<Option<Reference>> {
+    let key = reference(event)?;
+    if event["type"] != "gap" || crate::event_window::named_gap(event).is_some() {
+        return Ok(None);
+    }
+    let marker = step(event, "trace_target", "observed")?;
+    validation::canonical(&marker["value"], 64, true, "Gap drop count")?;
+    if event["payload_truncated"] != false {
+        return Err(Error::bad("Origin trace input contains a malformed gap"));
+    }
+    Ok(Some(key))
+}
+
+/// Slices of evidence for tests and shared cases, validated whole: a duplicate
+/// identity, a malformed gap or a malformed edge anywhere refuses.
+#[cfg(test)]
+pub struct Retained<'a> {
+    by_reference: BTreeMap<Reference, &'a Value>,
+    by_source: BTreeMap<Reference, Vec<&'a Value>>,
+    markers: BTreeMap<(String, u32), u64>,
+    artifacts: &'a [Value],
+}
+#[cfg(test)]
+impl<'a> Retained<'a> {
+    pub fn new(events: &'a [Value], edges: &'a [Value], artifacts: &'a [Value]) -> Result<Self> {
+        let mut by_reference = BTreeMap::new();
+        let mut markers = BTreeMap::<(String, u32), u64>::new();
+        for event in events {
+            let key = reference(event)?;
+            // Queue-loss metadata deliberately shares the last retained event's
+            // reference. It must never replace that event or satisfy an edge.
+            if event["type"] == "gap" {
+                if let Some((session, process, _)) = drop_marker(event)? {
+                    *markers.entry((session, process)).or_default() += 1;
+                }
+            } else if by_reference.insert(key, event).is_some() {
+                return Err(Error::bad(
+                    "Origin trace input contains a duplicate event reference",
+                ));
+            }
+        }
+        let mut by_source: BTreeMap<Reference, Vec<&Value>> = BTreeMap::new();
+        for edge in edges {
+            by_source
+                .entry(validate_edge(edge)?)
+                .or_default()
+                .push(edge);
+        }
+        Ok(Self {
+            by_reference,
+            by_source,
+            markers,
+            artifacts,
+        })
+    }
+}
+#[cfg(test)]
+impl Evidence for Retained<'_> {
+    fn request_events(&mut self, request_id: &str) -> Result<Vec<Value>> {
+        Ok(self
+            .by_reference
+            .values()
+            .filter(|event| event["request_id"] == request_id)
+            .map(|event| (*event).clone())
+            .collect())
+    }
+    fn event(&mut self, reference: &Reference) -> Result<Option<Value>> {
+        Ok(self
+            .by_reference
+            .get(reference)
+            .map(|event| (*event).clone()))
+    }
+    fn edges_from(&mut self, reference: &Reference) -> Result<Vec<Value>> {
+        Ok(self
+            .by_source
+            .get(reference)
+            .map(|edges| edges.iter().map(|edge| (*edge).clone()).collect())
+            .unwrap_or_default())
+    }
+    fn settles(&mut self, session: &str, process: u32) -> Result<Vec<Value>> {
+        Ok(self
+            .by_reference
+            .iter()
+            .filter(|((s, p, _), event)| {
+                s == session && *p == process && event["type"] == "js_invocation_settle"
+            })
+            .map(|(_, event)| (*event).clone())
+            .collect())
+    }
+    fn drop_markers(&mut self, session: &str, process: u32) -> Result<u64> {
+        Ok(self
+            .markers
+            .get(&(session.to_owned(), process))
+            .copied()
+            .unwrap_or(0))
+    }
+    fn artifact(&mut self, id: &str) -> Result<Option<Value>> {
+        Ok(self
+            .artifacts
+            .iter()
+            .find(|a| a["artifact_id"] == id)
+            .cloned())
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn build_with_bodies(
     events: &[Value],
@@ -469,6 +647,60 @@ pub fn build_with_bodies(
     root_process: Option<u32>,
     root_sequence: Option<&str>,
 ) -> Result<Value> {
+    check_selectors(request_id, session_id, root_process, root_sequence)?;
+    let mut retained = Retained::new(events, edges, artifacts)?;
+    trace(
+        &mut retained,
+        bodies,
+        request_id,
+        session_id,
+        root_process,
+        root_sequence,
+    )
+}
+
+/// Traces `request_id` back through `evidence`, reading the raw request
+/// bodies value flow searches from `artifact_root`.
+pub fn build(
+    evidence: &mut impl Evidence,
+    request_id: &str,
+    session_id: Option<&str>,
+    root_process: Option<u32>,
+    root_sequence: Option<&str>,
+    artifact_root: &Path,
+) -> Result<Value> {
+    check_selectors(request_id, session_id, root_process, root_sequence)?;
+    let events = evidence.request_events(request_id)?;
+    let mut records = BTreeMap::new();
+    for event in &events {
+        if event["type"] == "request_body" && event["artifact_id"] != "0" {
+            let id = event["artifact_id"].as_str().unwrap_or("0").to_owned();
+            let record = evidence.artifact(&id)?;
+            records.insert(id, record);
+        }
+    }
+    let bodies = request_bodies(
+        &events,
+        |id| records.get(id.as_str().unwrap_or("0")).cloned().flatten(),
+        request_id,
+        artifact_root,
+    );
+    trace(
+        evidence,
+        &bodies,
+        request_id,
+        session_id,
+        root_process,
+        root_sequence,
+    )
+}
+
+pub(crate) fn check_selectors(
+    request_id: &str,
+    session_id: Option<&str>,
+    root_process: Option<u32>,
+    root_sequence: Option<&str>,
+) -> Result<()> {
     validation::canonical(&json!(request_id), 64, false, "request_id")?;
     if let Some(session) = session_id {
         validation::canonical(&json!(session), 64, true, "session_id")?;
@@ -481,87 +713,19 @@ pub fn build_with_bodies(
     if let Some(sequence) = root_sequence {
         validation::canonical(&json!(sequence), 64, false, "root_sequence_number")?;
     }
-    let mut by_reference = BTreeMap::new();
-    let mut capture_gaps = Vec::new();
-    for event in events {
-        let key = reference(event)?;
-        // Queue-loss metadata deliberately shares the last retained event's
-        // reference. It must never replace that event or satisfy an edge.
-        if event["type"] == "gap" {
-            let marker = step(event, "trace_target", "observed")?;
-            // A named capture-limit gap carries its reason, not a drop count,
-            // in its own sequence slot. It is a sampling limit of its own
-            // category that Traffic already leaves out, so a request trace
-            // neither counts it as queue loss nor refuses the window over it.
-            if crate::event_window::named_gap(event).is_some() {
-                continue;
-            }
-            validation::canonical(&marker["value"], 64, true, "Gap drop count")?;
-            if event["payload_truncated"] != false {
-                return Err(Error::bad("Origin trace input contains a malformed gap"));
-            }
-            capture_gaps.push(key);
-        } else if by_reference.insert(key, event).is_some() {
-            return Err(Error::bad(
-                "Origin trace input contains a duplicate event reference",
-            ));
-        }
-    }
-    let mut by_source: BTreeMap<Reference, Vec<&Value>> = BTreeMap::new();
-    for edge in edges {
-        validation::fields(
-            edge,
-            &[
-                "protocol_version",
-                "session_id",
-                "from_process_id",
-                "from_sequence_number",
-                "to_process_id",
-                "to_sequence_number",
-                "relation",
-                "confidence",
-                "request_id",
-                "artifact_id",
-            ],
-            "Origin trace edge",
-        )?;
-        if edge["protocol_version"] != 1
-            || !RELATIONS.contains(&edge["relation"].as_str().unwrap_or(""))
-            || !["observed", "correlated"].contains(&edge["confidence"].as_str().unwrap_or(""))
-        {
-            return Err(Error::bad("Origin trace store contains a malformed edge"));
-        }
-        for field in ["session_id", "from_sequence_number", "to_sequence_number"] {
-            validation::canonical(&edge[field], 64, true, field)?;
-        }
-        for field in ["request_id", "artifact_id"] {
-            validation::canonical(&edge[field], 64, false, field)?;
-        }
-        let from = validation::integer(
-            &edge["from_process_id"],
-            "from_process_id",
-            0,
-            u64::from(u32::MAX),
-        )? as u32;
-        let to = validation::integer(
-            &edge["to_process_id"],
-            "to_process_id",
-            0,
-            u64::from(u32::MAX),
-        )? as u32;
-        if from == to && edge["from_sequence_number"] == edge["to_sequence_number"] {
-            return Err(Error::bad("Origin trace store contains a self edge"));
-        }
-        by_source
-            .entry((
-                edge["session_id"].as_str().unwrap().into(),
-                from,
-                edge["from_sequence_number"].as_str().unwrap().into(),
-            ))
-            .or_default()
-            .push(edge);
-    }
-    let candidates: Vec<_> = events
+    Ok(())
+}
+
+pub(crate) fn trace(
+    evidence: &mut impl Evidence,
+    bodies: &RequestBodies,
+    request_id: &str,
+    session_id: Option<&str>,
+    root_process: Option<u32>,
+    root_sequence: Option<&str>,
+) -> Result<Value> {
+    let request_events = evidence.request_events(request_id)?;
+    let candidates: Vec<&Value> = request_events
         .iter()
         .filter(|e| {
             e["type"] != "gap"
@@ -611,14 +775,11 @@ pub fn build_with_bodies(
     } else if preferred.len() != 1 {
         "empty"
     } else {
-        let mut current = preferred[0];
-        let mut visited = BTreeSet::from([reference(current)?]);
-        steps.push(step(current, "trace_target", "observed")?);
+        let mut current = preferred[0].clone();
+        let mut visited = BTreeSet::from([reference(&current)?]);
+        steps.push(step(&current, "trace_target", "observed")?);
         while steps.len() < 32 {
-            let mut candidates = by_source
-                .get(&reference(current)?)
-                .cloned()
-                .unwrap_or_default();
+            let mut candidates = evidence.edges_from(&reference(&current)?)?;
             candidates.sort_by(|a, b| {
                 RELATIONS
                     .iter()
@@ -657,10 +818,12 @@ pub fn build_with_bodies(
                         ))
                     });
                     if let Some(body) = body {
-                        match value_flow(&by_reference, &visited, current, body) {
+                        let (session, process, _) = reference(&current)?;
+                        let settles = evidence.settles(&session, process)?;
+                        match value_flow(&settles, &visited, &current, body) {
                             Ok(Some(settle)) => {
-                                visited.insert(reference(settle)?);
-                                steps.push(step(settle, "invocation_value_flow", "correlated")?);
+                                visited.insert(reference(&settle)?);
+                                steps.push(step(&settle, "invocation_value_flow", "correlated")?);
                                 correlated += 1;
                                 current = settle;
                                 continue;
@@ -677,8 +840,12 @@ pub fn build_with_bodies(
                     // Proximity never closes the gap. The identity chain really
                     // did end here, so the gap stays and the adjacency row is
                     // reported beside it rather than in place of it.
-                    let adjacent = adjacent_candidate(&by_reference, &visited, current)
-                        .and_then(|event| step(event, "temporal_adjacency", "time_adjacent").ok());
+                    let siblings = match current["request_id"].as_str() {
+                        Some(request) if request != "0" => evidence.request_events(request)?,
+                        _ => Vec::new(),
+                    };
+                    let adjacent = adjacent_candidate(&siblings, &visited, &current)
+                        .and_then(|event| step(&event, "temporal_adjacency", "time_adjacent").ok());
                     gaps.push(gap(
                         "no_predecessor",
                         steps.len() - 1,
@@ -703,11 +870,11 @@ pub fn build_with_bodies(
                 edge["to_process_id"].as_u64().unwrap() as u32,
                 edge["to_sequence_number"].as_str().unwrap().into(),
             );
-            let Some(event) = by_reference.get(&target) else {
+            let Some(event) = evidence.event(&target)? else {
                 gaps.push(gap(
                     "missing_event",
                     steps.len() - 1,
-                    "The highest-priority predecessor is outside the retained evidence window.",
+                    "The highest-priority predecessor is not in the stored evidence.",
                 ));
                 break;
             };
@@ -720,7 +887,7 @@ pub fn build_with_bodies(
                 break;
             }
             steps.push(step(
-                event,
+                &event,
                 edge["relation"].as_str().unwrap(),
                 edge["confidence"].as_str().unwrap(),
             )?);
@@ -741,21 +908,25 @@ pub fn build_with_bodies(
                 "The bounded trace step limit was reached.",
             ));
         }
-        let marker_count = capture_gaps
+        let streams = steps
             .iter()
-            .filter(|(session, process, _)| {
-                steps.iter().any(|s| {
-                    s["event"]["session_id"] == session.as_str()
-                        && s["event"]["process_id"] == *process
-                })
+            .filter_map(|s| {
+                Some((
+                    s["event"]["session_id"].as_str()?.to_owned(),
+                    s["event"]["process_id"].as_u64()? as u32,
+                ))
             })
-            .count();
+            .collect::<BTreeSet<_>>();
+        let mut marker_count = 0;
+        for (session, process) in &streams {
+            marker_count += evidence.drop_markers(session, *process)?;
+        }
         if marker_count > 0 {
             gaps.push(gap(
                 "capture_gap",
                 0,
                 &format!(
-                    "The retained window contains {marker_count} native queue-drop markers in this trace's session/process streams. Counts may overlap; these markers do not identify a missing predecessor or prove value flow."
+                    "The stored evidence contains {marker_count} native queue-drop markers in this trace's session/process streams. Counts may overlap; these markers do not identify a missing predecessor or prove value flow."
                 ),
             ));
         }
@@ -774,13 +945,16 @@ pub fn build_with_bodies(
     } else {
         ((linked * 100) as f64 / denominator as f64).round_ties_even() as usize
     };
-    let selected: Vec<_> = artifacts
+    let named = steps
         .iter()
-        .filter(|a| {
-            a["artifact_id"] != "0" && steps.iter().any(|s| s["artifact_id"] == a["artifact_id"])
-        })
-        .map(|a| {
-            let mut public = evidence::public_artifact(a);
+        .filter_map(|s| s["artifact_id"].as_str())
+        .filter(|id| *id != "0")
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    let mut selected = Vec::new();
+    for id in named {
+        if let Some(artifact) = evidence.artifact(&id)? {
+            let mut public = evidence::public_artifact(&artifact);
             public.as_object_mut().unwrap().retain(|key, _| {
                 [
                     "artifact_id",
@@ -793,9 +967,16 @@ pub fn build_with_bodies(
                 ]
                 .contains(&key.as_str())
             });
-            public
-        })
-        .collect();
+            selected.push(public);
+        }
+    }
+    // Manifest order is ascending artifact ID.
+    selected.sort_by_key(|artifact| {
+        artifact["artifact_id"]
+            .as_str()
+            .and_then(|id| id.parse::<u64>().ok())
+            .unwrap_or(0)
+    });
     Ok(
         json!({"contract_version":1,"document_kind":"origin-trace","request_id":request_id,"status":status,"steps":steps,"gaps":gaps,"coverage":{"linked_steps":linked,"observed_links":observed,"correlated_links":correlated,"time_adjacent_links":time_adjacent_links,"gap_count":gaps.len(),"percent":percent},"artifacts":selected}),
     )
@@ -981,10 +1162,10 @@ mod tests {
         assert_eq!(document["steps"][2]["event"]["sequence_number"], "3");
     }
 
-    /// The cases tools/check-origin-trace-gaps.swift runs through the native
-    /// app's builder: both builders must produce the same rows and gaps.
+    /// The shared invocation cases produce their recorded rows and gaps;
+    /// `event_index` runs the same cases through the stores.
     #[test]
-    fn shared_invocation_cases_match_the_swift_builder() {
+    fn shared_invocation_cases_trace_as_recorded() {
         let fixture: Value =
             serde_json::from_str(include_str!("../assets/origin-trace-invocation-cases.json"))
                 .unwrap();
@@ -1074,12 +1255,21 @@ mod tests {
         let artifact = json!({"artifact_id":"31","session_id":"9","kind":"request_body",
             "capture_origin":"network_request","creator_event_id":"2","byte_size":body.len(),
             "sha256":hash,"content_path":format!("blobs/{hash}.bin")});
-        let bodies =
-            retained_request_bodies(&[record.clone()], &[artifact.clone()], "900", root.path());
+        let bodies = retained_request_bodies(
+            &[record.clone()],
+            std::slice::from_ref(&artifact),
+            "900",
+            root.path(),
+        );
         assert_eq!(bodies.get(&key(84, 1)), Some(&body));
         assert!(
-            retained_request_bodies(&[record.clone()], &[artifact.clone()], "901", root.path())
-                .is_empty()
+            retained_request_bodies(
+                &[record.clone()],
+                std::slice::from_ref(&artifact),
+                "901",
+                root.path()
+            )
+            .is_empty()
         );
         for (field, value) in [
             ("creator_event_id", json!("3")),

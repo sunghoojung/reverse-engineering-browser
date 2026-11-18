@@ -90,7 +90,7 @@ function mount({protocol = 'http:', store = createStore(), hold = null, failing 
     const json = body => ({ok: true, status: 200, json: async () => structuredClone(body)});
     if (url.startsWith('/api/native-debugger')) return json(store.answer(parameters));
     if (url.startsWith('/api/request-stack')) return json({status: 'recorded', request: {sequence_number: parameters.get('observation_sequence')}, state: 'no_script', frames: [], observation: {site: null}});
-    if (url.startsWith('/api/requests')) return json(context.__requests?.(parameters) ?? {format: 'reb-request-index-v1', requests: [], located: {}});
+    if (url.startsWith('/api/requests')) return json(context.__requests?.(parameters) ?? {format: 'reb-request-index-v2', requests: [], located: {}});
     return {ok: false, status: 404, json: async () => ({error: 'not served'})};
   }
   const location = {protocol};
@@ -288,8 +288,8 @@ await check('Open request in Traffic selects through selectTrafficRow', async ()
     selectTrafficRow: id => calls.push(['select', id, state.inspectorTab]), loadTrafficRequest: (row, select) => calls.push(['load', row.id, select, state.inspectorTab]),
     trafficIndexRequest: (row, origin) => ({id: row.id, origin, indexRow: row}), renderInspector: () => calls.push(['inspector']),
     __requests: parameters => parameters.has('locate')
-      ? {format: 'reb-request-index-v1', requests: [], located: {[parameters.get('locate')]: block.size ? null : 2400}}
-      : {format: 'reb-request-index-v1', requests: Number(parameters.get('offset')) === 2400 ? [indexRow] : []}}});
+      ? {format: 'reb-request-index-v2', requests: [], located: {[parameters.get('locate')]: block.size ? null : 2400}}
+      : {format: 'reb-request-index-v2', requests: Number(parameters.get('offset')) === 2400 ? [indexRow] : []}}});
   ui.open();
   await until(() => ui.rows('#debugger-observations').length === 1, 'the request record');
   const openRequest = async () => {
@@ -309,7 +309,7 @@ await check('Open request in Traffic selects through selectTrafficRow', async ()
     ['/api/requests?sort=capture&order=asc&limit=1&offset=0&locate=S1%3AR42%3A77', '/api/requests?sort=capture&order=asc&limit=1&offset=2400']);
   assert.deepEqual(calls.filter(call => call[0] === 'load'), [['load', 'S1:R42:77', true, 'initiator']]);
   // Not indexed: nothing is selected, and the detail says why.
-  ui.context.__requests = () => ({format: 'reb-request-index-v1', requests: [], located: {'S1:R42:77': null}});
+  ui.context.__requests = () => ({format: 'reb-request-index-v2', requests: [], located: {'S1:R42:77': null}});
   calls.length = 0;
   ui.sidebar.querySelector('.debugger-detail-close').click();
   await openRequest();
@@ -599,8 +599,8 @@ await check('Open request in Traffic cancels when the researcher moves on', asyn
     showScreen: name => calls.push(['screen', name]), setConsoleTrafficView: () => {}, renderInspector: () => {},
     selectTrafficRow: id => calls.push(['select', id]), loadTrafficRequest: row => calls.push(['load', row.id]),
     trafficIndexRequest: (row, origin) => ({id: row.id, origin, indexRow: row}),
-    __requests: parameters => parameters.has('locate') ? {format: 'reb-request-index-v1', requests: [], located: {'S1:R42:77': 2400}}
-      : {format: 'reb-request-index-v1', requests: [indexRow]}}});
+    __requests: parameters => parameters.has('locate') ? {format: 'reb-request-index-v2', requests: [], located: {'S1:R42:77': 2400}}
+      : {format: 'reb-request-index-v2', requests: [indexRow]}}});
   const lookups = () => ui.requests.filter(entry => entry.url.startsWith('/api/requests'));
   const link = () => ui.sidebar.querySelector('.debugger-open-request');
   const choose = async () => { click(ui, ui.rows('#debugger-observations')[0]); await settle(); };
@@ -825,8 +825,8 @@ await check('moving on in the sidebar cancels a Traffic lookup', async () => {
     showScreen: name => calls.push(['screen', name]), setConsoleTrafficView: () => {}, renderInspector: () => {},
     selectTrafficRow: id => calls.push(['select', id]), loadTrafficRequest: row => calls.push(['load', row.id]),
     trafficIndexRequest: (row, origin) => ({id: row.id, origin, indexRow: row}),
-    __requests: parameters => parameters.has('locate') ? {format: 'reb-request-index-v1', requests: [], located: {'S1:R42:77': 2400}}
-      : {format: 'reb-request-index-v1', requests: [indexRow]}}});
+    __requests: parameters => parameters.has('locate') ? {format: 'reb-request-index-v2', requests: [], located: {'S1:R42:77': 2400}}
+      : {format: 'reb-request-index-v2', requests: [indexRow]}}});
   const lookups = () => ui.requests.filter(entry => entry.url.startsWith('/api/requests'));
   const row = key => ui.rows('#debugger-observations').find(item => item.dataset.key === key);
   const startLookup = async count => {

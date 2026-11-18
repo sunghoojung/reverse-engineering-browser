@@ -731,7 +731,8 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 68, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 69, "Review route coverage when the API changes");
+    assert!(ids.contains("export_requests_har"));
     assert!(ids.contains("get_wasm_pseudocode"));
     assert!(ids.contains("search_wasm_inspection"));
     assert!(ids.contains("get_request_headers"));
@@ -823,7 +824,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 68);
+    assert_eq!(operation_count, 69);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -1471,12 +1472,16 @@ async fn assert_poll_response(server: &Server, path: &str, expected: Value) {
     assert_eq!(unchanged.status(), 304);
     assert!(unchanged.bytes().await.unwrap().is_empty());
 }
-fn event_response(events: &[Value], scan_end: usize, limited: bool) -> Value {
+/// `older` is the byte offset of the oldest returned event when the window
+/// left older events out: the `before` cursor that reads them.
+fn event_response(events: &[Value], scan_end: usize, older: Option<usize>) -> Value {
+    let limited = older.is_some();
     json!({
         "count": events.len(),
         "events": events,
         "network_events": events,
-        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited, "malformed_lines":0},
+        "event_window": {"scope":"store", "scan_start":"0", "scan_end":scan_end.to_string(), "scan_limit":67108864, "events_limited":limited, "network_events_limited":limited, "malformed_lines":0,
+            "next_before": older.map(|offset| offset.to_string())},
         "broker_connected": true,
         "capture_mode": "idle",
         "capture_state": "not_live",
@@ -2012,15 +2017,13 @@ async fn session_summary_counts_frames_and_explains_gaps() {
     assert_contract_response(bad, "get", "/api/session/summary", 400).await;
 }
 
-// The summary's ETag names the request index's progress its body case counts
-// were read at, and an answer without them has no ETag (lock scope is not
-// observable here).
+// The summary counts the whole store from its indexes, says how far they
+// have read while they catch up, and is tagged by its own bytes, so an answer
+// read mid-store never revalidates as the complete one.
 #[tokio::test]
-async fn session_summary_tags_name_the_request_index_progress() {
+async fn session_summary_counts_a_long_store_whole_and_is_tagged_by_its_bytes() {
     let server = Server::start().await;
     let summary = |tag: Option<String>| {
-        // Each answer digests the whole store for its tag; a debug build
-        // under load can take longer than the client's default deadline.
         let request = server
             .client
             .get(format!("{}/api/session/summary", server.url))
@@ -2044,7 +2047,7 @@ async fn session_summary_tags_name_the_request_index_progress() {
             (status, tag, body)
         }
     };
-    // Both readers skip blank lines without parsing them, so blank lines
+    // Every reader skips blank lines without parsing them, so blank lines
     // under the 4 KiB record limit stand in for a large store cheaply.
     const MIB: usize = 1024 * 1024;
     let blank = |mebibytes: usize, store: &mut Vec<u8>| {
@@ -2054,58 +2057,81 @@ async fn session_summary_tags_name_the_request_index_progress() {
             store.extend_from_slice(&line);
         }
     };
-    let event = jsonl(&[window_event(1, "wasm", "module_compiled", "")]);
-    // A store the index reads in two 64 MiB steps: an answer counted mid-store
-    // never revalidates as the complete one. The index's maintenance read can
-    // run first, so a store already read whole is replaced by a fresh one.
-    let mut first = None;
-    for attempt in 0..3 {
-        let mut store = Vec::with_capacity(66 * MIB);
-        blank(65 + attempt, &mut store);
-        store.extend_from_slice(&event);
-        server.file("events.jsonl", &store);
-        drop(store);
+    // The first record lies more than 64 MiB before the store's end, where
+    // a summary of the newest bytes never looked.
+    let mut store = Vec::with_capacity(66 * MIB);
+    store.extend_from_slice(&jsonl(&[window_event(1, "wasm", "module_compiled", "")]));
+    blank(65, &mut store);
+    store.extend_from_slice(&jsonl(&[window_event(2, "canvas", "api_call", "")]));
+    server.file("events.jsonl", &store);
+    drop(store);
+    // The indexes read a long store in steps; each answer says how far.
+    let mut answers = Vec::new();
+    let complete = loop {
         let (status, tag, body) = summary(None).await;
         assert_eq!(status, 200);
-        if body.unwrap()["response_bodies"]["complete"] == false {
-            first = Some(tag.expect("a counted answer is tagged"));
-            break;
+        let (tag, body) = (tag.expect("every answer is tagged"), body.unwrap());
+        let done =
+            body["events"]["scope"] == "store" && body["response_bodies"]["complete"] == true;
+        answers.push((tag.clone(), body.clone()));
+        if done {
+            break (tag, body);
+        }
+        assert!(
+            answers.len() < 240,
+            "the summary never covered the whole store"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    let (complete, body) = complete;
+    assert_eq!(body["events"]["total"], "2");
+    assert_eq!(body["events"]["scan_end"], body["events"]["store_end"]);
+    assert!(
+        body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["code"] == "wasm_without_artifacts"),
+        "{body}"
+    );
+    // An answer read mid-store never revalidates as the complete one.
+    for (tag, partial) in &answers {
+        if partial != &body {
+            assert_ne!(tag, &complete);
+            let (status, again, _) = summary(Some(tag.clone())).await;
+            assert_eq!((status, again.as_ref()), (200, Some(&complete)));
         }
     }
-    let first = first.expect("an answer counted mid-store");
-    let (status, complete, body) = summary(None).await;
-    assert_eq!(status, 200);
-    assert_eq!(body.unwrap()["response_bodies"]["complete"], true);
-    let complete = complete.expect("a counted answer is tagged");
-    assert_ne!(first, complete);
-    let (status, tag, body) = summary(Some(first)).await;
-    assert_eq!(
-        status, 200,
-        "a mid-store answer's tag is not the complete one"
-    );
-    assert_eq!(body.unwrap()["response_bodies"]["complete"], true);
-    assert_eq!(tag.as_ref(), Some(&complete));
     let (status, tag, _) = summary(Some(complete.clone())).await;
     assert_eq!((status, tag), (304, Some(complete)));
-    // A first line longer than the index's 64 MiB read, then more than the
-    // summary's 64 MiB window: the index finds no record end and cannot read
-    // on, while the summary reads only the newest lines.
+    // A first line longer than any record stops both indexes there: the
+    // summary says what it cannot read rather than failing.
     let mut store = Vec::with_capacity(132 * MIB);
     store.resize(65 * MIB, b'x');
     store.push(b'\n');
     blank(65, &mut store);
-    store.extend_from_slice(&event);
+    store.extend_from_slice(&jsonl(&[window_event(1, "wasm", "module_compiled", "")]));
     server.file("events.jsonl", &store);
     drop(store);
     let (status, tag, body) = summary(None).await;
-    let bodies = &body.unwrap()["response_bodies"];
+    let body = body.unwrap();
     assert_eq!(status, 200);
+    assert!(tag.is_some());
+    assert_eq!(body["events"]["scope"], "stopped");
+    assert_eq!(body["events"]["total"], "0");
+    let unreadable = body["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"] == "events_unreadable")
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(unreadable["severity"], "error");
+    let bodies = &body["response_bodies"];
     assert_eq!(bodies["available"], false);
     assert!(
         bodies["reason"].as_str().unwrap().contains("oversized"),
         "{bodies}"
     );
-    assert_eq!(tag, None, "an unavailable answer is not tagged");
 }
 
 #[tokio::test]
@@ -2282,53 +2308,79 @@ async fn event_waits_return_new_matches_or_time_out() {
 #[tokio::test]
 async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     let server = Server::start().await;
-    assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
+    assert_poll_response(&server, "/api/events", event_response(&[], 0, None)).await;
     let mut events: Vec<_> = (1..=5001).map(metadata_event).collect();
     server.file("events.jsonl", &jsonl(&events));
     assert_poll_response(
         &server,
         "/api/events?limit=2",
-        event_response(&events[4999..], jsonl(&events).len(), true),
+        event_response(
+            &events[4999..],
+            jsonl(&events).len(),
+            Some(jsonl(&events[..4999]).len()),
+        ),
     )
     .await;
     assert_poll_response(
         &server,
         "/api/events?limit=9999",
-        event_response(&events[1..], jsonl(&events).len(), true),
+        event_response(
+            &events[1..],
+            jsonl(&events).len(),
+            Some(jsonl(&events[..1]).len()),
+        ),
     )
     .await;
     let response = server.get("/api/events?limit=2").await;
     let previous_etag = response.headers()["etag"].clone();
     drop(response);
-    // The next poll sees appended evidence, including a complete final record
-    // without a newline, rather than retaining an earlier response tree.
+    // Once the event index has caught up, the window ends where it does, at
+    // the last complete line: a final record without its newline is a record
+    // still being written, as it is to the request list. The answer is then
+    // the same bytes, and its tag, the digest of those bytes, is unchanged.
     events.push(metadata_event(5002));
-    {
+    let append = |bytes: &[u8]| {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .append(true)
             .open(server.root.path().join("events.jsonl"))
+            .unwrap()
+            .write_all(bytes)
             .unwrap();
-        file.write_all(&serde_json::to_vec(events.last().unwrap()).unwrap())
-            .unwrap();
-    }
+    };
+    append(&serde_json::to_vec(events.last().unwrap()).unwrap());
     let response = server
         .client
         .get(format!("{}/api/events?limit=2", server.url))
-        .header("If-None-Match", previous_etag)
+        .header("If-None-Match", previous_etag.clone())
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), 304);
+    assert_eq!(response.headers()["etag"], previous_etag);
+    let response = server.get("/api/events?limit=2").await;
+    assert_eq!(response.headers()["etag"], previous_etag);
     assert_eq!(
         response.bytes().await.unwrap().as_ref(),
         serde_json::to_vec(&event_response(
-            &events[5000..],
-            jsonl(&events).len() - 1,
-            true
+            &events[4999..5001],
+            jsonl(&events[..5001]).len(),
+            Some(jsonl(&events[..4999]).len())
         ))
         .unwrap()
     );
+    // The newline completes the record, which changes the answer and its tag.
+    append(b"\n");
+    assert_poll_response(
+        &server,
+        "/api/events?limit=2",
+        event_response(
+            &events[5000..],
+            jsonl(&events).len(),
+            Some(jsonl(&events[..5000]).len()),
+        ),
+    )
+    .await;
     server.file("rotated.jsonl", &jsonl(&[metadata_event(9000)]));
     std::fs::rename(
         server.root.path().join("rotated.jsonl"),
@@ -2341,12 +2393,12 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
         event_response(
             &[metadata_event(9000)],
             jsonl(&[metadata_event(9000)]).len(),
-            false,
+            None,
         ),
     )
     .await;
     server.file("events.jsonl", b"");
-    assert_poll_response(&server, "/api/events", event_response(&[], 0, false)).await;
+    assert_poll_response(&server, "/api/events", event_response(&[], 0, None)).await;
     // One damaged line is skipped and counted, so it cannot fail every poll.
     let mut invalid = metadata_event(1);
     invalid["payload"] = json!("not-hex");
@@ -2370,7 +2422,7 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
         event_response(
             &[metadata_event(2)],
             jsonl(&[metadata_event(2)]).len(),
-            false,
+            None,
         ),
     )
     .await;
@@ -7479,12 +7531,12 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
     ) {
         for entry in std::fs::read_dir(path).unwrap() {
             let entry = entry.unwrap();
-            // The backend rewrites its derived request index on its own 30-second
-            // timer, so a slow run can see it appear with no request causing it.
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("events.jsonl.requests-v1")
+            // The backend keeps derived indexes beside the stores on its own
+            // timers, so a run can see them appear with no request causing them.
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if [".requests-v2", ".events-v1", ".edges-v1", ".lookup-v1"]
+                .iter()
+                .any(|suffix| name.contains(suffix))
             {
                 continue;
             }
@@ -9215,7 +9267,7 @@ async fn float32_http_cli_discovery_parity_and_no_helpers() {
     }
 }
 #[tokio::test]
-async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and_scan_limits() {
+async fn float32_verified_artifact_rejects_corruption_stale_identity_and_missing() {
     const ROUTE: &str = "/api/float32/compare";
     let server = Server::start().await;
     let bytes = [0, 0, 128, 63, 0, 0, 0, 128, 1, 0, 192, 127, 0, 0, 128, 127];
@@ -9265,36 +9317,33 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_missing_and
         &format!("artifacts/{}", artifact["content_path"].as_str().unwrap()),
         &bytes,
     );
-    // Blank lines also consume the explicit line/work budget; no matching prefix.
-    server.file(
-        "artifacts/manifest.jsonl",
-        format!("{artifact}\n{}", "\n".repeat(8192)).as_bytes(),
-    );
-    let error: Value = serde_json::from_slice(
-        &assert_contract_response(
+    // The manifest is read whole through its index: an artifact is found
+    // however many records or blank lines follow it.
+    let mut later = artifact.clone();
+    let lines = (8..20_008)
+        .map(|id| {
+            later["artifact_id"] = json!(id.to_string());
+            later.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for manifest in [
+        format!("{artifact}\n{}", "\n".repeat(8192)),
+        format!("{artifact}\n{}", (" ".repeat(8191) + "\n").repeat(1024)),
+        format!("{artifact}\n{lines}\n"),
+    ] {
+        server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+        assert_contract_response(
             server.action(ROUTE, request.clone()).await,
             "post",
             ROUTE,
-            413,
+            200,
         )
-        .await,
-    )
-    .unwrap();
-    assert_eq!(error["code"], "resource_limit");
-    // The new opt-in scan cap must not silently narrow existing readers.
-    let old_reader = server.get("/api/artifacts/7/content").await;
-    assert_eq!(old_reader.status(), 200);
-    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
-    // Byte scan exhaustion is independent of the line cap and follows an early match.
-    server.file(
-        "artifacts/manifest.jsonl",
-        format!("{artifact}\n{}", (" ".repeat(8191) + "\n").repeat(1024)).as_bytes(),
-    );
-    let bounded = server.action(ROUTE, request.clone()).await;
-    assert_contract_response(bounded, "post", ROUTE, 413).await;
-    let old_reader = server.get("/api/artifacts/7/content").await;
-    assert_eq!(old_reader.status(), 200);
-    assert_eq!(old_reader.bytes().await.unwrap().as_ref(), &bytes);
+        .await;
+        let reader = server.get("/api/artifacts/7/content").await;
+        assert_eq!(reader.status(), 200);
+        assert_eq!(reader.bytes().await.unwrap().as_ref(), &bytes);
+    }
     server.file(
         "artifacts/manifest.jsonl",
         format!("{artifact}\n{artifact}\n").as_bytes(),
@@ -11706,6 +11755,154 @@ async fn request_detail_routes_report_what_their_read_covered() {
     assert_eq!(stack["coverage"]["scope"], "request_range");
 }
 
+/// The HAR export writes every hop of every selected row: a redirect keeps
+/// its own entry pointing at the next hop, a failed request keeps an entry
+/// with status 0, and header values come from the hop's verified block, with
+/// credential values only when asked for.
+#[tokio::test]
+async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
+    let server = Server::start().await;
+    let event = |sequence: u64, request: u64, kind: &str, parent: u64, payload: &[u8]| {
+        json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1_000_000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
+            "parent_event_id":parent.to_string(),"request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+            "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
+            "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false})
+    };
+    // A version 2 request_target: https, no port, the path and query whole.
+    let target = |text: &[u8]| {
+        let mut out = vec![0u8; 128];
+        (out[0], out[2], out[8]) = (2, 128, 2);
+        out[4..8].copy_from_slice(&(text.len() as u32).to_le_bytes());
+        out[12..12 + text.len()].copy_from_slice(text);
+        out
+    };
+    let block = b"Accept: */*\r\nAuthorization: Bearer har-SECRET\r\n";
+    let mut headers = vec![0u8; 128];
+    (headers[0], headers[2], headers[4], headers[5]) = (1, 128, 2, 1);
+    headers[8..12].copy_from_slice(&2u32.to_le_bytes());
+    headers[12..16].copy_from_slice(&(block.len() as u32).to_le_bytes());
+    headers[48..80].copy_from_slice(&Sha256::digest(block));
+    let mut sent = event(3, 17, "request_headers", 1, &headers);
+    sent["artifact_id"] = json!("5");
+    let mut redirected = event(4, 17, "request_redirected", 1, b"GET example.test");
+    redirected["status_code"] = json!(302);
+    let mut response = event(6, 17, "response_started", 4, b"GET example.test");
+    response["status_code"] = json!(200);
+    let mut failed = event(9, 18, "request_failed", 8, b"");
+    failed["error_code"] = json!(-105);
+    let events = vec![
+        event(1, 17, "request_started", 0, b"GET example.test"),
+        event(2, 17, "request_target", 1, &target(b"/start?x=1")),
+        sent,
+        redirected,
+        event(5, 17, "request_target", 4, &target(b"/next")),
+        response,
+        event(7, 17, "request_completed", 6, b""),
+        event(8, 18, "request_started", 0, b"POST unreachable.test"),
+        failed,
+    ];
+    server.file("events.jsonl", &jsonl(&events));
+    let hash = hex::encode(Sha256::digest(block));
+    let artifact = json!({"protocol_version":1,"artifact_id":"5","session_id":"1","navigation_id":"0",
+        "frame_id":"9","parent_artifact_id":"0","creator_event_id":"3","execution_context_id":"0",
+        "capture_origin":"network_request","kind":"request_headers","url":"https://example.test/start",
+        "mime_type":"text/plain","byte_size":block.len(),"sha256":hash,"sensitive":true,
+        "content_path":format!("blobs/{hash}.bin")});
+    server.file(&format!("artifacts/blobs/{hash}.bin"), block);
+    server.file(
+        "artifacts/manifest.jsonl",
+        format!("{artifact}\n").as_bytes(),
+    );
+    let route = "/api/requests/har";
+    let read = async |query: &str| -> Value {
+        let response = server.get(&format!("{route}?{query}")).await;
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=\"origin-trace.har\""
+        );
+        let bytes = assert_contract_response(response, "get", route, 200).await;
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    let har = read("").await;
+    let log = &har["log"];
+    assert_eq!(log["version"], "1.2");
+    assert_eq!(log["_reb"]["complete"], true, "{log}");
+    assert_eq!(log["_reb"]["rows"], 2);
+    assert_eq!(log["_reb"]["entries"], 3);
+    assert_eq!(
+        log["_reb"]["outcomes"],
+        json!({"redirect": 1, "complete": 1, "failed": 1})
+    );
+    let entries = log["entries"].as_array().unwrap();
+    let (first, second, third) = (&entries[0], &entries[1], &entries[2]);
+    assert_eq!(first["request"]["url"], "https://example.test/start?x=1");
+    assert_eq!(
+        first["request"]["queryString"],
+        json!([{"name": "x", "value": "1"}])
+    );
+    assert_eq!(first["response"]["status"], 302);
+    assert_eq!(
+        first["response"]["redirectURL"],
+        "https://example.test/next"
+    );
+    assert_eq!(first["_reb"]["outcome"], "redirect");
+    assert_eq!(first["_reb"]["url_complete"], true);
+    assert_eq!(first["startedDateTime"], "1970-01-01T00:00:00.001Z");
+    assert_eq!(first["time"], 3.0);
+    assert_eq!(
+        first["request"]["headers"],
+        json!([{"name": "Accept", "value": "*/*"},
+            {"name": "Authorization", "value": "", "_reb_withheld": true, "_reb_value_bytes": 17}])
+    );
+    assert_eq!(first["_reb"]["request_headers"]["source"], "network");
+    assert_eq!(second["request"]["url"], "https://example.test/next");
+    assert_eq!(second["response"]["status"], 200);
+    assert_eq!(second["_reb"]["outcome"], "complete");
+    assert_eq!(second["_reb"]["hop"], 1);
+    assert_eq!(third["request"]["method"], "POST");
+    assert_eq!(third["response"]["status"], 0);
+    assert_eq!(third["_reb"]["outcome"], "failed");
+    assert_eq!(third["_reb"]["error_code"], -105);
+    assert_eq!(third["_reb"]["url_complete"], false);
+    assert!(!har.to_string().contains("har-SECRET"));
+    // Asked for, the same entry carries the captured credential value.
+    let returned = read("credential_values=1").await;
+    assert_eq!(
+        returned["log"]["entries"][0]["request"]["headers"][1],
+        json!({"name": "Authorization", "value": "Bearer har-SECRET"})
+    );
+    assert_eq!(returned["log"]["_reb"]["credential_values"], "returned");
+    // The list's filters select the rows; a page is never one.
+    let failed_only = read("failed=1").await;
+    assert_eq!(failed_only["log"]["_reb"]["rows"], 1);
+    assert_eq!(
+        failed_only["log"]["entries"][0]["_reb"]["outcome"],
+        "failed"
+    );
+    // Traffic's selection: the exact rows, in the order named.
+    let ids = [&third, &first].map(|entry| entry["_reb"]["row_id"].as_str().unwrap().to_owned());
+    let selected = read(&format!("rows={}", ids.join(","))).await;
+    let selected = selected["log"]["entries"].as_array().unwrap();
+    assert_eq!(selected.len(), 3);
+    assert_eq!(selected[0]["_reb"]["outcome"], "failed");
+    assert_eq!(selected[1]["_reb"]["hop"], 0);
+    for (query, status) in [
+        ("limit=1", 400),
+        ("rows=nope", 404),
+        ("rows=a&failed=1", 400),
+    ] {
+        assert_contract_response(
+            server.get(&format!("{route}?{query}")).await,
+            "get",
+            route,
+            status,
+        )
+        .await;
+    }
+}
+
 /// A cookie spans the session: a script write older than provenance's newest
 /// 5,000 records is still listed, found through the request index, and a
 /// write of another name stays out of the answer.
@@ -11821,8 +12018,12 @@ async fn request_index_reaches_every_request_of_a_large_session() {
     assert_eq!(first["index"]["complete"], true);
     assert_eq!(first["facets"]["tabs"].as_array().unwrap().len(), 4);
     assert!(
-        !server.root.path().join("events.jsonl.requests-v1").exists(),
-        "a read writes no file"
+        server
+            .root
+            .path()
+            .join("events.jsonl.requests-v2")
+            .is_file(),
+        "the index is kept beside the store"
     );
     let unchanged = server
         .client
@@ -11956,7 +12157,7 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         ("1", "javascript", script.as_bytes().to_vec()),
         ("2", "request_body", body.clone()),
         ("3", "wasm", module.clone()),
-        // Header blocks hold credential values that stay withheld at every level.
+        // Header blocks hold credential values, withheld unless asked for.
         (
             "6",
             "request_headers",
@@ -12040,6 +12241,20 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         refused.contains("get_request_headers") && !refused.contains("SECRET-COOKIE"),
         "{refused}"
     );
+    // Asked for, as reb-api mcp asks only with --allow-content, it reads as text.
+    let asked: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server
+                .get("/api/artifacts/6/text?credential_values=1")
+                .await,
+            "get",
+            "/api/artifacts/{artifact_id}/text",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(asked["text"], "cookie: sid=token-SECRET-COOKIE\r\n");
     let binary: Value = serde_json::from_slice(
         &assert_contract_response(
             server.get("/api/artifacts/2/text").await,
@@ -12119,9 +12334,12 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
     let cookies = search("q=SECRET-COOKIE").await;
     assert!(
         cookies["matches"].as_array().unwrap().is_empty(),
-        "header blocks are never searched"
+        "header blocks are searched only when credential values are asked for"
     );
     assert_eq!(cookies["coverage"]["artifacts_selected"], 3);
+    let asked = search("q=SECRET-COOKIE&credential_values=1").await;
+    assert_eq!(asked["matches"][0]["artifact_id"], "6");
+    assert_eq!(asked["coverage"]["artifacts_selected"], 4);
     for query in [
         "q=",
         "q=a%0Ab",
@@ -12129,6 +12347,7 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         "q=a&regex=yes",
         "q=(&regex=true",
         "q=a%E2%80%A8b",
+        "q=a&credential_values=yes",
         "q=a&after=1",
         "match_case=true",
     ] {

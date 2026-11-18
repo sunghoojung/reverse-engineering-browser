@@ -171,9 +171,9 @@ legacy `--allow-session-start` keeps accepting them with
 `confirm_sensitive_capture`. None of these flags is authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
-content, `get_artifact_text`, `search_artifact_text` and
-`search_wasm_inspection`, and the offline Wasm runs `run_wasm_function` and
-`get_wasm_runs`, since running captured code discloses what it computes. They are listed only
+content, `get_artifact_text`, `search_artifact_text`,
+`search_wasm_inspection` and `export_requests_har`, and the offline Wasm runs
+`run_wasm_function` and `get_wasm_runs`, since running captured code discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
 it, `get_source_format` also lays out request and response bodies. Content is
@@ -645,8 +645,12 @@ frame's exact origin with `frame: child`; see
 work?" in one read. It reports capture state, event counts by category and
 type, first and last event time, up to 16 sessions, the 32 busiest frames with
 their top event types, gap counts with named gap reasons, artifact counts by
-kind with the 32 newest artifact identities and digests, and `checks`. Each
-check has a `code`, a `severity` of `info` or `warning`, and a plain message:
+kind with the 32 newest artifact identities and digests, and `checks`, over
+the whole session (`protocol_version` 2; version 1 summarized the newest
+64 MiB). Each list says how many it leaves out (`sessions_omitted`,
+`frames_omitted`, `types_omitted`, `items_omitted`, `unresolved_omitted`).
+Each check has a `code`, a `severity` of `info`, `warning` or `error`, and a
+plain message:
 
 | Code | Meaning |
 | --- | --- |
@@ -657,12 +661,11 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `no_events` | The store is empty. |
 | `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
 | `artifact_capture_failed` | Some artifact bodies were not stored. |
-| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the scanned manifest, and `retained_complete`, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
+| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the indexed manifest, and `retained_complete`, false while the manifest is still being indexed, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
 | `network_headers_unattributed` | Severity `warning`: `blocks` network header blocks and `lists` cookie lists arrived for requests the capture no longer tracked, so no row shows them. |
 | `final_headers_missing` | `count` requests of a content session ended with provisional headers and no cookie lists, one check per `reason`: `download`, `service_worker`, `from_cache` or `failed` (`info`, no request reached the network or it failed first), `not_reported` (`warning`, no observer or an untracked block) and `record_dropped` (`warning`, a full queue dropped records while it ran, so the block may have been lost). See [missing final blocks](native-network-v3.md#missing-final-blocks). |
-| `final_headers_untracked` | Header records of requests past the 131,072 the summary follows; their final blocks are not counted. Never raised for a metadata-only session, which records no header. |
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
-| `sequence_gaps` | Sequence numbers missing inside the scanned events. |
+| `sequence_gaps` | Sequence numbers missing inside the stored events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
@@ -671,10 +674,14 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: their snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
 | `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
-| `bounded_scope` | Only the newest 64 MiB of events were summarized. |
+| `malformed_lines` | Severity `warning`: `count` stored lines are not valid events, so no count includes them. |
+| `events_unreadable` | Severity `error`: the event index cannot read a record (one longer than any record can be), so the counts cover the store before it and `events.scope` is `stopped`. |
+| `artifact_manifest_unreadable` | Severity `error`: the same for the artifact manifest; `artifacts.scope` is `stopped`. |
+| `artifact_manifest_damaged` | Severity `warning`: a malformed or duplicate manifest record, which no count includes and which makes artifact reads by ID fail until the manifest is replaced. |
+| `summary_indexing` | The backend is still indexing a long session, so the counts cover the bytes `events.scan_end` and `artifacts.scan_end` name of `store_end`; read again shortly. |
 
 `response_bodies` counts every request's response body case from the request
-index's rows ([request index v1](request-index-v1.md)): `cases` lists each case
+index's rows ([request index v2](request-index-v2.md)): `cases` lists each case
 with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 `redirected`, `aborted`, `cancelled`, `empty`, `service_worker`, `memory_cache`,
 `failed_before_response` and `cancelled_before_response`
@@ -682,12 +689,9 @@ with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 A refused or malformed body can still name an earlier snapshot of the same
 response that the receiver holds; each case's `earlier_snapshots`, and the
 total beside `cases`, count those rows, which Traffic opens.
-`complete` is false while the index is still reading the store. The route's
-ETag names the store as it was before the index read and the index's progress
-after it, the point the counts were read at, so an answer counted mid-store
-never revalidates as the complete one. When the index cannot answer,
-`available` is false with a `reason`, the rest of the summary stands, and the
-answer has no ETag, so the next request reads the index again.
+`complete` is false while the index is still reading the store. When the
+index cannot answer, `available` is false with a `reason` and the rest of the
+summary stands.
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).
@@ -697,10 +701,18 @@ answer has no ETag, so the next request reads the index again.
 `browser_factory`, `no_loader_kind` or `no_start`); see
 [request owners and tabs](native-network-v3.md#request-owners-and-tabs) and
 [unresolved requests](native-network-v3.md#unresolved-requests).
-The summary scans the same newest 64 MiB as the polling window and the newest
-64 MiB of the manifest. It contains counts, identifiers and origin or
-`wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or
-bodies. Identifiers and origins can still be sensitive. It has its own ETag.
+The counts are folded as records arrive into the event index beside the store
+(`events.jsonl.events-v1`, which also keeps the gap totals) and the artifact
+lookup index beside the manifest (`manifest.jsonl.lookup-v1`), so a summary of
+a session of any length reads a few rows. A read folds what was appended for
+up to a second and answers from what is indexed; the background indexer folds
+the rest. `events.scope` and `artifacts.scope` are `store` when every complete
+record is counted, `indexing` while the index catches up (a `summary_indexing`
+check says how far) and `stopped` at a record it cannot read. The summary
+contains counts, identifiers and origin or `wasm://wasm/<hex>` labels only: no
+payloads, URL paths or queries, source or bodies. Identifiers and origins can
+still be sensitive. Its ETag is the digest of the answer's bytes, so an answer
+read mid-store never revalidates as the complete one.
 
 ## Saved JavaScript invocation sites
 
@@ -1073,19 +1085,36 @@ arrival order, not numeric sequence order. Network selection includes
 `network`. General event churn cannot displace this second window within the
 scan budget. Neither array promises a complete request lifecycle.
 
-The reader scans at most the newest 67,108,864 bytes, plus one boundary byte.
+The windows read at most the newest 67,108,864 bytes, plus one boundary byte.
 `event_window` reports `scan_start` and `scan_end` as canonical unsigned byte
-offsets (end exclusive), `scan_limit`, and separate `events_limited` and
-`network_events_limited` flags. A cut-through record prefix is omitted, not
-parsed as a new record. `scope: "store"` means the scan starts at byte zero;
-`"bounded_tail"` excludes an older prefix, even if fewer than 5,000 rows remain.
+offsets (end exclusive) of the summaries' scope, `scan_limit`, separate
+`events_limited` and `network_events_limited` flags, and `next_before`. A
+cut-through record prefix is omitted, not parsed as a new record.
+
+The summaries cover the whole store. The event index
+(`events.jsonl.events-v1`, layout `reb-event-index-v1/2`) folds every appended
+record into per-stream sequence bounds, the drop total, every named gap pair
+and the unreadable-line count, so a poll reads them without scanning the
+store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
+`"0"` and `scan_end` is where the index ends, which can be far past
+`scan_limit`; both windows then end at that same record boundary, so a record
+counted is a record the windows could show. The index reads only complete
+lines, as the request list does, so a final record without its newline is
+still being written and appears once the newline is. While the index catches up, the
+summaries cover the scanned tail: `"bounded_tail"` excludes an older prefix, even
+if fewer than 5,000 rows remain. A store no larger than `scan_limit` is
+`"store"` either way. `next_before` is the start of the oldest event the answer
+holds, or of the scanned tail, when older records exist: `before=next_before`
+reads them, newest first, with the filtered-read cursor below. It is null when
+the events reach the start of the store.
+
 A stored line that is not a valid event is skipped and counted in
 `malformed_lines`, so one damaged record cannot fail every poll. A tail still
 being written is omitted and not counted.
 
 `sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
-validated records in this declared scope. They are not session totals.
-Sequence gaps count absent IDs between the minimum and maximum observed sequence
+validated records in this declared scope; with `scope: "store"` they are
+session totals. Sequence gaps count absent IDs between the minimum and maximum observed sequence
 within each session/process in the stated scope. Late ACK-delayed arrivals close
 holes; duplicates do not create gaps. Unknown prefixes and tails are not counted.
 The native broker retains bounded missing intervals independently of its event
@@ -1098,9 +1127,14 @@ The respective `_saturated` flags distinguish clamping at u64 maximum.
 Malformed or incomplete JSON in the scanned records fails the refresh; the UI
 retains its last valid data. A complete final record without a newline is valid.
 The cache verifies exact overlap/boundary bytes and file identity before reuse.
-The Rust endpoint and the Swift stored-evidence reader both support this
-contract, including the separate network window, scan coverage, and saturated
-gap and drop totals. A response that omits the fields is still accepted, and
+The ETag of this poll, and of a filtered or paged read, is the SHA-256 of the
+answer's own bytes (for a page, with what its sites depend on), so `304` means
+the same bytes would be sent, however the store changed, and costs the answer
+rather than a pass over the store. A record still being written does not change
+the answer, so it does not change the tag.
+The Rust endpoint answers this poll in every mode; stored-evidence native mode
+forwards it to the bundled backend and sets only `broker_connected` and
+`capture_mode`, which it folds into the ETag. A response that omits the fields is still accepted, and
 the UI then resets old summaries and labels fallback counts as
 visible-window-only.
 
@@ -1236,8 +1270,49 @@ timeline. Each row names its root event and the
 `get_events` with `category=network`, `after=first_offset` and the member's
 `records` as `limit` reads them. The
 contract, bounds and invalidation rules are in
-[request-index-v1.md](request-index-v1.md). The `reb://` stored-evidence
+[request-index-v2.md](request-index-v2.md). The `reb://` stored-evidence
 workspace answers it through the bundled backend.
+
+### Request HAR export
+
+`GET /api/requests/har` (`export_requests_har`) writes every row a
+`get_requests` selection holds, in its order and with no row limit, as one HAR
+1.2 archive (format `reb-request-har-v1` in `log._reb`). It takes the same
+filter and sort parameters and no page, or `rows` with the exact row IDs to
+export in their order (Traffic's selected request); `limit`, `offset`,
+`since` and `locate` are refused. The rows are fixed when
+the export starts. The archive is streamed while each batch of 64 rows and
+then each row's byte range of the event store is read, so memory holds one
+batch and one row's records however long the session is. At most two exports
+run at once; a third is refused with 429.
+
+- Each hop is one entry. A redirect keeps its own entry with the redirect
+  status and `redirectURL`, the next hop's URL. A request that failed, was
+  interrupted or is still open keeps its entry with status 0. `_reb.outcome`
+  says which: `redirect`, `failed`, `incomplete`, `pending`, `complete`, or
+  `unlinked` for a row with no request start to join hops to, such as a
+  memory-cache reuse.
+- A hop's URL is its `request_target` child, read whole from its verified
+  artifact past 116 bytes. Without request content the session kept only the
+  host, and `_reb.url_complete` is false.
+- Headers come from the hop's header blocks (`get_request_headers`): the
+  `network` block that was sent, else the browser's provisional block,
+  named in `_reb.request_headers`. Credential values are written only with
+  `credential_values=1`. Below it such a header has an empty value,
+  `_reb_withheld` and its byte length, and its cookies are left out.
+- The request body and the final response body are written when their
+  artifacts were retained whole and verify. A response body that is not
+  UTF-8 is base64 (`content.encoding`), and a request body that is not is in
+  `postData._reb_base64`. `_reb.response_body` keeps the body's case.
+- Native capture keeps a monotonic clock only. `startedDateTime` is that
+  clock written as an offset from the Unix epoch, exact in order and spacing
+  and not a calendar date, and `log.comment` says so.
+- The status line is sent before the rows are read. A failure after it closes
+  the archive as valid JSON with `log._reb.complete` false and the error.
+
+Through MCP it is a content read, listed only with `--allow-content`, which
+also passes `credential_values=1`. A large archive returns a structural
+summary, so a model narrows it with `rows` or the filters.
 
 ## Cross-references
 
@@ -1378,10 +1453,12 @@ inside a character begins at the next one (`offset` is where it began), a
 character cut by `length` is finished from the next bytes, and invalid bytes
 become U+FFFD, counted in `replacements`. Each page re-verifies the artifact's
 SHA-256, as `get_artifact_content` does. Header blocks and cookie lists
-(`request_headers`, `response_headers`, `cookie_list`) are refused with 400 at
-every level, because they hold `Cookie`, `Set-Cookie`, `Authorization` and
-cookie values; `get_request_headers` and `get_request_cookies` read them with
-those values withheld.
+(`request_headers`, `response_headers`, `cookie_list`) are refused with 400
+unless the read passes `credential_values=1`, because they hold `Cookie`,
+`Set-Cookie`, `Authorization` and cookie values; `get_request_headers` and
+`get_request_cookies` read them with those values withheld unless they get the
+same parameter. `reb-api mcp` never lets a model pass it and passes it only
+with `--allow-content` (`x-reb-mcp.credential_values`).
 
 `GET /api/artifacts/search` (`search_artifact_text`,
 `reb-artifact-search-v2`) finds `q` on one line in every selected artifact, as
@@ -1390,7 +1467,8 @@ in the Rust `regex` syntax. That engine's matching time is linear in the text
 whatever the pattern, so captured text cannot make a search backtrack; `^`
 and `$` match at line breaks and an empty match is not counted. Without
 `match_case` (default false), letters fold by Unicode simple case folding, as
-Find in Sources folds them. Header blocks and cookie lists are never searched.
+Find in Sources folds them. Header blocks and cookie lists are searched only
+with `credential_values=1`.
 `kind`, `artifact_id`, `session_id`, `navigation_id`, `frame_id`,
 `execution_context_id`, `sha256` and `host` select artifacts as
 [`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first.

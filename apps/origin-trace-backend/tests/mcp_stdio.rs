@@ -691,7 +691,7 @@ fn compare_float32_returns_no_bytes_of_a_sensitive_artifact_through_mcp() {
     let mut mcp = Mcp::start(&server.url, false);
     let secret = b"SYNTHETIC-SECRET-BYTES-0123456!!";
     assert_eq!(secret.len() % 4, 0);
-    let words: Vec<String> = secret.chunks(4).map(|word| hex::encode(word)).collect();
+    let words: Vec<String> = secret.chunks(4).map(hex::encode).collect();
     let readable = retained_artifact(&server, "1", "bytecode_buffer", secret);
     let answer = mcp.request(
         "tools/call",
@@ -776,7 +776,8 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             "search_artifact_text",
             "search_wasm_inspection",
             "run_wasm_function",
-            "get_wasm_runs"
+            "get_wasm_runs",
+            "export_requests_har"
         ])
     );
     let mut mcp = Mcp::start(&server.url, false);
@@ -3597,5 +3598,123 @@ fn paused_page_values_and_their_names_need_allow_content() {
             3,
             "{level}: the count is not a secret"
         );
+    }
+}
+
+/// Credential header values reach the model only at Full access: below it the
+/// projection never asks for them, and no tool schema lets a model ask.
+#[test]
+fn credential_values_reach_the_model_only_at_full_access() {
+    use sha2::{Digest, Sha256};
+    let server = Server::start();
+    let block = b"Accept: */*\r\nAuthorization: Bearer SYNTHETIC-CREDENTIAL\r\n";
+    let hash = hex::encode(Sha256::digest(block));
+    let artifacts = server._root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), block).unwrap();
+    let artifact = json!({"protocol_version": 1, "artifact_id": "6", "session_id": "1",
+        "navigation_id": "0", "frame_id": "9", "parent_artifact_id": "0", "creator_event_id": "2",
+        "execution_context_id": "0", "capture_origin": "network_request", "kind": "request_headers",
+        "url": "https://owned.test/", "mime_type": "text/plain", "byte_size": block.len(),
+        "sha256": hash, "sensitive": true, "content_path": format!("blobs/{hash}.bin")});
+    std::fs::write(artifacts.join("manifest.jsonl"), format!("{artifact}\n")).unwrap();
+    // A captured network block (native-network-v3.md): 2 lines, hop 0.
+    let mut payload = [0u8; 128];
+    (payload[0], payload[2], payload[4], payload[5]) = (1, 128, 2, 1);
+    payload[8..12].copy_from_slice(&2u32.to_le_bytes());
+    payload[12..16].copy_from_slice(&(block.len() as u32).to_le_bytes());
+    payload[48..80].copy_from_slice(&Sha256::digest(block));
+    let event = |sequence: u64, kind: &str, parent: u64, artifact: &str, payload: &[u8]| {
+        json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9",
+            "artifact_id":artifact,"parent_event_id":parent.to_string(),"request_id":"17",
+            "process_id":7,"thread_id":1,"tab_id":1,"category":"network","type":kind,"flags":0,
+            "status_code":0,"error_code":0,"encoded_data_length":"0","decoded_body_length":"0",
+            "resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),
+            "payload_truncated":false})
+    };
+    std::fs::write(
+        server._root.path().join("events.jsonl"),
+        format!(
+            "{}\n{}\n",
+            event(1, "request_started", 0, "0", b""),
+            event(2, "request_headers", 1, "6", &payload)
+        ),
+    )
+    .unwrap();
+    let reads = [
+        "get_request_headers",
+        "get_request_cookies",
+        "get_cookie_provenance",
+        "get_artifact_text",
+        "search_artifact_text",
+    ];
+    for (level, returned) in [("read-only", false), ("auto", false), ("full", true)] {
+        let mut mcp = at_level(&server, level);
+        let tools = mcp.request("tools/list", json!({}));
+        for tool in tools["result"]["tools"].as_array().unwrap() {
+            if reads.iter().any(|name| tool["name"] == *name) {
+                assert!(
+                    tool["inputSchema"]["properties"]["credential_values"].is_null(),
+                    "{level}: {tool}"
+                );
+            }
+        }
+        let arguments = json!({"session_id": "1", "request_id": "17"});
+        let headers = mcp.request(
+            "tools/call",
+            json!({"name": "get_request_headers", "arguments": arguments}),
+        );
+        let document = &headers["result"]["structuredContent"];
+        assert_eq!(
+            document["credential_values"],
+            if returned { "returned" } else { "withheld" },
+            "{level}: {headers}"
+        );
+        let shown = &document["hops"][0]["request"][0]["headers"];
+        assert_eq!(
+            headers.to_string().contains("SYNTHETIC-CREDENTIAL"),
+            returned,
+            "{level}: {headers}"
+        );
+        if returned {
+            assert_eq!(shown[0], json!({"name": "Accept", "value": "*/*"}));
+            assert_eq!(
+                shown[1],
+                json!({"name": "Authorization", "value": "Bearer SYNTHETIC-CREDENTIAL", "credential": true})
+            );
+        } else {
+            // Below Full every other value is omitted as content too.
+            assert_eq!(shown[1]["value_withheld"], true, "{level}");
+        }
+        // A model that asks for the values is refused before any request.
+        let mut asked = arguments.clone();
+        asked["credential_values"] = json!("1");
+        let refused = mcp.request(
+            "tools/call",
+            json!({"name": "get_request_headers", "arguments": asked}),
+        );
+        assert_eq!(refused["result"]["isError"], true, "{level}: {refused}");
+        assert!(!refused.to_string().contains("SYNTHETIC-CREDENTIAL"));
+        // At Full the block itself is read in pages and searched.
+        if returned {
+            let text = mcp.request(
+                "tools/call",
+                json!({"name": "get_artifact_text", "arguments": {"artifact_id": "6"}}),
+            );
+            assert!(
+                tool_text(&text).contains("Bearer SYNTHETIC-CREDENTIAL"),
+                "{text}"
+            );
+            let search = mcp.request(
+                "tools/call",
+                json!({"name": "search_artifact_text", "arguments": {"q": "SYNTHETIC-CREDENTIAL"}}),
+            );
+            assert_eq!(
+                search["result"]["structuredContent"]["matches"][0]["artifact_id"], "6",
+                "{search}"
+            );
+        }
     }
 }

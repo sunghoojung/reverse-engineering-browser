@@ -13,6 +13,8 @@ serde_json = { version = "1.0", features = ["float_roundtrip", "raw_value"] }
 url = "2.5"
 sha2 = "0.10"
 base64 = "0.22"
+# The Stream trait a streamed response body implements (request_har::Chunks).
+futures-core = "0.3"
 hex = "0.4"
 tempfile = "3"
 libc = "0.2"
@@ -38,6 +40,10 @@ oxc_syntax = "=0.155.0"
 stacker = "=0.1.25"
 # The parser-free token pass shared with the deobfuscation worker.
 reb-js-lexer = { path = "../js-lexer" }
+# Disk-backed indexes of the append-only stores (src/index_db.rs), so a long
+# session is indexed whole with bounded memory. Bundled: the system library's
+# version and options differ between macOS and Linux.
+rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled", "functions", "collation", "cache"] }
 
 [build-dependencies]
 # Compiles the vendored Triskel graph layout engine; see vendor/README.md.

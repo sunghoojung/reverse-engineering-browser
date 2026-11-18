@@ -155,7 +155,7 @@ it.
   1 MiB to 16 GiB. See [Native network v3](protocol/native-network-v3.md).
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
-  ([request index v1](protocol/request-index-v1.md)).
+  ([request index v2](protocol/request-index-v2.md)).
   A load Blink answers from a resource it already holds (its memory cache, or
   a `data:` URL or MHTML archive resource it decodes itself) makes no request
   and is still recorded as one row: its host, status, decoded size, Blink
@@ -410,15 +410,19 @@ it.
   the researcher's Collection and Analyst drafts, local store paths and every
   other content field of a tool result go to the provider. Choose it only when
   the target's authorization and the provider's terms allow that data to leave
-  the machine. The request header and cookie reads withhold cookie values and
-  credential header values (by header name) at every level, and the text reads
-  and search never return header blocks or cookie lists. Other header values,
-  such as `Location` or `Referer`, are returned as captured and can still hold
-  a secret, and script the agent evaluates in a connected document at Full
-  access returns whatever that page can read, such as `document.cookie`. The
-  agent's own sessions can name request content, response media, canvas images
-  or invocation value digests only when the researcher also ticks a separate
-  sensitive-capture box, off by default and never remembered. Consent in the
+  the machine. That includes cookie values, received `Set-Cookie` lines and
+  credential header values such as `Authorization` from the request header and
+  cookie reads, and the header blocks and cookie lists the text reads and
+  search return, so a model can rebuild a request or study a signing scheme.
+  Below Full access those values are withheld (credential headers by header
+  name) and no tool lets the model ask for them; other header values, such as
+  `Location` or `Referer`, are withheld only as content is and can still hold
+  a secret on a connection that does not omit it. Script the agent evaluates
+  in a connected document at Full access returns whatever that page can read,
+  such as `document.cookie`. The agent's own sessions can name request
+  content, response media, canvas images or invocation value digests only when
+  the researcher also ticks a separate sensitive-capture box, off by default
+  and never remembered. Consent in the
   agent dock turns a level on: it shows what leaves the machine for that
   level, with the warning for Auto-approve actions and Full access, beside a
   button that names the level, and there is no other confirmation. The native
@@ -473,7 +477,7 @@ of the data-handling policy:
 | App-started Metadata content switches, digest default and agent-session exclusion | `LiveCaptureContent.resolve` and `LiveSessionCoordinator.captureDefaults` (Metadata turns request content, Canvas images and digests off; digests by default in Content mode with saved sites only, where an explicit value wins) and `session_launch.rs` (agent sessions remove an inherited site file and digest switch, and arm only named sites from a private copy) |
 | In-app agent permission level and per-call decision for the LangGraph and CLI loops | `AgentPermission.requested` (the level and sensitive choice consent sends) and `AgentToolGate` in [`AgentCore.swift`](apps/research-ui/macos/AgentCore.swift), held by `enable` and changed only by `lowerPermission` in [`AgentBridge.swift`](apps/research-ui/macos/AgentBridge.swift) |
 | Tool server content, effect and sensitive-capture gates (`--permission`, `--allow-content`, `--allow-sensitive-capture`) | [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs) |
-| Header blocks and cookie lists never returned by the text reads or search, at any level | `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) |
+| Credential header values, cookie values, and header blocks and cookie lists in the text reads and search, only at Full access | `x-reb-mcp.credential_values` in [`openapi.json`](protocol/openapi.json), applied by `credential_parameter` in [`mcp.rs`](apps/origin-trace-backend/src/bin/reb_api/mcp.rs); `Credentials` in [`request_headers.rs`](apps/origin-trace-backend/src/request_headers.rs) and `WITHHELD_KINDS` in [`artifact_text.rs`](apps/origin-trace-backend/src/artifact_text.rs) withhold them otherwise |
 | Message task origins bounded before they are read and validated before use | `CloneableMessage` traits and `ShallowClone` in Chromium patch `0047-carry-message-task-origins.patch`, then `DecodeNativeTaskOrigin` in the overlay's `common/native_request_stack.h` |
 | Origin allowlisting | Not implemented; the native event envelope lacks trustworthy origin identity |
 

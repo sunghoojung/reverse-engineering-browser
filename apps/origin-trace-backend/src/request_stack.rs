@@ -1183,7 +1183,7 @@ pub fn resolve_call(
     document
 }
 
-/// Resolves `get_requests` rows' innermost frames, keeping settled outcomes (protocol/request-index-v1.md).
+/// Resolves `get_requests` rows' innermost frames, keeping settled outcomes (protocol/request-index-v2.md).
 #[derive(Default)]
 pub struct InitiatorFrames(HashMap<String, Value>);
 
@@ -2451,7 +2451,10 @@ pub(crate) mod tests {
 
     fn caught_up(index: &Mutex<RequestIndex>) {
         for _ in 0..4 {
-            index.blocking_lock().refresh().unwrap();
+            index
+                .blocking_lock()
+                .refresh(std::time::Instant::now() + std::time::Duration::from_secs(60))
+                .unwrap();
         }
     }
 
@@ -3037,11 +3040,12 @@ pub(crate) mod tests {
         assert_eq!(read().0, SiteWork::default(), "settled");
     }
 
-    /// Review round 2, A: past the index's identity cap, a site whose identity
-    /// it does not hold is answered from the index alone, never by a 64 MiB
-    /// store scan per read, and kept until the index moves.
+    /// Review round 2, A: among more identities than version 1 of the index
+    /// held, a site whose identity the store does not hold is answered from
+    /// the index alone as missing, never by a store scan per read, and kept
+    /// until the index moves.
     #[test]
-    fn an_identity_past_the_index_cap_costs_no_store_scan() {
+    fn an_identity_missing_from_a_long_index_costs_no_store_scan() {
         let root = tempfile::tempdir().unwrap();
         let (store, artifacts) = (
             root.path().join("events.jsonl"),
@@ -3077,7 +3081,7 @@ pub(crate) mod tests {
         let (work, site) = read();
         assert_eq!(
             site,
-            json!({"status": "unresolved", "reason": "script_identity_outside_scan"})
+            json!({"status": "unresolved", "reason": "script_identity_missing"})
         );
         assert_eq!(
             work,
@@ -3545,7 +3549,7 @@ pub(crate) mod tests {
         wasm.push(0);
         wasm.push(custom.len() as u8);
         wasm.extend(custom);
-        let frames = vec![
+        let frames = [
             frame(1, 0, 7, fetch_at, send_at),
             frame(2, 0, 30, 0x2a1, 3),
             frame(1, 0, 8, 0, 0),

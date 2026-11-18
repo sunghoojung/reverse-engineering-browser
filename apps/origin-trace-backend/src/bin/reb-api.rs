@@ -96,9 +96,10 @@ enum Action {
         #[arg(long)]
         omit_content: bool,
         /// Also list the content reads (get_artifact_text, search_artifact_text,
-        /// search_wasm_inspection, and the offline Wasm runs run_wasm_function
-        /// and get_wasm_runs, which also need --allow-effects to run) and lay out request and response
-        /// bodies with get_source_format. Their results are captured content
+        /// search_wasm_inspection, export_requests_har, and the offline Wasm
+        /// runs run_wasm_function and get_wasm_runs, which also need
+        /// --allow-effects to run) and lay out request and response bodies
+        /// with get_source_format. Their results are captured content
         /// that goes to the model provider. Not authorization.
         #[arg(long, conflicts_with = "omit_content")]
         allow_content: bool,

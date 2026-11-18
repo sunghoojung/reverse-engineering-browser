@@ -221,8 +221,8 @@ function indexFixture({windowCount = 6, holdIndex = false} = {}) {
     mime_type: null, protocol: null, response_time_ns: null, error_code: 0, loader_observed: true, initiator: 'browser', main_frame: false,
     browser_internal: false, ordinal: index, records, members: [{session_id: '1', process_id: 7, request_id: String(index + 1), records}],
     first_offset: String(index * 100), end_offset: String((index + 1) * 100), root: null});
-  const document_ = rows => ({format: 'reb-request-index-v1', requests: rows, matching: rows.length, total: rows.length, through: rows.length, added: 0,
-    index: {epoch: 'epoch-1', complete: true, store_end: '10', indexed_end: '10', unindexed_records: '0', malformed_records: '0', request_limit: 100000},
+  const document_ = rows => ({format: 'reb-request-index-v2', requests: rows, matching: rows.length, total: rows.length, through: rows.length, added: 0,
+    index: {epoch: 'epoch-1', complete: true, store_end: '10', indexed_end: '10', malformed_records: '0'},
     sizes: {transferred: 0, resources: 0}, hidden_internal: 0, located: {}, facets: {tabs: [{tab_id: '1', count: rows.length, domains: ['fixture.invalid']}], domains: [{domain: 'fixture.invalid', count: rows.length}]},
     timeline: {first_time_ns: '1', last_time_ns: '9', buckets: []}});
   const pending = [], reads = [];
@@ -584,7 +584,7 @@ const pendingWindow = t => {
 {
   // The index read: pagination, retention of the last answer on failure, unsupported backends and detail paging.
   const urls = [], changes = [];
-  const doc = () => ({format: 'reb-request-index-v1', requests: [], matching: 0, total: 0, through: 0, added: 0,
+  const doc = () => ({format: 'reb-request-index-v2', requests: [], matching: 0, total: 0, through: 0, added: 0,
     index: {epoch: 'e', complete: true}, facets: {tabs: [], domains: []}, located: {}, sizes: {transferred: 0, resources: 0}, timeline: {first_time_ns: null, last_time_ns: null, buckets: []}});
   const t = fixture(app, traffic, 1);
   const respond = (status, body) => new Response(body === undefined ? '' : JSON.stringify(body), {status, headers: {ETag: '"v"'}});
@@ -628,7 +628,7 @@ const pendingWindow = t => {
   assert.equal(events.length, 400, 'Every page of a member is read');
   assert.equal(partial, false, 'A complete read is not partial');
   assert.match(detailReads[1], /after=50/);
-  // Absence after a partial read is unknown: a limited member list, the page cap, a damaged line, a short read.
+  // Absence after a partial read is unknown: the page cap, a damaged line, a short read.
   const readWith = async (pages, rowOverride = {}) => {
     let calls = 0;
     const reader = t.api.createTrafficIndex({fetcher: async () => respond(200, pages[Math.min(calls++, pages.length - 1)])});
@@ -636,7 +636,6 @@ const pendingWindow = t => {
   };
   const part = (query, count = 200) => ({events: eventsOf('1', count).map((event, i) => ({...event, sequence_number: String(i + calls())})), query});
   let serial = 1000; function calls() { serial += 1000; return serial; }
-  assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 400)], {members_limited: true})).partial, true, 'A row with unlisted members is partial');
   const full = {next_after: '2', limited: true, budget_exhausted: false};
   const capped = await readWith(Array.from({length: 17}, () => part(full, 20)));
   assert.equal(capped.partial, true, 'Stopping at the page cap with records unread is partial');
@@ -732,7 +731,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
 
   // A session that used no budget reads the summary once and shows nothing.
   {
-    const quiet = footer({summary: {checks: []}});
+    const quiet = footer({summary: {events: {scope: 'store'}, checks: []}});
     quiet.api.renderTrafficBudget(); await settle();
     assert.deepEqual(quiet.reads, ['/api/session/summary'], 'every session reads the summary once');
     assert.equal(quiet.notice.hidden, true, 'no refusal, no notice');
@@ -742,7 +741,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   // A stored capture whose refusals are all outside the loaded rows still shows
   // them: nothing arrives in a stored window, so the figure is exact.
   {
-    const stored = footer({summary: {checks: [check('response_body', 'not_captured_session_budget', 5)]}});
+    const stored = footer({summary: {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_session_budget', 5)]}});
     stored.api.renderTrafficBudget(); await settle();
     assert.equal(stored.notice.hidden, false);
     assert.equal(stored.line.textContent, 'Response body budget used, 0 KiB kept: 5 response bodies not kept · Raise it in New Live Session… for the next session.');
@@ -750,7 +749,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
 
   // A live content session.
   const f = footer({live: true,
-    summary: {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+    summary: {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
       check('request_body', 'not_captured_session_budget', 30, {retained_bytes: '1048576', retained_complete: false}),
       check('request_target', 'not_retained_session_budget', 12, {retained_bytes: '1048576', retained_complete: false}),
       check('response_body', 'not_captured_type', 7)]},
@@ -789,7 +788,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   assert.match(line.textContent, /: at least 42 request bodies or URLs not kept · /);
   // The next read is exact again while nothing arrives.
   clock.now += 30_000;
-  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2450, {retained_bytes: String(511 * 1048576)})]};
+  f.answers.summary = {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_session_budget', 2450, {retained_bytes: String(511 * 1048576)})]};
   api.renderTrafficBudget(); await settle();
   assert.equal(reads.length, 3);
   assert.match(line.textContent, /Response body budget \(512 MiB\) used, 511\.0 MiB kept: 2,450 response bodies not kept · Raise /);
@@ -804,8 +803,8 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   // bounded summary scan is a lower bound too.
   clock.now += 30_000;
   for (const index of [3, 4, 5, 8, 9, 10]) { t.state.requests[index].responseBody = null; t.state.requests[index].body = null; }
-  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
-    {code: 'bounded_scope', severity: 'info', message: 'bounded'}]};
+  f.answers.summary = {events: {scope: 'indexing'}, checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+    {code: 'summary_indexing', severity: 'info', message: 'indexing'}]};
   api.renderTrafficBudget(); await settle();
   assert.equal(reads.length, 5);
   assert.equal(line.textContent, 'Response body budget (512 MiB) used, 511.0 MiB kept: at least 2,400 response bodies not kept · '

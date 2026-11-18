@@ -2766,7 +2766,7 @@ function observationPanelFixture(narrow = false, options = {}) {
     emit(type,fields={}){for(const callback of this.listeners.get(type)??[])callback({target:this,currentTarget:this,preventDefault(){},stopPropagation(){},...fields});}
   }
   document.createElement=tag=>new ObservationNode(tag);document.body=new ObservationNode('body');document.documentElement=new ObservationNode('html');if(options.native)document.documentElement.classList.add('native-shell');
-  const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover','evidence-compare-toggle','evidence-comparison-section','evidence-comparison-panel','evidence-comparison-close','evidence-comparison-unavailable','evidence-package-panel'];
+  const ids=['evidence-investigation','evidence-rows','evidence-inspector','evidence-search','evidence-scope','evidence-workspace-notice','evidence-package-toggle','evidence-package-mode','evidence-return','evidence-trace','evidence-window-count','evidence-previous','evidence-next','evidence-context-kind','evidence-context-title','evidence-context-note','evidence-count','evidence-coverage-summary','evidence-gap-details','evidence-coverage-details','evidence-coverage-popover','evidence-compare-toggle','evidence-comparison-section','evidence-comparison-panel','evidence-comparison-close','evidence-comparison-unavailable','evidence-package-panel','evidence-range','evidence-range-label','evidence-range-oldest','evidence-range-earlier','evidence-range-later','evidence-range-newest'];
   const nodes=Object.fromEntries(ids.map(id=>[id,new ObservationNode()]));
   document.querySelector=selector=>nodes[selector.slice(1)]??null;
   const layout=new ObservationNode();layout.className='evidence-investigation-layout';
@@ -2778,7 +2778,8 @@ function observationPanelFixture(narrow = false, options = {}) {
   nodes['evidence-package-mode'].append(nodes['evidence-package-panel'],nodes['evidence-comparison-section']);
   nodes['evidence-comparison-section'].append(nodes['evidence-comparison-close'],nodes['evidence-comparison-unavailable'],nodes['evidence-comparison-panel']);
   const create=runInNewContext(observationCode+'\n'+comparisonSource+';createEvidenceWorkspace',{document,TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch:(...args)=>comparisonFetch(...args),location:{protocol:options.protocol||'http:'},window:{matchMedia:()=>({matches:narrow})}});
-  const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true});
+  const panel=create({getContext:()=>context,packagePanel:{sync(){},setVisible(value){packageVisible=value;if(!value)packageCancels++;}},onTrace(){},onRequest(){},onSource(){sourceCalls++;return true;},canOpenSource:()=>true,
+    ...(options.rangeFetch?{fetcher:(...args)=>options.rangeFetch(...args)}:{})});
   panel.setVisible(true);
   return {panel,nodes,tabs,document,get context(){return context;},set context(value){context=value;},get packageVisible(){return packageVisible;},get packageCancels(){return packageCancels;},get sourceCalls(){return sourceCalls;}};
 }
@@ -2807,15 +2808,79 @@ const retainedRow=observationRows().find(row=>row.dataset.evidenceKey==='7:42:10
 observations.context.events.push(observationEvent(108,'runtime','api_call','Date.now'));observations.panel.sync();
 assert.equal(observations.document.activeElement.dataset.evidenceKey,'7:42:102');assert.equal(observations.nodes['evidence-rows'].scrollTop,89);
 observations.context={...observations.context,events:observations.context.events.filter(event=>event.sequence_number!=='102')};observations.panel.sync();
-assert.equal(observations.panel.snapshot().selectedKey,null);assert.match(observations.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
+assert.equal(observations.panel.snapshot().selectedKey,null);assert.match(observations.nodes['evidence-workspace-notice'].textContent,/is not in this range of records/);
 observations.panel.sync();assert.equal(observations.panel.snapshot().selectedKey,null,'Eviction must not silently choose a neighboring record');
 observations.context=observationLarge;observations.panel.sync();assert.equal(observationRows().length,50);observations.nodes['evidence-next'].click();assert.match(observations.nodes['evidence-window-count'].textContent,/51–100 of 5000/);
 observationRows()[0].emit('keydown',{key:'End'});assert.match(observations.nodes['evidence-window-count'].textContent,/4951–5000 of 5000/);
 assert.equal(observations.document.activeElement.dataset.evidenceKey,'7:42:6000');
-observations.nodes['evidence-search'].value='not-present';observations.nodes['evidence-search'].emit('input');assert.match(observations.nodes['evidence-rows'].textContent,/No retained observations match/);
+observations.nodes['evidence-search'].value='not-present';observations.nodes['evidence-search'].emit('input');assert.match(observations.nodes['evidence-rows'].textContent,/No observations in view match/);
 observations.context={events:[],artifacts:[],request:null,error:'disconnected'};observations.panel.sync();assert.match(observations.nodes['evidence-workspace-notice'].textContent,/refresh is unavailable/);
 observations.context={events:[],artifacts:[],request:null};observations.panel.sync();assert.doesNotMatch(observations.nodes['evidence-workspace-notice'].textContent,/refresh/);
 console.log('PASS Evidence production reconciliation: stable inspector/focus/scroll, secondary package mode, stale exact-source refusal, eviction, CDP disclosure, 5,000-record paging, keyboard and failed refresh');
+
+// Older stored records are read by byte cursor, one page at a time, and held
+// until the researcher moves; the selected request's own records stay in view.
+{
+  const reads=[];let answer=null;
+  const pageOf=(events,{start,next_before,next_after,store_end='9000'})=>({ok:true,status:200,json:async()=>({count:events.length,events,network_events:[],
+    event_window:{scope:'bounded_range',scan_start:start,scan_end:next_after,scan_limit:67108864,events_limited:true,network_events_limited:false},
+    query:{direction:'backward',filters:{},limit:5000,returned:events.length,store_end,limited:true,budget_exhausted:false,next_before,next_after}})});
+  const ranged=observationPanelFixture(false,{nativeFocus:true,rangeFetch:(url,init)=>{reads.push(url);return new Promise((resolve,reject)=>{answer={resolve,reject};init.signal.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError')));});}});
+  const {nodes}=ranged, rows=()=>nodes['evidence-rows'].querySelectorAll('[data-evidence-key]').map(row=>row.dataset.evidenceKey);
+  const settle=()=>new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(nodes['evidence-range'].hidden,true,'every stored record in view needs no range bar');
+  const live=observationFixtureContext();
+  ranged.context={...live,nextBefore:'8000',storeEnd:'9000',mode:'live'};ranged.panel.sync();
+  assert.equal(nodes['evidence-range'].hidden,false);
+  assert.equal(nodes['evidence-range-label'].textContent,'Newest records · 88.8%–100% of the stored session · updates live');
+  assert.deepEqual(['oldest','earlier','later','newest'].map(name=>nodes[`evidence-range-${name}`].disabled),[false,false,true,true]);
+  nodes['evidence-range-earlier'].focus();nodes['evidence-range-earlier'].click();
+  assert.deepEqual(reads,['/api/events?before=8000&limit=5000']);
+  assert.match(nodes['evidence-range-label'].textContent,/^Reading earlier records…$/);
+  assert.equal(nodes['evidence-range-earlier'].disabled,false,'a move while reading supersedes the read');
+  answer.resolve(pageOf([observationEvent(20,'runtime','api_call','Date.now'),observationEvent(21,'runtime','api_call','performance.now')],{start:'4000',next_before:'4000',next_after:'8000'}));await settle();
+  assert.equal(nodes['evidence-range-label'].textContent,'Earlier records · 44.4%–88.8% of the stored session');
+  assert.deepEqual(['oldest','earlier','later','newest'].map(name=>nodes[`evidence-range-${name}`].disabled),[false,false,false,false]);
+  // The request's lifecycle records were read by ID, so they stay in view with the older page.
+  assert.deepEqual(rows().filter(key=>['7:42:103','7:42:106'].includes(key)),['7:42:103','7:42:106']);
+  assert(rows().includes('7:42:20')&&rows().includes('7:42:21'));assert(!rows().includes('7:42:100'),'records of the newest window are not in an older range');
+  assert.equal(nodes['evidence-count'].textContent,'4 observations in view');
+  assert.match(nodes['evidence-gap-details'].textContent,/^These counts cover the records in view; Oldest, Earlier and Later read the rest/);
+  assert.match(nodes['evidence-gap-details'].textContent,/0 absent sequence IDs between retained stream endpoints/,'records joined from the request index make no sequence holes');
+  ranged.context={...ranged.context,events:[...live.events,observationEvent(300,'runtime','api_call','Date.now')]};ranged.panel.sync();
+  assert(!rows().includes('7:42:300'),'a poll does not replace an older range');
+  assert.equal(nodes['evidence-workspace-notice'].hidden,true,'moving through the store is not an eviction');
+  // A failed read says so and keeps the view.
+  nodes['evidence-range-earlier'].click();assert.equal(reads.at(-1),'/api/events?before=4000&limit=5000');
+  answer.resolve({ok:false,status:400,json:async()=>({error:'before is not a record boundary'})});await settle();
+  assert.match(nodes['evidence-workspace-notice'].textContent,/The earlier records could not be read: before is not a record boundary\. The view is unchanged\./);
+  assert(rows().includes('7:42:20'));
+  answer=null;nodes['evidence-range-earlier'].click();answer.resolve({ok:true,status:200,json:async()=>({events:[],query:{next_before:'x'}})});await settle();
+  assert.match(nodes['evidence-workspace-notice'].textContent,/malformed page/);
+  // Oldest reaches the start of the store; the disabled button hands focus on.
+  nodes['evidence-range-oldest'].focus();nodes['evidence-range-oldest'].click();assert.equal(reads.at(-1),'/api/events?after=0&limit=5000');
+  answer.resolve(pageOf([observationEvent(1,'runtime','api_call','Date.now')],{start:'0',next_before:null,next_after:'2000'}));await settle();
+  assert.equal(nodes['evidence-range-label'].textContent,'Oldest records · 0%–22.2% of the stored session');
+  assert.equal(nodes['evidence-range-oldest'].disabled,true);assert.equal(nodes['evidence-range-earlier'].disabled,true);
+  assert.equal(ranged.document.activeElement,nodes['evidence-range-later']);
+  assert.equal(nodes['evidence-workspace-notice'].hidden,true,'a successful move clears the earlier failure');
+  // Later continues forward; a page that reaches the end of the store is the live newest window.
+  nodes['evidence-range-later'].click();assert.equal(reads.at(-1),'/api/events?after=2000&limit=5000');
+  answer.resolve(pageOf([observationEvent(2,'runtime','api_call','Date.now')],{start:'2000',next_before:'2000',next_after:'9000'}));await settle();
+  assert(rows().includes('7:42:100')&&rows().includes('7:42:300'));assert.equal(nodes['evidence-range-later'].disabled,true);
+  assert.equal(nodes['evidence-range-label'].textContent,'Newest records · 88.8%–100% of the stored session · updates live');
+  // A superseded read changes nothing.
+  nodes['evidence-range-earlier'].click();const stale=answer;nodes['evidence-range-newest'].click();
+  stale.resolve(pageOf([observationEvent(5,'runtime','api_call','Date.now')],{start:'1000',next_before:'1000',next_after:'2000'}));await settle();
+  assert(!rows().includes('7:42:5'));assert.equal(nodes['evidence-range-label'].textContent,'Newest records · 88.8%–100% of the stored session · updates live');
+  // Cursors do not survive a clear: the range returns to the newest window.
+  nodes['evidence-range-earlier'].click();answer.resolve(pageOf([observationEvent(20,'runtime','api_call','Date.now')],{start:'4000',next_before:'4000',next_after:'8000'}));await settle();
+  assert(rows().includes('7:42:20'));
+  ranged.context={...observationFixtureContext(),nextBefore:null,storeEnd:'500',mode:'live'};ranged.panel.sync();
+  assert(!rows().includes('7:42:20'));assert.equal(nodes['evidence-range'].hidden,true);
+  assert.match(nodes['evidence-workspace-notice'].textContent,/The stored session was cleared or replaced\. Showing its newest records\./);
+}
+console.log('PASS Evidence ranges: older stored records read by cursor (Oldest, Earlier, Later, Newest), request records joined, failures and superseded reads keep the view, a clear returns to the newest window');
 
 // Arrival order is not retained-identity membership and neither proves loss.
 for (const [ids, holes, jumps, late] of [[[1,3,2],'0',1,1],[[1,4,3],'1',1,1],[[3,2,1],'0',0,2],[[1,5],'3',1,0]]) {
@@ -2840,9 +2905,9 @@ for (const narrow of [false,true]) {
 const evictionNotice=observationPanelFixture();
 evictionNotice.nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:102"]').click();
 evictionNotice.context.events=evictionNotice.context.events.filter(event=>event.sequence_number!=='102');evictionNotice.context.error='disconnected';evictionNotice.panel.sync();
-assert.match(evictionNotice.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
+assert.match(evictionNotice.nodes['evidence-workspace-notice'].textContent,/is not in this range of records/);
 evictionNotice.nodes['evidence-rows'].querySelector('[data-evidence-key="7:42:101"]').click();
-assert.doesNotMatch(evictionNotice.nodes['evidence-workspace-notice'].textContent,/left the retained window/);
+assert.doesNotMatch(evictionNotice.nodes['evidence-workspace-notice'].textContent,/is not in this range of records/);
 assert.match(evictionNotice.nodes['evidence-workspace-notice'].textContent,/refresh is unavailable/);
 evictionNotice.context.error=null;evictionNotice.panel.sync();assert.equal(evictionNotice.nodes['evidence-workspace-notice'].hidden,true);
 const duplicateSource=observationPanelFixture();

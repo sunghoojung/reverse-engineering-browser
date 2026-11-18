@@ -67,7 +67,8 @@
 .block-graph-fn-wrap { position: relative; display: flex; align-items: center; gap: 2px; margin-right: 6px; }
 .block-graph-fn-menu { position: absolute; z-index: 5; top: 28px; left: 0; width: min(320px, 80vw); display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); box-shadow: 0 8px 22px var(--shadow); }
 .block-graph-fn-menu input { width: 100%; height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-2); color: var(--text); font: 11px var(--mono); }
-.block-graph-fn-list { position: relative; height: 240px; overflow: auto; }
+/* As tall as its rows, up to ten: a short module leaves no empty rows. */
+.block-graph-fn-list { position: relative; max-height: 240px; overflow: auto; }
 .block-graph-fn-spacer { width: 1px; }
 .block-graph-fn-row { position: absolute; left: 0; right: 0; height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 6px; border: 0; background: transparent; color: var(--text); font: 11px var(--mono); cursor: pointer; }
 .block-graph-fn-row:hover { background: var(--panel-3); }

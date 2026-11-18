@@ -12,7 +12,7 @@ const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))(
 // The layout worker loads the Triskel client with importScripts; here it is a global first.
 runInThisContext(await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8'));
 const layoutModule = require('../apps/research-ui/block_graph_layout.js');
-const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure, blockGraphClipSegment} = require('../apps/research-ui/block_graph.js');
+const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView} = require('../apps/research-ui/block_graph.js');
 const vmStatic = require('../apps/research-ui/vm_static.js');
 const {vmStaticOwnedExample} = require('../apps/research-ui/vm_static_view.js');
 const semantics = require('../apps/research-ui/vm_semantics.js');
@@ -236,6 +236,17 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   for (const base of ['.block-graph-minimap {', '.block-graph-minimap-canvas {', '.block-graph-hud {'])
     assert(container > css.indexOf(base), `the small-stage rules follow ${base}, so they win the cascade`);
   assert(/new Path2D\(\)/.test(view) && /drawOverview/.test(view), 'overview cards and edges are drawn one path per kind');
+}
+{
+  // The Functions list keeps the keyboard's row whole in view, whatever
+  // height the list has: ten rows of 24 px here, then a shorter list.
+  assert.equal(blockGraphRowInView(9, 0, 240, 24), 0, 'the tenth row shows without scrolling');
+  assert.equal(blockGraphRowInView(10, 0, 240, 24), 24, 'the eleventh row scrolls one row');
+  assert.equal(blockGraphRowInView(12, 24, 240, 24), 72, 'each step down past the end moves one row');
+  assert.equal(blockGraphRowInView(3, 72, 240, 24), 72, 'a row already in view does not scroll');
+  assert.equal(blockGraphRowInView(2, 72, 240, 24), 48, 'a row above the view scrolls to the top');
+  assert.equal(blockGraphRowInView(5, 0, 100, 24), 44, 'a list four rows tall shows the sixth row whole at its bottom');
+  assert.equal(blockGraphRowInView(1, 0, 0, 24), 24, 'an unmeasured list is one row tall');
 }
 {
   // Failures say why, and offer Retry only where trying again can help.

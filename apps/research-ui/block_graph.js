@@ -173,6 +173,14 @@ function blockGraphSegmentDistance(px, py, ax, ay, bx, by) {
   const t = length ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length)) : 0;
   return Math.hypot(px - ax - t * dx, py - ay - t * dy);
 }
+/** The scroll offset that shows row `row` (each `rowH` tall) whole in a list
+ * `height` px tall that is scrolled to `scroll`: unchanged when it already
+ * shows, else the least move. An unmeasured list counts as one row tall. */
+function blockGraphRowInView(row, scroll, height, rowH) {
+  const top = row * rowH, view = Math.max(rowH, height);
+  if (top < scroll) return top;
+  return top + rowH > scroll + view ? top + rowH - view : scroll;
+}
 /** The part [t0, t1] of segment `i` of the flat point list `pts` (from point
  * i to point i + 1) that lies in the rectangle `clip`, or null (Liang-Barsky). */
 function blockGraphClipSegment(pts, i, clip) {
@@ -1309,7 +1317,7 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset, fi
       }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'PageDown' || event.key === 'PageUp') {
         event.preventDefault(); const step = event.key.startsWith('Page') ? 10 : 1; cursor = Math.max(0, Math.min(filtered.length - 1, cursor + (event.key.endsWith('Down') ? step : -step)));
-        list.scrollTop = scroll = Math.max(0, Math.min(cursor * rowH, Math.max(scroll, (cursor - 12) * rowH))); paint();
+        list.scrollTop = scroll = blockGraphRowInView(cursor, scroll, list.clientHeight, rowH); paint();
       } else if (event.key === 'Enter' && filtered[cursor] !== undefined) { event.preventDefault(); choose(filtered[cursor]); }
     };
     input.addEventListener('keydown', keys); list.addEventListener('keydown', keys);
@@ -1449,4 +1457,4 @@ function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}
 }
 
 // The offline check reads the edge kinds and how failures are worded.
-if (typeof module === 'object' && module?.exports) module.exports = {BLOCK_GRAPH_KIND, blockGraphFailure, blockGraphClipSegment};
+if (typeof module === 'object' && module?.exports) module.exports = {BLOCK_GRAPH_KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView};

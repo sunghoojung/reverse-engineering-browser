@@ -184,12 +184,16 @@ class Memory:
     def start(self) -> None:
         def sample() -> None:
             while not self._stop.is_set():
-                if (kib := footprint_kib(self.pid)) is not None:
-                    self.phases.setdefault(self.phase, []).append(kib)
+                self.take(self.phase)
                 self._stop.wait(SAMPLE_SECONDS)
 
         self._thread = threading.Thread(target=sample, daemon=True)
         self._thread.start()
+
+    def take(self, phase: str) -> None:
+        """One sample now, charged to `phase`."""
+        if (kib := footprint_kib(self.pid)) is not None:
+            self.phases.setdefault(phase, []).append(kib)
 
     def stop(self) -> None:
         self._stop.set()
@@ -214,6 +218,8 @@ def measure(run: Run, name: str, pid: int) -> Memory:
     try:
         for phase, after in zip(PHASES, PHASES[1:] + ("",)):
             run.wait(ISSUE, [f"{name}:{phase}"], 900)
+            # A phase shorter than the sampling interval still has its end.
+            memory.take(phase)
             memory.phase = after
     finally:
         memory.stop()

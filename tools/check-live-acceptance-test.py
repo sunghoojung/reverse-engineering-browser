@@ -853,6 +853,17 @@ class Evidence(unittest.TestCase):
         self.assertEqual(self.report.lines[-1].status, "FAIL")
         self.assertIn("not found", self.report.lines[-1].detail)
 
+    def test_volume_memory_samples_every_phase_at_its_end(self):
+        # Phases that end before the first interval sample still have one.
+        with mock.patch.object(volume, "footprint_kib", return_value=100_000), \
+                mock.patch.object(volume, "BASELINE_SECONDS", 0), \
+                mock.patch.object(volume, "SAMPLE_SECONDS", 3600), \
+                mock.patch.object(self.run_, "wait", return_value=True), \
+                mock.patch.object(self.run_.fixture, "wait_beacons"), \
+                mock.patch.object(self.run_.fixture, "release"):
+            memory = volume.measure(self.run_, volume.NAME, 4242)
+        self.assertTrue(all(memory.phases.get(phase) for phase in volume.PHASES), memory.phases)
+
     def test_volume_memory_needs_the_page_without_a_session(self):
         self.run_.measurements[volume.NAME] = volume.Memory(4242, [100_000] * 8, {"responses": [120_000]})
         self.run_.measurements[volume.REFERENCE] = "no Brave executable to run the page without a session"

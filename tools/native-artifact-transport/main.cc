@@ -19,6 +19,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -517,14 +518,27 @@ class ScriptedBroker {
     reader_ = std::thread([this] {
       reb::NativeProbeEvent event;
       while (ReadExact(connection_, &event, sizeof(event))) {
-        std::lock_guard lock(mutex_);
-        events_.push_back(event);
+        {
+          std::lock_guard lock(mutex_);
+          events_.push_back(event);
+        }
+        while (paused_.load()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
       }
     });
   }
-  std::vector<reb::NativeProbeEvent> Events() {
+  // Stops reading after at most one more record, so the writer stalls again.
+  void Pause() { paused_.store(true); }
+  void Resume() { paused_.store(false); }
+  std::vector<reb::NativeProbeEvent> Events(const std::size_t from = 0) {
     std::lock_guard lock(mutex_);
-    return events_;
+    return {events_.begin() + static_cast<std::ptrdiff_t>(std::min(from, events_.size())),
+            events_.end()};
+  }
+  std::size_t Count() {
+    std::lock_guard lock(mutex_);
+    return events_.size();
   }
   void Disconnect() { shutdown(connection_, SHUT_RDWR); }
   void CloseAccepted() { close(connection_); }
@@ -533,6 +547,7 @@ class ScriptedBroker {
   std::string path_;
   int listener_;
   int connection_ = -1;
+  std::atomic<bool> paused_{false};
   std::mutex mutex_;
   std::vector<reb::NativeProbeEvent> events_;
   std::thread reader_;
@@ -637,8 +652,64 @@ void CheckLiveInvocationSites(const std::string& root) {
                "generation and hands an unreadable one to the session as an empty revision\n";
 }
 
-// Drops in the browser's mixed queue are reported as browser records, and the
-// end of artifact delivery is a named gap in the same stream.
+reb::NativeProbeEvent RendererRecord(const std::uint32_t process, const std::uint64_t sequence) {
+  reb::NativeProbeEvent event;
+  event.header.category = reb::NativeProbeCategory::kCanvas;
+  event.header.type = reb::NativeProbeType::kApiCall;
+  event.header.session_id = kSessionId;
+  event.header.process_id = process;
+  event.header.sequence_number = sequence;
+  return event;
+}
+
+// A burst far past the ring, queued by several threads at once as the
+// browser's UI and IO threads do, waits in the spill while the broker reads
+// nothing. It reaches the broker whole, each thread's records in the order
+// that thread queued them, and the spill is freed once it has been sent.
+void CheckSpilledBurst(ScriptedBroker& broker, const reb::NativeProbeEmitter emit) {
+  constexpr std::uint32_t kProducers = 4;
+  constexpr std::uint32_t kFirstProcess = 80;
+  constexpr std::uint64_t kRecords = 25'000;
+  std::vector<std::thread> producers;
+  for (std::uint32_t producer = 0; producer < kProducers; ++producer) {
+    producers.emplace_back([emit, producer] {
+      for (std::uint64_t sequence = 1; sequence <= kRecords; ++sequence) {
+        emit(RendererRecord(kFirstProcess + producer, sequence));
+      }
+    });
+  }
+  for (auto& producer : producers) {
+    producer.join();
+  }
+  auto& client = reb::NativeProbeSocketClient::Get();
+  const std::size_t spilled_chunks = client.SpillChunkCountForTesting();
+  Require(spilled_chunks > 0, "a burst past the ring spills");
+  broker.StartReading();
+  Require(WaitFor([&] { return broker.Count() >= kProducers * kRecords; }),
+          "every record of the burst reaches the broker");
+  std::map<std::uint32_t, std::uint64_t> last;
+  for (const auto& event : broker.Events()) {
+    Require(event.header.type != reb::NativeProbeType::kGap, "a spilled burst loses nothing");
+    std::uint64_t& previous = last[event.header.process_id];
+    Require(event.header.sequence_number == previous + 1,
+            "each thread's records arrive in the order it queued them");
+    previous = event.header.sequence_number;
+  }
+  Require(last.size() == kProducers, "every thread's records arrive");
+  for (const auto& [process, sequence] : last) {
+    Require(process >= kFirstProcess && sequence == kRecords, "every thread's records arrive");
+  }
+  Require(WaitFor([&] { return client.SpillChunkCountForTesting() == 0; }),
+          "the writer frees the spill once it is sent");
+  std::cout << "PASS broker writer: " << kProducers * kRecords << " records from " << kProducers
+            << " threads, " << spilled_chunks
+            << " chunks spilled past the ring, reach a stalled broker whole and in each thread's "
+               "order, and the spill is freed\n";
+}
+
+// Records the spill's bound refuses, and only those, are reported as browser
+// records in the mixed stream, and the end of artifact delivery is a named
+// gap in the same stream.
 void CheckTransportGaps(const std::string& root) {
   const std::string broker_path = root + "/broker.sock";
   ScriptedBroker broker(broker_path);
@@ -654,37 +725,42 @@ void CheckTransportGaps(const std::string& root) {
   broker.Accept();
   const reb::NativeProbeEmitter emit = reb::NativeProbeSession::Get().downstream();
   Require(emit != nullptr, "session emitter");
+  CheckSpilledBurst(broker, emit);
 
-  // The broker reads nothing yet, so the writer blocks and the queue fills.
+  // With the bound lowered to two chunks and the broker stalled again, the
+  // ring and the spill fill and the spill refuses the rest.
+  auto& client = reb::NativeProbeSocketClient::Get();
+  const std::size_t spill_limit = client.SetSpillChunkLimitForTesting(2);
+  broker.Pause();
+  const std::size_t first_event = broker.Count();
   constexpr std::uint64_t kRendererEvents = 20'000;
   for (std::uint64_t sequence = 1; sequence <= kRendererEvents; ++sequence) {
-    reb::NativeProbeEvent event;
-    event.header.category = reb::NativeProbeCategory::kCanvas;
-    event.header.type = reb::NativeProbeType::kApiCall;
-    event.header.session_id = kSessionId;
-    event.header.process_id = 77;
-    event.header.sequence_number = sequence;
-    emit(event);
+    emit(RendererRecord(77, sequence));
   }
-  broker.StartReading();
+  broker.Resume();
   std::uint64_t retained = 0;
   std::uint64_t reported = 0;
   std::vector<reb::NativeProbeEvent> gaps;
   Require(WaitFor([&] {
             retained = reported = 0;
             gaps.clear();
-            for (const auto& event : broker.Events()) {
+            std::uint64_t previous = 0;
+            for (const auto& event : broker.Events(first_event)) {
               if (event.header.type == reb::NativeProbeType::kGap) {
                 gaps.push_back(event);
                 reported += reb::NativeProbeDropWeight(event);
               } else if (event.header.process_id == 77) {
+                Require(event.header.sequence_number > previous,
+                        "records kept around a refusal stay in order");
+                previous = event.header.sequence_number;
                 ++retained;
               }
             }
             return retained + reported == kRendererEvents;
           }),
-          "every dropped record is counted by a gap");
-  Require(!gaps.empty() && reported > 0, "the queue dropped and said so");
+          "every refused record is counted by a gap");
+  Require(!gaps.empty() && reported > 0, "the spill refused past its bound and said so");
+  Require(client.SetSpillChunkLimitForTesting(spill_limit) == 2, "the lowered bound was in force");
   for (const auto& gap : gaps) {
     Require(gap.header.process_id == static_cast<std::uint32_t>(base::kTestBrowserProcessId) &&
                 gap.header.session_id == kSessionId &&
@@ -692,8 +768,8 @@ void CheckTransportGaps(const std::string& root) {
                 gap.header.sequence_number >= reb::NativeProbeSession::kFirstBrowserSequence,
             "a transport gap is a browser record with its own browser sequence");
   }
-  std::cout << "PASS broker writer: " << reported << " dropped of " << kRendererEvents
-            << " mixed-queue records reported by browser-sequenced gaps\n";
+  std::cout << "PASS broker writer: " << reported << " refused past a two-chunk spill of "
+            << kRendererEvents << " mixed-queue records reported by browser-sequenced gaps\n";
 
   close(artifact_connection);
   close(artifact_listener);

@@ -10,6 +10,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <compare>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -104,6 +105,7 @@ constexpr TimeDelta Milliseconds(std::int64_t value) {
 
 class TimeTicks {
  public:
+  TimeTicks() = default;
   static TimeTicks Now() {
     return TimeTicks(std::chrono::duration_cast<std::chrono::nanoseconds>(
                          std::chrono::steady_clock::now().time_since_epoch())
@@ -114,6 +116,7 @@ class TimeTicks {
     return TimeTicks(ns_ + delta.InNanoseconds());
   }
   TimeDelta operator-(const TimeTicks other) const { return TimeDelta(ns_ - other.ns_); }
+  auto operator<=>(const TimeTicks&) const = default;
 
  private:
   explicit TimeTicks(std::int64_t ns) : ns_(ns) {}
@@ -130,6 +133,7 @@ struct TestThreadId {
 };
 struct PlatformThread {
   static TestThreadId CurrentId() { return {}; }
+  static void YieldCurrentThread() { std::this_thread::yield(); }
 };
 
 class FilePath {

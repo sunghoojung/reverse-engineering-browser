@@ -280,4 +280,13 @@ struct WebLocalFrame {
   }
   FrameToken GetLocalFrameToken() const { return {}; }
 };
+// The transport binds its host remote to the IO thread's runner; the stub
+// remote takes any runner.
+struct Platform {
+  static Platform* Current() {
+    static Platform platform;
+    return &platform;
+  }
+  int GetIOTaskRunner() const { return 0; }
+};
 }  // namespace blink

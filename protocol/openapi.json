@@ -5201,6 +5201,9 @@
               "symbol": "simulate"
             }
           ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
     },
@@ -5363,6 +5366,9 @@
               "symbol": "CallIndex::build"
             }
           ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
         }
       }
     },

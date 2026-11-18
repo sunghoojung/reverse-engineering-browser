@@ -28,7 +28,9 @@
  *   runs as its neighbours leave room for.
  * - Routes. Every call is orthogonal: down from a port on its caller's
  *   bottom, across the gap under the caller's row, down its segment, across
- *   the gap over its callee's row, and down into the callee's top. Each gap
+ *   the gap over its callee's row, and down into the callee's top. A port
+ *   sits over its call's segment (or its callee) when the order allows, so
+ *   the call goes straight down without a jog. Each gap
  *   is a channel: every run in it gets a line of its own, so runs never
  *   share or touch a line and edges never merge, and the lines are ordered
  *   to avoid crossings. A gap grows to fit its lines. Back edges run up the
@@ -1138,6 +1140,46 @@ const flowGraphLayout = (() => {
   const lineY = (top, height, tracks, t, m) => top + (height - (tracks - 1) * m.trackGap) / 2 + t * m.trackGap;
 
   /**
+   * Ports along one side of a card, in list order and `step` apart within
+   * [lo, hi + (k - 1) * step], each as near `want[i]` as the order allows. A
+   * port that can make its call straight (`straight[i]`) is moved only by
+   * another such port, and the rest fan around them. In q = port - i * step
+   * order and spacing are q nondecreasing, so this pools adjacent violators
+   * (isotonic regression): a pool sits at the lower median of its straight
+   * ports, so one of two that collide stays straight, or at the mean of the
+   * rest when it has none.
+   */
+  function fitPorts(want, straight, k, step, lo, hi, port) {
+    const start = new Int32Array(k), value = new Float64Array(k), sum = new Float64Array(k), count = new Int32Array(k), medians = [];
+    let n = 0;
+    for (let i = 0; i < k; i += 1) {
+      const q = want[i] - i * step;
+      start[n] = i; value[n] = q;
+      medians[n] = straight[i] ? [q] : null; sum[n] = straight[i] ? 0 : q; count[n] = straight[i] ? 0 : 1;
+      n += 1;
+      while (n > 1 && value[n - 2] > value[n - 1]) {
+        const a = medians[n - 2], b = medians[n - 1];
+        const merged = !a ? b : !b ? a : mergeSorted(a, b);
+        medians[n - 2] = merged; sum[n - 2] += sum[n - 1]; count[n - 2] += count[n - 1];
+        value[n - 2] = merged ? merged[(merged.length - 1) >> 1] : sum[n - 2] / count[n - 2];
+        n -= 1;
+      }
+    }
+    for (let b = 0; b < n; b += 1) {
+      const q = Math.min(hi, Math.max(lo, value[b])), end = b + 1 < n ? start[b + 1] : k;
+      for (let i = start[b]; i < end; i += 1) port[i] = q + i * step;
+    }
+  }
+  const mergeSorted = (a, b) => {
+    const merged = new Array(a.length + b.length);
+    let i = 0, j = 0, o = 0;
+    while (i < a.length && j < b.length) merged[o++] = a[i] <= b[j] ? a[i++] : b[j++];
+    while (i < a.length) merged[o++] = a[i++];
+    while (j < b.length) merged[o++] = b[j++];
+    return merged;
+  };
+
+  /**
    * Ports, runs, lines and rows of one layered band, and the routes of the
    * calls inside it, band-local (x from the band content's left edge, y from
    * the band's top). `side[e]` is where a call between bands leaves or
@@ -1167,27 +1209,44 @@ const flowGraphLayout = (() => {
     const gutterX = e => contentW + m.gutter + gutterTrack.get(e) * m.trackGap;
     // Ports: a card's calls leave its bottom and enter its top in the order
     // of where their other end goes, so bundles do not cross at the card. A
-    // call drawn straight down (its other end right over or under the card's
-    // centre) takes the centre and the others spread from it; back edges take
-    // the right end, toward the gutter, and calls between bands the end on
-    // their side.
+    // call that can be drawn straight (its piece, or for a call to the next
+    // layer the card at its other end, over or under the card's ports) takes
+    // that place and the others fan out from the centre around it; back edges
+    // take the right end, toward the gutter, and calls between bands the end
+    // on their side.
     const nextX = e => (kind[e] === LONG ? topX(e) : kind[e] === BACK ? gutterX(e) : kind[e] === CROSS ? side[e] * FAR + e * 1e-3 : x[to[e]]);
     const prevX = e => (kind[e] === LONG ? bottomX(e) : kind[e] === BACK ? gutterX(e) : kind[e] === CROSS ? side[e] * FAR + e * 1e-3 : x[from[e]]);
+    const reachOf = v => Math.max(0, w[v] / 2 - m.portInset);
+    // Where a call to the next layer runs straight: over both cards' ports,
+    // nearest the middle of their centres; NaN when they do not overlap.
+    const straightShort = e => {
+      const a = from[e], b = to[e], lo = Math.max(x[a] - reachOf(a), x[b] - reachOf(b)), hi = Math.min(x[a] + reachOf(a), x[b] + reachOf(b));
+      return lo <= hi ? Math.min(hi, Math.max(lo, (x[a] + x[b]) / 2)) : NaN;
+    };
     const outs = new Map(), ins = new Map();
     const listOf = (map, v) => { let list = map.get(v); if (!list) map.set(v, list = []); return list; };
     for (const e of band.forward) { listOf(outs, from[e]).push(e); listOf(ins, to[e]).push(e); }
     for (const e of band.backs) { listOf(outs, from[e]).push(e); listOf(ins, to[e]).push(e); }
     for (const e of band.crossOut) listOf(outs, from[e]).push(e);
     for (const e of band.crossIn) listOf(ins, to[e]).push(e);
+    let want = new Float64Array(16), straight = new Uint8Array(16), port = new Float64Array(16);
     const spread = (v, list, key, target) => {
-      const k = list.length, cx = x[v], half = Math.max(0, w[v] / 2 - m.portInset);
-      if (k === 1) { target[list[0]] = cx; return; }
+      const k = list.length, cx = x[v], half = reachOf(v);
+      const straightAt = e => {
+        const at = kind[e] === LONG ? key(e) : kind[e] === SHORT ? straightShort(e) : NaN;
+        return Math.abs(at - cx) <= half ? at : NaN;
+      };
+      if (k === 1) { const at = straightAt(list[0]); target[list[0]] = at === at ? at : cx; return; }
       list.sort((a, b) => key(a) - key(b) || a - b);
-      let straight = -1;
-      for (let i = 0; i < k && straight < 0; i += 1) if ((kind[list[i]] === SHORT || kind[list[i]] === LONG) && Math.abs(key(list[i]) - cx) < 0.5) straight = i;
-      const origin = straight >= 0 ? straight : (k - 1) / 2;
-      const reach = Math.max(origin, k - 1 - origin), step = Math.min(m.portGap, half / reach);
-      list.forEach((e, i) => { target[e] = cx + (i - origin) * step; });
+      if (want.length < k) { want = new Float64Array(2 * k); straight = new Uint8Array(2 * k); port = new Float64Array(2 * k); }
+      const step = Math.min(m.portGap, 2 * half / (k - 1));
+      for (let i = 0; i < k; i += 1) {
+        const at = straightAt(list[i]);
+        straight[i] = at === at ? 1 : 0;
+        want[i] = at === at ? at : cx + (i - (k - 1) / 2) * step;
+      }
+      fitPorts(want, straight, k, step, cx - half, cx + half - (k - 1) * step, port);
+      for (let i = 0; i < k; i += 1) target[list[i]] = port[i];
     };
     outs.forEach((list, v) => spread(v, list, nextX, out.outX));
     ins.forEach((list, v) => spread(v, list, prevX, out.inX));

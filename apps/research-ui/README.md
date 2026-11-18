@@ -2868,6 +2868,9 @@ theme, Dawn and the light app palette in the light one.
   runs with rounded corners, the same shape Triskel's waypoints take. Each edge
   is outlined against the canvas, and its width follows how many records
   walked it.
+- A call leaves and enters its cards over its own segment, or over the card
+  at its other end, when the order of the card's calls allows, so it runs
+  straight without a jog under or over the card.
 - A call that skips rows runs down between the cards it passes, straight
   where its neighbours leave room and with a jog where they do not. A back
   edge inside a band runs up the band's right gutter.

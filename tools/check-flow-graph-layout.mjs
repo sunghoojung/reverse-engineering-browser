@@ -181,6 +181,19 @@ const run = async (name, graph) => {
 }
 
 {
+  // A wide caller over two narrow callees, which sit under its ports off its
+  // centre: both calls go straight down, with no jog under the caller.
+  const graph = {count: 3, lane: new Int32Array(3), weight: new Float64Array(3), from: Int32Array.from([0, 0]), to: Int32Array.from([1, 2]),
+    w: Float64Array.from([220, 60, 60]), h: Float64Array.from([34, 34, 34])};
+  const {layout} = await run('calls under their caller', graph);
+  for (let e = 0; e < 2; e += 1) {
+    const p = points(layout, e);
+    assert.equal(p.length, 4, `call ${e} under its caller is one straight line: ${JSON.stringify(p)}`);
+  }
+  console.log('PASS flow graph layout: calls between cards over one another go straight');
+}
+
+{
   // The same input lays out the same drawing.
   const graph = callGraph(1500, 5, 7), a = await layOut(graph), b = await layOut(graph);
   for (const key of ['x', 'y', 'routes', 'routeTypes', 'routeStart', 'layer', 'back']) assert.deepEqual(a[key], b[key], `the ${key} of a layout repeats exactly`);

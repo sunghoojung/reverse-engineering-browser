@@ -470,6 +470,23 @@ exec ${quote(systemGrep)} "$@"
   assert.match(badSwitch.stderr, /REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1/);
   console.log('PASS saved invocation sites start without invocation capture on a Brave that lacks it; explicit sites and other flags stay strict');
 
+  // The packaged app's request and promise stacks defaults: a Brave without
+  // promise registration stacks starts with request stacks alone, and one
+  // with both arms both. An explicit request stays strict.
+  const stackDefaults = {...switches.packaged, REB_NATIVE_REQUEST_STACKS:'1', REB_NATIVE_PROMISE_STACKS:'1',
+    REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'1'};
+  const prePromise = await braveApp({framework: [...allNames, 'reb_request_stacks']});
+  accepted(await launchWith(prePromise.executable, stackDefaults),
+    [...packaged, '--reb-request-stacks', '--reb-request-stacks', '--reb-promise-stacks'], prePromise.framework);
+  const withPromise = await braveApp({framework: [...allNames, 'reb_request_stacks', 'reb_promise_stacks']});
+  accepted(await launchWith(withPromise.executable, stackDefaults),
+    [...packaged, '--reb-request-stacks', '--reb-request-stacks', '--reb-promise-stacks', '--reb-promise-stacks'],
+    withPromise.framework);
+  const strictPromise = await launchWith(prePromise.executable, {...stackDefaults, REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:'0'});
+  assert.equal(strictPromise.status, 1, strictPromise.stderr);
+  assert.match(strictPromise.stderr, /does not define the requested V8 flag --reb-promise-stacks \(from REB_NATIVE_PROMISE_STACKS=1\)/);
+  console.log('PASS packaged request and promise stacks defaults drop promise stacks from a Brave that lacks them; an explicit request stays strict');
+
   // Request content capture is a Chromium switch, not a V8 flag. Invalid values
   // and masks without Network and Artifact refuse before any helper starts.
   const content = await braveApp({framework: allNames});

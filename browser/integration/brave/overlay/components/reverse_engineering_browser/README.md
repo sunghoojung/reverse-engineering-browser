@@ -353,8 +353,8 @@ hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
 renderer stack to the browser link (event 47). Every table belongs to one
 thread: the document main thread and each dedicated, shared and service worker
 are named without allocating, and get their own tables at their first walk
-or message receipt while capture is active (at most 32 workers per renderer;
-a schedule or post with no script running makes none), so later walks take
+or message receipt while capture is active (every worker its own; a
+schedule or post with no script running makes none), so later walks take
 no lock; only the call that makes the tables, detach and the transport's
 routing of a browser refusal to its owning thread take the registry lock.
 `common/native_request_stack.h` also defines the task origin a posted message

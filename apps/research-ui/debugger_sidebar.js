@@ -25,7 +25,7 @@ const DEBUGGER_WORKER_KINDS = Object.freeze({dedicated_worker: 'Dedicated worker
   service_worker: 'Service worker'});
 const DEBUGGER_STACK_STATES = Object.freeze({captured: 'stack captured', no_script: 'no script on the stack',
   unsupported_thread: 'stack not recorded on this thread', not_retained_artifact_unavailable: 'stack not retained (Artifact off)',
-  not_retained_budget: 'stack not retained (budget)'});
+  not_retained_budget: 'stack not retained (older build budget)'});
 const DEBUGGER_ID = /^(0|[1-9][0-9]{0,19})$/;
 
 // The registry is ready before the sidebar mounts: index.html loads this file

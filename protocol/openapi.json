@@ -11244,7 +11244,7 @@
               "not_retained_budget",
               "not_walked_thread_limit"
             ],
-            "description": "not_retained_budget: this thread's own budget of 1,024 stack artifacts per configuration for requests, navigations, cookie writes and debugger observations. not_walked_thread_limit, version 3: a worker found 32 other workers in its renderer holding stack tables, so nothing was walked; scope names it."
+            "description": "not_retained_budget: written only by earlier producers, which sent at most 1,024 stack artifacts per thread and configuration; current ones send every stack. not_walked_thread_limit, version 3, also only from earlier producers: a worker found 32 other workers in its renderer holding stack tables, so nothing was walked; scope names it."
           },
           "scope": {
             "type": [
@@ -11380,7 +11380,7 @@
                     "no_script",
                     "origin_rejected"
                   ],
-                  "description": "not_retained_budget: the thread's budget of 1,024 scheduling stacks, or for a microtask of 1,024 promise registration stacks, per configuration. no_script and origin_rejected (a message whose task origin did not validate, so its sender is not known) end the chain."
+                  "description": "not_retained_budget, only from earlier producers: the thread's budget of 1,024 scheduling stacks, or for a microtask of 1,024 promise registration stacks, per configuration. no_script and origin_rejected (a message whose task origin did not validate, so its sender is not known) end the chain."
                 },
                 "promise_stacks_on": {
                   "type": [

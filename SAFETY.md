@@ -77,8 +77,8 @@ it.
   script navigation, and of the stack that scheduled each async task it came
   from, including the stack that posted a message to a port, a broadcast
   channel or a worker, never names or values. `REB_NATIVE_PROMISE_STACKS=1`,
-  off by default everywhere, also records the stack of each promise
-  registration. Content capture sessions also retain the source of
+  on with request stacks in the packaged app and off by default in
+  `make live`, also records the stack of each promise registration. Content capture sessions also retain the source of
   each script a stack names as an artifact; metadata-only sessions do not.
   Agent-started sessions record them only when the start names
   `request_stacks`.

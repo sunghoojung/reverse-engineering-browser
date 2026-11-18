@@ -2310,11 +2310,11 @@ int main() {
   Run<&NativeTaskChainsAndNavigations>();
   Run<&NativeAsyncSegmentNotAdmitted>();
   Run<&NativeAsyncSegmentArtifactRefused>();
-  Run<&NativeRefusedStackBudgets>();
+  Run<&NativeRefusedStacksResend>();
   Run<&NativeWorkerRequestStacks>();
   Run<&NativeMessageOrigins>();
   Run<&NativePromiseRegistrations>();
-  Run<&NativeStackThreadLimit>();
+  Run<&NativeStackManyWorkers>();
   Run<&NativeRefusalRouting>();
   Run<&NativeRefusalConcurrency>();
   Run<&NativeDebuggerObservations>();

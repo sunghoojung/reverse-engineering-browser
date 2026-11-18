@@ -35,15 +35,18 @@ namespace reb {
 
 // One thread's tables: written only by that thread's walks, except the
 // refusal mailbox (see below). Keyed by configuration generation so a new
-// session never sees an old session's digests, scripts or budgets. Made by
+// session never sees an old session's digests or scripts. Made by
 // the thread's first call that needs them while capture is active
 // (ActiveTables): a walk or a message receipt. Never by AttachThread, nor by
 // a schedule or post with no script running, so a named thread that does
 // neither costs nothing.
 struct NativeRequestStackTables final {
+  // A stack artifact this thread sent. `creator` is the sequence of the
+  // record it was sent with, which a browser refusal names.
   struct Digest final {
     std::uint64_t generation = 0;
     std::array<std::uint8_t, 32> value{};
+    std::uint64_t creator = 0;
   };
   struct Script final {
     std::uint64_t generation = 0;
@@ -56,6 +59,9 @@ struct NativeRequestStackTables final {
     // A segment handle: a serial in this ring, a synthetic handle, or 0.
     std::uint64_t parent = 0;
     std::array<std::uint8_t, 32> digest{};
+    // The creator of the artifact `digest` names, 0 for a copy received in
+    // a message: a refusal finds the refused digest through it.
+    std::uint64_t creator = 0;
     std::uint32_t recorded = 0;
     std::uint8_t kind = 0;
     std::uint8_t state = 0;
@@ -78,6 +84,7 @@ struct NativeRequestStackTables final {
     std::uint32_t task_id = 0;
     std::uint32_t recorded = 0;
     std::array<std::uint8_t, 32> digest{};
+    std::uint64_t creator = 0;
     std::uint8_t state = 0;
     std::uint8_t registration = 0;
     std::uint8_t flags = 0;
@@ -94,14 +101,6 @@ struct NativeRequestStackTables final {
     std::uint64_t generation = 0;
     std::uint64_t hash = 0;
     std::uint64_t serial = 0;
-  };
-  // A stack artifact this thread queued in budget_generation, until a
-  // browser refusal needs it. Sequence 0 marks a free slot.
-  struct QueuedStack final {
-    std::uint64_t sequence = 0;
-    std::array<std::uint8_t, 32> digest{};
-    // Which budget admitted it.
-    enum class Budget : std::uint8_t { kRequest, kTask, kPromise } budget = Budget::kRequest;
   };
   NativeStackScope scope;
   std::uint32_t process_id = 0;
@@ -130,21 +129,10 @@ struct NativeRequestStackTables final {
   std::array<NativeStackFrame, kNativeRequestStackFrameCapacity> frames{};
   std::array<std::uint8_t, kNativeStackArtifactMaxBytes> artifact{};
   std::array<Digest, kNativeRequestStackDigestTable> digests{};
-  // The artifacts queued in budget_generation, by creator sequence: linear
-  // probing, removal by backward shift, cleared when the generation changes.
-  // A refusal refunds its budget and removes its entry, so at most the three
-  // budgets' sum is live: below the index size, an insertion always finds a
-  // free slot and no entry is ever displaced.
-  std::array<QueuedStack, kNativeStackQueuedIndex> queued{};
   std::array<Script, kNativeRequestStackScriptTable> scripts{};
   std::array<std::uint64_t, std::bit_ceil(2 * kNativeRequestStackFrameCapacity)> distinct{};
   std::uint32_t distinct_stamp = 0;
   std::size_t evict = 0;
-  std::uint64_t budget_generation = 0;
-  std::uint32_t stacks_sent = 0;
-  std::uint64_t source_bytes = 0;
-  std::uint32_t async_sent = 0;
-  std::uint32_t promise_sent = 0;
   std::array<Segment, kNativeAsyncTaskRing> segments{};
   std::uint64_t next_segment = 0;
   std::array<Attribution, kNativeTaskAttributionTable> attributions{};
@@ -156,9 +144,6 @@ struct NativeRequestStackTables final {
   std::array<Post, kNativeStackRecentPosts> posts{};
   std::size_t post_next = 0;
 };
-static_assert(kNativeStackQueuedIndex > kNativeRequestStackArtifactBudget +
-                                            kNativeAsyncTaskArtifactBudget +
-                                            kNativePromiseStackArtifactBudget);
 
 namespace {
 
@@ -189,16 +174,10 @@ void* (*g_allocate_frames)() = nullptr;
 void (*g_release_frames)(void*) = nullptr;
 std::atomic<bool> g_promise_stacks{false};
 std::atomic<std::uint64_t> g_next_table{0};
-// Worker threads with tables, at most kNativeStackThreadLimit. A thread
-// reserves its place before allocating and returns it when it detaches.
-std::atomic<std::uint32_t> g_worker_tables{0};
 // This thread's isolate, set by AttachThread; zero on an unattached thread.
 thread_local NativeStackScope t_scope{};
 // This thread's tables, made by ActiveTables and freed by DetachThread.
 thread_local NativeRequestStackTables* t_tables = nullptr;
-// The generation whose request_stack_thread_limit gap this thread sent.
-thread_local std::uint64_t t_limit_gap_generation = 0;
-thread_local bool t_limit_gap_sent = false;
 thread_local bool g_walking = false;
 thread_local std::uint64_t g_current_segment = 0;
 // The V8 async task ID of the promise reaction running on this thread, or 0.
@@ -220,8 +199,8 @@ NativeRequestStackTables* g_registry = nullptr;
 // atomic word holding both the creator and the table, so it is always one
 // writer's pair: two writers that claimed the same slot 8,192 claims apart
 // can only replace each other's word, never mix a creator with another
-// table. A refusal whose creator no slot holds goes to every attached table,
-// whose queued index finds its owner.
+// table. A refusal whose creator no slot holds goes to every attached table;
+// only the one whose entries name that creator acts on it.
 constexpr unsigned kOwnerTableBits = 20;
 constexpr std::uint64_t kOwnerTableMask = (1ULL << kOwnerTableBits) - 1;
 // The creator and table of a word, or 0 when either does not fit, which the
@@ -310,18 +289,6 @@ std::uint32_t CountDistinctScripts(NativeRequestStackTables& state,
   return count;
 }
 
-void ResetBudgets(NativeRequestStackTables& state, const std::uint64_t generation) noexcept {
-  if (state.budget_generation != generation) {
-    state.budget_generation = generation;
-    state.stacks_sent = 0;
-    state.source_bytes = 0;
-    state.async_sent = 0;
-    state.promise_sent = 0;
-    // Once per configuration: an older generation's refusals no longer apply.
-    state.queued.fill({});
-  }
-}
-
 const NativeRequestStackTables::Segment* FindSegment(const NativeRequestStackTables& state,
                                                      const std::uint64_t serial,
                                                      const std::uint64_t generation) noexcept {
@@ -353,56 +320,6 @@ std::uint64_t AttributedSegment(NativeRequestStackTables& state,
   return entry ? entry->segment : 0;
 }
 
-constexpr std::size_t kQueuedMask = kNativeStackQueuedIndex - 1;
-
-std::size_t QueuedHome(const std::uint64_t sequence) noexcept {
-  return Mix(sequence) & kQueuedMask;
-}
-
-void InsertQueued(NativeRequestStackTables& state,
-                  const NativeRequestStackTables::QueuedStack& entry) noexcept {
-  // Fewer live entries than slots, so a free slot is always reached.
-  for (std::size_t at = QueuedHome(entry.sequence), probes = 0; probes < kNativeStackQueuedIndex;
-       at = (at + 1) & kQueuedMask, ++probes) {
-    if (state.queued[at].sequence == 0) {
-      state.queued[at] = entry;
-      return;
-    }
-  }
-}
-
-// Removes the entry for `sequence` into `out`; false when this table never
-// queued it in the current configuration.
-bool TakeQueued(NativeRequestStackTables& state,
-                const std::uint64_t sequence,
-                NativeRequestStackTables::QueuedStack& out) noexcept {
-  if (sequence == 0) {
-    return false;
-  }
-  std::size_t hole = QueuedHome(sequence);
-  for (std::size_t probes = 0;; hole = (hole + 1) & kQueuedMask) {
-    if (state.queued[hole].sequence == 0 || ++probes > kNativeStackQueuedIndex) {
-      return false;
-    }
-    if (state.queued[hole].sequence == sequence) {
-      break;
-    }
-  }
-  out = state.queued[hole];
-  // Backward shift: move each later entry of the run into the hole when its
-  // home slot is not between the hole and it, so no lookup stops early.
-  for (std::size_t at = (hole + 1) & kQueuedMask; state.queued[at].sequence != 0;
-       at = (at + 1) & kQueuedMask) {
-    const std::size_t home = QueuedHome(state.queued[at].sequence);
-    if (((at - home) & kQueuedMask) >= ((at - hole) & kQueuedMask)) {
-      state.queued[hole] = state.queued[at];
-      hole = at;
-    }
-  }
-  state.queued[hole] = {};
-  return true;
-}
-
 // Nothing a refusal names can be trusted any more: forget every digest so
 // each stack is sent again, and stop calling any remembered segment captured.
 void ForgetCapturedStacks(NativeRequestStackTables& state) noexcept {
@@ -423,17 +340,81 @@ void ForgetCapturedStacks(NativeRequestStackTables& state) noexcept {
   }
 }
 
-// What reading a thread's tables found that a gap must count.
-struct TableStatus final {
-  bool overflowed = false;
-  bool limited = false;
-  bool limit_gap = false;
+// The refused creators a drain looks entries up by: open addressing over
+// twice the mailbox, so a probe always ends at an empty slot.
+class RefusedSet final {
+ public:
+  void Add(const std::uint64_t key) noexcept {
+    for (std::size_t at = Mix(key) & kMask;; at = (at + 1) & kMask) {
+      if (keys_[at] == key) {
+        return;
+      }
+      if (keys_[at] == 0) {
+        keys_[at] = key;
+        return;
+      }
+    }
+  }
+  [[nodiscard]] bool Contains(const std::uint64_t key) const noexcept {
+    if (key == 0) {
+      return false;
+    }
+    for (std::size_t at = Mix(key) & kMask; keys_[at] != 0; at = (at + 1) & kMask) {
+      if (keys_[at] == key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+ private:
+  static constexpr std::size_t kMask = 2 * kNativeStackRefusalMailbox - 1;
+  std::array<std::uint64_t, kMask + 1> keys_{};
 };
 
-// Applies the refusals routed to this thread since its last walk. Each found
-// refusal refunds its budget and forgets its digest; then one scan of the
-// segment and registration rings stops calling any of those digests
-// captured. A walk pays for at most that one scan however many arrived.
+// The digests those creators named. Each creator names one artifact, so at
+// most one digest per refusal.
+class RefusedDigests final {
+ public:
+  void Add(const std::array<std::uint8_t, 32>& digest) noexcept {
+    for (std::size_t at = Mix(DigestKey(digest)) & kMask;; at = (at + 1) & kMask) {
+      if (slots_[at] == 0) {
+        if (count_ == digests_.size()) {
+          return;
+        }
+        digests_[count_] = digest;
+        slots_[at] = static_cast<std::uint16_t>(++count_);
+        return;
+      }
+      if (digests_[slots_[at] - 1] == digest) {
+        return;
+      }
+    }
+  }
+  [[nodiscard]] bool Contains(const std::array<std::uint8_t, 32>& digest) const noexcept {
+    for (std::size_t at = Mix(DigestKey(digest)) & kMask; slots_[at] != 0;
+         at = (at + 1) & kMask) {
+      if (digests_[slots_[at] - 1] == digest) {
+        return true;
+      }
+    }
+    return false;
+  }
+  [[nodiscard]] bool empty() const noexcept { return count_ == 0; }
+
+ private:
+  static constexpr std::size_t kMask = 2 * kNativeStackRefusalMailbox - 1;
+  std::array<std::uint16_t, kMask + 1> slots_{};
+  std::array<std::array<std::uint8_t, 32>, kNativeStackRefusalMailbox> digests_;
+  std::size_t count_ = 0;
+};
+
+// Applies the refusals routed to this thread since its last walk. Every
+// entry names the creator of the artifact its digest was sent with, so one
+// scan of the digest table and the segment and registration rings finds the
+// refused digests and forgets them, and a second stops calling any segment
+// or registration on one of them captured, a copy received in a message
+// included. A walk pays for at most those two scans however many arrived.
 // Returns whether the mailbox overflowed, which forgot every digest.
 bool DrainRefusals(NativeRequestStackTables& state, const std::uint64_t generation) noexcept {
   const std::uint64_t head = state.refused_head.load(std::memory_order_acquire);
@@ -444,81 +425,56 @@ bool DrainRefusals(NativeRequestStackTables& state, const std::uint64_t generati
   // The producer never runs more than the mailbox ahead of the published tail.
   const std::size_t count =
       static_cast<std::size_t>(std::min<std::uint64_t>(head - tail, kNativeStackRefusalMailbox));
-  std::array<std::uint64_t, kNativeStackRefusalMailbox> creators;
+  RefusedSet creators;
   for (std::size_t i = 0; i < count; ++i) {
-    creators[i] = state.refused[(tail + i) & (kNativeStackRefusalMailbox - 1)];
+    if (const std::uint64_t creator = state.refused[(tail + i) & (kNativeStackRefusalMailbox - 1)]) {
+      creators.Add(creator);
+    }
   }
   state.refused_tail.store(head, std::memory_order_release);
   // After the tail: a refusal the producer could not store is seen here or by
   // the next drain, never by none.
-  const bool overflowed = state.refused_overflow.exchange(false, std::memory_order_acq_rel);
-
-  // The refused digests, keyed for the one scan below.
-  constexpr std::size_t kSlots = 2 * kNativeStackRefusalMailbox;
-  std::array<std::uint16_t, kSlots> slots{};
-  std::array<std::array<std::uint8_t, 32>, kNativeStackRefusalMailbox> refused;
-  std::size_t refused_count = 0;
-  using Budget = NativeRequestStackTables::QueuedStack::Budget;
-  for (std::size_t i = 0; i < count; ++i) {
-    NativeRequestStackTables::QueuedStack queued;
-    if (!TakeQueued(state, creators[i], queued)) {
-      continue;
-    }
-    // The refused attempt stored nothing, so its retry must not be charged again.
-    std::uint32_t& sent = queued.budget == Budget::kTask      ? state.async_sent
-                          : queued.budget == Budget::kPromise ? state.promise_sent
-                                                              : state.stacks_sent;
-    if (sent != 0) {
-      --sent;
-    }
-    if (auto* digest = Find(state.digests, Mix(DigestKey(queued.digest)), [&](const auto& entry) {
-          return entry.generation == generation && entry.value == queued.digest;
-        })) {
-      *digest = {};
-    }
-    for (std::size_t at = Mix(DigestKey(queued.digest)) & (kSlots - 1);;
-         at = (at + 1) & (kSlots - 1)) {
-      if (slots[at] == 0) {
-        refused[refused_count] = queued.digest;
-        slots[at] = static_cast<std::uint16_t>(++refused_count);
-        break;
-      }
-      if (refused[slots[at] - 1] == queued.digest) {
-        break;
-      }
-    }
-  }
-  if (overflowed) {
+  if (state.refused_overflow.exchange(false, std::memory_order_acq_rel)) {
     ForgetCapturedStacks(state);
     return true;
   }
-  if (refused_count == 0) {
-    return false;
+
+  RefusedDigests refused;
+  for (NativeRequestStackTables::Digest& digest : state.digests) {
+    if (digest.generation == generation && creators.Contains(digest.creator)) {
+      refused.Add(digest.value);
+      // The next identical stack is sent again.
+      digest = {};
+    }
   }
-  const auto is_refused = [&](const std::array<std::uint8_t, 32>& digest) {
-    for (std::size_t at = Mix(DigestKey(digest)) & (kSlots - 1); slots[at] != 0;
-         at = (at + 1) & (kSlots - 1)) {
-      if (refused[slots[at] - 1] == digest) {
-        return true;
+  for (const NativeRequestStackTables::Segment& segment : state.segments) {
+    if (segment.generation == generation && creators.Contains(segment.creator)) {
+      refused.Add(segment.digest);
+    }
+  }
+  if (state.registrations) {
+    for (const auto& registration : *state.registrations) {
+      if (registration.generation == generation && creators.Contains(registration.creator)) {
+        refused.Add(registration.digest);
       }
     }
+  }
+  if (refused.empty()) {
     return false;
-  };
-  // A segment names its artifact by digest, whether it queued that artifact or
-  // found the digest already remembered, so every one on a refused digest lost it.
+  }
   const auto captured = static_cast<std::uint8_t>(NativeTaskSegmentState::kCaptured);
   const auto unretained =
       static_cast<std::uint8_t>(NativeTaskSegmentState::kNotRetainedArtifactUnavailable);
   for (NativeRequestStackTables::Segment& segment : state.segments) {
     if (segment.generation == generation && segment.state == captured &&
-        is_refused(segment.digest)) {
+        refused.Contains(segment.digest)) {
       segment.state = unretained;
     }
   }
   if (state.registrations) {
     for (auto& registration : *state.registrations) {
       if (registration.generation == generation && registration.state == captured &&
-          is_refused(registration.digest)) {
+          refused.Contains(registration.digest)) {
         registration.state = unretained;
       }
     }
@@ -529,43 +485,26 @@ bool DrainRefusals(NativeRequestStackTables& state, const std::uint64_t generati
 // This thread's existing tables with every routed refusal applied, or null.
 // Never allocates; for calls that run only under a segment a walk made.
 NativeRequestStackTables* ThreadTables(const std::uint64_t generation,
-                                       TableStatus& status) noexcept {
+                                       bool& overflowed) noexcept {
   NativeRequestStackTables* const state = t_tables;
   if (state) {
-    ResetBudgets(*state, generation);
-    status.overflowed = DrainRefusals(*state, generation);
+    overflowed = DrainRefusals(*state, generation);
   }
   return state;
 }
 
 // This thread's tables, made by its first walk or message receipt while
-// capture is active, with
-// every routed refusal applied. Null on a thread with no scope, and on a
-// worker past kNativeStackThreadLimit, which sets `limited`, and `limit_gap`
-// once per configuration.
+// capture is active, with every routed refusal applied. Null on a thread
+// with no scope. Every worker gets its own: their cost grows with the
+// workers a page starts, which already pay for their own isolates.
 NativeRequestStackTables* ActiveTables(const std::uint64_t generation,
-                                       TableStatus& status) noexcept {
+                                       bool& overflowed) noexcept {
   if (t_tables) {
-    return ThreadTables(generation, status);
+    return ThreadTables(generation, overflowed);
   }
   const NativeStackScope scope = t_scope;
   if (scope.thread == 0) {
     return nullptr;
-  }
-  const bool worker = scope.thread != static_cast<std::uint8_t>(NativeStackThread::kDocument);
-  if (worker) {
-    std::uint32_t live = g_worker_tables.load(std::memory_order_relaxed);
-    do {
-      if (live >= kNativeStackThreadLimit) {
-        status.limited = true;
-        if (!t_limit_gap_sent || t_limit_gap_generation != generation) {
-          t_limit_gap_sent = true;
-          t_limit_gap_generation = generation;
-          status.limit_gap = true;
-        }
-        return nullptr;
-      }
-    } while (!g_worker_tables.compare_exchange_weak(live, live + 1, std::memory_order_relaxed));
   }
   // Once per thread. Walks run from script and receipts from message
   // dispatch, never under WorkerThread::lock_.
@@ -584,7 +523,6 @@ NativeRequestStackTables* ActiveTables(const std::uint64_t generation,
     g_registry = state;
   }
   t_tables = state;
-  ResetBudgets(*state, generation);
   return state;
 }
 
@@ -702,19 +640,12 @@ bool NativeRequestStackWalk::NetworkActive(const NativeProbeSink& sink) noexcept
 }
 
 NativeRequestStackTables* NativeRequestStackWalk::Tables(const std::uint64_t generation,
-                                                         const bool make,
-                                                         bool* const limited) noexcept {
-  TableStatus status;
+                                                         const bool make) noexcept {
+  bool overflowed = false;
   NativeRequestStackTables* const state =
-      make ? ActiveTables(generation, status) : ThreadTables(generation, status);
-  if (status.overflowed) {
+      make ? ActiveTables(generation, overflowed) : ThreadTables(generation, overflowed);
+  if (overflowed) {
     EmitGap("request_stack_refusals_overflowed", RequestFrameId(), generation);
-  }
-  if (status.limit_gap) {
-    EmitGap("request_stack_thread_limit", RequestFrameId(), generation);
-  }
-  if (limited) {
-    *limited = status.limited;
   }
   return state;
 }
@@ -761,10 +692,7 @@ NativeStackScope NativeRequestStackWalk::CurrentScope() noexcept {
 
 void NativeRequestStackWalk::DetachThread() noexcept {
   NativeRequestStackTables* const state = t_tables;
-  const bool worker = t_scope.thread != 0 &&
-                      t_scope.thread != static_cast<std::uint8_t>(NativeStackThread::kDocument);
   t_scope = {};
-  t_limit_gap_sent = false;
   g_current_segment = 0;
   t_reaction = 0;
   if (!state) {
@@ -792,9 +720,6 @@ void NativeRequestStackWalk::DetachThread() noexcept {
     g_release_frames(frames);
   }
   delete state;
-  if (worker) {
-    g_worker_tables.fetch_sub(1, std::memory_order_relaxed);
-  }
 }
 
 void NativeRequestStackWalk::RecordAdmitted(const std::int32_t request_id,
@@ -808,12 +733,10 @@ void NativeRequestStackWalk::RecordAdmitted(const std::int32_t request_id,
   if ((generation & 1U) != 0) {
     return;
   }
-  bool limited = false;
-  NativeRequestStackTables* const state = Tables(generation, true, &limited);
+  NativeRequestStackTables* const state = Tables(generation, true);
   NativeRequestStackWalk walk(state, generation, request_id, initiated_sequence, RequestFrameId(),
-                              NativeProbeType::kRequestInitiatorStack,
-                              limited ? ScopeTail(t_scope) : ScopeTail(state));
-  // A thread without tables has no scope, or found every table in use.
+                              NativeProbeType::kRequestInitiatorStack, ScopeTail(state));
+  // A thread without tables has no scope.
   NativeRequestStackWalkResult result = NativeRequestStackWalkResult::kUnsupportedThread;
   if (state) {
     g_walking = true;
@@ -828,11 +751,10 @@ void NativeRequestStackWalk::RecordAdmitted(const std::int32_t request_id,
   }
   NativeRequestStackPayload payload;
   payload.protocol_version = kNativeRequestStackScopePayloadVersion;
-  payload.state =
-      static_cast<std::uint8_t>(limited ? NativeRequestStackState::kNotWalkedThreadLimit
-                                : result == NativeRequestStackWalkResult::kNoScript && state
-                                    ? NativeRequestStackState::kNoScript
-                                    : NativeRequestStackState::kUnsupportedThread);
+  payload.state = static_cast<std::uint8_t>(result == NativeRequestStackWalkResult::kNoScript &&
+                                                    state
+                                                ? NativeRequestStackState::kNoScript
+                                                : NativeRequestStackState::kUnsupportedThread);
   walk.Emit(payload);
 }
 
@@ -1421,7 +1343,6 @@ void NativeRequestStackWalk::FramesReady(const std::uint32_t total_depth,
     return;
   }
   NativeRequestStackTables& state = *state_;
-  ResetBudgets(state, generation_);
   recorded = std::min(recorded, kNativeRequestStackSyncLimit);
   async_frames = std::min(async_frames, kNativeRequestStackAsyncLimit);
   payload.total_depth = total_depth;
@@ -1495,21 +1416,18 @@ void NativeRequestStackWalk::FramesReady(const std::uint32_t total_depth,
   if (execution_context_id_ == 0 || !sink.IsArtifactCaptureEnabled()) {
     payload.state =
         static_cast<std::uint8_t>(NativeRequestStackState::kNotRetainedArtifactUnavailable);
-  } else if (known) {
-    payload.state = static_cast<std::uint8_t>(NativeRequestStackState::kCaptured);
-  } else if (state.stacks_sent >= kNativeRequestStackArtifactBudget) {
-    payload.state = static_cast<std::uint8_t>(NativeRequestStackState::kNotRetainedBudget);
   } else {
     payload.state = static_cast<std::uint8_t>(NativeRequestStackState::kCaptured);
-    payload.flags |= kNativeRequestStackArtifactQueued;
-    queue = true;
+    if (!known) {
+      payload.flags |= kNativeRequestStackArtifactQueued;
+      queue = true;
+    }
   }
   Emit(payload);
   if (stack_sequence_ == 0 || !queue) {
     return;
   }
   QueueStackArtifact(sink, state, hash, payload.digest, content);
-  ++state.stacks_sent;
 }
 
 void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
@@ -1518,7 +1436,6 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
     return;
   }
   NativeRequestStackTables& state = *state_;
-  ResetBudgets(state, generation_);
   const bool registration = task_kind_ == NativeAsyncTaskKind::kMicrotask;
   const std::uint32_t limit = task_frame_limit();
   recorded = std::min(recorded, limit);
@@ -1562,17 +1479,15 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
 
   NativeProbeSink& sink = NativeProbeSink::Get();
   const std::size_t hash = Mix(DigestKey(payload.digest));
-  const bool known = Find(state.digests, hash, [&](const NativeRequestStackTables::Digest& entry) {
-                       return entry.generation == generation_ && entry.value == payload.digest;
-                     }) != nullptr;
-  std::uint32_t& sent = registration ? state.promise_sent : state.async_sent;
-  const std::uint32_t budget =
-      registration ? kNativePromiseStackArtifactBudget : kNativeAsyncTaskArtifactBudget;
+  const NativeRequestStackTables::Digest* const known =
+      Find(state.digests, hash, [&](const NativeRequestStackTables::Digest& entry) {
+        return entry.generation == generation_ && entry.value == payload.digest;
+      });
   auto segment_state = NativeTaskSegmentState::kCaptured;
+  std::uint64_t creator = known ? known->creator : 0;
   if (execution_context_id_ == 0 || !sink.IsArtifactCaptureEnabled()) {
     segment_state = NativeTaskSegmentState::kNotRetainedArtifactUnavailable;
-  } else if (!known && sent >= budget) {
-    segment_state = NativeTaskSegmentState::kNotRetainedBudget;
+    creator = 0;
   } else if (!known) {
     NativeProbeEvent event =
         ChildEvent(NativeProbeType::kAsyncTaskStack,
@@ -1581,8 +1496,8 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
     event.inline_payload = EncodeNativeRequestStackRecord(payload);
     if (sink.EmitStatus(event, generation_) == NativeProbeEmitStatus::kAdmitted) {
       stack_sequence_ = event.header.sequence_number;
+      creator = stack_sequence_;
       QueueStackArtifact(sink, state, hash, payload.digest, content);
-      ++sent;
     } else {
       // No record and no artifact left this renderer for this segment.
       segment_state = NativeTaskSegmentState::kNotRetainedArtifactUnavailable;
@@ -1596,6 +1511,7 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
                task_id_,
                recorded,
                payload.digest,
+               creator,
                static_cast<std::uint8_t>(segment_state),
                payload.registration,
                payload.flags};
@@ -1604,6 +1520,7 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
   }
   NativeRequestStackTables::Segment segment;
   segment.digest = payload.digest;
+  segment.creator = creator;
   segment.recorded = recorded;
   segment.kind = payload.kind;
   segment.state = static_cast<std::uint8_t>(segment_state);
@@ -1643,21 +1560,15 @@ void NativeRequestStackWalk::QueueStackArtifact(
     url[kPrefix.size() + 2 * i] = kHex[digest[i] >> 4U];
     url[kPrefix.size() + 2 * i + 1] = kHex[digest[i] & 0x0fU];
   }
-  // Indexed and named before the artifact leaves, so its refusal, which
-  // follows the browser's receipt, finds this table's entry.
-  using Budget = NativeRequestStackTables::QueuedStack::Budget;
-  InsertQueued(state, {stack_sequence_, digest,
-                       !async_task_walk()                              ? Budget::kRequest
-                       : task_kind_ == NativeAsyncTaskKind::kMicrotask ? Budget::kPromise
-                                                                       : Budget::kTask});
+  // Remembered and named before the artifact leaves, so its refusal, which
+  // follows the browser's receipt, finds this table and the digest.
+  NativeRequestStackTables::Digest& slot = Slot(state.digests, hash, generation_, state.evict);
+  slot = {generation_, digest, stack_sequence_};
   g_owners[g_owner_next.fetch_add(1, std::memory_order_relaxed) & (kNativeStackOwnerRing - 1)]
       .store(OwnerWord(stack_sequence_, state.ordinal), std::memory_order_release);
   sink.CaptureGeneratedArtifact(
       NativeArtifactKind::kStack, NativeArtifactCaptureOrigin::kRequestStack, stack_sequence_,
       execution_context_id_, frame_id_, std::string_view(url.data(), url.size()), content);
-  NativeRequestStackTables::Digest& slot = Slot(state.digests, hash, generation_, state.evict);
-  slot.generation = generation_;
-  slot.value = digest;
 }
 
 // The order that keeps every refusal applied or covered: a walk indexes its
@@ -1665,7 +1576,7 @@ void NativeRequestStackWalk::QueueStackArtifact(
 // it; the browser refuses only an artifact it received; this routes the
 // refusal under the registry lock to the owning table's mailbox, or, when
 // the owner slot was reused, to every attached table's mailbox (each looks
-// the creator up in its own queued index, so only the owner acts on it); a
+// the creator up in its own entries, so only the owner acts on it); a
 // full mailbox records an overflow instead; the owning thread drains at its
 // next walk (DrainRefusals). A refusal is dropped only for a table that was
 // detached, whose segments no longer exist.
@@ -1732,8 +1643,7 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
     if (javascript) {
       // Inline source can embed per-user data; only content capture retains it.
       queue = sink.IsArtifactCaptureEnabled() && sink.IsContentCaptureEnabled() &&
-              !script.url.empty() && script.url.size() <= kNativeArtifactMaxUrlBytes &&
-              state.source_bytes + script.bytes.size() <= kNativeRequestStackSourceBytes;
+              !script.url.empty() && script.url.size() <= kNativeArtifactMaxUrlBytes;
       payload.flags |= queue ? kNativeScriptIdentitySourceQueued : kNativeScriptIdentityNotRetained;
     }
   }
@@ -1759,7 +1669,6 @@ void NativeRequestStackWalk::DescribeScript(const NativeStackScriptSource& scrip
                                 NativeArtifactCaptureOrigin::kStackScript,
                                 event.header.sequence_number, script.execution_context_id,
                                 frame_id_, script.url, script.bytes);
-  state.source_bytes += script.bytes.size();
 }
 
 }  // namespace reb

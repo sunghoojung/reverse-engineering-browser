@@ -565,12 +565,26 @@ if [[ "${native_request_stacks:-0}" == 1 ]]; then
   fi
 fi
 readonly request_stacks_state
+# Promise registration stacks (protocol/native-network-v3.md, Promise
+# registrations). The packaged app turns them on with request stacks; a Brave
+# that predates the flag drops that default the same way.
+promise_stacks_state=off
+if [[ "${request_stacks_state}" == on && "${native_promise_stacks:-0}" == 1 ]]; then
+  promise_stacks_state=on
+  if [[ "${native_request_stacks_if_supported:-0}" == 1 ]] &&
+     stack_image="$(locate_brave_v8_image "${brave_binary}")"; then
+    stack_scan_status=0
+    LC_ALL=C grep -a -q -F -e reb_promise_stacks "${stack_image}" || stack_scan_status=$?
+    if (( stack_scan_status == 1 )); then
+      promise_stacks_state=browser_unsupported
+    fi
+  fi
+fi
+readonly promise_stacks_state
 if [[ "${request_stacks_state}" == on ]]; then
   add_native_js_flag --reb-request-stacks \
     REB_NATIVE_REQUEST_STACKS=1 REB_NATIVE_REQUEST_STACKS=0
-  # Promise registration stacks; off by default for their cost
-  # (protocol/native-network-v3.md, Promise registrations).
-  if [[ "${native_promise_stacks:-0}" == 1 ]]; then
+  if [[ "${promise_stacks_state}" == on ]]; then
     add_native_js_flag --reb-promise-stacks \
       REB_NATIVE_PROMISE_STACKS=1 REB_NATIVE_PROMISE_STACKS=0
   fi
@@ -1041,7 +1055,10 @@ fi
 if [[ "${request_stacks_state}" == browser_unsupported ]]; then
   echo "Request call stacks: unavailable; this Brave does not define --reb-request-stacks"
 fi
-echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0) request_stacks=$([[ "${request_stacks_state}" == on ]] && echo 1 || echo 0) promise_stacks=$([[ "${request_stacks_state}" == on && "${native_promise_stacks}" == 1 ]] && echo 1 || echo 0)"
+if [[ "${promise_stacks_state}" == browser_unsupported ]]; then
+  echo "Promise registration stacks: unavailable; this Brave does not define --reb-promise-stacks"
+fi
+echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0) request_stacks=$([[ "${request_stacks_state}" == on ]] && echo 1 || echo 0) promise_stacks=$([[ "${promise_stacks_state}" == on ]] && echo 1 || echo 0)"
 echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
 if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then
   echo "JavaScript invocation tracking: unavailable; Brave at ${brave_binary} does not define --reb-js-invocation-capture, so this session started without the saved invocation sites and records no invocation evidence"

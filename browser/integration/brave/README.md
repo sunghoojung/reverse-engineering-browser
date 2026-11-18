@@ -502,8 +502,8 @@ V8 initialization names the main thread's isolate and `WorkerThread` each
 worker's when its global scope starts, with or without the flag (two
 thread-local stores, nothing allocated under `WorkerThread::lock_`); a
 thread's tables and V8 frame buffer come from its first walk or message
-receipt while capture is active, at most 32 workers per renderer, and are
-freed at shutdown.
+receipt while capture is active, every worker its own, and are freed at
+shutdown.
 Chromium `0047` carries a task origin beside `sender_stack_trace_id` in
 `CloneableMessage` (mojom, both struct variants and their traits, and
 `ShallowClone` for the browser's `BroadcastChannel` relay), bounds it to 1,544

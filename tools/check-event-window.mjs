@@ -58,7 +58,7 @@ assert.equal(
 );
 api.renderNetworkNotice();
 assert.equal(notice.kind, 'gap');
-assert.match(notice.text, /Showing the last 5,000 evidence events/);
+assert.match(notice.text, /Traffic shows requests from the newest 5,000 evidence events until the request index answers/);
 assert.match(notice.text, /280 sequence-gap IDs were observed in the stored capture/);
 assert.match(notice.text, /The queue reports 280 dropped events; counts may overlap sequence gaps/);
 assert.equal(

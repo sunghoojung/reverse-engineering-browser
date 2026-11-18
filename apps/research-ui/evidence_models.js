@@ -364,6 +364,9 @@
         state.eventCountScope = body.event_window?.scope ??
           (state.sequenceGaps !== null && state.queueDrops !== null ? 'store' : 'rendered_window');
         state.eventsLimited = body.event_window?.events_limited ?? body.count >= 5000;
+        // Evidence reads older records from these cursors (protocol/http-api.md).
+        state.eventNextBefore = body.event_window?.next_before ?? null;
+        state.eventStoreEnd = body.event_window?.scan_end ?? null;
         state.networkEventsAvailable = Array.isArray(body.network_events);
         state.networkEventsLimited = body.event_window?.network_events_limited === true;
         state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;

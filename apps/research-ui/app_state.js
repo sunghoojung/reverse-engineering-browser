@@ -161,6 +161,8 @@
         eventFailureKind: null,
         sessionMode: standalonePreview ? 'preview' : 'live',
         eventsLimited: false,
+        eventNextBefore: null,
+        eventStoreEnd: null,
         sequenceGaps: null,
         queueDrops: null,
         // Named gap reasons per category; null means derive from visible events.

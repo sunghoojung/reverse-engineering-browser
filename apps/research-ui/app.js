@@ -195,6 +195,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       const evidenceWorkspace = createEvidenceWorkspace({
         getContext: () => ({request: state.requests.find(request => request.id === state.selectedRequestId),
           events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited,
+          nextBefore: state.eventNextBefore, storeEnd: state.eventStoreEnd,
           error: state.eventFailureKind, mode: state.sessionMode}),
         packagePanel: evidencePackagePanel,
         onTrace: () => typeof openInvestigation === 'function'
@@ -393,7 +394,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const indexed = state.trafficIndex?.answer?.() ?? null;
         if (state.eventsLimited && !indexed) {
           if (kind === 'empty') kind = 'gap';
-          messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
+          messages.push('Traffic shows requests from the newest 5,000 evidence events until the request index answers. Older events remain on disk, and Evidence reads them with Earlier and Oldest.');
         }
         if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
@@ -9348,6 +9349,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.events = [];
         state.canvasRenderCaptures = [];
         state.eventsLimited = false;
+        state.eventNextBefore = null;
+        state.eventStoreEnd = null;
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
         state.namedGaps = [];

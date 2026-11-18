@@ -3169,7 +3169,7 @@ supply arguments, return values, exceptions or Promise settlement. Observer,
 placement, producer and historical build remain unknown. IDs and original hashes
 are available in **Provenance & exact identifiers**; they do not crowd every row.
 **Coverage & gaps** separates missing parent references, queue markers, sequence
-holes, arrival discontinuities, unavailable request records and the retained-window limit without adding
+holes, arrival discontinuities and which range of the store is in view without adding
 them into a loss total or inventing capture completeness. Numeric holes are counted
 from sorted unique session/process IDs, so a later-arriving record can fill one;
 absent numbers alone do not prove capture loss. Long request headings ellipsize
@@ -3178,9 +3178,19 @@ scrollable disclosure above the workspace and never consumes the pane height;
 Escape closes it and restores the summary focus. Records remain in retained
 order within relationship groups, not a cross-process execution timeline.
 
-The view inspects at most 5,000 events and 500 artifact descriptors, renders 50
-observations per page, bounds each parent lookup to 32 links and does not fetch
-missing evidence. Search filters existing observations only. Arrow keys, Home and
+The view holds one range of up to 5,000 stored records at a time: the newest,
+which each poll replaces, or an older one. When the store holds more, the range
+bar above the list says where the range lies in the stored session, by byte
+position, and **Oldest**, **Earlier**, **Later** and **Newest** move through it
+with the event route's `after` and `before` cursors (`GET /api/events`), one read
+at a time; a newer move supersedes a read still running, a failed read keeps the
+view and says why, and a read that reaches the end of the store is the live newest
+range again. A clear or another store returns to the newest range, since cursors
+do not survive it. The selected request's own lifecycle records, read by ID from
+the request index, stay in view in every range. Artifact references resolve
+against the whole catalog. The view renders 50 observations per page, bounds each
+parent lookup to 32 links and does not fetch a missing parent; the range that holds
+it shows it. Search filters existing observations only. Arrow keys, Home and
 End move through the displayed order. At 760 px and below, **Observations / Selected
 record** switches between full-width panes. Unchanged refreshes preserve inspector
 DOM, disclosures, focus and scroll. Eviction explicitly clears the selected record

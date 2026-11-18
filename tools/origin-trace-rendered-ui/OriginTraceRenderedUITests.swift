@@ -3277,6 +3277,56 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Real-size sources in the packaged app: a 24 MB bundle and a 57 MB module
+  // (artifacts 950 and 951, present only when REB_RENDERED_UI_LARGE_SOURCES
+  // names their directory). Prints how long each view takes to show its first
+  // answer, and resident memory after it.
+  @MainActor
+  func test43LargeSourcesOpenWhole() async throws {
+    let ui = try await prepare(windowSizes[0])
+    try await show(ui, "sources")
+    guard try await ui.value("state.artifacts.some(artifact => artifact.artifact_id === '951')") as? Bool == true else {
+      throw XCTSkip("Set REB_RENDERED_UI_LARGE_SOURCES to a directory with bundle.js and module.wasm")
+    }
+    var timings: [String] = []
+    func timed(_ label: String, _ step: () async throws -> Void) async throws {
+      let start = Date()
+      try await step()
+      let seconds = Date().timeIntervalSince(start)
+      let rss = try memorySample(ui, label)
+      timings.append(String(format: "%@ %.2f s web=%d MiB backend=%d MiB", label, seconds, (rss["web"] ?? 0) / 1024, (rss["backend"] ?? 0) / 1024))
+    }
+    let artifact = { (id: String) in "state.artifacts.find(artifact => artifact.artifact_id === '\(id)')" }
+    try await timed("open 24 MB bundle") {
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"950\"]", containing: "bundle")
+      try await ui.waitUntil("\(artifact("950"))?.contentVerified === true && document.querySelectorAll('#source-code .source-line').length > 0",
+        timeout: 300, "the bundle did not open whole")
+    }
+    let bytes = try await ui.value("\(artifact("950")).byte_size") as? Int ?? 0
+    XCTAssertGreaterThan(bytes, 20 << 20, "the bundle is real-size: \(bytes) bytes")
+    try await ui.screenshot("large-sources-bundle")
+    try await timed("find every function in the bundle") {
+      _ = try await ui.value("(() => { const input = document.querySelector('#source-search'); input.value = 'function'; input.dispatchEvent(new Event('input', {bubbles: true})); return true; })()")
+      try await ui.waitUntil("/^[0-9,]+ of [0-9,]+ matches/.test(document.querySelector('#source-position').textContent) && !/[+]|finding/.test(document.querySelector('#source-position').textContent)",
+        timeout: 300, "Find did not count the whole bundle")
+    }
+    let found = try await ui.value("document.querySelector('#source-position').textContent") as? String ?? ""
+    try await ui.screenshot("large-sources-bundle-find")
+    try await timed("open 57 MB module as hex") {
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"951\"]", containing: "module")
+      try await ui.waitUntil("\(artifact("951"))?.contentVerified === true && document.querySelectorAll('#source-code .source-line').length > 0",
+        timeout: 300, "the module did not open whole")
+    }
+    try await ui.screenshot("large-sources-module-hex")
+    try await timed("first Inspect window of the module") {
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the module")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("(state.sourceEditorView?.view?.wasm?.rows ?? []).length > 0", timeout: 300, "the first Inspect window did not load")
+    }
+    try await ui.screenshot("large-sources-module-inspect")
+    print("RENDERED_UI_LARGE_SOURCES find=\(found)\n" + timings.map { "RENDERED_UI_LARGE_SOURCES \($0)" }.joined(separator: "\n"))
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor

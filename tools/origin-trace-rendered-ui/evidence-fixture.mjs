@@ -1012,7 +1012,19 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
   const observed = await goldenEvidence(artifacts, observedStore);
   assert(observed.events.filter(event => event.type === 'wasm_guest_invocation').length === 2, 'observed store holds outer and inner activations');
   const debuggerRecords = await debuggerObservations(network, artifacts);
-  const manifest = [...demoArtifacts, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
+  // REB_RENDERED_UI_LARGE_SOURCES names a directory holding bundle.js and
+  // module.wasm for a timing and memory measurement of real-size sources
+  // (artifacts 950 and 951). They are read at test time and never committed.
+  const largeDirectory = process.env.REB_RENDERED_UI_LARGE_SOURCES;
+  const large = largeDirectory ? [
+    await artifact(artifacts, {artifact_id: '950', session_id: '1', navigation_id: '100', frame_id: '200',
+      capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: 'https://large.test/bundle.js'},
+    await readFile(join(largeDirectory, 'bundle.js'))),
+    await artifact(artifacts, {artifact_id: '951', session_id: '1', navigation_id: '100', frame_id: '200',
+      capture_origin: 'webassembly_compile', kind: 'wasm', execution_context_id: '0', mime_type: 'application/wasm', url: 'https://large.test/module.wasm'},
+    await readFile(join(largeDirectory, 'module.wasm'))),
+  ] : [];
+  const manifest = [...demoArtifacts, ...large, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];
   const retained = [...demoEvents, ...requests, ...guest.events, ...physical.events, ...observed.events];
   for (const process of WORKER_STACK_PROCESSES) {
     assert.equal(retained.filter(event => event.process_id === process).length,

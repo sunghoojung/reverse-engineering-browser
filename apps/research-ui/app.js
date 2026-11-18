@@ -795,7 +795,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function canvasPreviewProgress(artifact) {
-        return `Reading the retained Canvas preview · ${formatByteSize(artifact.loadedBytes ?? 0)} of ${formatByteSize(artifact.byte_size)}`;
+        // A size never wraps between its number and unit.
+        const size = bytes => formatByteSize(bytes).replace(' ', '\u00a0');
+        return `Reading the retained Canvas preview · ${size(artifact.loadedBytes ?? 0)} of ${size(artifact.byte_size)}`;
       }
 
       function showCanvasGalleryPage(delta) {
@@ -1044,7 +1046,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             control.addEventListener('click', showCanvasGalleryPage.bind(null, direction));
             return control;
           };
-          nav.append(button('Newer', -1, page === 0), textElement('span', '', pageText), button('Older', 1, page === pages - 1));
+          nav.append(button('Newer', -1, page === 0), textElement('span', '', `Page ${(page + 1).toLocaleString()} of ${pages.toLocaleString()}`),
+            button('Older', 1, page === pages - 1));
           pager.push(nav);
         }
         elements.signalRenderList.replaceChildren(...pager, ...captures.map(renderCanvasCapture));

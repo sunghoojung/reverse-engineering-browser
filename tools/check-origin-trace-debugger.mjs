@@ -2159,6 +2159,7 @@ function canvasAccounting(context) {
   assert.equal(context.elements.signalRenderCount.textContent,'50');
   assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 1-24 of 50, newest first');
   assert.deepEqual(pager().map(button=>[button.textContent,button.disabled]),[['Newer',true],['Older',false]]);
+  assert.match(context.elements.signalRenderList.querySelector('nav').textContent,/^NewerPage 1 of 3Older$/);
   assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,24);assert.deepEqual(loaded(),Array.from({length:24},(_,i)=>50-i));
   pager()[1].focus();pager()[1].click();await canvasSettled(context);
   assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 25-48 of 50, newest first');
@@ -2234,7 +2235,7 @@ function canvasAccounting(context) {
     setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
     fetch:async()=>{reads++;if(reads>2)return new Response(canvasText);const pending=ownedDeferred();held.push(pending);return pending.promise;}});
   context.events(artifacts);context.render();assert.equal(reads,2);assert.equal(timers.size,0,'A preview read has no deadline');
-  assert.match(context.elements.signalRenderList.textContent,/Reading the retained Canvas preview · 0 bytes of /);
+  assert.match(context.elements.signalRenderList.textContent,/Reading the retained Canvas preview · 0\u00a0bytes of /);
   const stops=context.elements.signalRenderList.querySelectorAll('button').filter(button=>button.textContent==='Stop');assert.equal(stops.length,2);
   for(const stop of stops)stop.click();
   assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);

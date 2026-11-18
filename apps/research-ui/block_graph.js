@@ -169,6 +169,19 @@ function blockGraphSegmentDistance(px, py, ax, ay, bx, by) {
   const t = length ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length)) : 0;
   return Math.hypot(px - ax - t * dx, py - ay - t * dy);
 }
+/** The part [t0, t1] of segment `i` of the flat point list `pts` (from point
+ * i to point i + 1) that lies in the rectangle `clip`, or null (Liang-Barsky). */
+function blockGraphClipSegment(pts, i, clip) {
+  const x0 = pts[i * 2], y0 = pts[i * 2 + 1], dx = pts[i * 2 + 2] - x0, dy = pts[i * 2 + 3] - y0;
+  let t0 = 0, t1 = 1;
+  const side = (p, q) => {
+    if (p === 0) return q >= 0;
+    const t = q / p;
+    if (p < 0) { if (t > t1) return false; if (t > t0) t0 = t; } else { if (t < t0) return false; if (t < t1) t1 = t; }
+    return true;
+  };
+  return side(-dx, x0 - clip.l) && side(dx, clip.r - x0) && side(-dy, y0 - clip.t) && side(dy, clip.b - y0) ? [t0, t1] : null;
+}
 
 let blockGraphViews = 0;
 function createBlockGraphView(root, options = {}) {
@@ -241,6 +254,8 @@ function createBlockGraphView(root, options = {}) {
     [K.table]: ['table', [2, 3]], [K.table_default]: ['table', [2, 3]], [K.exception]: ['exception', [8, 4]], [K.unresolved]: ['unresolved', [4, 2, 1, 2]],
     [K.call]: ['call', [1, 3]], [K.assumed]: ['assumed', [1, 3]], [K.sequence]: ['sequence', []]};
   const styleOf = kind => edgeStyles[kind] ?? edgeStyles[K.branch];
+  // One repeat of a kind's dash pattern; a canvas repeats an odd list twice.
+  const dashPeriod = kind => { const dash = styleOf(kind)[1]; return dash.reduce((sum, part) => sum + part, 0) * (dash.length % 2 ? 2 : 1); };
   const m = {charW: 6.6, rowH: 16, headerH: 22, padX: 10, padY: 7};
   let chipCharW = 6;
   const measure = () => {
@@ -257,10 +272,16 @@ function createBlockGraphView(root, options = {}) {
   const rowText = row => graph.rows.slice(starts[row], starts[row + 1] - 1);
 
   /** The part of the stage the minimap and the HUD leave clear, which Fit
-   * fills: beside the minimap or above it, whichever leaves more room. */
-  function clearArea() {
-    const box = stage.getBoundingClientRect?.(), mini = miniWrap.hidden ? null : miniWrap.getBoundingClientRect?.(), cue = hud.getBoundingClientRect?.();
+   * fills: beside the minimap or above it, whichever leaves more room. The
+   * HUD is measured as it will be at the view's zoom: with the overview cue
+   * when `overview`, since a fit that zooms out shows the cue it measured
+   * before. */
+  function clearArea(overview) {
+    const box = stage.getBoundingClientRect?.(), mini = miniWrap.hidden ? null : miniWrap.getBoundingClientRect?.();
     if (!box?.width) return {w: cssW, h: cssH};
+    const shown = lodCue.hidden; lodCue.hidden = !overview;
+    const cue = hud.getBoundingClientRect?.();
+    lodCue.hidden = shown;
     const miniW = mini?.width ? box.right - mini.left : 0, miniH = mini?.height ? box.bottom - mini.top : 0;
     const hudH = cue?.height ? box.bottom - cue.top : 0;
     const beside = {w: cssW - miniW, h: cssH - hudH}, above = {w: cssW, h: cssH - Math.max(miniH, hudH)};
@@ -268,10 +289,13 @@ function createBlockGraphView(root, options = {}) {
     const best = area(beside) >= area(above) ? beside : above;
     return {w: Math.max(1, best.w), h: Math.max(1, best.h)};
   }
-  /** The view that shows the whole drawing in the clear part of the stage. */
+  /** The view that shows the whole drawing in the clear part of the stage,
+   * and the overview cue too when the drawing only fits below row zoom. */
   function fitView() {
-    const {w, h} = clearArea();
-    const z = Math.min(1, w / layout.width, h / layout.height);
+    const zoomIn = ({w, h}) => Math.min(1, w / layout.width, h / layout.height);
+    let clear = clearArea(false), z = zoomIn(clear);
+    if (z < BLOCK_GRAPH_ROW_ZOOM) { clear = clearArea(true); z = zoomIn(clear); }
+    const {w, h} = clear;
     return {x: layout.width / 2 - w / 2 / z, y: layout.height / 2 - h / 2 / z, z};
   }
   /** How far out the view zooms: past Fit for no graph, to Fit for any. */
@@ -333,18 +357,56 @@ function createBlockGraphView(root, options = {}) {
     }
   }
   /** Adds edge `edge`'s polyline to `path`, its corners rounded by `corner`
-   * where the segments beside a corner leave room. */
-  function trace(path, edge, corner) {
-    const start = layout.pointStart[edge], end = layout.pointStart[edge + 1], pts = layout.points;
-    path.moveTo(pts[start * 2], pts[start * 2 + 1]);
-    for (let i = start + 1; i < end; i += 1) {
-      const x = pts[i * 2], y = pts[i * 2 + 1];
-      if (corner && i < end - 1) {
-        const nx = pts[(i + 1) * 2], ny = pts[(i + 1) * 2 + 1];
-        const r = Math.min(corner, Math.hypot(x - pts[(i - 1) * 2], y - pts[(i - 1) * 2 + 1]) / 2, Math.hypot(nx - x, ny - y) / 2);
-        if (r > 0.5) { path.arcTo(x, y, nx, ny, r); continue; }
+   * where the segments beside a corner leave room. An edge that leaves
+   * `clip`, the view grown by more than a dash period, a corner and a stroke,
+   * adds only its runs of segments that meet `clip`: a canvas lays a dash
+   * pattern along the whole path before it clips, so an edge as tall as a
+   * large function cost its full length every frame. Each run starts a whole
+   * number of dash periods (`period`) along the edge from its first point,
+   * where the restarted pattern matches the whole edge's, so the dashes stay
+   * put as the view pans; the tangent distances and arc lengths are those
+   * arcTo draws. */
+  function trace(path, edge, corner, clip = null, period = 0) {
+    const start = layout.pointStart[edge], end = layout.pointStart[edge + 1], pts = layout.points, box = layout.box;
+    if (!clip || (box[edge * 4] >= clip.l && box[edge * 4 + 1] >= clip.t && box[edge * 4 + 2] <= clip.r && box[edge * 4 + 3] <= clip.b)) {
+      path.moveTo(pts[start * 2], pts[start * 2 + 1]);
+      for (let i = start + 1; i < end; i += 1) {
+        const x = pts[i * 2], y = pts[i * 2 + 1];
+        if (corner && i < end - 1) {
+          const nx = pts[(i + 1) * 2], ny = pts[(i + 1) * 2 + 1];
+          const r = Math.min(corner, Math.hypot(x - pts[(i - 1) * 2], y - pts[(i - 1) * 2 + 1]) / 2, Math.hypot(nx - x, ny - y) / 2);
+          if (r > 0.5) { path.arcTo(x, y, nx, ny, r); continue; }
+        }
+        path.lineTo(x, y);
       }
-      path.lineTo(x, y);
+      return;
+    }
+    // `walked` is the stroked length up to where segment i's straight part
+    // starts, `tangentIn` that part's distance from point i.
+    let walked = 0, tangentIn = 0, open = false, next = blockGraphClipSegment(pts, start, clip);
+    for (let i = start; i < end - 1; i += 1) {
+      const span = next;
+      next = i + 2 < end ? blockGraphClipSegment(pts, i + 1, clip) : null;
+      const x0 = pts[i * 2], y0 = pts[i * 2 + 1], x1 = pts[i * 2 + 2], y1 = pts[i * 2 + 3], length = Math.hypot(x1 - x0, y1 - y0);
+      let r = 0, tangentOut = 0, arc = 0;
+      if (corner && i + 2 < end) {
+        const nx = pts[i * 2 + 4], ny = pts[i * 2 + 5];
+        r = Math.min(corner, length / 2, Math.hypot(nx - x1, ny - y1) / 2);
+        // The turn between the two segments; a straight or reversed pair is
+        // drawn as a line through the point.
+        const turn = Math.atan2(Math.abs((x1 - x0) * (ny - y1) - (y1 - y0) * (nx - x1)), (x1 - x0) * (nx - x1) + (y1 - y0) * (ny - y1));
+        if (r > 0.5 && turn > 1e-6 && turn < Math.PI - 1e-6) { tangentOut = r * Math.tan(turn / 2); arc = r * turn; } else r = 0;
+      }
+      if (span) {
+        if (!open) {
+          const along = Math.max(span[0] * length, tangentIn), back = period ? (walked + along - tangentIn) % period : 0, at = length ? (along - back) / length : 0;
+          path.moveTo(x0 + (x1 - x0) * at, y0 + (y1 - y0) * at);
+          open = true;
+        }
+        if (next) { if (r) path.arcTo(x1, y1, pts[i * 2 + 4], pts[i * 2 + 5], r); else path.lineTo(x1, y1); }
+        else { path.lineTo(x0 + (x1 - x0) * span[1], y0 + (y1 - y0) * span[1]); open = false; }
+      }
+      walked += length - tangentIn - tangentOut + arc; tangentIn = tangentOut;
     }
   }
   /** Adds the arrowhead at edge `edge`'s end to `path`. */
@@ -360,6 +422,8 @@ function createBlockGraphView(root, options = {}) {
    * edges over the rest, then the focused edge. Returns the edges to label. */
   function drawEdges(rv, bv, lod) {
     const plain = new Map(), picked = new Map(), labeled = [], corner = lod === 2 ? 6 : 0, count = graph.from.length, box = layout.box;
+    // Past a dash period, a corner and the focus halo, nothing clipped shows.
+    const pad = 32 + 8 / view.z, clip = {l: view.x - pad, t: view.y - pad, r: rv + pad, b: bv + pad};
     const batch = (map, kind) => { let entry = map.get(kind); if (!entry) map.set(kind, entry = {path: new Path2D(), heads: new Path2D()}); return entry; };
     let focused = false;
     for (let edge = 0; edge < count; edge += 1) {
@@ -368,7 +432,7 @@ function createBlockGraphView(root, options = {}) {
       if (lod === 2 && !isStub(edge) && chipText(edge) && (near || edge === focusEdge || BLOCK_GRAPH_LABELED.has(kind))) labeled.push(edge);
       if (edge === focusEdge) { focused = true; continue; }
       const entry = batch(near ? picked : plain, kind);
-      trace(entry.path, edge, corner);
+      trace(entry.path, edge, corner, clip, lod === 2 ? dashPeriod(kind) : 0);
       if (lod >= 1 && graph.to[edge] >= 0) arrowhead(entry.heads, edge);
     }
     ctx.lineJoin = 'round'; ctx.lineCap = 'butt';
@@ -384,7 +448,7 @@ function createBlockGraphView(root, options = {}) {
     if (focused) {
       // The focused edge: a soft halo under a full-width selection stroke.
       const path = new Path2D(), heads = new Path2D();
-      trace(path, focusEdge, corner); if (graph.to[focusEdge] >= 0) arrowhead(heads, focusEdge);
+      trace(path, focusEdge, corner, clip, lod === 2 ? dashPeriod(graph.kind[focusEdge]) : 0); if (graph.to[focusEdge] >= 0) arrowhead(heads, focusEdge);
       ctx.setLineDash([]); ctx.strokeStyle = tokens.selectionSoft; ctx.lineWidth = lod === 2 ? 8 : 7 / view.z; ctx.stroke(path);
       ctx.strokeStyle = ctx.fillStyle = tokens.selection; ctx.lineWidth = lod === 2 ? 3.2 : 3 / view.z; ctx.setLineDash(lod === 2 ? styleOf(graph.kind[focusEdge])[1] : []);
       ctx.stroke(path); ctx.setLineDash([]); ctx.fill(heads);
@@ -703,8 +767,10 @@ function createBlockGraphView(root, options = {}) {
     }
     keyToggle.hidden = !legend.childElementCount;
   }
-  /** First view: actual size, centered on the selected block or the entry.
-   * A graph that fits at actual size is centered whole. Fit is one key away. */
+  /** First view: actual size, centered on the selected block or the entry in
+   * the part of the stage the minimap leaves clear, so its successors do not
+   * open under the minimap. A graph that fits at actual size is centered
+   * whole. Fit is one key away. */
   function start() {
     if (!layout || !cssW) return;
     view.z = 1;
@@ -712,7 +778,7 @@ function createBlockGraphView(root, options = {}) {
     if (whole.z >= 1) { view = whole; fitted = true; requestDraw(); return; }
     fitted = false;
     const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0);
-    view.x = layout.x[block] + layout.w[block] / 2 - cssW / 2;
+    view.x = layout.x[block] + layout.w[block] / 2 - clearArea(false).w / 2;
     view.y = layout.y[block] - 24;
     requestDraw();
   }
@@ -1362,4 +1428,4 @@ function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}
 }
 
 // The offline check reads the edge kinds and how failures are worded.
-if (typeof module === 'object' && module?.exports) module.exports = {BLOCK_GRAPH_KIND, blockGraphFailure};
+if (typeof module === 'object' && module?.exports) module.exports = {BLOCK_GRAPH_KIND, blockGraphFailure, blockGraphClipSegment};

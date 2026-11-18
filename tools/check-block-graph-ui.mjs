@@ -12,7 +12,7 @@ const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))(
 // The layout worker loads the Triskel client with importScripts; here it is a global first.
 runInThisContext(await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8'));
 const layoutModule = require('../apps/research-ui/block_graph_layout.js');
-const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure} = require('../apps/research-ui/block_graph.js');
+const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure, blockGraphClipSegment} = require('../apps/research-ui/block_graph.js');
 const vmStatic = require('../apps/research-ui/vm_static.js');
 const {vmStaticOwnedExample} = require('../apps/research-ui/vm_static_view.js');
 const semantics = require('../apps/research-ui/vm_semantics.js');
@@ -497,6 +497,78 @@ globalThis.create = createBlockGraphView;`, context);
   assert.match(host.querySelector('.block-graph-selection').textContent, /^loc_8 .*edge \u2190 loc_18/, 'a stub\'s row goes to the block it reaches');
   click(...exitRow(1));
   assert.match(host.querySelector('.block-graph-selection').textContent, /^loc_8 .*edge \u2192 unresolved/, 'an unresolved row focuses its edge');
+  frames = [];
+}
+{
+  // A dashed edge as tall as a large function, drawn at actual size from its
+  // middle: only a run around the view is added to the path, since a canvas
+  // dashes a whole path before it clips, and the run starts where the whole
+  // edge's dash pattern restarts, so every visible dash sits where it would
+  // on the whole edge and none moves as the view pans.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="host"></div></body></html>');
+  const strokes = [];
+  let dash = [];
+  const recording = new Proxy({}, {get: (_, key) => key === 'measureText' ? () => ({width: 6.6}) : key === 'setLineDash' ? list => { dash = list; }
+    : key === 'stroke' ? path => { if (path) strokes.push({ops: path.ops, dash}); } : () => {}, set: () => true});
+  window.HTMLCanvasElement.prototype.getContext = () => recording;
+  const rect = {left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700};
+  let frames = [];
+  const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}),
+    Path2D: class { constructor() { this.ops = []; } rect() {} moveTo(...a) { this.ops.push(['M', ...a]); } lineTo(...a) { this.ops.push(['L', ...a]); } arcTo(...a) { this.ops.push(['A', ...a]); } closePath() {} },
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; }, cancelAnimationFrame: () => {}, devicePixelRatio: 1, console, ResizeObserver: class { observe() {} disconnect() {} }};
+  runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph_layout.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
+globalThis.create = createBlockGraphView;`, context);
+  const host = document.querySelector('#host');
+  host.getBoundingClientRect = () => rect;
+  const view = context.create(host, {runner: {run: async () => null, skip() {}, cancel() {}}});
+  for (const element of host.querySelectorAll('*')) element.getBoundingClientRect = () => (element.matches('.block-graph-stage, .block-graph-canvas') ? rect : {left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0});
+  view.activate();
+  const graph = fixture(3, [[0, 2, KIND.table, '0-9'], [0, 1], [1, 2]], {title: 'func 0', status: 'decoded', instructions: 3, omissions: [], evidence: 'declared'});
+  const layout = {...lay(graph), engine: {name: 'layered'}, width: 1300, height: 200200};
+  [[440, 0], [300, 100000], [1040, 200040]].forEach(([x, y], block) => { layout.x[block] = x; layout.y[block] = y; });
+  const tall = [[500, 40], [500, 60], [800, 60], [800, 200000], [1100, 200000], [1100, 200040]];
+  const polylines = [tall, [[480, 40], [480, 100000]], [[340, 100040], [1060, 200040]]];
+  layout.pointStart = Uint32Array.from([0, 6, 8, 10]);
+  layout.points = Float32Array.from(polylines.flat(2));
+  layout.box = Float32Array.from(polylines.flatMap(points => [Math.min(...points.map(p => p[0])), Math.min(...points.map(p => p[1])), Math.max(...points.map(p => p[0])), Math.max(...points.map(p => p[1]))]));
+  view.setResult({graph, starts: layoutModule.rowStarts(graph.rows), layout});
+  const flush = () => { while (frames.length) frames.shift()(); };
+  flush();
+  view.select(1);
+  strokes.length = 0;
+  flush();
+  // Lengths along a path as a canvas strokes it: arcTo runs straight to its
+  // first tangent point, then along the arc to the second.
+  const along = ops => {
+    const pieces = [];
+    let x = 0, y = 0, walked = 0;
+    const line = (tx, ty) => { pieces.push({x0: x, y0: y, x1: tx, y1: ty, from: walked}); walked += Math.hypot(tx - x, ty - y); x = tx; y = ty; };
+    for (const [op, ...a] of ops) {
+      if (op === 'M') { [x, y] = a; walked = 0; pieces.length = 0; }
+      else if (op === 'L') line(a[0], a[1]);
+      else {
+        const [x1, y1, x2, y2, r] = a, ux = x1 - x, uy = y1 - y, vx = x2 - x1, vy = y2 - y1, lu = Math.hypot(ux, uy), lv = Math.hypot(vx, vy);
+        const turn = Math.atan2(Math.abs(ux * vy - uy * vx), ux * vx + uy * vy), d = r * Math.tan(turn / 2);
+        line(x1 - ux / lu * d, y1 - uy / lu * d); walked += r * turn; x = x1 + vx / lv * d; y = y1 + vy / lv * d;
+      }
+    }
+    return {pieces, length: walked, at: (px, py) => { for (const p of pieces) if (blockGraphClipSegment([p.x0, p.y0, p.x1, p.y1], 0, {l: px - 1e-3, t: py - 1e-3, r: px + 1e-3, b: py + 1e-3})) return p.from + Math.hypot(px - p.x0, py - p.y0); return NaN; }};
+  };
+  const whole = along([['M', ...tall[0]], ...tall.slice(1, -1).map((p, i) => ['A', ...p, ...tall[i + 2], 6]), ['L', ...tall.at(-1)]]);
+  const table = strokes.filter(stroke => stroke.dash.join() === '2,3' && stroke.ops.some(op => op[1] === 800));
+  assert.equal(table.length, 1, 'the table edge is stroked with its dash');
+  const runs = [];
+  for (const op of table[0].ops) { if (op[0] === 'M') runs.push([]); runs.at(-1).push(op); }
+  assert.equal(runs.length, 1, 'one run of the tall edge meets the view');
+  const run = along(runs[0]), top = layout.y[1] + layout.h[1] / 2 - 350;
+  assert(run.length < 700 + 2 * 50, `only the run around the view is added: ${run.length}`);
+  assert(run.at(800, top) >= 0 && run.at(800, top + 700) >= 0, 'the run covers the view');
+  for (let y = top; y <= top + 700; y += 37.25) {
+    const phase = (((whole.at(800, y) - run.at(800, y)) % 5) + 5) % 5;
+    assert(phase < 1e-3 || 5 - phase < 1e-3, `a visible dash at y ${y} sits where it does on the whole edge: ${phase}`);
+  }
   frames = [];
 }
 {

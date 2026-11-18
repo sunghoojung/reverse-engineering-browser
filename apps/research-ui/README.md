@@ -2479,9 +2479,13 @@ use **Linear** to hide the linear pane (hidden at first in a window under 600
 px high). Neither pane keeps a control or a scrolled row under the divider
 (see [Pane sizes](#pane-sizes)). The text view's line window and search
 notice are hidden while Graph is active. A graph opens at actual size, centered
-on the entry block (or the whole graph when it fits), and **Fit** or `0` shows
-all of it in the part of the stage the minimap and the status line leave
-clear. Zoom goes out as far as Fit needs, at any size. Below the zoom where
+on the entry block in the part of the stage the minimap leaves clear (or the
+whole graph when it fits), and **Fit** or `0` shows all of it in the part the
+minimap and the status line leave clear, the overview cue included when the
+fit is below row zoom. Zoom goes out as far as Fit needs, at any size. Edges
+are added to the drawing only where they cross the view, so a long dashed
+edge costs its visible length, and each dash keeps its place along the whole
+edge as the view pans. Below the zoom where
 rows are readable, cards keep a screen-size label and an overview cue says
 rows are hidden; further out, cards are filled boxes drawn one path per kind,
 so a graph of any size stays a few fills, and the selection and the shown Find

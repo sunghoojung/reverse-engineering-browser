@@ -5,8 +5,9 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {performance} from 'node:perf_hooks';
-import {runInThisContext} from 'node:vm';
+import {runInNewContext, runInThisContext} from 'node:vm';
 const require = createRequire(import.meta.url);
+const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))('linkedom');
 // The layout worker loads the Triskel client with importScripts; here it is a global first.
 runInThisContext(await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8'));
 const layoutModule = require('../apps/research-ui/block_graph_layout.js');
@@ -197,14 +198,205 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   answers.push({status: 404, body: {}});
   result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
   assert.equal(result.layout.engine.reason.status, 404);
-  answers.push({body: {...laid(), graphs: [{status: 'too_large', reason: 'over the per-graph limit'}]}});
+  answers.push({body: {...laid(), graphs: [{status: 'failed', reason: 'Triskel placed nodes 1 and 2 on top of each other'}]}});
   result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
-  assert.equal(result.layout.engine.reason.code, 'too_large');
+  assert.deepEqual(result.layout.engine.reason, {code: 'failed', status: 'failed', detail: 'Triskel placed nodes 1 and 2 on top of each other'}, 'a failed layout keeps the region layout and says why');
+  // Progress is heard once a request is sent; a stopped request keeps the
+  // region layout as `cancelled`.
+  const heard = [];
+  answers.push({body: laid()});
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS, {progress: stage => heard.push(stage)});
+  assert.deepEqual(heard, [{stage: 'triskel'}]);
+  assert.equal(result.layout.engine.name, 'triskel');
+  const stop = new AbortController();
+  // Like fetch: an aborted signal rejects at once, a later abort when it comes.
+  const answering = globalThis.fetch;
+  globalThis.fetch = async (url, init) => new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+    if (init.signal.aborted) abort(); else init.signal.addEventListener('abort', abort);
+  });
+  result = await layoutModule.withTriskel(base(), layoutModule.METRICS, {signal: stop.signal, progress: () => queueMicrotask(() => stop.abort())});
+  assert.deepEqual(result.layout.engine, {name: 'layered', reason: {code: 'cancelled'}}, 'a stopped Triskel request keeps the region layout');
+  globalThis.fetch = answering;
   answers.push({body: {...laid(), graphs: [{...laid().graphs[0], nodes: [[0, 0]]}]}});
   result = await layoutModule.withTriskel(base(), layoutModule.METRICS);
   assert.equal(result.layout.engine.reason.code, 'mismatch', 'an answer of the wrong shape is never drawn');
   result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS, engine: 'layered'});
   assert.equal(result.layout.engine.name, 'layered', 'a shell without the route never calls it');
   delete globalThis.fetch;
+}
+{
+  // Past the size Triskel lays out unasked the region layout is drawn at
+  // once with nothing sent; asked (`all`), a graph of any size is sent whole.
+  const {AUTOMATIC} = graphLayoutClient;
+  const count = AUTOMATIC.graphNodes + 1, edges = Array.from({length: count - 1}, (_, index) => [index, index + 1]);
+  const graph = fixture(count, edges);
+  const sent = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body.graphs[0].nodes.length);
+    return {ok: true, status: 200, json: async () => ({schema: 'graph-layout-v1', engine: {name: 'triskel', revision: 'abc1234def'},
+      graphs: [{status: 'failed', reason: 'Triskel placed nodes 7 and 8 on top of each other'}]})};
+  };
+  let result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS, engine: 'triskel'});
+  assert.deepEqual(result.layout.engine, {name: 'layered', reason: {code: 'large'}}, 'a large graph keeps the region layout unasked');
+  assert.deepEqual(sent, [], 'and sends nothing');
+  result = await layoutModule.runAsync({type: 'graph', graph, metrics: layoutModule.METRICS, engine: 'triskel', all: true});
+  assert.deepEqual(sent, [count], 'asked, any size is sent');
+  assert.equal(result.layout.engine.reason.code, 'failed');
+  delete globalThis.fetch;
+  const client = await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8');
+  assert(!/setTimeout|AbortSignal\.timeout|LIMITS|too_large|request_budget/.test(client), 'the layout client has no timeout and no size limit');
+}
+{
+  // The region layout draws structured control flow of any size: 100,000
+  // blocks of nested branches, loops and early returns.
+  let seed = 7;
+  const next = bound => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % bound; };
+  const edges = [];
+  let count = 1;
+  const block = () => count++;
+  const region = (entry, budget, depth) => {
+    let current = entry;
+    while (budget > 0 && count < 100000) {
+      const pick = depth < 12 ? next(10) : 0;
+      if (pick < 4) { const after = block(); edges.push([current, after]); current = after; budget -= 1; }
+      else if (pick < 6) { const a = block(), b = block(), join = block(), share = Math.max(1, budget / 6 | 0); edges.push([current, a, KIND.taken], [current, b, KIND.not_taken]);
+        edges.push([region(a, share, depth + 1), join], [region(b, share, depth + 1), join]); current = join; budget -= 3 + 2 * share; }
+      else if (pick < 8) { const head = block(), body = block(), out = block(); edges.push([current, head], [head, body, KIND.taken], [head, out, KIND.not_taken]);
+        edges.push([region(body, Math.max(1, budget / 5 | 0), depth + 1), head]); current = out; budget -= 3 + (budget / 5 | 0); }
+      else { const done = block(), after = block(); edges.push([current, done, KIND.taken], [current, after, KIND.not_taken]); current = after; budget -= 2; }
+    }
+    return current;
+  };
+  region(0, 100000, 0);
+  const started = performance.now(), layout = lay(fixture(count, edges)), elapsed = performance.now() - started;
+  assert(count >= 99000, `${count} blocks`);
+  assert.equal(overlaps(layout, count), 0, 'no card overlaps in a large structured function');
+  assert(elapsed < 60000, `${count} blocks lay out in bounded time: ${elapsed}ms`);
+}
+{
+  // The view over a stand-in runner. Triskel has no deadline: while it lays
+  // out a graph not drawn yet, Use the region layout stops it; past the size
+  // it runs on unasked, Lay out with Triskel keeps the drawing while it runs,
+  // turns into Cancel, and draws its answer with the selection kept.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="host"></div></body></html>');
+  let frames = [];
+  const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}),
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; }, cancelAnimationFrame: () => {}, devicePixelRatio: 1, console};
+  runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
+globalThis.create = createBlockGraphView;`, context);
+  const calls = [], skips = [];
+  let answer = null;
+  const runner = {run: (message, transfer, options) => { calls.push(message); return new Promise(resolve => { answer = resolve; }); }, skip: () => skips.push(true), cancel: () => {}};
+  const host = document.querySelector('#host');
+  const view = context.create(host, {runner});
+  view.activate();
+  const $ = selector => host.querySelector(selector);
+  const shown = element => element && !element.hidden;
+  view.setState('loading', 'Laying out the graph\u2026');
+  view.progress({stage: 'triskel'});
+  assert.match($('.block-graph-state p').textContent, /^Laying out with Triskel \u00b7 0 s$/);
+  const skip = [...host.querySelectorAll('.block-graph-state button')].find(item => item.textContent === 'Use the region layout');
+  assert(shown(skip), 'Triskel over no drawing offers the region layout');
+  skip.click();
+  assert.equal(skips.length, 1, 'which stops Triskel for the running job');
+  const graph = fixture(3, [[0, 1], [1, 2]], {title: 'func 1', status: 'decoded', instructions: 3, omissions: [], evidence: 'declared'});
+  const drawn = engine => ({graph, starts: layoutModule.rowStarts(graph.rows), layout: {...lay(graph), engine}});
+  view.setResult(drawn({name: 'layered', reason: {code: 'large'}}));
+  const triskel = $('.block-graph-triskel');
+  assert(shown(triskel) && triskel.textContent === 'Lay out with Triskel', 'a graph past the automatic size offers Triskel');
+  assert.match($('.block-graph-stats').textContent, /region layout$/);
+  view.select(1);
+  triskel.click();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].all, true, 'asked, it is sent whatever its size');
+  assert.equal(calls[0].engine, 'triskel'); assert.equal(calls[0].graph, graph, 'the drawn graph itself');
+  assert.equal(triskel.textContent, 'Cancel', 'while it runs the button stops it');
+  assert(shown($('.block-graph-engine-run')) && $('.block-graph-engine-run').textContent.startsWith('Laying out with Triskel'), 'and the header counts its seconds');
+  assert(!shown($('.block-graph-state')), 'the region layout stays drawn meanwhile');
+  triskel.click();
+  assert.equal(skips.length, 2, 'Cancel stops Triskel');
+  answer(drawn({name: 'triskel', revision: '196ba112eba992c1460af3097c038defcf7a7e45'}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match($('.block-graph-stats').textContent, /Triskel layout$/);
+  assert(!shown(triskel) && !shown($('.block-graph-engine-run')), 'a Triskel drawing needs no offer');
+  assert.match($('.block-graph-selection').textContent, /^loc_8 /, 'the selected block stays selected');
+  view.setResult(drawn({name: 'layered', reason: {code: 'cancelled'}}));
+  assert(shown(triskel) && /Triskel stopped$/.test($('.block-graph-stats').textContent), 'a stopped run is offered again');
+  view.setState('loading', 'Decoding basic blocks\u2026');
+  assert(!shown(triskel), 'never over a load in progress');
+  frames = [];
+}
+{
+  // The flow graph over a realm past the size Triskel runs on unasked: a call
+  // tree of 2,047 cards, which nothing folds. The layered layout is drawn
+  // with nothing sent; Lay out with Triskel sends the realm, counts its
+  // seconds beside Cancel, a stopped run is offered again, and an answer
+  // replaces the layered layout.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="flow"></div></body></html>');
+  window.HTMLElement.prototype.scrollIntoView ??= function scrollIntoView() {};
+  const count = 2047, SHA = 'a'.repeat(64);
+  const nodes = Array.from({length: count}, (_, id) => ({id, kind: 'wasm', context: 0, status: 'resolved', function_index: id, sha256: SHA, artifact_id: '9', url: 'https://wasm.test/m.wasm', script_id: 3, hits: 1, entries: id ? 0 : 1, leaves: 2 * id + 1 < count ? 0 : 1}));
+  const edges = [];
+  for (let id = 1; id < count; id += 1) edges.push({from: (id - 1) >> 1, to: id, kind: 'call', count: 1, crosses: []});
+  // One page of a complete generation (flow-graph-v2).
+  const doc = {schema: 'flow-graph-v2', session_id: '1', generation: '1', evidence: 'observed', complete: true, cursor: 0, next_cursor: null, node_count: count, edge_count: edges.length,
+    coverage: {caught_up: true, artifacts_caught_up: true, folded_bytes: '64', store_end: '64', malformed_records: 0},
+    stacks: {records: {request_initiator_stack: 1}, not_walked: {}, distinct: 1, occurrences: 1, decoded: 1}, not_shown: [],
+    contexts: [{id: 0, first_node: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}], nodes, edges};
+  const layouts = [];
+  const fetch = async (url, init = {}) => {
+    if (String(url).startsWith('/api/flow-graph')) return {ok: true, status: 200, json: async () => doc};
+    assert.equal(url, '/api/graph-layout');
+    const body = JSON.parse(init.body);
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+      if (init.signal?.aborted) abort(); else init.signal?.addEventListener('abort', abort);
+      layouts.push({body, answer: graphs => resolve({ok: true, status: 200, json: async () => ({schema: 'graph-layout-v1', engine: {name: 'triskel', revision: 'abc1234def'}, graphs})})});
+    });
+  };
+  const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, fetch, performance, console,
+    requestAnimationFrame: fn => setTimeout(() => fn(performance.now()), 0), cancelAnimationFrame: clearTimeout, setTimeout, clearTimeout, queueMicrotask,
+    getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, innerWidth: 1180, devicePixelRatio: 1, dispatchEvent: () => true,
+    URLSearchParams, AbortController, AbortSignal, DOMException, MessageChannel};
+  // No Worker here, so the Graph pane's pipeline runs on this thread.
+  const scripts = ['graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_model.js', 'flow_graph_layout.js', 'flow_graph_worker.js', 'flow_graph.js'];
+  runInNewContext(`${(await Promise.all(scripts.map(name => readFile(new URL(`../apps/research-ui/${name}`, import.meta.url), 'utf8')))).join('\n')}
+globalThis.create = createFlowGraphPanel;`, context);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  const host = document.querySelector('#flow');
+  const flow = context.create({host, open: () => {}, available: () => true});
+  flow.show({session: '1'});
+  const $ = selector => host.querySelector(selector);
+  for (let i = 0; i < 200 && !/layout/i.test($('.flow-graph-engine')?.textContent ?? ''); i++) await settle();
+  assert.equal($('.flow-graph-engine').textContent, 'Layered layout', `${$('.flow-graph-state')?.textContent}`);
+  assert.equal(layouts.length, 0, 'a realm past the automatic size sends nothing unasked');
+  const triskel = $('.flow-graph-triskel');
+  assert(!triskel.hidden && triskel.textContent === 'Lay out with Triskel', 'and is offered Triskel');
+  assert.match($('.flow-graph-engine').title, /over 2,000 cards or 8,000 calls, where Triskel runs only when asked/);
+  triskel.click();
+  for (let i = 0; i < 200 && !layouts.length; i++) await settle();
+  assert.equal(layouts.length, 1);
+  assert.equal(layouts[0].body.graphs[0].nodes.length, count, 'asked, the whole realm is sent');
+  // The pipeline says it is running once the request is out.
+  for (let i = 0; i < 200 && triskel.textContent !== 'Cancel'; i++) await settle();
+  assert.equal(triskel.textContent, 'Cancel');
+  assert.match($('.flow-graph-engine-run').textContent, /^Laying out with Triskel \u00b7 \d+ s$/);
+  assert($('.flow-graph-state').hidden, 'the layered layout stays drawn meanwhile');
+  triskel.click();
+  for (let i = 0; i < 200 && triskel.textContent !== 'Lay out with Triskel'; i++) await settle();
+  assert(!triskel.hidden && triskel.textContent === 'Lay out with Triskel', 'a stopped run is offered again');
+  assert($('.flow-graph-engine-run').hidden);
+  assert.match($('.flow-graph-engine').title, /Triskel was stopped/);
+  triskel.click();
+  for (let i = 0; i < 200 && layouts.length < 2; i++) await settle();
+  layouts[1].answer([{status: 'laid_out', width: 25600, height: 1600, elapsed_ms: 1,
+    nodes: Array.from({length: count}, (_, i) => [(i % 128) * 200, Math.floor(i / 128) * 100]),
+    edges: layouts[1].body.graphs[0].edges.map(([from, to]) => [(from % 128) * 200, Math.floor(from / 128) * 100, (to % 128) * 200, Math.floor(to / 128) * 100])}]);
+  for (let i = 0; i < 200 && !/^Triskel/.test($('.flow-graph-engine').textContent); i++) await settle();
+  assert.equal($('.flow-graph-engine').textContent, 'Triskel layout', 'the answer replaces the layered layout');
+  assert(triskel.hidden && $('.flow-graph-engine-run').hidden);
 }
 console.log('PASS block graph model and layout (offline; rendered acceptance is the packaged-app gate)');

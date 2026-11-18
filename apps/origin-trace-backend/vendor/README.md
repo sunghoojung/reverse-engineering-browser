@@ -41,8 +41,9 @@ of where the MPL-2.0 source is and of the one change it is compiled with.
 Triskel runs on graphs shaped by captured pages, and it is built with `NDEBUG`,
 so its asserts are not a safety net. The server never calls it: each request
 gets a contained `origin-trace-backend --graph-layout-worker` process with no
-network access (on macOS no file access either), a resident memory limit, a budget per graph and a
-request deadline ([`src/graph_layout.rs`](../src/graph_layout.rs)). Defects
+network access (on macOS no file access either), a resident memory limit and a
+budget per graph that grows with its size
+([`src/graph_layout.rs`](../src/graph_layout.rs)). Defects
 found in this revision while building that route:
 
 - Its SESE pass orients a region by an undirected depth-first search. When that
@@ -60,7 +61,8 @@ found in this revision while building that route:
 - `Layout::remove_small_regions` keeps a reference to a deque element after
   `pop_back`; AddressSanitizer reports it on most graphs.
 - It places nodes on top of each other, and edges through nodes, in wide
-  layers. `build.rs` fixes this one; see below.
+  layers, which large and unstructured graphs have most. `build.rs` fixes
+  this one; see below.
 
 ## Fixed at build time
 

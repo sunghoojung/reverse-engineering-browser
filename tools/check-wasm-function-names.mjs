@@ -424,7 +424,7 @@ async function checkWiring() {
   for (const path of ['scripts/build-research-app.sh', 'apps/research-ui/macos/OriginTraceApp.swift', 'apps/origin-trace-backend/src/app.rs'])
     assert((await read(path)).includes('wasm_function_names.js'), path);
   assert(app.includes("if (typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.changed();"));
-  assert(app.includes("if (view.wasmRows && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow("));
+  assert(app.includes("if (view.wasm && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow(row, view.wasm.row(index),"));
   assert(app.includes('setInterval(() => { refresh(); evidenceNames.poll?.(); }, 2000);'), 'The 2 s tick polls the names library');
   const module = await read('apps/research-ui/wasm_function_names.js');
   assert(!/innerHTML|insertAdjacentHTML|outerHTML/.test(module), 'Names are inserted as text only');

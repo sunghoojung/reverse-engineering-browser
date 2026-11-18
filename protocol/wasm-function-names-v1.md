@@ -100,8 +100,9 @@ the number of items named. Only `ready` joins names.
 `target_function_index` is structure, like `function_index`: a read that omits
 row text (the read-only permission levels) still names a call's target.
 
-The native `reb://app` routes and the `origin-trace-wasm` CLI do not join names;
-the packaged UI reads names from its own store and renders them itself.
+The native `reb://app` routes forward to the loopback routes of the backend the
+stored-evidence window runs, so they join names the same way. The
+`origin-trace-wasm` CLI does not join names.
 
 ## Bounds
 

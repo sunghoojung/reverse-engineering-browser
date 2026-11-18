@@ -3,12 +3,9 @@
  * responses. Captured bytes only ever become text nodes, hex, a JSON tree of
  * text nodes, or a raster image whose signature matches its bytes. HTML is
  * shown as source and never rendered. */
-const TRAFFIC_RESPONSE_PAGE_BYTES = 2 * 1024 * 1024;
+// Recently shown bodies kept for reselection; the newest stays whatever its size.
 const TRAFFIC_RESPONSE_CACHE_BYTES = 48 * 1024 * 1024;
 const TRAFFIC_RESPONSE_RETRY_MS = 2000;
-const TRAFFIC_RESPONSE_FIND_LIMIT = 1000;
-// Hex shows one window of this many bytes at a time, paged to the end of the body.
-const TRAFFIC_RESPONSE_HEX_BYTES = 256 * 1024;
 const TRAFFIC_RESPONSE_CAPTURE_BYTES = 16n * 1024n * 1024n;
 // Bytes of a cut, partial or stopped body can end inside a character.
 const TRAFFIC_RESPONSE_OPEN_ENDED = new Set(['captured_truncated', 'partial', 'aborted', 'cancelled']);
@@ -349,56 +346,70 @@ function trafficResponseCaseMeaning(kind) {
 function createTrafficResponse({getArtifacts, getEvents, contentSession, readable, onChange, request, worker, lookup = null,
   getRequests = () => [], related = null, open = null}) {
   const views = new Map();
-  const options = {pretty: false, wrap: true, hex: false, query: '', current: 0, hexKey: null, hexOffset: 0};
+  const options = {pretty: false, wrap: true, hex: false, hexKey: null, hexOffset: 0};
+  // Find stays apart from the view options: typing updates the shown body's
+  // marks and count in place instead of drawing the body again. One count
+  // runs at a time, over the whole document shown (source_syntax.js).
+  const find = {query: '', rank: 0, entry: null, shown: null, reveal: false};
   const previews = new Map();
   let previewArea = null;
   let generation = 0;
   const layouts = createCodeLayouts({request, layouts: worker, onChange: () => {generation += 1; onChange();}});
 
-  async function load(artifact, key, previous) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    const mismatch = message => Object.assign(new Error(message), {integrity: true});
-    const loaded = previous?.bytes ?? new Uint8Array(0);
+  // A body is read whole in one request, with its progress and Cancel and no
+  // deadline. A retried failure stays shown until the new read settles.
+  function start(artifact, key, previous = null) {
+    const entry = {status: 'loading', artifact, received: 0, total: artifact.byte_size, verifying: false, controller: new AbortController(), previous};
+    views.set(key, entry);
+    void load(entry, key);
+    return entry;
+  }
+
+  async function load(entry, key) {
+    const {artifact, controller} = entry;
+    let painted = 0;
+    const repaint = () => {if (views.get(key) === entry) onChange();};
     let view;
     try {
-      const limit = Math.min(artifact.byte_size - loaded.length, TRAFFIC_RESPONSE_PAGE_BYTES);
-      const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${loaded.length}&limit=${limit}`,
-        {cache: 'no-store', signal: controller.signal});
-      if (!response.ok) {
-        if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the retained SHA-256');
-        response.body?.cancel().catch(() => {});
-        throw new Error(`the artifact store returned ${response.status}`);
-      }
-      const chunk = await sourceFactsReadBytes(response, limit, controller.signal);
-      if (chunk.length !== limit) throw mismatch('its retained byte size changed');
-      const bytes = new Uint8Array(loaded.length + chunk.length);
-      bytes.set(loaded);
-      bytes.set(chunk, loaded.length);
-      const complete = bytes.length === artifact.byte_size;
-      let verified = false;
-      if (complete && globalThis.crypto?.subtle) {
-        const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
-          byte => byte.toString(16).padStart(2, '0')).join('');
-        if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
-        verified = true;
-      }
-      view = {status: 'ready', artifact, bytes, complete, verified, loaded: bytes.length, total: artifact.byte_size};
+      const {bytes, verified} = await trafficReadArtifact(artifact, {signal: controller.signal,
+        onBytes: received => {
+          entry.received = received;
+          if (Date.now() - painted < 100) return;
+          painted = Date.now();
+          repaint();
+        },
+        onVerify: () => {entry.verifying = true; repaint();}});
+      view = {status: 'ready', artifact, bytes, verified, total: bytes.length};
     } catch (error) {
-      const message = controller.signal.aborted ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, '');
-      view = previous ? {...previous, moreError: message}
-        : {status: 'error', error: message, retryable: error?.integrity !== true, failedAt: Date.now()};
-    } finally {
-      clearTimeout(timeout);
+      view = controller.signal.aborted ? {status: 'cancelled', artifact}
+        : {status: 'error', artifact, error: String(error?.message ?? error).replace(/\.$/, ''), retryable: error?.integrity !== true, failedAt: Date.now()};
     }
+    // A cancelled or evicted read has been replaced already.
+    if (views.get(key) !== entry) return;
     views.delete(key);
     views.set(key, view);
     evict(key);
     onChange();
   }
 
+  function cancel(key) {
+    const entry = views.get(key);
+    if (entry?.status !== 'loading') return;
+    entry.controller.abort();
+    views.set(key, {status: 'cancelled', artifact: entry.artifact});
+    onChange();
+  }
+
+  function readAgain(key) {
+    const entry = views.get(key);
+    if (entry?.status !== 'cancelled') return;
+    start(entry.artifact, key);
+    onChange();
+  }
+
   // Bytes and parsed previews share one budget. A preview goes with its view,
   // and its source length stands in for an object graph that is larger still.
+  // The newest view stays whatever its size.
   function evict(keep) {
     const cost = (item, key) => (item.bytes?.length ?? 0) + (previews.get(key)?.sourceBytes ?? 0);
     let retained = [...views.entries()].reduce((sum, [key, item]) => sum + cost(item, key), 0);
@@ -406,6 +417,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       if (views.size <= 8 && retained <= TRAFFIC_RESPONSE_CACHE_BYTES) break;
       if (oldest === keep) continue;
       retained -= cost(item, oldest);
+      item.controller?.abort();
       views.delete(oldest);
       previews.delete(oldest);
     }
@@ -416,22 +428,11 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     const key = `${artifact.session_id}:${artifact.artifact_id}:${artifact.sha256}`;
     const current = views.get(key);
     if (current?.retryable && Date.now() - current.failedAt >= TRAFFIC_RESPONSE_RETRY_MS) {
-      views.set(key, {status: 'loading', previous: current});
-      void load(artifact, key, null);
+      start(artifact, key, current);
       return {...current, key};
     }
-    if (current) return {...(current.previous ?? current), loadingMore: current.status === 'loading' && Boolean(current.previous?.bytes), key};
-    views.set(key, {status: 'loading'});
-    void load(artifact, key, null);
-    return {status: 'loading', key};
-  }
-
-  function more(key) {
-    const view = views.get(key);
-    if (view?.status !== 'ready' || view.complete) return;
-    views.set(key, {status: 'loading', previous: {...view, moreError: null}});
-    void load(view.artifact, key, view);
-    onChange();
+    if (current) return {...(current.status === 'loading' && current.previous ? current.previous : current), key};
+    return {...start(artifact, key), key};
   }
 
   // The receiver's refusal joins the artifact's creator record exactly.
@@ -465,39 +466,97 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
         : 'The body artifact is not in the artifact manifest: its acknowledgment is pending.';
     }
     if (view.status === 'unavailable') return 'Retained bodies are read from the local backend, which this view does not have.';
-    if (view.status === 'loading') return 'Loading the retained body…';
+    if (view.status === 'loading') return trafficReadProgress(view);
+    if (view.status === 'cancelled') return 'Reading the retained body was cancelled.';
     if (view.status === 'error') return `The retained body could not be read: ${view.error}.${view.retryable ? ' It is read again on the next refresh.' : ''}`;
-    const notes = [];
-    if (!view.complete) notes.push(`Showing the first ${trafficResponseBytes(view.loaded)} of ${trafficResponseBytes(view.total)} retained.`);
-    if (view.moreError) notes.push(`The next range could not be read: ${view.moreError}.`);
-    if (!view.verified) notes.push(view.complete ? 'The retained digest could not be rechecked in this view.'
-      : 'The local backend checked the retained digest; this view rechecks it once every byte is shown.');
-    return notes.join(' ') || null;
+    return view.verified ? null : 'The retained digest could not be rechecked in this view.';
   }
 
-  function codeView(text, artifact, language, {layout = null, status = null, find = true} = {}) {
+  function codeView(text, artifact, language, {rows = codeViewRows(text), layout = null, status = null, marks = new Map()} = {}) {
     const syntax = language === 'text' ? {kind: 'plain', mime_type: 'text/plain'}
       : {kind: artifact.kind === 'wasm' ? 'wasm' : 'response_body', mime_type: artifact.mime_type, url: artifact.url};
-    const rows = codeViewRows(text);
-    const found = find && options.query ? findSourceOccurrences(rows.map(row => row.text), options.query, TRAFFIC_RESPONSE_FIND_LIMIT) : {matches: []};
-    const current = found.matches.length ? options.current % found.matches.length : -1;
-    const marks = new Map();
-    found.matches.forEach((match, index) => {
-      if (!marks.has(match.line)) marks.set(match.line, []);
-      marks.get(match.line).push({column: match.column, length: match.length, match: index});
-    });
-    const view = createCodeView({text, rows, syntax, label: 'Response body', className: 'traffic-response-code', rowClass: 'traffic-response-line',
-      wrap: options.wrap, marks, current, layout: layout?.map ? layout : null, onRaw: status && (raw => {status.textContent = codeViewRawText(raw);})});
-    if (current >= 0) view.reveal(found.matches[current].line);
-    return {code: view.box, view, matches: found.matches.length, truncated: Boolean(found.truncated), current};
+    return createCodeView({text, rows, syntax, label: 'Response body', className: 'traffic-response-code', rowClass: 'traffic-response-line',
+      wrap: options.wrap, marks, current: -1, layout: layout?.map ? layout : null, onRaw: status && (raw => {status.textContent = codeViewRawText(raw);})});
+  }
+
+  // The count over the shown document: a new query or document stops the
+  // previous one. Its marks and count repaint about every 200 ms while it runs.
+  function findIn(key, document) {
+    if (!find.query) {
+      cancelSourceFind(find.entry?.search);
+      find.entry = null;
+      return null;
+    }
+    if (find.entry?.key === key && find.entry.query === find.query) return find.entry.search;
+    cancelSourceFind(find.entry?.search);
+    const entry = find.entry = {key, query: find.query, painted: 0};
+    entry.search = startSourceFind(document(), find.query, {onProgress: search => {
+      if (find.entry !== entry) return;
+      if (search.status === 'running' && Date.now() - entry.painted < 200) return;
+      entry.painted = Date.now();
+      showFind();
+    }});
+    return entry.search;
+  }
+
+  // Count, marks and current match of the shown body. `reveal` moves to the
+  // current match, now or once the count reaches one; a match in another hex
+  // window opens that window.
+  function showFind(reveal = false) {
+    const shown = find.shown;
+    if (!shown || shown.count.isConnected === false) return;
+    if (reveal) find.reveal = true;
+    const search = shown.search();
+    const running = search?.status === 'running';
+    const progress = running ? ` · finding ${Math.floor(100 * search.scanned / search.document.chunks)}%` : '';
+    let current = -1, row = null;
+    if (!search?.total) {
+      find.rank = 0;
+      shown.count.textContent = !find.query ? '' : search.error || (running ? `No matches yet${progress}` : 'No matches');
+      if (!running) find.reveal = false;
+    } else {
+      find.rank = running ? Math.min(find.rank, search.total - 1) : find.rank % search.total;
+      const match = sourceFindMatch(search, find.rank);
+      shown.count.textContent = `${(find.rank + 1).toLocaleString('en-US')} of ${search.total.toLocaleString('en-US')}${running ? '+' : ''}${progress}`;
+      const window = shown.hex ? shown.hex.windowOf(match.offset) : null;
+      if (window !== null && window !== shown.hex.start) {
+        if (find.reveal) {
+          options.hexOffset = window;
+          shown.container.dataset.renderKey = '';
+          onChange();
+          return;
+        }
+      } else {
+        current = match.offset;
+        row = codeViewRowAt(shown.rows, match.offset - shown.base);
+      }
+    }
+    const marked = {search, current, scanned: search?.scanned ?? 0};
+    if (marked.search !== shown.marked.search || marked.current !== shown.marked.current || marked.scanned !== shown.marked.scanned) {
+      shown.marked = marked;
+      shown.view.mark(shown.marks, current, row === null ? [] : [row]);
+    }
+    if (find.reveal && row !== null) {
+      find.reveal = false;
+      shown.view.reveal(row);
+      shown.view.box.querySelector('.code-view-mark.is-current')?.scrollIntoView?.({block: 'center'});
+    }
+  }
+
+  // Until the count is done, Next stops at the last match counted.
+  function stepFind(direction) {
+    const search = find.entry?.search;
+    if (!search?.total) return;
+    const moved = find.rank + direction;
+    find.rank = search.status === 'running' ? Math.max(0, Math.min(search.total - 1, moved)) : (moved + search.total) % search.total;
+    showFind(true);
   }
 
   // Preview shares the Payload tree, so its reach and keys are the same.
   function jsonPreview(key, value, sourceBytes) {
     let shown = previews.get(key);
     if (!shown) {
-      shown = {model: {json: {value}, keys: new WeakMap()}, expanded: new Set(['$']), selected: null,
-        find: {query: '', matches: [], current: -1, truncated: false}, sourceBytes};
+      shown = {model: {json: {value}, keys: new WeakMap()}, expanded: new Set(['$']), selected: null, find: trafficPayloadNoFind(), sourceBytes};
       previews.set(key, shown);
       while (previews.size > 8) previews.delete(previews.keys().next().value);
       evict(key);
@@ -515,7 +574,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     return holder;
   }
 
-  function toolbar(container, binary, prettyable, shown, text, copyNote) {
+  function toolbar(container, binary, prettyable, text, copyNote) {
     const bar = trafficNode('div', 'traffic-response-toolbar');
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', 'Response body view');
@@ -534,17 +593,15 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     copy.type = 'button';
     copy.dataset.control = 'copy';
     bar.append(copy);
-    const find = document.createElement('input');
-    find.type = 'search';
-    find.className = 'traffic-response-find';
-    find.placeholder = 'Find';
-    find.value = options.query;
-    find.dataset.control = 'find';
-    find.setAttribute('aria-label', 'Find in response body');
-    bar.append(find);
-    const findCount = shown.matches;
-    const count = trafficNode('span', 'traffic-response-count', !options.query ? '' : !findCount ? 'No matches'
-      : `${shown.current + 1} of ${findCount.toLocaleString('en-US')}${shown.truncated ? '+' : ''}`);
+    const input = document.createElement('input');
+    input.type = 'search';
+    input.className = 'traffic-response-find';
+    input.placeholder = 'Find';
+    input.value = find.query;
+    input.dataset.control = 'find';
+    input.setAttribute('aria-label', 'Find in response body');
+    bar.append(input);
+    const count = trafficNode('span', 'traffic-response-count');
     count.setAttribute('aria-live', 'polite');
     const status = trafficNode('span', 'traffic-response-status');
     status.setAttribute('role', 'status');
@@ -560,124 +617,78 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       container.dataset.renderKey = '';
       onChange();
     });
-    find.addEventListener('input', () => {
-      options.query = find.value;
-      options.current = 0;
-      container.dataset.renderKey = '';
-      onChange();
-      container.querySelector('.code-view-mark.is-current')?.scrollIntoView?.({block: 'center'});
+    input.addEventListener('input', () => {
+      find.query = input.value;
+      find.rank = 0;
+      showFind(true);
     });
-    find.addEventListener('keydown', event => {
-      if (event.key !== 'Enter' || !findCount) return;
+    input.addEventListener('keydown', event => {
+      if (event.key !== 'Enter') return;
       event.preventDefault();
-      options.current = (shown.current + (event.shiftKey ? findCount - 1 : 1)) % findCount;
-      container.dataset.renderKey = '';
-      onChange();
-      container.querySelector('.code-view-mark.is-current')?.scrollIntoView?.({block: 'center'});
+      stepFind(event.shiftKey ? -1 : 1);
     });
-    return bar;
-  }
-
-  // Previous and next hex windows; a window past the loaded bytes reads the next range.
-  function hexPager(range, view) {
-    const bar = trafficNode('div', 'traffic-response-hex-pager');
-    bar.setAttribute('role', 'group');
-    bar.setAttribute('aria-label', 'Hex range');
-    for (const [control, label, step, disabled] of [
-      ['hex-previous', 'Previous 256 KiB', -1, range.start === 0],
-      ['hex-next', 'Next 256 KiB', 1, range.end >= view.total]]) {
-      const button = trafficNode('button', 'secondary-button', label);
-      button.type = 'button';
-      button.dataset.control = control;
-      // Not `disabled`, so keyboard focus stays when a step reaches either end.
-      button.setAttribute('aria-disabled', String(disabled));
-      button.addEventListener('click', () => {
-        if (disabled) return;
-        options.hexOffset = Math.max(0, range.start + step * TRAFFIC_RESPONSE_HEX_BYTES);
-        onChange();
-      });
-      bar.append(button);
-    }
-    return bar;
+    return {bar, count};
   }
 
   function responseBody(container, request, artifact, view) {
     const nodes = [];
     const bytes = view.bytes;
-    const decoded = trafficResponseText(bytes, !view.complete || TRAFFIC_RESPONSE_OPEN_ENDED.has(request?.responseBody?.state));
+    const decoded = trafficResponseText(bytes, TRAFFIC_RESPONSE_OPEN_ENDED.has(request?.responseBody?.state));
     const text = decoded?.text ?? null;
     const binary = text === null;
     const source = {kind: 'response_body', mime_type: artifact.mime_type, url: artifact.url};
     const language = binary ? 'bytes' : sourceSyntaxLanguage(source);
     const prettyable = !binary && sourcePrettySupported(source);
-    let shown;
     let value = text;
     let note = null;
     let copyNote = 'Copied.';
     let layout = null;
+    let hex = null;
+    let document;
     const raw = trafficNode('p', 'traffic-body-note code-view-raw');
     raw.setAttribute('role', 'status');
-    let hexWindow = null;
     if (binary || options.hex) {
-      // One window at a time, paged by range to the end of the retained body.
+      // One window at a time, paged to the end of the body; Find counts every row.
       if (options.hexKey !== view.key) {
         options.hexKey = view.key;
         options.hexOffset = 0;
       }
-      const last = Math.max(0, Math.floor((view.total - 1) / TRAFFIC_RESPONSE_HEX_BYTES) * TRAFFIC_RESPONSE_HEX_BYTES);
-      const start = Math.min(options.hexOffset, last);
-      const end = Math.min(start + TRAFFIC_RESPONSE_HEX_BYTES, view.total);
-      hexWindow = {start, end, loaded: bytes.length >= end};
-      value = formatWasmHex(bytes.subarray(start, Math.min(end, bytes.length)), start);
-      shown = codeView(value, artifact, 'text');
-      if (view.total > TRAFFIC_RESPONSE_HEX_BYTES) {
-        note = `Hex shows bytes ${start.toLocaleString('en-US')} to ${(end - 1).toLocaleString('en-US')} of ${trafficResponseBytes(view.total)}.`;
-        copyNote = `Copied the hex of bytes ${start.toLocaleString('en-US')} to ${(end - 1).toLocaleString('en-US')} of ${trafficResponseBytes(view.total)}.`;
+      hex = codeViewHexWindow(bytes, options.hexOffset);
+      value = hex.text;
+      document = () => sourceFindHexDocument(bytes);
+      if (hex.total > CODE_VIEW_HEX_BYTES) {
+        const range = `bytes ${hex.start.toLocaleString('en-US')} to ${(hex.end - 1).toLocaleString('en-US')} of ${trafficResponseBytes(hex.total)}`;
+        note = `Hex shows ${range}.`;
+        copyNote = `Copied the hex of ${range}.`;
       }
-      // A window past the loaded ranges reads the next range itself.
-      if (!hexWindow.loaded && !view.loadingMore && !view.moreError) void Promise.resolve().then(() => more(view.key));
     } else {
-      if (options.pretty && prettyable && view.complete) {
+      if (options.pretty && prettyable) {
         layout = layouts.layout(artifact, text, source, null);
         note = codeLayoutNote(layout);
         if (layout.status === 'ready') value = layout.text;
-      } else if (options.pretty && prettyable) {
-        note = 'Pretty print waits until every retained byte is shown.';
       }
-      shown = codeView(value, artifact, language, {layout: layout?.status === 'ready' ? layout : null, status: raw});
+      const searched = value;
+      document = () => sourceFindTextDocument(searched);
     }
-    if (!binary && !view.complete && !options.hex) copyNote = `Copied the ${trafficResponseBytes(bytes.length)} loaded so far; ${trafficResponseBytes(view.total - bytes.length)} more are retained.`;
-    nodes.push(toolbar(container, binary, prettyable, shown, value, copyNote));
+    const rows = codeViewRows(value);
+    const shown = find.shown = {container, rows, hex, base: hex?.base ?? 0, marked: {search: null, current: -1, scanned: 0},
+      key: JSON.stringify([view.key, hex ? 'hex' : layout?.status === 'ready' ? `pretty:${layout.engine}` : 'text'])};
+    shown.search = () => findIn(shown.key, document);
+    shown.marks = (first, last) => codeViewFindMarks(shown.marked.search, rows, first, last, shown.base);
+    shown.view = codeView(value, artifact, hex ? 'text' : language, {rows, marks: shown.marks,
+      layout: layout?.status === 'ready' ? layout : null, status: hex ? null : raw});
+    const tools = toolbar(container, binary, prettyable, value, copyNote);
+    shown.count = tools.count;
+    nodes.push(tools.bar);
     if (decoded?.lossy && !options.hex) nodes.push(trafficNode('p', 'traffic-body-note', 'Not valid UTF-8; shown with replacement characters. Hex shows the exact bytes.'));
     if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
-    if (hexWindow && view.total > TRAFFIC_RESPONSE_HEX_BYTES) nodes.push(hexPager(hexWindow, view));
-    if (hexWindow && !hexWindow.loaded) {
-      nodes.push(trafficNode('p', 'traffic-body-note', view.moreError
-        ? `These bytes could not be read: ${view.moreError}.` : 'Reading these bytes…'));
-    }
-    nodes.push(shown.code);
+    if (hex && hex.total > CODE_VIEW_HEX_BYTES) nodes.push(trafficHexPager(hex, start => {options.hexOffset = start; onChange();}));
+    nodes.push(shown.view.box);
     if (layout?.status === 'ready' && layout.map) nodes.push(raw);
-    if (!view.complete && !hexWindow) {
-      const button = trafficNode('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
-      button.type = 'button';
-      button.dataset.control = 'more';
-      // Not `disabled`, so keyboard focus stays on it while the range loads.
-      button.setAttribute('aria-disabled', String(Boolean(view.loadingMore)));
-      button.addEventListener('click', () => more(view.key));
-      nodes.push(button);
-    }
     return nodes;
   }
 
   function preview(artifact, view, record) {
-    if (!view.complete) {
-      if (!view.moreError) return [trafficNode('p', 'traffic-body-note', 'Reading every retained byte for Preview…')];
-      const retry = trafficNode('button', 'secondary-button traffic-body-more', 'Read the rest again');
-      retry.type = 'button';
-      retry.dataset.control = 'more';
-      retry.addEventListener('click', () => more(view.key));
-      return [trafficNode('p', 'traffic-body-note', 'Preview needs every retained byte, and the next range could not be read.'), retry];
-    }
     const bytes = view.bytes;
     const image = trafficImageType(bytes, artifact.mime_type);
     if (image) {
@@ -707,7 +718,7 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       }
     }
     if (language === 'markup') {
-      return [...lossyNote, trafficNode('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup', {find: false}).code];
+      return [...lossyNote, trafficNode('p', 'traffic-body-note', 'Markup is shown as source and never rendered.'), codeView(text, artifact, 'markup').box];
     }
     const pre = trafficNode('pre', 'traffic-body-text', text);
     pre.tabIndex = 0;
@@ -812,16 +823,18 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     const key = JSON.stringify([request?.id, request?.origin, tab, record, kind, request?.responseStarted?.sequenceNumber, artifact?.artifact_id,
       tried.map(entry => [entry.item.artifactId, entry.refused]), source && [source.id, source.found, source.reason, source.body, source.mimeType],
       fetches && [fetches.status, fetches.capped, fetches.searched, fetches.rows.map(row => [row.id, row.responseBodyIndex?.case])],
-      refusal, found?.status, view && [view.status, view.loaded, view.error, view.moreError, view.loadingMore], options, generation]);
+      refusal, found?.status, view && [view.status, view.received, view.verifying, view.error], options, generation]);
     if (container.dataset.renderKey === key) return;
     container.dataset.renderKey = key;
-    // The same body keeps its place across a next range, wrap or pretty print.
+    // The same body keeps its place across wrap, pretty print or a refresh.
     const scrollKey = JSON.stringify([request?.id, request?.origin, tab, artifact?.artifact_id]);
     const shownCode = container.dataset.scrollKey === scrollKey ? container.querySelector('.traffic-response-code') : null;
     const scroll = shownCode ? {top: shownCode.scrollTop, left: shownCode.scrollLeft} : null;
     container.dataset.scrollKey = scrollKey;
     previewArea?.dispose();
     previewArea = null;
+    find.shown?.view.dispose();
+    find.shown = null;
     const active = container.contains(document.activeElement) ? document.activeElement.dataset?.control : null;
     const caret = active === 'find' ? document.activeElement.selectionStart : null;
     const nodes = [trafficNode('h2', '', tab === 'preview' ? 'Preview' : 'Response')];
@@ -876,6 +889,15 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
     }
     const note = contentNote(shownRecord, artifact, view ?? {}, refusal, found);
     if (note) nodes.push(trafficNode('p', 'traffic-body-note', note));
+    const control = (name, label, act) => {
+      const button = trafficNode('button', 'secondary-button traffic-body-read', label);
+      button.type = 'button';
+      button.dataset.control = name;
+      button.addEventListener('click', act);
+      nodes.push(button);
+    };
+    if (view?.status === 'loading' && view.controller) control('cancel', 'Cancel', () => cancel(view.key));
+    if (view?.status === 'cancelled') control('read', 'Read the body', () => readAgain(view.key));
     if (view?.status === 'ready') {
       nodes.push(...(tab === 'preview' ? preview(artifact, view, shownRecord) : responseBody(container, shownFrom, artifact, view)));
     }
@@ -887,14 +909,14 @@ function createTrafficResponse({getArtifacts, getEvents, contentSession, readabl
       code.scrollLeft = scroll.left;
     }
     if (active) {
+      // Cancel and Read the body replace each other, then give way to the body.
       const control = container.querySelector(`[data-control="${active}"]`) ??
-        (active === 'more' ? container.querySelector('.traffic-response-code') : null);
+        (['cancel', 'read'].includes(active) ? container.querySelector('[data-control="cancel"], [data-control="read"], .traffic-response-code') : null);
       control?.focus?.();
       if (caret !== null && control?.setSelectionRange) control.setSelectionRange(caret, caret);
     }
-    // A parsed preview needs every retained byte, so ranges are read on without a click.
-    if (tab === 'preview' && view?.status === 'ready' && !view.complete && !view.loadingMore && !view.moreError) more(view.key);
+    showFind();
   }
 
-  return {render, more};
+  return {render};
 }

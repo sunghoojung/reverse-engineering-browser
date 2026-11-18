@@ -25,6 +25,11 @@ export async function checkPackageContract() {
     assert((await stat(join(root, 'apps/research-ui', asset))).size > 0);
   }
   const native = await readFile(join(root, 'apps/research-ui/macos/OriginTraceApp.swift'), 'utf8');
+  // JavaScriptCore interprets every script unless its process may map JIT
+  // pages, so only the analyst runner is signed with that entitlement.
+  assert.match(build, /codesign --force --sign - --entitlements "\$\{analyst_runner_entitlements\}"/);
+  assert.match(await readFile(join(root, 'apps/research-ui/macos/OriginTraceAnalystRunner.entitlements'), 'utf8'),
+    /<key>com\.apple\.security\.cs\.allow-jit<\/key>\s*<true\/>/);
   assert(build.includes('ClientProjectExportSmoke.swift'));
   const clientSmoke=await readFile(join(root,'apps/research-ui/macos/ClientProjectExportSmoke.swift'),'utf8');
   const clientUI=await readFile(join(root,'tools/client-project-ui/ClientProjectUITests.swift'),'utf8');
@@ -314,6 +319,10 @@ async function main() {
     assert((await stat(join(resources, 'OriginTrace.icns'))).size > 0);
     await access(join(resources, 'run-live-session.sh'), constants.X_OK);
     execFileSync('codesign', ['--verify', '--deep', '--strict', app], {cwd: temporary, stdio: 'pipe'});
+    const entitlements = binary => execFileSync('codesign', ['-d', '--entitlements', '-', '--xml', join(app, 'Contents/MacOS', binary)],
+      {cwd: temporary, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']});
+    assert(entitlements('OriginTraceAnalystRunner').includes('com.apple.security.cs.allow-jit'), 'the sealed app keeps the runner entitlement');
+    assert(!entitlements('OriginTrace').includes('allow-jit'), 'only the analyst runner may map JIT pages');
     execFileSync(join(app, 'Contents/MacOS/OriginTrace'), ['--check-native-ui-url'], {cwd: temporary, stdio: 'inherit'});
     const offline = await runPackagedSmoke(app, temporary, 'offline');
     assert.equal(new URL(offline.result.location).protocol, 'reb:');

@@ -507,16 +507,19 @@ const blockGraphLayout = (() => {
    * single-entry single-exit regions. When the backend serves it, it lays
    * out the function; the region layout above stays where the client says
    * why: Triskel would draw it much wider (a dispatcher's fan, which that
-   * layout stacks into a grid) or taller, the function is past Triskel's
-   * limits, or the route is missing or fails. */
-  async function withTriskel(result, metrics) {
+   * layout stacks into a grid) or taller, the function is past the size
+   * Triskel runs on unasked (`all` asks), it was stopped, or the route is
+   * missing or fails. `progress` hears {stage: 'triskel'} once a request is
+   * sent; `signal` stops it and keeps the region layout. */
+  async function withTriskel(result, metrics, {all = false, signal = null, progress = null} = {}) {
     const m = {...METRICS, ...metrics}, {graph, layout} = result, n = graph.count;
     const keep = reason => { layout.engine = {name: 'layered', reason}; return result; };
     if (n < 2) return keep({code: 'one_block'});
     const resolved = [];
     for (let e = 0; e < graph.from.length; e += 1) if (graph.to[e] >= 0) resolved.push(e);
     const {outcomes: [outcome], revision} = await graphLayoutClient.layOut([{nodes: Array.from({length: n}, (_, v) => [layout.w[v], layout.h[v]]),
-      edges: resolved.map(e => [graph.from[e], graph.to[e]]), width: layout.width - m.margin * 2, height: layout.height - m.margin * 2}]);
+      edges: resolved.map(e => [graph.from[e], graph.to[e]]), width: layout.width - m.margin * 2, height: layout.height - m.margin * 2}],
+    {all, signal, onSend: () => progress?.({stage: 'triskel'})});
     if (!outcome.result) return keep(outcome.reason);
     const laid = outcome.result, x = new Float32Array(n), y = new Float32Array(n);
     for (let v = 0; v < n; v += 1) { x[v] = m.margin + laid.nodes[v][0]; y[v] = m.margin + laid.nodes[v][1]; }
@@ -541,9 +544,9 @@ const blockGraphLayout = (() => {
       engine: {name: 'triskel', revision}};
     return result;
   }
-  async function runAsync(message) {
+  async function runAsync(message, {signal = null, progress = null} = {}) {
     const result = run(message);
-    if (message.engine === 'triskel') return withTriskel(result, message.metrics);
+    if (message.engine === 'triskel') return withTriskel(result, message.metrics, {all: Boolean(message.all), signal, progress});
     result.layout.engine = {name: 'layered', reason: {code: 'not_served'}};
     return result;
   }
@@ -557,12 +560,21 @@ const blockGraphLayout = (() => {
 if (typeof module === 'object' && module?.exports) module.exports = blockGraphLayout;
 else if (typeof importScripts === 'function') {
   importScripts('graph_layout_client.js');
+  // {cancel: id} stops Triskel for that job, which still answers with its
+  // region layout; {id, progress} reports a stage before the answer.
+  const running = new Map();
   self.onmessage = async event => {
+    const {id, cancel} = event.data;
+    if (cancel !== undefined) { running.get(cancel)?.abort(); return; }
+    const controller = new AbortController();
+    running.set(id, controller);
     try {
-      const result = await blockGraphLayout.runAsync(event.data);
-      self.postMessage({id: event.data.id, ok: true, result}, blockGraphLayout.transfer(result));
+      const result = await blockGraphLayout.runAsync(event.data, {signal: controller.signal, progress: stage => self.postMessage({id, progress: stage})});
+      self.postMessage({id, ok: true, result}, blockGraphLayout.transfer(result));
     } catch (error) {
-      self.postMessage({id: event.data.id, ok: false, error: error?.message ?? 'Layout failed.'});
+      self.postMessage({id, ok: false, error: error?.message ?? 'Layout failed.'});
+    } finally {
+      running.delete(id);
     }
   };
 }

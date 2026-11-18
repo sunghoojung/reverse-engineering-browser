@@ -8,15 +8,19 @@
  * the same pipeline on its own thread where no worker starts.
  *
  * Page to pipeline, each with an `id` its answers carry:
- *   {op: 'load', session, measure, collapse, expanded: [node key], triskel}
+ *   {op: 'load', session, measure, collapse, expanded: [node key], triskel, all}
  *   {op: 'refold', generation, collapse, expanded: [node index], measure}
+ *   {op: 'triskel'}   every realm to Triskel, whatever its size (`all`)
+ *   {op: 'cancel'}    stops Triskel; the realms it had not answered stay layered
  *   {op: 'lineage', nodes: [card], edges: [drawn edge]}
  *   {op: 'find', needle}
  *   {op: 'abort'}
  * Pipeline to page: {id, type} with type progress, doc, nodes, edges (the
- * document in slices), fold (flowGraphPack), layout, engine, lineage, find or
- * error. A lineage and a Find carry `fold`, the id of the job whose fold they
- * answer for, since the page may still be drawing an earlier one. */
+ * document in slices), fold (flowGraphPack), layout, engine, triskel
+ * ({running}: whether Triskel has requests in flight for that fold),
+ * lineage, find or error. A lineage and a Find carry `fold`, the id of the
+ * job whose fold they answer for, since the page may still be drawing an
+ * earlier one. */
 'use strict';
 
 /* Nodes or edges per message: each slice deserializes on the page in a few
@@ -71,6 +75,12 @@ function createFlowGraphPipeline(post) {
   // of an older one stops at its next check and is never sent. A read has its
   // own count, so a refold of the graph on screen never stops a refresh.
   let epoch = 0, reads = 0, current = null, controller = null;
+  // Triskel requests in flight, by the signature of the realm each lays out
+  // (flowGraphLaneSignatures): a refold that keeps a realm waits for its
+  // answer instead of asking again, and one that changes it stops that
+  // request, which stops its worker in the backend.
+  const flights = new Map();
+  const stopFlights = () => { for (const flight of flights.values()) flight.controller.abort(); flights.clear(); };
 
   async function getPage(query) {
     const signal = AbortSignal.any ? AbortSignal.any([controller.signal, AbortSignal.timeout(FLOW_GRAPH_PAGE_TIMEOUT_MS)]) : controller.signal;
@@ -115,12 +125,14 @@ function createFlowGraphPipeline(post) {
     }
   }
 
-  async function load({id, session, measure, collapse, expanded = [], triskel = false}) {
+  async function load({id, session, measure, collapse, expanded = [], triskel = false, all = false}) {
     const read = ++reads, live = () => read === reads;
     controller?.abort(); controller = new AbortController();
     const doc = await readPages(id, session, live);
     if (!doc) return;
     const mine = ++epoch;
+    // A new generation numbers its cards anew, so no realm signature carries.
+    stopFlights();
     const model = flowGraphModel(doc);
     const {nodes, edges, ...head} = doc;
     post({id, type: 'doc', head});
@@ -129,7 +141,7 @@ function createFlowGraphPipeline(post) {
     // Chains stay expanded across generations by the function, not the id.
     const byKey = new Map(model.nodes.map((node, index) => [flowGraphNodeKey(node), index]));
     const open = new Set(expanded.map(key => byKey.get(key)).filter(index => index !== undefined).map(String));
-    current = {session, generation: doc.generation, model, measure, collapse, expanded: open, triskel, display: null, graph: null, state: null, lanes: null, findText: null};
+    current = {session, generation: doc.generation, model, measure, collapse, expanded: open, triskel, all, runs: 0, halted: 0, display: null, graph: null, state: null, lanes: null, findText: null};
     post({id, type: 'expanded', expanded: [...open]});
     layOut(id, mine, false);
   }
@@ -159,23 +171,31 @@ function createFlowGraphPipeline(post) {
     if (c.triskel) triskel(id, mine);
   }
 
-  /** Lays out each realm within the route's limits, a request each, and
-   * swaps the accepted ones in. Only Triskel's answer says whether it keeps a
-   * realm: no cheap measure of a realm bounds how narrow Triskel draws it,
-   * since Triskel ranks each region of it on its own. */
+  /** Lays out realms with Triskel, a request each, and swaps the accepted
+   * ones in. A realm within graphLayoutClient.AUTOMATIC is sent unasked;
+   * once the page asks (`all`), every realm is, whatever its size, and a
+   * stopped one again. Only Triskel's answer says whether it keeps a realm:
+   * no cheap measure of a realm bounds how narrow Triskel draws it, since
+   * Triskel ranks each region of it on its own. One run is live per layout:
+   * a later one takes over the realms still in flight. */
   async function triskel(id, mine) {
-    const c = current, state = c.state, graph = c.graph;
-    const live = () => mine === epoch && current === c && c.state === state;
-    const {LIMITS} = graphLayoutClient, outcomes = state.outcomes.slice(), report = {...state.report}, queue = [];
+    const c = current, state = c.state, graph = c.graph, run = ++c.runs;
+    const live = () => mine === epoch && current === c && c.state === state && c.runs === run;
+    const {AUTOMATIC} = graphLayoutClient, outcomes = state.outcomes.slice(), report = {...state.report}, queue = [], wanted = new Set();
     for (const item of flowGraphLayout.realmGraphs(graph, state)) {
-      if (!['not_served', 'pending'].includes(outcomes[item.lane].reason?.code)) continue;
-      const tooLarge = item.graph.nodes.length > LIMITS.graphNodes || item.graph.edges.length > LIMITS.graphEdges;
-      outcomes[item.lane] = {reason: {code: tooLarge ? 'too_large' : 'pending'}};
-      if (!tooLarge) queue.push(item);
+      const code = outcomes[item.lane].reason?.code;
+      if (!['not_served', 'pending', 'large', 'cancelled'].includes(code)) continue;
+      const large = item.graph.nodes.length > AUTOMATIC.graphNodes || item.graph.edges.length > AUTOMATIC.graphEdges;
+      if (!c.all && (large || code === 'cancelled')) { if (code !== 'cancelled') outcomes[item.lane] = {reason: {code: 'large'}}; continue; }
+      outcomes[item.lane] = {reason: {code: 'pending'}};
+      item.signature = c.lanes.get(item.key);
+      wanted.add(item.signature);
+      queue.push(item);
     }
-    // Smallest first: Triskel answers those soonest, so no large realm, which
-    // may run to the route's deadline, holds the rest back.
-    queue.sort((a, b) => a.graph.nodes.length - b.graph.nodes.length);
+    for (const [signature, flight] of flights) if (!wanted.has(signature)) { flight.controller.abort(); flights.delete(signature); }
+    // Realms already in flight first, then smallest first: Triskel answers
+    // those soonest, so no large realm holds the rest back.
+    queue.sort((a, b) => flights.has(b.signature) - flights.has(a.signature) || a.graph.nodes.length - b.graph.nodes.length);
     // What the drawn layout shows: an accepted realm waits for its swap.
     const drawn = Uint8Array.from(outcomes, outcome => (outcome.result ? 1 : 0));
     const shown = () => flowGraphEngine(state, outcomes.map((outcome, lane) => (outcome.result && !drawn[lane] ? {reason: {code: 'pending'}} : outcome)), report);
@@ -191,11 +211,26 @@ function createFlowGraphPipeline(post) {
         post({id, type: 'layout', layout, swap: true}, transfer);
       } else post({id, type: 'engine', engine: shown()});
     };
+    /** The answer for one realm: the request in flight for the same realm,
+     * or a new one, which takes its place. */
+    const ask = item => {
+      let flight = flights.get(item.signature);
+      if (!flight) {
+        const signal = new AbortController();
+        flight = {controller: signal, answer: graphLayoutClient.layOut([item.graph], {all: true, signal: signal.signal})};
+        flights.set(item.signature, flight);
+        flight.answer.then(() => { if (flights.get(item.signature) === flight) flights.delete(item.signature); });
+      }
+      return flight.answer;
+    };
     swap();
-    const run = async () => {
+    post({id, type: 'triskel', running: queue.length > 0});
+    const work = async () => {
       while (queue.length && live()) {
+        // Cancel leaves every realm not yet answered layered.
+        if (c.halted === run) { for (const item of queue.splice(0)) outcomes[item.lane] = {reason: {code: 'cancelled'}}; break; }
         const item = queue.shift();
-        const answer = await graphLayoutClient.layOut([item.graph]);
+        const answer = await ask(item);
         if (!live()) return;
         outcomes[item.lane] = answer.outcomes[0];
         report.revision = answer.revision ?? report.revision;
@@ -204,8 +239,28 @@ function createFlowGraphPipeline(post) {
         swap();
       }
     };
-    await Promise.all(Array.from({length: FLOW_GRAPH_TRISKEL_PARALLEL}, run));
+    await Promise.all(Array.from({length: FLOW_GRAPH_TRISKEL_PARALLEL}, work));
+    if (!live()) return;
+    if (c.halted === run) for (const item of queue.splice(0)) outcomes[item.lane] = {reason: {code: 'cancelled'}};
     swap(true);
+    post({id, type: 'triskel', running: false});
+  }
+
+  /** The page asked for every realm (`all`): one more run over the layout
+   * on screen, which keeps the answers it has. */
+  function triskelAll() {
+    const c = current;
+    if (!c?.state || !c.triskel) return;
+    c.all = true;
+    triskel(c.fold, epoch);
+  }
+  /** Stops Triskel: the requests in flight end `cancelled`, and so does
+   * each realm still queued. */
+  function cancel() {
+    const c = current;
+    if (!c) return;
+    c.all = false; c.halted = c.runs;
+    stopFlights();
   }
 
   function refold({id, generation, collapse, expanded, measure}) {
@@ -276,7 +331,7 @@ function createFlowGraphPipeline(post) {
     post({id, type: 'find', fold: c?.fold ?? null, needle, matches: found}, [found.buffer]);
   }
 
-  const ops = {load, refold, lineage, find, abort: () => { epoch += 1; reads += 1; controller?.abort(); }};
+  const ops = {load, refold, triskel: triskelAll, cancel, lineage, find, abort: () => { epoch += 1; reads += 1; controller?.abort(); stopFlights(); }};
   return {
     async handle(message) {
       try {

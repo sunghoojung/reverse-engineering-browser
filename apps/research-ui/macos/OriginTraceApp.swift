@@ -132,8 +132,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let analystRunnerURL: URL
   private let analystRunnerCoreURL: URL
   private var tasks = SchemeTaskRegistry()
-  private let deobfuscationService: NativeDeobfuscationService
-  private let wasmService: NativeWasmService
+  // Forwarded reads still in flight, by request. Each entry's reply holds its
+  // request, so the identifier is not reused while the entry exists. Main thread only.
+  private var forwarded: [ObjectIdentifier: StoredEvidenceBackend.Forwarding] = [:]
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let storedBackend: StoredEvidenceBackend
@@ -141,6 +142,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let analystRunnerLock = NSLock()
   private var activeAnalystProcess: Process?
   private var activeAnalystRunID: Int?
+  private var activeAnalystTask: ObjectIdentifier?
   private var analystCancelRequested = false
 
   init(
@@ -162,8 +164,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.analystRunnerURL = analystRunnerURL
     self.analystRunnerCoreURL = analystRunnerCoreURL
     decoderService = NativeDecoderService(executableURL: decoderExecutableURL)
-    deobfuscationService = NativeDeobfuscationService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceDeobfuscator"))
-    wasmService = NativeWasmService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceWasmInspector"))
     self.brokerSocketURL = brokerSocketURL
     self.storedBackend = storedBackend
     self.demoEvidenceEnabled = demoEvidenceEnabled
@@ -187,6 +187,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     activeAnalystProcess?.terminate()
     activeAnalystProcess = nil
     activeAnalystRunID = nil
+    activeAnalystTask = nil
     analystRunnerLock.unlock()
   }
 
@@ -203,7 +204,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       // The idle backend reads the stores; this app names the broker and mode.
       let overlay = StoredEvidenceBackend.isEventPoll(urlSchemeTask.request)
         ? eventPollOverlay() : nil
-      storedBackend.forward(urlSchemeTask.request, overlay: overlay) { body, status, contentType, headers in
+      forwarded[ObjectIdentifier(urlSchemeTask)] = storedBackend.forward(urlSchemeTask.request, overlay: overlay) { body, status, contentType, headers in
         self.send(body, contentType: contentType, status: status, headers: headers, to: urlSchemeTask)
       }
       return
@@ -219,7 +220,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_model.js", "/flow_graph_layout.js", "/flow_graph_worker.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/traffic_copy.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_model.js", "/flow_graph_layout.js", "/flow_graph_worker.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/wasm_inspection.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/traffic_copy.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -251,40 +252,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "error": "Offline Wasm runs need a live workspace. Nothing ran.",
           "code": "dependency_unavailable", "details": [:]
         ]), "application/json; charset=utf-8", 503, [:])
-      case "/api/source-facts":
-        // The stored-evidence scheme has no reviewed source-facts adapter.
-        // Live workspaces use the bundled Rust HTTP backend instead.
-        response = (try JSONSerialization.data(withJSONObject: [
-          "error": "JavaScript facts are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
-          "code": "dependency_unavailable", "details": [:]
-        ]), "application/json; charset=utf-8", 503, [:])
-      case "/api/deobfuscation":
-        handleDeobfuscation(requestURL, to: urlSchemeTask)
-        return
-      case "/api/wasm":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "WASM inspection requires GET")
-        }
-        handleWasm(requestURL, to: urlSchemeTask)
-        return
-      case "/api/artifact-map":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "The artifact map requires GET")
-        }
-        handleArtifactMap(requestURL, to: urlSchemeTask)
-        return
-      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "WASM graph routes require GET")
-        }
-        handleWasmGraph(requestURL, to: urlSchemeTask)
-        return
-      case "/api/wasm/diff":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "The WASM module diff requires GET")
-        }
-        handleWasmDiff(requestURL, to: urlSchemeTask)
-        return
       case "/api/decoder":
         response = (try decoderService.state(), "application/json; charset=utf-8", 200, [:])
       case "/api/decoder/actions":
@@ -383,6 +350,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
     tasks.stop(urlSchemeTask)
+    // A run has no deadline, so the page that started it ending it is what
+    // frees the runner when nothing is left to read its result.
+    analystRunnerLock.lock()
+    if activeAnalystTask == ObjectIdentifier(urlSchemeTask) {
+      analystCancelRequested = true
+      activeAnalystProcess?.terminate()
+    }
+    analystRunnerLock.unlock()
+    // A page that aborts a forwarded analysis stops its backend work too.
+    forwarded.removeValue(forKey: ObjectIdentifier(urlSchemeTask))?.cancel()
   }
 
   private func healthResponse() throws -> Data {
@@ -834,28 +811,36 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func apiCollectionRequestBody(_ request: URLRequest) throws -> Data {
+    try requestBody(
+      request, label: "API Collection action", maximumBytes: 2 * 1_024 * 1_024 + 64 * 1_024
+    )
+  }
+
+  /// A request body read whole; nil `maximumBytes` reads one of any size.
+  private func requestBody(_ request: URLRequest, label: String, maximumBytes: Int?) throws -> Data {
+    let fits = { (count: Int) in maximumBytes.map { count <= $0 } ?? true }
     if let body = request.httpBody {
-      guard body.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
-        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      guard fits(body.count) else {
+        throw LocalHTTPError(status: 413, message: "\(label) is oversized")
       }
       return body
     }
     guard let stream = request.httpBodyStream else {
-      throw LocalHTTPError(status: 400, message: "API Collection action body is missing")
+      throw LocalHTTPError(status: 400, message: "\(label) body is missing")
     }
     stream.open()
     defer { stream.close() }
     var data = Data()
-    var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
+    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
     while stream.hasBytesAvailable {
       let count = stream.read(&buffer, maxLength: buffer.count)
       if count < 0 {
-        throw LocalHTTPError(status: 400, message: "API Collection action body could not be read")
+        throw LocalHTTPError(status: 400, message: "\(label) body could not be read")
       }
       if count == 0 { break }
       data.append(buffer, count: count)
-      guard data.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
-        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      guard fits(data.count) else {
+        throw LocalHTTPError(status: 413, message: "\(label) is oversized")
       }
     }
     return data
@@ -954,23 +939,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
+  // The library has no byte limit and a run no deadline or size limit, as in
+  // the Rust backend's workspace::Kind::Analyst.
   private func localAnalystLimits() -> [String: Int] {
     [
       "folders": 32,
       "files": 64,
       "folder_depth": 4,
-      "file_bytes": 32 * 1_024,
-      "total_file_bytes": 512 * 1_024,
-      "document_bytes": 1_024 * 1_024,
       "variables": 32,
       "variable_value_bytes": 4 * 1_024,
       "variable_bytes": 16 * 1_024,
-      "evidence_bytes": 768 * 1_024,
-      "selected_artifact_bytes": 64 * 1_024,
-      "execution_timeout_ms": 2_000,
-      "logs": 64,
-      "log_bytes": 1_024,
-      "result_bytes": 32 * 1_024,
     ]
   }
 
@@ -997,11 +975,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let controls = content.unicodeScalars.contains {
       $0.value < 0x20 && ![0x09, 0x0a, 0x0d].contains($0.value)
     }
-    guard content.utf8.count <= 32 * 1_024, !controls else {
-      throw LocalHTTPError(
-        status: 400,
-        message: "Analyst file content is oversized or contains controls"
-      )
+    guard !controls else {
+      throw LocalHTTPError(status: 400, message: "Analyst file content contains controls")
     }
     return (content, content.utf8.count)
   }
@@ -1111,9 +1086,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       ),
       try apiCollectionInteger(document["contract_version"], label: "Analyst contract version") == 1,
       document["document_kind"] as? String == "local-analyst-workspace",
-      NSDictionary(dictionary: document["limits"] as? [String: Any] ?? [:]).isEqual(
-        to: localAnalystLimits()
-      ),
+      // A document written under other limits still reads; the next save
+      // records these.
+      document["limits"] is [String: Any],
       let rawFolders = document["folders"] as? [Any],
       (1...32).contains(rawFolders.count),
       let rawFiles = document["files"] as? [Any],
@@ -1168,7 +1143,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
     }
     var fileIDs = Set<Int>()
-    var totalContentBytes = 0
     for file in files {
       let identifier = file["id"] as! Int
       let folderID = file["folder_id"] as! Int
@@ -1178,10 +1152,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       else {
         throw LocalHTTPError(status: 400, message: "Analyst file ID, folder, or name is invalid")
       }
-      totalContentBytes += file["content_bytes"] as! Int
-    }
-    guard totalContentBytes <= 512 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst file content exceeds 512 KiB")
     }
     let normalized: [String: Any] = [
       "contract_version": 1,
@@ -1192,9 +1162,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "files": files.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
       "limits": localAnalystLimits(),
     ]
-    guard try JSONSerialization.data(withJSONObject: normalized).count <= 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst workspace document exceeds 1 MiB")
-    }
     if generation == 0 {
       guard updatedAt == 0, folders.count == 1, files.isEmpty else {
         throw LocalHTTPError(status: 400, message: "Analyst workspace generation zero must be empty")
@@ -1221,26 +1188,22 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     defer { Darwin.close(descriptor) }
     var metadata = stat()
     guard fstat(descriptor, &metadata) == 0,
-      (metadata.st_mode & S_IFMT) == S_IFREG,
-      metadata.st_size <= 1_024 * 1_024
+      (metadata.st_mode & S_IFMT) == S_IFREG
     else {
-      throw LocalHTTPError(status: 500, message: "Analyst workspace store must be a bounded regular file")
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store must be a regular file")
     }
     do {
-      let maximumBytes = 1_024 * 1_024
       var data = Data()
-      var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
-      while data.count <= maximumBytes {
-        let requested = min(buffer.count, maximumBytes + 1 - data.count)
-        let count = Darwin.read(descriptor, &buffer, requested)
+      data.reserveCapacity(Int(metadata.st_size))
+      var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+      while true {
+        let count = Darwin.read(descriptor, &buffer, buffer.count)
         if count < 0 {
+          if errno == EINTR { continue }
           throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be read")
         }
         if count == 0 { break }
         data.append(buffer, count: count)
-      }
-      guard data.count <= maximumBytes else {
-        throw LocalHTTPError(status: 500, message: "Analyst workspace store exceeds 1 MiB")
       }
       return try decodeLocalAnalyst(data)
     } catch let error as LocalHTTPError where error.status == 500 {
@@ -1265,18 +1228,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func writeLocalAnalyst(_ workspace: [String: Any], lease: NativeWorkspaceLease) throws {
     var data = try JSONSerialization.data(withJSONObject: workspace)
     data.append(0x0a)
-    guard data.count <= 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst workspace store exceeds 1 MiB")
-    }
     try lease.write(data)
-  }
-
-  private func localAnalystRequestBody(_ request: URLRequest) throws -> Data {
-    let data = try apiCollectionRequestBody(request)
-    guard data.count <= 1_024 * 1_024 + 64 * 1_024 else {
-      throw LocalHTTPError(status: 413, message: "Analyst workspace action is oversized")
-    }
-    return data
   }
 
   private func replaceLocalAnalyst(_ action: [String: Any]) throws -> (Data, Int, [String: String]) {
@@ -1291,7 +1243,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       action["expected_generation"], label: "Expected analyst workspace generation"
     )
     let lease = try NativeWorkspaceLease(
-      at: localAnalystStoreURL, label: "Analyst workspace", maximumBytes: 1_024 * 1_024
+      at: localAnalystStoreURL, label: "Analyst workspace", maximumBytes: nil
     )
     defer { lease.close() }
     let current = try decodeLocalAnalyst(lease.read())
@@ -1365,6 +1317,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func normalizeLocalAnalystRun(_ action: [String: Any]) throws -> (Data, Int) {
+    guard try apiCollectionInteger(action["protocol_version"], label: "Analyst protocol version") == 2
+    else {
+      throw LocalHTTPError(
+        status: 400,
+        message: "Analyst runs use protocol 2, which names the selected artifact by artifact_id and sha256"
+      )
+    }
     guard apiCollectionExactKeys(
       action,
       [
@@ -1372,14 +1331,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "source", "variables", "evidence", "confirmed", "confirmed_sensitive",
       ]
     ), action["action"] as? String == "run_local_analyst_script",
-      try apiCollectionInteger(action["protocol_version"], label: "Analyst protocol version") == 1,
       action["confirmed"] as? Bool == true,
+      let confirmedSensitive = action["confirmed_sensitive"] as? Bool,
       let source = action["source"] as? String,
       !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-      source.utf8.count <= 32 * 1_024,
       let variables = action["variables"] as? [String: Any],
       variables.count <= 32,
-      let evidence = action["evidence"] as? [String: Any],
+      var evidence = action["evidence"] as? [String: Any],
       apiCollectionExactKeys(
         evidence,
         [
@@ -1387,15 +1345,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "selected_artifact", "summary",
         ]
       ),
-      let events = evidence["events"] as? [Any], events.count <= 500,
-      let artifacts = evidence["artifacts"] as? [Any], artifacts.count <= 500,
-      let traceEdges = evidence["trace_edges"] as? [Any], traceEdges.count <= 1_000,
-      let profiles = evidence["signal_profiles"] as? [Any], profiles.count <= 256,
+      evidence["events"] is [Any], evidence["artifacts"] is [Any],
+      evidence["trace_edges"] is [Any], evidence["signal_profiles"] is [Any],
       evidence["vm_analysis"] is NSNull || evidence["vm_analysis"] is [String: Any],
       evidence["selected_artifact"] is NSNull || evidence["selected_artifact"] is [String: Any],
       evidence["summary"] is [String: Any]
     else {
-      throw LocalHTTPError(status: 400, message: "Analyst run action is malformed or oversized")
+      throw LocalHTTPError(status: 400, message: "Analyst run action is malformed")
     }
     let runID = try apiCollectionInteger(action["run_id"], label: "Analyst run ID", minimum: 1)
     let scriptID = try apiCollectionInteger(
@@ -1415,21 +1371,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
       variableBytes += name.utf8.count + value.utf8.count
     }
-    guard variableBytes <= 16 * 1_024,
-      try JSONSerialization.data(withJSONObject: evidence).count <= 768 * 1_024
-    else {
-      throw LocalHTTPError(status: 400, message: "Analyst variables or evidence are oversized")
-    }
-    if let selected = evidence["selected_artifact"] as? [String: Any] {
-      guard let content = selected["content"] as? String,
-        content.utf8.count <= 64 * 1_024,
-        selected["sensitive"] as? Bool != true || action["confirmed_sensitive"] as? Bool == true
-      else {
-        throw LocalHTTPError(
-          status: 400,
-          message: "Confirm bounded sensitive selected artifact bytes before running"
-        )
-      }
+    guard variableBytes <= 16 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "Analyst variables exceed 16 KiB")
     }
     let workspace = try loadLocalAnalyst()
     guard workspace["generation"] as? Int == generation,
@@ -1445,8 +1388,59 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         message: "Only the current saved JavaScript analyst script can execute"
       )
     }
+    // The script reads the stored, SHA-256 verified bytes of the artifact the
+    // page selected, whatever their size, and its manifest record.
+    var selectedBytes = Data()
+    if let reference = evidence["selected_artifact"] as? [String: Any] {
+      guard apiCollectionExactKeys(reference, ["artifact_id", "sha256"]),
+        let artifactID = reference["artifact_id"] as? String,
+        let sha256 = reference["sha256"] as? String,
+        sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+      else {
+        throw LocalHTTPError(status: 400, message: "Analyst selected artifact reference is invalid")
+      }
+      guard let artifact = try artifactEntries().first(where: {
+        $0["artifact_id"] as? String == artifactID
+      }) else {
+        throw LocalHTTPError(status: 404, message: "Artifact not found")
+      }
+      // The kinds Sources never lists are read only with their own evidence,
+      // never by a script, as in the Rust backend's analyst::Run::admit.
+      guard ![
+        "canvas_data_url", "request_body", "request_target", "request_headers",
+        "response_headers", "cookie_list", "stack",
+      ].contains(artifact["kind"] as? String ?? "") else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "Only an artifact Sources lists can be a run's selected artifact"
+        )
+      }
+      guard artifact["sha256"] as? String == sha256 else {
+        throw LocalHTTPError(
+          status: 409,
+          message: "The selected artifact changed; select it again before running"
+        )
+      }
+      guard artifact["sensitive"] as? Bool != true || confirmedSensitive else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "Confirm inclusion of sensitive selected artifact bytes before running"
+        )
+      }
+      selectedBytes = try verifiedArtifactBytes(artifact)
+      var metadata: [String: Any] = [:]
+      for field in [
+        "protocol_version", "artifact_id", "session_id", "navigation_id", "frame_id",
+        "parent_artifact_id", "creator_event_id", "execution_context_id", "capture_origin",
+        "kind", "origin", "url", "mime_type", "byte_size", "sha256", "sensitive",
+      ] {
+        if let value = artifact[field], !(value is NSNull) { metadata[field] = value }
+      }
+      metadata["byte_size"] = selectedBytes.count
+      evidence["selected_artifact"] = metadata
+    }
     let runnerInput: [String: Any] = [
-      "protocol_version": 1,
+      "protocol_version": 2,
       "run_id": runID,
       "script_id": scriptID,
       "library_generation": generation,
@@ -1454,11 +1448,29 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "variables": variables,
       "evidence": evidence,
     ]
-    let data = try JSONSerialization.data(withJSONObject: runnerInput)
-    guard data.count <= 800 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst runner input exceeds 800 KiB")
-    }
+    // Runner input v2: one JSON line, then the selected artifact's bytes.
+    var data = try JSONSerialization.data(withJSONObject: runnerInput)
+    data.reserveCapacity(data.count + 1 + selectedBytes.count)
+    data.append(0x0a)
+    data.append(selectedBytes)
     return (data, runID)
+  }
+
+  /// A stored artifact's whole content, checked against its manifest's byte
+  /// size and SHA-256 before anything reads it.
+  private func verifiedArtifactBytes(_ artifact: [String: Any]) throws -> Data {
+    guard let byteSize = artifact["byte_size"] as? Int,
+      let sha256 = artifact["sha256"] as? String
+    else {
+      throw LocalHTTPError(status: 500, message: "Artifact manifest record is malformed")
+    }
+    let data = try Data(contentsOf: artifactContentURL(artifact), options: .mappedIfSafe)
+    guard data.count == byteSize,
+      SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256
+    else {
+      throw LocalHTTPError(status: 500, message: "Artifact content does not match its manifest")
+    }
+    return data
   }
 
   private func localAnalystFailure(
@@ -1480,7 +1492,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "result_truncated": false,
         "logs": [],
         "logs_truncated": false,
-        "duration_ms": min(max(duration, 0), 7_000),
+        "duration_ms": max(duration, 0),
         "error": String(message.prefix(512)),
       ]
     )
@@ -1490,8 +1502,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     _ data: Data,
     action: [String: Any]
   ) throws -> Data {
-    guard data.count <= 128 * 1_024,
-      let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       apiCollectionExactKeys(
         result,
         [
@@ -1509,15 +1520,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         == apiCollectionInteger(action["library_generation"], label: "Analyst generation"),
       let ok = result["ok"] as? Bool,
       let outcome = result["outcome"] as? String,
-      ["completed", "failed", "cancelled", "timed_out"].contains(outcome),
+      ["completed", "failed", "cancelled"].contains(outcome),
       ok == (outcome == "completed"),
       let resultType = result["result_type"] as? String, resultType.utf8.count <= 64,
-      let resultText = result["result_text"] as? String, resultText.utf8.count <= 32 * 1_024,
+      result["result_text"] is String,
       result["result_truncated"] is Bool,
-      let logs = result["logs"] as? [[String: Any]], logs.count <= 64,
+      let logs = result["logs"] as? [[String: Any]],
       result["logs_truncated"] is Bool,
-      let duration = try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration"),
-      duration <= 7_000,
+      (try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration")) != nil,
       let error = result["error"] as? String, error.utf8.count <= 512,
       ok ? error.isEmpty : !error.isEmpty
     else {
@@ -1527,8 +1537,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       guard apiCollectionExactKeys(log, ["level", "text"]),
         let level = log["level"] as? String,
         ["log", "info", "warn", "error"].contains(level),
-        let text = log["text"] as? String,
-        text.utf8.count <= 1_024
+        log["text"] is String
       else {
         throw LocalHTTPError(status: 422, message: "Analyst runner returned a malformed log")
       }
@@ -1536,8 +1545,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return data
   }
 
+  /// Runs until the script settles, the researcher cancels it, or the page
+  /// that asked goes away (`task`); there is no deadline.
   private func runLocalAnalyst(
-    _ action: [String: Any]
+    _ action: [String: Any],
+    task: ObjectIdentifier
   ) throws -> Data {
     guard FileManager.default.isExecutableFile(atPath: analystRunnerURL.path),
       FileManager.default.isReadableFile(atPath: analystRunnerCoreURL.path)
@@ -1566,6 +1578,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       try process.run()
       activeAnalystProcess = process
       activeAnalystRunID = normalized.1
+      activeAnalystTask = task
       analystCancelRequested = false
       analystRunnerLock.unlock()
     } catch {
@@ -1594,23 +1607,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       outputGroup.leave()
     }
     let started = Date()
-    // The deadline covers the input too: a runner that never reads it must not
-    // hold this write, and with it the only runner slot. A write after the
-    // runner ended fails with EPIPE instead of signalling this app.
+    // The input is written apart from this wait, so a runner that never reads
+    // it can still be cancelled. A write after the runner ended fails with
+    // EPIPE instead of signalling this app.
     let input = inputPipe.fileHandleForWriting
     _ = fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1)
     DispatchQueue.global(qos: .userInitiated).async {
       try? input.write(contentsOf: normalized.0)
       try? input.close()
     }
-    let timedOut = terminated.wait(timeout: .now() + 2.5) == .timedOut
-    if timedOut {
-      process.terminate()
-      if terminated.wait(timeout: .now() + 0.25) == .timedOut {
-        kill(process.processIdentifier, SIGKILL)
-        _ = terminated.wait(timeout: .now() + 0.25)
-      }
-    }
+    terminated.wait()
     // Ending the runner closes its output, unless something it started still
     // holds the pipe. The slot is released either way.
     let drained = outputGroup.wait(timeout: .now() + 1) == .success
@@ -1620,6 +1626,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     if activeAnalystProcess === process {
       activeAnalystProcess = nil
       activeAnalystRunID = nil
+      activeAnalystTask = nil
       analystCancelRequested = false
     }
     analystRunnerLock.unlock()
@@ -1628,14 +1635,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         action: action,
         outcome: "cancelled",
         message: "Analyst script cancelled",
-        duration: duration
-      )
-    }
-    if timedOut {
-      return try localAnalystFailure(
-        action: action,
-        outcome: "timed_out",
-        message: "Analyst script exceeded the 2 second execution limit",
         duration: duration
       )
     }
@@ -1723,7 +1722,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   ) {
     let action: [String: Any]
     do {
-      let body = try localAnalystRequestBody(request)
+      let body = try requestBody(request, label: "Analyst action", maximumBytes: nil)
       guard let value = try JSONSerialization.jsonObject(with: body) as? [String: Any],
         let kind = value["action"] as? String
       else {
@@ -1764,7 +1763,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         self.send(
-          try self.runLocalAnalyst(action),
+          try self.runLocalAnalyst(action, task: ObjectIdentifier(task)),
           contentType: "application/json; charset=utf-8",
           status: 200,
           headers: [:],
@@ -1921,232 +1920,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
-  private func completeDeobfuscation(_ body: Data, status: Int, to task: WKURLSchemeTask) {
-    send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task)
-  }
-
-  private func handleArtifactMap(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let ids = items.filter { $0.name == "artifact_id" }
-        guard items.count == 1, ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
-          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
-          throw NativeDecoderError(status: 400, message: "One canonical nonzero artifact ID is required")
-        }
-        let body = try self.wasmService.artifactMap(root: self.artifactStoreURL, artifactID: id)
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "The artifact map is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  private func handleWasmGraph(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let valueFlow = ["function", "offset", "operand", "local", "direction", "max_nodes", "max_depth", "interprocedural"]
-        let allowed = url.path == "/api/wasm/pseudocode" ? ["artifact_id", "function", "line_offset", "line_limit"]
-          : url.path == "/api/wasm/graph" ? ["artifact_id", "function"]
-          : url.path == "/api/wasm/identification" ? ["artifact_id", "row_offset", "row_limit"]
-          : url.path == "/api/wasm/value-flow" ? ["artifact_id"] + valueFlow : ["artifact_id"]
-        let ids = items.filter { $0.name == "artifact_id" }
-        guard items.allSatisfy({ allowed.contains($0.name) }), ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
-          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
-          throw NativeDecoderError(status: 400, message: "WASM graph routes take one canonical artifact_id and, for the graph route, function")
-        }
-        let arguments: [String]
-        let schema: String
-        if url.path == "/api/wasm/pseudocode" {
-          let functions = items.filter { $0.name == "function" }
-          guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
-            throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")
-          }
-          // The helper refuses a window past the line count or the line limit.
-          var window: [String] = []
-          for name in ["line_offset", "line_limit"] {
-            let values = items.filter { $0.name == name }
-            guard values.count <= 1 else { throw NativeDecoderError(status: 400, message: "Specify \(name) only once") }
-            if let value = values.first?.value {
-              guard let number = UInt32(value), name == "line_offset" || number > 0 else {
-                throw NativeDecoderError(status: 400, message: "\(name) is an unsigned 32-bit integer")
-              }
-              window += ["--\(name.replacingOccurrences(of: "_", with: "-"))", String(number)]
-            }
-          }
-          arguments = ["--pseudocode-function", function] + window
-          schema = "wasm-pseudocode-v1"
-        } else if url.path == "/api/wasm/value-flow" {
-          // The Rust provider validates every parameter; values are ASCII
-          // digits or words, so the query passes through as it came.
-          let names = items.map(\.name)
-          guard Set(names).count == names.count, items.allSatisfy({ ($0.value ?? "").range(of: #"^[a-z0-9]{1,20}$"#, options: .regularExpression) != nil }) else {
-            throw NativeDecoderError(status: 400, message: "WASM value flow takes each parameter once, as a number or a word")
-          }
-          let query = items.filter { $0.name != "artifact_id" }.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
-          arguments = ["--value-flow", query]
-          schema = "wasm-value-flow-v1"
-        } else if url.path == "/api/wasm/graph" {
-          let functions = items.filter { $0.name == "function" }
-          guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
-            throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")
-          }
-          arguments = ["--graph-function", function]
-          schema = "wasm-block-graph-v1"
-        } else if url.path == "/api/wasm/identification" {
-          // The same suggestion window as the loopback route: one value each,
-          // canonical, with the backend's 1024-row page as the ceiling.
-          var window: [String] = []
-          for (name, flag, minimum) in [("row_offset", "--row-offset", 0), ("row_limit", "--row-limit", 1)] {
-            let values = items.filter { $0.name == name }
-            guard values.count <= 1 else {
-              throw NativeDecoderError(status: 400, message: "WASM identification takes one \(name)")
-            }
-            if let raw = values.first?.value {
-              guard let value = Int(raw), value >= minimum, String(value) == raw, name != "row_limit" || value <= 1024 else {
-                throw NativeDecoderError(status: 400, message: name == "row_limit" ? "row_limit is 1 to 1024" : "row_offset is an unsigned integer")
-              }
-              window += [flag, raw]
-            }
-          }
-          arguments = ["--identification"] + window
-          schema = "wasm-identification-v1"
-        } else {
-          arguments = ["--functions"]
-          schema = "wasm-function-index-v1"
-        }
-        let body = try self.wasmService.graphDocument(root: self.artifactStoreURL, artifactID: id, extraArguments: arguments, schema: schema)
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "WASM graph decoding is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  /// The helper validates the page and statuses again; this only refuses a
-  /// parameter it would not pass on, so nothing unchecked reaches its argv.
-  private func handleWasmDiff(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let allowed = ["artifact_id", "compare_artifact_id", "status", "row_offset", "row_limit"]
-        func one(_ name: String, pattern: String, required: Bool) throws -> String? {
-          let values = items.filter { $0.name == name }
-          if values.isEmpty, !required { return nil }
-          guard values.count == 1, let value = values[0].value, value.count <= 128,
-            value.range(of: pattern, options: .regularExpression) != nil else {
-            throw NativeDecoderError(status: 400, message: "The WASM module diff takes one canonical artifact_id and compare_artifact_id with optional status, row_offset and row_limit")
-          }
-          return value
-        }
-        guard items.allSatisfy({ allowed.contains($0.name) }) else {
-          throw NativeDecoderError(status: 400, message: "The WASM module diff takes artifact_id and compare_artifact_id with optional status, row_offset and row_limit")
-        }
-        let canonical = #"^[1-9][0-9]{0,19}$"#
-        guard let id = try one("artifact_id", pattern: canonical, required: true), UInt64(id) != nil,
-          let other = try one("compare_artifact_id", pattern: canonical, required: true), UInt64(other) != nil else {
-          throw NativeDecoderError(status: 400, message: "Artifact IDs are canonical nonzero unsigned 64-bit integers")
-        }
-        var arguments = ["--diff-with", other]
-        if let status = try one("status", pattern: #"^[a-z]+(,[a-z]+)*$"#, required: false) { arguments += ["--status", status] }
-        if let offset = try one("row_offset", pattern: #"^[0-9]{1,10}$"#, required: false) { arguments += ["--row-offset", offset] }
-        if let limit = try one("row_limit", pattern: #"^[0-9]{1,4}$"#, required: false) { arguments += ["--row-limit", limit] }
-        let body = try self.wasmService.graphDocument(root: self.artifactStoreURL, artifactID: id, extraArguments: arguments, schema: "wasm-module-diff-v1")
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "The WASM module diff is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  private func handleWasm(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let ids = items.filter { $0.name == "artifact_id" }
-        guard ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
-          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
-          throw NativeDecoderError(status: 400, message: "One canonical nonzero artifact ID is required")
-        }
-        let body = try self.wasmService.inspect(root: self.artifactStoreURL, artifactID: id)
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "WASM inspection is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  private func handleDeobfuscation(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let artifactID = query.first(where: { $0.name == "artifact_id" })?.value
-        let scriptID = query.first(where: { $0.name == "script_id" })?.value
-        let mode = query.first(where: { $0.name == "mode" })?.value ?? "analysis"
-        guard mode == "analysis" || mode == "derived" else {
-          throw NativeDecoderError(status: 400, message: "Deobfuscation mode is invalid")
-        }
-        guard artifactID != nil || scriptID != nil else {
-          throw NativeDecoderError(status: 400, message: "Script ID or artifact ID is required")
-        }
-        guard artifactID == nil || scriptID == nil else {
-          throw NativeDecoderError(status: 400, message: "Specify only one source identifier")
-        }
-        guard scriptID == nil else {
-          throw NativeDecoderError(status: 409, message: "Live debugging is not enabled")
-        }
-        guard let id = artifactID, UInt64(id) != nil,
-          let artifact = try self.artifactEntries().first(where: { ($0["artifact_id"] as? String) == id }),
-          let relativePath = artifact["content_path"] as? String
-        else { throw NativeDecoderError(status: 404, message: "Artifact not found") }
-        guard artifact["kind"] as? String == "javascript" else {
-          throw NativeDecoderError(status: 400, message: "Artifact is not JavaScript")
-        }
-        let root = self.artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
-        let path = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
-        guard path.path.hasPrefix(root.path + "/") else {
-          throw NativeDecoderError(status: 400, message: "Artifact path escapes the store")
-        }
-        let file = try FileHandle(forReadingFrom: path)
-        defer { try? file.close() }
-        let source = try file.read(upToCount: NativeDeobfuscationService.maximumSourceBytes + 1) ?? Data()
-        guard source.count == artifact["byte_size"] as? Int else {
-          throw NativeDecoderError(status: 400, message: "Artifact is oversized or does not match its manifest")
-        }
-        let assumptionItems = query.filter { $0.name == "assume_intrinsics" }
-        let assumption = assumptionItems.first?.value ?? "0"
-        guard assumptionItems.count <= 1, assumption == "0" || assumption == "1" else {
-          throw NativeDecoderError(status: 400, message: "Intrinsic assumption must be 0 or 1")
-        }
-        let response = try self.deobfuscationService.analyze(source: source, artifactID: id, mode: mode, assumeIntrinsics: assumption == "1")
-        self.completeDeobfuscation(response, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "Artifact analysis is unavailable: \(error.localizedDescription)"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
   private func artifactContentResponse(for requestURL: URL) throws -> (Data, [String: String]) {
     let components = requestURL.path.split(separator: "/")
     guard components.count == 4,
@@ -2163,7 +1936,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let artifactID = String(components[2])
     guard artifactID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
       let artifact = try artifactEntries().first(where: { ($0["artifact_id"] as? String) == artifactID }),
-      let relativePath = artifact["content_path"] as? String,
       let byteSize = artifact["byte_size"] as? Int,
       byteSize >= 0
     else {
@@ -2174,15 +1946,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       )
     }
 
-    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
-    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
-    guard contentURL.path.hasPrefix(root.path + "/") else {
-      throw NSError(
-        domain: "OriginTrace",
-        code: 6,
-        userInfo: [NSLocalizedDescriptionKey: "Artifact content path escapes the artifact store"]
-      )
-    }
+    let contentURL = try artifactContentURL(artifact)
     let attributes = try FileManager.default.attributesOfItem(atPath: contentURL.path)
     guard let storedSize = attributes[.size] as? NSNumber, storedSize.intValue == byteSize else {
       throw NSError(
@@ -2196,7 +1960,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let requestedOffset = query.first(where: { $0.name == "offset" })?.value.flatMap(Int.init) ?? 0
     let requestedLimit = query.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 2 * 1024 * 1024
     let offset = max(0, requestedOffset)
-    let limit = min(max(requestedLimit, 1), 2 * 1024 * 1024)
+    // Any range, as the Rust backend serves it: Sources reads a whole artifact in one request.
+    let limit = max(requestedLimit, 1)
     guard offset <= byteSize else {
       throw NSError(
         domain: "OriginTrace",
@@ -2207,7 +1972,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let handle = try FileHandle(forReadingFrom: contentURL)
     defer { try? handle.close() }
     try handle.seek(toOffset: UInt64(offset))
-    let data = try handle.read(upToCount: limit) ?? Data()
+    let data = try handle.read(upToCount: min(limit, byteSize - offset)) ?? Data()
     return (
       data,
       [
@@ -2219,6 +1984,28 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "X-Artifact-Truncated": offset + data.count < byteSize ? "1" : "0",
       ]
     )
+  }
+
+  /// The stored file a manifest record names, refused when its path leaves
+  /// the artifact store.
+  private func artifactContentURL(_ artifact: [String: Any]) throws -> URL {
+    guard let relativePath = artifact["content_path"] as? String else {
+      throw NSError(
+        domain: "OriginTrace",
+        code: 5,
+        userInfo: [NSLocalizedDescriptionKey: "Artifact not found"]
+      )
+    }
+    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
+    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
+    guard contentURL.path.hasPrefix(root.path + "/") else {
+      throw NSError(
+        domain: "OriginTrace",
+        code: 6,
+        userInfo: [NSLocalizedDescriptionKey: "Artifact content path escapes the artifact store"]
+      )
+    }
+    return contentURL
   }
 
   private func vmAnalysisResponse(for requestURL: URL) throws -> Data {
@@ -2559,6 +2346,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       return
     }
     guard tasks.finish(task) else { return }
+    forwarded.removeValue(forKey: ObjectIdentifier(task))
     guard let requestURL = task.request.url,
       let response = HTTPURLResponse(
         url: requestURL,
@@ -3741,7 +3529,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
             const updated = await replacement.json();
             if (!isLocalAnalystWorkspace(updated)) throw new Error('Analyst POST returned a malformed workspace');
             const run = {
-              action: 'run_local_analyst_script', protocol_version: 1, run_id: 1, script_id: scriptID,
+              action: 'run_local_analyst_script', protocol_version: 2, run_id: 1, script_id: scriptID,
               library_generation: updated.generation, source, variables: {seed: 'native-verified'},
               evidence: {events: [{sequence_number: '1'}], artifacts: [], trace_edges: [],
                 signal_profiles: [], vm_analysis: null, selected_artifact: null,

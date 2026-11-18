@@ -243,9 +243,9 @@ chain card. A card lists every edge it starts, a page of rows at a time.
 The pane reads, models, folds and measures in a worker (the page measures
 font advances and sends them, and runs the same pipeline itself where no
 worker starts) and lands each page in time slices. It draws the layered
-layout first, then lays out each realm the Triskel budget accepts in the
-background and swaps it in, keeping the selected card where it was on
-screen. Selecting a card asks `get_flow_graph_paths` for the stacks through
+layout first, then lays out each realm of up to 2,000 cards with Triskel in
+the background, and a larger one when asked, and swaps it in, keeping the
+selected card where it was on screen. Selecting a card asks `get_flow_graph_paths` for the stacks through
 it and lights them; choosing a request asks for its own. Lineage (V) draws
 only the lit stacks' cards, left to right. Zoomed out below 4.5%, each realm
 is one block with its name and counts, and the edges between realms are

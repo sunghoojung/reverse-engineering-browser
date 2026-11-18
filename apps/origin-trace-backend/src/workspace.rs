@@ -41,10 +41,12 @@ impl Kind {
             Self::Analyst => "files",
         }
     }
+    /// The Analyst library has no byte limit: it holds the researcher's own
+    /// scripts and notes, and grows with them.
     fn maximum(self) -> usize {
         match self {
             Self::Collection => 2 * 1024 * 1024,
-            Self::Analyst => 1024 * 1024,
+            Self::Analyst => usize::MAX,
         }
     }
     pub fn limits(self) -> Value {
@@ -53,7 +55,7 @@ impl Kind {
                 json!({"folders":32,"requests":128,"folder_depth":4,"variables_per_scope":32,"variable_bytes_per_scope":32768,"request_body_bytes":65536,"document_bytes":2097152})
             }
             Self::Analyst => {
-                json!({"folders":32,"files":64,"folder_depth":4,"file_bytes":32768,"total_file_bytes":524288,"document_bytes":1048576,"variables":32,"variable_value_bytes":4096,"variable_bytes":16384,"evidence_bytes":786432,"selected_artifact_bytes":65536,"execution_timeout_ms":2000,"logs":64,"log_bytes":1024,"result_bytes":32768})
+                json!({"folders":32,"files":64,"folder_depth":4,"variables":32,"variable_value_bytes":4096,"variable_bytes":16384})
             }
         }
     }
@@ -345,8 +347,13 @@ fn item(kind: Kind, value: &Value, metadata: bool) -> Result<Value> {
             {
                 return Err(Error::bad("Analyst file kind or language is invalid"));
             }
-            let content =
-                validation::text(&value["content"], "Analyst file content", 32768, true, true)?;
+            let content = validation::text(
+                &value["content"],
+                "Analyst file content",
+                usize::MAX,
+                true,
+                true,
+            )?;
             result["kind"] = json!(kind);
             result["language"] = json!(language);
             if content
@@ -397,9 +404,12 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         ],
         "Workspace document",
     )?;
+    // `limits` describes the host that wrote the document. A document written
+    // under other limits still reads, and the next save records these.
     if value["contract_version"] != 1
         || value["document_kind"] != kind.document()
-        || value["limits"] != kind.limits()
+        || !value["limits"].is_object()
+        || (kind == Kind::Collection && value["limits"] != kind.limits())
     {
         return Err(Error::bad("Workspace document contract is unsupported"));
     }
@@ -475,7 +485,6 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         names.clear();
     }
     let mut identifiers = BTreeSet::new();
-    let mut total_content = 0;
     for item in &values {
         let identifier = item["id"].as_u64().unwrap();
         let parent = item["folder_id"].as_u64().unwrap();
@@ -492,10 +501,6 @@ pub fn normalize(kind: Kind, value: &Value) -> Result<Value> {
         )) {
             return Err(Error::bad("Workspace sibling name is duplicated"));
         }
-        total_content += item["content_bytes"].as_u64().unwrap_or(0);
-    }
-    if total_content > 524288 {
-        return Err(Error::bad("Analyst file content exceeds 512 KiB"));
     }
     folders.sort_by_key(|v| v["id"].as_u64());
     values.sort_by_key(|v| v["id"].as_u64());

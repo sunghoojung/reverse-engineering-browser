@@ -18,24 +18,20 @@
         return {matches, truncated: false};
       }
 
-      // One selected document owns this sparse index. No array is allocated per
-      // newline, and excerpts never normalize CRLF, BOMs or UTF-16 positions.
-      // 64 Mi units hold a 16 MiB artifact laid out at up to four times its size.
-      const SOURCE_DOCUMENT_LIMIT = 64 * 1024 * 1024;
-      // The artifact receiver's default per-artifact cap; larger text shows a limit notice.
-      const SOURCE_PREVIEW_BYTES = 16 * 1024 * 1024;
+      // One selected document owns this sparse index: one anchor per 128 lines
+      // of a document of any length. No array is allocated per newline, and
+      // excerpts never normalize CRLF, BOMs or UTF-16 positions.
       const SOURCE_WINDOW_LINES = 1000;
       const SOURCE_WINDOW_COLUMN_LIMIT = 16384;
       const SOURCE_WINDOW_OTHER_COLUMNS = 512;
       function sourceDocumentIndex(text) {
-        const length = Math.min(text.length, SOURCE_DOCUMENT_LIMIT);
         const anchors = [0];
         let lineCount = 1;
-        for (let offset = text.indexOf('\n'); offset >= 0 && offset < length; offset = text.indexOf('\n', offset + 1)) {
+        for (let offset = text.indexOf('\n'); offset >= 0; offset = text.indexOf('\n', offset + 1)) {
           if (lineCount % 128 === 0) anchors.push(offset + 1);
           lineCount++;
         }
-        return {text, length, anchors, lineCount, complete: length === text.length};
+        return {text, length: text.length, anchors, lineCount};
       }
       // One page of a longer document: absolute lines from lineBase, offsets within the page text.
       function sourcePageIndex(text, lineBase, lineCount) {
@@ -77,19 +73,21 @@
         const end = newline < 0 ? index.length : Math.min(newline, index.length);
         return {start, end, length: end - start};
       }
+      // The Find pattern for a query: a single-line literal whose syntax
+      // characters are all escaped, so it has no quantifier to backtrack and
+      // every scan is linear. Unicode case folding applies unless the caller
+      // asks to match case.
+      function sourceFindPattern(query, matchCase = false) {
+        if (!query) return {pattern: null, error: ''};
+        if (query.length > 512) return {pattern: null, error: 'Find accepts at most 512 UTF-16 code units.'};
+        if (/[\r\n\u2028\u2029]/u.test(query)) return {pattern: null, error: 'Find uses a single-line literal; line separators are not supported.'};
+        return {pattern: new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), matchCase ? 'gu' : 'giu'), error: ''};
+      }
       function sourceDocumentMatches(index, query, limit = 1000, acceptLine = null, matchCase = false) {
         const matches = [];
-        if (!query) return {matches, truncated: false, error: ''};
-        if (query.length > 512) return {matches, truncated: false, error: 'Find accepts at most 512 UTF-16 code units.'};
-        if (/[\r\n\u2028\u2029]/u.test(query)) return {matches, truncated: false, error: 'Find uses a single-line literal; line separators are not supported.'};
-        const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        // Every syntax character is escaped, so the pattern is a literal with no
-        // quantifier to backtrack; Unicode case folding is applied unless the
-        // caller asks to match case.
-        const pattern = new RegExp(escaped, matchCase ? 'gu' : 'giu');
-        // Accepted representation bounds normally make this a shared string;
-        // an oversized defensive input is explicitly a searched prefix.
-        const text = index.complete ? index.text : index.text.slice(0, index.length);
+        const {pattern, error} = sourceFindPattern(query, matchCase);
+        if (!pattern) return {matches, truncated: false, error};
+        const text = index.text;
         let match, line = index.lineBase ?? 0, lineStart = 0, newline = text.indexOf('\n');
         while ((match = pattern.exec(text)) !== null) {
           while (newline >= 0 && newline < match.index) {line++; lineStart = newline + 1; newline = text.indexOf('\n', lineStart);}
@@ -98,6 +96,130 @@
           matches.push({line, column: match.index - lineStart, offset: match.index, length: match[0].length});
         }
         return {matches, truncated: false, error: ''};
+      }
+
+      // Find in a document of any size. A search counts its matches chunk by
+      // chunk in short slices between tasks, so typing stays responsive, and it
+      // keeps one count per chunk: memory follows the document, not the number
+      // of matches, and match n is found again by rescanning its one chunk.
+      // Offsets are the document's: UTF-16 units of a text, or the units of a
+      // hex view's rows laid end to end.
+      const SOURCE_FIND_CHUNK_UNITS = 64 * 1024;
+      const SOURCE_FIND_SLICE_MS = 12;
+      // A text: chunk c holds the matches that start in its 64 Ki units. A
+      // match may run into the next chunk, whose rescan then starts after it.
+      function sourceFindTextDocument(text) {
+        const units = SOURCE_FIND_CHUNK_UNITS;
+        return {kind: 'text', source: text, chunkUnits: units, chunks: Math.max(1, Math.ceil(text.length / units)),
+          span: chunk => ({text, start: chunk * units, end: Math.min(text.length, (chunk + 1) * units), base: 0})};
+      }
+      // A hex view: one chunk per page of rows, formatted when it is scanned. A
+      // row ends in a newline, which no query holds, so no match leaves its page.
+      function sourceFindHexDocument(bytes) {
+        const layout = sourceHexLayout(bytes.length), units = SOURCE_HEX_PAGE_ROWS * layout.rowUnits;
+        let cached = null;
+        return {kind: 'hex', source: bytes, chunkUnits: units, rowUnits: layout.rowUnits,
+          chunks: Math.max(1, Math.ceil(sourceHexRows(bytes) / SOURCE_HEX_PAGE_ROWS)),
+          span: chunk => {
+            if (cached?.chunk !== chunk) {
+              const text = sourceHexText(bytes, chunk * SOURCE_HEX_PAGE_ROWS, SOURCE_HEX_PAGE_ROWS, layout);
+              cached = {chunk, span: {text, start: 0, end: text.length, base: chunk * units}};
+            }
+            return cached.span;
+          }};
+      }
+      // Calls visit(offset, length) for each match that starts in the span,
+      // from `from`, until visit returns false. The scanned text ends one
+      // longest match past the span, so each exec stays within one chunk.
+      function sourceFindSpan(search, chunk, visit) {
+        const span = search.document.span(chunk), {text} = span;
+        const from = Math.max(span.start, search.resume.get(chunk) ?? 0);
+        const stop = Math.min(text.length, span.end + search.margin);
+        const window = from === 0 && stop === text.length ? text : text.slice(from, stop);
+        const {pattern} = search;
+        pattern.lastIndex = 0;
+        for (let match = pattern.exec(window); match !== null; match = pattern.exec(window)) {
+          const index = from + match.index;
+          if (index >= span.end) break;
+          if (index + match[0].length > span.end) search.resume.set(chunk + 1, index + match[0].length);
+          if (visit(span.base + index, match[0].length) === false) return;
+        }
+      }
+      // Starts a search; the first slice runs now. `onProgress` follows each
+      // later slice until the last chunk is counted.
+      function startSourceFind(document, query, {matchCase = false, onProgress = () => {}, schedule = step => setTimeout(step, 0),
+        now = () => (globalThis.performance ?? Date).now(), sliceMs = SOURCE_FIND_SLICE_MS} = {}) {
+        const {pattern, error} = sourceFindPattern(query, matchCase);
+        const search = {document, query, matchCase, pattern, error, status: pattern ? 'running' : error ? 'error' : 'done',
+          counts: new Uint32Array(document.chunks), resume: new Map(), scanned: 0, total: 0,
+          // The longest match: case folding keeps a code point's count but may pair a BMP unit with a surrogate pair.
+          margin: 2 * query.length, cancelled: false};
+        if (!pattern) return search;
+        const step = scheduled => {
+          if (search.cancelled) return;
+          const until = now() + sliceMs;
+          do {
+            let count = 0;
+            sourceFindSpan(search, search.scanned, () => {count++;});
+            search.counts[search.scanned++] = count;
+            search.total += count;
+          } while (search.scanned < document.chunks && now() < until);
+          if (search.scanned === document.chunks) search.status = 'done';
+          else schedule(() => step(true));
+          if (scheduled) onProgress(search);
+        };
+        step(false);
+        return search;
+      }
+      function cancelSourceFind(search) {
+        if (search) search.cancelled = true;
+      }
+      // Match `rank` among those counted so far, as {offset, length}, or null.
+      function sourceFindMatch(search, rank) {
+        if (!Number.isSafeInteger(rank) || rank < 0 || rank >= search.total) return null;
+        let chunk = 0;
+        while (rank >= search.counts[chunk]) rank -= search.counts[chunk++];
+        let found = null;
+        sourceFindSpan(search, chunk, (offset, length) => {
+          if (rank-- > 0) return true;
+          found = {offset, length};
+          return false;
+        });
+        return found;
+      }
+      // Matches that start in [from, to), rescanning only the chunks that hold one.
+      function sourceFindBetween(search, from, to) {
+        const found = [], units = search.document.chunkUnits;
+        for (let chunk = Math.max(0, Math.floor(from / units)), last = Math.min(search.scanned, Math.ceil(to / units)) - 1; chunk <= last; chunk++) {
+          if (!search.counts[chunk]) continue;
+          sourceFindSpan(search, chunk, (offset, length) => {
+            if (offset >= to) return false;
+            if (offset >= from) found.push({offset, length});
+            return true;
+          });
+        }
+        return found;
+      }
+      // For ascending ranges [start, end): whether each holds the start of a match.
+      // A chunk with matches that lies inside a range answers without a rescan.
+      function sourceFindMarks(search, ranges) {
+        const units = search.document.chunkUnits;
+        let cached = -1, starts = [];
+        return ranges.map(([start, end]) => {
+          for (let chunk = Math.max(0, Math.floor(start / units)), last = Math.min(search.scanned, Math.ceil(end / units)) - 1; chunk <= last; chunk++) {
+            if (!search.counts[chunk]) continue;
+            if (chunk * units >= start && (chunk + 1) * units <= end) return true;
+            if (cached !== chunk) {
+              starts = [];
+              sourceFindSpan(search, chunk, offset => {starts.push(offset);});
+              cached = chunk;
+            }
+            let low = 0, high = starts.length;
+            while (low < high) {const middle = (low + high) >> 1; if (starts[middle] < start) low = middle + 1; else high = middle;}
+            if (low < starts.length && starts[low] < end) return true;
+          }
+          return false;
+        });
       }
       function sourceDocumentExcerpt(index, line, column = 0, maximum = SOURCE_WINDOW_OTHER_COLUMNS) {
         const bounds = sourceDocumentLine(index, line);
@@ -289,14 +411,6 @@
         return file || source.url;
       }
 
-      // One hex row is 78 UTF-16 units, including its newline. The hex view of
-      // a 2 MiB binary preview stays within 8 Mi units.
-      const WASM_HEX_ROW_UNITS = 78;
-      function wasmHexByteLimit() {
-        const rows = Math.floor((8 * 1024 * 1024 - 160) / WASM_HEX_ROW_UNITS);
-        return rows * 16;
-      }
-
       function formatByteSize(bytes) {
         if (bytes < 1024) return `${bytes} bytes`;
         if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -309,25 +423,93 @@
         return source?.kind === 'wasm' || source?.kind === 'bytecode_buffer';
       }
 
+      // Whether a source's retained bytes are loaded: as decoded text, or as
+      // the bytes its hex view formats.
+      function sourcePreviewLoaded(source) {
+        return source?.content !== undefined || source?.hexBytes !== undefined;
+      }
+
+      // A hex row is an address of at least 8 digits, 16 bytes and their
+      // printable column, then a newline: 78 UTF-16 units below 4 GiB. Every row
+      // of one view has the same width, so row r starts at r * rowUnits.
+      const SOURCE_HEX_PAGE_ROWS = 1000;
+      const SOURCE_HEX_DIGITS = '0123456789abcdef';
+      // A byte's two digits and its printable column character, as character codes.
+      const SOURCE_HEX_CODES = (() => {
+        const codes = new Uint8Array(768);
+        for (let byte = 0; byte < 256; byte++) {
+          codes[byte * 3] = SOURCE_HEX_DIGITS.charCodeAt(byte >> 4);
+          codes[byte * 3 + 1] = SOURCE_HEX_DIGITS.charCodeAt(byte & 15);
+          codes[byte * 3 + 2] = byte >= 32 && byte < 127 ? byte : 46;
+        }
+        return codes;
+      })();
+      let sourceHexDecoder;
+      function sourceHexLayout(byteLength, base = 0) {
+        const digits = Math.max(8, Math.max(0, base + byteLength - 1).toString(16).length);
+        return {base, digits, rowUnits: digits + 70};
+      }
+      function sourceHexRows(bytes) {
+        return Math.max(1, Math.ceil(bytes.length / 16));
+      }
+      // Rows first..first+count of `bytes` without a trailing newline. Each
+      // character is written once into one buffer, so a page costs about as much
+      // as copying its text.
+      function sourceHexText(bytes, first = 0, count = Infinity, layout = sourceHexLayout(bytes.length)) {
+        const start = Math.min(bytes.length, first * 16), end = Math.min(bytes.length, start + Math.min(count, Number.MAX_SAFE_INTEGER / 16) * 16);
+        if (end <= start) return '';
+        const {base, digits, rowUnits} = layout, rows = Math.ceil((end - start) / 16), hexAt = digits + 2, textAt = digits + 52;
+        const units = new Uint8Array(rows * rowUnits - 1 - (16 - (end - start - (rows - 1) * 16)));
+        let at = 0;
+        for (let offset = start; offset < end; offset += 16) {
+          const row = at, length = Math.min(16, end - offset);
+          let address = base + offset;
+          for (let digit = digits - 1; digit >= 0; digit--) {units[row + digit] = SOURCE_HEX_DIGITS.charCodeAt(address % 16); address = Math.floor(address / 16);}
+          units.fill(32, row + digits, row + textAt);
+          units[row + textAt - 1] = 124;
+          for (let index = 0; index < length; index++) {
+            const code = bytes[offset + index] * 3, cell = row + hexAt + index * 3;
+            units[cell] = SOURCE_HEX_CODES[code];
+            units[cell + 1] = SOURCE_HEX_CODES[code + 1];
+            units[row + textAt + index] = SOURCE_HEX_CODES[code + 2];
+          }
+          units[row + textAt + length] = 124;
+          at = row + textAt + length + 1;
+          if (at < units.length) units[at++] = 10;
+        }
+        // Every unit is ASCII, which Latin-1 decodes as itself.
+        sourceHexDecoder ??= typeof TextDecoder === 'function' ? new TextDecoder('latin1') : null;
+        if (sourceHexDecoder) return sourceHexDecoder.decode(units);
+        let text = '';
+        for (let from = 0; from < units.length; from += 8192) text += String.fromCharCode.apply(null, units.subarray(from, from + 8192));
+        return text;
+      }
       // `base` is the offset of the first byte, for a window into a longer body.
       function formatWasmHex(buffer, base = 0) {
-        const bytes = new Uint8Array(buffer);
-        const rows = [];
-        for (let offset = 0; offset < bytes.length; offset += 16) {
-          const chunk = bytes.slice(offset, offset + 16);
-          const address = (base + offset).toString(16).padStart(8, '0');
-          const hex = [...chunk].map(byte => byte.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ');
-          const printable = [...chunk].map(byte => byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.').join('');
-          rows.push(`${address}  ${hex}  |${printable}|`);
-        }
-        return rows.join('\n');
+        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        return sourceHexText(bytes, 0, Infinity, sourceHexLayout(bytes.length, base));
+      }
+      // The byte under `column` of hex row `line`: one of its two digits or its
+      // printable character; null on an address, a separator or past the end.
+      function sourceHexColumnByte(page, line, column) {
+        const digits = page.rowUnits - 70, first = line * 16, length = Math.min(16, page.bytes.length - first);
+        const hex = column - digits - 2, text = column - digits - 52;
+        const index = hex >= 0 && hex < 47 && hex % 3 !== 2 ? Math.floor(hex / 3) : text >= 0 ? text : -1;
+        return index >= 0 && index < length ? first + index : null;
+      }
+      // The page of a hex view that holds row `line`, read by the editor as a
+      // page of a longer document; `row(line)` is that row's first byte.
+      function sourceHexPage(bytes, line = 0) {
+        const lineCount = sourceHexRows(bytes), pages = Math.ceil(lineCount / SOURCE_HEX_PAGE_ROWS);
+        const block = Math.max(0, Math.min(pages - 1, Math.floor((Number.isSafeInteger(line) ? line : 0) / SOURCE_HEX_PAGE_ROWS)));
+        const layout = sourceHexLayout(bytes.length), lineBase = block * SOURCE_HEX_PAGE_ROWS;
+        return {hex: true, bytes, block, lineBase, lineCount, rowUnits: layout.rowUnits,
+          text: sourceHexText(bytes, lineBase, SOURCE_HEX_PAGE_ROWS, layout),
+          row: row => row >= lineBase && row < Math.min(lineCount, lineBase + SOURCE_HEX_PAGE_ROWS) ? row * 16 : null};
       }
 
       // The in-page layout streams its tokens and keeps no per-token mapping,
-      // so it accepts the 16 MiB artifact cap; output stays within 3x input.
-      const SOURCE_PRETTY_INPUT_LIMIT = 16 * 1024 * 1024;
-      const SOURCE_PRETTY_OUTPUT_LIMIT = 48 * 1024 * 1024;
-      const SOURCE_PRETTY_TOKEN_LIMIT = 250000;
+      // so it lays out text of any length in memory proportional to it.
       const SOURCE_PRETTY_LANGUAGES = new Set(['javascript', 'json', 'css', 'markup']);
       const SOURCE_PRETTY_CONTROL_WORDS = new Set(['catch', 'for', 'if', 'switch', 'while', 'with']);
       const SOURCE_PRETTY_REGEX_PREFIXES = new Set([
@@ -460,10 +642,7 @@
       function sourcePrettyTokens(value, language) {
         const next = createSourcePrettyLexer(value, language);
         const tokens = [];
-        for (let token = next(); token; token = next()) {
-          if (tokens.length >= SOURCE_PRETTY_TOKEN_LIMIT) throw new RangeError('Pretty print token limit reached');
-          tokens.push(token);
-        }
+        for (let token = next(); token; token = next()) tokens.push(token);
         return tokens;
       }
 
@@ -486,7 +665,6 @@
         let lineStart = true;
         const append = (chunk, synthetic) => {
           if (!chunk) return;
-          if (length + chunk.length > SOURCE_PRETTY_OUTPUT_LIMIT) throw new RangeError('Pretty-print output exceeds three times the input limit');
           parts.push(chunk);
           if (parts.length === 8192) { blocks.push(parts.join('')); parts = []; }
           length += chunk.length;
@@ -727,7 +905,6 @@
       function prettyPrintSource(source, value) {
         const language = sourceSyntaxLanguage(source);
         if (!SOURCE_PRETTY_LANGUAGES.has(language)) return {error: `Pretty print does not support ${sourceSyntaxLabel(language)}.`};
-        if (value.length > SOURCE_PRETTY_INPUT_LIMIT) return {error: 'Pretty print is limited to the 16 MiB artifact cap.'};
         try {
           const text = language === 'markup' ? prettyPrintMarkupSource(value)
             : language === 'css' ? prettyPrintCssSource(value)

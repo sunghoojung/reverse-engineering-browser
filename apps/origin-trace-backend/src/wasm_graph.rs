@@ -7,29 +7,20 @@
 //! the module, and a graph is one function at a time: nothing retains a
 //! whole-module structure.
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, check_cancelled},
     evidence, validation, wasm, wasm_names,
 };
 use serde_json::Value;
-use std::{
-    fmt::Write as _,
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{fmt::Write as _, path::Path, sync::atomic::AtomicBool};
 use wasmparser::{ExternalKind, KnownCustom, Name, Operator, Parser, Payload};
 
-/// The artifact receiver's default store limit is 16 MiB and its configured
-/// limit can be raised; 64 MiB covers both without an unbounded read.
-pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Web engines reject a body above this size, so a longer one cannot have run.
 pub(crate) const MAX_BODY_BYTES: usize = 7_654_321;
 /// Instruction rows are the bulk of a large function's response.
 const MAX_ROW_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STRUCTURE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_LABEL_BYTES: usize = 96;
-const DEADLINE: Duration = Duration::from_secs(4);
 /// Edge kinds in the order `edge_kinds` lists them.
 const EDGE_KINDS: [&str; 8] = [
     "fallthrough",
@@ -72,7 +63,8 @@ pub(crate) fn artifact(root: &Path, id: &str) -> Result<Artifact> {
     if record["kind"] != "wasm" {
         return Err(Error::bad("Artifact is not WebAssembly"));
     }
-    let bytes = evidence::content(root, &record, MAX_BYTES)?;
+    // A module of any size is read whole: one analysis holds it once.
+    let bytes = evidence::read(root, &record)?;
     Ok(Artifact {
         bytes,
         artifact_id: record["artifact_id"].clone(),
@@ -90,7 +82,7 @@ struct Row {
 
 /// Lists a module's functions without decoding any instruction.
 pub fn function_index(root: &Path, id: &str) -> Result<String> {
-    function_index_named(root, id, None)
+    function_index_named(root, id, None, &AtomicBool::new(false))
 }
 
 /// The function list with the researcher names of this module's functions as
@@ -99,6 +91,7 @@ pub(crate) fn function_index_named(
     root: &Path,
     id: &str,
     analyst: Option<&wasm_names::Names>,
+    cancelled: &AtomicBool,
 ) -> Result<String> {
     let artifact = artifact(root, id)?;
     let mut imported = 0u32;
@@ -107,10 +100,9 @@ pub(crate) fn function_index_named(
     let mut names: Vec<(u32, String)> = Vec::new();
     let mut exports: Vec<(u32, String)> = Vec::new();
     let mut omissions: Vec<String> = Vec::new();
-    let mut listed_bytes = 0usize;
-    let mut stopped = false;
     let mut ended = false;
     for payload in Parser::new(0).parse_all(&artifact.bytes) {
+        check_cancelled(cancelled, "WASM function index")?;
         let payload = payload.map_err(bad)?;
         match payload {
             Payload::Version { num: 1, .. } | Payload::Version { .. } => {}
@@ -140,15 +132,6 @@ pub(crate) fn function_index_named(
                     .get(rows.len())
                     .copied()
                     .ok_or_else(|| Error::protocol("WASM function declaration is unavailable"))?;
-                listed_bytes += 28;
-                if listed_bytes > MAX_INDEX_BYTES {
-                    stopped = true;
-                    omissions.push(
-                        "Function index byte budget reached; later functions are not listed."
-                            .into(),
-                    );
-                    break;
-                }
                 rows.push(Row {
                     start: range.start,
                     end: range.end,
@@ -172,7 +155,7 @@ pub(crate) fn function_index_named(
             _ => {}
         }
     }
-    if !ended && !stopped {
+    if !ended {
         omissions.push("Module traversal stopped before its end.".into());
     }
     if rows.is_empty() {
@@ -241,7 +224,7 @@ pub(crate) fn function_index_named(
     }
     let _ = write!(
         out,
-        "],\"omissions\":{},\"limits\":{{\"max_input_bytes\":{MAX_BYTES},\"max_index_bytes\":{MAX_INDEX_BYTES},\"max_name_bytes\":{MAX_NAME_BYTES}}},\"notice\":\"Static function list. Graphs are computed one function at a time.\"}}",
+        "],\"omissions\":{},\"limits\":{{\"max_name_bytes\":{MAX_NAME_BYTES}}},\"notice\":\"Static function list. Graphs are computed one function at a time.\"}}",
         serde_json::to_string(&omissions).expect("JSON strings"),
     );
     Ok(match (analyst, artifact.sha256.as_str()) {
@@ -317,11 +300,10 @@ struct Decoded {
     arms: Vec<u32>,
     exceptions: Vec<(u32, u32)>,
     byte_end: u32,
-    stopped: bool,
     omissions: Vec<String>,
 }
 
-fn decode(body: &wasmparser::FunctionBody<'_>, deadline: Instant) -> Result<Decoded> {
+fn decode(body: &wasmparser::FunctionBody<'_>, cancelled: &AtomicBool) -> Result<Decoded> {
     let mut decoded = Decoded {
         offsets: Vec::new(),
         flows: Vec::new(),
@@ -334,20 +316,14 @@ fn decode(body: &wasmparser::FunctionBody<'_>, deadline: Instant) -> Result<Deco
         arms: Vec::new(),
         exceptions: Vec::new(),
         byte_end: body.range().end as u32,
-        stopped: false,
         omissions: Vec::new(),
     };
     let mut stack: Vec<u32> = vec![0];
     let mut reader = body.get_operators_reader().map_err(bad)?;
     let mut ended_function = false;
     while !reader.eof() {
-        if decoded.offsets.len() & 4095 == 0 && Instant::now() > deadline {
-            decoded.stopped = true;
-            decoded.omissions.push(format!(
-                "Decoding deadline reached at byte {}; remaining instructions are not in this graph.",
-                reader.original_position()
-            ));
-            break;
+        if decoded.offsets.len() & 4095 == 0 {
+            check_cancelled(cancelled, "WASM block graph")?;
         }
         let (op, offset) = reader.read_with_offset().map_err(bad)?;
         let index = decoded.offsets.len() as u32;
@@ -519,13 +495,11 @@ fn decode(body: &wasmparser::FunctionBody<'_>, deadline: Instant) -> Result<Deco
             decoded.flows.push((index, flow));
         }
     }
-    if !decoded.stopped {
-        reader.finish().map_err(bad)?;
-        if !ended_function || !stack.is_empty() {
-            return Err(Error::protocol(
-                "WASM function control structure is unterminated",
-            ));
-        }
+    reader.finish().map_err(bad)?;
+    if !ended_function || !stack.is_empty() {
+        return Err(Error::protocol(
+            "WASM function control structure is unterminated",
+        ));
     }
     Ok(decoded)
 }
@@ -726,7 +700,7 @@ fn build(decoded: &Decoded) -> Graph {
             None => {
                 if has_next {
                     fallthrough(&mut edges, FALLTHROUGH, None);
-                } else if !decoded.stopped {
+                } else {
                     flags[block as usize] |= EXIT;
                 }
             }
@@ -1019,7 +993,7 @@ fn json_string(out: &mut String, value: &str) {
 
 /// Basic blocks for one defined function, or a provider error a caller shows.
 pub fn function_graph(root: &Path, id: &str, function: u32) -> Result<String> {
-    function_graph_named(root, id, function, None)
+    function_graph_named(root, id, function, None, &AtomicBool::new(false))
 }
 
 /// The block graph with the function's researcher name as `analyst_name` and
@@ -1029,10 +1003,9 @@ pub(crate) fn function_graph_named(
     id: &str,
     function: u32,
     analyst: Option<&wasm_names::Names>,
+    cancelled: &AtomicBool,
 ) -> Result<String> {
     let artifact = artifact(root, id)?;
-    let started = Instant::now();
-    let deadline = started + DEADLINE;
     let mut imported = 0u32;
     let mut types = Vec::new();
     let mut position = 0u32;
@@ -1065,7 +1038,7 @@ pub(crate) fn function_graph_named(
                     )));
                 }
                 let ty = types.get(position as usize - 1).copied();
-                let out = graph_document(&artifact, function, ty, &body, deadline)?;
+                let out = graph_document(&artifact, function, ty, &body, cancelled)?;
                 let (Some(names), Some(sha)) = (analyst, artifact.sha256.as_str()) else {
                     return Ok(out);
                 };
@@ -1100,9 +1073,9 @@ fn graph_document(
     function: u32,
     ty: Option<u32>,
     body: &wasmparser::FunctionBody<'_>,
-    deadline: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<String> {
-    let decoded = decode(body, deadline)?;
+    let decoded = decode(body, cancelled)?;
     let mut graph = build(&decoded);
     let mut omissions = decoded.omissions.clone();
     omissions.append(&mut graph.omissions);
@@ -1195,8 +1168,6 @@ fn graph_document(
         }
         block_rows.push((first_row, included, end - leader));
     }
-    // A decode stopped early leaves a suffix of operators unread; the graph is
-    // already labeled partial, so the reader state past `kept` is irrelevant.
     let mut out =
         String::with_capacity(structure_bytes.min(MAX_STRUCTURE_BYTES) + rows.len() + 2048);
     out.push_str("{\"schema\":\"wasm-block-graph-v1\",\"artifact_id\":");
@@ -1270,9 +1241,8 @@ fn graph_document(
     json_string(&mut out, &rows);
     let _ = write!(
         out,
-        ",\"row_count\":{row_index},\"omissions\":{},\"limits\":{{\"max_input_bytes\":{MAX_BYTES},\"max_body_bytes\":{MAX_BODY_BYTES},\"max_row_text_bytes\":{MAX_ROW_TEXT_BYTES},\"max_structure_bytes\":{MAX_STRUCTURE_BYTES},\"deadline_ms\":{}}},\"notice\":\"Declared static control flow. Reachable here is not observed execution, and a complete drawing is not a proof.\"}}",
+        ",\"row_count\":{row_index},\"omissions\":{},\"limits\":{{\"max_body_bytes\":{MAX_BODY_BYTES},\"max_row_text_bytes\":{MAX_ROW_TEXT_BYTES},\"max_structure_bytes\":{MAX_STRUCTURE_BYTES}}},\"notice\":\"Declared static control flow. Reachable here is not observed execution, and a complete drawing is not a proof.\"}}",
         serde_json::to_string(&omissions).expect("JSON strings"),
-        DEADLINE.as_millis(),
     );
     Ok(out)
 }

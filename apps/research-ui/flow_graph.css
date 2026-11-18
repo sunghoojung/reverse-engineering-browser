@@ -250,6 +250,8 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 .flow-graph-engine { flex: 0 0 auto; color: var(--faint); font-family: var(--sans); }
 .flow-graph-engine[data-engine="triskel"] { color: var(--muted); }
 .flow-graph-engine:empty { display: none; }
+.flow-graph-engine-run { flex: 0 0 auto; color: var(--muted); font-family: var(--sans); }
+.flow-graph-engine-run[hidden], .flow-graph-triskel[hidden] { display: none; }
 .flow-graph-status > .flow-graph-limits { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--amber); font-family: var(--sans); text-overflow: ellipsis; }
 .flow-graph-status > .flow-graph-limits:empty { flex: 1 1 0; }
 .flow-graph-key-toggle { margin-left: auto; }

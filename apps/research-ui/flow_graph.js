@@ -44,10 +44,10 @@ const FLOW_GRAPH_LIST_ROW = 24;
  * one_card, not_served or pending from the pipeline), or '' when it needs
  * none. */
 function flowGraphLayoutReason(reason) {
-  const {LIMITS} = graphLayoutClient;
+  const {AUTOMATIC} = graphLayoutClient;
   switch (reason?.code) {
-    case 'too_large': return 'over Triskel\u2019s size limit';
-    case 'request_budget': return reason.limit === 'graphs' ? `past the ${LIMITS.graphs} realms one layout request holds` : `past the ${LIMITS.nodes.toLocaleString()} cards one layout request holds`;
+    case 'large': return `over ${AUTOMATIC.graphNodes.toLocaleString()} cards or ${AUTOMATIC.graphEdges.toLocaleString()} calls, where Triskel runs only when asked`;
+    case 'cancelled': return 'Triskel was stopped';
     case 'wider': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 wider`;
     case 'taller': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 taller`;
     case 'mismatch': return 'Triskel\u2019s answer did not match the realm';
@@ -207,6 +207,16 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   setSelectionText();
   const summary = make('span', 'flow-graph-summary', '');
   const engineLabel = make('span', 'flow-graph-engine', '');
+  // Triskel has no deadline: its elapsed seconds while it runs in the
+  // background, and a button that lays out the realms it did not run on
+  // unasked, or stops it while it runs.
+  const engineRun = make('span', 'flow-graph-engine-run', ''); engineRun.setAttribute('role', 'status'); engineRun.setAttribute('aria-live', 'polite'); engineRun.hidden = true;
+  const triskelButton = button('Lay out with Triskel', () => {
+    // A stopped run asks again only when asked again.
+    triskelAll = !triskelRunning;
+    pipeline.send({op: triskelRunning ? 'cancel' : 'triskel'});
+  }, 'Lay out the large realms with Triskel', 'flow-graph-tool flow-graph-triskel');
+  triskelButton.hidden = true;
   const limits = make('span', 'flow-graph-limits', FLOW_GRAPH_LIMITS);
   const legend = make('div', 'flow-graph-legend'); legend.id = `flow-graph-legend-${Math.random().toString(36).slice(2, 8)}`;
   const requestAgain = button('Request stack', () => { if (requestKey) lightRequest(requestKey); canvas.focus({preventScroll: true}); }, 'Light the stack of the chosen request again', 'flow-graph-tool flow-graph-request-again');
@@ -249,7 +259,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const keyLimits = make('p', '', FLOW_GRAPH_LIMITS); legend.append(keyLimits);
   const detailsToggle = button('Details', () => setDetails(!detailsOpen), 'Show details', 'flow-graph-tool flow-graph-details-toggle');
   detailsToggle.setAttribute('aria-pressed', 'false');
-  status.append(selectionText, requestAgain, summary, engineLabel, limits, keyToggle, legend, detailsToggle);
+  status.append(selectionText, requestAgain, summary, engineLabel, engineRun, triskelButton, limits, keyToggle, legend, detailsToggle);
   // The rename editor's own slot: Details is rebuilt on every refresh.
   const nameHost = make('div', 'flow-graph-name-host');
   stage.append(nameHost);
@@ -303,6 +313,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   // The session's layout, and while Lineage is on the lineage drawn in its
   // place (`lineage` is the layout the pipeline laid out for the lit stack).
   let sessionLayout = null, lineage = null, lineageOn = false;
+  // `triskelAll` sends every realm, whatever its size, until the session
+  // changes or a run is stopped; `triskelWait` stops the elapsed seconds.
+  let triskelAll = false, triskelRunning = false, triskelWait = null;
   let collapse = true, expanded = new Set(), selected = -1, selectedRow = -1, highlight = null, highlightLabel = '', matches = [], matchSet = new Set(), matchIndex = -1, requestKey = null, shownRequest = '', visible = false;
   // The workspace's timeline mark: a Wasm function (and row) a sample points
   // to, apart from the selection. The selection last reported to onSelect.
@@ -396,6 +409,32 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     stateTitle.textContent = headingText; stateText.textContent = message; retry.hidden = !canRetry; retry.textContent = retryLabel;
     host.dataset.state = kind;
   }
+  /** Whether the pipeline has Triskel requests in flight: their elapsed
+   * seconds beside Cancel. */
+  function triskelProgress(running) {
+    if (!running) { stopTriskelWait(); return; }
+    if (triskelRunning) return;
+    triskelRunning = true; engineRun.hidden = false;
+    triskelWait = graphTriskelElapsed(text => { engineRun.textContent = text; });
+    renderTriskel();
+  }
+  function stopTriskelWait() {
+    triskelWait?.(); triskelWait = null; triskelRunning = false;
+    engineRun.textContent = ''; engineRun.hidden = true;
+    renderTriskel();
+  }
+  function renderTriskel() {
+    const realms = sessionLayout?.engine?.realms ?? [];
+    const offered = available() && realms.some(item => item.reason?.code === 'large' || item.reason?.code === 'cancelled');
+    const focused = host.ownerDocument?.activeElement === triskelButton;
+    // A lineage is laid out in the app; the session's realms wait behind it.
+    triskelButton.hidden = (lineageOn && lineage) || !(triskelRunning || offered);
+    triskelButton.textContent = triskelRunning ? 'Cancel' : 'Lay out with Triskel';
+    triskelButton.setAttribute('aria-label', triskelRunning ? 'Stop Triskel and keep the layered layout' : 'Lay out the large realms with Triskel');
+    triskelButton.title = triskelRunning ? 'Stop Triskel and keep the layered layout.'
+      : `Triskel lays out realms of up to ${graphLayoutClient.AUTOMATIC.graphNodes.toLocaleString()} cards unasked. A larger realm takes it longer, and it has no size limit.`;
+    if (focused && triskelButton.hidden) canvas.focus({preventScroll: true});
+  }
   let flashTimer = 0;
   /** Passing feedback, in its own toast: a warning in the banner stays. */
   function flash(text, kind = 'info') {
@@ -438,7 +477,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     const keepExpanded = model ? [...expanded].map(id => flowGraphNodeKey(model.nodes[Number(id)])) : [];
     loadJob = foldJob = ++jobs; incoming = null; packedFold = null; foldedDuringLoad = false;
     reasons.set(loadJob, 'replay');
-    pipeline.send({op: 'load', id: loadJob, session: requested, measure, collapse, expanded: keepExpanded, triskel: available()});
+    pipeline.send({op: 'load', id: loadJob, session: requested, measure, collapse, expanded: keepExpanded, triskel: available(), all: triskelAll});
   }
 
   /** Folds the model again (a chain expanded or folded, every frame drawn or
@@ -484,6 +523,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
         return;
       }
       if (type === 'engine') { landing = landing.then(() => { if (id === shownFold && sessionLayout) { sessionLayout.engine = message.engine; renderEngine(); if (detailsOpen && selected < 0) renderInspector(); } }); return; }
+      if (type === 'triskel') { landing = landing.then(() => { if (id === shownFold) triskelProgress(message.running); }); return; }
     }
     if (type === 'lineage' && id === lineageJob) { landing = landing.then(() => landLineage(message)); return; }
     if (type === 'find' && id === findJob) landing = landing.then(() => landFind(message));
@@ -641,6 +681,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   /** Which engine laid out the realms, and why a realm kept the layered one. */
   function renderEngine() {
     const engine = layout?.engine, realms = sessionLayout?.engine?.realms ?? [];
+    renderTriskel();
     if (!engine) { engineLabel.textContent = ''; engineLabel.title = ''; return; }
     if (lineageOn && lineage) {
       engineLabel.textContent = 'Lineage · layered'; engineLabel.dataset.engine = 'layered';
@@ -652,7 +693,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     engineLabel.textContent = (triskel ? `Triskel layout${triskel < sized.length ? ` · ${triskel} of ${sized.length} realms` : ''}` : failure ? 'Layered layout · Triskel unavailable' : 'Layered layout')
       + (waiting ? ` · ${waiting} waiting` : '');
     engineLabel.dataset.engine = triskel ? 'triskel' : 'layered';
-    engineLabel.title = [triskel || waiting ? `Triskel ${sessionLayout.engine.revision ? sessionLayout.engine.revision.slice(0, 7) : ''} lays out each realm that fits its limits, in the background; a realm it would draw far wider than the stacked layered layout keeps that one.`.replace('  ', ' ') : 'Laid out in the app with the layered layout.',
+    engineLabel.title = [triskel || waiting ? `Triskel ${sessionLayout.engine.revision ? sessionLayout.engine.revision.slice(0, 7) : ''} lays out each realm of up to ${graphLayoutClient.AUTOMATIC.graphNodes.toLocaleString()} cards in the background, and larger ones when asked; a realm it would draw far wider than the stacked layered layout keeps that one.`.replace('  ', ' ') : 'Laid out in the app with the layered layout.',
       // Realms of one origin are told apart by their realm, the detail's first part.
       ...realms.filter(item => flowGraphLayoutReason(item.reason)).map(item => {
         const label = model?.contexts[item.key]?.label;
@@ -2488,6 +2529,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       if (changed) {
         // What was read for the last session is not this one's.
         pipeline.send({op: 'abort'});
+        triskelAll = false; stopTriskelWait();
         loadJob = foldJob = shownFold = ++jobs; incoming = null; packedFold = null; reading = false; requested = null; layingOut = false; foldedDuringLoad = false;
         model = null; display = null; cards = null; layout = null; sessionLayout = null; lineage = null; lineageOn = false; lineageFor = null; overview = null;
         selected = -1; selectedRow = -1; highlight = null; highlightFromRequest = false; keyIndex = null; markTarget = null;

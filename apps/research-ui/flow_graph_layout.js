@@ -686,7 +686,8 @@ const flowGraphLayout = (() => {
    * cards the way a CFG tool lays out a function. A realm keeps the layered
    * layout above where the client says why: Triskel would draw it much wider
    * (a wide fan of calls, which Triskel does not stack) or taller, it is past
-   * the route's limits, or the route is missing or fails. Bands keep the
+   * the size Triskel runs on unasked (`all` asks), it was stopped, or the
+   * route is missing or fails. Bands keep the
    * layered layout's order, so the page still sits above the frames it calls
    * into, and calls between bands are routed the same way for either engine. */
 
@@ -752,8 +753,10 @@ const flowGraphLayout = (() => {
   }
 
   /** The layered layout, then Triskel for the realms the client keeps when
-   * `engine` is triskel; the engine report says why each other realm stayed. */
-  async function runAsync({graph, metrics = METRICS, engine}) {
+   * `engine` is triskel; the engine report says why each other realm stayed.
+   * `progress` hears {stage: 'triskel'} once a request is sent; `signal`
+   * stops it and keeps the layered layout. */
+  async function runAsync({graph, metrics = METRICS, engine, all = false}, {signal = null, progress = null} = {}) {
     const local = layoutGraph(graph, metrics), realm = realms(graph, local);
     const outcomes = realm.members.map(list => ({reason: {code: list.length < 2 ? 'one_card' : 'not_served'}}));
     const report = {revision: null, failure: null};
@@ -765,7 +768,7 @@ const flowGraphLayout = (() => {
         lanes.push(lane);
         graphs.push({nodes: list.map(v => [local.w[v], local.h[v]]), edges: realm.inner[lane].map(e => [realm.localIndex[graph.from[e]], realm.localIndex[graph.to[e]]]), width: band.w, height: band.h});
       });
-      const answer = await graphLayoutClient.layOut(graphs);
+      const answer = await graphLayoutClient.layOut(graphs, {all, signal, onSend: () => progress?.({stage: 'triskel'})});
       lanes.forEach((lane, index) => { outcomes[lane] = answer.outcomes[index]; });
       report.revision = answer.revision;
       report.failure = answer.failure;
@@ -866,12 +869,21 @@ const flowGraphLayout = (() => {
 
 if (typeof importScripts === 'function') {
   importScripts('graph_layout_client.js');
+  // The block graph worker's protocol: {cancel: id} stops Triskel for that
+  // job, and {id, progress} reports a stage before the answer.
+  const running = new Map();
   self.onmessage = async event => {
+    const {id, cancel} = event.data;
+    if (cancel !== undefined) { running.get(cancel)?.abort(); return; }
+    const controller = new AbortController();
+    running.set(id, controller);
     try {
-      const result = await flowGraphLayout.runAsync(event.data);
-      self.postMessage({id: event.data.id, ok: true, result}, flowGraphLayout.transfer(result));
+      const result = await flowGraphLayout.runAsync(event.data, {signal: controller.signal, progress: stage => self.postMessage({id, progress: stage})});
+      self.postMessage({id, ok: true, result}, flowGraphLayout.transfer(result));
     } catch (error) {
-      self.postMessage({id: event.data.id, ok: false, error: error?.message ?? 'Layout failed.'});
+      self.postMessage({id, ok: false, error: error?.message ?? 'Layout failed.'});
+    } finally {
+      running.delete(id);
     }
   };
 }

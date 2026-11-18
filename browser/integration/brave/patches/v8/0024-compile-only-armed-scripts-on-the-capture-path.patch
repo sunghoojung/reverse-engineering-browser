@@ -645,7 +645,7 @@ index a133725..063977c 100644
 +  return v8::ScriptCompiler::CompileUnboundScript(CcTest::isolate(),
 +                                                  &script_source)
 +      .ToLocalChecked()
-+      ->GetId();
++      ->ScriptId();
 +}
 +
 +}  // namespace

@@ -41,14 +41,14 @@ const FLOW_GRAPH_PATH_CACHE = 256;
 const FLOW_GRAPH_LIST_ROW = 24;
 
 /** Why a realm keeps the layered layout (a graphLayoutClient reason, or
- * one_card, not_served, pending or a predicted wider from the pipeline), or
- * '' when it needs none. */
+ * one_card, not_served or pending from the pipeline), or '' when it needs
+ * none. */
 function flowGraphLayoutReason(reason) {
   const {LIMITS} = graphLayoutClient;
   switch (reason?.code) {
     case 'too_large': return 'over Triskel\u2019s size limit';
     case 'request_budget': return reason.limit === 'graphs' ? `past the ${LIMITS.graphs} realms one layout request holds` : `past the ${LIMITS.nodes.toLocaleString()} cards one layout request holds`;
-    case 'wider': return reason.predicted ? `its widest call layer alone is ${reason.ratio.toFixed(1)}\u00d7 wider than the layered band, so Triskel was not asked` : `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 wider`;
+    case 'wider': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 wider`;
     case 'taller': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 taller`;
     case 'mismatch': return 'Triskel\u2019s answer did not match the realm';
     case 'failed': return `Triskel ${reason.status}${reason.detail ? `: ${reason.detail}` : ''}`;
@@ -643,7 +643,11 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       + (waiting ? ` · ${waiting} waiting` : '');
     engineLabel.dataset.engine = triskel ? 'triskel' : 'layered';
     engineLabel.title = [triskel || waiting ? `Triskel ${sessionLayout.engine.revision ? sessionLayout.engine.revision.slice(0, 7) : ''} lays out each realm that fits its limits, in the background; a realm it would draw far wider than the stacked layered layout keeps that one.`.replace('  ', ' ') : 'Laid out in the app with the layered layout.',
-      ...realms.filter(item => flowGraphLayoutReason(item.reason)).map(item => `${model?.contexts[item.key]?.label.title ?? 'Realm'}: layered, ${flowGraphLayoutReason(item.reason)}.`), failure ?? ''].filter(Boolean).join('\n');
+      // Realms of one origin are told apart by their realm, the detail's first part.
+      ...realms.filter(item => flowGraphLayoutReason(item.reason)).map(item => {
+        const label = model?.contexts[item.key]?.label;
+        return `${[label?.title ?? 'Realm', label?.detail?.split(' · ')[0]].filter(Boolean).join(', ')}: layered, ${flowGraphLayoutReason(item.reason)}.`;
+      }), failure ?? ''].filter(Boolean).join('\n');
   }
 
   // Geometry ---------------------------------------------------------------

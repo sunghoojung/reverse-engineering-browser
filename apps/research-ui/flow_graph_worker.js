@@ -32,61 +32,6 @@ const FLOW_GRAPH_SWAP_MS = 400;
  * less; this only notices a backend that stopped answering. */
 const FLOW_GRAPH_PAGE_TIMEOUT_MS = 120000;
 
-/** Why Triskel's drawing of a realm would be refused before asking, or null.
- * A realm past the route's limits is too large. Triskel lays the calls of
- * one depth side by side and does not wrap them, so the widest layer of the
- * realm's own calls, laid side by side, is about as narrow as its drawing
- * can be; when that alone is wider than the client keeps, asking cannot
- * help. */
-function flowGraphTriskelRefusal(graph) {
-  const {LIMITS, ACCEPT} = graphLayoutClient;
-  if (graph.nodes.length > LIMITS.graphNodes || graph.edges.length > LIMITS.graphEdges) return {code: 'too_large'};
-  const widest = flowGraphWidestLayer(graph), limit = Math.max(graph.width * ACCEPT.widen, ACCEPT.freeWidth);
-  return widest > limit ? {code: 'wider', ratio: widest / Math.max(1, graph.width), predicted: true} : null;
-}
-
-/** The widest layer of a graph-layout-v1 graph's longest-path layering, its
- * cycles broken by a depth-first walk and its roots pulled down next to their
- * nearest callee: the summed width of the nodes in it. */
-function flowGraphWidestLayer({nodes, edges}) {
-  const count = nodes.length, outs = Array.from({length: count}, () => []);
-  for (const [from, to] of edges) if (from !== to) outs[from].push(to);
-  // Iterative depth-first walk: an edge to a node on the stack closes a cycle.
-  const color = new Uint8Array(count), forward = Array.from({length: count}, () => []), indegree = new Uint32Array(count);
-  for (let start = 0; start < count; start += 1) {
-    if (color[start]) continue;
-    const stack = [[start, 0]]; color[start] = 1;
-    while (stack.length) {
-      const top = stack[stack.length - 1], [v, at] = top;
-      if (at < outs[v].length) {
-        top[1] += 1;
-        const w = outs[v][at];
-        if (color[w] === 1) continue;
-        forward[v].push(w); indegree[w] += 1;
-        if (!color[w]) { color[w] = 1; stack.push([w, 0]); }
-      } else { color[v] = 2; stack.pop(); }
-    }
-  }
-  const layer = new Int32Array(count), order = [], queue = [];
-  for (let v = 0; v < count; v += 1) if (!indegree[v]) queue.push(v);
-  for (let head = 0; head < queue.length; head += 1) {
-    const v = queue[head]; order.push(v);
-    for (const w of forward[v]) { layer[w] = Math.max(layer[w], layer[v] + 1); if (--indegree[w] === 0) queue.push(w); }
-  }
-  const called = new Uint8Array(count);
-  for (const list of forward) for (const w of list) called[w] = 1;
-  for (let i = order.length - 1; i >= 0; i -= 1) {
-    const v = order[i];
-    if (called[v] || !forward[v].length) continue;
-    layer[v] = Math.min(...forward[v].map(w => layer[w])) - 1;
-  }
-  const widths = new Map();
-  for (let v = 0; v < count; v += 1) widths.set(layer[v], (widths.get(layer[v]) ?? 0) + nodes[v][0]);
-  let widest = 0;
-  for (const width of widths.values()) widest = Math.max(widest, width);
-  return widest;
-}
-
 /** A layout the page can take ownership of: the arrays the pipeline's state
  * shares with it are copied, the rest are transferred. */
 function flowGraphSendable(layout) {
@@ -214,19 +159,23 @@ function createFlowGraphPipeline(post) {
     if (c.triskel) triskel(id, mine);
   }
 
-  /** Lays out each realm Triskel can take, in band order, a request each,
-   * and swaps the accepted ones in. A realm whose answer would be refused is
-   * never sent. */
+  /** Lays out each realm within the route's limits, a request each, and
+   * swaps the accepted ones in. Only Triskel's answer says whether it keeps a
+   * realm: no cheap measure of a realm bounds how narrow Triskel draws it,
+   * since Triskel ranks each region of it on its own. */
   async function triskel(id, mine) {
     const c = current, state = c.state, graph = c.graph;
     const live = () => mine === epoch && current === c && c.state === state;
-    const outcomes = state.outcomes.slice(), report = {...state.report}, queue = [];
+    const {LIMITS} = graphLayoutClient, outcomes = state.outcomes.slice(), report = {...state.report}, queue = [];
     for (const item of flowGraphLayout.realmGraphs(graph, state)) {
       if (!['not_served', 'pending'].includes(outcomes[item.lane].reason?.code)) continue;
-      const refused = flowGraphTriskelRefusal(item.graph);
-      outcomes[item.lane] = {reason: refused ?? {code: 'pending'}};
-      if (!refused) queue.push(item);
+      const tooLarge = item.graph.nodes.length > LIMITS.graphNodes || item.graph.edges.length > LIMITS.graphEdges;
+      outcomes[item.lane] = {reason: {code: tooLarge ? 'too_large' : 'pending'}};
+      if (!tooLarge) queue.push(item);
     }
+    // Smallest first: Triskel answers those soonest, so no large realm, which
+    // may run to the route's deadline, holds the rest back.
+    queue.sort((a, b) => a.graph.nodes.length - b.graph.nodes.length);
     // What the drawn layout shows: an accepted realm waits for its swap.
     const drawn = Uint8Array.from(outcomes, outcome => (outcome.result ? 1 : 0));
     const shown = () => flowGraphEngine(state, outcomes.map((outcome, lane) => (outcome.result && !drawn[lane] ? {reason: {code: 'pending'}} : outcome)), report);

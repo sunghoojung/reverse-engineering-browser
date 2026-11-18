@@ -3182,16 +3182,17 @@ band it is in, and the selected card stays where it was on screen.
 
 **Triskel:** the layered layout is drawn first. When the backend serves
 `POST /api/graph-layout`, each realm of 2 to 2,000 cards is then sent to
-[Triskel](https://github.com/triskellib/triskel) in the background, in band
-order, one realm per request and two at a time, and each realm it accepts is
+[Triskel](https://github.com/triskellib/triskel) in the background, smallest
+first, one realm per request and two at a time, and each realm it accepts is
 swapped in, at most every 400 ms, keeping the selected card (or the card in
-the middle of the view) where it was on screen. A realm whose widest layer of
-its own calls, laid side by side, is already wider than the rule below keeps
-is never sent, and says so. The client keeps Triskel's last 64 answers by
-realm, so a new layout of mostly the same realms, such as a chain folded or a
-refresh, sends only the realms that changed. A realm takes Triskel's coordinates and waypoints unless Triskel would
-draw it more than 1.6 times wider than the layered layout and over 1,400 px,
-or more than 1.6 times taller and over 1,600 px taller.
+the middle of the view) where it was on screen. No realm within the route's
+limits is refused before Triskel answers: Triskel ranks each SESE region of a
+realm on its own, so no measure of the realm alone bounds how narrow it draws
+it. The client keeps Triskel's last 64 answers by realm, so a new layout of
+mostly the same realms, such as a chain folded or a refresh, sends only the
+realms that changed. A realm takes Triskel's coordinates and waypoints unless
+Triskel would draw it more than 1.6 times wider than the layered layout and
+over 1,400 px, or more than 1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would
 otherwise run off to the side. The layered layout also stays when Triskel's
 answer is missing, too large or the wrong shape. Either way the bands keep the

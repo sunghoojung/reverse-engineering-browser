@@ -32,23 +32,40 @@ final class Harness {
   // xcodebuild starts the host in the background. Keyboard focus and pointer
   // delivery require the real active key window, so ask Launch Services to
   // reopen and activate this same instance, as a user switching to it would.
+  // macOS can drop a request: the first tests after xcodebuild started the
+  // host have failed to become active within ten seconds of one. A request is
+  // sent again every two seconds until the app is active, and a line says
+  // when that was needed.
   func activate() async throws {
-    if !NSApp.isActive {
-      let configuration = NSWorkspace.OpenConfiguration()
-      configuration.activates = true
-      configuration.addsToRecentItems = false
-      configuration.createsNewApplicationInstance = false
-      _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
-      NSApp.activate(ignoringOtherApps: true)
-    }
-    window.makeKeyAndOrderFront(nil)
-    window.makeFirstResponder(webView)
-    let deadline = Date().addingTimeInterval(10)
-    while !(NSApp.isActive && window.isKeyWindow) {
+    let started = Date()
+    let deadline = started.addingTimeInterval(45)
+    var asked = Date.distantPast
+    var requests = 0
+    var first = true
+    while true {
+      if !NSApp.isActive, Date().timeIntervalSince(asked) >= 2 {
+        asked = Date()
+        requests += 1
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        configuration.createsNewApplicationInstance = false
+        _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
+        NSApp.activate(ignoringOtherApps: true)
+      }
+      if first || !window.isKeyWindow {
+        first = false
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(webView)
+      }
+      if NSApp.isActive && window.isKeyWindow { break }
       guard Date() < deadline else {
-        throw HarnessError("Origin Trace did not become the active key window (active=\(NSApp.isActive), key=\(window.isKeyWindow))")
+        throw HarnessError("Origin Trace did not become the active key window after \(requests) requests (active=\(NSApp.isActive), key=\(window.isKeyWindow))")
       }
       try await Task.sleep(nanoseconds: 100_000_000)
+    }
+    if requests > 1 {
+      print(String(format: "RENDERED_UI_ACTIVATION %d requests, %.1f s", requests, Date().timeIntervalSince(started)))
     }
     // AppKit activation precedes WebKit's asynchronous focus notification.
     // Sending input in that gap can lose a click or suppress :focus-visible.
@@ -4055,10 +4072,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
           try await Task.sleep(nanoseconds: 100_000_000)
         }
         try await ui.settle()
-        let shell = try await ui.json("({mode: document.querySelector('#session-mode').textContent, kind: document.querySelector('#session-mode').dataset.kind, capture: document.querySelector('.capture-state').innerText, panel: document.querySelector('#session-panel').hidden})")
+        // The narrow sidebar is a rail that shows the status as a dot, so the
+        // status is read from its text and its accessible name, not its layout.
+        let shell = try await ui.json("({mode: document.querySelector('#session-mode').textContent, kind: document.querySelector('#session-mode').dataset.kind, capture: document.querySelector('.capture-state').textContent, label: document.querySelector('.capture-state').getAttribute('aria-label'), panel: document.querySelector('#session-panel').hidden})")
         XCTAssertEqual(shell["mode"] as? String, "Ended session", "\(size.name): \(shell)")
         XCTAssertEqual(shell["kind"] as? String, "ended", "\(size.name): \(shell)")
         XCTAssertTrue((shell["capture"] as? String ?? "").contains("Ended"), "\(size.name): not Capturing: \(shell)")
+        XCTAssertTrue((shell["label"] as? String ?? "").contains("Ended"), "\(size.name): the rail's status is named: \(shell)")
         XCTAssertEqual(shell["panel"] as? Bool, true, "\(size.name): no start panel over the review: \(shell)")
         try await show(ui, "traffic")
         let rows = try await ui.value("document.querySelectorAll('#screen-traffic .request-row').length") as? Int ?? 0
@@ -4284,8 +4304,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await assertLayout(ui, "#session-panel", "\(name) refused budget")
         try await ui.screenshot("start-panel-limit-refused-\(name)")
         // Native checks what the page sends, as the agent path checks its options.
+        // Each start names every session option, as the page's does, so the
+        // limits are what native refuses.
         let native = try await ui.json("""
-          (async () => { const ask = body => webkit.messageHandlers.rebSession.postMessage({op: 'start', ...body}).then(() => 'accepted', error => error.message);
+          (async () => { const post = message => webkit.messageHandlers.rebSession.postMessage(message);
+            const panel = await post({op: 'state'});
+            const options = Object.fromEntries(Object.entries(panel.options).map(([key, option]) => [key, option.value]));
+            const ask = body => post({op: 'start', options, ...body}).then(() => 'accepted', error => error.message);
             return {over: await ask({mode: 'content', request_content_budget_mib: 5000, response_body_budget_mib: 512, response_media: false}),
               fraction: await ask({mode: 'content', request_content_budget_mib: 256, response_body_budget_mib: 12.5, response_media: false}),
               metadata: await ask({mode: 'metadata', response_media: true}),
@@ -4312,8 +4337,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           try await ui.key(49, " ")
           let raised = try await ui.json(fields)
           XCTAssertEqual(raised["media"] as? Bool, true, "\(name): Space checks media and fonts: \(raised)")
-          try await ui.tab()
-          try await ui.tab()
+          // Fresh profile, Advanced options and Continue Offline come before Start.
+          for _ in 0..<4 { try await ui.tab() }
           let start = try await focus()
           XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): \(start)")
           try await ui.key(36, "\r")

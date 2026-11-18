@@ -111,6 +111,7 @@
     generation += 1;
     trace = null;
     marked = new Map();
+    drawn = new Map();
     elements.list.replaceChildren();
     elements.list.style.paddingTop = '';
     elements.list.style.paddingBottom = '';
@@ -573,9 +574,33 @@
     return entry;
   }
 
+  // What makes a drawn row the same row: its identity and the state its
+  // element shows. A row whose signature holds across renders keeps its
+  // element, so the focused row is never detached by a scroll or a resize.
+  function signature(row) {
+    switch (row.type) {
+      case 'node': return `n:${row.node.id}`;
+      case 'section': return `s:${row.section.side}:${row.section.expanded}:${row.section.count}`;
+      case 'group': return `g:${row.group.side}:${row.group.kind}:${row.group.expanded}:${row.group.count}`;
+      case 'item': {
+        const path = row.item && trace.paths.get(row.item.id);
+        const state = !path ? 'closed' : !path.expanded ? 'folded' : path.steps ? 'open' : 'reading';
+        return `i:${row.group.side}:${row.group.kind}:${row.index}:${row.item ? row.item.id : '-'}:${state}`;
+      }
+      case 'step': return `t:${row.step.node.id}:${row.depth}:${trace.joins.has(row.step.node.id)}`;
+      case 'callers': return `c:${trace.callers.expanded}:${trace.callers.count}`;
+      case 'site': return `x:${row.index}:${row.site ? 1 : 0}`;
+      case 'note': return `o:${row.depth}:${row.text}`;
+      default: return `?:${row.type}`;
+    }
+  }
+
   // The window of rows that fits the scroller, drawn with spacers for the
   // rest, so the list's height is the whole tree's and its DOM is a screen.
+  // Rows already drawn stay where they are; only rows entering or leaving
+  // the window, or changing state, touch the DOM.
   let allRows = [];
+  let drawn = new Map();
   function render() {
     if (!trace) return;
     allRows = rows();
@@ -584,18 +609,40 @@
     const top = elements.scroll.scrollTop || 0;
     const first = Math.max(0, Math.floor(top / ROW) - OVERSCAN);
     const last = Math.min(total, Math.ceil((top + height) / ROW) + OVERSCAN);
-    const focusedIndex = document.activeElement?.closest?.('.value-flow-row')?.dataset?.index;
-    const focusedButton = document.activeElement?.className;
     elements.list.style.paddingTop = `${first * ROW}px`;
     elements.list.style.paddingBottom = `${Math.max(0, total - last) * ROW}px`;
-    const drawn = [];
-    for (let index = first; index < last; index += 1) drawn.push(renderRow(allRows[index], index));
-    elements.list.replaceChildren(...drawn);
-    if (focusedIndex !== undefined) {
-      const again = elements.list.querySelector(`[data-index="${focusedIndex}"]`);
-      const button = again?.querySelector(focusedButton ? `.${String(focusedButton).split(' ')[0]}` : 'button') ?? again?.querySelector('button');
-      button?.focus?.({preventScroll: true});
+    const focused = document.activeElement?.closest?.('.value-flow-row');
+    const focusedButton = focused ? String(document.activeElement.className).split(' ')[0] : '';
+    const keep = new Map();
+    let cursor = elements.list.firstElementChild;
+    let refocus = null;
+    for (let index = first; index < last; index += 1) {
+      const row = allRows[index];
+      const key = signature(row);
+      let element = drawn.get(key);
+      if (element) {
+        drawn.delete(key);
+      } else {
+        element = renderRow(row, index);
+        // The focused row changed state (a path opened): its new element
+        // takes the focus its old one held.
+        if (focused && focused.dataset.index === String(index) && focused.isConnected) refocus = element;
+      }
+      element.dataset.index = String(index);
+      keep.set(key, element);
+      if (element === cursor) cursor = cursor.nextElementSibling;
+      else elements.list.insertBefore(element, cursor);
     }
+    for (const element of drawn.values()) {
+      if (element.isConnected) element.remove();
+    }
+    if (focused && !focused.isConnected && keep.size && !refocus) {
+      // A focused row left the window: keep the keyboard in the tree.
+      const again = elements.list.querySelector(`[data-index="${focused.dataset.index}"]`) ?? elements.list.firstElementChild;
+      refocus = again;
+    }
+    if (refocus) (refocus.querySelector(focusedButton ? `.${focusedButton}` : 'button') ?? refocus.querySelector('button'))?.focus?.({preventScroll: true});
+    drawn = keep;
     elements.scroll.hidden = total === 0;
     elements.clear.hidden = false;
     delete panel.dataset.empty;

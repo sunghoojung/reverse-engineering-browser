@@ -946,15 +946,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   // The library has no byte limit and a run no deadline or size limit, as in
   // the Rust backend's workspace::Kind::Analyst.
+  /// The library holds the researcher's own folders, files and variables,
+  /// as many and as large as they make, so it records no limits.
   private func localAnalystLimits() -> [String: Int] {
-    [
-      "folders": 32,
-      "files": 64,
-      "folder_depth": 4,
-      "variables": 32,
-      "variable_value_bytes": 4 * 1_024,
-      "variable_bytes": 16 * 1_024,
-    ]
+    [:]
   }
 
   private func emptyLocalAnalystWorkspace() -> [String: Any] {
@@ -1095,9 +1090,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       // records these.
       document["limits"] is [String: Any],
       let rawFolders = document["folders"] as? [Any],
-      (1...32).contains(rawFolders.count),
-      let rawFiles = document["files"] as? [Any],
-      rawFiles.count <= 64
+      !rawFolders.isEmpty,
+      let rawFiles = document["files"] as? [Any]
     else {
       throw LocalHTTPError(status: 400, message: "Analyst workspace document contract is invalid")
     }
@@ -1123,21 +1117,27 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     else {
       throw LocalHTTPError(status: 400, message: "Analyst root folder is invalid")
     }
+    // A folder reaches the root without a cycle once; a walk stops at a
+    // folder already reached, so a hierarchy of any depth is checked in
+    // linear time and a cycle is found on the walk that enters it.
+    var reached: Set<Int> = []
     for folder in folders {
-      var seen = Set([folder["id"] as! Int])
+      var walked: Set<Int> = []
+      var path: [Int] = []
       var current = folder
-      var depth = 0
-      while !(current["parent_id"] is NSNull) {
-        let parentID = current["parent_id"] as! Int
-        guard seen.insert(parentID).inserted, let parent = foldersByID[parentID] else {
+      while !reached.contains(current["id"] as! Int) {
+        let identifier = current["id"] as! Int
+        guard walked.insert(identifier).inserted else {
+          throw LocalHTTPError(status: 400, message: "Analyst folder hierarchy is invalid")
+        }
+        path.append(identifier)
+        if current["parent_id"] is NSNull { break }
+        guard let parent = foldersByID[current["parent_id"] as! Int] else {
           throw LocalHTTPError(status: 400, message: "Analyst folder hierarchy is invalid")
         }
         current = parent
-        depth += 1
-        guard depth <= 4 else {
-          throw LocalHTTPError(status: 400, message: "Analyst folder depth exceeds four levels")
-        }
       }
+      reached.formUnion(path)
     }
     var siblingNames = Set<String>()
     for folder in folders {
@@ -1341,7 +1341,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let source = action["source"] as? String,
       !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       let variables = action["variables"] as? [String: Any],
-      variables.count <= 32,
       var evidence = action["evidence"] as? [String: Any],
       apiCollectionExactKeys(
         evidence,
@@ -1365,19 +1364,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let generation = try apiCollectionInteger(
       action["library_generation"], label: "Analyst library generation"
     )
-    var variableBytes = 0
+    // Private variables are the researcher's own values, of any number and
+    // size; each is a named text value.
     for (name, rawValue) in variables {
-      guard name.utf8.count <= 128,
-        name.range(of: #"^[A-Za-z_][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
-        let value = rawValue as? String,
-        value.utf8.count <= 4 * 1_024
+      guard name.range(of: #"^[A-Za-z_][A-Za-z0-9_.-]*$"#, options: .regularExpression) != nil,
+        rawValue is String
       else {
         throw LocalHTTPError(status: 400, message: "Analyst variable name or value is invalid")
       }
-      variableBytes += name.utf8.count + value.utf8.count
-    }
-    guard variableBytes <= 16 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst variables exceed 16 KiB")
     }
     let workspace = try loadLocalAnalyst()
     guard workspace["generation"] as? Int == generation,
@@ -1498,7 +1492,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "logs": [],
         "logs_truncated": false,
         "duration_ms": max(duration, 0),
-        "error": String(message.prefix(512)),
+        "error": message,
       ]
     )
   }
@@ -1533,7 +1527,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       let logs = result["logs"] as? [[String: Any]],
       result["logs_truncated"] is Bool,
       (try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration")) != nil,
-      let error = result["error"] as? String, error.utf8.count <= 512,
+      let error = result["error"] as? String,
       ok ? error.isEmpty : !error.isEmpty
     else {
       throw LocalHTTPError(status: 422, message: "Analyst runner returned a malformed result")
@@ -1653,7 +1647,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
     outputLock.lock()
     let result = output
-    let diagnostic = String(data: errorOutput.prefix(512), encoding: .utf8) ?? ""
+    let diagnostic = String(decoding: errorOutput, as: UTF8.self)
     outputLock.unlock()
     guard !result.isEmpty else {
       throw LocalHTTPError(

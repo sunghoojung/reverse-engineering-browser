@@ -140,10 +140,12 @@ ranking pack**, or a pack plus two opcode workspace documents and exact
 interpreter artifact IDs for **Compare builds**. It sends only an explicit
 request to the local Rust backend; files remain inert. The browser retains the
 original JSON text to avoid rounding u64 identities. Changes and Clear invalidate
-the previous report; Cancel ignores outstanding results. A bounded preview and
-explicit complete-report download (or a clearly labeled copy action in native
-live mode) preserve the report's limitations and original
-evidence. Downloads use normal browser file permissions. Review before sharing.
+the previous report. A request runs until it is done or Cancel stops it, and
+the status shows its elapsed seconds; Cancel ignores outstanding results. The
+whole report, each selected row and every limitation are shown, the text in
+the shared code view, which mounts only the rows near view, beside an explicit
+complete-report download (or a clearly labeled copy action in native live
+mode) that preserves the report's limitations and original evidence. Downloads use normal browser file permissions. Review before sharing.
 Stored-evidence native mode has no pack backend and shows an explicit unavailable
 message; use the live local backend/browser-development mode or the offline CLI.
 

@@ -5624,8 +5624,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           !isSafeIntegerInRange(workspace.updated_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
           !isPlainObject(workspace.limits) || Object.keys(workspace.limits).length !== Object.keys(expectedLimits).length ||
           Object.keys(expectedLimits).some(key => workspace.limits[key] !== expectedLimits[key]) ||
-          !Array.isArray(workspace.folders) || workspace.folders.length < 1 || workspace.folders.length > 32 ||
-          !Array.isArray(workspace.files) || workspace.files.length > 64) return false;
+          !Array.isArray(workspace.folders) || workspace.folders.length < 1 ||
+          !Array.isArray(workspace.files)) return false;
         const validName = name => isBoundedText(name, 128) && name.trim() === name && name.length > 0 &&
           !name.includes('/') && !/[\x00-\x1f\x7f]/u.test(name);
         const folders = new Map();
@@ -5639,15 +5639,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const root = folders.get(1);
         if (!root || root.name !== 'Analyst Workspace' || root.parent_id !== null ||
           [...folders.values()].some(folder => folder.id !== 1 && folder.parent_id === null)) return false;
+        // A walk toward the root stops at a folder already reached, so a
+        // hierarchy of any depth is checked in linear time.
+        const reached = new Set();
         for (const folder of folders.values()) {
-          const seen = new Set([folder.id]);
+          const walked = new Set();
           let current = folder;
-          let depth = 0;
-          while (current.parent_id !== null) {
-            if (seen.has(current.parent_id) || !folders.has(current.parent_id) || ++depth > 4) return false;
-            seen.add(current.parent_id);
+          while (!reached.has(current.id)) {
+            if (walked.has(current.id)) return false;
+            walked.add(current.id);
+            if (current.parent_id === null) break;
+            if (!folders.has(current.parent_id)) return false;
             current = folders.get(current.parent_id);
           }
+          walked.forEach(id => reached.add(id));
         }
         const siblingNames = new Set();
         for (const folder of folders.values()) {
@@ -5696,14 +5701,45 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           result.ok !== (result.outcome === 'completed') || !isBoundedText(result.result_type, 64) ||
           typeof result.result_text !== 'string' || typeof result.result_truncated !== 'boolean' ||
           !Array.isArray(result.logs) || typeof result.logs_truncated !== 'boolean' ||
-          !isSafeIntegerInRange(result.duration_ms, 0, Number.MAX_SAFE_INTEGER) || !isBoundedText(result.error, 512) ||
+          !isSafeIntegerInRange(result.duration_ms, 0, Number.MAX_SAFE_INTEGER) || typeof result.error !== 'string' ||
           (result.ok ? result.error.length !== 0 : result.error.length === 0)) return false;
         return result.logs.every(log => analystExactKeys(log, ['level', 'text']) &&
           ['log', 'info', 'warn', 'error'].includes(log.level) && typeof log.text === 'string');
       }
 
+      // The library's folders and files by ID and by parent, with each
+      // folder's sort path, built once for each loaded library (it is only
+      // ever replaced whole), so the tree and folder lists of a library of any
+      // size cost linear time.
+      let analystIndexFor = null, analystIndexValue = null;
+      function analystIndex() {
+        if (analystIndexFor === state.localAnalyst) return analystIndexValue;
+        const folders = new Map(), children = new Map(), files = new Map(), paths = new Map(), depths = new Map();
+        const listed = (map, key) => map.get(key) ?? map.set(key, []).get(key);
+        for (const folder of state.localAnalyst.folders) folders.set(folder.id, folder);
+        for (const folder of state.localAnalyst.folders) if (folder.parent_id !== null) listed(children, folder.parent_id).push(folder);
+        for (const file of state.localAnalyst.files) listed(files, file.folder_id).push(file);
+        const byName = (left, right) => left.name.localeCompare(right.name);
+        children.forEach(list => list.sort(byName)); files.forEach(list => list.sort(byName));
+        let deepest = 0;
+        const pending = state.localAnalyst.folders.filter(folder => folder.parent_id === null);
+        pending.forEach(folder => { paths.set(folder.id, folder.name); depths.set(folder.id, 0); });
+        while (pending.length) {
+          const folder = pending.pop();
+          for (const child of children.get(folder.id) ?? []) {
+            const depth = depths.get(folder.id) + 1;
+            paths.set(child.id, `${paths.get(folder.id)}/${child.name}`); depths.set(child.id, depth);
+            deepest = Math.max(deepest, depth);
+            pending.push(child);
+          }
+        }
+        analystIndexFor = state.localAnalyst;
+        analystIndexValue = {folders, children, files, paths, depths, deepest};
+        return analystIndexValue;
+      }
+
       function analystFolder(folderId = state.analystSelectedFolderId) {
-        return state.localAnalyst.folders.find(folder => folder.id === folderId) ?? null;
+        return analystIndex().folders.get(folderId) ?? null;
       }
 
       function analystFile(fileId = state.analystSelectedFileId) {
@@ -5722,16 +5758,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return lineage;
       }
 
-      function analystFolderDepth(folderId) {
-        return Math.max(0, analystFolderLineage(folderId).length - 1);
-      }
-
       function analystDescendantIds(folderId) {
-        const descendants = new Set();
-        const visit = parentId => state.localAnalyst.folders
-          .filter(folder => folder.parent_id === parentId)
-          .forEach(folder => { descendants.add(folder.id); visit(folder.id); });
-        visit(folderId);
+        const {children} = analystIndex(), descendants = new Set(), pending = [folderId];
+        while (pending.length) {
+          for (const folder of children.get(pending.pop()) ?? []) { descendants.add(folder.id); pending.push(folder.id); }
+        }
         return descendants;
       }
 
@@ -6069,27 +6100,32 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
         const target = rows[next];
         if (target.dataset.fileId) selectAnalystFile(Number(target.dataset.fileId), true);
-        else selectAnalystFolder(Number(target.dataset.folderId), true);
+        else if (target.dataset.folderId) selectAnalystFolder(Number(target.dataset.folderId), true);
+        else target.focus();
       }
 
       function renderAnalystTree() {
         const focused = analystElements.tree.contains(document.activeElement) ? document.activeElement?.dataset : null;
         const scrollTop = analystElements.tree.scrollTop;
+        const index = analystIndex();
+        const selectedFile = analystFile();
+        const selectedFolder = state.analystSelectedFileId === null ? analystFolder() : null;
         const nodes = [];
-        const appendFolder = (folder, depth) => {
-          const children = state.localAnalyst.folders.filter(candidate => candidate.parent_id === folder.id)
-            .sort((left, right) => left.name.localeCompare(right.name));
-          const files = state.localAnalyst.files.filter(file => file.folder_id === folder.id)
-            .sort((left, right) => left.name.localeCompare(right.name));
+        const treeRow = (depth, title) => {
+          const row = document.createElement('button'); row.type = 'button'; row.className = 'analyst-tree-row'; row.title = title;
+          row.style.setProperty('--analyst-depth', String(depth)); row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(depth + 1));
+          row.addEventListener('keydown', moveAnalystTreeSelection);
+          return row;
+        };
+        const folderRow = (folder, depth) => {
           const expanded = state.analystExpandedFolderIds.has(folder.id);
-          const row = document.createElement('button'); row.type = 'button'; row.className = 'analyst-tree-row';
-          row.title = folder.name; row.dataset.folderId = String(folder.id); row.style.setProperty('--analyst-depth', String(depth));
-          row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(depth + 1));
+          const count = (index.children.get(folder.id)?.length ?? 0) + (index.files.get(folder.id)?.length ?? 0);
+          const row = treeRow(depth, folder.name); row.dataset.folderId = String(folder.id);
           row.setAttribute('aria-expanded', String(expanded));
           row.setAttribute('aria-selected', String(state.analystSelectedFileId === null && state.analystSelectedFolderId === folder.id));
           row.append(textElement('span', 'analyst-tree-glyph', expanded ? '▾' : '▸'),
             textElement('span', 'analyst-tree-name', folder.name),
-            textElement('span', 'analyst-tree-meta', String(children.length + files.length)));
+            textElement('span', 'analyst-tree-meta', count.toLocaleString()));
           row.addEventListener('click', () => {
             const alreadySelected = state.analystSelectedFileId === null && state.analystSelectedFolderId === folder.id;
             if (!selectAnalystFolder(folder.id)) return;
@@ -6098,39 +6134,70 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             } else state.analystExpandedFolderIds.add(folder.id);
             renderLocalAnalyst();
           });
-          row.addEventListener('keydown', moveAnalystTreeSelection);
-          nodes.push(row);
-          if (!expanded) return;
-          children.forEach(child => appendFolder(child, depth + 1));
-          files.forEach(file => {
-            const fileRow = document.createElement('button'); fileRow.type = 'button'; fileRow.className = 'analyst-tree-row';
-            fileRow.title = file.name; fileRow.dataset.fileId = String(file.id); fileRow.style.setProperty('--analyst-depth', String(depth + 1));
-            fileRow.setAttribute('role', 'treeitem'); fileRow.setAttribute('aria-level', String(depth + 2));
-            fileRow.setAttribute('aria-selected', String(state.analystSelectedFileId === file.id));
-            fileRow.append(textElement('span', 'analyst-tree-glyph', file.kind === 'analyst-script' ? 'JS' : '·'),
-              textElement('span', 'analyst-tree-name', file.name),
-              textElement('span', 'analyst-tree-meta', file.kind === 'analyst-script' ? 'script' : file.language));
-            fileRow.addEventListener('click', () => selectAnalystFile(file.id, true));
-            fileRow.addEventListener('keydown', moveAnalystTreeSelection);
-            nodes.push(fileRow);
-          });
+          return row;
         };
-        const root = analystFolder(1);
-        if (root) appendFolder(root, 0);
+        const fileRow = (file, depth) => {
+          const row = treeRow(depth, file.name); row.dataset.fileId = String(file.id);
+          row.setAttribute('aria-selected', String(state.analystSelectedFileId === file.id));
+          row.append(textElement('span', 'analyst-tree-glyph', file.kind === 'analyst-script' ? 'JS' : '·'),
+            textElement('span', 'analyst-tree-name', file.name),
+            textElement('span', 'analyst-tree-meta', file.kind === 'analyst-script' ? 'script' : file.language));
+          row.addEventListener('click', () => selectAnalystFile(file.id, true));
+          return row;
+        };
+        // A folder shows its entries a page at a time; the rest stay one
+        // Show more row away, and the selected entry is always shown.
+        const moreRow = (folder, depth, shown, total) => {
+          const remaining = total - shown, next = Math.min(remaining, ANALYST_LIST_PAGE);
+          const row = treeRow(depth, `${remaining.toLocaleString()} more in ${folder.name}`); row.className += ' analyst-tree-more';
+          row.dataset.moreFolderId = String(folder.id);
+          row.append(textElement('span', 'analyst-tree-glyph', '…'),
+            textElement('span', 'analyst-tree-name', `Show ${next.toLocaleString()} more`),
+            textElement('span', 'analyst-tree-meta', `${remaining.toLocaleString()} left`));
+          row.addEventListener('click', () => {
+            const position = [...analystElements.tree.querySelectorAll('.analyst-tree-row')].indexOf(row);
+            state.analystFolderRowsShown.set(folder.id, shown + ANALYST_LIST_PAGE);
+            renderAnalystTree();
+            // The first newly shown entry takes this row's place and its focus.
+            analystElements.tree.querySelectorAll('.analyst-tree-row')[position]?.focus({preventScroll: true});
+          });
+          return row;
+        };
+        const pending = [];
+        const root = index.folders.get(1);
+        if (root) pending.push({folder: root, depth: 0});
+        while (pending.length) {
+          const entry = pending.pop();
+          if (entry.row) { nodes.push(entry.row); continue; }
+          if (entry.file) { nodes.push(fileRow(entry.file, entry.depth)); continue; }
+          const {folder, depth} = entry;
+          nodes.push(folderRow(folder, depth));
+          if (!state.analystExpandedFolderIds.has(folder.id)) continue;
+          const entries = [...(index.children.get(folder.id) ?? []), ...(index.files.get(folder.id) ?? [])];
+          const wanted = entries.findIndex(item => item === selectedFile || item === selectedFolder);
+          const shown = Math.min(entries.length, Math.max(state.analystFolderRowsShown.get(folder.id) ?? ANALYST_LIST_PAGE, wanted + 1));
+          if (shown > (state.analystFolderRowsShown.get(folder.id) ?? ANALYST_LIST_PAGE)) state.analystFolderRowsShown.set(folder.id, shown);
+          if (shown < entries.length) pending.push({row: moreRow(folder, depth + 1, shown, entries.length)});
+          for (let item = shown - 1; item >= 0; item -= 1) {
+            pending.push(Object.hasOwn(entries[item], 'parent_id') ? {folder: entries[item], depth: depth + 1} : {file: entries[item], depth: depth + 1});
+          }
+        }
         analystElements.tree.replaceChildren(...nodes);
         analystElements.tree.scrollTop = scrollTop;
         const focusKey = focused?.fileId ? `[data-file-id="${focused.fileId}"]`
-          : focused?.folderId ? `[data-folder-id="${focused.folderId}"]` : null;
+          : focused?.folderId ? `[data-folder-id="${focused.folderId}"]`
+            : focused?.moreFolderId ? `[data-more-folder-id="${focused.moreFolderId}"]` : null;
         if (focusKey) analystElements.tree.querySelector(focusKey)?.focus({preventScroll: true});
       }
 
       function analystFolderOptions(selectedId, excludedIds = new Set()) {
+        const {paths} = analystIndex();
         const options = state.localAnalyst.folders.filter(folder => !excludedIds.has(folder.id))
-          .sort((left, right) => analystFolderLineage(left.id).map(item => item.name).join('/').localeCompare(
-            analystFolderLineage(right.id).map(item => item.name).join('/')))
+          .sort((left, right) => (paths.get(left.id) ?? '').localeCompare(paths.get(right.id) ?? ''))
           .map(folder => {
             const option = document.createElement('option'); option.value = String(folder.id);
-            option.textContent = analystFolderLineage(folder.id).map(item => item.name).join(' / ');
+            // Names never contain a slash, so the sort path splits back into them.
+            option.textContent = (paths.get(folder.id) ?? folder.name).split('/').join(' / ');
             option.selected = folder.id === selectedId;
             return option;
           });
@@ -6224,18 +6291,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         let variables;
         try { variables = JSON.parse(source); }
         catch { throw new TypeError('Private variables must be a JSON object.'); }
-        if (!isPlainObject(variables) || Object.keys(variables).length > 32) {
-          throw new TypeError('Private variables must be an object with at most 32 entries.');
-        }
-        let bytes = 0;
+        if (!isPlainObject(variables)) throw new TypeError('Private variables must be a JSON object.');
         for (const [name, value] of Object.entries(variables)) {
-          if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) || utf8ByteLength(name) > 128 ||
-            typeof value !== 'string' || utf8ByteLength(value) > 4 * 1024) {
-            throw new TypeError('Variable names and text values exceed the local runner contract.');
+          if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/u.test(name) || typeof value !== 'string') {
+            throw new TypeError('Each variable needs an identifier name and a text value.');
           }
-          bytes += utf8ByteLength(name) + utf8ByteLength(value);
         }
-        if (bytes > 16 * 1024) throw new TypeError('Private variables exceed 16 KiB.');
         return variables;
       }
 
@@ -6318,8 +6379,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         analystElements.confirmSensitive.disabled = state.analystRunPending;
       }
 
+      let analystResultView = null;
       function renderAnalystResult(run) {
         if (!run || run.pending) {
+          analystResultView?.dispose(); analystResultView = null;
           analystElements.resultMeta.textContent = run ? `run ${run.run_id} is executing in a fresh helper process` : 'Select a completed run.';
           analystElements.resultBadge.dataset.kind = 'offline';
           analystElements.resultBadge.textContent = run ? 'Running' : 'No result';
@@ -6329,16 +6392,27 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         analystElements.resultMeta.textContent = `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${run.duration_ms} ms · ${analystEvidenceText(run.evidence_summary)}`;
         analystElements.resultBadge.dataset.kind = run.ok ? '' : 'error';
         analystElements.resultBadge.textContent = run.outcome.replaceAll('_', ' ');
-        const nodes = [];
-        const result = document.createElement('pre');
-        result.textContent = run.ok ? run.result_text || '(undefined)' : run.error;
-        nodes.push(result);
+        // The result or error and every log entry are whole: the text in the
+        // shared code view, which mounts only the rows near view, and the log
+        // a page of entries at a time.
+        analystResultView?.dispose();
+        analystResultView = createCodeView({text: run.ok ? run.result_text || '(undefined)' : run.error,
+          syntax: codeViewSyntax(run.ok && run.result_text ? 'json' : 'text'), label: run.ok ? 'Analyst result' : 'Analyst error',
+          className: 'analyst-result-code', wrap: true});
+        const nodes = [analystResultView.box];
         if (run.logs.length) {
           const logs = document.createElement('div'); logs.className = 'analyst-log-list';
-          run.logs.forEach(log => {
-            const row = document.createElement('div'); row.className = 'analyst-log-row'; row.dataset.level = log.level;
-            row.textContent = `${log.level}: ${log.text}`; logs.append(row);
-          });
+          const appendLogs = () => {
+            logs.querySelector('.analyst-show-more')?.remove();
+            for (const log of run.logs.slice(logs.childElementCount, state.analystLogsShown)) {
+              const row = document.createElement('div'); row.className = 'analyst-log-row'; row.dataset.level = log.level; row.tabIndex = -1;
+              row.textContent = `${log.level}: ${log.text}`; logs.append(row);
+            }
+            if (logs.childElementCount < run.logs.length) logs.append(analystShowMore(run.logs.length - logs.childElementCount, 'log entries', () => {
+              state.analystLogsShown += ANALYST_LIST_PAGE; appendLogs();
+            }, logs, '.analyst-log-row'));
+          };
+          appendLogs();
           nodes.push(logs);
         }
         if (run.result_truncated || run.logs_truncated) nodes.push(textElement('p', 'experiment-privacy',
@@ -6358,14 +6432,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!state.analystRuns.some(run => run.run_id === state.analystSelectedRunId)) {
           state.analystSelectedRunId = state.analystRuns[0]?.run_id ?? null;
         }
-        analystElements.historyBadge.textContent = `${state.analystRuns.length} / 64`;
-        analystElements.historyBadge.dataset.kind = state.analystRuns.length ? '' : 'offline';
-        if (!state.analystRuns.length) analystElements.history.replaceChildren(
-          emptyListboxOption('analyst-empty', state.analystHistoryEvictions
-            ? `${state.analystHistoryEvictions} older runs were evicted; history is now clear.`
-            : 'Run a saved script to see results and logs.')
+        const count = state.analystRuns.length;
+        analystElements.historyBadge.textContent = `${count.toLocaleString()} ${count === 1 ? 'run' : 'runs'}`;
+        analystElements.historyBadge.dataset.kind = count ? '' : 'offline';
+        // Every run is kept; the list shows them a page at a time, newest
+        // first, and always reaches the selected run.
+        const selectedAt = state.analystRuns.findIndex(run => run.run_id === state.analystSelectedRunId);
+        state.analystHistoryShown = Math.max(state.analystHistoryShown, selectedAt + 1);
+        const shown = state.analystRuns.slice(0, state.analystHistoryShown);
+        if (!count) analystElements.history.replaceChildren(
+          emptyListboxOption('analyst-empty', 'Run a saved script to see results and logs.')
         );
-        else analystElements.history.replaceChildren(...state.analystRuns.map(run => {
+        else analystElements.history.replaceChildren(...shown.map(run => {
           const row = document.createElement('button'); row.type = 'button'; row.className = 'analyst-history-row';
           row.setAttribute('role', 'option'); row.setAttribute('aria-selected', String(run.run_id === state.analystSelectedRunId));
           row.tabIndex = run.run_id === state.analystSelectedRunId ? 0 : -1;
@@ -6373,7 +6451,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (!run.pending && !run.ok) outcome.dataset.kind = 'error';
           row.append(textElement('span', '', run.file_name), outcome,
             textElement('small', '', `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${analystEvidenceText(run.evidence_summary)}${run.completed_at_ms ? ` · ${new Date(run.completed_at_ms).toLocaleTimeString()}` : ''}`));
-          row.addEventListener('click', () => { state.analystSelectedRunId = run.run_id; renderAnalystHistory(); });
+          row.addEventListener('click', () => {
+            if (state.analystSelectedRunId !== run.run_id) state.analystLogsShown = ANALYST_LIST_PAGE;
+            state.analystSelectedRunId = run.run_id; renderAnalystHistory();
+          });
           row.addEventListener('keydown', event => {
             if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
             event.preventDefault();
@@ -6381,11 +6462,27 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             const index = rows.indexOf(row);
             const next = event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1
               : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)));
-            rows[next].click(); rows[next].focus();
+            rows[next].click(); analystElements.history.querySelectorAll('.analyst-history-row')[next]?.focus();
           });
           return row;
         }));
+        analystElements.historyMore.replaceChildren(...(shown.length < count ? [analystShowMore(count - shown.length, 'older runs', () => {
+          state.analystHistoryShown += ANALYST_LIST_PAGE; renderAnalystHistory();
+        }, analystElements.history, '.analyst-history-row')] : []));
         renderAnalystResult(state.analystRuns.find(run => run.run_id === state.analystSelectedRunId) ?? null);
+      }
+
+      /** A Show more control for a paged list: `more` shows the next page,
+       * after which the first newly shown row in `list` takes focus. */
+      function analystShowMore(remaining, noun, more, list, rowSelector) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary-button analyst-show-more';
+        button.textContent = `Show ${Math.min(remaining, ANALYST_LIST_PAGE).toLocaleString()} more ${noun} (${remaining.toLocaleString()} not shown)`;
+        button.addEventListener('click', () => {
+          const position = list.querySelectorAll(rowSelector).length;
+          more();
+          list.querySelectorAll(rowSelector)[position]?.focus();
+        });
+        return button;
       }
 
       function renderLocalAnalyst() {
@@ -6394,15 +6491,18 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         analystElements.editorEmpty.parentElement?.parentElement?.setAttribute('data-state', firstUse ? 'empty' : 'ready');
         analystElements.reload.disabled = state.localAnalystSaving || state.localAnalystRefreshing;
         analystElements.generation.textContent = `Generation ${state.localAnalyst.generation}`;
-        analystElements.fileCount.textContent = `${state.localAnalyst.files.length} / 64`;
-        analystElements.folderUsage.textContent = `${state.localAnalyst.folders.length} / 32`;
-        analystElements.contentUsage.textContent = `${formatByteSize(state.localAnalyst.files.reduce((sum, file) => sum + file.content_bytes, 0))} / 512 KiB`;
+        const fileCount = state.localAnalyst.files.length, folderCount = state.localAnalyst.folders.length;
+        analystElements.fileCount.textContent = `${fileCount.toLocaleString()} ${fileCount === 1 ? 'file' : 'files'}`;
+        analystElements.folderUsage.textContent = folderCount.toLocaleString();
+        analystElements.fileUsage.textContent = fileCount.toLocaleString();
+        analystElements.contentUsage.textContent = formatByteSize(state.localAnalyst.files.reduce((sum, file) => sum + file.content_bytes, 0));
+        const deepest = analystIndex().deepest;
+        analystElements.depthUsage.textContent = `${deepest.toLocaleString()} ${deepest === 1 ? 'level' : 'levels'}`;
         analystElements.notice.dataset.kind = state.localAnalystStatus;
         analystElements.notice.textContent = state.localAnalystMessage;
-        analystElements.newFolder.disabled = state.localAnalystSaving || state.localAnalyst.folders.length >= 32 ||
-          analystFolderDepth(state.analystSelectedFolderId) >= 4;
-        analystElements.newScript.disabled = state.localAnalystSaving || state.localAnalyst.files.length >= 64;
-        analystElements.newNote.disabled = state.localAnalystSaving || state.localAnalyst.files.length >= 64;
+        analystElements.newFolder.disabled = state.localAnalystSaving;
+        analystElements.newScript.disabled = state.localAnalystSaving;
+        analystElements.newNote.disabled = state.localAnalystSaving;
         renderAnalystTree();
         renderAnalystFolderForm();
         renderAnalystEditor();
@@ -7077,11 +7177,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             pending: true
           };
           state.analystRuns.unshift(pending);
-          if (state.analystRuns.length > 64) {
-            state.analystRuns.length = 64;
-            state.analystHistoryEvictions += 1;
-          }
           state.analystSelectedRunId = run.run_id;
+          state.analystLogsShown = ANALYST_LIST_PAGE;
           state.analystRunStartedAt = performance.now();
           analystRunTick(run.run_id);
           renderLocalAnalyst();
@@ -10193,7 +10290,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.analystRunPending) return;
         state.analystRuns = [];
         state.analystSelectedRunId = null;
-        state.analystHistoryEvictions = 0;
+        state.analystHistoryShown = ANALYST_LIST_PAGE;
+        state.analystLogsShown = ANALYST_LIST_PAGE;
         state.analystNextRunId = 1;
         setAnalystNotice(state.localAnalyst.files.length ? 'ready' : 'empty', 'Ephemeral analyst run history was cleared. Saved files were not changed.');
         renderLocalAnalyst();

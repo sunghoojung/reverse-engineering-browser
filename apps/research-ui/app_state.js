@@ -35,15 +35,12 @@
         updated_at_ms: 0,
         folders: [{id: 1, name: 'Analyst Workspace', parent_id: null}],
         files: [],
-        limits: {
-          folders: 32,
-          files: 64,
-          folder_depth: 4,
-          variables: 32,
-          variable_value_bytes: 4 * 1024,
-          variable_bytes: 16 * 1024
-        }
+        // The library records no limits: it holds as many folders and files,
+        // as deep and as large, as the researcher makes.
+        limits: {}
       });
+      // Rows a long Analyst list adds each time the researcher asks for more.
+      const ANALYST_LIST_PAGE = 200;
 
       const emptyDecoderEngine = () => ({
         protocol_version: 1,
@@ -253,7 +250,11 @@
         analystCancelRunId: null,
         analystNextRunId: 1,
         analystRunStartedAt: null,
-        analystHistoryEvictions: 0,
+        // Rows shown in each folder of the tree, run history rows and log rows of
+        // the selected result; each list shows more on request, never less.
+        analystFolderRowsShown: new Map(),
+        analystHistoryShown: ANALYST_LIST_PAGE,
+        analystLogsShown: ANALYST_LIST_PAGE,
         analystRuns: [],
         analystSelectedRunId: null,
         decoderEngine: emptyDecoderEngine(),
@@ -458,7 +459,9 @@
         notice: document.querySelector('#analyst-notice'),
         fileCount: document.querySelector('#analyst-file-count'),
         folderUsage: document.querySelector('#analyst-folder-usage'),
+        fileUsage: document.querySelector('#analyst-file-usage'),
         contentUsage: document.querySelector('#analyst-content-usage'),
+        depthUsage: document.querySelector('#analyst-depth-usage'),
         newFolder: document.querySelector('#analyst-new-folder'),
         newScript: document.querySelector('#analyst-new-script'),
         newNote: document.querySelector('#analyst-new-note'),
@@ -496,6 +499,7 @@
         run: document.querySelector('#analyst-run'),
         cancel: document.querySelector('#analyst-cancel'),
         clearHistory: document.querySelector('#analyst-clear-history'),
+        historyMore: document.querySelector('#analyst-history-more'),
         snapshotBadge: document.querySelector('#analyst-snapshot-badge'),
         historyBadge: document.querySelector('#analyst-history-badge'),
         history: document.querySelector('#analyst-history'),

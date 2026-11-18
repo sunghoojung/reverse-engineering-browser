@@ -6061,6 +6061,79 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
     assert!(response.text().await.unwrap().contains("protocol 2"));
 }
 
+/// The library, a run's variables and its error have no shape limits: 40
+/// folders nested 39 deep, 100 files, 64 variables of 8 KiB each and a 4,000
+/// character error all go through, where 32 folders, 4 levels, 64 files, 32
+/// variables of 4 KiB in 16 KiB and a 512-character error were the limits.
+#[tokio::test]
+async fn analyst_libraries_variables_and_errors_have_no_shape_limits() {
+    let server = Server::start().await;
+    let runner: Value = server
+        .get("/api/local-analyst/runner")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runner["available"], true, "Node.js 22+ must be on PATH");
+    assert_eq!(runner["limits"], json!({}));
+    let mut folders = vec![json!({"id":1,"name":"Analyst Workspace","parent_id":null})];
+    folders.extend(
+        (2..=40).map(|id| json!({"id":id,"name":format!("Level {id}"),"parent_id":id - 1})),
+    );
+    let mut files: Vec<Value> = (1..=100)
+        .map(|id| {
+            json!({"id":id,"folder_id":1 + id % 40,"name":format!("Note {id}"),"kind":"scratchpad",
+            "language":"text","content":"x"})
+        })
+        .collect();
+    let sum = "let bytes = 0; for (let i = 0; i < 64; i++) bytes += Utils.getVar(`v${i}`).length; return bytes;";
+    files.push(json!({"id":101,"folder_id":40,"name":"Sum","kind":"analyst-script","language":"javascript","content":sum}));
+    let throws = "throw new Error('e'.repeat(4000));";
+    files.push(json!({"id":102,"folder_id":40,"name":"Throws","kind":"analyst-script","language":"javascript","content":throws}));
+    let saved = server
+        .action(
+            "/api/local-analyst/actions",
+            json!({"action":"replace_local_analyst_workspace","expected_generation":0,"folders":folders,"files":files}),
+        )
+        .await;
+    let bytes = assert_contract_response(saved, "post", "/api/local-analyst/actions", 200).await;
+    let library: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(library["folders"].as_array().unwrap().len(), 40);
+    assert_eq!(library["files"].as_array().unwrap().len(), 102);
+    assert_eq!(library["limits"], json!({}));
+    let loaded: Value = server.get("/api/local-analyst").await.json().await.unwrap();
+    assert_eq!(loaded, library, "the library reads back whole");
+    let mut cyclic = json!({"action":"replace_local_analyst_workspace","expected_generation":1,
+        "folders":library["folders"],"files":[]});
+    cyclic["folders"][1]["parent_id"] = json!(40);
+    let refused = server.action("/api/local-analyst/actions", cyclic).await;
+    assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+
+    let variables: serde_json::Map<String, Value> = (0..64)
+        .map(|i| (format!("v{i}"), json!("a".repeat(8192))))
+        .collect();
+    let run = |id: u64, script: u64, source: &str| {
+        json!({"action":"run_local_analyst_script","protocol_version":2,"run_id":id,"script_id":script,
+        "library_generation":1,"source":source,"variables":variables,
+        "evidence":{"events":[],"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,
+            "selected_artifact":null,"summary":{}},"confirmed":true,"confirmed_sensitive":false})
+    };
+    let response = server
+        .action("/api/local-analyst/actions", run(1, 101, sum))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "completed", "{result}");
+    assert_eq!(result["result_text"], (64 * 8192).to_string());
+    let response = server
+        .action("/api/local-analyst/actions", run(2, 102, throws))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "failed");
+    assert_eq!(result["error"], "e".repeat(4000), "the error is kept whole");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_status() {

@@ -291,7 +291,7 @@ impl Analyst {
                     Error::protocol(if output.stderr.is_empty() {
                         "Analyst runner returned malformed output".into()
                     } else {
-                        validation::truncate(String::from_utf8_lossy(&output.stderr).trim(), 512)
+                        String::from_utf8_lossy(&output.stderr).trim().to_owned()
                     })
                 })?;
                 validate_result(&result, &request)?;
@@ -353,7 +353,7 @@ fn normalize(value: &Value, workspace: &Value) -> Result<(Value, Option<(String,
     if source.trim().is_empty() || source.chars().any(|c| c < ' ' && !"\t\n\r".contains(c)) {
         return Err(Error::bad("Analyst source is empty or contains controls"));
     }
-    let variables = workspace::variables(&value["variables"], 128, 16384, true)?;
+    let variables = workspace::variables(&value["variables"], &workspace::ANALYST_SCOPE, true)?;
     let evidence = &value["evidence"];
     validation::fields(
         evidence,
@@ -472,7 +472,7 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
     for (key, max) in [
         ("result_type", 64),
         ("result_text", usize::MAX),
-        ("error", 512),
+        ("error", usize::MAX),
     ] {
         validation::text(&value[key], key, max, true, true)
             .map_err(|e| Error::protocol(e.message))?;
@@ -499,7 +499,7 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
     Ok(())
 }
 fn failure(request: &Value, outcome: &str, message: &str, duration: u64) -> Value {
-    let mut result = json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration,"error":validation::truncate(message,512)});
+    let mut result = json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration,"error":message});
     annotate_failure(&mut result);
     result
 }

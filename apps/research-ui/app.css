@@ -1732,7 +1732,10 @@ var(--panel);
       .analyst-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
       .analyst-actions button { min-height: 28px; padding: 4px 8px; }
       .analyst-tree { display: grid; padding: 4px 0; }
-      .analyst-tree-row { width: 100%; min-height: 35px; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; align-items: center; padding: 6px 8px 6px calc(8px + var(--analyst-depth, 0) * 12px); border: 0; background: transparent; color: var(--text); text-align: left; }
+      .analyst-tree-row { width: 100%; min-height: 35px; display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; gap: 4px; align-items: center; padding: 6px 8px 6px calc(8px + min(var(--analyst-depth, 0), 8) * 12px); border: 0; background: transparent; color: var(--text); text-align: left; }
+      /* Past eight levels the indent stays put so a deep folder keeps room for
+         its name; aria-level still gives its depth. */
+      .analyst-tree-more .analyst-tree-name { color: var(--accent); }
       .analyst-tree-row:hover, .analyst-tree-row:focus { background: var(--panel-3); }
       .analyst-tree-row[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
       .analyst-tree-glyph { color: var(--faint); font: 11px var(--mono); text-align: center; }
@@ -1785,6 +1788,10 @@ var(--panel);
       .analyst-history-row strong { color: var(--green); font: 10px var(--mono); text-transform: none; }
       .analyst-history-row strong[data-kind="error"] { color: var(--red); }
       .analyst-history-row small { grid-column: 1 / -1; color: var(--faint); font: 10px var(--mono); }
+      .analyst-history-more { padding: 8px 10px; border-top: 1px solid var(--line-soft); }
+      .analyst-history-more:empty { display: none; }
+      .analyst-show-more { width: 100%; min-height: 28px; padding: 4px 8px; font: 10px/1.45 var(--mono); }
+      .analyst-result-code { max-height: 220px; padding: 8px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 4px; }
       .analyst-result { display: grid; gap: 8px; min-height: 150px; padding: 10px; }
       .analyst-result pre { max-height: 220px; margin: 0; padding: 8px; overflow: auto; border: 1px solid var(--line-soft); background: var(--panel); color: var(--muted); font: 10px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
       .analyst-log-list { display: grid; gap: 4px; }
@@ -2535,8 +2542,8 @@ var(--panel);
       .traffic-payload-note { margin: 0 0 8px; color: var(--muted); font: 12px/1.5 var(--sans); }
       .traffic-payload-view { max-height: max(160px, 55vh); padding: 4px 0; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
       /* Captured code reads on the Sources editor surface its syntax colors are tuned for. */
-      .traffic-response-code, .traffic-payload-view { background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); }
-      :is(.traffic-response-code, .traffic-payload-view) ::selection { background: var(--code-selection); }
+      .traffic-response-code, .traffic-payload-view, .analyst-result-code, .code-view.vm-pack-output, .code-view.vm-pack-row-json { background: var(--code-bg); color: var(--code-text); font: 12px/18px var(--code-font); }
+      :is(.traffic-response-code, .traffic-payload-view, .analyst-result-code, .vm-pack-output, .vm-pack-row-json) ::selection { background: var(--code-selection); }
       .traffic-payload-view:focus-visible, .traffic-payload-view [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
       .traffic-payload-line { padding: 0 8px; }
       .code-view-mark { border-radius: 2px; background: color-mix(in srgb, var(--amber) 30%, transparent); color: inherit; }
@@ -3875,7 +3882,9 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .vm-experiment-form input, .vm-experiment-form select { box-sizing: border-box; max-width: 100%; }
 
 /* Bounded inert pack output; long source identities never widen the workspace. */
-.vm-pack-output { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Code views scroll in their own box, which is what mounts their rows. */
+.vm-pack-output, .code-view.vm-pack-row-json { max-height: 28rem; padding: 8px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 4px; }
+.code-view.vm-pack-row-json { max-height: 20rem; }
 .vm-pack-inputs label { display: grid; gap: 0.35rem; min-width: 0; max-width: 100%; }
 .vm-pack-inputs input { max-width: 100%; min-width: 0; }
 
@@ -4804,7 +4813,9 @@ input[type="file"]:hover::file-selector-button { background: var(--panel-3); }
 #screen-vm .vm-tool-shell .vm-review-inspector h3 { margin: 8px 0 4px; font-size: 13px; }
 #vm-ledger-workspace .vm-review-inspector > .vm-tool-subtitle { margin: 0 0 8px; }
 #vm-packs-workspace .vm-review-detail > h4, #vm-ledger-workspace .vm-review-field > h4 { margin: 12px 0 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
-#vm-packs-workspace .vm-review-detail > h4 + p, #vm-ledger-workspace .vm-review-field > p { margin: 0; color: var(--text); font: 12px/1.5 var(--mono); }
+#vm-packs-workspace .vm-review-detail > h4 + p, #vm-ledger-workspace .vm-review-field > p { margin: 0; color: var(--text); font: 12px/1.5 var(--mono); overflow-wrap: anywhere; }
+/* A cell shows the start of a long value; the inspector shows all of it. */
+#vm-packs-workspace .vm-pack-cell { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 #vm-ledger-workspace .vm-review-inspector section > h4 { margin: 16px 0 4px; font-size: 12px; font-weight: 500; }
 #vm-ledger-workspace [data-ledger-editor] > label { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; }
 

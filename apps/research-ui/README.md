@@ -3741,8 +3741,9 @@ do not generalize; unsupported inputs are retained without execution. See
 functions as the offline `origin-trace-vm-pack` CLI. Import local JSON, specify
 exact interpreter artifact IDs for comparison, then explicitly apply or compare.
 No imported code executes. Invalid schema, stale digests and undeclared source
-families are rejected. Cancel, Clear, bounded preview and complete report download
-are available. The local Rust HTTP backend is required; native stored-evidence
+families are rejected. A request runs until it is done or **Cancel** stops it,
+with its elapsed seconds in the status; Clear, the whole report and complete
+report download are available. The local Rust HTTP backend is required; native stored-evidence
 mode explains how to use the backend or CLI. See the
 [versioned pack contract](../../protocol/vm-analysis-pack-v1.md) for limits and
 agent-facing `vm_pack_apply`/`vm_pack_compare` routes.
@@ -3832,9 +3833,10 @@ Analysis content scrolls within the dock and ends at its wrapping bottom tabs.
 
 Analysis packs and Opcode ledger put local file selection and structured results
 first. Expand **Compare two builds** for the comparison workspace inputs and
-exact artifact IDs. Pack reports show bounded ranking/comparison tables;
-**Inspect raw report JSON** retains the original preview and the export keeps
-the complete exact response. Numeric identities too large for exact browser
+exact artifact IDs. Pack reports show paged ranking/comparison tables whose
+cells show the start of a long value and whose inspector shows all of it;
+**Inspect raw report JSON** shows the whole original response in the shared
+code view and the export keeps the complete exact response. Numeric identities too large for exact browser
 number display are labeled **See exact JSON**, never silently rounded.
 
 Ledger JSON editors are collapsed beneath coverage. **Create empty ledger**

@@ -51,17 +51,25 @@ async function evidencePackageReadBytes(response, maximum, signal) {
   signal?.addEventListener('abort', cancel, {once: true});
   try {
     checkAbort();
-    // Own each chunk immediately so tiny views cannot retain huge backing stores.
-    const bytes = new Uint8Array(maximum);
+    // Own each chunk immediately so tiny views cannot retain huge backing
+    // stores. With no maximum (Infinity) the whole response is kept.
+    const whole = maximum === Infinity, bytes = whole ? null : new Uint8Array(maximum), parts = [];
     let size = 0, chunks = 0;
     while (true) {
       const {done, value} = await reader.read();
       checkAbort();
-      if (done) return bytes.subarray(0, size);
-      if (++chunks > 65536) throw new Error('The package response exceeded its transport chunk limit.');
+      if (done) {
+        if (!whole) return bytes.subarray(0, size);
+        const joined = new Uint8Array(size);
+        parts.reduce((at, part) => { joined.set(part, at); return at + part.byteLength; }, 0);
+        return joined;
+      }
+      if (++chunks > 65536 && !whole) throw new Error('The package response exceeded its transport chunk limit.');
       if (!(value instanceof Uint8Array)) throw new Error('The package response contained a non-byte chunk.');
-      if (value.byteLength > maximum - size) throw new Error('The package response exceeded its byte limit.');
-      bytes.set(value, size); size += value.byteLength;
+      if (whole) parts.push(value.byteOffset === 0 && value.byteLength === value.buffer.byteLength ? value : value.slice());
+      else if (value.byteLength > maximum - size) throw new Error('The package response exceeded its byte limit.');
+      else bytes.set(value, size);
+      size += value.byteLength;
       // Include empty chunks, and yield so timeout/Cancel tasks can run even if
       // every read is immediately fulfilled by a fragmented producer.
       if (chunks % 256 === 0) { await new Promise(resolve => setTimeout(resolve, 0)); checkAbort(); }

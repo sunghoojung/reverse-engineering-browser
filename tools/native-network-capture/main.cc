@@ -395,6 +395,108 @@ void HeaderBlocks() {
          "early-hints factory gate only in a current, unexpired content session with Network\n";
 }
 
+// A request waits to send a body that capture still reads or hashes apart
+// from it, and goes once that ends, whatever the outcome; a stream is read as
+// it is sent, so it never waits.
+void BodyReadWaits() {
+  auto& sink = reb::NativeNetworkCaptureSink::Get();
+  auto& artifacts = reb::NativeArtifactCaptureSink::Get();
+  const auto mask = reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kNetwork);
+  base::test_now_ns = 100;
+  network::ResourceRequest request;
+  request.method = "POST";
+  request.url = GURL("https", "api.example.test", "/upload", "");
+  int resumed = 0;
+  const auto resume = [&resumed] { return base::OnceClosure([&resumed] { ++resumed; }); };
+  // Each case starts with no read, hash or posted task of an earlier one.
+  const auto start = [&](const std::uint64_t id) {
+    base::ThreadPool::RunPending();
+    artifacts.read_calls.clear();
+    base::SequencedTaskRunner::RunPosted();
+    events.clear();
+    resumed = 0;
+    sink.RecordRequestStarted(id, 0, 0, 4, 5, 11, 12, request, reb::NativeBrowserLoaderKind(2));
+    sink.TeeRequestBody(id, request);
+  };
+  reb::NativeRequestBodyReadOutcome outcome;
+  outcome.state = reb::NativeRequestBodyState::kCaptured;
+  outcome.artifact_id = 970;
+  outcome.body_length = 7;
+  outcome.captured_length = 7;
+
+  // In memory: the record is emitted first, then the request goes on this sequence.
+  sink.SetEmitter(Emit, 22, mask, 200, true);
+  request.request_body = BytesBody({Bytes("payload")});
+  start(301);
+  assert(artifacts.read_calls.size() == 1 && sink.WaitForBodyRead(301, resume()));
+  assert(std::move(artifacts.read_calls[0].record).Run(outcome) ==
+         Last(reb::NativeProbeType::kRequestBody).header.sequence_number);
+  assert(resumed == 0 && base::SequencedTaskRunner::RunPosted() == 1 && resumed == 1);
+  assert(!sink.WaitForBodyRead(301, resume()) && resumed == 1);
+
+  // A file or blob part is read from its own source, so its request waits too.
+  for (auto element : {network::DataElement(network::DataElementFile{}),
+                       network::DataElement(network::DataElementDataPipe{})}) {
+    request.request_body = std::make_shared<network::ResourceRequestBody>();
+    request.request_body->elements_mutable()->push_back(std::move(element));
+    start(302);
+    assert(artifacts.read_calls.size() == 1 && sink.WaitForBodyRead(302, resume()));
+    static_cast<void>(std::move(artifacts.read_calls[0].record).Run(outcome));
+    assert(base::SequencedTaskRunner::RunPosted() == 1 && resumed == 1);
+  }
+
+  // A stream is read through the request's own upload: waiting would never end.
+  request.request_body = std::make_shared<network::ResourceRequestBody>();
+  request.request_body->elements_mutable()->emplace_back(network::DataElementChunkedDataPipe{});
+  start(303);
+  assert(artifacts.read_calls.size() == 1 && !sink.WaitForBodyRead(303, resume()));
+  static_cast<void>(std::move(artifacts.read_calls[0].record).Run(outcome));
+  assert(base::SequencedTaskRunner::RunPosted() == 0 && resumed == 0);
+
+  // A read of an earlier session records nothing and still lets its request go,
+  // as does a read whose recorder is dropped unrun.
+  request.request_body = BytesBody({Bytes("payload")});
+  start(304);
+  assert(sink.WaitForBodyRead(304, resume()));
+  sink.SetEmitter(Emit, 23, mask, 200, true);
+  assert(std::move(artifacts.read_calls[0].record).Run(outcome) == 0);
+  assert(base::SequencedTaskRunner::RunPosted() == 1 && resumed == 1);
+  start(305);
+  assert(sink.WaitForBodyRead(305, resume()));
+  artifacts.read_calls.clear();
+  assert(base::SequencedTaskRunner::RunPosted() == 1 && resumed == 1);
+
+  // A read the artifact sink refuses holds its request for one task at most.
+  artifacts.read_admission = reb::NativeRequestContentAdmission::kRefused;
+  start(306);
+  assert(artifacts.read_calls.empty() && sink.WaitForBodyRead(306, resume()));
+  assert(base::SequencedTaskRunner::RunPosted() == 1 && resumed == 1);
+  artifacts.read_admission = reb::NativeRequestContentAdmission::kQueued;
+
+  // Metadata only: the request waits for the hash, and for nothing when the
+  // worker refuses it or the body is a password form, which is not hashed.
+  sink.SetEmitter(Emit, 22, mask, 200);
+  start(307);
+  assert(sink.WaitForBodyRead(307, resume()) && base::ThreadPool::RunPending() == 1);
+  assert(Body(Last(reb::NativeProbeType::kRequestBody)).state ==
+             static_cast<std::uint8_t>(State::kMetadataOnly) &&
+         resumed == 0 && base::SequencedTaskRunner::RunPosted() == 1 && resumed == 1);
+  base::ThreadPool::refuse = true;
+  start(308);
+  base::ThreadPool::refuse = false;
+  assert(base::SequencedTaskRunner::RunPosted() == 1 && !sink.WaitForBodyRead(308, resume()));
+  request.request_body->set_contains_sensitive_info(true);
+  start(309);
+  assert(base::ThreadPool::pending.empty() && !sink.WaitForBodyRead(309, resume()));
+  // Outside capture nothing is read, so nothing waits.
+  sink.SetEmitter(nullptr, 0, 0, 0);
+  request.request_body = BytesBody({Bytes("payload")});
+  start(310);
+  assert(events.empty() && !sink.WaitForBodyRead(310, resume()) && resumed == 0);
+  std::cout << "PASS native request body reads: in-memory, file and blob bodies hold their "
+               "request until read or hashed, streams never wait, every end releases\n";
+}
+
 void RequestContent() {
   auto& sink = reb::NativeNetworkCaptureSink::Get();
   auto& artifacts = reb::NativeArtifactCaptureSink::Get();
@@ -1351,6 +1453,7 @@ int main() {
       << "PASS native network sink: disabled/expiry/category, owned profile, stable identity, "
          "synthetic/abort provenance, terminal-once/session rollover, truncation/queue loss\n";
   RequestContent();
+  BodyReadWaits();
   HeaderBlocks();
   CookieLists();
   NavigationLinks();

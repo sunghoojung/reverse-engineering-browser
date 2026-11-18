@@ -220,8 +220,13 @@ neither kind; Traffic shows them with their request.
   ([disk reserve](../services/artifact-receiver/README.md#disk-reserve)).
   Version 1 records come from browsers that charged a per-session budget
   (state 10) and kept at most 16 MiB per body (state 5).
-- The request is never delayed, consumed or altered. Content sessions read
-  file, blob and stream parts as described in
+- The request is never consumed or altered. It waits while capture reads or
+  hashes its body apart from it: Brave patch 0027 holds an in-memory, file or
+  blob body's request before the proxy sends it until the read ends, so the
+  browser never keeps a body after its request is done. A body the writer
+  must drain through a full pool starts its request that much later; a stream
+  part is read as it is sent and never waits. Content sessions read file, blob
+  and stream parts as described in
   [v3](native-network-v3.md#request-body-reads).
 - Queue loss is reported as in v1. A lost child leaves its request with no
   body or target record, which consumers show as "no record", not as no body.

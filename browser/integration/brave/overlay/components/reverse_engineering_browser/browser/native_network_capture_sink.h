@@ -18,6 +18,8 @@
 #include <vector>
 
 #include "base/files/file_path.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
 #include "base/synchronization/lock.h"
@@ -115,6 +117,14 @@ class NativeNetworkCaptureSink final {
   // getter changes, to one that forwards every byte unchanged. In-memory
   // bodies are read as soon as the request starts.
   void TeeRequestBody(std::uint64_t request_id, network::ResourceRequest& request) noexcept;
+  // UI sequence, before the request is sent: true while capture still reads
+  // or hashes its body apart from the request (in memory, a file or a blob),
+  // and `resume` then runs on this sequence once that ends. The request waits
+  // to send the body, so capture never holds one longer than its request
+  // does, and a page that uploads faster than the receiver stores is slowed
+  // to it, as a stream upload is. A stream part is read as it is sent, so it
+  // never waits here.
+  [[nodiscard]] bool WaitForBodyRead(std::uint64_t request_id, base::OnceClosure resume) noexcept;
   void RecordRequestRedirected(std::uint64_t request_id,
                                std::int32_t initiator_request_id,
                                std::uint32_t initiator_process_id,
@@ -201,6 +211,11 @@ class NativeNetworkCaptureSink final {
   std::uint64_t RecordBodyRead(std::uint64_t generation,
                                std::uint64_t read_id,
                                const NativeRequestBodyReadOutcome& outcome) noexcept;
+  // Counts a read the request waits on. The runner ends it on this sequence
+  // when it runs or is destroyed, so a read that records nothing, such as one
+  // of an earlier session, still lets its request go.
+  [[nodiscard]] base::ScopedClosureRunner BeginBodyRead(std::uint64_t request_id);
+  void EndBodyRead(std::uint64_t request_id) noexcept;
 
   // One hop of a tracked request: its start record and URL.
   struct HeaderHop final {
@@ -279,6 +294,12 @@ class NativeNetworkCaptureSink final {
   std::optional<DeferredBody> unread_body_;
   std::map<std::uint64_t, DeferredBody> reading_bodies_;
   std::uint64_t next_read_id_ = 1;
+  // Requests whose body is still being read or hashed, by request ID.
+  struct BodyReadWait final {
+    std::uint32_t reads = 0;
+    base::OnceClosure resume;
+  };
+  std::map<std::uint64_t, BodyReadWait> body_read_waits_;
   // The flush before this configuration's expiry has run, so no new read starts.
   bool deferred_bodies_flushed_ = false;
 };

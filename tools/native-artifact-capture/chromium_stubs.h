@@ -204,6 +204,14 @@ struct SequencedTaskRunner {
   };
   std::vector<Posted> tasks;
 };
+// The returned closure posts `task` to the runner, where it waits for
+// RunPosted like any other posted task.
+template <class Task>
+OnceClosure BindPostTask(const std::shared_ptr<SequencedTaskRunner>& runner, Task task) {
+  return OnceClosure([runner, posted_task = OnceClosure(std::move(task))]() mutable {
+    runner->PostTask(Location(), std::move(posted_task));
+  });
+}
 }  // namespace base
 #define FROM_HERE ::base::Location()
 

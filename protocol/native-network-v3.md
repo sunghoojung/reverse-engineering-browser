@@ -1380,6 +1380,15 @@ in-memory body on a worker and keeps no bytes.
 - Bytes stream to the receiver as they are read, whole at any length, and
   are hashed as they pass. Before payload version 2 a part past 16 MiB was
   sized, not read.
+- A read of an in-memory, file or blob body, and a Metadata only hash, run
+  apart from the request, so Brave patch 0027 holds the request in
+  `ContinueToStartRequest` until they end
+  (`NativeNetworkCaptureSink::WaitForBodyRead`). The reader's reference keeps
+  the body alive, and a request that finished first would leave the browser
+  holding a body Chromium had already released: four 72 MiB uploads in a row
+  kept 168 MiB more than the same Brave without a session. The hold ends when
+  the read does for any reason, a refused or dropped read included. A stream
+  part is read as the network sends it, so its request never waits.
 - The record is emitted when the read ends, still the child of
   `request_started`; its end frame names it as the artifact's creator. A body
   never handed to the reader (no hook) is recorded as `not_captured_body_kind`
@@ -1425,7 +1434,10 @@ form post was state 11.
   whole.
 - Each read holds at most one pending 64 KiB data frame in the in-flight pool
   and waits for space when it is full; a file or blob read resumes when the
-  writer drains, as a stream upload does.
+  writer drains, as a stream upload does. Its request waits for it (see
+  [Read](#read)), so a large body starts its request after about the time the
+  artifact channel takes to move it, and the browser holds no body past its
+  request.
 - The receiver's free-disk reserve is the only bound on what is stored; a
   refused body is state 13.
 

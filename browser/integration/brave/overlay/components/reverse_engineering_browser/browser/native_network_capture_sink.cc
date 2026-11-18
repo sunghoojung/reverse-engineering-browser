@@ -18,6 +18,8 @@
 #include "base/functional/bind.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/process/process_handle.h"
+#include "base/task/bind_post_task.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -752,6 +754,7 @@ void NativeNetworkCaptureSink::HashRequestBody(const NativeProbeEmitter emitter,
                                                scoped_refptr<network::ResourceRequestBody> bytes) {
   const std::uint64_t read_id = next_read_id_++;
   const std::uint64_t body_length = body.summary.body_length;
+  base::ScopedClosureRunner hashed = BeginBodyRead(body.parent.request_id);
   const auto entry = reading_bodies_.emplace(read_id, std::move(body)).first;
   // A started body is immutable; the reference keeps it alive for the hash.
   const bool posted = base::ThreadPool::PostTaskAndReplyWithResult(
@@ -769,14 +772,14 @@ void NativeNetworkCaptureSink::HashRequestBody(const NativeProbeEmitter emitter,
           std::move(bytes)),
       base::BindOnce(
           [](const std::uint64_t for_generation, const std::uint64_t id, const std::uint64_t length,
-             const std::array<std::uint8_t, 32>& digest) {
+             base::ScopedClosureRunner, const std::array<std::uint8_t, 32>& digest) {
             static_cast<void>(Get().RecordBodyRead(
                 for_generation, id,
                 NativeRequestBodyReadOutcome{.state = NativeRequestBodyState::kMetadataOnly,
                                              .body_length = length,
                                              .sha256 = digest}));
           },
-          generation(), read_id, body_length));
+          generation(), read_id, body_length, std::move(hashed)));
   // Without a worker the record follows at once, without the digest.
   if (!posted) {
     EmitDeferredBody(emitter, entry->second, NativeRequestBodyState::kMetadataOnly);
@@ -788,10 +791,21 @@ void NativeNetworkCaptureSink::ReadBody(const NativeProbeEmitter emitter,
                                         DeferredBody body,
                                         network::ResourceRequestBody& request_body) noexcept {
   const std::uint64_t read_id = next_read_id_++;
+  // A stream part is read as the request sends it, so its request cannot wait
+  // for the read. Checked before the read interposes on the stream.
+  const auto* const elements = request_body.elements();
+  const bool streamed =
+      elements->size() == 1 && elements->front().TryAs<network::DataElementChunkedDataPipe>();
+  base::ScopedClosureRunner read =
+      streamed ? base::ScopedClosureRunner() : BeginBodyRead(body.parent.request_id);
   switch (NativeArtifactCaptureSink::Get().ReadRequestBody(
       request_body, body.parent.request_id, body.parent.frame_id, body.url, body.mime_type,
-      base::BindOnce(&NativeNetworkCaptureSink::RecordBodyRead, base::Unretained(this),
-                     generation(), read_id))) {
+      base::BindOnce(
+          [](const std::uint64_t for_generation, const std::uint64_t id, base::ScopedClosureRunner,
+             const NativeRequestBodyReadOutcome& outcome) {
+            return Get().RecordBodyRead(for_generation, id, outcome);
+          },
+          generation(), read_id, std::move(read)))) {
     case NativeRequestContentAdmission::kQueued:
       reading_bodies_.emplace(read_id, std::move(body));
       return;
@@ -802,6 +816,36 @@ void NativeNetworkCaptureSink::ReadBody(const NativeProbeEmitter emitter,
       EmitDeferredBody(emitter, body, NativeRequestBodyState::kNotCapturedTransferRefused);
       return;
   }
+}
+
+base::ScopedClosureRunner NativeNetworkCaptureSink::BeginBodyRead(const std::uint64_t request_id) {
+  ++body_read_waits_[request_id].reads;
+  // Posted, since the read's last reference may go on its worker.
+  return base::ScopedClosureRunner(base::BindPostTask(
+      base::SequencedTaskRunner::GetCurrentDefault(),
+      base::BindOnce(&NativeNetworkCaptureSink::EndBodyRead, base::Unretained(this), request_id)));
+}
+
+void NativeNetworkCaptureSink::EndBodyRead(const std::uint64_t request_id) noexcept {
+  const auto found = body_read_waits_.find(request_id);
+  if (found == body_read_waits_.end() || --found->second.reads != 0) {
+    return;
+  }
+  base::OnceClosure resume = std::move(found->second.resume);
+  body_read_waits_.erase(found);
+  if (resume) {
+    std::move(resume).Run();
+  }
+}
+
+bool NativeNetworkCaptureSink::WaitForBodyRead(const std::uint64_t request_id,
+                                               base::OnceClosure resume) noexcept {
+  const auto found = body_read_waits_.find(request_id);
+  if (found == body_read_waits_.end()) {
+    return false;
+  }
+  found->second.resume = std::move(resume);
+  return true;
 }
 
 void NativeNetworkCaptureSink::RecordRequestStarted(

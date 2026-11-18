@@ -130,14 +130,39 @@ struct ThreadPool {
     while (!pending.empty()) {
       auto task = std::move(pending.front());
       pending.erase(pending.begin());
-      task();
+      std::move(task).Run();
       ++count;
     }
     return count;
   }
   static inline bool refuse = false;
-  static inline std::vector<std::function<void()>> pending;
+  // Move-only, since a reply may own a ScopedClosureRunner.
+  static inline std::vector<OnceCallback<void()>> pending;
 };
+using OnceClosure = OnceCallback<void()>;
+// The sink's own sequence: tasks posted back to it wait until a test runs them.
+struct SequencedTaskRunner {
+  static std::shared_ptr<SequencedTaskRunner> GetCurrentDefault() {
+    return std::make_shared<SequencedTaskRunner>();
+  }
+  static std::size_t RunPosted() {
+    std::size_t count = 0;
+    while (!posted.empty()) {
+      auto task = std::move(posted.front());
+      posted.erase(posted.begin());
+      std::move(task).Run();
+      ++count;
+    }
+    return count;
+  }
+  static inline std::vector<OnceClosure> posted;
+};
+template <class Task>
+OnceClosure BindPostTask(const std::shared_ptr<SequencedTaskRunner>&, Task task) {
+  return OnceClosure([posted_task = OnceClosure(std::move(task))]() mutable {
+    SequencedTaskRunner::posted.push_back(std::move(posted_task));
+  });
+}
 }  // namespace base
 namespace content {
 class BrowserContext {

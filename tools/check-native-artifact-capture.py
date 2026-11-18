@@ -31,6 +31,7 @@ HEADERS = (
     "base/no_destructor.h",
     "base/location.h",
     "base/task/sequenced_task_runner.h",
+    "base/task/bind_post_task.h",
     "base/files/file_path.h",
     "base/functional/bind.h",
     "base/process/process_handle.h",

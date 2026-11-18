@@ -141,21 +141,26 @@ Payload capture is limited to a bounded metadata prefix. Network request
 prefixes contain only the method and destination host. Fragments and URL
 credentials are never captured. Every admitted request
 also gets a `request_body` child record from `browser/native_network_capture_sink.cc`
-with the body's kind, length, normalized content type and a SHA-256 of
-in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
-sink also emit `request_target` children (path and query, 116-byte prefix plus
-original length) for starts and redirects and hand longer targets and at most
-16 MiB of in-memory body bytes to `NativeArtifactCaptureSink::CaptureRequestContent`
-as sensitive `request_target` and `request_body` artifacts, copied and hashed
-off the UI sequence. No session byte budget applies; the receiver's disk
-reserve refuses what would fill the store's volume, and that refusal is its own
-state. Brave patch
-`0019-tee-native-request-bodies` hands bodies with file, blob or stream parts to
-`browser/native_request_body_reader.cc`, which reads them on a background
-sequence (a stream part through a forwarding tee getter) and records them when
-the read ends. Password form posts keep neither bytes nor a digest. The wire
-and limits are in [Native network v2](../../../../../../protocol/native-network-v2.md)
-and [v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
+with the body's kind, length and normalized content type; a Metadata only
+session hashes an in-memory body whole on a worker and records the digest
+without the bytes. Only with `--reb-capture-request-content` does the sink also
+emit `request_target` children (path and query, 116-byte prefix plus original
+length) for starts and redirects, hand longer targets to
+`NativeArtifactCaptureSink::CaptureRequestContent` as sensitive `request_target`
+artifacts, and read every body whole: Brave patch
+`0019-tee-native-request-bodies` hands it to
+`browser/native_request_body_reader.cc`, which reads it on a background
+sequence (a stream part through a forwarding tee getter), streams it to the
+receiver as a sensitive `request_body` artifact and records it when the read
+ends. No size limit or session byte budget applies; the receiver's disk reserve
+refuses what would fill the store's volume, and that refusal is its own state.
+Brave patch `0027-hold-requests-for-body-reads` holds a request whose body is
+read or hashed apart from it until that ends, so the browser never keeps a body
+past its request. A content session keeps a password form post like any other
+body and marks it `credential_form`; a Metadata only session keeps neither its
+bytes nor a digest. The wire and limits are in
+[Native network v2](../../../../../../protocol/native-network-v2.md) and
+[v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
 Every network body streams to the receiver through
 `browser/native_artifact_stream.cc` in data frames of at most 64 KiB, so the
 in-flight pool bounds bytes in flight rather than bodies

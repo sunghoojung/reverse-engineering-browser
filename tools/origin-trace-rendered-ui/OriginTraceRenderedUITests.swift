@@ -60,7 +60,12 @@ final class Harness {
       }
       if NSApp.isActive && window.isKeyWindow { break }
       guard Date() < deadline else {
-        throw HarnessError("Origin Trace did not become the active key window after \(requests) requests (active=\(NSApp.isActive), key=\(window.isKeyWindow))")
+        // Another app that keeps taking the foreground, such as a second
+        // rendered run on this Mac, is named so the failure is not read as
+        // the product's.
+        let front = NSWorkspace.shared.frontmostApplication
+        let holder = front.map { "\($0.localizedName ?? "?") PID \($0.processIdentifier) at \($0.bundleURL?.path ?? "?")" } ?? "none"
+        throw HarnessError("Origin Trace did not become the active key window after \(requests) requests (active=\(NSApp.isActive), key=\(window.isKeyWindow), frontmost: \(holder))")
       }
       try await Task.sleep(nanoseconds: 100_000_000)
     }
@@ -353,19 +358,36 @@ final class Harness {
   func screenshot(_ name: String) async throws {
     try await settle()
     // Two frames can land inside an entrance animation: the start panel has
-    // been captured at a fifth of its opacity. Finite animations finish first;
-    // infinite ones, such as a spinner, are left running.
-    let finished = try await webView.callAsyncJavaScript(
+    // been captured at a fifth of its opacity. The finite animations running
+    // now get two seconds to finish; infinite ones, such as a spinner, are
+    // left running. The wait is polled from here, so a page whose timers stop
+    // cannot hold the screenshot.
+    _ = try await webView.callAsyncJavaScript(
       """
-      const running = document.getAnimations().filter(animation => animation.playState === 'running'
+      window.__rebScreenshotAnimations = document.getAnimations().filter(animation => animation.playState === 'running'
         && Number.isFinite(animation.effect?.getComputedTiming().endTime));
-      return await Promise.race([
-        Promise.all(running.map(animation => animation.finished.catch(() => null))).then(() => true),
-        new Promise(done => setTimeout(() => done(false), 2000)),
-      ]);
+      return true;
       """,
       contentWorld: .page)
-    if finished as? Bool != true { print("RENDERED_UI_ANIMATION_RUNNING \(name)") }
+    let deadline = Date().addingTimeInterval(2)
+    while true {
+      let running = try await webView.callAsyncJavaScript(
+        """
+        return window.__rebScreenshotAnimations.filter(animation => animation.playState === 'running').map(animation => {
+          const target = animation.effect?.target;
+          const node = target ? target.tagName.toLowerCase() + (target.id ? `#${target.id}` : '') + [...target.classList].map(name => `.${name}`).join('') : 'no target';
+          return `${animation.animationName ?? animation.transitionProperty ?? 'animation'} on ${node} at ${Math.round(animation.currentTime ?? -1)} of ${Math.round(animation.effect.getComputedTiming().endTime)} ms`;
+        });
+        """,
+        contentWorld: .page) as? [String] ?? []
+      if running.isEmpty { break }
+      guard Date() < deadline else {
+        print("RENDERED_UI_ANIMATION_RUNNING \(name): \(running.joined(separator: "; "))")
+        break
+      }
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    _ = try await webView.callAsyncJavaScript("delete window.__rebScreenshotAnimations; return true;", contentWorld: .page)
     let configuration = WKSnapshotConfiguration()
     configuration.afterScreenUpdates = true
     let image = try await webView.takeSnapshot(configuration: configuration)

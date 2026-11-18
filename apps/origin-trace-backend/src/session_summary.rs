@@ -1732,7 +1732,11 @@ mod tests {
 
     /// The summary of a store, from its event index on disk beside it.
     fn summarize(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Value {
-        let mut indexes = Indexes::new(store, &store.with_file_name("origin-trace.jsonl"));
+        let mut indexes = Indexes::new(
+            store,
+            &store.with_file_name("origin-trace.jsonl"),
+            &store.with_file_name("request-signals.jsonl"),
+        );
         build(
             &mut indexes,
             artifacts,

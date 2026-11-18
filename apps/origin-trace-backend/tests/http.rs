@@ -1085,6 +1085,69 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
     assert!(!schema.is_valid(&altered));
 }
 
+/// A profile is found by its exact root however many newer profiles follow
+/// it, a later record for the same root replaces it, and a damaged line stops
+/// every lookup rather than answering from the records around it.
+#[tokio::test]
+async fn signal_profiles_are_found_at_any_age_by_their_root() {
+    let server = Server::start().await;
+    let profile = |request: u64, sequence: u64, count: &str| {
+        json!({"protocol_version":1,"document_kind":"request-signal-profile","session_id":"1",
+            "request_id":request.to_string(),"root_event":{"process_id":7,"sequence_number":sequence.to_string()},
+            "initiator_event":null,"navigation_id":"1","frame_id":"1",
+            "signals":[{"category":"canvas","relation":"same_context","confidence":"correlated",
+                "event_count":count,"first_event":{"process_id":7,"sequence_number":"1"},
+                "last_event":{"process_id":7,"sequence_number":"1"}}],
+            "coverage":{"parent_depth":0,"parent_depth_limit":32,"copied_from_initiator":false,
+                "retention_truncated":false,"parent_depth_limited":false,"count_saturated":false}})
+        .to_string()
+    };
+    let path = server.root.path().join("signals.jsonl");
+    let mut lines = vec![profile(1, 2, "3")];
+    lines.extend((2..12_002).map(|request| profile(request, request * 2, "1")));
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let route = |request: u64, sequence: u64| {
+        format!(
+            "/api/request-signal-profile?session_id=1&request_id={request}&root_process_id=7&root_sequence_number={sequence}"
+        )
+    };
+    let response = server.get(&route(1, 2)).await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        body["request_id"], "1",
+        "the oldest of 12,001 profiles is found"
+    );
+    assert_eq!(body["signals"][0]["event_count"], "3");
+    assert_eq!(
+        server.get(&route(1, 3)).await.status(),
+        404,
+        "only the exact root selects it"
+    );
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, (profile(1, 2, "9") + "\n").as_bytes()).unwrap();
+    let body: Value = server.get(&route(1, 2)).await.json().await.unwrap();
+    assert_eq!(
+        body["signals"][0]["event_count"], "9",
+        "a later record replaces it"
+    );
+
+    std::io::Write::write_all(&mut file, b"{\"truncated\":\n").unwrap();
+    let response = server.get(&route(1, 2)).await;
+    assert_eq!(response.status(), 500);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("malformed request signal profile")
+    );
+}
+
 #[tokio::test]
 async fn openapi_responses_match_live_local_http_and_conditional_reads() {
     let server = Server::start().await;

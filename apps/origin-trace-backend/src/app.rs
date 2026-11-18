@@ -224,6 +224,9 @@ const INDEX_INTERVAL: Duration = Duration::from_secs(1);
 /// How long an event poll folds appended records into the gap totals; the
 /// background fold keeps the index within a second of the store.
 const EVENT_TOTALS_FOLD: Duration = Duration::from_millis(100);
+/// How long a signal profile lookup may spend bringing its index up to the
+/// signal store before it answers that indexing is still under way.
+const SIGNAL_PROFILE_FOLD: Duration = Duration::from_secs(2);
 
 impl App {
     pub async fn stop(&self) {
@@ -295,6 +298,7 @@ impl App {
             indexes: Arc::new(std::sync::Mutex::new(crate::event_index::Indexes::new(
                 &options.store,
                 &options.trace_store,
+                &options.signal_store,
             ))),
             initiator_frames: Arc::default(),
             observation_sites: Arc::default(),
@@ -1579,27 +1583,27 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                let path = self.options.signal_store.clone();
+                let indexes = self.indexes.clone();
                 self.blocking(move || {
-                    let profiles = evidence::recent(&path, 10000, 16384, "request signal profile")?;
-                    for profile in &profiles {
+                    let key = crate::event_index::ProfileKey {
+                        session: &session,
+                        request: &request,
+                        process,
+                        sequence: &sequence,
+                    };
+                    let profile = indexes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .signal_profile(&key, std::time::Instant::now() + SIGNAL_PROFILE_FOLD)?;
+                    if let Some(profile) = &profile {
                         validation::schema("SignalProfile", profile, 500)?;
                     }
-                    profiles
-                        .into_iter()
-                        .rev()
-                        .find(|p| {
-                            p["session_id"] == session
-                                && p["request_id"] == request
-                                && p["root_event"]["process_id"] == process
-                                && p["root_event"]["sequence_number"] == sequence
-                        })
-                        .ok_or_else(|| {
-                            Error::new(
-                                404,
-                                "No request signal profile matches the selected request",
-                            )
-                        })
+                    profile.ok_or_else(|| {
+                        Error::new(
+                            404,
+                            "No request signal profile matches the selected request",
+                        )
+                    })
                 })
                 .await?
             }

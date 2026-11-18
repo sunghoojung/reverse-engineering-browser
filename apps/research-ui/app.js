@@ -4082,7 +4082,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.signalProfileKey = selection.key;
             state.signalProfileEtag = response.headers.get('ETag');
           } else {
-            if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
+            if (!response.ok) {
+              // A 503 says how far the profile index has got; the next refresh asks again.
+              const failure = response.status === 503 ? await response.json().catch(() => null) : null;
+              throw new Error(typeof failure?.error === 'string' ? failure.error.slice(0, 1024)
+                : `Request signal profile store returned ${response.status}`);
+            }
             const body = await response.json();
             if (!ownsSelection()) return;
             if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');

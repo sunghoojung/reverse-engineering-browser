@@ -1833,7 +1833,7 @@
       "get": {
         "operationId": "get_request_signal_profile",
         "summary": "get request signal profile",
-        "description": "Exact identity lookup over the most recent 10000 profiles. A 404 may also carry ETag; an exact conditional request can return 304 before redoing lookup.",
+        "description": "Exact identity lookup over every profile in the signal store, through its disk index (`request-signals.jsonl.profiles-v1`); a later record for the same root replaces an earlier one. While the index has not reached a root it returns 503 with how far it got. A malformed or oversized profile line fails every lookup with 500. A 404 may also carry ETag; an exact conditional request can return 304 before redoing lookup.",
         "tags": [
           "request-signal-profile"
         ],
@@ -1893,6 +1893,16 @@
           },
           "500": {
             "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The signal profile index is still catching up with the store. Retry shortly.",
             "content": {
               "application/json": {
                 "schema": {

@@ -2508,13 +2508,19 @@ pub(crate) mod tests {
         root
     }
 
-    /// The event identity index of `store`, which a record read locates through.
+    /// The event identity index of `store`, which a record read locates
+    /// through, caught up: a read folds it for at most a second, which a
+    /// loaded test run must not depend on.
     fn event_indexes(store: &Path) -> std::sync::Mutex<crate::event_index::Indexes> {
-        std::sync::Mutex::new(crate::event_index::Indexes::new(
+        let mut indexes = crate::event_index::Indexes::new(
             store,
             &store.with_file_name("origin-trace.jsonl"),
             &store.with_file_name("request-signals.jsonl"),
-        ))
+        );
+        indexes
+            .catch_up(std::time::Instant::now() + std::time::Duration::from_secs(120))
+            .unwrap();
+        std::sync::Mutex::new(indexes)
     }
 
     fn caught_up(index: &Mutex<RequestIndex>) {
@@ -2973,11 +2979,6 @@ pub(crate) mod tests {
         let index = Mutex::new(RequestIndex::new(&store));
         caught_up(&index);
         let events = event_indexes(&store);
-        events
-            .lock()
-            .unwrap()
-            .catch_up(std::time::Instant::now() + std::time::Duration::from_secs(120))
-            .unwrap();
         let read = |sequence| {
             observation_document(&store, &artifacts, &index, &events, Some(9), 42, sequence)
                 .unwrap()

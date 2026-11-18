@@ -183,7 +183,15 @@ mod tests {
             &store.path().join("origin-trace.jsonl"),
             &store.path().join("request-signals.jsonl"),
         ));
+        // A read folds the index for at most 100 ms; a loaded test run must
+        // not leave the listing partial.
+        indexes
+            .lock()
+            .unwrap()
+            .catch_up(std::time::Instant::now() + std::time::Duration::from_secs(120))
+            .unwrap();
         let current = state(&path, &indexes, &console, Some(Value::Null), &every, &pause).unwrap();
+        assert_eq!(current["threads"]["coverage"]["scope"], "store");
         assert_eq!(current["availability"], "unsupported");
         assert_eq!(current["lease"], Value::Null);
         assert_eq!(current["threads"]["frames"][1]["out_of_process"], true);

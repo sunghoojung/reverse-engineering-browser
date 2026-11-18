@@ -352,6 +352,20 @@ final class Harness {
 
   func screenshot(_ name: String) async throws {
     try await settle()
+    // Two frames can land inside an entrance animation: the start panel has
+    // been captured at a fifth of its opacity. Finite animations finish first;
+    // infinite ones, such as a spinner, are left running.
+    let finished = try await webView.callAsyncJavaScript(
+      """
+      const running = document.getAnimations().filter(animation => animation.playState === 'running'
+        && Number.isFinite(animation.effect?.getComputedTiming().endTime));
+      return await Promise.race([
+        Promise.all(running.map(animation => animation.finished.catch(() => null))).then(() => true),
+        new Promise(done => setTimeout(() => done(false), 2000)),
+      ]);
+      """,
+      contentWorld: .page)
+    if finished as? Bool != true { print("RENDERED_UI_ANIMATION_RUNNING \(name)") }
     let configuration = WKSnapshotConfiguration()
     configuration.afterScreenUpdates = true
     let image = try await webView.takeSnapshot(configuration: configuration)

@@ -18211,45 +18211,43 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "max_artifact_bytes",
-                  "max_js_matches_per_rule",
-                  "max_js_function_regions",
-                  "max_js_region_work_bytes",
-                  "max_wasm_sections",
-                  "max_wasm_section_bytes",
                   "max_graph_edges",
                   "max_bytecode_snapshot_bytes",
                   "max_manifest_line_bytes",
                   "max_event_line_bytes",
                   "max_artifact_records",
-                  "max_event_records",
-                  "max_wasm_functions",
-                  "max_wasm_instructions"
+                  "max_event_records"
                 ],
                 "properties": {
                   "max_artifact_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: artifacts larger than this were refused. Every artifact is now read whole."
                   },
                   "max_js_matches_per_rule": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: matches counted per rule and region. Every match is now counted."
                   },
                   "max_js_function_regions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: function regions examined. Every region is now examined."
                   },
                   "max_js_region_work_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: bytes scanned over all regions. Each region now scans only its own text, so the scan is linear in the source."
                   },
                   "max_wasm_sections": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: modules with more sections were refused."
                   },
                   "max_wasm_section_bytes": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: modules with a larger section were refused."
                   },
                   "max_graph_edges": {
                     "type": "integer",
@@ -18277,11 +18275,13 @@
                   },
                   "max_wasm_functions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: modules with more defined functions were refused."
                   },
                   "max_wasm_instructions": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: modules with more instructions were refused."
                   }
                 }
               }

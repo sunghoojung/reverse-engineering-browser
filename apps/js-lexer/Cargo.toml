@@ -1,0 +1,8 @@
+[package]
+name = "reb-js-lexer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# One parser-free JavaScript token pass shared by the Origin Trace backend and
+# the deobfuscation worker. It has no dependencies so either can build it.

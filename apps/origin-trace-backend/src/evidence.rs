@@ -1,5 +1,5 @@
 use crate::{
-    error::{Code, Error, Result},
+    error::{Code, Error, Result, check_cancelled},
     validation,
 };
 use serde_json::{Value, json};
@@ -9,6 +9,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom},
     path::Path,
+    sync::atomic::AtomicBool,
 };
 
 pub const PUBLIC_ARTIFACT_FIELDS: [&str; 15] = [
@@ -135,6 +136,12 @@ pub fn public_artifact(artifact: &Value) -> Value {
             .unwrap_or_default()
     )
 }
+/// The whole verified content of one artifact. Analysis reads use this: the
+/// manifest's byte size is the only size, the read is sized to it up front,
+/// and the bytes are hashed before any of them are interpreted.
+pub fn read(root: &Path, artifact: &Value) -> Result<Vec<u8>> {
+    content(root, artifact, usize::MAX)
+}
 pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>> {
     let root = root.canonicalize()?;
     let path = root
@@ -155,8 +162,10 @@ pub fn content(root: &Path, artifact: &Value, maximum: usize) -> Result<Vec<u8>>
         return Err(Error::new(500, "Artifact content byte size is invalid")
             .with_code(Code::ArtifactIntegrity));
     }
-    let mut bytes = Vec::new();
-    file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+    let expected = file.metadata()?.len();
+    let mut bytes = Vec::with_capacity(usize::try_from(expected).unwrap_or(0).min(maximum));
+    file.take((maximum as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
     if bytes.len() > maximum {
         return Err(Error::bad("Artifact content exceeds its byte limit"));
     }
@@ -172,6 +181,19 @@ pub fn verified_range(
     artifact: &Value,
     offset: usize,
     limit: usize,
+) -> Result<Vec<u8>> {
+    verified_range_cancellable(root, artifact, offset, limit, &AtomicBool::new(false))
+}
+
+/// `verified_range` for a request that can go away. The whole file is hashed
+/// for every range, so a large artifact takes as long as its disk needs; the
+/// read stops between 64 KiB blocks once `cancelled` is set.
+pub fn verified_range_cancellable(
+    root: &Path,
+    artifact: &Value,
+    offset: usize,
+    limit: usize,
+    cancelled: &AtomicBool,
 ) -> Result<Vec<u8>> {
     let root = root.canonicalize()?;
     let path = root
@@ -195,18 +217,15 @@ pub fn verified_range(
         return Err(Error::new(500, "Artifact content byte size is invalid")
             .with_code(Code::ArtifactIntegrity));
     }
-    let started = std::time::Instant::now();
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     let mut position = 0usize;
-    let mut selected = Vec::with_capacity(limit.min(2 * 1024 * 1024));
+    let wanted = usize::try_from(expected)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(offset);
+    let mut selected = Vec::with_capacity(limit.min(wanted));
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(30) {
-            return Err(Error::new(
-                408,
-                "Artifact verification exceeded its deadline",
-            ));
-        }
+        check_cancelled(cancelled, "Artifact content")?;
         let size = file.read(&mut buffer)?;
         if size == 0 {
             break;

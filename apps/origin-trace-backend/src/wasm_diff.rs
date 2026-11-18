@@ -10,12 +10,13 @@
 //! executes either module, and no instruction text or constant value leaves
 //! this module: the report is structure only.
 //!
-//! One budget bounds all of the work: a deadline checked inside every body
-//! and every loop that can grow with the module, and a cap on similarity
-//! scores. A step the budget stops leaves its functions unclassified rather
-//! than guessed.
+//! A comparison of modules of any size runs whole. A cap on similarity
+//! scores bounds the matching passes, and cancellation, checked inside every
+//! body and every loop that can grow with the module, stops the work once the
+//! request is gone. A step the score cap stops leaves its functions
+//! unclassified rather than guessed.
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, check_cancelled},
     evidence, validation, wasm,
 };
 use serde_json::{Value, json};
@@ -23,8 +24,11 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
 };
 use wasmparser::{
     BlockType, CompositeInnerType, DataKind, Encoding, ExternalKind, FunctionBody, KnownCustom,
@@ -35,11 +39,6 @@ use wasmparser::{
 /// spelling a fingerprint depends on changes, so a stored fingerprint is never
 /// compared with one computed under different rules.
 pub const FINGERPRINT_VERSION: u32 = 1;
-/// The same per-module input limit as the block graph.
-pub const MAX_BYTES: usize = 64 * 1024 * 1024;
-/// Imports plus defined functions fingerprinted per module. Large Unity and
-/// Emscripten builds stay under it; a larger module is compared on a prefix.
-const MAX_FUNCTIONS: usize = 262_144;
 /// Web engines reject a body above this size, so a longer one cannot have run.
 const MAX_BODY_BYTES: usize = 7_654_321;
 /// Web engines reject a function with more locals than this.
@@ -60,11 +59,10 @@ const MAX_NEIGHBOURHOOD: usize = 64;
 /// Rounds of exact matching between propagation steps: a later round only
 /// resolves ties whose other members propagation matched meanwhile.
 const MAX_EXACT_ROUNDS: usize = 4;
-/// Instructions decoded between two deadline checks inside one body.
+/// Instructions decoded between two cancellation checks inside one body.
 const CHECK_EVERY: u32 = 4096;
-/// Fingerprinting and matching share one deadline. It sits under the native
-/// helper's five-second process limit so a report, partial or not, arrives.
-pub(crate) const DEADLINE: Duration = Duration::from_secs(4);
+/// What a cancelled request names.
+const WHAT: &str = "WASM comparison";
 const SIMILARITY_THRESHOLD: f64 = 0.75;
 /// A propagated match must still look like the function it claims to be.
 const PROPAGATION_FLOOR: f64 = 0.5;
@@ -83,10 +81,6 @@ pub const PAGE_DEFAULT_ROWS: usize = 200;
 const PAGE_BYTES: usize = 122_880;
 /// The MCP server's inline limit, which a page must stay under.
 const _: () = assert!(PAGE_BYTES < 131_072);
-/// What a partial report says about paging. It is not cached, so each page
-/// is a new comparison that can stop at a different point, and rows are
-/// ordered by status: a later page can repeat or skip rows of an earlier one.
-const PARTIAL_PAGES: &str = "This report is partial and is not kept, so each page is compared again and can stop at a different point: pages of a partial report can repeat or skip rows. Retry for a complete report before paging.";
 /// Reports kept so paging a comparison does not repeat it.
 const CACHED_REPORTS: usize = 2;
 const NONE: u32 = u32::MAX;
@@ -173,9 +167,7 @@ fn bounded(name: &str) -> String {
 /// without depending on how fast the machine is.
 #[derive(Clone, Copy)]
 struct Limits {
-    deadline: Duration,
     max_comparisons: u64,
-    max_functions: usize,
     /// Stops `step` at its check after this many of its own checks passed.
     stop_in: Option<(&'static str, u64)>,
     /// Stops at the check after this many, wherever it falls.
@@ -184,18 +176,17 @@ struct Limits {
 
 impl Limits {
     const DEFAULT: Self = Self {
-        deadline: DEADLINE,
         max_comparisons: MAX_COMPARISONS,
-        max_functions: MAX_FUNCTIONS,
         stop_in: None,
         stop_after_checks: None,
     };
 }
 
 /// The shared budget. Once a check fails it stays failed, and `stopped` says
-/// which step stopped and why.
-struct Budget {
+/// which step stopped and why. `started` only times the report.
+struct Budget<'c> {
     started: Instant,
+    cancelled: &'c AtomicBool,
     limits: Limits,
     comparisons: u64,
     checks: u64,
@@ -204,10 +195,11 @@ struct Budget {
     stopped: Option<(&'static str, &'static str)>,
 }
 
-impl Budget {
-    fn new(limits: Limits, started: Instant) -> Self {
+impl<'c> Budget<'c> {
+    fn new(limits: Limits, cancelled: &'c AtomicBool) -> Self {
         Self {
-            started,
+            started: Instant::now(),
+            cancelled,
             limits,
             comparisons: 0,
             checks: 0,
@@ -230,8 +222,8 @@ impl Budget {
                     .is_some_and(|n| self.checks > n)
             {
                 self.stopped = Some((step, "test stop"));
-            } else if self.started.elapsed() > self.limits.deadline {
-                self.stopped = Some((step, "deadline"));
+            } else if self.cancelled.load(Ordering::Relaxed) {
+                self.stopped = Some((step, "cancellation"));
             }
         }
         self.stopped.is_some()
@@ -455,7 +447,7 @@ struct Module {
     funcs: Vec<Func>,
     callers: Vec<Vec<u32>>,
     type_text: Vec<String>,
-    /// Functions past a limit or the deadline that were never fingerprinted.
+    /// Functions the budget stopped before they were fingerprinted.
     truncated: bool,
     /// Each `INDEX_SECTIONS` section's id and byte range, in module order.
     index_sections: Vec<(u8, std::ops::Range<usize>)>,
@@ -554,7 +546,7 @@ fn fingerprint(
     ty: u32,
     context: &Context<'_>,
     scratch: &mut Scratch,
-    budget: &mut Budget,
+    budget: &mut Budget<'_>,
 ) -> Result<Option<Print>> {
     let range = body.range();
     if range.len() > MAX_BODY_BYTES {
@@ -926,7 +918,7 @@ fn global_tag(content: ValType, mutable: bool) -> u64 {
 fn analyze(
     bytes: &[u8],
     label: &str,
-    budget: &mut Budget,
+    budget: &mut Budget<'_>,
     omissions: &mut Vec<String>,
 ) -> Result<Module> {
     if bytes.is_empty() {
@@ -943,12 +935,10 @@ fn analyze(
     let mut bodies = Vec::new();
     let mut segments = Vec::new();
     let mut declared = 0u32;
-    // Imported functions past the function limit are counted, not kept.
     let mut imported = 0u32;
-    let limit = budget.limits.max_functions;
     // Every section entry counts toward the next budget check, so a module
-    // of millions of imports, exports, names or segments cannot outrun the
-    // deadline while it is parsed.
+    // of millions of imports, exports, names or segments stops soon after
+    // its request is cancelled.
     let mut entries = 0u64;
     let mut parsing_stopped = false;
     macro_rules! poll {
@@ -1008,13 +998,7 @@ fn analyze(
                         TypeRef::Func(ty) => {
                             func_types.push(ty);
                             imported += 1;
-                            if imports.len() < limit {
-                                imports.push((
-                                    offset,
-                                    bounded(import.module),
-                                    bounded(import.name),
-                                ));
-                            }
+                            imports.push((offset, bounded(import.module), bounded(import.name)));
                         }
                         TypeRef::Global(global) => {
                             globals.push(global_tag(global.content_type, global.mutable))
@@ -1115,14 +1099,11 @@ fn analyze(
         segments: &segments,
     };
     let total = imported as usize + declared as usize;
-    let mut truncated = parsing_stopped || total > limit;
-    let mut funcs = Vec::with_capacity(total.min(limit));
+    let mut truncated = parsing_stopped;
+    let mut funcs = Vec::with_capacity(total);
     let mut same_signature = HashMap::<(String, String, u64), u32>::new();
     let mut same_name = HashMap::<(String, String), u32>::new();
     for (index, (offset, module, field)) in imports.into_iter().enumerate() {
-        if funcs.len() >= limit {
-            break;
-        }
         let ty = func_types[index];
         let signature = context.signature_of_type(ty);
         let by_signature = same_signature
@@ -1161,9 +1142,6 @@ fn analyze(
     }
     let mut scratch = Scratch::default();
     for (position, body) in bodies.iter().enumerate() {
-        if funcs.len() >= limit {
-            break;
-        }
         if budget.late(FINGERPRINTING) {
             truncated = true;
             break;
@@ -1317,7 +1295,7 @@ struct Matcher<'m> {
     grouped_a: Vec<bool>,
     grouped_b: Vec<bool>,
     groups: Vec<Group>,
-    budget: Budget,
+    budget: Budget<'m>,
     /// A matched pair whose positional proposals were already made.
     positional_done: Vec<bool>,
     /// Similarity scores already paid for during propagation.
@@ -1330,7 +1308,7 @@ struct Matcher<'m> {
 }
 
 impl<'m> Matcher<'m> {
-    fn new(a: &'m Module, b: &'m Module, budget: Budget) -> Self {
+    fn new(a: &'m Module, b: &'m Module, budget: Budget<'m>) -> Self {
         Self {
             a,
             b,
@@ -2096,7 +2074,7 @@ impl<'m> Matcher<'m> {
         let b = b.into_iter().filter(|i| self.open_b(*i)).collect();
         (a, b)
     }
-    fn run(mut self) -> (Vec<Row>, Vec<Group>, Budget, bool) {
+    fn run(mut self) -> (Vec<Row>, Vec<Group>, Budget<'m>, bool) {
         self.settle(Vec::new());
         if self.budget.stopped.is_none() {
             let made = self.structural();
@@ -2264,20 +2242,27 @@ fn sides(module: Module) -> (Vec<Side>, Vec<String>) {
 
 #[cfg(test)]
 fn compare(a_bytes: &[u8], b_bytes: &[u8], a: Value, b: Value) -> Result<Report> {
-    compare_with(a_bytes, b_bytes, a, b, Limits::DEFAULT, Instant::now())
+    compare_with(
+        a_bytes,
+        b_bytes,
+        a,
+        b,
+        Limits::DEFAULT,
+        &AtomicBool::new(false),
+    )
 }
 
-/// `started` is when the request began, so reading and verifying both
-/// modules counts against the deadline too.
+/// A cancelled request gets an error, not the part compared before the
+/// flag was seen.
 fn compare_with(
     a_bytes: &[u8],
     b_bytes: &[u8],
     a: Value,
     b: Value,
     limits: Limits,
-    started: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<Report> {
-    let mut budget = Budget::new(limits, started);
+    let mut budget = Budget::new(limits, cancelled);
     let mut omissions = Vec::new();
     let module_a = analyze(a_bytes, "A", &mut budget, &mut omissions)?;
     let module_b = analyze(b_bytes, "B", &mut budget, &mut omissions)?;
@@ -2295,6 +2280,7 @@ fn compare_with(
             .zip(&module_b.index_sections)
             .all(|((x, xr), (y, yr))| x == y && a_bytes[xr.clone()] == b_bytes[yr.clone()]);
     let (rows, groups, budget, structural_incomplete) = matcher.run();
+    check_cancelled(cancelled, WHAT)?;
     let mut counts = [0u64; 7];
     let mut methods = [0u64; 7];
     for row in &rows {
@@ -2341,9 +2327,6 @@ fn compare_with(
         && !structural_incomplete
         && !module_a.truncated
         && !module_b.truncated;
-    if !complete {
-        omissions.push(PARTIAL_PAGES.into());
-    }
     let (a_sides, a_types) = sides(module_a);
     let (b_sides, b_types) = sides(module_b);
     Ok(Report {
@@ -2479,13 +2462,10 @@ fn render(report: &Report, page: &Page) -> Result<Value> {
             "rows": rows,
             "omissions": report.omissions,
             "limits": {
-                "max_module_bytes": MAX_BYTES,
-                "max_functions": MAX_FUNCTIONS,
                 "max_body_bytes": MAX_BODY_BYTES,
                 "max_comparisons": MAX_COMPARISONS,
                 "max_candidates_per_function": MAX_CANDIDATES,
                 "max_neighbourhood": MAX_NEIGHBOURHOOD,
-                "deadline_ms": DEADLINE.as_millis() as u64,
                 "max_page_rows": PAGE_MAX_ROWS,
                 "page_bytes": PAGE_BYTES,
                 "similarity_threshold": SIMILARITY_THRESHOLD,
@@ -2541,14 +2521,19 @@ fn record(artifacts: &[Value], id: &str) -> Result<Value> {
 
 /// Compares two captured modules and returns one page of the match table.
 ///
-/// `started` is when the request arrived, before it waited for a reader, so
-/// the deadline bounds the whole request. A complete report is cached in this
-/// process by both artifact IDs and SHA-256 digests, so paging the same pair
-/// does not repeat the comparison; a partial one is not, so a retry gets a
-/// fresh attempt. The native helper is a new process per page, so it has no
-/// such cache.
-pub fn diff(root: &Path, a_id: &str, b_id: &str, page: &Page, started: Instant) -> Result<Value> {
-    diff_with(root, a_id, b_id, page, Limits::DEFAULT, started)
+/// Modules of any size are compared with no deadline; `cancelled` stops the
+/// work when the request goes away. A report is cached in this process by
+/// both artifact IDs and SHA-256 digests, so paging the same pair does not
+/// repeat the comparison. A report the score cap left partial is cached too:
+/// the cap stops at the same point every time.
+pub fn diff(
+    root: &Path,
+    a_id: &str,
+    b_id: &str,
+    page: &Page,
+    cancelled: &AtomicBool,
+) -> Result<Value> {
+    diff_with(root, a_id, b_id, page, Limits::DEFAULT, cancelled)
 }
 
 fn diff_with(
@@ -2557,7 +2542,7 @@ fn diff_with(
     b_id: &str,
     page: &Page,
     limits: Limits,
-    started: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<Value> {
     if a_id == b_id {
         return Err(Error::bad("Compare two different artifacts"));
@@ -2581,8 +2566,8 @@ fn diff_with(
     let report = match cached {
         Some(report) => report,
         None => {
-            let a_bytes = evidence::content(root, &a, MAX_BYTES)?;
-            let b_bytes = evidence::content(root, &b, MAX_BYTES)?;
+            let a_bytes = evidence::read(root, &a)?;
+            let b_bytes = evidence::read(root, &b)?;
             let meta = |record: &Value, bytes: &[u8]| {
                 json!({"artifact_id": record["artifact_id"], "sha256": record["sha256"],
                     "session_id": record["session_id"], "byte_size": bytes.len()})
@@ -2593,11 +2578,9 @@ fn diff_with(
                 meta(&a, &a_bytes),
                 meta(&b, &b_bytes),
                 limits,
-                started,
+                cancelled,
             )?);
-            if report.complete
-                && let Ok(mut reports) = REPORTS.lock()
-            {
+            if let Ok(mut reports) = REPORTS.lock() {
                 reports.retain(|(k, _)| *k != key);
                 reports.push((key, report.clone()));
                 while reports.len() > CACHED_REPORTS {

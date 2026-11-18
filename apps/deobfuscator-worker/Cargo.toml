@@ -12,15 +12,18 @@ oxc_parser = "0.151.0"
 oxc_syntax = "0.151.0"
 oxc_span = "0.151.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 tree-sitter = "0.25"
 tree-sitter-javascript = "0.25"
+# Sizes the native stack of the recursive Oxc passes from measured nesting.
+reb-js-lexer = { path = "../js-lexer" }
+stacker = "=0.1.25"
 
-# The preflight's tree-sitter parse is generated C whose cost an unoptimized
-# build multiplies roughly fivefold. Its wall-clock backstop must never decide
-# admission, so the parser is built optimized in every profile: the debug
-# worker that tests and the development backend run then parses at release
-# speed while the Rust code keeps its debug assertions.
+# The tree-sitter parse behind the byte-position queries is generated C whose
+# cost an unoptimized build multiplies roughly fivefold, so the parser is built
+# optimized in every profile: the debug worker that tests and the development
+# backend run parses at release speed while the Rust code keeps its debug
+# assertions.
 [profile.dev.package.tree-sitter]
 opt-level = 3
 

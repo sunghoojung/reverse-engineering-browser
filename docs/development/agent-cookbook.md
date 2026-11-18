@@ -513,14 +513,17 @@ Needs Full access.
 ```text
 search_artifact_text {"q": "sha256", "kind": "javascript", "limit": 50}
 search_artifact_text {"q": "sha256", "kind": "javascript", "limit": 50, "offset": 50}
+search_artifact_text {"q": "crypto\\.subtle\\.(sign|digest)", "regex": true, "kind": "javascript"}
 ```
 
-Good: `matches` with `artifact_id`, `line`, `column` and a little context, and
+Good: `total_matches` counts every match in every file, read whole whatever
+its size; `matches` is a page with `artifact_id`, `line`, `column` and a
+little context, `files` gives each file on the page its match count, and
 `coverage.complete: true`. `next_offset` pages further. A file named in
-`coverage.not_fully_searched` was skipped (over 16 MiB) or hit 100 matches;
-narrow with `artifact_id`, `sha256` or `host`, or read it with recipe 21. The
-literal is plain text: there are no patterns, and `match_case` false folds
-ASCII letters only.
+`coverage.not_searched` could not be read or verified. `q` is literal text
+unless `regex` is true; regular expressions use the Rust `regex` syntax and
+run in time linear in the text. `match_case` false folds letters by Unicode
+simple case folding.
 
 ## 23. Read a large Wasm module's disassembly
 
@@ -532,8 +535,19 @@ inspect_wasm {"artifact_id": "9", "sections": "code", "row_offset": 1024, "row_l
 ```
 
 Good: `row_window` with `total_rows` and `next_offset`; continue until it is
-null. A window stops early to fit the inline limit. For one function's blocks
-use `get_wasm_functions` then `get_wasm_function_graph`.
+null. A window stops early to fit the inline limit. Every row of any module is
+reachable; nothing is cut at a row count or a size. To start at an offset from
+another tool, pass `byte_offset` instead of `row_offset`. To find text, use
+`search_wasm_inspection` (Full access):
+
+```text
+search_wasm_inspection {"artifact_id": "9", "q": "call { function_index: 42 }"}
+inspect_wasm {"artifact_id": "9", "row_offset": 81234, "row_limit": 16}
+```
+
+Its `total_matches` counts the whole module, and each match's `row` is a
+`row_offset`. For one function's blocks use `get_wasm_functions` then
+`get_wasm_function_graph`.
 
 ## 24. Work autonomously at Full access
 

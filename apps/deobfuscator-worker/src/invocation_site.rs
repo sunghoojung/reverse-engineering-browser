@@ -1,8 +1,8 @@
 //! Finds the function a native JavaScript invocation site names
 //! (protocol/native-js-invocation-v1.md), either by a dotted name bound to a
-//! function or by a byte offset inside one. It reads the bounded tree-sitter
-//! preflight tree, so text inside a string, template or comment can never
-//! match. It reports byte offsets and syntax facts only; the caller computes
+//! function or by a byte offset inside one. It reads the tree-sitter syntax
+//! tree of the whole source, so text inside a string, template or comment can
+//! never match. It reports byte offsets and syntax facts only; the caller computes
 //! the site key from the verified artifact bytes and decides what to refuse.
 use serde::{Deserialize, Serialize};
 use tree_sitter::Node;
@@ -452,9 +452,6 @@ pub(crate) fn analyze(request: Request) -> Response {
     if request.operation != "invocation_site" {
         return invalid("invalid invocation site request", source.len());
     }
-    if source.len() > crate::MAX_SOURCE_BYTES {
-        return invalid("source exceeds the analysis byte limit", source.len());
-    }
     let by_name = match (&request.name, request.byte_offset) {
         (Some(name), None) => match parse_name(name) {
             Some(name) => Some(name),
@@ -473,7 +470,7 @@ pub(crate) fn analyze(request: Request) -> Response {
         }
         _ => return invalid("give exactly one of name and byte_offset", source.len()),
     };
-    let tree = match crate::preflight::parse_checked(source) {
+    let tree = match crate::syntax_tree::parse(source) {
         Ok(tree) => tree,
         Err(message) => return invalid(message, source.len()),
     };
@@ -771,6 +768,6 @@ mod tests {
         assert!(!both.ok);
         let malformed = named("window.hsw=function(a){", "hsw");
         assert!(!malformed.ok);
-        assert!(malformed.error.unwrap().contains("preflight"));
+        assert!(malformed.error.unwrap().contains("syntax tree"));
     }
 }

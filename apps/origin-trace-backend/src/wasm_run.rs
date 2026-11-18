@@ -32,21 +32,15 @@ use std::{
 };
 use tokio::sync::Semaphore;
 use wasmi::{
-    CompilationMode, Config, Engine, Extern, ExternType, F32, F64, Func, FuncType, Global,
-    Instance, Memory, Module, Mutability, Nullable, Ref, RefType, ResourceLimiter, ResumableCall,
-    Store, Table, TrapCode, V128, Val, ValType, errors::ErrorKind,
+    CompilationMode, Config, CustomFuelCosts, Engine, Extern, ExternType, F32, F64, Func, FuncType,
+    Global, Instance, Memory, Module, Mutability, Nullable, Ref, RefType, ResourceLimiter,
+    ResumableCall, Store, Table, TrapCode, V128, Val, ValType, errors::ErrorKind,
 };
 use wasmi_core::LimiterError;
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 pub const SCHEMA: &str = "wasm-run-v1";
 const STORE_SCHEMA: &str = "reb-wasm-runs-v1";
-/// The artifact receiver's default per-artifact limit. A larger module is
-/// refused before compilation, which no deadline can interrupt. Compiling
-/// takes about 25 to 30 times the module size in memory at its peak (a
-/// 6.9 MB body of nested ifs peaked near 320 MB resident), so a module at
-/// this cap can need about 480 MB for the length of the run.
-pub const MAX_MODULE_BYTES: usize = 16 * 1024 * 1024;
 /// Wasm itself allows 1,000 parameters and results per function type.
 const MAX_VALUES: usize = 1000;
 const MAX_STUBS: usize = 256;
@@ -96,8 +90,9 @@ const INTERPRETER_VERSION: &str = "2.0.0";
 
 /// Default and maximum for each limit. The maxima bound what the module may
 /// use while it runs: linear memory and tables up to 64 MiB and 1,000,000
-/// elements in total, and 10 s. Compilation memory is bounded separately, by
-/// MAX_MODULE_BYTES.
+/// elements in total, and 10 s. A module is validated whole and each function
+/// is translated on its first call, so compilation memory follows the
+/// functions a run reaches, not the module's size.
 const FUEL: (u64, u64) = (100_000_000, 10_000_000_000);
 const MEMORY_PAGES: (u64, u64) = (256, 1024);
 const TABLE_ELEMENTS: (u64, u64) = (10_000, 1_000_000);
@@ -1254,12 +1249,22 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
     let selected = select(request, &facts)?;
     let (executable, aliases) = rewrite(bytes, &facts, selected.index, request.run_start)?;
     let mut config = Config::default();
-    // Eager compilation happens in Module::new, bounded by the module size
-    // cap. Lazy compilation would charge a body's translation against one fuel
-    // slice on its first call, so a large body could never run.
+    // Module::new validates every body, which is linear and small in memory.
+    // A body is translated on its first call instead of up front: eager
+    // translation takes about 25 to 30 times the module size at its peak and
+    // cannot be interrupted, so a module of tens of MiB would hold gigabytes
+    // past its deadline. Translation costs no fuel here, because wasmi would
+    // charge a body's translation against the one fuel slice of its first
+    // call, so a large body could never run. Byte copies keep wasmi's default
+    // cost of one fuel per 64 bytes.
     config
         .consume_fuel(true)
-        .compilation_mode(CompilationMode::Eager)
+        .compilation_mode(CompilationMode::LazyTranslation)
+        .fuel_cost(CustomFuelCosts {
+            bytes_copied_per_fuel: 64,
+            fuel_per_bytes_translated: 0,
+            fuel_per_bytes_validated: 0,
+        })
         .set_max_recursion_depth(limits.call_depth as usize);
     let engine = Engine::new(&config);
     let module = Module::new(&engine, &executable[..]).map_err(|error| {
@@ -1433,9 +1438,10 @@ fn execute(request: &Request, limits: Limits, bytes: &[u8], started: Instant) ->
         None => Instance::new(&mut store, &module, &externs)
             .map_err(|error| instantiation_failure(&error, &store)),
     };
-    // Compilation and instantiation cannot be interrupted; they are bounded by
-    // the module, element and constant-expression caps. A deadline that passed
-    // during them is reported as such, before any function is called.
+    // Validation and instantiation cannot be interrupted; validation is linear
+    // in the module, and instantiation is bounded by the element and
+    // constant-expression caps. A deadline that passed during them is
+    // reported as such, before any function is called.
     let instance = match instance {
         Ok(_) if Instant::now() >= deadline => Err(Outcome::new(
             Status::DeadlineExceeded,
@@ -1652,13 +1658,8 @@ fn run_blocking(root: &Path, request: &Request, limits: Limits) -> Result<Value>
         )
         .with_code(Code::StateConflict));
     }
-    if artifact["byte_size"]
-        .as_u64()
-        .is_some_and(|size| size > MAX_MODULE_BYTES as u64)
-    {
-        return Err(Error::bad("WASM run input exceeds 16 MiB"));
-    }
-    let bytes = evidence::content(root, &artifact, MAX_MODULE_BYTES)?;
+    // A module of any size is read whole.
+    let bytes = evidence::read(root, &artifact)?;
     let mut record = execute(request, limits, &bytes, started)?;
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2563,8 +2564,9 @@ mod tests {
 
     #[test]
     fn a_large_function_body_runs_within_an_ordinary_fuel_limit() {
-        // Lazy compilation charged about 7 fuel per body byte against one fuel
-        // slice on the first call, so a body over about 140 KB never ran.
+        // Lazy translation used to charge about 7 fuel per body byte against
+        // one fuel slice on the first call, so a body over about 140 KB never
+        // ran; it is free now.
         let source = repeated(
             "(module (func (export \"run\") (result i32) i32.const 0 ",
             "i32.const 1 i32.add ",

@@ -216,19 +216,20 @@ const header = ui => [...ui.root.querySelectorAll('th')].map(cell => cell.textCo
   assert.equal(chosen(twin), '12', 'a same-SHA re-capture is skipped');
 }
 {
-  // A partial report is not kept for reopening: choosing it again reads it
-  // again, and Show more says why its pages are unreliable.
+  // A partial report is kept for reopening like a complete one: the backend
+  // keeps it and the score cap stops at the same point every time.
   const many = Array.from({length: 300}, (_, index) => ({status: 'unclassified', method: null, score: null, a: side(index), b: null}));
-  const ui = mount({pairs: {431: {rows: many, omissions: ['The fingerprinting step stopped at the deadline.']}}});
+  const ui = mount({pairs: {431: {rows: many, omissions: ['The structural matching step stopped at the comparison limit.']}}});
   click(ui, ui.document.querySelector('#compare'));
   await until(() => rows(ui).length === 200, 'the partial first page');
-  assert.match(ui.root.querySelector('.wasm-diff-more').title, /partial/);
+  assert.equal(ui.root.querySelector('.wasm-diff-more').title, '', 'Show more needs no reliability warning');
   choose(ui, '12');
   await until(() => ui.requests.at(-1).other === '12', 'another pair');
   await until(() => rows(ui).length === 8, 'the other pair');
   const before = ui.requests.filter(entry => entry.other === '431').length;
   choose(ui, '431');
-  await until(() => ui.requests.filter(entry => entry.other === '431').length === before + 1, 'the partial pair is read again');
+  await until(() => rows(ui).length === 200, 'the partial pair reopens');
+  assert.equal(ui.requests.filter(entry => entry.other === '431').length, before, 'the partial pair is not read again');
 }
 {
   // A non-Wasm selection hides the action and closes the table.

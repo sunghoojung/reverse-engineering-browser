@@ -232,16 +232,19 @@ export async function checkAnalystController(root) {
   assert.equal(await f.ui.saveAnalystFile(),false);assert.equal(f.ui.selectAnalystFile(2),false);assert.equal(f.ui.analystHasUnsavedWork(),true);
   f.mode='ready';f.held.shift()();assert.equal(await saving,true);assert.equal(f.postCount(),1);
 
-  // Deadline retires a stuck body/header read without assuming it failed to commit.
+  // No deadline: a save the store is slow to answer stays pending, then lands once.
   f=await controllerFixture(root);f.edit('Late original');f.mode='hold-post';const late=f.ui.saveAnalystFile();
-  [...f.timers][0].callback();assert.equal(await late,false);assert(f.state.analystDraftDirty);assert.equal(f.state.localAnalyst.generation,1);
-  f.mode='ready';f.held.shift()();await new Promise(resolve=>setTimeout(resolve,0));
-  assert.equal(f.state.localAnalyst.generation,1,'Late acknowledgement must not mutate UI');
-  assert.equal(await f.ui.saveAnalystFile(),true,'A 409 after the original delayed commit is reconciled to the exact saved snapshot');
-  assert.equal(f.server.generation,2,'No duplicate commit');
-  assert.equal(f.state.analystDraftDirty,false);assert.equal(f.postCount(),2,'Only the explicit retry sent another application POST');
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(f.timers.size,0,'No save deadline is armed');assert.equal(f.state.localAnalystSaving,true);
+  f.mode='ready';f.held.shift()();assert.equal(await late,true);
+  assert.equal(f.server.generation,2);assert.equal(f.state.localAnalyst.generation,2);
+  assert.equal(f.state.analystDraftDirty,false);assert.equal(f.postCount(),1,'No duplicate commit');
+  // A library of any size: a 3 MiB script saves and loads whole.
+  f=await controllerFixture(root);f.edit('x'.repeat(3*1024*1024));assert.equal(await f.ui.saveAnalystFile(),true);
+  assert.equal(f.server.files.find(file=>file.id===1).content.length,3*1024*1024);
   assert.equal(await f.ui.refreshLocalAnalyst(true),true);
-  console.log('PASS Analyst dirty same-file/navigation/folder/unload guards, focus, exact receipts, uncertain reconciliation, conflict bases, stale replies, deadlines and duplicate-write suppression (controller fixture; not rendered QA)');
+  assert.equal(f.state.localAnalyst.files.find(file=>file.id===1).content_bytes,3*1024*1024);
+  console.log('PASS Analyst dirty same-file/navigation/folder/unload guards, focus, exact receipts, uncertain reconciliation, conflict bases, stale replies, no save deadline, libraries of any size and duplicate-write suppression (controller fixture; not rendered QA)');
   await checkAnalystCancel(root);
 }
 
@@ -252,12 +255,15 @@ async function checkAnalystCancel(root) {
   const slice=(start,end)=>{const first=app.indexOf(start),last=app.indexOf(end,first);assert(first>=0&&last>first,start);return app.slice(first,last);};
   const control=()=>({disabled:false,checked:false,hidden:false,textContent:'',style:{}});
   const analystElements=new Proxy({},{get:(target,key)=>target[key]??=control()});
-  const state={analystRunPending:false,analystActiveRunId:null,analystCancelRunId:null,analystNextRunId:1,analystTotalRuns:0,analystRuns:[],
+  const state={analystRunPending:false,analystActiveRunId:null,analystCancelRunId:null,analystNextRunId:1,analystRunStartedAt:null,analystRuns:[],
     analystHistoryEvictions:0,analystSelectedRunId:null,analystDraftDirty:false,localAnalystNeedsReload:false,localAnalystPendingSave:null,
     localAnalyst:{generation:3},localAnalystRunner:{available:true,active_run_id:null},events:[],artifacts:[],originTrace:null,signalProfile:null,
     vmAnalysisStatus:'ready',vmFindings:[]};
   const posts=[],notices=[];
-  const context={state,analystElements,
+  const ticks=[];
+  const context={state,analystElements,performance,
+    // The elapsed-seconds notice reschedules itself; the check runs ticks by hand.
+    setTimeout:callback=>ticks.push(callback),
     analystFile:()=>({id:4,kind:'analyst-script',name:'probe.js',content:'return 1;'}),selectedAnalystArtifact:()=>null,
     analystVariables:()=>[],buildAnalystEvidence:()=>({summary:{events:0}}),isLocalAnalystResult:()=>true,refreshLocalAnalyst:async()=>true,
     setAnalystNotice:(kind,message)=>notices.push({kind,message}),
@@ -265,13 +271,16 @@ async function checkAnalystCancel(root) {
   const ui=runInNewContext(slice('      function renderAnalystExecution()','      function renderAnalystResult(')+
     slice('      async function runLocalAnalystScript()','      // Source ownership never comes from a URL.')+';({renderAnalystExecution,runLocalAnalystScript,cancelLocalAnalystScript})',context);
   context.renderLocalAnalyst=ui.renderAnalystExecution;
-  const settle=()=>new Promise(resolve=>setTimeout(resolve,0));
+  const settle=()=>new Promise(resolve=>globalThis.setTimeout(resolve,0));
   const post=action=>{const index=posts.findIndex(item=>item.body.action===action);assert(index>=0,action);return posts.splice(index,1)[0];};
   const result=run_id=>({protocol_version:1,run_id,ok:true,outcome:'completed',duration_ms:4,result_type:'number',result_text:'1',result_truncated:false,logs:[],logs_truncated:false});
   // A late cancellation: the run completes before the runner refuses it.
   analystElements.confirm.checked=true;
   const run=ui.runLocalAnalystScript();
   assert.equal(analystElements.cancel.disabled,false);
+  assert.match(notices.at(-1).message,/^Run 1 is running in a fresh isolated helper process · 0 s\. Cancel stops it\.$/);
+  state.analystRunStartedAt-=61000;ticks.shift()();
+  assert.match(notices.at(-1).message,/· 61 s\./,'A run with no deadline counts its seconds');
   const cancel=ui.cancelLocalAnalystScript();
   assert.equal(analystElements.cancel.disabled,true);
   ui.renderAnalystExecution();
@@ -280,6 +289,8 @@ async function checkAnalystCancel(root) {
   assert.equal(posts.filter(item=>item.body.action==='cancel_local_analyst_script').length,1,'One cancellation per run');
   post('run_local_analyst_script').reply(200,result(1));await run;
   const completed=notices.at(-1);
+  ticks.splice(0).forEach(tick=>tick());
+  assert.equal(notices.at(-1),completed,'A settled run stops counting');assert.equal(ticks.length,0);
   assert.match(completed.message,/Run 1 completed/);
   post('cancel_local_analyst_script').reply(409,{error:'No analyst run is active.'});await cancel;
   assert.equal(notices.at(-1),completed,'A late refusal does not replace the completion notice');

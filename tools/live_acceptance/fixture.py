@@ -351,6 +351,9 @@ def _handler_class(fixture: Fixture) -> type[http.server.BaseHTTPRequestHandler]
             receipt.head_bytes = len(head.encode("latin-1"))
             digest = hashlib.sha256()
             self.wfile.write(head.encode("latin-1"))
+            # A client that has read the whole response can read its receipt at
+            # once, so the receipt names what is sent before the last bytes
+            # leave. Only `completed` waits for the write to succeed.
             if response.chunks is not None:
                 written = []
                 for part in response.chunks:
@@ -366,25 +369,26 @@ def _handler_class(fixture: Fixture) -> type[http.server.BaseHTTPRequestHandler]
                         digest.update(part)
                         written.append(part)
                         receipt.wire_length += len(part)
-                self.wfile.write(b"0\r\n\r\n")
                 receipt.decoded_body = b"".join(written)
+                receipt.wire_sha256 = digest.hexdigest()
+                self.wfile.write(b"0\r\n\r\n")
             elif response.abort_after is not None:
                 sent = response.body[: response.abort_after]
-                self.wfile.write(sent)
-                self.wfile.flush()
                 digest.update(sent)
                 receipt.wire_length = len(sent)
                 receipt.decoded_body = sent
+                receipt.wire_sha256 = digest.hexdigest()
                 receipt.aborted = True
                 self.close_connection = True
+                self.wfile.write(sent)
             else:
-                if self.command != "HEAD":
-                    self.wfile.write(response.body)
                 digest.update(response.body)
                 receipt.wire_length = len(response.body)
                 receipt.decoded_body = response.body if response.decoded is None else response.decoded
+                receipt.wire_sha256 = digest.hexdigest()
+                if self.command != "HEAD":
+                    self.wfile.write(response.body)
             self.wfile.flush()
-            receipt.wire_sha256 = digest.hexdigest()
             receipt.completed = not receipt.aborted
 
         def log_message(self, *_args) -> None:

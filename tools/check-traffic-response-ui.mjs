@@ -2,10 +2,12 @@
 // against decoded response_body records in a DOM model: capture states and
 // every reason a body is missing, a memory-cache reuse shown with the bytes of
 // the request it names, a service worker's own fetches of the same URL, the
-// artifact join, hex paged by range to the end of the body, reads checked by size and SHA-256, pretty print
-// through the shared Oxc or in-page layout with raw ranges, wrap, hex, find
-// and copy, a JSON tree, a signature-checked image, and captured markup
-// inserted as text. Not rendered QA.
+// artifact join, whole-body reads with progress, Cancel and Read the body,
+// checked by size and SHA-256, hex paged by window to the end of the body,
+// pretty print through the shared Oxc or in-page layout with raw ranges, wrap,
+// Find with an exact count over the whole text or every hex row, copy, a JSON
+// tree, a signature-checked image, and captured markup inserted as text. Not
+// rendered QA.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -20,6 +22,8 @@ const ui = name => readFile(new URL(`../apps/research-ui/${name}`, import.meta.u
 const {window, document} = parseHTML('<!doctype html><div id="panel"></div>');
 const reads = [], copied = [];
 const blobs = new Map();
+// Artifacts whose read the test holds open: each delivers one chunk per pull it allows.
+const held = new Map();
 const state = {artifacts: [], events: [], content: true};
 let pendingDigests = 0;
 const countedCrypto = {subtle: {digest: (...args) => {
@@ -31,11 +35,21 @@ const context = createContext({
   setTimeout, clearTimeout, crypto: countedCrypto, btoa, Response, Promise, AbortSignal, URLSearchParams,
   decodePayload: event => Buffer.from(event.payload, 'hex').toString(),
   navigator: {clipboard: {writeText: async text => {copied.push(text);}}},
-  fetch: async url => {
+  fetch: async (url, init = {}) => {
     reads.push(url);
     const [, id, offset, limit] = /artifacts\/(\d+)\/content\?offset=(\d+)&limit=(\d+)/.exec(url);
     const bytes = blobs.get(id);
-    return bytes ? new Response(bytes.subarray(Number(offset), Number(offset) + Number(limit))) : new Response('', {status: 404});
+    if (!bytes) return new Response('', {status: 404});
+    const range = bytes.subarray(Number(offset), Number(offset) + Number(limit));
+    const gate = held.get(id);
+    if (!gate) return new Response(range);
+    let at = 0;
+    init.signal?.addEventListener('abort', () => {gate.cancelled = true;});
+    return new Response(new ReadableStream({async pull(controller) {
+      await new Promise(resolve => gate.waiting.push(resolve));
+      if (at >= range.length) {controller.close(); return;}
+      controller.enqueue(range.slice(at, at += gate.chunk));
+    }, cancel() {gate.cancelled = true;}}));
   }
 });
 runInContext(`${await ui('source_syntax.js')}\n${await ui('source_format.js')}\n${await ui('code_view.js')}\n${await ui('source_facts.js')}\n${await ui('traffic_view.js')}\n${await ui('traffic_payload.js')}\n${await ui('traffic_response.js')}
@@ -182,7 +196,7 @@ assert.equal(panel.querySelectorAll('.traffic-response-line').length, 1);
 const press = async control => {panel.querySelector(`[data-control="${control}"]`).click(); await settle();};
 // The backend Oxc layout of the retained JSON body; a clicked token names its raw range.
 const laid = '{\n  "challenge": "c1",\n  "answers": [1, 2, { "deep": [true, null] }],\n  "html": "<b>x</b>"\n}';
-formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only', language: 'json',
+formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only', language: 'json',
   source: {artifact_id: jsonArtifact.artifact_id, sha256: jsonArtifact.sha256}, status: 'formatted', text: laid})}));
 await press('pretty');
 assert.equal(formatReads.at(-1), `/api/source-format?session_id=7&artifact_id=${jsonArtifact.artifact_id}`);
@@ -216,7 +230,7 @@ await press('hex');
 await press('pretty');
 // A body Oxc refuses is laid out in the page, with the reason.
 const broken = retain('{"a":1,}', 'application/json');
-formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only', language: 'json',
+formatReplies.push(() => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only', language: 'json',
   source: {artifact_id: broken.artifact_id, sha256: broken.sha256}, status: 'unavailable', reason: 'parse-failed', text: null})}));
 await show(request(record(broken)));
 await press('pretty');
@@ -282,29 +296,57 @@ assert.equal(panel.querySelector('[data-control="hex"]').disabled, true);
 await show(request(record(binary)), 'preview');
 assert.match(panel.textContent, /Binary body: no preview/);
 
-// A large body loads by range and is verified once complete.
+// A body of any size is read whole in one request and verified; no range control remains.
 const large = 'x'.repeat(2 * 1024 * 1024 + 100);
 const largeRequest = request(record(retain(large, 'text/plain')));
+const readsBefore = reads.length;
 await show(largeRequest);
-assert.match(notes(), /Showing the first 2,097,152 bytes of 2,097,252 bytes retained/);
-// Show the next 2 MiB keeps the reader's place in the shown text.
-const beforeMore = panel.querySelector('.traffic-response-code');
-beforeMore.scrollTop = 40;
-panel.querySelector('.traffic-body-more').click();
-await until(() => !panel.querySelector('.traffic-body-more'), 'the next range completes the body');
+assert.equal(reads.length, readsBefore + 1, 'one read for the whole body');
+assert.match(reads.at(-1), new RegExp(`content\\?offset=0&limit=${large.length}$`));
 assert.doesNotMatch(notes(), /Showing the first|could not be rechecked/);
-assert.equal(panel.querySelector('.traffic-response-code').scrollTop, 40, 'the next range keeps the scroll position');
-// Preview reads every range without a click, then shows the whole body.
+assert.equal(panel.querySelector('.traffic-body-more, .traffic-body-read'), null);
+await press('copy');
+assert.equal(copied.at(-1), large, 'every byte is shown');
+// While the bytes arrive the panel says how many, with Cancel; a cancel offers Read the body.
+{
+  const slow = retain('s'.repeat(300000), 'text/plain');
+  const gate = {chunk: 65536, waiting: [], cancelled: false};
+  held.set(slow.artifact_id, gate);
+  const pull = async () => {await until(() => gate.waiting.length, 'the read waits for its next chunk'); gate.waiting.shift()(); await settle();};
+  await show(request(record(slow)));
+  await pull();
+  await until(() => /Reading the retained body: 65,536 bytes of 300,000 bytes…/.test(notes()), 'progress names the bytes read so far');
+  const cancel = panel.querySelector('[data-control="cancel"]');
+  assert.equal(cancel?.textContent, 'Cancel');
+  cancel.click();
+  await settle();
+  assert(gate.cancelled, 'Cancel stops the read');
+  assert.match(notes(), /Reading the retained body was cancelled\./);
+  assert.equal(panel.querySelector('[data-control="cancel"]'), null);
+  // A cancelled body is not read again by a refresh, only by Read the body.
+  const afterCancel = reads.length;
+  view.render(panel, ...current);
+  await settle();
+  assert.equal(reads.length, afterCancel, 'a refresh does not read a cancelled body');
+  held.delete(slow.artifact_id);
+  panel.querySelector('[data-control="read"]').click();
+  await until(() => panel.querySelector('.traffic-response-code'), 'Read the body reads it again');
+  assert.equal(reads.length, afterCancel + 1);
+  await press('copy');
+  assert.equal(copied.at(-1).length, 300000);
+}
+// Preview reads the whole body once, then shows it.
 const autoRequest = request(record(retain(JSON.stringify({text: 'x'.repeat(2 * 1024 * 1024 + 100)}), 'application/json')));
 await show(autoRequest, 'preview');
-await until(() => panel.querySelector('.traffic-payload-tree'), 'Preview pages the whole body itself');
-assert.equal(reads.filter(url => url.includes(`/${state.artifacts.at(-1).artifact_id}/content`)).length, 2, 'Each retained range is read once');
-// Copy says what it wrote and how much remains, and survives a denied clipboard.
+await until(() => panel.querySelector('.traffic-payload-tree'), 'Preview shows the whole body');
+assert.equal(reads.filter(url => url.includes(`/${state.artifacts.at(-1).artifact_id}/content`)).length, 1, 'The body is read once');
+// Copy writes the whole body, and survives a denied clipboard.
 const partialRequest = request(record(retain('y'.repeat(2 * 1024 * 1024 + 50), 'text/plain')));
 await show(partialRequest);
 await press('copy');
 await settle();
-assert.match(panel.querySelector('.traffic-response-status').textContent, /Copied the 2,097,152 bytes loaded so far; 50 bytes more are retained/);
+assert.equal(panel.querySelector('.traffic-response-status').textContent, 'Copied.');
+assert.equal(copied.at(-1).length, 2 * 1024 * 1024 + 50, 'Copy writes every byte');
 const clipboard = context.navigator.clipboard.writeText;
 context.navigator.clipboard.writeText = async () => {throw new Error('denied');};
 await press('copy');
@@ -345,10 +387,41 @@ for (const name of ['partial', 'aborted', 'cancelled', 'captured_truncated']) {
   await show(request(record(cut, {state: name, partialIndex: 1, capturedLength: '10', bodyLength: '20'})), 'preview');
   assert.doesNotMatch(panel.textContent, /Binary body/, `${name} keeps a preview`);
 }
-// A range that ends inside a character is still text.
+// A character across the old 2 MiB range boundary is one character of text.
 await show(request(record(retain('a'.repeat(2 * 1024 * 1024 - 1) + 'é' + 'b'.repeat(100), 'text/plain'))));
-assert.match(notes(), /Showing the first 2,097,152 bytes/);
 assert.equal(panel.querySelector('[data-control="hex"]').disabled, false, 'a split character is not binary');
+assert.doesNotMatch(notes(), /Not valid UTF-8/);
+
+// Find counts every match of the whole body, past any former cap, and marks a
+// match that continues past a 4,096-unit row of a long line.
+{
+  const many = retain('ab'.repeat(600000), 'text/plain');
+  await show(request(record(many)));
+  const findInput = () => panel.querySelector('[data-control="find"]');
+  const count = () => panel.querySelector('.traffic-response-count').textContent;
+  findInput().value = 'a';
+  findInput().dispatchEvent(new window.Event('input'));
+  assert.match(count(), /^1 of [\d,]+\+ · finding \d+%$|^1 of 600,000$/, 'a running count says so');
+  await until(() => count() === '1 of 600,000', 'every match is counted, not the first 1,000');
+  const step = new window.Event('keydown');
+  Object.defineProperty(step, 'key', {value: 'Enter'});
+  Object.defineProperty(step, 'shiftKey', {value: true});
+  findInput().dispatchEvent(step);
+  assert.equal(count(), '600,000 of 600,000', 'Shift+Enter from the first match wraps to the last');
+  findInput().value = 'needle';
+  findInput().dispatchEvent(new window.Event('input'));
+  await settle();
+  assert.equal(count(), 'No matches');
+  const split = retain(`${'x'.repeat(4093)}needle${'x'.repeat(100)}`, 'text/plain');
+  await show(request(record(split)));
+  await until(() => count() === '1 of 1', 'a match across rows is found');
+  assert.deepEqual([...panel.querySelectorAll('.traffic-response-code mark')].map(mark => mark.textContent), ['nee', 'dle'],
+    'the match is marked on both rows of its line');
+  findInput().value = '';
+  findInput().dispatchEvent(new window.Event('input'));
+  await settle();
+  assert.equal(panel.querySelectorAll('.traffic-response-code mark').length, 0, 'an empty Find clears the marks');
+}
 
 // Integrity failures stay explicit and are not retried; refusals name their reason.
 const tampered = retain('{"a":1}', 'application/json');
@@ -609,14 +682,27 @@ await step('hex-previous');
 assert.match(hexCode(), /^00000000  /);
 const hexReads = reads.length;
 for (let index = 0; index < 8; index += 1) await step('hex-next');
-await until(() => /^00200000  /.test(hexCode()), 'a window past the first range reads the next range');
-assert.equal(reads.length, hexReads + 1, 'the next range is read once');
+assert.match(hexCode(), /^00200000  /);
+assert.equal(reads.length, hexReads, 'every window comes from the one read of the body');
 await step('hex-next');
 assert.match(notes(), /Hex shows bytes 2,359,296 to 2,404,351 of 2,404,352 bytes/);
 assert.equal(panel.querySelector('[data-control="hex-next"]').getAttribute('aria-disabled'), 'true', 'the last window ends the body');
 // The view draws rows as they scroll; Copy holds the whole window.
 await press('copy');
 assert.match(copied.at(-1).split('\n').at(-1), /^0024aff0  /, 'the last row is the body\'s last 16 bytes');
+// Find in Hex counts every row of the body and opens the window of a match.
+await step('hex-previous');
+for (let index = 0; index < 8; index += 1) await step('hex-previous');
+assert.match(hexCode(), /^00000000  /);
+const hexFind = panel.querySelector('[data-control="find"]');
+hexFind.value = '0024aff0';
+hexFind.dispatchEvent(new window.Event('input'));
+await until(() => /Hex shows bytes 2,359,296 to 2,404,351/.test(notes()), 'a match in the last window opens it');
+assert.equal(panel.querySelector('.traffic-response-count').textContent, '1 of 1');
+assert.equal(panel.querySelector('.traffic-response-code mark.is-current')?.textContent, '0024aff0');
+hexFind.value = '';
+hexFind.dispatchEvent(new window.Event('input'));
+await settle();
 
 // Unchanged inputs do not rebuild the panel.
 await show(request(record(jsonArtifact)));
@@ -653,6 +739,7 @@ assert(renders > 0);
   assert(reads.length > before, 'The first preview was evicted, because bytes and parsed source together passed the budget');
 }
 console.log(`PASS traffic response UI: every capture state and body case with its reason, a partial body's arrived bytes and seal, ` +
-  `a memory-cache reuse showing and opening the request it names, a service worker's own fetches of the same URL, hex paged by range to the end, artifact join, pretty print by the Oxc layout with token raw ranges or the in-page layout with its reason, wrap/find/copy/hex, ` +
-  `JSON tree bound, inert HTML and SVG, signature-checked image, ranged verified reads, integrity and refusal notes ` +
+  `a memory-cache reuse showing and opening the request it names, a service worker's own fetches of the same URL, hex paged by window to the end, artifact join, pretty print by the Oxc layout with token raw ranges or the in-page layout with its reason, wrap/copy/hex, ` +
+  `Find counting all 600,000 matches and opening a match in another hex window, JSON tree bound, inert HTML and SVG, signature-checked image, ` +
+  `whole verified reads with progress, Cancel and Read the body, integrity and refusal notes ` +
   `(${reads.length} reads; DOM model, not rendered QA)`);

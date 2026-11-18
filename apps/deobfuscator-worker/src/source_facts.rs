@@ -6,23 +6,12 @@ use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::scope::{ScopeFlags, ScopeId};
-use serde::Deserialize;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json, value::RawValue};
 use std::{
     cell::Cell,
     collections::{BTreeMap, BTreeSet},
 };
-
-// The bounded preflight admits at most `preflight::MAX_TREE_NODES` tree-sitter
-// nodes, so this budget is no longer the first limit an admitted source meets.
-// It stays fixed rather than caller-supplied: a per-request budget would make
-// two reports of the same bytes disagree. Larger sources are addressed with a
-// region instead, which is now reachable for the dense minified bundles that
-// the preflight node bound used to refuse before this budget was consulted.
-const MAX_AST_NODES: usize = 262_144;
-const MAX_FACTS: usize = 16_384;
-const MAX_FRONTIERS: usize = 256;
-const MAX_BINDING_CANDIDATES: usize = 64;
 
 /// Half-open original-byte window carried from `region_start_byte` and
 /// `region_end_byte`. The worker never derives one from text, a name or a
@@ -42,14 +31,10 @@ pub struct Request {
     #[serde(default)]
     pub region: Option<Region>,
 }
-/// Facts outside `coverage.analyzed_range` are not produced; this is scoping,
-/// not budget loss, so it never sets `truncated`.
+/// Facts outside `coverage.analyzed_range` are not produced. A region narrows
+/// the question; nothing else does, so a program of any size is analyzed whole.
 const SCOPED: &str =
     "analysis covered coverage.analyzed_range only; omitted syntax remains unknown";
-const WHOLE: &str =
-    "the requested region is not inside a callable body; the whole program was analyzed";
-const NARROW: &str =
-    "request region_start_byte and region_end_byte to analyze one callable body instead";
 
 /// A node is analyzed when it overlaps the analyzed window. Every enclosing
 /// node overlaps, so the real scope chain above a selected callable body is
@@ -66,34 +51,67 @@ fn range(span: Span) -> Value {
 fn key(cell: &Cell<Option<ScopeId>>) -> usize {
     cell as *const _ as usize
 }
-fn response(bytes: usize) -> Value {
-    json!({"schema":"reb-javascript-source-facts-v1","profile":"lexical-effects-v1",
-        "offset_unit":"utf-8-byte","source_bytes":bytes,"ok":true,
-        "scopes":[],"bindings":[],"callables":[],"regions":[],"operations":[],
-        "coverage":{"status":"complete","truncated":false,"diagnostics":[],"frontiers":[],
-        "analyzed_range":{"start":0,"end":bytes}},
-        "limits":{"max_source_bytes":crate::MAX_SOURCE_BYTES,"max_ast_nodes":MAX_AST_NODES,
-        "max_facts":MAX_FACTS,"max_frontiers":MAX_FRONTIERS,"max_binding_candidates":MAX_BINDING_CANDIDATES,
-        // Reported from the guard's own constants so a declared limit cannot
-        // drift from the bound that actually decided admission.
-        "preflight_depth":crate::preflight::MAX_TREE_DEPTH,
-        "preflight_nodes":crate::preflight::MAX_TREE_NODES,
-        "preflight_parse_heap_bytes":crate::preflight::MAX_PARSE_HEAP_BYTES}})
+/// One fact as compact JSON text. A whole bundle yields about a hundred
+/// thousand facts per megabyte of source, and a JSON tree per fact costs more
+/// than ten times its text, so the large tables never hold trees.
+type Row = Box<RawValue>;
+fn row(value: Value) -> Row {
+    serde_json::value::to_raw_value(&value).expect("a JSON value serializes")
 }
-pub fn invalid(message: &str, bytes: usize) -> Value {
+
+/// The report serializes straight to the worker's output.
+#[derive(Serialize)]
+pub struct Report {
+    schema: &'static str,
+    profile: &'static str,
+    offset_unit: &'static str,
+    source_bytes: usize,
+    ok: bool,
+    coverage: Coverage,
+    scopes: Vec<Value>,
+    bindings: Vec<Value>,
+    callables: Vec<Value>,
+    regions: Vec<Row>,
+    operations: Vec<Row>,
+}
+#[derive(Serialize)]
+struct Coverage {
+    status: &'static str,
+    diagnostics: Vec<&'static str>,
+    analyzed_range: Value,
+    frontiers: Vec<Row>,
+}
+fn response(bytes: usize) -> Report {
+    Report {
+        schema: "reb-javascript-source-facts-v2",
+        profile: "lexical-effects-v1",
+        offset_unit: "utf-8-byte",
+        source_bytes: bytes,
+        ok: true,
+        coverage: Coverage {
+            status: "complete",
+            diagnostics: vec![],
+            analyzed_range: json!({"start":0,"end":bytes}),
+            frontiers: vec![],
+        },
+        scopes: vec![],
+        bindings: vec![],
+        callables: vec![],
+        regions: vec![],
+        operations: vec![],
+    }
+}
+pub fn invalid(message: &'static str, bytes: usize) -> Report {
     let mut out = response(bytes);
-    out["ok"] = json!(false);
-    out["coverage"]["status"] = json!("unavailable");
-    out["coverage"]["diagnostics"] = json!([message]);
+    out.ok = false;
+    out.coverage.status = "unavailable";
+    out.coverage.diagnostics = vec![message];
     out
 }
-pub fn analyze(request: Request) -> Value {
+pub fn analyze(request: Request) -> Report {
     let source = &request.source;
     if request.operation != "source_facts" {
         return invalid("invalid operation", source.len());
-    }
-    if source.len() > crate::MAX_SOURCE_BYTES {
-        return invalid("source byte limit exceeded", source.len());
     }
     let requested = match request.region {
         None => None,
@@ -112,9 +130,6 @@ pub fn analyze(request: Request) -> Value {
             Some(Span::new(region.start, region.end))
         }
     };
-    if let Err(error) = crate::preflight::check(source) {
-        return invalid(error, source.len());
-    }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
     if !parsed.diagnostics.is_empty() {
@@ -135,74 +150,39 @@ pub fn analyze(request: Request) -> Value {
     });
     let analyzed = window.unwrap_or(parsed.program.span);
     let mut out = response(source.len());
-    out["coverage"]["analyzed_range"] = range(analyzed);
-    let mut count = Count { nodes: 0, window };
-    count.visit_program(&parsed.program);
-    if count.nodes > MAX_AST_NODES {
-        return exhausted(
-            out,
-            "AST node budget exceeded; no lexical resolutions produced",
-            requested,
-            window,
-        );
-    }
     let mut declarations = Declarations {
         window,
         ..Default::default()
     };
     declarations.visit_program(&parsed.program);
-    let base =
-        declarations.scopes.len() + declarations.bindings.len() + declarations.callables.len();
-    if base >= MAX_FACTS {
-        return exhausted(
-            out,
-            "declaration budget exceeded; no lexical resolutions produced",
-            requested,
-            window,
-        );
-    }
-    let mut effects = Effects::new(&declarations, base);
+    let mut effects = Effects::new(&declarations);
     effects.visit_program(&parsed.program);
-    out["scopes"] = json!(
-        declarations
-            .scopes
-            .iter()
-            .map(|s| &s.fact)
-            .collect::<Vec<_>>()
-    );
-    out["bindings"] = json!(declarations.bindings);
-    out["callables"] = json!(declarations.callables);
-    out["regions"] = json!(effects.regions);
-    out["operations"] = json!(effects.operations);
-    let mut diagnostics = Vec::new();
-    if effects.truncated {
-        diagnostics.push("fact or frontier budget exceeded; omitted syntax remains unknown");
-    }
-    if window.is_some() {
-        diagnostics.push(SCOPED);
-    }
-    out["coverage"] = json!({"status":if effects.frontiers.is_empty() && diagnostics.is_empty() {"complete"} else {"partial"},
-        "truncated":effects.truncated,"diagnostics":diagnostics,
-        "frontiers":effects.frontiers,"analyzed_range":range(analyzed)});
-    out
-}
-/// A reached budget keeps empty fact tables: resolving references against an
-/// incomplete declaration table would be a guess. The note says which narrower
-/// request can still produce facts, and `analyzed_range` says what was tried.
-fn exhausted(
-    mut out: Value,
-    message: &str,
-    requested: Option<Span>,
-    window: Option<Span>,
-) -> Value {
-    let note = match (requested, window) {
-        (_, Some(_)) => SCOPED,
-        (Some(_), None) => WHOLE,
-        (None, None) => NARROW,
+    let Effects {
+        regions,
+        operations,
+        frontiers,
+        ..
+    } = effects;
+    let diagnostics = if window.is_some() {
+        vec![SCOPED]
+    } else {
+        vec![]
     };
-    out["coverage"]["status"] = json!("partial");
-    out["coverage"]["truncated"] = json!(true);
-    out["coverage"]["diagnostics"] = json!([message, note]);
+    out.coverage = Coverage {
+        status: if frontiers.is_empty() && diagnostics.is_empty() {
+            "complete"
+        } else {
+            "partial"
+        },
+        diagnostics,
+        analyzed_range: range(analyzed),
+        frontiers,
+    };
+    out.scopes = declarations.scopes.into_iter().map(|s| s.fact).collect();
+    out.bindings = declarations.bindings;
+    out.callables = declarations.callables;
+    out.regions = regions;
+    out.operations = operations;
     out
 }
 /// Resolve the innermost callable body containing the requested window. A body
@@ -243,35 +223,6 @@ impl<'a> Visit<'a> for Select {
             self.body = Some(it.body.span());
         }
         walk::walk_arrow_function_expression(self, it);
-    }
-}
-struct Count {
-    nodes: usize,
-    window: Option<Span>,
-}
-impl<'a> Visit<'a> for Count {
-    fn enter_node(&mut self, _: AstKind<'a>) {
-        self.nodes += 1;
-    }
-    fn visit_expression(&mut self, it: &Expression<'a>) {
-        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span()) {
-            walk::walk_expression(self, it);
-        }
-    }
-    fn visit_statement(&mut self, it: &Statement<'a>) {
-        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span()) {
-            walk::walk_statement(self, it);
-        }
-    }
-    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
-        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span) {
-            walk::walk_function(self, it, flags);
-        }
-    }
-    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
-        if self.nodes <= MAX_AST_NODES && analyzing(self.window, it.span) {
-            walk::walk_arrow_function_expression(self, it);
-        }
     }
 }
 struct Scope {
@@ -381,9 +332,6 @@ impl Declarations {
                 return json!({"kind":"unresolved","binding_ids":[],"resolution":"implicit-arguments-environment","name":name});
             }
             if let Some(ids) = self.scopes[index].names.get(name) {
-                if ids.len() > MAX_BINDING_CANDIDATES {
-                    return json!({"kind":"unresolved","binding_ids":[],"resolution":"binding-candidate-limit","name":name});
-                }
                 return json!({"kind":if ids.len()==1 {"binding"} else {"ambiguous"},"binding_ids":ids,
                     "resolution":if ids.len()==1 {"lexical-only"} else {"duplicate-declarations"},"name":name});
             }
@@ -547,17 +495,15 @@ impl<'a> Visit<'a> for Declarations {
 struct Effects<'d> {
     declarations: &'d Declarations,
     scopes: Vec<usize>,
-    regions: Vec<Value>,
-    operations: Vec<Value>,
-    frontiers: Vec<Value>,
+    regions: Vec<Row>,
+    operations: Vec<Row>,
+    frontiers: Vec<Row>,
     current_region: usize,
     callable: Option<usize>,
     orders: Vec<usize>,
-    base: usize,
-    truncated: bool,
 }
 impl<'d> Effects<'d> {
-    fn new(declarations: &'d Declarations, base: usize) -> Self {
+    fn new(declarations: &'d Declarations) -> Self {
         Self {
             declarations,
             scopes: vec![],
@@ -567,20 +513,10 @@ impl<'d> Effects<'d> {
             current_region: 0,
             callable: None,
             orders: vec![],
-            base,
-            truncated: false,
         }
     }
     fn analyzed(&self, span: Span) -> bool {
         analyzing(self.declarations.window, span)
-    }
-    fn available(&mut self) -> bool {
-        if self.base + self.regions.len() + self.operations.len() >= MAX_FACTS {
-            self.truncated = true;
-            false
-        } else {
-            true
-        }
     }
     fn next(&mut self) -> usize {
         let n = self.orders[self.current_region];
@@ -588,9 +524,6 @@ impl<'d> Effects<'d> {
         n
     }
     fn region(&mut self, span: Span, kind: &str, action: impl FnOnce(&mut Self)) {
-        if !self.available() {
-            return;
-        }
         let parent = if self.regions.is_empty() {
             None
         } else {
@@ -599,33 +532,23 @@ impl<'d> Effects<'d> {
         let order = if parent.is_some() { self.next() } else { 0 };
         let old = self.current_region;
         self.current_region = self.regions.len();
-        self.regions.push(json!({"id":self.current_region,"parent_id":parent,"callable_id":self.callable,"range":range(span),"kind":kind,"entry_order":order}));
+        self.regions.push(row(json!({"id":self.current_region,"parent_id":parent,"callable_id":self.callable,"range":range(span),"kind":kind,"entry_order":order})));
         self.orders.push(0);
         action(self);
         self.current_region = old;
     }
     fn op(&mut self, span: Span, kind: &str, detail: Value) {
-        if !self.available() {
-            return;
-        }
         let order = self.next();
-        self.operations.push(json!({"id":self.operations.len(),"region_id":self.current_region,"order":order,"range":range(span),"kind":kind,"detail":detail}));
+        self.operations.push(row(json!({"id":self.operations.len(),"region_id":self.current_region,"order":order,"range":range(span),"kind":kind,"detail":detail})));
     }
     fn frontier(&mut self, span: Span, reason: &str) {
-        if self.frontiers.len() < MAX_FRONTIERS {
-            self.frontiers
-                .push(json!({"range":range(span),"reason":reason}));
-        } else {
-            self.truncated = true;
-        }
+        self.frontiers
+            .push(row(json!({"range":range(span),"reason":reason})));
     }
     fn target(&mut self, id: &IdentifierReference<'_>) -> Value {
         let target = self
             .declarations
             .resolve(id.name.as_str(), *self.scopes.last().unwrap());
-        if target["resolution"] == "binding-candidate-limit" {
-            self.truncated = true;
-        }
         if target["kind"] != "binding" {
             self.frontier(id.span, target["resolution"].as_str().unwrap());
         }
@@ -788,7 +711,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         });
     }
     fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
-        if !self.available() || !self.analyzed(it.span) {
+        if !self.analyzed(it.span) {
             return;
         }
         let old = self.callable;
@@ -812,7 +735,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         );
     }
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
-        if !self.available() || !self.analyzed(it.span) {
+        if !self.analyzed(it.span) {
             return;
         }
         let old = self.callable;
@@ -869,7 +792,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         }
     }
     fn visit_statement(&mut self, it: &Statement<'a>) {
-        if !self.available() || !self.analyzed(it.span()) {
+        if !self.analyzed(it.span()) {
             return;
         }
         match it {
@@ -970,7 +893,7 @@ impl<'a> Visit<'a> for Effects<'_> {
         }
     }
     fn visit_expression(&mut self, it: &Expression<'a>) {
-        if !self.available() || !self.analyzed(it.span()) {
+        if !self.analyzed(it.span()) {
             return;
         }
         match it {
@@ -1146,19 +1069,22 @@ impl<'a> Visit<'a> for Effects<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn facts(source: &str) -> Value {
-        analyze(Request {
+    /// Runs on the stack the worker sizes for this source, as `serve` does.
+    fn run(source: &str, region: Option<Region>) -> Value {
+        let request = Request {
             operation: "source_facts".into(),
             source: source.into(),
-            region: None,
+            region,
+        };
+        stacker::grow(crate::stack_for(source), || {
+            serde_json::to_value(analyze(request)).unwrap()
         })
     }
+    fn facts(source: &str) -> Value {
+        run(source, None)
+    }
     fn region_facts(source: &str, start: u32, end: u32) -> Value {
-        analyze(Request {
-            operation: "source_facts".into(),
-            source: source.into(),
-            region: Some(Region { start, end }),
-        })
+        run(source, Some(Region { start, end }))
     }
     fn ops(v: &Value, kind: &str) -> Vec<Value> {
         v["operations"]
@@ -1209,18 +1135,19 @@ mod tests {
         assert!(reasons(&out).contains(&"super-reference-effects"));
     }
     #[test]
-    fn duplicate_candidate_lists_are_bounded_before_serializing() {
+    fn duplicate_declarations_list_every_candidate() {
         let source = format!("{}{}", "var x;".repeat(300), "x;".repeat(300));
         let out = facts(&source);
-        assert_eq!(out["coverage"]["truncated"], true);
-        assert!(reasons(&out).contains(&"binding-candidate-limit"));
-        assert!(ops(&out, "read").iter().all(|o| {
-            o["detail"]["target"]["binding_ids"]
-                .as_array()
-                .unwrap()
-                .is_empty()
+        let reads = ops(&out, "read");
+        assert_eq!(reads.len(), 300);
+        assert!(reads.iter().all(|o| {
+            o["detail"]["target"]["kind"] == "ambiguous"
+                && o["detail"]["target"]["binding_ids"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+                    == 300
         }));
-        assert!(serde_json::to_vec(&out).unwrap().len() < 400_000);
     }
     #[test]
     fn module_exports_keep_local_callable_facts_without_linking_claims() {
@@ -1460,8 +1387,8 @@ mod tests {
             1
         );
     }
-    /// A minified bundle shape: one glue IIFE whose declarations alone exhaust
-    /// the fact budget, with one named callable to select inside it.
+    /// A minified bundle shape: one glue IIFE with thousands of declarations,
+    /// with one named callable to select inside it.
     fn bundle() -> String {
         let mut glue = String::new();
         for i in 0..4200 {
@@ -1472,32 +1399,38 @@ mod tests {
         )
     }
     #[test]
-    fn region_scope_produces_callable_facts_where_the_whole_bundle_produces_none() {
+    fn a_whole_bundle_and_one_of_its_callables_are_both_analyzed() {
         let source = bundle();
         let whole = facts(&source);
-        assert_eq!(whole["coverage"]["status"], "partial");
-        assert_eq!(whole["coverage"]["truncated"], true);
-        assert_eq!(
-            whole["coverage"]["diagnostics"],
-            json!([
-                "declaration budget exceeded; no lexical resolutions produced",
-                NARROW
-            ])
-        );
+        assert_eq!(whole["ok"], true);
+        assert_eq!(whole["coverage"]["diagnostics"], json!([]));
         assert_eq!(
             whole["coverage"]["analyzed_range"],
             json!({"start":0,"end":source.len()})
         );
-        for table in ["scopes", "bindings", "callables", "regions", "operations"] {
-            assert!(whole[table].as_array().unwrap().is_empty());
-        }
+        // Every declaration of the glue resolves: 4,200 functions, each with
+        // one local, plus `shared`, `target`, `seed` and `local`.
+        assert_eq!(whole["bindings"].as_array().unwrap().len(), 2 * 4200 + 4);
+        assert_eq!(whole["callables"].as_array().unwrap().len(), 4200 + 2);
+        let read = |name: &str| {
+            ops(&whole, "read")
+                .into_iter()
+                .filter(|o| o["detail"]["target"]["name"] == name)
+                .map(|o| {
+                    o["detail"]["target"]["resolution"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(read("shared"), vec!["lexical-only"]);
+        assert_eq!(read("p4199"), vec!["lexical-only"]);
 
         let cursor = source.find("var local").unwrap() as u32;
         let out = region_facts(&source, cursor, cursor);
         assert_eq!(out["ok"], true);
         assert_eq!(out["coverage"]["status"], "partial");
-        // Scoping is not budget loss.
-        assert_eq!(out["coverage"]["truncated"], false);
         assert!(
             out["coverage"]["diagnostics"]
                 .as_array()
@@ -1550,14 +1483,12 @@ mod tests {
                 .all(nested)
         );
     }
-    /// Dense minified glue at real minifier density, large enough that the
-    /// preflight node bound refused it outright before that bound was derived
-    /// from the source byte cap. The point of this fixture is admission, not
-    /// the fact budget: `bundle()` above already covers the declaration budget.
+    /// Dense minified glue at real minifier density, past every bound the
+    /// analysis used to have on input bytes, syntax nodes and facts.
     fn dense_bundle() -> String {
         let mut glue = String::new();
         let mut index = 0usize;
-        while glue.len() < 600 * 1024 {
+        while glue.len() < 6 * 1024 * 1024 {
             glue.push_str(&format!(
                 "function p{index}(a,b){{var c=(a|0)+(b>>>2),d=a?b:c;\
                  return c>3?(a+b)*c-d:({{k:a,v:[b,c,a&b]}}).v[(c%3)|0];}}"
@@ -1571,41 +1502,24 @@ mod tests {
     }
 
     #[test]
-    fn a_dense_minified_bundle_is_admitted_and_still_reports_what_it_covered() {
+    fn a_dense_six_megabyte_bundle_is_analyzed_whole() {
         let source = dense_bundle();
+        let functions = source.matches("function p").count();
         let whole = facts(&source);
-        // Before the preflight node bound was derived from the byte cap this
-        // was `unavailable` with "JavaScript preflight exceeded its complexity
-        // budget": no analysis budget was ever consulted, and no region could
-        // be requested either, because admission is shared by both paths.
         assert_eq!(whole["ok"], true);
-        assert_ne!(whole["coverage"]["status"], "unavailable");
-        // Admission is not coverage. A bundle this size still reaches a whole
-        // program budget and still refuses to resolve anything against the
-        // incomplete table, naming the narrower request that can answer.
-        assert_eq!(whole["coverage"]["status"], "partial");
-        assert_eq!(whole["coverage"]["truncated"], true);
+        assert_eq!(whole["coverage"]["diagnostics"], json!([]));
+        // Two parameters and two locals per glue function, all resolved.
+        assert_eq!(whole["callables"].as_array().unwrap().len(), functions + 2);
         assert_eq!(
-            whole["coverage"]["diagnostics"],
-            json!([
-                "AST node budget exceeded; no lexical resolutions produced",
-                NARROW
-            ])
+            whole["bindings"].as_array().unwrap().len(),
+            5 * functions + 4
         );
-        for table in ["scopes", "bindings", "callables", "regions", "operations"] {
-            assert!(whole[table].as_array().unwrap().is_empty());
-        }
-        assert_eq!(
-            whole["limits"]["preflight_nodes"],
-            json!(crate::preflight::MAX_TREE_NODES)
-        );
+        assert!(whole["operations"].as_array().unwrap().len() > 16384 * 16);
 
-        // What admission buys: the region path now reaches these bytes.
         let cursor = source.find("var local").unwrap() as u32;
         let out = region_facts(&source, cursor, cursor);
         assert_eq!(out["ok"], true);
         assert_eq!(out["coverage"]["status"], "partial");
-        assert_eq!(out["coverage"]["truncated"], false);
         assert_eq!(
             slice(&source, &out["coverage"]["analyzed_range"]),
             "{var local=seed+shared;return local;}"
@@ -1623,24 +1537,14 @@ mod tests {
     }
 
     #[test]
-    fn a_region_whose_callable_still_exceeds_a_budget_fails_closed() {
+    fn a_region_in_a_large_callable_analyzes_that_whole_callable() {
         let source = bundle();
         let cursor = source.find("var shared").unwrap() as u32;
         let out = region_facts(&source, cursor, cursor);
         assert_eq!(out["coverage"]["status"], "partial");
-        assert_eq!(out["coverage"]["truncated"], true);
-        assert_eq!(
-            out["coverage"]["diagnostics"],
-            json!([
-                "declaration budget exceeded; no lexical resolutions produced",
-                SCOPED
-            ])
-        );
-        // The analysis unit is reported even when it produced nothing.
+        assert_eq!(out["coverage"]["diagnostics"], json!([SCOPED]));
         assert!(slice(&source, &out["coverage"]["analyzed_range"]).starts_with("{var shared=1;"));
-        for table in ["scopes", "bindings", "callables", "regions", "operations"] {
-            assert!(out[table].as_array().unwrap().is_empty());
-        }
+        assert!(out["callables"].as_array().unwrap().len() > 4200);
     }
     #[test]
     fn an_open_declaration_table_never_resolves_or_looks_external() {
@@ -1842,54 +1746,28 @@ mod tests {
         );
     }
     #[test]
-    fn parser_and_output_limits_fail_closed_and_are_deterministic() {
+    fn only_malformed_syntax_is_refused_and_reports_are_deterministic() {
         assert_eq!(facts("let = ;")["coverage"]["status"], "unavailable");
-        let oversized = facts(&" ".repeat(crate::MAX_SOURCE_BYTES + 1));
-        assert_eq!(oversized["source_bytes"], crate::MAX_SOURCE_BYTES + 1);
-        assert_eq!(oversized["coverage"]["status"], "unavailable");
-        assert_eq!(facts(&format!("{}0", "!".repeat(129)))["ok"], false);
-        // Two Oxc nodes per statement exceeds the node budget while staying
-        // inside the preflight's own tree-sitter node bound.
-        let too_large = facts(&"0;".repeat(MAX_AST_NODES / 2 + 16));
-        assert_eq!(too_large["coverage"]["truncated"], true);
-        assert_eq!(
-            too_large["coverage"]["diagnostics"],
-            json!([
-                "AST node budget exceeded; no lexical resolutions produced",
-                NARROW
-            ])
-        );
-        assert!(too_large["bindings"].as_array().unwrap().is_empty());
+        assert_eq!(facts(&format!("{}0", "!".repeat(20_000)))["ok"], true);
+        let statements = facts(&"0;".repeat(200_000));
+        assert_eq!(statements["coverage"]["status"], "complete");
+        assert_eq!(statements["operations"].as_array().unwrap().len(), 200_000);
+        // Every frontier is reported, however many there are.
         let source = "let x=0; x++;".repeat(1500);
         let out = facts(&source);
-        let total = ["scopes", "bindings", "callables", "regions", "operations"]
-            .into_iter()
-            .map(|k| out[k].as_array().unwrap().len())
-            .sum::<usize>();
-        assert!(total <= MAX_FACTS);
-        assert!(out["coverage"]["frontiers"].as_array().unwrap().len() <= MAX_FRONTIERS);
-        assert_eq!(out["coverage"]["truncated"], true);
+        assert_eq!(ops(&out, "write").len(), 1500 * 2);
+        assert!(out["coverage"]["frontiers"].as_array().unwrap().len() >= 1500);
         let small = "let a=1; function f(x){return x+a;} f(a);";
         assert_eq!(facts(small), facts(small));
-        // The parse heap ceiling is shared, so it reaches this operation too,
-        // and the limit it decided by is the one reported. Nested sequence
-        // expressions are the shape that used to be paid for in full and only
-        // then refused.
+        // Nested sequence expressions used to be refused for parser memory.
+        // They are parsed on a stack sized from their nesting.
         let mut nested = "(a,".repeat(196_608);
         nested.push('a');
         nested.push_str(&")".repeat(196_608));
         nested.push(';');
-        let refused = facts(&nested);
-        assert_eq!(refused["ok"], false);
-        assert_eq!(refused["coverage"]["status"], "unavailable");
-        assert_eq!(
-            refused["coverage"]["diagnostics"],
-            json!(["JavaScript preflight exceeded its parse memory budget"])
-        );
-        assert_eq!(
-            refused["limits"]["preflight_parse_heap_bytes"],
-            json!(crate::preflight::MAX_PARSE_HEAP_BYTES)
-        );
+        let deep = facts(&nested);
+        assert_eq!(deep["ok"], true);
+        assert_eq!(ops(&deep, "read").len(), 196_608 + 1);
     }
     #[test]
     fn rejected_source_facts_do_not_desynchronize_the_worker() {

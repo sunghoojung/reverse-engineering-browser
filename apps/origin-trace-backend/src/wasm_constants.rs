@@ -695,33 +695,20 @@ pub(crate) struct Run {
     pub end: usize,
 }
 
-/// Why a scan stopped early, if it did.
-pub(crate) enum Stop {
-    Deadline,
-}
-
-/// What one data scan found: the runs it kept, how many bytes it read, why
-/// it stopped early if it did, and the runs it found past its budget.
+/// What one data scan found: every run, and how many bytes it read before
+/// it finished or was cancelled.
 pub(crate) struct DataScan {
     pub runs: Vec<Run>,
     pub scanned: usize,
-    pub stop: Option<Stop>,
-    pub dropped: usize,
 }
 
 /// Finds every run of at least `data_min_run` consecutive elements in
-/// `data`. `expired` is polled every 64 KiB. At most `room` runs are kept,
-/// and `room` is reduced by the runs kept: a table repeated a million times
-/// costs a count, not a million stored runs.
-pub(crate) fn scan_data(
-    data: &[u8],
-    expired: &mut dyn FnMut() -> bool,
-    room: &mut usize,
-) -> DataScan {
+/// `data`. `cancelled` is polled every 64 KiB. Every run is kept: one costs
+/// a few words, and runs are found at most once per position.
+pub(crate) fn scan_data(data: &[u8], cancelled: &mut dyn FnMut() -> bool) -> DataScan {
     let seeds = seeds();
     let catalog = catalog();
     let mut runs = Vec::new();
-    let mut dropped = 0usize;
     // The last run found per set and encoding: a later position inside it at
     // the same phase would only rediscover it.
     let mut last: HashMap<(usize, Encoding), (usize, usize)> = HashMap::new();
@@ -753,11 +740,6 @@ pub(crate) fn scan_data(
         }
         last.insert((set_number, seed.encoding), (start, end));
         if end_index - first >= set.data_min_run {
-            if *room == 0 {
-                dropped += 1;
-                return;
-            }
-            *room -= 1;
             runs.push(Run {
                 set: set_number,
                 encoding: seed.encoding,
@@ -769,12 +751,10 @@ pub(crate) fn scan_data(
         }
     };
     for position in 0..data.len() {
-        if position.is_multiple_of(65_536) && expired() {
+        if position.is_multiple_of(65_536) && cancelled() {
             return DataScan {
                 runs,
                 scanned: position,
-                stop: Some(Stop::Deadline),
-                dropped,
             };
         }
         if position + 4 <= data.len() {
@@ -801,8 +781,6 @@ pub(crate) fn scan_data(
     DataScan {
         runs,
         scanned: data.len(),
-        stop: None,
-        dropped,
     }
 }
 

@@ -1647,6 +1647,7 @@ mod tests {
             "get_wasm_pseudocode",
             "get_wasm_module_diff",
             "get_wasm_value_flow",
+            "get_wasm_call_sites",
             "validate_evidence_package",
             "export_evidence_package",
             "compare_evidence_packages",

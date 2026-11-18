@@ -2706,6 +2706,7 @@ impl RequestIndex {
                     epoch: self.empty_epoch.clone(),
                     indexed_to: 0,
                     file_end: 0,
+                    scanned_to: 0,
                     reopened: false,
                 }
             }
@@ -3055,7 +3056,7 @@ impl RequestIndex {
     pub fn is_caught_up(&self) -> bool {
         self.position
             .as_ref()
-            .is_some_and(|position| position.caught_up(RECORD_BYTES as u64))
+            .is_some_and(|position| position.caught_up())
     }
 
     /// The store epoch the index rows belong to and the byte offset folded

@@ -1997,8 +1997,7 @@
       "get": {
         "operationId": "get_flow_graph",
         "summary": "Fold every recorded stack of one session into one flow graph across frames, realms, JavaScript, eval and Wasm",
-        "description": "Every request_initiator_stack (34), navigation_initiator_stack (46), async_task_stack (48) and walked script_cookie write (39) of one session, folded into one observed graph. Each distinct stack digest is decoded once and counted by occurrences; each retained script or module is read once for every frame that names it. Nodes are functions (javascript, eval for eval or new Function scripts, wasm) and sinks (request as METHOD host, navigation kind, cookie_write API), keyed by realm and code, so the same code in one realm is one node. contexts are realms: process_id plus the execution_context_id of the script_identity records (35), with the frame_ids the realm's stacks were recorded in, tab_ids and script origins. Edges: call (adjacent synchronous frames, with call sites), await (an async function's awaiter, labeled by any Promise combinator), task (a task segment: the stack that scheduled a timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or message, or the registration of a promise reaction, task microtask labeled Promise.then, Promise.catch, Promise.finally or await, to that task's first frame; via names microtask hops that recorded no registration), omitted (the run a stack deeper than 1,024 frames dropped) and request, navigation or cookie_write edges to sinks. crosses names frame (a change of realm), language (JavaScript and Wasm) and dynamic (a call into eval code). paths lists each distinct stack's edges and nodes for highlighting. A frame that does not resolve keeps its script ID and a reason; a missing scheduling stack cuts the chain (chain_cut on the node it would have entered), never bridged. Workers, MessagePort messages and out-of-process frames are not walked and are listed in not_shown. An edge counts each stack once however often that stack walks it; via, label and omitted merge what the stacks that share it say. A task edge enters only a frame known to be its task's first: the last awaiter of an await chain, else the outermost synchronous frame, never the outermost of a walk that stopped at 256 frames or of a truncated await chain. Limits are reported in limits and truncated, a scan stops at a 30-second deadline with coverage.stopped deadline, and complete is false whenever anything was cut. The answer is cached until the event store or artifact manifest changes; a deadline-cut answer is not cached. See protocol/flow-graph-v1.md. Wasm nodes carry their module sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
-        "tags": [
+        "description": "Every request_initiator_stack (34), navigation_initiator_stack (46), async_task_stack (48) and walked script_cookie write (39) of one session, folded into one observed graph: every record, with no budget on stacks, nodes, edges, identities or request IDs. The fold is kept per session and only moves forward. The event index names the session's records, so a request reads only those appended since the last, of this session alone; each distinct stack digest is decoded once and counted by occurrences, stack, script and module artifacts are found by SHA-256 through the artifact lookup and read in parallel, and each retained source is read again only for offsets it has not resolved. Nodes are functions (javascript, eval for eval or new Function scripts, wasm) and sinks (request as METHOD host, navigation kind, cookie_write API), keyed by realm and code, so the same code in one realm is one node; stacks counts the distinct stacks through each. contexts are realms: process_id plus the execution_context_id of the script_identity records (35), with every frame_id the realm's records were recorded in, every tab_id and every script origin. Edges: call (adjacent synchronous frames, with every call site), await (an async function's awaiter, labeled by any Promise combinator), task (a task segment: the stack that scheduled a timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or message, or the registration of a promise reaction, task microtask labeled Promise.then, Promise.catch, Promise.finally or await, to that task's first frame; via names microtask hops that recorded no registration), omitted (the run a stack deeper than 1,024 frames dropped) and request, navigation or cookie_write edges to sinks. crosses names frame (a change of realm), language (JavaScript and Wasm) and dynamic (a call into eval code). The answer is paged so that no answer holds a whole large session: every page carries the head and every context, nodes are grouped by context with IDs in that order, and each edge comes on the page that holds its later end, so a client that reads from cursor 0 along next_cursor, passing the generation, has both ends of every edge it reads, and a context's nodes start at its first_node. A page request with a generation folds nothing, so the pages of one generation stay one graph while the stores grow; once the graph has moved on it answers 409. A stack's path is served on demand by get_flow_graph_paths, by node, by renderer request or by digest, against the generation this answer names. A frame that does not resolve keeps its script ID and a reason; a missing scheduling stack cuts the chain (chain_cut on the node it would have entered), never bridged; a task no script scheduled (no_script) or a message whose origin was rejected (origin_rejected) ends its chain uncut, in chain_ends. Workers, MessagePort messages and out-of-process frames that the records cannot hold are listed in not_shown. An edge counts each stack once however often that stack walks it; via, label and omitted merge what the stacks that share it say. A task edge enters only a frame known to be its task's first: the last awaiter of an await chain, else the outermost synchronous frame, never the outermost of a walk that stopped at 256 frames or of a truncated await chain. Nothing is cut and no deadline applies: a request folds for at most 10 seconds and then answers with coverage.caught_up false, keeping its place for the next request, and complete is false until every record and artifact the stores held is folded. A client that disconnects stops the build where it is. Two requests for one session share one build. See protocol/flow-graph-v2.md. Wasm nodes carry their module sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",        "tags": [
           "events"
         ],
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -2010,6 +2009,40 @@
             "description": "The capture session to fold.",
             "schema": {
               "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "query",
+            "required": false,
+            "description": "The generation an earlier page named. With it the answer is a page of that graph and folds nothing; once the graph has moved on the route answers 409. Without it the fold catches up first.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The first node of the page: 0, a next_cursor or a context's first_node.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Nodes and edges the page holds, at least one node and the edges that end at it. A page is a run of the generation's cached encoding, so any number is cheap to serve.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295,
+              "default": 65536
             }
           }
         ],
@@ -2025,11 +2058,11 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads stored events, the artifact manifest and verified stack, JavaScript and Wasm bytes. Writes nothing and requests no browser mutation. A scan stops at a 30-second deadline and reports coverage.stopped deadline.",
+          "notes": "Reads the session's indexed events, the artifact lookup and verified stack, JavaScript and Wasm bytes. Writes nothing and requests no browser mutation. A request without generation folds for at most 10 seconds and reports coverage.caught_up; the next request goes on from there. A request with generation answers a page of that graph without folding.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/flow_graph.rs",
-              "symbol": "run"
+              "symbol": "graph"
             },
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -2060,7 +2093,7 @@
             }
           },
           "400": {
-            "description": "Missing or malformed session_id, or an unknown parameter.",
+            "description": "Missing or malformed session_id, cursor or limit, a cursor past the last node, or an unknown parameter.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2071,6 +2104,189 @@
           },
           "403": {
             "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The generation named is not the current graph's; ask for the graph again without it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/flow-graph/paths": {
+      "get": {
+        "operationId": "get_flow_graph_paths",
+        "summary": "List the recorded stacks that walk one flow graph node, started one renderer request, or have one digest",
+        "description": "The distinct stacks of one session's flow graph (get_flow_graph) that walk a node, that one renderer request's request_initiator_stack record named (process_id and request_id, as its request_initiated record carries them), or that have one stack digest, optionally in one renderer process. nodes and edges list every node and edge any matching stack walks, as the graph's node IDs and edge indexes, so one answer lights them all; paths lists one page of the matching stacks in the order the session first recorded them, each with its own nodes and edges, its occurrences and the number of requests it started, and next_cursor names the next page. Pass the graph's generation: another generation's answer would name other IDs, so once the graph has moved on the route answers 409 and the client asks for the graph again. Without generation the answer names the current graph and says which generation that is. A session not folded yet is folded first. See protocol/flow-graph-v2.md.",
+        "tags": [
+          "events"
+        ],
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "The capture session whose flow graph to read.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "generation",
+            "in": "query",
+            "required": false,
+            "description": "The generation of the get_flow_graph answer whose node IDs the client holds. A graph that has moved on answers 409.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "node",
+            "in": "query",
+            "required": false,
+            "description": "A node ID of that answer: the stacks that walk it. Excludes request_id, digest and process_id.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "process_id",
+            "in": "query",
+            "required": false,
+            "description": "Renderer process: required with request_id, and narrows digest to one process.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "required": false,
+            "description": "Renderer request ID, as its request_initiated record carries it: the stack its request_initiator_stack record named.",
+            "schema": {
+              "$ref": "#/components/schemas/NonzeroUint64String"
+            }
+          },
+          {
+            "name": "digest",
+            "in": "query",
+            "required": false,
+            "description": "A stack digest, as a paths answer or a stack record names it.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The next_cursor of the previous page; 0 for the first.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Paths per page, clamped to 1..1024. nodes and edges always cover every matching stack.",
+            "schema": {
+              "type": "integer",
+              "default": 64
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Reads the session's flow graph fold, folding a session not folded yet first. Writes nothing and requests no browser mutation.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/flow_graph.rs",
+              "symbol": "paths"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        },
+        "responses": {
+          "200": {
+            "description": "One page of the matching stacks, and every node and edge they walk.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlowGraphPaths"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed session_id, not exactly one of node, request_id with process_id, or digest, a node the graph does not have, or an unknown parameter.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The flow graph changed since the answer that generation names; ask get_flow_graph again.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11136,56 +11352,78 @@
         "required": [
           "schema",
           "session_id",
+          "generation",
           "evidence",
           "complete",
           "coverage",
           "stacks",
-          "truncated",
-          "limits",
           "not_shown",
+          "node_count",
+          "edge_count",
+          "cursor",
+          "next_cursor",
           "contexts",
           "nodes",
           "edges",
-          "paths"
+          "analyst_names"
         ],
         "properties": {
           "schema": {
-            "const": "flow-graph-v1"
+            "const": "flow-graph-v2"
           },
           "session_id": {
             "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "generation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Names this graph's node and edge IDs. It changes whenever the fold changes the graph, and is never reused, even across restarts; get_flow_graph_paths takes it and answers 409 once the graph has moved on."
           },
           "evidence": {
             "const": "observed"
           },
           "complete": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "coverage.caught_up and coverage.artifacts_caught_up: every record and artifact the stores held is folded. Nothing is ever cut; a graph that is not complete is still growing."
           },
           "coverage": {
             "type": "object",
             "required": [
-              "stopped",
-              "scanned_bytes",
+              "caught_up",
+              "folded_bytes",
               "store_end",
+              "artifacts_caught_up",
               "malformed_records",
+              "index_damage",
               "elapsed_ms"
             ],
             "properties": {
-              "stopped": {
-                "enum": [
-                  "end",
-                  "deadline"
-                ]
+              "caught_up": {
+                "type": "boolean",
+                "description": "Every record of the session in the event store is folded. False while the event index is still reaching the store's end, or when this request answered after its 10-second slice of folding; the fold keeps its place and the next request goes on."
               },
-              "scanned_bytes": {
-                "$ref": "#/components/schemas/Uint64String"
+              "folded_bytes": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Every record of the session that starts before this event store offset is folded."
               },
               "store_end": {
                 "$ref": "#/components/schemas/Uint64String"
               },
+              "artifacts_caught_up": {
+                "type": "boolean",
+                "description": "The artifact lookup covered every complete manifest record when the fold read it, so an artifact reported missing was not in the manifest."
+              },
               "malformed_records": {
                 "type": "integer",
-                "minimum": 0
+                "minimum": 0,
+                "description": "Records of the session the fold's decoders refused."
+              },
+              "index_damage": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The first store line the event index refused (not a record, a duplicate or oversized), which no fold reads; null when there is none."
               },
               "elapsed_ms": {
                 "type": "integer",
@@ -11201,8 +11439,7 @@
               "distinct",
               "decoded",
               "not_walked",
-              "unresolved",
-              "over_budget"
+              "unresolved"
             ],
             "properties": {
               "records": {
@@ -11237,64 +11474,7 @@
                   "type": "integer",
                   "minimum": 0
                 }
-              },
-              "over_budget": {
-                "type": "integer",
-                "minimum": 0
               }
-            }
-          },
-          "truncated": {
-            "type": "object",
-            "required": [
-              "nodes",
-              "edges",
-              "paths",
-              "identities",
-              "request_labels",
-              "request_ids",
-              "source_budget",
-              "source_deadline"
-            ],
-            "properties": {
-              "nodes": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "edges": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "paths": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "identities": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "request_labels": {
-                "type": "boolean"
-              },
-              "request_ids": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "source_budget": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "source_deadline": {
-                "type": "integer",
-                "minimum": 0
-              }
-            }
-          },
-          "limits": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "integer",
-              "minimum": 0
             }
           },
           "not_shown": {
@@ -11302,6 +11482,28 @@
             "items": {
               "type": "string"
             }
+          },
+          "node_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Nodes in this generation; their IDs are 0 to node_count - 1, grouped by context."
+          },
+          "edge_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cursor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The first node this page holds."
+          },
+          "next_cursor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "description": "The first node of the next page; pass it with this generation. Null on the last page."
           },
           "contexts": {
             "type": "array",
@@ -11315,7 +11517,8 @@
                 "origins",
                 "frame_ids",
                 "tab_ids",
-                "counts"
+                "counts",
+                "first_node"
               ],
               "properties": {
                 "id": {
@@ -11375,15 +11578,16 @@
                     "type": "object",
                     "required": [
                       "frame_id",
-                      "stacks"
+                      "records"
                     ],
                     "properties": {
                       "frame_id": {
                         "$ref": "#/components/schemas/NonzeroUint64String"
                       },
-                      "stacks": {
+                      "records": {
                         "type": "integer",
-                        "minimum": 0
+                        "minimum": 1,
+                        "description": "Records whose innermost frame is in this realm and that were recorded in this frame."
                       }
                     }
                   }
@@ -11397,16 +11601,23 @@
                 },
                 "counts": {
                   "type": "object",
+                  "description": "Nodes of this context by kind.",
                   "additionalProperties": {
                     "type": "integer",
                     "minimum": 0
                   }
+                },
+                "first_node": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "This context's first node ID; its nodes are the next sum(counts) IDs, so a cursor of first_node pages from this context on."
                 }
               }
             }
           },
           "nodes": {
             "type": "array",
+            "description": "This page's nodes: the IDs from cursor on, in order.",
             "items": {
               "type": "object",
               "required": [
@@ -11415,6 +11626,7 @@
                 "context",
                 "status",
                 "hits",
+                "stacks",
                 "entries",
                 "leaves"
               ],
@@ -11531,6 +11743,11 @@
                   "type": "integer",
                   "minimum": 0
                 },
+                "stacks": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Distinct stacks that walk this node; get_flow_graph_paths with node lists them."
+                },
                 "entries": {
                   "type": "integer",
                   "minimum": 0
@@ -11555,16 +11772,15 @@
           },
           "edges": {
             "type": "array",
+            "description": "Every edge whose later end is one of this page's nodes, so each edge arrives once, with or after both its ends. Edge IDs are their places in this order across the pages.",
             "items": {
               "type": "object",
               "required": [
                 "from",
                 "to",
                 "kind",
-                "crosses",
                 "count",
-                "stacks",
-                "sites"
+                "stacks"
               ],
               "properties": {
                 "from": {
@@ -11604,6 +11820,8 @@
                 },
                 "crosses": {
                   "type": "array",
+                  "description": "Absent when the edge crosses nothing.",
+                  "minItems": 1,
                   "items": {
                     "enum": [
                       "frame",
@@ -11622,7 +11840,8 @@
                 },
                 "sites": {
                   "type": "array",
-                  "maxItems": 8,
+                  "description": "Every distinct call site the stacks that share this edge name, in source order. Absent when no site resolves to a position.",
+                  "minItems": 1,
                   "items": {
                     "type": "object",
                     "properties": {
@@ -11644,12 +11863,84 @@
               }
             }
           },
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
+          }
+        }
+      },
+      "FlowGraphPaths": {
+        "type": "object",
+        "required": [
+          "schema",
+          "session_id",
+          "generation",
+          "total",
+          "occurrences",
+          "nodes",
+          "edges",
+          "cursor",
+          "next_cursor",
+          "paths"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "schema": {
+            "const": "flow-graph-paths-v1"
+          },
+          "session_id": {
+            "$ref": "#/components/schemas/NonzeroUint64String"
+          },
+          "generation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The graph generation whose node and edge IDs this answer names."
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Distinct stacks that match."
+          },
+          "occurrences": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Records of all the stacks that match."
+          },
+          "nodes": {
+            "type": "array",
+            "description": "Every node any matching stack walks, sorted: one answer lights them all.",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "edges": {
+            "type": "array",
+            "description": "Every edge any matching stack walks, as indexes into the graph's edges, sorted.",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "cursor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_cursor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "The cursor of the next page of paths; null on the last."
+          },
           "paths": {
             "type": "array",
+            "description": "This page of matching stacks, in the order the session first recorded them.",
             "items": {
               "type": "object",
               "required": [
                 "process_id",
+                "isolate_key",
                 "digest",
                 "occurrences",
                 "retained",
@@ -11657,10 +11948,19 @@
                 "nodes",
                 "edges"
               ],
+              "additionalProperties": false,
               "properties": {
                 "process_id": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "isolate_key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[0-9a-f]{16}$",
+                  "description": "The worker's context ID the stack was walked in; null for the document main thread."
                 },
                 "digest": {
                   "type": "string",
@@ -11668,16 +11968,20 @@
                 },
                 "occurrences": {
                   "type": "integer",
-                  "minimum": 0
+                  "minimum": 1
                 },
                 "retained": {
-                  "type": "boolean"
+                  "type": "boolean",
+                  "description": "The stack's frames were read; false when only its innermost frame is known."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "Why the frames were not read, when they were not."
                 },
                 "requests": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/NonzeroUint64String"
-                  }
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Renderer requests this stack started; get_flow_graph_paths with process_id and request_id finds the stack of each."
                 },
                 "nodes": {
                   "type": "array",
@@ -11695,9 +11999,6 @@
                 }
               }
             }
-          },
-          "analyst_names": {
-            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },

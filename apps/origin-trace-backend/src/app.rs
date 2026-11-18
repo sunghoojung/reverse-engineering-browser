@@ -195,8 +195,8 @@ pub struct App {
     xrefs: Arc<crate::xrefs::Cursors>,
     /// The store's drop gaps, extended only over appended bytes.
     gaps: Arc<crate::gap_tally::GapTally>,
-    /// The last flow graph and the store snapshot it describes.
-    flow_graph: Arc<crate::flow_graph::Cache>,
+    /// Each kept session's flow graph fold, advanced as the stores grow.
+    flow_graph: Arc<crate::flow_graph::Graphs>,
     /// Researcher Wasm function names, reread only when the library changes.
     wasm_names: Arc<crate::wasm_names::Cache>,
     /// The Analyst library's last ETag and the file state it was computed
@@ -545,6 +545,14 @@ impl App {
             .await?
         };
         Ok(([("content-type", "application/json")], document).into_response())
+    }
+    /// The stores and index a flow graph fold reads.
+    fn flow_inputs(&self) -> crate::flow_graph::Inputs {
+        crate::flow_graph::Inputs {
+            store: self.options.store.clone(),
+            artifacts: self.options.artifacts.clone(),
+            indexes: self.indexes.clone(),
+        }
     }
     /// Reads the researcher Wasm names on a blocking thread: one `stat` while
     /// the library is unchanged, a bounded reread when it changed.
@@ -1648,24 +1656,88 @@ impl App {
                 value
             }
             "/api/flow-graph" => {
-                q.only(&["session_id"], &[])?;
+                q.only(&["session_id", "generation", "cursor", "limit"], &[])?;
                 let session = q.number("session_id", None, 64, true)?;
-                let stores = crate::store_scan::Stores {
-                    events: self.options.store.clone(),
-                    artifacts: self.options.artifacts.clone(),
-                };
-                let cache = self.flow_graph.clone();
-                // A client that moved on leaves no scan running.
+                let generation = q.one("generation")?.map(str::to_owned);
+                let cursor = q.number("cursor", Some("0"), 32, false)? as u32;
+                let limit = q.limit(crate::flow_graph::GRAPH_PAGE, u32::MAX as usize)?;
+                let (graphs, inputs) = (self.flow_graph.clone(), self.flow_inputs());
+                // A client that moved on stops the build where it is; the
+                // next request goes on from there.
                 let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let _cancel_on_drop = CancelOnDrop(cancel.clone());
                 let names = self.names_reader();
-                let graph = self
+                let page = self
                     .blocking(move || {
-                        let graph = crate::flow_graph::run(&stores, session, &cache, &cancel)?;
-                        crate::wasm_names::annotate_flow_graph_bytes(graph, &names())
+                        let page = crate::flow_graph::Page {
+                            generation: generation.as_deref(),
+                            cursor,
+                            limit,
+                        };
+                        crate::flow_graph::graph(&graphs, &inputs, session, page, &cancel, &names())
                     })
                     .await?;
-                return Ok(bytes_response(graph, "application/json"));
+                return Ok(pieces_response(page, "application/json"));
+            }
+            "/api/flow-graph/paths" => {
+                use crate::flow_graph::PathQuery;
+                q.only(
+                    &[
+                        "session_id",
+                        "generation",
+                        "node",
+                        "process_id",
+                        "request_id",
+                        "digest",
+                        "cursor",
+                        "limit",
+                    ],
+                    &[],
+                )?;
+                let session = q.number("session_id", None, 64, true)?;
+                let generation = q.one("generation")?.map(str::to_owned);
+                let process = match q.one("process_id")? {
+                    Some(_) => Some(q.number("process_id", None, 32, true)? as u32),
+                    None => None,
+                };
+                let query = match (q.any(&["node"]), q.any(&["request_id"]), q.one("digest")?) {
+                    (true, false, None) if process.is_none() => {
+                        PathQuery::Node(q.number("node", None, 32, false)? as u32)
+                    }
+                    (false, true, None) => PathQuery::Request {
+                        process: process
+                            .ok_or_else(|| Error::bad("process_id is required with request_id"))?,
+                        request: q.number("request_id", None, 64, true)?,
+                    },
+                    (false, false, Some(digest)) => PathQuery::Digest {
+                        digest: crate::flow_graph::digest(digest)?,
+                        process,
+                    },
+                    _ => {
+                        return Err(Error::bad(
+                            "Specify one of node, request_id with process_id, or digest",
+                        ));
+                    }
+                };
+                let cursor = q.number("cursor", Some("0"), 32, false)? as u32;
+                let limit = q.limit(
+                    crate::flow_graph::PATHS_PAGE,
+                    crate::flow_graph::PATHS_PAGE_MAX,
+                )?;
+                let (graphs, inputs) = (self.flow_graph.clone(), self.flow_inputs());
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let _cancel_on_drop = CancelOnDrop(cancel.clone());
+                let answer = self
+                    .blocking(move || {
+                        let page = crate::flow_graph::Page {
+                            generation: generation.as_deref(),
+                            cursor,
+                            limit,
+                        };
+                        crate::flow_graph::paths(&graphs, &inputs, session, page, &query, &cancel)
+                    })
+                    .await?;
+                return Ok(bytes_response(answer, "application/json"));
             }
             "/api/xrefs" => {
                 let query = crate::xrefs::XrefQuery::parse(&q)?;
@@ -2886,6 +2958,26 @@ fn bytes_response(bytes: impl Into<Body>, mime: &'static str) -> Response {
     response
         .headers_mut()
         .insert("content-type", HeaderValue::from_static(mime));
+    response
+}
+/// A body of pieces already in memory, sent one after another without
+/// joining them.
+struct Pieces(std::vec::IntoIter<axum::body::Bytes>);
+impl futures_core::Stream for Pieces {
+    type Item = std::result::Result<axum::body::Bytes, std::convert::Infallible>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::task::Poll::Ready(self.0.next().map(Ok))
+    }
+}
+fn pieces_response(pieces: Vec<axum::body::Bytes>, mime: &'static str) -> Response {
+    let length: usize = pieces.iter().map(|piece| piece.len()).sum();
+    let mut response = bytes_response(Body::from_stream(Pieces(pieces.into_iter())), mime);
+    response
+        .headers_mut()
+        .insert("content-length", HeaderValue::from(length));
     response
 }
 async fn socket_connected(path: Option<&Path>) -> bool {

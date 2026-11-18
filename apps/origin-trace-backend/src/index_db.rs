@@ -38,14 +38,19 @@ pub struct Position {
     pub indexed_to: u64,
     /// The file's length at the last check.
     pub file_end: u64,
+    /// How far the last fold read: the bytes from `indexed_to` to here are
+    /// one line without its newline yet.
+    pub scanned_to: u64,
     /// The index was found on disk rather than built in this process.
     pub reopened: bool,
 }
 impl Position {
-    /// Every complete record of the file is indexed: what remains is at most
-    /// one record still being written.
-    pub fn caught_up(&self, record_bytes: u64) -> bool {
-        self.file_end.saturating_sub(self.indexed_to) <= record_bytes
+    /// Every complete record of the file is indexed: a fold read to the end,
+    /// and what remains is at most one record still being written. A fold
+    /// that stopped at its deadline or budget is not caught up, however
+    /// little it left.
+    pub fn caught_up(&self) -> bool {
+        self.scanned_to.max(self.indexed_to) >= self.file_end
     }
 }
 
@@ -352,6 +357,7 @@ impl Sidecar {
             epoch,
             indexed_to,
             file_end: end,
+            scanned_to: indexed_to,
             reopened: self.reopened,
         })
     }
@@ -367,6 +373,7 @@ impl Sidecar {
             epoch,
             indexed_to: 0,
             file_end: 0,
+            scanned_to: 0,
             reopened: self.reopened,
         })
     }
@@ -443,6 +450,7 @@ impl Sidecar {
         transaction.commit().sql()?;
         Ok(Position {
             indexed_to: at,
+            scanned_to: read_to,
             ..position.clone()
         })
     }
@@ -620,7 +628,7 @@ mod tests {
         assert!(sidecar.temporary_reason().is_none());
         let first = fold_all(&mut sidecar, &path);
         assert_eq!((first.indexed_to, count(&sidecar)), (5, 2));
-        assert!(!first.caught_up(0) && first.caught_up(64));
+        assert!(first.caught_up(), "what remains is a record being written");
         std::fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -655,6 +663,32 @@ mod tests {
         drop(sidecar);
         remove(&path, ".test-v1").unwrap();
         assert!(!sidecar_path(&path, ".test-v1").exists());
+    }
+
+    /// A fold that stopped before the end left complete records unread,
+    /// however few: the index is not caught up until one reads to the end.
+    #[test]
+    fn a_fold_cut_by_its_deadline_is_not_caught_up() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("store.jsonl");
+        std::fs::write(&path, b"a\nbb\n").unwrap();
+        let mut sidecar = Sidecar::open(&path, ".test-v1", "test-v1", SCHEMA).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let position = sidecar.check(&mut file).unwrap();
+        let cut = sidecar
+            .fold(
+                &mut file,
+                &position,
+                u64::MAX,
+                Instant::now(),
+                64,
+                "oversized",
+                &mut |_: &Transaction<'_>, _: &[u8], _: u64, _: u64| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(cut.indexed_to, 0);
+        assert!(!cut.caught_up());
+        assert!(fold_all(&mut sidecar, &path).caught_up());
     }
 
     #[cfg(unix)]

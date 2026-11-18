@@ -16,6 +16,9 @@ base64 = "0.22"
 # The Stream trait a streamed response body implements (request_har::Chunks).
 futures-core = "0.3"
 hex = "0.4"
+# A fast non-cryptographic hasher for the flow graph's in-memory tables,
+# which are keyed by evidence identifiers rather than untrusted strings.
+foldhash = "0.2"
 tempfile = "3"
 libc = "0.2"
 regex = "1"

@@ -1191,6 +1191,7 @@ pub fn build(
                 epoch: String::new(),
                 indexed_to: 0,
                 file_end: 0,
+                scanned_to: 0,
                 reopened: false,
             },
             None,
@@ -1199,7 +1200,7 @@ pub fn build(
     };
     let events_scope = if stopped.is_some() {
         "stopped"
-    } else if position.caught_up(event_index::RECORD_BYTES as u64) {
+    } else if position.caught_up() {
         "store"
     } else {
         "indexing"

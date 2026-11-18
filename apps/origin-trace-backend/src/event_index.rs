@@ -32,8 +32,9 @@ use std::{
 
 pub const EVENTS_SUFFIX: &str = ".events-v1";
 pub const EDGES_SUFFIX: &str = ".edges-v1";
-/// The second layout adds the gap totals, the third the summary's counts.
-const EVENTS_FORMAT: &str = "reb-event-index-v1/3";
+/// The second layout adds the gap totals, the third the summary's counts,
+/// the fourth the flow graph's record kind.
+const EVENTS_FORMAT: &str = "reb-event-index-v1/4";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
 /// The largest event or edge record a trace reads.
 pub const RECORD_BYTES: usize = 4096;
@@ -41,10 +42,12 @@ pub const RECORD_BYTES: usize = 4096;
 const FOLD_BYTES: u64 = 64 * 1024 * 1024;
 /// How long a trace read may spend bringing its indexes up to the stores.
 pub const TRACE_DEADLINE: Duration = Duration::from_secs(5);
-/// `kind` of an indexed event: another type, or a `js_invocation_settle`,
-/// which value flow reads by renderer stream.
+/// `kind` of an indexed event: another type, a `js_invocation_settle`, which
+/// value flow reads by renderer stream, or one of the record types the flow
+/// graph folds (`flow_graph::TYPES`), which it reads by session.
 const OTHER: i64 = 0;
 const SETTLE: i64 = 1;
+const FLOW: i64 = 2;
 pub(crate) const EVENT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS events(start INTEGER PRIMARY KEY, end INTEGER NOT NULL,
         session INTEGER NOT NULL, process INTEGER NOT NULL, sequence INTEGER NOT NULL,
@@ -52,6 +55,7 @@ pub(crate) const EVENT_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS events_identity ON events(session, process, sequence);
     CREATE INDEX IF NOT EXISTS events_request ON events(request) WHERE request != 0;
     CREATE INDEX IF NOT EXISTS events_settles ON events(session, process) WHERE kind = 1;
+    CREATE INDEX IF NOT EXISTS events_flow ON events(session, start) WHERE kind = 2;
     CREATE TABLE IF NOT EXISTS markers(session INTEGER NOT NULL, process INTEGER NOT NULL,
         count INTEGER NOT NULL, PRIMARY KEY(session, process)) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0),
@@ -342,10 +346,10 @@ impl EventFold {
             self.sequence(transaction, reference, !after_marker)?;
         }
         let request = event["request_id"].as_str().map_or(0, number);
-        let kind = if event["type"] == "js_invocation_settle" {
-            SETTLE
-        } else {
-            OTHER
+        let kind = match event["type"].as_str() {
+            Some("js_invocation_settle") => SETTLE,
+            Some(kind) if crate::flow_graph::TYPES.contains(&kind) => FLOW,
+            _ => OTHER,
         };
         transaction
             .prepare_cached(
@@ -528,7 +532,7 @@ impl StoreIndex {
         let Some((mut file, mut position)) = self.index.open()? else {
             return Ok(None);
         };
-        while !position.caught_up(0) && Instant::now() < deadline {
+        while !position.caught_up() && Instant::now() < deadline {
             let before = position.indexed_to;
             position = self.index.sidecar().fold(
                 &mut file,
@@ -603,7 +607,7 @@ fn indexing(position: &Position) -> Error {
 /// appends the newline last, so a line that parses as one object is complete;
 /// anything shorter is a write in progress and is not read yet.
 fn tail(file: &mut File, position: &Position) -> Result<Option<Vec<u8>>> {
-    if position.indexed_to >= position.file_end || !position.caught_up(RECORD_BYTES as u64) {
+    if position.indexed_to >= position.file_end || !position.caught_up() {
         return Ok(None);
     }
     let bytes = index_db::read_range(file, position.indexed_to, position.file_end)?;
@@ -698,6 +702,16 @@ pub struct SummaryIndex<'a> {
     pub connection: &'a Connection,
 }
 
+/// One session's flow graph records as the event index holds them.
+pub struct FlowRows {
+    /// Where the index stands; every row starts below `indexed_to`.
+    pub position: Position,
+    /// Byte ranges `[start, end)` of the records, the newline included.
+    pub rows: Vec<(u64, u64)>,
+    /// The first record the index refused, which no row stands for.
+    pub damage: Option<Error>,
+}
+
 /// The event and edge indexes of one session's stores.
 pub struct Indexes {
     events: StoreIndex,
@@ -735,7 +749,7 @@ impl Indexes {
         let Some((_, position)) = self.events.refresh(deadline)? else {
             return Ok(None);
         };
-        if !position.caught_up(RECORD_BYTES as u64) {
+        if !position.caught_up() {
             return Ok(None);
         }
         totals(self.events.index.sidecar().connection(), &position).map(Some)
@@ -761,6 +775,50 @@ impl Indexes {
         }))
     }
 
+    /// The flow graph's records of `session` that start at or after `from`,
+    /// at most `limit` of them in store order, from the event index brought
+    /// up to the store until `deadline`; None when there is no store.
+    pub fn flow_rows(
+        &mut self,
+        session: u64,
+        from: u64,
+        limit: usize,
+        deadline: Instant,
+    ) -> Result<Option<FlowRows>> {
+        let Some((_, position)) = self.events.refresh(deadline)? else {
+            return Ok(None);
+        };
+        let damage = self.events.damage()?;
+        // `kind = 2` lets SQLite use the partial index, which a bound
+        // parameter alone never implies.
+        let rows = self
+            .events
+            .index
+            .sidecar()
+            .connection()
+            .prepare_cached(
+                "SELECT start, end FROM events WHERE session = ?1 AND kind = 2 AND start >= ?2
+                 ORDER BY start LIMIT ?3",
+            )
+            .sql()?
+            .query_map(
+                params![
+                    index_db::key(session),
+                    from as i64,
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+            )
+            .sql()?
+            .collect::<rusqlite::Result<_>>()
+            .sql()?;
+        Ok(Some(FlowRows {
+            position,
+            rows,
+            damage,
+        }))
+    }
+
     /// Removes both indexes, before a capture clear empties their stores.
     pub fn discard(&mut self) -> Result<()> {
         self.events.index.discard()?;
@@ -782,7 +840,7 @@ impl Indexes {
                 opened.push(None);
                 continue;
             };
-            if !position.caught_up(RECORD_BYTES as u64) {
+            if !position.caught_up() {
                 return Err(indexing(&position));
             }
             if let Some(error) = index.damage()? {

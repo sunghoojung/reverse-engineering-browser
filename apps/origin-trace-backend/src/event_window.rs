@@ -267,16 +267,18 @@ pub(crate) fn malformed() -> Error {
 pub(crate) fn unsigned(value: &Value) -> Option<u64> {
     match value {
         Value::Number(number) => number.as_u64(),
-        Value::String(text)
-            if !text.is_empty()
-                && text.len() <= 20
-                && (text.len() == 1 || !text.starts_with('0'))
-                && text.bytes().all(|byte| byte.is_ascii_digit()) =>
-        {
-            text.parse().ok()
-        }
+        Value::String(text) => unsigned_text(text),
         _ => None,
     }
+}
+/// A canonical decimal: no sign, no leading zero, at most 20 digits.
+pub(crate) fn unsigned_text(text: &str) -> Option<u64> {
+    (!text.is_empty()
+        && text.len() <= 20
+        && (text.len() == 1 || !text.starts_with('0'))
+        && text.bytes().all(|byte| byte.is_ascii_digit()))
+    .then(|| text.parse().ok())
+    .flatten()
 }
 // The HTTP contract weighs every non-count marker as one queue drop, so a named
 // marker stays in queue_drops; named_gaps lets a reader take that weight back out.

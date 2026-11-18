@@ -961,7 +961,11 @@
     <script src="wasm_runner.js"></script>
     <script src="wasm_readable.js"></script>
     <script src="wasm_diff_view.js"></script>
+    <!-- The Graph pane's model, layout and pipeline: its Worker loads the same
+         three, and the page runs the pipeline itself where no Worker starts. -->
+    <script src="flow_graph_model.js"></script>
     <script src="flow_graph_layout.js"></script>
+    <script src="flow_graph_worker.js"></script>
     <script src="flow_graph.js"></script>
     <script src="flow_timeline.js"></script>
     <script src="flow_workspace.js"></script>

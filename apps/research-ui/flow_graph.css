@@ -120,9 +120,12 @@
 
 /* Heading and tools float over the canvas, like a document title. */
 .flow-graph-heading { position: absolute; z-index: 2; top: 12px; left: 18px; max-width: calc(100% - var(--flow-tools-w, 640px) - 48px); display: flex; align-items: baseline; gap: 12px; white-space: nowrap; pointer-events: none; }
-.flow-graph-title { flex: 0 0 auto; color: var(--text); font: 600 19px var(--sans); letter-spacing: -0.01em; }
-.flow-graph-stats { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font: 13px var(--sans); text-overflow: ellipsis; }
-.flow-graph-evidence { flex: 0 0 auto; color: var(--faint); font: 13px var(--sans); }
+/* When Find widens the tools, the stats give way first, then the state
+ * label, then the title; each keeps its whole text in its tooltip. */
+.flow-graph-title { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--text); font: 600 19px var(--sans); letter-spacing: -0.01em; text-overflow: ellipsis; }
+.flow-graph-stats { flex: 0 100 auto; min-width: 0; overflow: hidden; color: var(--muted); font: 13px var(--sans); text-overflow: ellipsis; }
+.flow-graph-evidence { flex: 0 10 auto; min-width: 0; overflow: hidden; color: var(--faint); font: 13px var(--sans); text-overflow: ellipsis; }
+.flow-graph-stats, .flow-graph-evidence { pointer-events: auto; cursor: default; }
 .flow-graph-evidence[data-partial="true"] { color: var(--amber); }
 .flow-graph-tools { position: absolute; z-index: 3; top: 10px; right: 12px; max-width: calc(100% - 24px); display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
 .flow-graph-filter input { width: 200px; height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--text); font: 11.5px var(--sans); }
@@ -139,6 +142,7 @@
 .flow-graph-zoom-bar .flow-graph-tool { min-width: 26px; padding: 0 8px; }
 .flow-graph-tools > .flow-graph-tool { min-height: 30px; padding: 0 14px; border: 1px solid var(--line); background: var(--panel); }
 .flow-graph-tool:disabled { cursor: default; opacity: 0.45; }
+.flow-graph-tools > .flow-graph-lineage-toggle[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 .flow-graph-zoom { min-width: 40px; color: var(--faint); font: 11px var(--mono); text-align: center; }
 .flow-graph-segment-item:focus-visible, .flow-graph-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -205,6 +209,15 @@
 .flow-inspector-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
 ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--text); font: 11px var(--mono); }
 .flow-inspector-list li { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; overflow-wrap: anywhere; }
+/* Callers, callees and sites list every entry, one line each with the whole
+ * text in its tooltip; a long list builds only the rows scrolled into view. */
+.flow-inspector-scroll { position: relative; min-width: 0; }
+.flow-inspector-scroll[data-virtual] { overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line-soft); border-radius: 6px; }
+.flow-inspector-scroll[data-virtual] > .flow-inspector-rows { position: relative; display: block; }
+.flow-inspector-rows > li { height: 24px; flex-wrap: nowrap; align-items: center; overflow: hidden; white-space: nowrap; }
+.flow-inspector-scroll[data-virtual] > .flow-inspector-rows > li { position: absolute; left: 0; right: 0; padding: 0 6px; }
+.flow-inspector-rows > li > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.flow-inspector-rows > li > .flow-inspector-meta { flex: 0 0 auto; max-width: 45%; }
 .flow-inspector-link { min-width: 0; padding: 2px 4px; border: 0; border-radius: 3px; background: transparent; color: var(--accent); font: 11px var(--mono); text-align: left; overflow-wrap: anywhere; }
 .flow-inspector-link:hover { background: var(--panel-3); }
 .flow-inspector-link:focus-visible, .flow-graph-inspector .secondary-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -222,9 +235,14 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 /* Status bar: where the selection is, then what the graph rests on. */
 .flow-graph-status { position: relative; min-width: 0; display: flex; align-items: center; gap: 16px; padding: 0 12px; border-top: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 11.5px var(--mono); white-space: nowrap; }
 .flow-graph-status > * { flex: 0 0 auto; }
-.flow-graph-selection { flex: 0 1 auto; min-width: 0; max-width: 52%; overflow: hidden; color: var(--flow-js-ink); text-overflow: ellipsis; }
-.flow-graph-selection:empty { display: none; }
-.flow-graph-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
+/* The selection takes the room it needs before the summary: its name and
+ * location give way, its count never does. */
+.flow-graph-selection { flex: 0 1 auto; min-width: 0; display: inline-flex; overflow: hidden; color: var(--flow-js-ink); }
+.flow-graph-selection[data-empty] { display: none; }
+.flow-graph-selection-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.flow-graph-selection-count { flex: 0 0 auto; color: var(--text); }
+.flow-graph-selection-what:not(:empty) + .flow-graph-selection-count:not(:empty)::before { content: " · "; color: var(--muted); white-space: pre; }
+.flow-graph-summary { flex: 0 1000 auto; min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; }
 .flow-graph-summary::before { content: "●"; margin-right: 7px; color: var(--accent); font-size: 9px; vertical-align: 1px; }
 .flow-graph-summary:empty { display: none; }
 .flow-graph-engine { flex: 0 0 auto; color: var(--faint); font-family: var(--sans); }
@@ -299,7 +317,6 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
   /* A drawer over the right of the canvas: the graph keeps its height. */
   .flow-graph-inspector { position: absolute; z-index: 6; top: 0; right: 0; bottom: 0; width: min(300px, 62%); border-left: 1px solid var(--line); box-shadow: -10px 0 26px var(--shadow); }
   .flow-graph-status > .flow-graph-limits { display: none; }
-  .flow-graph-selection { max-width: 70%; }
 }
 /* A short canvas keeps its room for the graph. */
 @container flow-stage (max-height: 380px) {

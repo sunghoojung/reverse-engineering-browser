@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 83] = [
+const UI_ASSETS: [&str; 85] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -50,7 +50,9 @@ const UI_ASSETS: [&str; 83] = [
     "graph_layout_client.js",
     "flow_graph.css",
     "flow_graph.js",
+    "flow_graph_model.js",
     "flow_graph_layout.js",
+    "flow_graph_worker.js",
     "flow_timeline.js",
     "flow_workspace.css",
     "flow_workspace.js",

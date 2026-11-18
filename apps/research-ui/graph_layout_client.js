@@ -156,5 +156,5 @@ const graphLayoutClient = (() => {
     return {outcomes, revision: fresh ?? revision, failure: null};
   }
 
-  return {LIMITS, layOut, routePoints};
+  return {LIMITS, ACCEPT, layOut, routePoints};
 })();

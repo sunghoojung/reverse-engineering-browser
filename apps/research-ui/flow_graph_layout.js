@@ -772,9 +772,96 @@ const flowGraphLayout = (() => {
     }
     return assemble(graph, local, realm, outcomes, report, metrics);
   }
+
+  /* The Graph pane's band interface (flow_graph_worker.js): the layered
+   * layout is drawn first, each realm's Triskel answer is swapped in when it
+   * comes, a refold lays out again only the bands it changed, and a lineage
+   * is laid out on its own, left to right. A state is what a later call needs
+   * of a layout; it stays where the layout was made. */
+
+  /** The layered layout with every realm layered, and its state. */
+  function layered(graph, metrics = METRICS) {
+    const local = layoutGraph(graph, metrics), realm = realms(graph, local);
+    const outcomes = realm.members.map(list => ({reason: {code: list.length < 2 ? 'one_card' : 'not_served'}}));
+    const state = {local, realm, outcomes, report: {revision: null, failure: null}};
+    return {layout: assemble(graph, local, realm, outcomes, state.report, metrics), state};
+  }
+  /** Each realm of two or more cards as graph-layout-v1 takes it, with its
+   * band's layered size: {lane, key, graph}. */
+  function realmGraphs(graph, state) {
+    const {local, realm} = state, out = [];
+    realm.members.forEach((list, lane) => {
+      if (list.length < 2) return;
+      const band = local.content.bands[lane];
+      out.push({lane, key: band.key, graph: {nodes: list.map(v => [local.w[v], local.h[v]]),
+        edges: realm.inner[lane].map(e => [realm.localIndex[graph.from[e]], realm.localIndex[graph.to[e]]]), width: band.w, height: band.h}});
+    });
+    return out;
+  }
+  /** The layout with `outcomes` per lane ({result}, Triskel's, or {reason});
+   * the state keeps them for the next call. */
+  function withRealms(graph, state, outcomes, report, metrics = METRICS) {
+    state.outcomes = outcomes; state.report = report;
+    return assemble(graph, state.local, state.realm, outcomes, report, metrics);
+  }
+  /** A refold's layout: each lane in `keep` takes `previous`'s content and
+   * outcome, the others are laid out afresh together, and the bands keep
+   * their order. A kept lane must hold the same cards and calls inside it,
+   * in the same order, in both graphs; a lane new to the graph lays out
+   * everything again. */
+  function relayout(graph, previous, keep, metrics = METRICS) {
+    const m = {...METRICS, ...metrics}, {count, from, to} = graph, old = previous.local;
+    const keys = old.content.bands.map(band => band.key), index = new Map(keys.map((key, band) => [key, band]));
+    for (let v = 0; v < count; v += 1) if (!index.has(graph.lane[v])) return layered(graph, metrics);
+    const bandOf = Int32Array.from({length: count}, (_, v) => index.get(graph.lane[v]));
+    const lanes = keys.map(key => ({key})), realm = realms(graph, {lanes, content: {bandOf}});
+    const w = Float32Array.from({length: count}, (_, v) => graph.w?.[v] ?? m.nodeW), h = Float32Array.from({length: count}, (_, v) => graph.h?.[v] ?? m.nodeH);
+    const lx = new Float64Array(count), ly = new Float64Array(count), layer = new Int32Array(count), back = new Uint8Array(from.length);
+    const routes = new Array(from.length).fill(null), bands = old.content.bands.slice(), outcomes = previous.outcomes.slice();
+    keys.forEach((key, lane) => {
+      if (!keep.has(key)) return;
+      realm.members[lane].forEach((v, i) => { const u = previous.realm.members[lane][i]; lx[v] = old.content.lx[u]; ly[v] = old.content.ly[u]; layer[v] = old.layer[u]; });
+      realm.inner[lane].forEach((e, i) => { const f = previous.realm.inner[lane][i]; routes[e] = old.content.routes[f]; back[e] = old.back[f]; });
+    });
+    const nodes = [], at = new Int32Array(count).fill(-1);
+    for (let v = 0; v < count; v += 1) if (!keep.has(graph.lane[v])) { at[v] = nodes.length; nodes.push(v); }
+    if (nodes.length) {
+      const edges = [];
+      for (let e = 0; e < from.length; e += 1) if (at[from[e]] >= 0 && at[to[e]] >= 0) edges.push(e);
+      const fresh = layoutGraph({count: nodes.length, lane: Int32Array.from(nodes, v => graph.lane[v]), weight: graph.weight ? Float64Array.from(nodes, v => graph.weight[v]) : undefined,
+        from: Int32Array.from(edges, e => at[from[e]]), to: Int32Array.from(edges, e => at[to[e]]), w: Float32Array.from(nodes, v => w[v]), h: Float32Array.from(nodes, v => h[v])}, metrics);
+      const freshBand = new Map(fresh.content.bands.map((band, i) => [band.key, i]));
+      nodes.forEach((v, s) => { lx[v] = fresh.content.lx[s]; ly[v] = fresh.content.ly[s]; layer[v] = fresh.layer[s]; });
+      edges.forEach((e, s) => { if (bandOf[from[e]] === bandOf[to[e]]) { routes[e] = fresh.content.routes[s]; back[e] = fresh.back[s]; } });
+      keys.forEach((key, lane) => {
+        if (keep.has(key)) return;
+        bands[lane] = fresh.content.bands[freshBand.get(key)] ?? {key, w: 0, h: 0, cards: 0};
+        outcomes[lane] = {reason: {code: realm.members[lane].length < 2 ? 'one_card' : 'not_served'}};
+      });
+    }
+    // A call into a band drawn above its caller runs back up, as orderBands has it.
+    for (let e = 0; e < from.length; e += 1) if (bandOf[from[e]] !== bandOf[to[e]]) back[e] = bandOf[to[e]] < bandOf[from[e]] ? 1 : 0;
+    const ports = () => new Float64Array(from.length).fill(NaN);
+    const local = {lanes, w, h, layer, back, top: m.margin, waypoints: 0, content: {bands, bandOf, lx, ly, routes, outPort: ports(), inPort: ports()}};
+    const state = {local, realm, outcomes, report: previous.report};
+    return {layout: assemble(graph, local, realm, outcomes, state.report, metrics), state};
+  }
+  /** A lineage: the layered layout turned to read left to right, so realms
+   * are columns in call order and causes sit left of what they led to. Route
+   * curves then leave and arrive sideways (`direction` right). */
+  function lineage(graph, metrics = METRICS) {
+    const m = {...METRICS, ...metrics};
+    // A band's side pads become its top and bottom: the top holds its name.
+    const local = layoutGraph({...graph, w: graph.h, h: graph.w}, {...m, lanePadX: m.lanePadTop, lanePadTop: m.lanePadX, lanePadBottom: m.lanePadX});
+    const routes = Float32Array.from(local.routes);
+    for (let i = 0; i < routes.length; i += 2) { const x = routes[i]; routes[i] = routes[i + 1]; routes[i + 1] = x; }
+    return {x: local.y, y: local.x, w: local.h, h: local.w, layer: local.layer, back: local.back, routes, routeTypes: local.routeTypes, routeStart: local.routeStart,
+      lanes: local.lanes.map(lane => ({key: lane.key, x: lane.y, y: lane.x, w: lane.h, h: lane.w})), width: local.height, height: local.width, direction: 'right',
+      engine: {name: 'layered', revision: null, triskel: false, realms: [], failure: null}};
+  }
   const transfer = layout => [layout.x.buffer, layout.y.buffer, layout.w.buffer, layout.h.buffer, layout.layer.buffer, layout.back.buffer,
     layout.routes.buffer, layout.routeTypes.buffer, layout.routeStart.buffer];
-  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, runAsync, transfer};
+  return {METRICS, ROUTE: {MOVE, CURVE, LINE, CORNER}, runAsync, transfer, layered, realmGraphs, withRealms, relayout, lineage};
 })();
 
 if (typeof importScripts === 'function') {

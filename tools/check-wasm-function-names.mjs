@@ -276,16 +276,20 @@ async function checkFlow() {
   document.hasFocus ??= () => true;
   let focused = null;
   window.HTMLElement.prototype.focus = function focus() { focused = this; };
-  const node = {id: 0, kind: 'wasm', context: 0, status: 'resolved', function_index: 5, sha256: SHA, artifact_id: '9', url: 'https://wasm.test/m.wasm', script_id: 3, hits: 2, entries: 1, leaves: 1};
-  const graph = {schema: 'flow-graph-v1', session_id: '1', evidence: 'observed', complete: true, coverage: {stopped: 'end'}, stacks: {records: {request_initiator_stack: 1}, not_walked: {}},
-    truncated: {}, limits: {}, not_shown: {}, contexts: [{id: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}],
-    nodes: [node], edges: [], paths: []};
+  const node = {id: 0, kind: 'wasm', context: 0, status: 'resolved', function_index: 5, sha256: SHA, artifact_id: '9', url: 'https://wasm.test/m.wasm', script_id: 3, hits: 2, stacks: 1, entries: 1, leaves: 1};
+  // One page of a complete generation, and the stacks through the node.
+  const graph = {schema: 'flow-graph-v2', session_id: '1', generation: '1', evidence: 'observed', complete: true, cursor: 0, next_cursor: null, node_count: 1, edge_count: 0,
+    coverage: {caught_up: true, artifacts_caught_up: true, folded_bytes: '64', store_end: '64', malformed_records: 0}, stacks: {records: {request_initiator_stack: 1}, not_walked: {}, distinct: 1, occurrences: 2, decoded: 1},
+    not_shown: [], contexts: [{id: 0, first_node: 0, process_id: 1, execution_context_id: '7', origin: 'https://wasm.test', origins: [], frame_ids: [], tab_ids: [], counts: {}}],
+    nodes: [node], edges: []};
+  const paths = {schema: 'flow-graph-paths-v1', session_id: '1', generation: '1', total: 1, occurrences: 2, cursor: 0, next_cursor: null, nodes: [0], edges: [], paths: []};
   const store = server(library());
-  const fetcher = async (url, options) => String(url).startsWith('/api/flow-graph') ? Response.json(graph) : store.fetcher(url, options);
+  const fetcher = async (url, options) => String(url).startsWith('/api/flow-graph/paths') ? Response.json(paths) : String(url).startsWith('/api/flow-graph') ? Response.json(graph) : store.fetcher(url, options);
+  // No Worker here, so the Graph pane's pipeline runs on this thread.
   const context = {document, window, Event, location: {protocol: 'http:'}, addEventListener: () => {}, fetch: fetcher,
-    requestAnimationFrame: fn => setTimeout(() => fn(performance.now()), 0), cancelAnimationFrame: clearTimeout, performance,
+    requestAnimationFrame: fn => setTimeout(() => fn(performance.now()), 0), cancelAnimationFrame: clearTimeout, performance, queueMicrotask, MessageChannel,
     getComputedStyle: () => ({getPropertyValue: () => ''}), innerHeight: 800, innerWidth: 1180, devicePixelRatio: 1, dispatchEvent: () => true, URLSearchParams, AbortSignal};
-  const scripts = ['wasm_function_names.js', 'graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_layout.js', 'flow_graph.js'];
+  const scripts = ['wasm_function_names.js', 'graph_layout_client.js', 'block_graph.js', 'request_stack.js', 'flow_graph_model.js', 'flow_graph_layout.js', 'flow_graph_worker.js', 'flow_graph.js'];
   const extra = (await Promise.all(scripts.map(name => read(`apps/research-ui/${name}`)))).join('\n');
   const {api, validateLibrary, wasm, panel: createFlow, flowGraphKey} = await namesModels(root, context, extra, ', wasm: RebWasmFunctionNames, panel: createFlowGraphPanel, flowGraphKey: flowGraphNodeKey');
   const controller = api.mount({fetcher: store.fetcher, validateLibrary, onChange: () => wasm.changed()});
@@ -429,7 +433,7 @@ async function checkWiring() {
     assert(source.includes('RebWasmFunctionNames'), path);
   }
   // The flow graph helper names only Wasm nodes with a module digest.
-  const flow = await read('apps/research-ui/flow_graph.js');
+  const flow = await read('apps/research-ui/flow_graph_model.js');
   const helper = flow.slice(flow.indexOf('function flowGraphAnalystName'), flow.indexOf('function flowGraphNodeName'));
   const names = {};
   const ctx = {globalThis: {RebWasmFunctionNames: {nameOf: (sha, index) => names[`${sha}:${index}`] ?? null}}};

@@ -2088,9 +2088,12 @@ otherwise by the origin of its first document artifact: a retained HTML response
 internals start collapsed. A folder chain with one folder child reads as one row
 (`a/b/c`). Files show their plain name, eval code `VM<id>` as in DevTools, with
 a mask icon tinted by type and the two-letter kind code kept as its text. The
-artifact ID is in the muted meta column, the tooltip and Details; same-named
-siblings add a muted query, session or frame suffix, or their artifact ID when nothing else differs. Extension names are not captured,
-so extensions show their ID.
+artifact ID is in the muted meta column, the tooltip and Details. The name
+takes its width first; an ID that does not fit in what is left loses its leading
+digits, which neighboring IDs share, and a navigator narrower than 200 px hides
+it. Same-named siblings add a muted query, session or frame suffix, or their
+artifact ID when nothing else differs. Extension names are not captured, so
+extensions show their ID.
 
 Only rows near the viewport are mounted; the focused row stays mounted while
 scrolled away. One row is in the Tab order. Up/Down move through rows, Right

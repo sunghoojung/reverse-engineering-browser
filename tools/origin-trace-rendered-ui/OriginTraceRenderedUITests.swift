@@ -984,6 +984,24 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.key(53, "\u{1B}")
       let cleared = try await ui.value("document.querySelector('#source-tree-filter').value === '' && document.querySelectorAll('#source-tree [data-artifact-id]').length > 1") as? Bool
       XCTAssertEqual(cleared, true, "\(size.name): Escape clears the filter and restores the tree")
+      // A 20-digit artifact ID never squeezes the name it labels: the ID takes
+      // what the name leaves and keeps its last digits, and the row's title
+      // keeps it whole.
+      try await ui.click("#source-tree-filter")
+      try await ui.type("18446744073709551615")
+      let wide = try await ui.json("""
+        (() => { const row = document.querySelector('#source-tree [data-artifact-id="18446744073709551615"]');
+          const raw = row?.querySelector('.source-tree-raw'), meta = row?.querySelector('.source-tree-meta');
+          return {found: Boolean(row), name: raw?.textContent ?? '', nameClipped: raw ? raw.scrollWidth > raw.clientWidth + 1 : true,
+            metaWidth: meta?.clientWidth ?? 0, metaDirection: meta ? getComputedStyle(meta).direction : '', title: row?.title ?? ''}; })()
+        """)
+      XCTAssertEqual(wide["found"] as? Bool, true, "\(size.name): the golden artifact is a Sources file: \(wide)")
+      XCTAssertEqual(wide["nameClipped"] as? Bool, false, "\(size.name): a 20-digit ID leaves its name whole: \(wide)")
+      XCTAssertEqual(wide["metaDirection"] as? String, "rtl", "\(size.name): a clipped ID loses its leading digits: \(wide)")
+      XCTAssertTrue((wide["title"] as? String ?? "").contains("artifact 18446744073709551615"), "\(size.name): the row's title names the whole ID: \(wide)")
+      try await assertLayout(ui, "#screen-sources", "\(size.name) sources wide artifact ID")
+      try await ui.screenshot("sources-tree-wide-id-\(size.name)")
+      try await ui.key(53, "\u{1B}")
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"303\"]")
       try await ui.waitUntil("(document.querySelector('#source-code')?.innerText ?? '').includes('retainedLine')", "retained source did not render")
       let source = try await ui.value("document.querySelector('#source-code').innerText") as? String ?? ""

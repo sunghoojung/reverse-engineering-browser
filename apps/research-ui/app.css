@@ -1199,7 +1199,9 @@ var(--panel);
         top: calc(var(--source-row, 0) * 24px);
         height: 24px;
         display: grid;
-        grid-template-columns: 12px 16px minmax(0, 1fr) auto;
+        /* The name takes its width first and the meta column what is left,
+           so a 20-digit artifact ID never squeezes the name it labels. */
+        grid-template-columns: 12px 16px minmax(0, max-content) minmax(0, 1fr);
         align-items: center;
         gap: 4px;
         padding: 0 8px 0 calc(4px + var(--source-depth, 0) * 10px);
@@ -1214,7 +1216,11 @@ var(--panel);
       .source-tree-row[aria-selected="true"] { background: var(--accent-soft); color: var(--text); }
       .source-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .source-tree-suffix { flex: 0 4 auto; min-width: 0; overflow: hidden; color: var(--faint); font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-      .source-tree-meta { color: var(--faint); font: 10px var(--mono); font-variant-numeric: tabular-nums; }
+      /* A meta that does not fit loses its leading digits, since IDs that sit
+         together differ at the end; the row's title and label keep it whole.
+         Right to left only moves the clipped edge: digits still read left to
+         right. */
+      .source-tree-meta { min-width: 0; overflow: hidden; color: var(--faint); font: 10px var(--mono); font-variant-numeric: tabular-nums; text-align: right; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
       .source-tree-twisty { width: 12px; height: 12px; background: var(--faint); -webkit-mask: var(--source-twisty) center / 12px 12px no-repeat; mask: var(--source-twisty) center / 12px 12px no-repeat; }
       .source-tree-row[aria-expanded="true"] > .source-tree-twisty { transform: rotate(90deg); }
       .source-tree-row[data-source-tree-kind="file"] > .source-tree-twisty { visibility: hidden; }

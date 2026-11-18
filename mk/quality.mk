@@ -94,6 +94,12 @@ wasm-identification-fixtures:
 wasm-diff-fixtures:
 	$(call ignored-rust-test,--lib,wasm_diff::tests::write_wasm_diff_fixtures,)
 
+# Rebuild the block graph's exception fixture after editing its .wat source.
+# make check fails while the checked-in module differs from its source.
+.PHONY: wasm-block-graph-fixtures
+wasm-block-graph-fixtures:
+	$(call ignored-rust-test,--lib,wasm_graph::tests::write_block_graph_fixtures,)
+
 # The actual C++ native Wasm encoders feed the Rust workspace builder, the
 # shipped viewer and the Python validator. The Rust tests also export the exact
 # evidence stores they built; make rendered-ui-check renders those stores

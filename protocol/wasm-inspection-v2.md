@@ -188,24 +188,45 @@ parameter is refused, and an imported or undefined index returns 404. A function
 is decoded only when requested; nothing retains a whole-module graph.
 
 A block's `flags` carry `entry`, `reachable` (a declared path from the entry, not
-observed execution), `exit`, `trap`, and `rows_cut`. `edges` are
-`[from, to, kind, label]`, where `to` is null for an unresolved target: a tail
-call, a throw, or a label past the frames that decoded. Kinds are `fallthrough`,
-`branch`, `taken`, `not_taken`, `table` (br_table arms with the same target, as
-a compact case list), `table_default`, `exception`, and `unresolved`. `rows`
-are newline-terminated `offset mnemonic operands` text, and a run of identical
-block openers is one row with a count, so `row_count` can be below
-`instruction_count`. `complete` is always false.
+observed execution), `exit`, and `trap`. `edges` are `[from, to, kind, label]`,
+where `to` is null for an unresolved target: a tail call, an exception that may
+leave the function, or a label past the frames that decoded. Kinds are
+`fallthrough`, `branch`, `taken`, `not_taken`, `table` (br_table arms with the
+same target, labeled with every case they take, as a compact `0-3,9` list),
+`table_default`, `exception`, and `unresolved`. `rows` are newline-terminated
+`offset mnemonic operands` text, and a run of identical block openers is one
+row with a count, so `row_count` can be below `instruction_count`. A
+`try_table` row lists its clauses as `(catch tag label)`, and a row that may
+throw names the blocks of its handlers after `->`. `complete` is always false.
+
+Exception edges run from each block holding an instruction that may throw to
+every handler that may catch it, labeled by the clause (`catch 0`,
+`catch_all`, `catch_ref 2`, `catch_all_ref`). A legacy `try` covers its body
+up to its first `catch`; `delegate` hands its exceptions to the scope it names,
+and naming the function's own label sends them to the caller. `throw` and
+`rethrow` carry a tag, so they are resolved here: a clause for another defined
+tag is skipped, and only imported tags may be one tag under two indexes.
+`throw_ref` and a call may raise any tag; an edge only a call reaches is
+labeled `call: ` before its clause, and a call never gets an escape edge,
+because a callee that throws is not yet evidence. A `throw`, `rethrow` or
+`throw_ref` that no clause certainly catches also gets an `unresolved` edge
+with no target, labeled by the instruction, or `throw: may escape` when a
+clause might catch it. A trap is not an exception and raises no edge.
 
 A module of any size is read whole, and the function index lists every
-function. Budgets are byte budgets chosen from real artifacts: the
-7,654,321-byte body limit web engines enforce, 16 MiB of row text and 32 MiB of
-structure for one function. Anything cut sets `status` to `partial` and is
-named in `omissions`; structure is kept before row text, and an edge leaving
-the retained prefix stays labeled. Decoding has no deadline: the request is
-polled every 4,096 instructions, and one that goes away stops the decode and is
-answered 499 `cancelled`. `limits` no longer reports `max_input_bytes`,
-`max_index_bytes` or `deadline_ms`; version 1 readers ignore the absent keys.
+function. One function's graph has no row or structure budget: every block,
+edge and row is written. The only bound is the 7,654,321-byte body limit web
+engines enforce, since a longer body cannot have run, and `limits` reports it
+as `max_body_bytes`. The document is streamed: the function is decoded and its
+graph built first, so a decode error is still an ordinary error response,
+and only then are the bytes written as they are produced. `status` is
+`partial` when a label names a frame that never opened, and `omissions` says
+which. Decoding has no deadline: the request is polled every 4,096
+instructions, and one that goes away before the stream starts is answered 499
+`cancelled`; one that goes away later stops the writer. `limits` no longer
+reports `max_input_bytes`, `max_index_bytes`, `deadline_ms`, the row text or
+structure budgets, and `flag_bits` no longer names `rows_cut`; version 1
+readers ignore the absent keys and read flags by the names `flag_bits` gives.
 
 `GET /api/wasm/pseudocode` lifts one function into readable lines with the
 same artifact checks; [WASM pseudocode](wasm-pseudocode-v1.md) defines it.

@@ -55,7 +55,9 @@ struct NativeRequestBodyReadOutcome;
 
 // Browser-process observation boundary for Brave's existing URL loader factory
 // and client proxies. Registering an emitter explicitly enables capture for one
-// authorized session. The inactive path is one atomic load per lifecycle event.
+// authorized session. While no session is armed a proxied request tests
+// IsArmed, one atomic load with no call, and each later lifecycle event tests
+// only the request's own lifecycle.
 class NativeNetworkCaptureSink final {
  public:
   static NativeNetworkCaptureSink& Get();
@@ -63,10 +65,16 @@ class NativeNetworkCaptureSink final {
   NativeNetworkCaptureSink(const NativeNetworkCaptureSink&) = delete;
   NativeNetworkCaptureSink& operator=(const NativeNetworkCaptureSink&) = delete;
 
+  // Whether a session armed the sink, before Get(): IsEnabled adds the
+  // category and expiry checks.
+  [[nodiscard]] static bool IsArmed() noexcept {
+    return emitter_.load(std::memory_order_acquire) != nullptr;
+  }
   [[nodiscard]] bool IsEnabled() const noexcept;
   // UI sequence only. Set once from the explicit disposable user-data directory,
   // before activation; never admit OTR/system/other profile contexts.
   void SetOwnedProfilePath(base::FilePath path);
+  // False at once in a browser that set no owned profile path.
   [[nodiscard]] bool IsOwnedContext(content::BrowserContext* context) const;
   [[nodiscard]] std::uint64_t generation() const noexcept;
   // capture_content admits raw request targets, body bytes and header blocks
@@ -222,7 +230,8 @@ class NativeNetworkCaptureSink final {
 
   base::FilePath owned_profile_path_;
   std::atomic<std::uint64_t> generation_{0};
-  std::atomic<NativeProbeEmitter> emitter_{nullptr};
+  // A static member, so IsArmed needs neither Get() nor its guard load.
+  static std::atomic<NativeProbeEmitter> emitter_;
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};

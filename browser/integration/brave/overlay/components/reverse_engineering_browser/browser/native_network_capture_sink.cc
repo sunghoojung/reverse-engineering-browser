@@ -402,6 +402,8 @@ NativeRequestBodyKind KindOf(const network::DataElement& element) noexcept {
 
 }  // namespace
 
+std::atomic<NativeProbeEmitter> NativeNetworkCaptureSink::emitter_{nullptr};
+
 NativeNetworkCaptureSink::NativeNetworkCaptureSink() = default;
 
 NativeNetworkCaptureSink::~NativeNetworkCaptureSink() = default;
@@ -427,7 +429,7 @@ void NativeNetworkCaptureSink::SetOwnedProfilePath(base::FilePath path) {
 }
 
 bool NativeNetworkCaptureSink::IsOwnedContext(content::BrowserContext* context) const {
-  return context && !context->IsOffTheRecord() && !owned_profile_path_.empty() &&
+  return !owned_profile_path_.empty() && context && !context->IsOffTheRecord() &&
          context->GetPath() == owned_profile_path_;
 }
 

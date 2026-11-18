@@ -409,6 +409,12 @@ assert(tree(), 'the whole body parses once every byte is read');
 console.log('PASS Payload limits and failures: cut prefix noted at the top and shown as sent, ranged reads continue to the whole body, failed or pending re-reads keep the last view, digest mismatch shows none');
 
 // A 5 MiB JSON body: parsing and every interaction render a bounded number of rows.
+// The layout worker runs inline, so this process's CPU time is the work each
+// step did; wall time would also count waiting for a core on a loaded host.
+const cpuMs = () => {
+  const {user, system} = process.cpuUsage();
+  return (user + system) / 1000;
+};
 const items = [];
 for (let index = 0, size = 0; size < 5 * 1024 * 1024; index += 1) {
   const item = JSON.stringify({id: index, name: `item-${index}`, tags: ['a', 'b'], nested: {x: index * 1.5, ok: true, v: null}});
@@ -420,30 +426,30 @@ const large = `{"items":[${items.join(',')}]}`;
 assert(large.length >= 5 * 1024 * 1024);
 const largeBytes = encoder.encode(large);
 const largeRequest = request(record({bodyLength: String(largeBytes.length), capturedLength: String(largeBytes.length)}));
-let started = performance.now();
+let started = cpuMs();
 render(largeRequest, {status: 'ready', bytes: largeBytes, text: large, lossy: false, verified: true});
-const opened = performance.now() - started;
+const opened = cpuMs() - started;
 assert(all('.traffic-payload-tree [role="treeitem"]').length <= 3, 'only the root and its key render at first');
 press(treeRows()[1], 'ArrowRight');
 assert(treeRows().length <= 2 + rangeCount(items.length));
-started = performance.now();
+started = cpuMs();
 find().value = 'deep-match';
 event(find(), 'input');
-const found = performance.now() - started;
+const found = cpuMs() - started;
 assert.equal(text('.traffic-payload-matches'), '1 of 1');
 assert.equal(text('.traffic-payload-tree .is-current'), 'needle: "deep-match"');
 assert(panel.querySelectorAll('*').length < 2500, `the DOM stays bounded: ${panel.querySelectorAll('*').length} elements`);
-started = performance.now();
+started = cpuMs();
 click(button('Source'));
 await settle();
-const source = performance.now() - started;
+const source = cpuMs() - started;
 assert(all('.traffic-payload-lines .traffic-payload-line').length <= 400, 'source renders its rows in blocks');
 assert(all('.traffic-payload-lines mark.is-current').length === 1, 'the source match is revealed');
 for (const [label, elapsed] of [['open', opened], ['find', found], ['source', source]]) {
-  assert(elapsed < 4000, `5 MiB ${label} took ${Math.round(elapsed)} ms`);
+  assert(elapsed < 4000, `5 MiB ${label} took ${Math.round(elapsed)} ms of CPU`);
 }
 click(button('Parsed'));
-console.log(`PASS Payload 5 MiB JSON: open ${Math.round(opened)} ms, find ${Math.round(found)} ms, source ${Math.round(source)} ms, DOM bounded (DOM model; rendered timing is the packaged-app check)`);
+console.log(`PASS Payload 5 MiB JSON: CPU for open ${Math.round(opened)} ms, find ${Math.round(found)} ms, source ${Math.round(source)} ms, DOM bounded (DOM model; rendered timing is the packaged-app check)`);
 
 function rangeCount(count) {
   let step = 100;

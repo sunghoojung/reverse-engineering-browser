@@ -6,6 +6,7 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_FACTORY_OWNER_HOOK_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_FACTORY_OWNER_HOOK_H_
 
+#include <atomic>
 #include <cstdint>
 
 #include "base/component_export.h"
@@ -39,19 +40,50 @@ struct NativeFactoryOwner final {
   std::uint64_t service_worker_token_low = 0;
 };
 
+// Only a browser with an owned capture profile reads the owner, so until Arm
+// a scope is one atomic load and touches no thread-local, and the current
+// owner names nothing.
 class COMPONENT_EXPORT(REB_FACTORY_OWNER_HOOK) ScopedNativeFactoryOwner final {
  public:
-  explicit ScopedNativeFactoryOwner(const NativeFactoryOwner& owner) noexcept;
+  explicit ScopedNativeFactoryOwner(const NativeFactoryOwner& owner) noexcept : armed_(Armed()) {
+    if (armed_) [[unlikely]] {
+      previous_ = Exchange(owner);
+    }
+  }
   ScopedNativeFactoryOwner(const ScopedNativeFactoryOwner&) = delete;
   ScopedNativeFactoryOwner& operator=(const ScopedNativeFactoryOwner&) = delete;
-  ~ScopedNativeFactoryOwner();
+  ~ScopedNativeFactoryOwner() {
+    if (armed_) [[unlikely]] {
+      static_cast<void>(Exchange(previous_));
+    }
+  }
+
+  // The browser's capture startup, before its owned profile makes any
+  // factory. UI thread, once; a browser that never arms keeps every scope
+  // inert.
+  static void Arm() noexcept;
+  // Never cleared once set. Relaxed: it publishes no other data, and the
+  // owner slot it guards is the calling thread's own.
+  [[nodiscard]] static bool Armed() noexcept {
+    return armed_owners_.load(std::memory_order_relaxed);
+  }
+  // The calling thread's owner slot.
+  [[nodiscard]] static NativeFactoryOwner Current() noexcept;
 
  private:
-  const NativeFactoryOwner previous_;
+  static NativeFactoryOwner Exchange(const NativeFactoryOwner& owner) noexcept;
+
+  static std::atomic<bool> armed_owners_;
+
+  NativeFactoryOwner previous_;
+  const bool armed_;
 };
 
-COMPONENT_EXPORT(REB_FACTORY_OWNER_HOOK)
-NativeFactoryOwner CurrentNativeFactoryOwner() noexcept;
+// The innermost scope's owner on this thread, or none until armed.
+[[nodiscard]] inline NativeFactoryOwner CurrentNativeFactoryOwner() noexcept {
+  return ScopedNativeFactoryOwner::Armed() ? ScopedNativeFactoryOwner::Current()
+                                           : NativeFactoryOwner{};
+}
 
 // A service-worker job names the version it starts and the cause it scoped
 // around its script fetch, so that version's own fetches can name the same

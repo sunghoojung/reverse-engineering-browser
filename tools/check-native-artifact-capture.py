@@ -84,6 +84,7 @@ HEADERS = (
 TRANSPORT_HEADERS = (
     "build/build_config.h",
     "base/command_line.h",
+    "base/component_export.h",
     "base/containers/span.h",
     "base/files/file_path.h",
     "base/files/file_util.h",
@@ -220,6 +221,7 @@ def check_transport(receiver: str) -> None:
             str(sources / "browser/native_artifact_socket_client.cc"),
             str(sources / "browser/native_probe_socket_client.cc"),
             str(sources / "browser/native_local_ipc_client.cc"),
+            str(sources / "common/native_factory_owner_hook.cc"),
             str(sources / "common/native_probe_queue.cc"),
             "-o",
             str(binary),

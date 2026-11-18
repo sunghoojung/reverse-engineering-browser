@@ -20,6 +20,48 @@ never retains arguments, text, pixels, or return values. The inactive sink path
 performs one atomic emitter check and returns without allocating, blocking, or
 changing the surface result.
 
+## Inactive path
+
+While no session is active, no hook allocates, locks, makes a system call, or
+calls into V8 or the embedder, except on the paths the launch-time choices
+below keep. Every other first check reads static, constant-initialized state,
+and no other per-event hook touches a thread-local.
+Per-thread sink state larger than a pointer is allocated on a thread's first
+active use and freed when the thread exits, so the sink image's thread-local
+block is 81 bytes on arm64 (it was 131 KiB). The only write to it without a
+session is a V8 thread's scope, once when the thread starts. In a static build
+those bytes are part of the image's one block, which every thread allocates
+anyway; in a component build that store makes dyld allocate the sink
+library's block for the thread.
+
+| Hook | Cost with no session |
+| --- | --- |
+| Renderer sink checks, generated binding, Canvas, Web Audio and runtime operation records | One atomic load of the exported sink's field, inline |
+| Renderer request start | The same load, before the URL's scheme or host is read |
+| Script cookie access | One atomic load of a static member, inline |
+| `TypedArray` and `ArrayBuffer` construction | Three loads in the `TypedArray` builtin (the external reference, the gate pointer, its byte) and two in the `ArrayBuffer` builtin; no runtime call or callback |
+| Wasm trap | Two V8 flag tests without `--reb-wasm-br-table-dispatch` or `--reb-wasm-call-indirect-dispatch`; with either, see the launch-time choices below |
+| Blink async task run and navigation kind scope | One atomic load without `--reb-request-stacks` |
+| Proxied browser request | Two atomic loads when it starts; later events read only the request's own fields |
+| Early-hints loader factory | Two atomic loads; the factory is built as stock |
+| Factory owner scope | One atomic load in a browser that did not start capture from its command line |
+| V8 thread start (document and dedicated, shared or service worker) | One thread-local store of the thread's scope, once per thread |
+
+Three launch-time choices keep work on these paths without a session. With
+`--reb-wasm-br-table-dispatch` or `--reb-wasm-call-indirect-dispatch`, which
+the packaged app passes whenever the VM and Artifact categories are on, every
+Liftoff function entry, return and tail call still calls a builtin, the
+runtime and Blink's enabled check, and every trap walks the stack and calls
+into Blink. Blink's trap and heartbeat checks then read this thread's state
+slot: a function-local static, created under base's thread-local lock on the
+process's first call, then a thread-local lookup. The other two keep work
+because evidence from before a session depends on it. With `--reb-request-stacks` the
+stack provider is installed at renderer start and never removed, so a task
+run with a carried segment exchanges one thread-local word on entry and exit.
+A browser the launcher starts arms the factory owner scope before its profile
+exists, so each scope exchanges one thread-local owner record. Requests made
+before a session still name their owner.
+
 While capture is active, renderer operations resolve the current Blink frame
 token only after the policy check. The browser-process host maps that token to
 its top-level tab through live frames, then through `browser/native_tab_resolver.h`

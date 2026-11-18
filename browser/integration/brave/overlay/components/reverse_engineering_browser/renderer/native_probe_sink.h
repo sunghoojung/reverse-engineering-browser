@@ -16,8 +16,6 @@
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest.h"
 
 #include "base/component_export.h"
-#include "base/memory/raw_ptr.h"
-#include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_compiled_script.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
@@ -138,9 +136,13 @@ enum class NativeWasmGuestModuleDecision : std::uint8_t {
   kRejectModule,
 };
 
+// Every hook on a per-event path calls an inline gate below through Get():
+// the address of one exported, constant-initialized object, then a single
+// atomic load that returns while capture is inactive. The rest of each check
+// is out of line.
 class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
  public:
-  static NativeProbeSink& Get();
+  static NativeProbeSink& Get() noexcept { return instance_; }
 
   NativeProbeSink(const NativeProbeSink&) = delete;
   NativeProbeSink& operator=(const NativeProbeSink&) = delete;
@@ -159,19 +161,38 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // not wait for producers already past this admission check.
   [[nodiscard]] bool CanAdmitEvent(const NativeProbeEvent& event,
                                    std::uint64_t config_generation) const noexcept;
-  [[nodiscard]] bool IsArtifactCaptureEnabled() const noexcept;
+  [[nodiscard]] bool IsArtifactCaptureEnabled() const noexcept {
+    return artifact_emitter_.load(std::memory_order_acquire) != nullptr &&
+           IsArtifactCaptureEnabledSlow();
+  }
   // Whether this session opted in to retaining request and script content.
   [[nodiscard]] bool IsContentCaptureEnabled() const noexcept {
     return capture_request_content_.load(std::memory_order_relaxed);
   }
-  [[nodiscard]] bool IsVmCaptureEnabled() const noexcept;
-  [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept;
-  // One atomic load while inactive, for loaders that must convert before
-  // they can record.
-  [[nodiscard]] bool IsCaptureArmed() const noexcept;
+  [[nodiscard]] bool IsVmCaptureEnabled() const noexcept {
+    return artifact_emitter_.load(std::memory_order_acquire) != nullptr && IsVmCaptureEnabledSlow();
+  }
+  // Nonzero while the published configuration captures VM evidence. V8
+  // loads it on each supported runtime buffer construction and makes no
+  // runtime call or callback while it is 0. Only SetEmitters writes it.
+  [[nodiscard]] const std::atomic<std::uint8_t>& RuntimeBufferGate() const noexcept {
+    return runtime_buffer_gate_;
+  }
+  [[nodiscard]] bool IsCanvasImageCaptureEnabled() const noexcept {
+    return artifact_emitter_.load(std::memory_order_acquire) != nullptr &&
+           IsCanvasImageCaptureEnabledSlow();
+  }
+  // One atomic load, for loaders that must convert before they can record.
+  [[nodiscard]] bool IsCaptureArmed() const noexcept {
+    return emitter_.load(std::memory_order_acquire) != nullptr;
+  }
   [[nodiscard]] bool RuntimeScriptSourceNeeded(std::uint64_t execution_context_id,
                                                std::uint64_t script_id) const noexcept;
-  [[nodiscard]] std::uint64_t RuntimeCaptureGeneration() const noexcept;
+  [[nodiscard]] std::uint64_t RuntimeCaptureGeneration() const noexcept {
+    return artifact_emitter_.load(std::memory_order_acquire) != nullptr
+               ? RuntimeCaptureGenerationSlow()
+               : 0;
+  }
   // Caller must preserve the generation at observation time. No URL matching,
   // cross-thread transfer, or inference of VM classification occurs here.
   [[nodiscard]] bool RegisterRuntimeScriptObservation(
@@ -349,6 +370,10 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // call leaves the request for a thread that has one. Replacing the
   // configuration clears it.
   void RequestWasmExecutionInterrupt() noexcept;
+  // Whether this thread has a host call open in the current configuration,
+  // the only case ReportWasmTrap records, so a trap without one converts no
+  // document URL. Allocates nothing and takes no lock.
+  [[nodiscard]] bool IsWasmHostCallOpen() const noexcept;
   // Closes the open host call. Unknown function or offset must be passed
   // with the known flag clear and the integer 0; a nonzero unknown is refused.
   void ReportWasmTrap(NativeWasmExecutionReason reason,
@@ -435,49 +460,91 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // Called by the loader right after RecordRequestInitiated. Records only a
   // request started inside an invocation, or one started outside script while
   // an admitted invocation has not settled (unknown).
-  void RecordNativeJsInvocationRequest(std::int32_t request_id) noexcept;
-  void RecordApiCall(NativeProbeCategory category, std::string_view operation) noexcept;
-  void RecordPropertyRead(NativeProbeCategory category, std::string_view operation) noexcept;
+  // Zero until invocation capture is configured.
+  void RecordNativeJsInvocationRequest(const std::int32_t request_id) noexcept {
+    if (native_invocation_generation_.load(std::memory_order_acquire) != 0) [[unlikely]] {
+      RecordNativeJsInvocationRequestSlow(request_id);
+    }
+  }
+  void RecordApiCall(const NativeProbeCategory category,
+                     const std::string_view operation) noexcept {
+    if (IsCaptureArmed()) [[unlikely]] {
+      static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation));
+    }
+  }
+  void RecordPropertyRead(const NativeProbeCategory category,
+                          const std::string_view operation) noexcept {
+    if (IsCaptureArmed()) [[unlikely]] {
+      static_cast<void>(
+          RecordSurfaceOperation(category, NativeProbeType::kPropertyRead, operation));
+    }
+  }
   // Call-site state is an opaque, monotonically ordered configuration claim,
   // not a session ID. Zero initializes an unobserved site. Failed admission
   // leaves generation - 1 so stale callers cannot reclaim a newer generation.
-  void RecordApiCallOnce(NativeProbeCategory category,
-                         std::string_view operation,
-                         std::atomic<std::uint64_t>& observed_generation) noexcept;
-  void RecordPropertyReadOnce(NativeProbeCategory category,
-                              std::string_view operation,
-                              std::atomic<std::uint64_t>& observed_generation) noexcept;
+  void RecordApiCallOnce(const NativeProbeCategory category,
+                         const std::string_view operation,
+                         std::atomic<std::uint64_t>& observed_generation) noexcept {
+    if (IsCaptureArmed()) [[unlikely]] {
+      static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kApiCall, operation,
+                                               &observed_generation));
+    }
+  }
+  void RecordPropertyReadOnce(const NativeProbeCategory category,
+                              const std::string_view operation,
+                              std::atomic<std::uint64_t>& observed_generation) noexcept {
+    if (IsCaptureArmed()) [[unlikely]] {
+      static_cast<void>(RecordSurfaceOperation(category, NativeProbeType::kPropertyRead, operation,
+                                               &observed_generation));
+    }
+  }
   void RecordCanvasToDataUrl() noexcept;
   void RecordCanvasToDataUrl(std::string_view data_url) noexcept;
-  void RecordWebAudioCall(std::string_view operation) noexcept;
+  void RecordWebAudioCall(const std::string_view operation) noexcept {
+    RecordApiCall(NativeProbeCategory::kWebAudio, operation);
+  }
   // A browser-internal scheme is counted instead of recorded unless the
   // configuration opts in. The result is what the loader keeps to finish a
   // request the browser proxy never sees; see protocol/native-network-v3.md.
-  [[nodiscard]] NativeRendererRequest RecordRequestInitiated(std::int32_t request_id,
-                                                             std::string_view method,
-                                                             std::string_view scheme,
-                                                             std::string_view host) noexcept;
+  [[nodiscard]] NativeRendererRequest RecordRequestInitiated(const std::int32_t request_id,
+                                                             const std::string_view method,
+                                                             const std::string_view scheme,
+                                                             const std::string_view host) noexcept {
+    if (!IsCaptureArmed()) [[likely]] {
+      return {};
+    }
+    return RecordRequestInitiatedSlow(request_id, method, scheme, host);
+  }
   // Only for AnsweredInRenderer() requests of the configuration that recorded
   // them: a content-mode request_target child, then request_completed or
   // request_failed. target starts the URL's path and query of target_length.
   void RecordRendererRequestComplete(const NativeRendererRequest& request,
-                                     std::string_view target,
-                                     std::size_t target_length,
-                                     int port,
-                                     std::int32_t error_code,
-                                     std::int64_t encoded_data_length,
-                                     std::int64_t decoded_body_length) noexcept;
+                                     const std::string_view target,
+                                     const std::size_t target_length,
+                                     const int port,
+                                     const std::int32_t error_code,
+                                     const std::int64_t encoded_data_length,
+                                     const std::int64_t decoded_body_length) noexcept {
+    if (request.AnsweredInRenderer()) [[unlikely]] {
+      RecordRendererRequestCompleteSlow(request, target, target_length, port, error_code,
+                                        encoded_data_length, decoded_body_length);
+    }
+  }
   // A request content::ServiceWorkerSubresourceLoader ended itself
   // (NativeServiceWorkerEndsRequest): the renderer completion, with
   // from_service_worker, of the http(s) start this process recorded under
   // request_id; or a service_worker_end_lost gap naming that request when
   // another start of the same configuration took its slot. One atomic load
   // while inactive.
-  void RecordServiceWorkerRequestEnd(std::int32_t request_id,
-                                     std::string_view target,
-                                     std::size_t target_length,
-                                     int port,
-                                     std::int32_t error_code) noexcept;
+  void RecordServiceWorkerRequestEnd(const std::int32_t request_id,
+                                     const std::string_view target,
+                                     const std::size_t target_length,
+                                     const int port,
+                                     const std::int32_t error_code) noexcept {
+    if (IsCaptureArmed()) [[unlikely]] {
+      RecordServiceWorkerRequestEndSlow(request_id, target, target_length, port, error_code);
+    }
+  }
   // Charges one memory-cache reuse to the configuration's budget, after the
   // Network category, expiry and page checks, so the caller converts nothing
   // for a reuse it will not record. A reuse in a page that is not ordinary is
@@ -528,14 +595,48 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   [[nodiscard]] bool EnableWasmBrTableSampling(const PageGuestSamplePolicy& policy) noexcept;
   void DisablePageGuestSampling() noexcept;
   void ObserveCapturedJavaScriptSwitchProgram(std::span<const std::uint8_t> program) noexcept;
-  void ObserveCapturedWasmModule(std::span<const std::uint8_t> module) noexcept;
+  // Per Wasm compile and instantiation; one atomic load until the br_table
+  // shape is enabled.
+  void ObserveCapturedWasmModule(const std::span<const std::uint8_t> module) noexcept {
+    if (wasm_br_table_sampling_.load(std::memory_order_acquire) != 0) [[unlikely]] {
+      ObservePageGuest(false, module);
+    }
+  }
 
  private:
-  friend class base::NoDestructor<NativeProbeSink>;
   friend class NativeDebuggerWatch;
   friend class NativeRequestStackWalk;
   friend class NativeScriptCookieSink;
-  NativeProbeSink() noexcept;
+  // Every member is constant-initialized, so the instance needs no
+  // constructor to run. Defined beside instance_, its only use; declared
+  // inline without a body, the form the Chromium style checker accepts.
+  inline constexpr NativeProbeSink() noexcept;
+
+  static NativeProbeSink instance_;
+
+  // The out-of-line rest of each inline gate above, reached only after its
+  // first load found capture armed.
+  [[nodiscard]] bool IsArtifactCaptureEnabledSlow() const noexcept;
+  [[nodiscard]] bool IsVmCaptureEnabledSlow() const noexcept;
+  [[nodiscard]] bool IsCanvasImageCaptureEnabledSlow() const noexcept;
+  [[nodiscard]] std::uint64_t RuntimeCaptureGenerationSlow() const noexcept;
+  void RecordNativeJsInvocationRequestSlow(std::int32_t request_id) noexcept;
+  [[nodiscard]] NativeRendererRequest RecordRequestInitiatedSlow(std::int32_t request_id,
+                                                                 std::string_view method,
+                                                                 std::string_view scheme,
+                                                                 std::string_view host) noexcept;
+  void RecordRendererRequestCompleteSlow(const NativeRendererRequest& request,
+                                         std::string_view target,
+                                         std::size_t target_length,
+                                         int port,
+                                         std::int32_t error_code,
+                                         std::int64_t encoded_data_length,
+                                         std::int64_t decoded_body_length) noexcept;
+  void RecordServiceWorkerRequestEndSlow(std::int32_t request_id,
+                                         std::string_view target,
+                                         std::size_t target_length,
+                                         int port,
+                                         std::int32_t error_code) noexcept;
 
   [[nodiscard]] NativeProbeEmitStatus EmitStatus(const NativeProbeEvent& event,
                                                  std::uint64_t generation) const noexcept;
@@ -826,6 +927,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<NativeRendererProbeEmitter> emitter_{nullptr};
   std::atomic<NativeProbeFrameIdProvider> frame_id_provider_{nullptr};
   std::atomic<NativeGeneratedArtifactEmitter> artifact_emitter_{nullptr};
+  std::atomic<std::uint8_t> runtime_buffer_gate_{0};
   std::atomic<std::uint64_t> next_sequence_{1};
   // Even generations are stable. SetEmitters transitions through the next odd
   // generation while replacing the independently atomic policy fields.
@@ -891,7 +993,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::uint64_t> wasm_br_table_interpreter_id_{0};
   std::atomic<std::uint64_t> wasm_br_table_bytecode_id_{0};
   std::atomic<std::uint64_t> page_guest_invocation_{1};
-  raw_ptr<const NativeWasmGuestAdapter> native_guest_retained_adapter_ = nullptr;
+  // ConfigureNativeWasmGuest's process-lifetime copy; that serialized
+  // control sequence is its only reader and writer.
+  std::atomic<const NativeWasmGuestAdapter*> native_guest_retained_adapter_{nullptr};
   std::atomic<const NativeWasmGuestAdapter*> native_guest_adapter_{nullptr};
   std::atomic<NativeGuestCaptureEmitter> native_guest_capture_{nullptr};
   std::atomic<NativeGuestHostEmitter> native_guest_host_{nullptr};

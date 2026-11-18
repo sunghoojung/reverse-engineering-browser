@@ -32,6 +32,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 
 #define BUILDFLAG(flag) (flag)
+#define COMPONENT_EXPORT(component)
 #define IS_POSIX 1
 #define GUARDED_BY(lock)
 #define FROM_HERE ::base::Location()

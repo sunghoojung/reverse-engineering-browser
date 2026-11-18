@@ -12,7 +12,11 @@ reconfiguration with a producer paused after its claim, preservation of newer
 accepted/failed claims, masked/malformed/expired events, expiry immediately before
 transport admission, property/network callbacks, Canvas creator-event admission, notification
 coalescing, the frame attribution a network request record shares with its
-sibling collectors, and allocation-free disabled calls. Looping/waiting in the fixture controls deterministic races; production
+sibling collectors, and allocation-free disabled calls. A fresh thread first
+drives every inactive renderer hook and checks that none allocates, including
+the per-thread state the sink makes only for active capture, and that V8's
+runtime buffer gate is closed until a configuration with the VM category
+opens it. Looping/waiting in the fixture controls deterministic races; production
 probe calls make one claim CAS and one TryPush call. The existing queue is
 lock-free, not wait-free; its internal contention retries are unchanged.
 

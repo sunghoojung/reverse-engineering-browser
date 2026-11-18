@@ -421,8 +421,9 @@ access. See [WASM value flow](wasm-value-flow-v1.md).
 a connected agent. It returns bounded current session discovery without fetching
 source or bytecode. It includes `live_admission`, the same process-lifetime
 `instance_id` as `/api/health` (also sent as `X-REB-Expected-Instance`), endpoint,
-capture mode, `capture_options`, and a retained Wasm artifact inventory (16
-entries from a 256 KiB manifest tail). Use this route's own ETag for
+capture mode, `capture_options`, and a retained Wasm artifact inventory (the 16
+newest Wasm artifacts of the whole manifest, from the artifact lookup index, and
+a count of the rest). Use this route's own ETag for
 conditional reads. No target/session join is inferred from URL or timing.
 
 `capture_options` labels what this session's launcher passed to Brave, for

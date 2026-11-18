@@ -597,10 +597,11 @@ source, bodies, headers, socket URLs, and diagnostics. HTTP(S) URLs are origin
 labels; conventional Wasm hex labels are retained. IDs are never truncated into
 different identities: an oversized ID is `null`. These labels/IDs can still be
 sensitive metadata, so establish provider-sharing scope first. Each inventory
-has at most 16 entries. Artifact coverage is only a 256 KiB manifest tail;
-`window_truncated` and `items_omitted` are not evidence that an absent module was
-never captured. Artifact `script_id` is always `null`; no script is joined by
-URL, time, or hash.
+has at most 16 entries. The Wasm inventory lists the newest modules of the
+whole artifact manifest and counts the rest in `items_omitted`;
+`list_artifacts` with `kind=wasm` pages every one. While `scope` is `indexing`
+the counts cover the manifest up to `scan_end`, so read again shortly. Artifact
+`script_id` is always `null`; no script is joined by URL, time, or hash.
 
 Then call `get_session_summary` with no arguments. It reports event counts by
 type and frame, gap reasons, artifact digests, and `checks` that name what

@@ -223,5 +223,6 @@ def main(argv: list[str] | None = None) -> int:
     failed = sum(report.count("FAIL") for report in reports)
     manual = sum(report.count("MANUAL") for report in reports)
     passed = sum(report.count("PASS") for report in reports)
-    print(f"RESULT {args.session}: {passed} passed, {failed} failed, {manual} manual", flush=True)
+    skipped = sum(report.count("SKIP") for report in reports)
+    print(f"RESULT {args.session}: {passed} passed, {failed} failed, {manual} manual, {skipped} skipped", flush=True)
     return 1 if failed else 0

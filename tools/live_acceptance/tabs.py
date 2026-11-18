@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from urllib.parse import parse_qs, urlsplit
 
 from live_acceptance.binary import png
 from live_acceptance.evidence import find_rows, row_tabs
@@ -94,16 +95,18 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function controlled(count) {
   for (let i = 0; i < 150; i++) {
     const list = await clients.matchAll();
-    if (list.length >= count) return list.length;
+    if (list.length >= count) return list;
     await sleep(200);
   }
-  return (await clients.matchAll()).length;
+  return clients.matchAll();
 }
 self.addEventListener('message', event => {
   if (event.data === 'fetch-after-close') {
     event.waitUntil(sleep(3000).then(() => fetch('/tabs/sw/after-close?r=1')));
   } else if (event.data && event.data.all) {
-    event.waitUntil(controlled(event.data.all).then(n => fetch('/tabs/sw/all-clients?n=' + n)));
+    // n counts every client; seen names the many-tab frames among them.
+    event.waitUntil(controlled(event.data.all).then(list => fetch('/tabs/sw/all-clients?n=' + list.length + '&seen=' +
+      list.map(client => new URL(client.url).searchParams.get('i')).filter(i => i !== null).join(','))));
   }
 });
 """
@@ -406,14 +409,27 @@ def verify(run: Run) -> None:
     found = find_rows(rows, prefix="/tabs/sw/all-clients?")
     if not found:
         problems.append("no row for the fetch a service worker made with 30 controlled tabs")
+    unseen: list[int] = []
     for row in found:
-        missing = {tab for tab in many if tab} - row_tabs(row)
+        # Capture must link the tabs of the frames the worker saw as clients.
+        # Every frame reported itself controlled, but on a loaded machine the
+        # worker once saw 21 of 30 after 30 s: a fixture premise, kept apart.
+        seen_text = parse_qs(urlsplit(row.get("target") or "").query).get("seen", [""])[0]
+        seen = {int(index) for index in seen_text.split(",") if index.isdigit() and int(index) < MANY_TABS}
+        unseen = sorted(set(range(MANY_TABS)) - seen)
+        missing = {many[index] for index in seen if many[index]} - row_tabs(row)
         if missing:
             problems.append(f"{row.get('target')} is missing tabs {sorted(missing)}; tab_link {row.get('tab_link')}")
         if (row.get("tab_link") or {}).get("kind") != LINK_CLIENTS:
             problems.append(f"tab_link {row.get('tab_link')}, expected kind {LINK_CLIENTS}")
-    report.check(ISSUE, f"service worker with {MANY_TABS} tabs", problems,
-                 f"its fetch links to all {MANY_TABS} client tabs")
+    if unseen and not problems:
+        report.skipped(ISSUE, f"service worker with {MANY_TABS} tabs",
+                       f"the worker saw only {MANY_TABS - len(unseen)} of the {MANY_TABS} frames as clients when it "
+                       f"fetched (not frames {unseen}), though each reported itself controlled. Its fetch links to "
+                       "the tabs of the frames it saw. Rerun with --only tabs")
+    else:
+        report.check(ISSUE, f"service worker with {MANY_TABS} tabs", problems,
+                     f"its fetch links to all {MANY_TABS} client tabs")
 
     speculation = run.tab_of("/tabs/speculation.html")
     prefetched = [r for r in fx.receipts("/tabs/prefetch-target.html") if "prefetch" in (r.request.header("Sec-Purpose") or "")]

@@ -425,9 +425,12 @@ def exchange(process, request, operation=1, target=0, source=""):
     process.stdin.write(REQUEST.pack(MAGIC, 2, operation, request, target, len(encoded), 0) + encoded)
     process.stdin.flush()
     header = process.stdout.read(32)
+    # The bridge reports a startup failure, such as a browser that never
+    # authenticated, as text and exits.
+    assert not header.startswith(b"error:"), (header + process.stdout.read()).decode(errors="replace").strip()
     assert len(header) == 32, "C++ bridge closed before a response"
     fields = RESPONSE.unpack(header)
-    assert fields[:2] == (MAGIC, 2) and fields[3] == request and fields[8] == 0
+    assert fields[:2] == (MAGIC, 2) and fields[3] == request and fields[8] == 0, f"Unexpected response {fields} to request {request}"
     payload = process.stdout.read(fields[7])
     assert len(payload) == fields[7]
     return fields, payload
@@ -481,12 +484,20 @@ def check(binary, browser):
                 nonlocal request
                 request += 1
                 return exchange(process, request, operation, target, source)
-            deadline = time.monotonic() + 15
+            # This wait includes the browser's own start. A build's first launch
+            # on a loaded machine once missed 15 s before spawning any helper;
+            # later launches list the frame in 3-4 s. The message says whether
+            # the browser connected (status 6 is disconnected) and still runs.
+            started = time.monotonic()
             while True:
                 header, payload = run()
                 if header[6]:
                     break
-                assert time.monotonic() < deadline, "HTTP fixture never became an eligible frame"
+                browser_state = "running" if process.native_browser is None or process.native_browser.poll() is None \
+                    else f"exited {process.native_browser.returncode}"
+                assert time.monotonic() - started < 60, (
+                    f"HTTP fixture never became an eligible frame in {time.monotonic() - started:.1f} s: "
+                    f"last status {header[2]}, {header[6]} targets, browser {browser_state}")
                 time.sleep(0.1)
             target = TARGET.unpack(payload[:TARGET.size])[0]
             header, payload = run(2, target, "window.fixture + 1")

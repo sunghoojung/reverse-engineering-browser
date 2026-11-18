@@ -407,42 +407,38 @@ impl App {
         admitted: Option<OwnedSemaphorePermit>,
     ) -> Result<Vec<u8>> {
         // Share the existing blocking-I/O admission pool, with a narrower package
-        // cap and a single bounded wait. A dropped caller cannot release permits
-        // while its blocking validation work is still running.
-        let permits = tokio::time::timeout(Duration::from_secs(1), async {
-            let package = match admitted {
-                Some(permit) => permit,
-                None => self.package_io.clone().acquire_owned().await.map_err(|_| {
-                    Error::new(503, "Package operations are unavailable")
-                        .with_code(Code::DependencyUnavailable)
-                })?,
-            };
-            let io = self.io.clone().acquire_owned().await.map_err(|_| {
+        // cap. There is no admission or work deadline: an operation waits for
+        // its permits and runs until done, and a caller that goes away sets the
+        // flag the work polls, so its permits come back promptly.
+        let package = match admitted {
+            Some(permit) => permit,
+            None => self.package_io.clone().acquire_owned().await.map_err(|_| {
                 Error::new(503, "Package operations are unavailable")
                     .with_code(Code::DependencyUnavailable)
-            })?;
-            Ok::<_, Error>((package, io))
-        })
-        .await
-        .map_err(|_| {
-            Error::new(408, "Package admission deadline exceeded").with_code(Code::Timeout)
-        })??;
+            })?,
+        };
+        let io = self.io.clone().acquire_owned().await.map_err(|_| {
+            Error::new(503, "Package operations are unavailable")
+                .with_code(Code::DependencyUnavailable)
+        })?;
+        let permits = (package, io);
         let events = self.options.store.clone();
         let artifacts = self.options.artifacts.clone();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelOnDrop(cancelled.clone());
         tokio::task::spawn_blocking(move || {
             let _permits = permits;
             match operation {
-                PackageOperation::Export => {
-                    evidence_package::export_bytes_at(&bytes, &events, &artifacts, deadline)
-                }
+                PackageOperation::Export => evidence_package::export_bytes_cancellable(
+                    &bytes, &events, &artifacts, cancelled,
+                ),
                 PackageOperation::Compare => {
-                    evidence_comparison::compare_bytes_at(&bytes, deadline)
+                    evidence_comparison::compare_bytes_cancellable(&bytes, cancelled)
                 }
-                PackageOperation::Validate => {
-                    serde_json::to_vec(&evidence_package::validate_bytes(&bytes)?)
-                        .map_err(|_| Error::new(500, "Package validation failed"))
-                }
+                PackageOperation::Validate => serde_json::to_vec(
+                    &evidence_package::validate_bytes_cancellable(&bytes, cancelled)?,
+                )
+                .map_err(|_| Error::new(500, "Package validation failed")),
             }
         })
         .await
@@ -3157,21 +3153,24 @@ mod tests {
                         .unwrap(),
                 )
             };
-            let error = app
-                .package_operation(b"{}".to_vec(), PackageOperation::Validate, None)
-                .await
-                .unwrap_err();
-            assert_eq!(error.status, if closed { 503 } else { 408 });
-            assert_eq!(
-                serde_json::to_value(&error).unwrap(),
-                json!({
-                    "error": if closed { "Package operations are unavailable" } else {
-                        "Package admission deadline exceeded"
-                    },
-                    "code": if closed { "dependency_unavailable" } else { "timeout" },
-                    "details": {}
-                })
-            );
+            let waiting = app.package_operation(b"{}".to_vec(), PackageOperation::Validate, None);
+            if closed {
+                let error = waiting.await.unwrap_err();
+                assert_eq!(error.status, 503);
+                assert_eq!(
+                    serde_json::to_value(&error).unwrap(),
+                    json!({"error": "Package operations are unavailable",
+                        "code": "dependency_unavailable", "details": {}})
+                );
+            } else {
+                // No admission deadline: the operation waits for its permits,
+                // and one whose request goes away gives up its place.
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), waiting)
+                        .await
+                        .is_err()
+                );
+            }
             drop(held);
             if !closed {
                 let bytes = app

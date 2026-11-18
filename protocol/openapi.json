@@ -7245,7 +7245,7 @@
             }
           },
           "408": {
-            "description": "Request-body read or bounded validation permit-wait deadline expired.",
+            "description": "The request body stalled past its read deadline. Validation itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7264,6 +7264,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and validation stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -7443,7 +7453,7 @@
             }
           },
           "408": {
-            "description": "Request-body, one-second total permit wait, or ten-second cooperative whole-export deadline expired. Filesystem reads may still block in the kernel; this is not a hard kill guarantee.",
+            "description": "The request body stalled past its read deadline. The export itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7462,6 +7472,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the export stopped between reads. Filesystem reads may still block in the kernel; this is not a hard kill guarantee.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -8850,7 +8870,7 @@
             }
           },
           "408": {
-            "description": "Body, admission or cooperative comparison deadline exceeded. No successful partial comparison is returned.",
+            "description": "The request body stalled past its read deadline. Comparison itself has no deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -8869,6 +8889,16 @@
                 "schema": {
                   "type": "string",
                   "const": "nosniff"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the comparison stopped. No partial comparison is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }

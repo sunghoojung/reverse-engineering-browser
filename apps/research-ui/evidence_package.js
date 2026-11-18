@@ -87,7 +87,7 @@ function evidencePackageValidationResult(value) {
 function evidencePackageError(status) {
   return ({400: 'The package request was rejected as malformed.',
     404: 'An exact selected identity is unavailable. Refresh the retained view and review the selection.',
-    408: 'The bounded package operation timed out. No package was saved; retry only when you choose.',
+    408: 'The request did not reach the local package service in time. No package was saved; retry only when you choose.',
     409: 'Export was refused: a writer may still hold a lease, the source changed, or identities conflict. No writer was stopped. Review the stores before retrying.',
     413: 'The package or source scan exceeds a supported bound. A smaller selection cannot bypass a whole-source scan limit.',
     422: 'The retained source or artifact integrity check failed. No package was produced.',
@@ -107,14 +107,16 @@ function evidencePackageView(document, validation) {
   return document;
 }
 
-function createEvidencePackageController({getSelection, onChange, protocol, fetcher = fetch, deadline = 15000}) {
+// No deadline: an operation shows its elapsed seconds until it finishes or
+// Cancel aborts it, which stops the local service's work too.
+function createEvidencePackageController({getSelection, onChange, protocol, fetcher = fetch}) {
   const model = {status: 'idle', message: '', validation: null, document: null, bytes: null, origin: null, selectionKey: null, revision: 0};
   let generation = 0;
   let active = null;
   const changed = () => { model.revision += 1; onChange(model); };
-  const cancel = (message = 'Cancelled. A bounded server operation already started may finish; its result will not be applied.') => {
+  const cancel = (message = 'Cancelled. The local service stops the operation; no result was applied.') => {
     if (!active) return;
-    generation += 1; clearTimeout(active.timer); active.controller.abort(); active = null;
+    generation += 1; clearInterval(active.timer); active.controller.abort(); active = null;
     model.status = 'cancelled'; model.message = message; changed();
   };
   const clear = () => {
@@ -134,13 +136,15 @@ function createEvidencePackageController({getSelection, onChange, protocol, fetc
     const controller = new AbortController();
     const current = () => generation === token && active?.controller === controller;
     const selectionCurrent = () => kind !== 'export' || evidencePackageSelectionKey(getSelection()) === model.selectionKey;
-    const timer = setTimeout(() => {
+    const working = kind === 'export' ? 'Reading the exact selection under cooperative stopped-store leases…' : 'Validating the original file bytes with the local service…';
+    const started = Date.now();
+    const timer = setInterval(() => {
       if (!current()) return;
-      cancel('The package operation timed out. No result was applied; retry only when you choose.');
-      model.status = 'error'; changed();
-    }, deadline);
+      model.message = `${working} ${Math.floor((Date.now() - started) / 1000)} s`; changed();
+    }, 1000);
+    timer?.unref?.();
     active = {controller, timer};
-    Object.assign(model, {status: 'loading', message: kind === 'export' ? 'Reading the exact selection under cooperative stopped-store leases…' : 'Validating the original file bytes with the local service…',
+    Object.assign(model, {status: 'loading', message: working,
       validation: null, document: null, bytes: null, origin: kind, selectionKey: kind === 'export' ? evidencePackageSelectionKey(selection) : null}); changed();
     const post = async (operation, bytes, maximum) => {
       const response = await fetcher(`/api/evidence/packages/${operation}`, {method: 'POST', cache: 'no-store',
@@ -182,7 +186,7 @@ function createEvidencePackageController({getSelection, onChange, protocol, fetc
       if (!current()) return;
       model.status = 'error'; model.message = error instanceof Error ? error.message : 'The local package service is unavailable.';
     } finally {
-      if (current()) { clearTimeout(timer); active = null; changed(); }
+      if (current()) { clearInterval(timer); active = null; changed(); }
     }
   };
   return {model, cancel, clear, export: () => run('export'), validate: file => run('file', file)};

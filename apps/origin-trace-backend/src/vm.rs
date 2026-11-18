@@ -7,7 +7,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
     sync::LazyLock,
 };
@@ -16,6 +16,10 @@ use wasmparser::{ElementItems, ElementKind, Operator, Parser, Payload, TypeRef};
 pub(crate) mod capture_mode;
 #[path = "vm_dispatch_shape.rs"]
 pub(crate) mod dispatch_shape;
+#[path = "vm_document.rs"]
+pub mod document;
+#[path = "vm_input.rs"]
+mod input;
 #[path = "vm_js_lexer.rs"]
 pub(crate) mod js_lexer;
 #[cfg(test)]
@@ -27,6 +31,8 @@ pub(crate) mod wasm_control;
 mod wasm_dispatch;
 #[path = "vm_wasm_tables.rs"]
 pub(crate) mod wasm_tables;
+pub use document::Analysis;
+pub(crate) use input::Runtime;
 
 const PROFILE: &str = "anti-bot-vm-detection-v1";
 static CONFIG: LazyLock<Value> = LazyLock::new(|| {
@@ -92,7 +98,7 @@ static ANTI: LazyLock<Vec<(&str, u64, Regex)>> = LazyLock::new(|| {
 ].into_iter().map(|(id,weight,p)|(id,weight,Regex::new(p).expect("Anti-bot rule"))).collect()
 });
 pub(crate) fn current_producer() -> Value {
-    json!({"id":"origin-trace-vm-detector","version":"1.10.0"})
+    json!({"id":"origin-trace-vm-detector","version":"1.11.0"})
 }
 
 // The catalog and generated documents share this exact profile projection.
@@ -919,25 +925,6 @@ fn retain_handlerless_javascript_as_candidate(result: &mut Value, workspace: &Va
     result["status"] = json!("partial");
     result["coverage"]["complete"] = json!(false);
 }
-fn graph_entry(
-    nodes: &mut Vec<Value>,
-    edges: &mut Vec<Value>,
-    seen: &mut BTreeSet<String>,
-    node: Value,
-    edge: Value,
-) -> bool {
-    let id = node["id"].as_str().unwrap();
-    if seen.contains(id) {
-        return true;
-    }
-    if edges.len() >= CONFIG["MAX_GRAPH_EDGES"].as_u64().unwrap() as usize {
-        return false;
-    }
-    seen.insert(id.into());
-    nodes.push(node);
-    edges.push(edge);
-    true
-}
 #[cfg(test)]
 fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
     analyze_with_roles(artifact, bytes, events).0
@@ -945,6 +932,18 @@ fn analyze(artifact: &Value, bytes: &[u8], events: &[Value]) -> Value {
 
 /// Workspace extraction spends the same artifact budget. Its exhaustion
 /// must remain visible even when extraction cannot return a workspace.
+/// Names on a classification document that the artifact's work budget ran
+/// out after it was listed.
+fn work_limited(classification: &mut Value) {
+    if let Some(omissions) = classification["omissions"].as_array_mut()
+        && !omissions
+            .iter()
+            .any(|o| o["reason"] == "classification-work-limit")
+    {
+        omissions.push(json!({"reason":"classification-work-limit","detail":"The shared artifact work or memory budget prevented completion of 1 downstream claim-gate or table-layout pass. Unsupported claims were withheld."}));
+    }
+}
+
 pub(crate) fn finish_classification(
     result: &mut Value,
     workspace: Option<&mut Value>,
@@ -953,16 +952,10 @@ pub(crate) fn finish_classification(
     if !meter.exhausted() {
         return;
     }
-    let classification = &mut result["frontend"]["dispatch_classification"];
-    if let Some(omissions) = classification["omissions"].as_array_mut()
-        && !omissions
-            .iter()
-            .any(|o| o["reason"] == "classification-work-limit")
-    {
-        omissions.push(json!({"reason":"classification-work-limit","detail":"The shared artifact work or memory budget prevented completion of 1 downstream claim-gate or table-layout pass. Unsupported claims were withheld."}));
-    }
+    work_limited(&mut result["frontend"]["dispatch_classification"]);
     if let Some(workspace) = workspace {
-        workspace["dispatch_classification"] = classification.clone();
+        workspace["dispatch_classification"] =
+            result["frontend"]["dispatch_classification"].clone();
         workspace["coverage"]["omissions"].as_array_mut().expect("workspace omissions").push(json!({"reason":"classification-work-limit","detail":"The shared artifact work or memory budget prevented completion of the claim gate or table layout."}));
         workspace["coverage"]["complete"] = json!(false);
     }
@@ -970,6 +963,7 @@ pub(crate) fn finish_classification(
 
 /// The analysis result and the roles of every classified dispatch site, which
 /// the opcode-claim gate reads without classifying the artifact again.
+#[cfg(test)]
 pub(crate) fn analyze_with_roles(
     artifact: &Value,
     bytes: &[u8],
@@ -978,67 +972,165 @@ pub(crate) fn analyze_with_roles(
     analyze_with_meter(artifact, bytes, events, &dispatch_shape::Meter::new())
 }
 
+#[cfg(test)]
 pub(crate) fn analyze_with_meter(
     artifact: &Value,
     bytes: &[u8],
     events: &[Value],
     meter: &dispatch_shape::Meter,
 ) -> (Value, Option<dispatch_shape::Roles>) {
+    analyze_in(artifact, bytes, &Runtime::of(events), meter)
+}
+
+/// One artifact's analysis, correlated with the records of its frame.
+#[cfg(test)]
+fn analyze_in(
+    artifact: &Value,
+    bytes: &[u8],
+    context: &Runtime,
+    meter: &dispatch_shape::Meter,
+) -> (Value, Option<dispatch_shape::Roles>) {
+    match analyze_content(artifact, bytes, meter) {
+        Ok((content, roles)) => (artifact_result(artifact, &content, context), roles),
+        Err(message) => (failure(artifact, "malformed-artifact", &message), None),
+    }
+}
+
+/// What an artifact's bytes alone decide: structure, score, tier, static
+/// relevance, classification and bytecode snapshot. Identical bytes decide
+/// identically, so a session pass analyzes each content once and
+/// `artifact_result` adds what names the artifact and correlates its frame.
+#[derive(Clone)]
+struct Content {
+    runtime: &'static str,
+    tier: &'static str,
+    score: u64,
+    finding_id: String,
+    observations: Vec<Value>,
+    anti: Vec<Value>,
+    frontend: Value,
+    omissions: Vec<Value>,
+    bytecode_snapshot: Option<Value>,
+    byte_count: usize,
+}
+impl Content {
+    fn has_workspace(&self) -> bool {
+        crate::vm_opcode::has_workspace(self.runtime, self.tier, &self.frontend)
+    }
+}
+
+/// Distinct contents whose analysis the session pass keeps for reuse. A
+/// session loads far fewer contents than artifacts; past this many, the
+/// oldest is analyzed again if it reappears.
+const CONTENT_CACHE: usize = 1024;
+
+/// Results as they are produced: spooled whole, with the counts the summary
+/// reports and the findings a mixed finding joins.
+struct Results {
+    spool: document::Spool,
+    analyzed: u64,
+    candidates: u64,
+    likely_vm: u64,
+    failed: u64,
+    worker_failures: BTreeMap<String, u64>,
+    findings: Vec<Value>,
+}
+
+impl Results {
+    fn new(root: &Path) -> Result<Self> {
+        Ok(Self {
+            spool: document::Spool::new(root)?,
+            analyzed: 0,
+            candidates: 0,
+            likely_vm: 0,
+            failed: 0,
+            worker_failures: BTreeMap::new(),
+            findings: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, result: Value) -> Result<()> {
+        self.analyzed += 1;
+        self.failed += u64::from(result["status"] == "failed");
+        for omission in result["frontend"]["dispatch_classification"]["omissions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            if omission["reason"] == "analysis-worker-failed" {
+                *self
+                    .worker_failures
+                    .entry(omission["detail"].as_str().unwrap_or("protocol").to_owned())
+                    .or_default() += omission["omitted_records"].as_u64().unwrap_or(1);
+            }
+        }
+        self.spool.push(&result)?;
+        match result["tier"].as_str() {
+            Some("candidate") => self.candidates += 1,
+            Some("likely-vm") => self.likely_vm += 1,
+            _ => return Ok(()),
+        }
+        self.findings.push(result);
+        Ok(())
+    }
+}
+
+/// One content as the session pass keeps it for the next artifact with the
+/// same bytes: its analysis or failure, and its native JavaScript source key.
+struct Analyzed {
+    source: Option<([u8; 32], u32)>,
+    outcome: std::result::Result<Content, (&'static str, String)>,
+}
+impl Analyzed {
+    fn result(&self, artifact: &Value, context: &Runtime) -> Value {
+        match &self.outcome {
+            Ok(content) => artifact_result(artifact, content, context),
+            Err((code, message)) => failure(artifact, code, message),
+        }
+    }
+}
+
+/// The content analysis of an artifact's bytes, or why they do not parse.
+fn analyze_content(
+    artifact: &Value,
+    bytes: &[u8],
+    meter: &dispatch_shape::Meter,
+) -> std::result::Result<(Content, Option<dispatch_shape::Roles>), String> {
     let runtime = if artifact["kind"] == "javascript" {
         "javascript"
     } else {
         "webassembly"
     };
     let source = if runtime == "javascript" {
-        match std::str::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => {
-                return (
-                    failure(
-                        artifact,
-                        "malformed-artifact",
-                        "Artifact is not UTF-8 JavaScript",
-                    ),
-                    None,
-                );
-            }
-        }
+        std::str::from_utf8(bytes).map_err(|_| "Artifact is not UTF-8 JavaScript".to_owned())?
     } else {
         ""
     };
-    let (observations, mut frontend, mut omissions) = if runtime == "javascript" {
-        match js(source) {
-            Ok((obs, omissions)) => (obs, json!({"replacement_character_count":0}), omissions),
-            Err(e) => return (failure(artifact, "malformed-artifact", &e.message), None),
-        }
+    let (observations, mut frontend, omissions) = if runtime == "javascript" {
+        let (obs, omissions) = js(source).map_err(|e| e.message)?;
+        (obs, json!({"replacement_character_count":0}), omissions)
     } else {
-        match wasm(bytes) {
-            Ok((obs, frontend)) => {
-                let omitted = frontend["dispatch_inventory"]["omitted_site_count"]
-                    .as_u64()
-                    .unwrap_or(0);
-                let omissions = if omitted > 0 {
-                    vec![json!({"reason":"dispatch-inventory-limit","omitted_records":omitted})]
-                } else {
-                    Vec::new()
-                };
-                (obs, frontend, omissions)
-            }
-            Err(e) => return (failure(artifact, "malformed-artifact", &e.message), None),
-        }
+        let (obs, frontend) = wasm(bytes).map_err(|e| e.message)?;
+        let omitted = frontend["dispatch_inventory"]["omitted_site_count"]
+            .as_u64()
+            .unwrap_or(0);
+        let omissions = if omitted > 0 {
+            vec![json!({"reason":"dispatch-inventory-limit","omitted_records":omitted})]
+        } else {
+            Vec::new()
+        };
+        (obs, frontend, omissions)
     };
     // Classification is interpretation over the same bytes, metered on its
-    // own and never an input to the observations, score or tier above.
+    // own and never an input to the observations, score or tier above. Its
+    // listed sites name the artifact, which `artifact_result` fills in.
     let classified = classify_artifact(runtime, bytes, meter);
     let roles = classified
         .as_ref()
         .map(|classified| dispatch_shape::Roles::new(classified, meter));
     if let Some(classified) = classified {
-        frontend["dispatch_classification"] = dispatch_shape::document(
-            &artifact["artifact_id"],
-            classified.sites,
-            classified.omissions,
-        );
+        frontend["dispatch_classification"] =
+            dispatch_shape::document(&json!("0"), classified.sites, classified.omissions);
     }
     let rules = observations
         .iter()
@@ -1066,7 +1158,36 @@ pub(crate) fn analyze_with_meter(
             anti.push(json!({"rule_id":id,"weight":weight,"coordinate":{"byte_offset":m.start(),"byte_size":m.len()},"detail":"Static anti-bot relevance signal. It does not establish VM structure."}));
         }
     }
-    let id = finding(artifact["sha256"].as_str().unwrap(), &rules);
+    let content = Content {
+        runtime,
+        tier,
+        score,
+        finding_id: finding(artifact["sha256"].as_str().unwrap(), &rules),
+        observations,
+        anti,
+        frontend,
+        omissions,
+        bytecode_snapshot: (runtime == "javascript" && tier != "none")
+            .then(|| crate::vm_bytecode::snapshot(source, "0")),
+        byte_count: bytes.len(),
+    };
+    Ok((content, roles))
+}
+
+/// An artifact's result: its content analysis, named for the artifact and
+/// correlated with the records of its frame.
+fn artifact_result(artifact: &Value, content: &Content, context: &Runtime) -> Value {
+    let mut frontend = content.frontend.clone();
+    for site in frontend["dispatch_classification"]["sites"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        site["artifact_id"] = artifact["artifact_id"].clone();
+    }
+    let mut anti = content.anti.clone();
+    let mut omissions = content.omissions.clone();
+    let id = &content.finding_id;
     let artifact_node = format!("artifact:{}", artifact["artifact_id"].as_str().unwrap());
     let finding_node = format!("finding:{id}");
     let mut nodes = vec![
@@ -1076,383 +1197,272 @@ pub(crate) fn analyze_with_meter(
     let mut edges = vec![
         json!({"from":artifact_node,"to":finding_node,"state":"inferred","reason":"Deterministic static analysis produced this candidate."}),
     ];
-    let mut requests = Vec::<String>::new();
-    let mut runtime_events = Vec::new();
-    let mut request_events = Vec::new();
+    // Frame correlation is a count and a get_events filter: every artifact
+    // of a frame shares its records, so none of them is copied per artifact.
+    // A zero frame ID means attribution is unavailable (for example a
+    // worker), not a shared frame; only records naming the artifact count.
+    let frame = input::frame_of(artifact);
+    let available = artifact["frame_id"] != "0";
+    let frame_context = frame
+        .as_ref()
+        .filter(|_| available)
+        .and_then(|frame| context.frame(frame));
+    let own = frame
+        .as_ref()
+        .zip(artifact["artifact_id"].as_str().filter(|id| *id != "0"))
+        .and_then(|(frame, id)| context.attributed(frame, id));
+    let empty = BTreeMap::new();
+    let own_rules = own.unwrap_or(&empty);
     let mut representatives = BTreeMap::<&str, (&Value, bool)>::new();
-    let mut unavailable = 0usize;
-    for event in events.iter().filter(|e| {
-        e["session_id"] == artifact["session_id"] && e["navigation_id"] == artifact["navigation_id"]
-    }) {
-        let rule = runtime_rule(event);
-        let request = event["category"] == "network"
-            && ["request_started", "request_initiated"]
-                .contains(&event["type"].as_str().unwrap_or(""))
-            && event["request_id"].as_str().is_some_and(|id| id != "0");
-        if rule.is_none() && !request {
-            continue;
-        }
-        let observed =
-            artifact["artifact_id"] != "0" && event["artifact_id"] == artifact["artifact_id"];
-        // Zero frame IDs mean unavailable attribution (for example a worker),
-        // not a shared frame. Explicit captured artifact attribution can still
-        // identify a signal when both frame IDs are unavailable.
-        if event["frame_id"] != artifact["frame_id"] {
-            continue;
-        }
-        if artifact["frame_id"] == "0" && (!observed || rule.is_none()) {
-            unavailable += 1;
-            continue;
-        }
-        if let Some(rule) = rule {
-            runtime_events.push((event, observed));
-            let representative = representatives.entry(rule).or_insert((event, observed));
-            if observed && !representative.1 {
-                *representative = (event, true);
-            }
-        }
-        if request {
-            request_events.push(event);
+    for (rule, stats) in own_rules {
+        if let Some(first) = &stats.first {
+            representatives.insert(rule, (first, true));
         }
     }
+    for (rule, stats) in frame_context
+        .map(|frame| &frame.rules)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(first) = &stats.first {
+            representatives.entry(rule).or_insert((first, false));
+        }
+    }
+    let own_total = own_rules.values().map(|rule| rule.count).sum::<u64>();
+    let unavailable = if available {
+        0
+    } else {
+        frame
+            .as_ref()
+            .and_then(|frame| context.frame(frame))
+            .map_or(0, |frame| {
+                (frame.requests + frame.rules.values().map(|rule| rule.count).sum::<u64>())
+                    .saturating_sub(own_total)
+            })
+    };
     let weights = runtime_weights();
     for (rule, (event, observed)) in &representatives {
         // Runtime evidence has an event coordinate, never an invented source
         // byte range. It changes relevance only, not structural VM scoring.
         anti.push(json!({"rule_id":rule,"weight":weights[*rule],"event":event_value(event),"event_sequence":event["sequence_number"],"state":if *observed {"observed"} else {"correlated"},"detail":if *observed {"A captured browser-signal event explicitly names this artifact. API use alone does not establish fingerprinting or anti-bot behavior."} else {"A captured browser-signal event shares this artifact's session, navigation metadata, and nonzero frame. Script attribution and causality are unknown; API use alone does not establish fingerprinting or anti-bot behavior."}}));
     }
-    let mut graph_ids = BTreeSet::new();
-    let mut graph_omitted = 0usize;
-    // Scoring representatives stay first, so every retained relevance
-    // explanation has a graph node even when later context exceeds the cap.
-    // Request edges follow, before individual signal events. A browser-signal
-    // flood must not consume the cap and drop every correlated request.
+    // Each scoring representative has a graph node, so every relevance
+    // explanation is in the graph; the rest of the frame is counted.
     for (event, observed) in representatives.values().copied() {
         let node = event_node("event", event);
-        if !graph_entry(
-            &mut nodes,
-            &mut edges,
-            &mut graph_ids,
-            json!({"id":node,"kind":"browser-signal","label":format!("{} {}",event["category"].as_str().unwrap(),event["type"].as_str().unwrap()),"event":event_value(event),"event_sequence":event["sequence_number"]}),
-            json!({"from":node,"to":finding_node,"state":if observed {"observed"} else {"correlated"},"reason":if observed {"Captured nonzero artifact attribution; no value flow is claimed."} else {"Matching session, navigation metadata, and nonzero frame; script attribution and causality remain unknown."}}),
-        ) {
-            graph_omitted += 1;
-        }
+        nodes.push(json!({"id":node,"kind":"browser-signal","label":format!("{} {}",event["category"].as_str().unwrap(),event["type"].as_str().unwrap()),"event":event_value(event),"event_sequence":event["sequence_number"]}));
+        edges.push(json!({"from":node,"to":finding_node,"state":if observed {"observed"} else {"correlated"},"reason":if observed {"Captured nonzero artifact attribution; no value flow is claimed."} else {"Matching session, navigation metadata, and nonzero frame; script attribution and causality remain unknown."}}));
     }
-    for event in request_events {
-        let request = event["request_id"].as_str().unwrap();
-        let node = event_node("request", event);
-        if graph_entry(
-            &mut nodes,
-            &mut edges,
-            &mut graph_ids,
-            json!({"id":node,"kind":"request","label":format!("request {request}"),"request_id":request,"event":event_value(event),"event_sequence":event["sequence_number"]}),
-            json!({"from":finding_node,"to":node,"state":"correlated","reason":"Matching session, navigation metadata, and nonzero frame. Exact value provenance and causal ordering are not claimed."}),
-        ) {
-            if !requests.iter().any(|r| r == request) {
-                requests.push(request.into());
-            }
+    let mut signals = BTreeMap::<&str, (u64, u64)>::new();
+    for (rule, stats) in own_rules {
+        signals.entry(rule).or_default().0 = stats.count;
+    }
+    for (rule, stats) in frame_context
+        .map(|frame| &frame.rules)
+        .into_iter()
+        .flatten()
+    {
+        let entry = signals.entry(rule).or_default();
+        entry.1 = stats.count.saturating_sub(entry.0);
+    }
+    let runtime_context = json!({
+        "session_id": artifact["session_id"],
+        "navigation_id": artifact["navigation_id"],
+        "frame_id": artifact["frame_id"],
+        "frame_attribution": if available {"available"} else {"unavailable"},
+        "request_records": frame_context.map_or(0, |frame| frame.requests),
+        "signal_records": signals.iter().map(|(rule, (observed, correlated))| json!({"rule_id": rule, "observed": observed, "correlated": correlated})).collect::<Vec<_>>(),
+        // get_events parameters that list the frame's records, or the
+        // artifact's own records when the frame is unknown.
+        "events_filter": if available {
+            json!({"session_id": artifact["session_id"], "navigation_id": artifact["navigation_id"], "frame_id": artifact["frame_id"]})
         } else {
-            graph_omitted += 1;
-        }
-    }
-    for (event, observed) in runtime_events {
-        let node = event_node("event", event);
-        if !graph_entry(
-            &mut nodes,
-            &mut edges,
-            &mut graph_ids,
-            json!({"id":node,"kind":"browser-signal","label":format!("{} {}",event["category"].as_str().unwrap(),event["type"].as_str().unwrap()),"event":event_value(event),"event_sequence":event["sequence_number"]}),
-            json!({"from":node,"to":finding_node,"state":if observed {"observed"} else {"correlated"},"reason":if observed {"Captured nonzero artifact attribution; no value flow is claimed."} else {"Matching session, navigation metadata, and nonzero frame; script attribution and causality remain unknown."}}),
-        ) {
-            graph_omitted += 1;
-        }
-    }
+            json!({"session_id": artifact["session_id"], "artifact_id": artifact["artifact_id"]})
+        },
+    });
     if unavailable > 0 {
         omissions.push(
             json!({"reason":"runtime-frame-attribution-unavailable","omitted_records":unavailable}),
         );
     }
-    if graph_omitted > 0 {
-        omissions
-            .push(json!({"reason":"runtime-graph-edge-limit","omitted_records":graph_omitted}));
+    let observations = &content.observations;
+    let mut result = json!({"artifact_id":artifact["artifact_id"],"artifact_sha256":artifact["sha256"],"runtime":content.runtime,"status":if omissions.is_empty() {"complete"} else {"partial"},"finding_id":id,"tier":content.tier,"vm_score":content.score,"vm_threshold":60,"required_family_count":3,"evidence_families":observations.iter().map(|o|o["family"].as_str().unwrap()).collect::<BTreeSet<_>>(),"observations":observations,"anti_bot_score":anti.iter().map(|o|o["weight"].as_u64().unwrap()).sum::<u64>().min(100),"anti_bot_observations":anti,"runtime_context":runtime_context,"graph":{"nodes":nodes,"edges":edges},"coverage":{"complete":omissions.is_empty(),"observed_bytes":content.byte_count,"total_bytes":content.byte_count,"omissions":omissions,"residual_unknowns":["Static evidence does not confirm guest dispatch at runtime.","Frame context is correlation, not exact value provenance."]},"frontend":frontend});
+    if let Some(snapshot) = &content.bytecode_snapshot {
+        let mut snapshot = snapshot.clone();
+        snapshot["artifact_id"] = artifact["artifact_id"].clone();
+        result["bytecode_snapshot"] = snapshot;
     }
-    let mut result = json!({"artifact_id":artifact["artifact_id"],"artifact_sha256":artifact["sha256"],"runtime":runtime,"status":if omissions.is_empty() {"complete"} else {"partial"},"finding_id":id,"tier":tier,"vm_score":score,"vm_threshold":60,"required_family_count":3,"evidence_families":observations.iter().map(|o|o["family"].as_str().unwrap()).collect::<BTreeSet<_>>(),"observations":observations,"anti_bot_score":anti.iter().map(|o|o["weight"].as_u64().unwrap()).sum::<u64>().min(100),"anti_bot_observations":anti,"related_request_ids":requests,"graph":{"nodes":nodes,"edges":edges},"coverage":{"complete":omissions.is_empty(),"observed_bytes":bytes.len(),"total_bytes":bytes.len(),"omissions":omissions,"residual_unknowns":["Static evidence does not confirm guest dispatch at runtime.","Request edges are correlation, not exact value provenance."]},"frontend":frontend});
-    if runtime == "javascript" && tier != "none" {
-        result["bytecode_snapshot"] =
-            crate::vm_bytecode::snapshot(source, artifact["artifact_id"].as_str().unwrap());
-    }
-    (result, roles)
+    result
 }
-// Read a bounded prefix, report omissions, and hash exactly the consumed input.
-type JsonlInput = (Vec<(usize, Value)>, Vec<Value>, String);
-fn input(path: &Path, line_limit: u64, record_limit: usize, source: &str) -> Result<JsonlInput> {
-    use std::io::{BufRead, Read};
-    let file = match evidence::regular_file(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((vec![], vec![], hex::encode(Sha256::digest([]))));
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let mut reader = std::io::BufReader::new(file);
-    let mut records = Vec::new();
-    let mut omissions = Vec::new();
-    let mut hash = Sha256::new();
-    let mut line = 0;
-    let started = std::time::Instant::now();
-    while records.len() < record_limit {
-        if started.elapsed() > std::time::Duration::from_secs(10) {
-            omissions.push(json!({"reason":format!("{source}-read-deadline")}));
-            break;
-        }
-        let mut bytes = Vec::new();
-        let size = reader
-            .by_ref()
-            .take(line_limit + 1)
-            .read_until(b'\n', &mut bytes)?;
-        if size == 0 {
-            break;
-        }
-        line += 1;
-        hash.update(&bytes);
-        if size as u64 > line_limit {
-            omissions.push(json!({"reason":format!("{source}-line-byte-limit"),"line":line}));
-            break;
-        }
-        if bytes.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        match serde_json::from_slice(&bytes) {
-            Ok(v) => records.push((line, v)),
-            Err(_) => omissions.push(json!({"reason":format!("malformed-{source}"),"line":line})),
-        }
-        if omissions.len() >= 1024 {
-            omissions.push(json!({"reason":format!("{source}-omission-limit")}));
-            break;
-        }
-    }
-    if records.len() >= record_limit && reader.read(&mut [0u8])? != 0 {
-        omissions.push(
-            json!({"reason":format!("{source}-record-limit"),"observed_records":records.len()}),
-        );
-    }
-    Ok((records, omissions, hex::encode(hash.finalize())))
-}
+
 pub(crate) struct Documents {
-    pub analysis: Value,
+    pub analysis: Analysis,
     pub opcode_workspace: Result<Value>,
     pub host_links: Result<Value>,
 }
 
 pub(crate) fn store_documents(root: &Path, event_store: &Path) -> Result<Documents> {
     let mut documents = build_documents(root, event_store)?;
-    publish(root, &mut documents, &mut durable::write_private)?;
+    publish(root, &mut documents, &mut durable::write_private_from)?;
     Ok(documents)
 }
 
 fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
-    let (manifest, mut omissions, manifest_digest) = input(
-        &root.join("manifest.jsonl"),
-        65536,
-        10000,
-        "artifact-manifest",
-    )?;
-    let (event_records, event_omissions, event_digest) =
-        input(event_store, 16384, 100000, "event")?;
-    omissions.extend(event_omissions);
     let capture_provenance = capture_mode::Provenance::read(root)?;
+    let manifest_path = root.join("manifest.jsonl");
+    let manifest = input::manifest(&manifest_path, &capture_provenance)?;
+    let event_input = input::events(event_store, &capture_provenance, &manifest.creators)?;
+    let mut omissions = manifest.omissions.clone();
+    omissions.extend(event_input.omissions);
     let capture_mode = if omissions.is_empty() {
-        capture_provenance.aggregate(
-            manifest
-                .iter()
-                .chain(event_records.iter())
-                .map(|(_, record)| record),
-        )
+        capture_mode::aggregate(manifest.modes.iter().chain(&event_input.modes).copied())
     } else {
         "unknown"
     };
-    let mut artifacts = Vec::new();
-    let mut snapshot_artifacts = Vec::new();
-    let mut failures = Vec::new();
-    let mut seen = BTreeSet::new();
-    for (line, mut artifact) in manifest {
-        let snapshot_candidate = crate::vm_opcode::is_snapshot_candidate(&artifact);
-        let error = if snapshot_candidate {
-            crate::vm_opcode::validate_snapshot_artifact(&artifact)
-        } else {
-            evidence::validate_artifact(&mut artifact)
-        }
-        .err()
-        .map(|e| e.message)
-        .or_else(|| {
-            (!seen.insert(artifact["artifact_id"].as_str().unwrap_or("").to_owned()))
-                .then(|| "duplicate artifact ID".into())
-        });
-        if let Some(reason) = error {
-            let omission = json!({"reason":"invalid-artifact-manifest","line":line});
-            omissions.push(omission.clone());
-            let id = if evidence::canonical(&artifact["artifact_id"], 64, false) {
-                artifact["artifact_id"].clone()
-            } else {
-                json!("0")
-            };
-            let hash = artifact["sha256"]
-                .as_str()
-                .filter(|s| {
-                    s.len() == 64
-                        && s.bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                })
-                .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
-            failures.push(json!({"artifact_id":id,"artifact_sha256":hash,"runtime":match artifact["kind"].as_str() {Some("javascript")=>"javascript",Some("wasm")=>"webassembly",_=>"unknown"},"status":"failed","error":{"code":"invalid-artifact-manifest","message":format!("Artifact manifest line {line}: {reason}")},"coverage":{"complete":false,"omissions":[omission]}}));
-        } else if snapshot_candidate || artifact["kind"] == "wasm_guest_adapter" {
-            snapshot_artifacts.push(artifact);
-        } else {
-            artifacts.push(artifact);
-        }
-    }
-    let invalid_ids = failures
-        .iter()
-        .filter_map(|f| f["artifact_id"].as_str())
-        .collect::<BTreeSet<_>>();
-    snapshot_artifacts.retain(|a| {
-        a["capture_origin"] != "native_wasm_guest"
-            || !invalid_ids.contains(a["artifact_id"].as_str().unwrap_or(""))
-    });
-    // Resolve before normalization so conflicting identities remain tombstones.
-    let exact_request_links = {
-        let index =
-            crate::vm_request_links::Index::new(event_records.iter().map(|(_, event)| event));
-        let invalid_ids = failures
-            .iter()
-            .filter_map(|failure| failure["artifact_id"].as_str())
-            .collect::<BTreeSet<_>>();
-        artifacts
-            .iter()
-            .map(|artifact| {
-                let id = artifact["artifact_id"].as_str().unwrap().to_owned();
-                let duplicate = invalid_ids.contains(id.as_str());
-                (
-                    id,
-                    if duplicate {
-                        Vec::new()
-                    } else {
-                        index.links(artifact)
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-    let mut events = Vec::<Option<Value>>::new();
-    let mut event_ids = BTreeMap::<EventReference, Option<usize>>::new();
-    let mut capture_gaps = 0usize;
+    let snapshot_artifacts = manifest.snapshot_artifacts;
+    let link_index = crate::vm_request_links::Index::new(event_input.links.iter());
     let mut dispatch_budget_losses = Vec::new();
     let mut native_js_gaps = Vec::new();
-    let mut native_js_sources = BTreeSet::new();
-    for (line, event) in event_records {
-        let reference = if event["type"] == "vm_dispatch_report" {
-            crate::vm_dispatch_input::report_reference(&event)
-        } else {
-            event_reference(&event)
-        };
-        if reference.is_none()
-            || !matches!(event["protocol_version"].as_u64(), Some(2 | 3))
-            || !["navigation_id", "frame_id"]
-                .iter()
-                .all(|k| evidence::canonical(&event[k], 64, false))
-            || !["category", "type"].iter().all(|k| event[k].is_string())
-            || ["artifact_id", "request_id"].iter().any(|k| {
-                event
-                    .get(k)
-                    .is_some_and(|v| !evidence::canonical(v, 64, false))
-            })
-        {
-            omissions.push(json!({"reason":"invalid-event-contract","line":line}));
-            continue;
-        }
-        // Transport gap markers intentionally reuse the preceding retained
-        // event's sequence. They are coverage evidence, not conflicting events.
+    for gap in &event_input.gaps {
         // A vm gap that names an interpreter artifact is also a dispatch-budget
         // loss. The opcode workspace sums that weight so a capped trace stays
         // incomplete. Other gaps stay capture-gap markers only.
-        if event["type"] == "gap" {
-            capture_gaps += 1;
-            if let Some(loss) = crate::vm_opcode::dispatch_budget_loss(&event) {
-                dispatch_budget_losses.push(loss);
-            }
-            if let Some(gap) = crate::vm_opcode::native_js::gap(&event) {
-                native_js_gaps.push(gap);
-            }
-            continue;
+        if let Some(loss) = crate::vm_opcode::dispatch_budget_loss(gap) {
+            dispatch_budget_losses.push(loss);
         }
-        let reference = reference.unwrap();
-        match event_ids.get_mut(&reference) {
-            Some(Some(index)) if events[*index].as_ref() != Some(&event) => {
-                events[*index] = None;
-                *event_ids.get_mut(&reference).unwrap() = None;
-                omissions.push(json!({"reason":"conflicting-event-identity","line":line}));
-            }
-            Some(_) => (),
-            None => {
-                event_ids.insert(reference, Some(events.len()));
-                events.push(Some(event));
-            }
+        if let Some(gap) = crate::vm_opcode::native_js::gap(gap) {
+            native_js_gaps.push(gap);
         }
     }
-    if capture_gaps > 0 {
+    if !event_input.gaps.is_empty() {
         // This counts markers, not dropped events: queue reports and sequence
         // gaps can overlap and must never be added into a fabricated loss total.
-        omissions.push(json!({"reason":"capture-gap","observed_records":capture_gaps}));
+        omissions.add_count("capture-gap", event_input.gaps.len() as u64, None);
     }
-    let events = events.into_iter().flatten().collect::<Vec<_>>();
+    let omissions = omissions.values();
+    let events = event_input
+        .records
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect::<Vec<_>>();
+    let runtime_context = event_input.runtime;
     // Script text is keyed only when native JavaScript records exist to join.
     let has_native_js = events
         .iter()
         .any(|event| event["type"] == "js_dispatch_observation");
+    let native_js_sources = std::cell::RefCell::new(BTreeSet::new());
     let profile = current_profile();
-    let mut results = failures;
+    let mut results = Results::new(root)?;
+    for failure in manifest.failures {
+        results.push(failure)?;
+    }
     let mut opcode_workspaces = Vec::new();
-    for artifact in &artifacts {
+    // Kept past the pass: the artifacts a workspace or a mixed finding names.
+    let mut artifacts = Vec::new();
+    // A session loads the same scripts in navigation after navigation, so
+    // its artifacts share far fewer contents than they have records. The
+    // oldest content leaves first, so memory stays bounded when they do not.
+    let mut contents = HashMap::<[String; 4], Analyzed>::new();
+    let mut content_order = std::collections::VecDeque::new();
+    input::analyzed_artifacts(&manifest_path, manifest.length, |artifact| {
         if !["javascript", "wasm"].contains(&artifact["kind"].as_str().unwrap_or("")) {
-            continue;
+            return Ok(());
         }
-        let (mut result, bytes) = match evidence::content(root, artifact, 16 * 1024 * 1024) {
-            Ok(bytes) => {
-                if has_native_js
-                    && artifact["kind"] == "javascript"
-                    && let Some(key) = crate::vm_opcode::native_js::source_key(&bytes)
-                {
-                    native_js_sources.insert((
-                        artifact["session_id"].as_str().unwrap_or("").to_owned(),
-                        artifact["frame_id"].as_str().unwrap_or("").to_owned(),
-                        key.sha256,
-                        key.length,
-                    ));
+        // Bytes are read, verified and analyzed once per content. A content
+        // with an opcode workspace is analyzed for each artifact, as the
+        // workspace joins that artifact's own samples under its own budget.
+        let key = [
+            &artifact["kind"],
+            &artifact["sha256"],
+            &artifact["content_path"],
+            &artifact["byte_size"],
+        ]
+        .map(Value::to_string);
+        let mut fresh = None;
+        if !contents.contains_key(&key) {
+            let analyzed = match evidence::content(root, &artifact, 16 * 1024 * 1024) {
+                Err(e) => Some(Analyzed {
+                    source: None,
+                    outcome: Err((
+                        if e.status == 400 {
+                            "artifact-byte-limit"
+                        } else {
+                            "artifact-integrity"
+                        },
+                        e.message,
+                    )),
+                }),
+                Ok(bytes) => {
+                    let source = (has_native_js && artifact["kind"] == "javascript")
+                        .then(|| crate::vm_opcode::native_js::source_key(&bytes))
+                        .flatten()
+                        .map(|key| (key.sha256, key.length));
+                    let meter = dispatch_shape::Meter::new();
+                    match analyze_content(&artifact, &bytes, &meter) {
+                        Err(message) => Some(Analyzed {
+                            source,
+                            outcome: Err(("malformed-artifact", message)),
+                        }),
+                        Ok((content, roles)) if content.has_workspace() => {
+                            fresh = Some((bytes, content, roles, source));
+                            None
+                        }
+                        Ok((mut content, roles)) => {
+                            // Without a workspace the classification work is
+                            // all done, so its budget is the content's alone.
+                            if roles.is_some_and(|roles| roles.meter.exhausted()) {
+                                work_limited(&mut content.frontend["dispatch_classification"]);
+                            }
+                            Some(Analyzed {
+                                source,
+                                outcome: Ok(content),
+                            })
+                        }
+                    }
                 }
-                let (result, roles) = analyze_with_roles(artifact, &bytes, &events);
-                (result, Some((bytes, roles)))
+            };
+            if let Some(analyzed) = analyzed {
+                if contents.len() == CONTENT_CACHE
+                    && let Some(oldest) = content_order.pop_front()
+                {
+                    contents.remove(&oldest);
+                }
+                content_order.push_back(key.clone());
+                contents.insert(key.clone(), analyzed);
             }
-            Err(e) => (
-                failure(
-                    artifact,
-                    if e.status == 400 {
-                        "artifact-byte-limit"
-                    } else {
-                        "artifact-integrity"
-                    },
-                    &e.message,
-                ),
-                None,
+        }
+        let (mut result, source, workspace_input) = match fresh {
+            Some((bytes, content, roles, source)) => (
+                artifact_result(&artifact, &content, &runtime_context),
+                source,
+                Some((bytes, roles)),
             ),
+            None => {
+                let analyzed = &contents[&key];
+                (
+                    analyzed.result(&artifact, &runtime_context),
+                    analyzed.source,
+                    None,
+                )
+            }
         };
+        if let Some((sha256, length)) = source {
+            native_js_sources.borrow_mut().insert((
+                artifact["session_id"].as_str().unwrap_or("").to_owned(),
+                artifact["frame_id"].as_str().unwrap_or("").to_owned(),
+                sha256,
+                length,
+            ));
+        }
         if result["status"] != "failed" {
-            result["exact_request_links"] = json!(
-                exact_request_links
-                    .get(artifact["artifact_id"].as_str().unwrap())
-                    .cloned()
-                    .unwrap_or_default()
-            );
+            // Resolved before normalization so conflicting identities remain
+            // tombstones; an ID that also names an invalid record links nothing.
+            let id = artifact["artifact_id"].as_str().unwrap();
+            result["exact_request_links"] = json!(if manifest.invalid_ids.contains(id) {
+                Vec::new()
+            } else {
+                link_index.links(&artifact)
+            });
         }
         if result["status"] != "failed" && !omissions.is_empty() {
             result["status"] = json!("partial");
@@ -1460,12 +1470,14 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
             result["coverage"]["omissions"]
                 .as_array_mut()
                 .unwrap()
-                .extend(omissions.clone());
+                .extend(omissions.iter().cloned());
         }
-        if let Some((bytes, roles)) = bytes {
+        let mut keep = artifact["kind"] == "wasm"
+            || ["candidate", "likely-vm"].contains(&result["tier"].as_str().unwrap_or(""));
+        if let Some((bytes, roles)) = workspace_input {
             let mut workspace = crate::vm_opcode::workspace(
                 root,
-                artifact,
+                &artifact,
                 &bytes,
                 crate::vm_opcode::Analysis {
                     result: &result,
@@ -1485,26 +1497,19 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
                 workspace["capture_mode"] = json!(capture_provenance.mode(&artifact["session_id"]));
                 retain_handlerless_javascript_as_candidate(&mut result, &workspace);
                 opcode_workspaces.push(workspace);
+                keep = true;
             }
         }
-        results.push(result);
-    }
+        if keep {
+            artifacts.push(artifact);
+        }
+        results.push(result)
+    })?;
+    let native_js_sources = native_js_sources.into_inner();
+    let mut omissions = omissions;
     // An operational worker failure is retryable, never derived evidence.
     // Return before writing any document; App only caches successful calls.
-    let mut worker_failures = BTreeMap::<&str, u64>::new();
-    for result in &results {
-        for omission in result["frontend"]["dispatch_classification"]["omissions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
-            if omission["reason"] == "analysis-worker-failed" {
-                *worker_failures
-                    .entry(omission["detail"].as_str().unwrap_or("protocol"))
-                    .or_default() += omission["omitted_records"].as_u64().unwrap_or(1);
-            }
-        }
-    }
+    let worker_failures = &results.worker_failures;
     if !worker_failures.is_empty() {
         return Err(crate::error::Error::new(
             503,
@@ -1535,7 +1540,7 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
             "detail":"Native JavaScript dispatch records name script text that no analyzed JavaScript artifact of the same session and frame has. They supply no observed claim."}));
     }
     let mut mixed = Vec::new();
-    for wasm in results.iter().filter(|r| {
+    for wasm in results.findings.iter().filter(|r| {
         r["runtime"] == "webassembly"
             && ["candidate", "likely-vm"].contains(&r["tier"].as_str().unwrap_or(""))
     }) {
@@ -1544,7 +1549,7 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
             .find(|a| a["artifact_id"] == wasm["artifact_id"])
             .map(|a| a["parent_artifact_id"].clone())
             .unwrap_or(Value::Null);
-        if let Some(js) = results.iter().find(|r| {
+        if let Some(js) = results.findings.iter().find(|r| {
             r["artifact_id"] == parent
                 && r["runtime"] == "javascript"
                 && ["candidate", "likely-vm"].contains(&r["tier"].as_str().unwrap_or(""))
@@ -1559,13 +1564,15 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
             mixed.push(json!({"finding_id":finding(&format!("{}:{}",js["artifact_sha256"].as_str().unwrap(),wasm["artifact_sha256"].as_str().unwrap()),&rules),"runtime":"mixed","tier":if js["tier"]=="likely-vm" || wasm["tier"]=="likely-vm" {"likely-vm"} else {"candidate"},"artifact_ids":[parent,wasm["artifact_id"]],"vm_score":js["vm_score"].as_u64().unwrap()+wasm["vm_score"].as_u64().unwrap(),"anti_bot_score":js["anti_bot_score"],"evidence_families":js["evidence_families"].as_array().unwrap().iter().chain(wasm["evidence_families"].as_array().unwrap()).map(|v|v.as_str().unwrap()).collect::<BTreeSet<_>>(),"boundary":{"state":"observed","reason":"The WASM artifact manifest names the JavaScript artifact as its creator."}}));
         }
     }
-    let mut document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":current_producer(),"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest_digest,"event_store_digest":event_digest,"capture_provenance_digest":capture_provenance.digest},"capture_mode":capture_mode,"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.len(),"candidate_count":results.iter().filter(|r|r["tier"]=="candidate").count(),"likely_vm_count":results.iter().filter(|r|r["tier"]=="likely-vm").count(),"failed_count":results.iter().filter(|r|r["status"]=="failed").count(),"mixed_count":mixed.len()},"results":results,"mixed_findings":mixed});
-    document["document_digest"] = json!(digest(&document)?);
-    let opcode_workspace = crate::vm_opcode::document(&document, opcode_workspaces);
+    let document = json!({"contract_version":1,"document_kind":"vm-analysis","producer":current_producer(),"profile_digest":digest(&profile)?,"profile":profile,"inputs":{"artifact_manifest_digest":manifest.digest,"event_store_digest":event_input.digest,"capture_provenance_digest":capture_provenance.digest},"capture_mode":capture_mode,"input_coverage":{"complete":omissions.is_empty(),"omissions":omissions},"summary":{"analyzed_artifacts":results.analyzed,"candidate_count":results.candidates,"likely_vm_count":results.likely_vm,"failed_count":results.failed,"mixed_count":mixed.len()},"mixed_findings":mixed});
+    let document = results.spool.finish(document)?;
+    let opcode_workspace = crate::vm_opcode::document(document.head(), opcode_workspaces);
     let host_links = opcode_workspace
         .as_ref()
         .map_err(Clone::clone)
-        .and_then(|workspace| crate::vm_host_links::document(workspace, &artifacts, &events));
+        .and_then(|workspace| {
+            crate::vm_host_links::document(workspace, &artifacts, &events, &runtime_context)
+        });
     Ok(Documents {
         analysis: document,
         opcode_workspace,
@@ -1612,7 +1619,7 @@ fn remove_dependant(path: &Path) -> std::io::Result<bool> {
 fn publish(
     root: &Path,
     documents: &mut Documents,
-    write: &mut dyn FnMut(&Path, &[u8]) -> Result<()>,
+    write: &mut dyn FnMut(&Path, &mut dyn std::io::Read) -> Result<()>,
 ) -> Result<()> {
     let paths = CHAIN.map(|name| root.join(name));
     #[cfg(unix)]
@@ -1641,7 +1648,7 @@ fn publish(
     if removed && let Some(directory) = paths[0].parent() {
         std::fs::File::open(directory)?.sync_all()?;
     }
-    write(&paths[0], &canonical(&documents.analysis)?)?;
+    write(&paths[0], &mut documents.analysis.reader())?;
     for index in [1, 2] {
         let document = if index == 1 {
             &documents.opcode_workspace
@@ -1650,7 +1657,9 @@ fn publish(
         };
         // An unavailable document has no written dependant either.
         let Ok(value) = document else { break };
-        if let Err(error) = canonical(value).and_then(|bytes| write(&paths[index], &bytes)) {
+        if let Err(error) =
+            canonical(value).and_then(|bytes| write(&paths[index], &mut bytes.as_slice()))
+        {
             documents.fail_from(index, error);
             break;
         }
@@ -1719,15 +1728,12 @@ mod chain_tests {
             assert_eq!(linked(root.path()), [true; 3]);
             inputs(root.path(), &["{\"x\":1}\n"]);
             let mut next = build_documents(root.path(), &store).unwrap();
-            assert_ne!(
-                next.analysis["document_digest"],
-                first.analysis["document_digest"]
-            );
-            let result = publish(root.path(), &mut next, &mut |path, bytes| {
+            assert_ne!(next.analysis.digest(), first.analysis.digest());
+            let result = publish(root.path(), &mut next, &mut |path, source| {
                 if path.ends_with(failing_name) {
                     Err(crate::error::Error::new(500, "Synthetic write failure"))
                 } else {
-                    durable::write_private(path, bytes)
+                    durable::write_private_from(path, source)
                 }
             });
             assert_eq!(result.is_err(), failing == 0);
@@ -1736,7 +1742,7 @@ mod chain_tests {
             let analysis = read(root.path(), 0).unwrap();
             assert_eq!(
                 analysis["document_digest"],
-                if failing == 0 { &first } else { &next }.analysis["document_digest"]
+                if failing == 0 { &first } else { &next }.analysis.digest()
             );
             // A failed analysis write fails the whole call instead.
             assert_eq!(next.opcode_workspace.is_ok(), failing != 1);
@@ -1764,12 +1770,9 @@ mod chain_tests {
             assert_eq!(linked(root.path()), [true, true, stuck == 2], "{stuck}");
             assert_eq!(
                 read(root.path(), 0).unwrap()["document_digest"],
-                first.analysis["document_digest"]
+                first.analysis.digest()
             );
-            assert_ne!(
-                next.analysis["document_digest"],
-                first.analysis["document_digest"]
-            );
+            assert_ne!(next.analysis.digest(), first.analysis.digest());
             assert_eq!(next.opcode_workspace.is_ok(), stuck == 2);
             assert!(next.host_links.is_err());
         }
@@ -1790,11 +1793,16 @@ mod chain_tests {
     }
 }
 
-pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
+/// Publishes the documents and returns the analysis, held by reference.
+pub fn store_analysis(root: &Path, event_store: &Path) -> Result<Analysis> {
     let documents = store_documents(root, event_store)?;
     documents.opcode_workspace?;
     documents.host_links?;
     Ok(documents.analysis)
+}
+
+pub fn store(root: &Path, event_store: &Path) -> Result<Value> {
+    store_analysis(root, event_store)?.document()
 }
 
 #[cfg(test)]
@@ -1804,15 +1812,20 @@ mod profile_tests {
     #[test]
     fn handler_recovery_requirement_has_distinct_profile_and_accepts_older_profiles() {
         let current = current_profile();
-        assert_eq!(current_producer()["version"], "1.10.0");
+        assert_eq!(current_producer()["version"], "1.11.0");
         assert_eq!(current["javascript_likely_vm_requires_handlers"], true);
         let mut historical = current.clone();
         historical
             .as_object_mut()
             .unwrap()
             .remove("javascript_likely_vm_requires_handlers");
-        // The pinned digest is the version 2 profile that preceded both.
+        // The pinned digest is the version 2 profile that preceded both,
+        // which still had the record and graph limits producer 1.11.0 removed.
         historical["javascript_scoring_version"] = json!(2);
+        let limits = historical["limits"].as_object_mut().unwrap();
+        limits.insert("max_artifact_records".into(), json!(10000));
+        limits.insert("max_event_records".into(), json!(100000));
+        limits.insert("max_graph_edges".into(), json!(1024));
         assert_eq!(
             digest(&historical).unwrap(),
             "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"

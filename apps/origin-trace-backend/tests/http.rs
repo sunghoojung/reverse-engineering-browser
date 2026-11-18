@@ -73,7 +73,10 @@ impl Server {
             }
         }
         let mut child = child.args(args).spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // The first launches of a freshly linked binary wait on macOS code
+        // signing assessment, which takes longer than ten seconds on a loaded
+        // machine. A started backend writes its endpoint in under a second.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let url = loop {
             if let Ok(url) = std::fs::read_to_string(&endpoint) {
                 break url.trim().to_owned();
@@ -1083,6 +1086,69 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
     let mut altered = action("CaptureAction", "clear");
     altered["effects"] = json!(["read-only"]);
     assert!(!schema.is_valid(&altered));
+}
+
+/// A profile is found by its exact root however many newer profiles follow
+/// it, a later record for the same root replaces it, and a damaged line stops
+/// every lookup rather than answering from the records around it.
+#[tokio::test]
+async fn signal_profiles_are_found_at_any_age_by_their_root() {
+    let server = Server::start().await;
+    let profile = |request: u64, sequence: u64, count: &str| {
+        json!({"protocol_version":1,"document_kind":"request-signal-profile","session_id":"1",
+            "request_id":request.to_string(),"root_event":{"process_id":7,"sequence_number":sequence.to_string()},
+            "initiator_event":null,"navigation_id":"1","frame_id":"1",
+            "signals":[{"category":"canvas","relation":"same_context","confidence":"correlated",
+                "event_count":count,"first_event":{"process_id":7,"sequence_number":"1"},
+                "last_event":{"process_id":7,"sequence_number":"1"}}],
+            "coverage":{"parent_depth":0,"parent_depth_limit":32,"copied_from_initiator":false,
+                "retention_truncated":false,"parent_depth_limited":false,"count_saturated":false}})
+        .to_string()
+    };
+    let path = server.root.path().join("signals.jsonl");
+    let mut lines = vec![profile(1, 2, "3")];
+    lines.extend((2..12_002).map(|request| profile(request, request * 2, "1")));
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let route = |request: u64, sequence: u64| {
+        format!(
+            "/api/request-signal-profile?session_id=1&request_id={request}&root_process_id=7&root_sequence_number={sequence}"
+        )
+    };
+    let response = server.get(&route(1, 2)).await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        body["request_id"], "1",
+        "the oldest of 12,001 profiles is found"
+    );
+    assert_eq!(body["signals"][0]["event_count"], "3");
+    assert_eq!(
+        server.get(&route(1, 3)).await.status(),
+        404,
+        "only the exact root selects it"
+    );
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, (profile(1, 2, "9") + "\n").as_bytes()).unwrap();
+    let body: Value = server.get(&route(1, 2)).await.json().await.unwrap();
+    assert_eq!(
+        body["signals"][0]["event_count"], "9",
+        "a later record replaces it"
+    );
+
+    std::io::Write::write_all(&mut file, b"{\"truncated\":\n").unwrap();
+    let response = server.get(&route(1, 2)).await;
+    assert_eq!(response.status(), 500);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("malformed request signal profile")
+    );
 }
 
 #[tokio::test]
@@ -2983,6 +3049,44 @@ fn analyze_vm(root: &Path, events: &[Value]) -> Value {
     document
 }
 #[test]
+fn vm_identical_bytes_give_each_artifact_its_own_result() {
+    // The pass analyzes a content once; each artifact must still read as if
+    // it were analyzed alone, under its own ID, URL, frame and signals.
+    for source in [
+        "function run(code) { let pc=0, stack=[]; while (pc<code.length) { switch(code[pc++]) { case 1: stack.push(1); break; default: return; } } }",
+        "const answer = 42; navigator.userAgent;",
+        "not javascript {",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let first = vm_artifact(root.path(), source.as_bytes(), "3");
+        let mut second = first.clone();
+        second["artifact_id"] = json!("2");
+        second["frame_id"] = json!("4");
+        second["url"] = json!("https://synthetic.test/reloaded.js");
+        let events = [
+            vm_event("web_audio", 1, 10, "2"),
+            vm_event("canvas", 2, 10, "0"),
+        ];
+        let alone = |artifact: &Value| {
+            std::fs::write(
+                root.path().join("manifest.jsonl"),
+                jsonl(std::slice::from_ref(artifact)),
+            )
+            .unwrap();
+            analyze_vm(root.path(), &events)["results"][0].clone()
+        };
+        let expected = [alone(&first), alone(&second)];
+        std::fs::write(
+            root.path().join("manifest.jsonl"),
+            jsonl(&[first.clone(), second.clone()]),
+        )
+        .unwrap();
+        let document = analyze_vm(root.path(), &events);
+        assert_eq!(document["results"], json!(expected), "{source}");
+        assert_ne!(expected[0], expected[1]);
+    }
+}
+#[test]
 fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
     for source in [
         "function run(code) { let pc=0, stack=[]; while (pc<code.length) { switch(code[pc++]) { case 1: stack.push(1); break; default: return; } } }",
@@ -3031,18 +3135,26 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
             json!({"session_id":"1","process_id":10,"sequence_number":"2"})
         );
         assert!(observations[0].get("coordinate").is_none());
+        // The rule's representative is a graph node; the rest of the frame
+        // is counted, with the get_events filter that lists it.
         let nodes = result["graph"]["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), 5);
-        assert!(nodes.iter().any(|n| n["id"] == "event:1:10:1"));
+        assert_eq!(nodes.len(), 3);
         assert!(
             result["graph"]["edges"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
+                .any(|e| e["from"] == "event:1:10:2" && e["state"] == "observed")
+        );
+        assert_eq!(
+            result["runtime_context"],
+            json!({"session_id":"1","navigation_id":"2","frame_id":"3","frame_attribution":"available",
+                "request_records":0,
+                "signal_records":[{"rule_id":"antibot.runtime-web-audio","observed":2,"correlated":1}],
+                "events_filter":{"session_id":"1","navigation_id":"2","frame_id":"3"}})
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.10.0");
+        assert_eq!(document["producer"]["version"], "1.11.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -3092,33 +3204,35 @@ fn vm_runtime_identity_disambiguates_processes_and_rejects_conflicts() {
     }
     let document = analyze_vm(root.path(), &events);
     assert_eq!(document["input_coverage"]["complete"], false);
+    // Omissions are counted per reason, with the line each was first seen on.
+    let omissions = document["input_coverage"]["omissions"].as_array().unwrap();
     assert_eq!(
-        document["input_coverage"]["omissions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        8
+        omissions
+            .iter()
+            .map(|o| (
+                o["reason"].as_str().unwrap(),
+                o["observed_records"].as_u64().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("conflicting-event-identity", 1),
+            ("invalid-event-contract", 7)
+        ]
     );
-    assert_eq!(
-        document["input_coverage"]["omissions"][0]["reason"],
-        "conflicting-event-identity"
-    );
+    assert_eq!(omissions[0]["line"], 7);
+    assert_eq!(omissions[1]["line"], 9);
     let result = &document["results"][0];
     assert_eq!(result["anti_bot_score"], 50);
-    assert_eq!(result["related_request_ids"], json!(["55"]));
+    // Both processes' request starts count; neither is copied into the result.
+    assert_eq!(result["runtime_context"]["request_records"], 2);
     let nodes = result["graph"]["nodes"].as_array().unwrap();
-    assert_eq!(nodes.len(), 6);
+    assert_eq!(nodes.len(), 4);
     let ids = nodes
         .iter()
         .map(|n| n["id"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids.len(), nodes.len());
-    for id in [
-        "event:1:10:1",
-        "event:1:11:1",
-        "request:1:10:2",
-        "request:1:11:2",
-    ] {
+    for id in ["event:1:10:1", "event:1:11:1"] {
         assert!(ids.contains(id), "{id}");
     }
     assert!(!ids.contains("event:1:10:3"));
@@ -3179,22 +3293,24 @@ fn vm_runtime_unknown_frames_do_not_invent_shared_context() {
     );
 }
 #[test]
-fn vm_runtime_graph_limit_is_explicit_and_preserves_representative() {
+fn vm_runtime_frame_context_is_counted_and_keeps_the_attributed_representative() {
     let root = tempfile::tempdir().unwrap();
     vm_artifact(root.path(), b"const answer=42;", "3");
     let mut events = (1..=1030)
         .map(|sequence| vm_event("web_audio", sequence, 10, "0"))
         .collect::<Vec<_>>();
-    // Stronger attribution remains visible even when it arrived after the cap.
+    // The attribution arriving last is still the representative.
     events[1029]["artifact_id"] = json!("1");
     events.push(vm_event("network", 1031, 10, "0"));
     let document = analyze_vm(root.path(), &events);
     let result = &document["results"][0];
     assert_eq!(result["anti_bot_score"], 25);
-    assert_eq!(result["status"], "partial");
-    assert_eq!(result["graph"]["edges"].as_array().unwrap().len(), 1024);
-    assert_eq!(result["graph"]["nodes"].as_array().unwrap().len(), 1025);
+    assert_eq!(result["status"], "complete");
+    assert_eq!(result["coverage"]["omissions"], json!([]));
+    assert_eq!(result["graph"]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(result["graph"]["nodes"].as_array().unwrap().len(), 3);
     assert_eq!(result["anti_bot_observations"][0]["event_sequence"], "1030");
+    assert_eq!(result["anti_bot_observations"][0]["state"], "observed");
     assert!(
         result["graph"]["nodes"]
             .as_array()
@@ -3203,28 +3319,11 @@ fn vm_runtime_graph_limit_is_explicit_and_preserves_representative() {
             .any(|n| n["id"] == "event:1:10:1030")
     );
     assert_eq!(
-        result["coverage"]["omissions"],
-        json!([{"reason":"runtime-graph-edge-limit","omitted_records":8}])
-    );
-    let network = events.last().unwrap();
-    let request_id = network["request_id"].as_str().unwrap();
-    assert_eq!(result["related_request_ids"], json!([request_id]));
-    assert!(
-        result["graph"]["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| {
-                n["id"]
-                    == format!(
-                        "request:{}:{}:{}",
-                        network["session_id"].as_str().unwrap(),
-                        network["process_id"].as_u64().unwrap(),
-                        network["sequence_number"].as_str().unwrap()
-                    )
-                    && n["kind"] == "request"
-                    && n["request_id"] == request_id
-            })
+        result["runtime_context"],
+        json!({"session_id":"1","navigation_id":"2","frame_id":"3","frame_attribution":"available",
+            "request_records":1,
+            "signal_records":[{"rule_id":"antibot.runtime-web-audio","observed":1,"correlated":1029}],
+            "events_filter":{"session_id":"1","navigation_id":"2","frame_id":"3"}})
     );
 }
 #[tokio::test]
@@ -3331,6 +3430,104 @@ async fn vm_ranked_static_candidate_workspace_roundtrips_http_and_schema() {
 }
 
 #[tokio::test]
+async fn vm_full_read_streams_every_result_and_findings_view_counts_the_rest() {
+    let server = Server::start().await;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tools/fixtures/vm-dynamic-debug/wasm-ranked-dispatch.json"
+    ))
+    .unwrap();
+    let root = server.root.path().join("artifacts");
+    let bytes = hex::decode(fixture["module_hex"].as_str().unwrap()).unwrap();
+    let mut module = vm_artifact(&root, &bytes, "3");
+    module["kind"] = json!("wasm");
+    module["mime_type"] = json!("application/wasm");
+    let plain = vm_artifact(&root, b"const answer = 42;", "3");
+    let manifest = [module]
+        .into_iter()
+        .chain((2..=4).map(|id| {
+            let mut artifact = plain.clone();
+            artifact["artifact_id"] = json!(id.to_string());
+            artifact
+        }))
+        .collect::<Vec<_>>();
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+
+    let response = server.get("/api/analysis/vm").await;
+    let length = response.headers()["content-length"].clone();
+    let full_etag = response.headers()["etag"].clone();
+    let streamed = assert_contract_response(response, "get", "/api/analysis/vm", 200).await;
+    assert_eq!(length.to_str().unwrap(), streamed.len().to_string());
+    let full: Value = serde_json::from_slice(&streamed).unwrap();
+    assert_vm_document(&full);
+    // The read is the published canonical document, byte for byte.
+    assert_eq!(
+        streamed,
+        std::fs::read(root.join("analysis/vm-analysis-v1.json")).unwrap()
+    );
+    assert_eq!(
+        streamed,
+        origin_trace_backend::vm::canonical(&full).unwrap()
+    );
+    let tiers = full["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["tier"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(tiers, ["candidate", "none", "none", "none"]);
+
+    let response = server.get("/api/analysis/vm?view=findings").await;
+    let etag = response.headers()["etag"].clone();
+    assert_ne!(etag, full_etag);
+    let findings: Value = serde_json::from_slice(
+        &assert_contract_response(response, "get", "/api/analysis/vm", 200).await,
+    )
+    .unwrap();
+    let spec = specification();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["VmAnalysis"],
+        &findings,
+        "VM findings view",
+    );
+    assert_eq!(findings["results"], json!([full["results"][0]]));
+    assert_eq!(
+        findings["results_view"],
+        json!({"kind":"findings","listed_results":1,"omitted_results":3})
+    );
+    for key in [
+        "document_digest",
+        "summary",
+        "mixed_findings",
+        "input_coverage",
+    ] {
+        assert_eq!(findings[key], full[key], "{key}");
+    }
+    assert_contract_response(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm?view=findings", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap(),
+        "get",
+        "/api/analysis/vm",
+        304,
+    )
+    .await;
+    for query in ["view=all", "view=", "view=findings&view=findings"] {
+        assert_contract_response(
+            server.get(&format!("/api/analysis/vm?{query}")).await,
+            "get",
+            "/api/analysis/vm",
+            400,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
     let server = Server::start().await;
     vm_artifact(
@@ -3354,8 +3551,22 @@ async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
         .validate(&document)
         .unwrap();
     assert!(!document.to_string().contains("PRIVATE HOST PAYLOAD"));
-    assert_eq!(document["workspaces"][0]["links"][0]["state"], "unknown");
-    assert!(document["workspaces"][0]["links"][0]["guest_position"].is_null());
+    // Without a VM parent no sample can position the host event, so it is
+    // counted in the frame rather than listed.
+    let row = &document["workspaces"][0];
+    assert_eq!(row["links"], json!([]));
+    assert_eq!(row["frame_host_records"], 1);
+    assert_eq!(row["attributed_host_records"], 1);
+    assert_eq!(
+        row["events_filter"],
+        json!({"session_id":"1","navigation_id":"2","frame_id":"3"})
+    );
+    assert!(
+        row["omissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("dispatch-samples-unavailable"))
+    );
     let workspace: Value = server
         .get("/api/analysis/vm/opcodes")
         .await
@@ -3766,7 +3977,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.10.0");
+    assert_eq!(document["producer"]["version"], "1.11.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 3);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -6270,7 +6481,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.10.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.11.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -6326,6 +6537,11 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         .unwrap()
         .remove("javascript_likely_vm_requires_handlers");
     historical_profile["javascript_scoring_version"] = json!(2);
+    // Producer 1.11.0 removed the record and graph limits it still had.
+    let limits = historical_profile["limits"].as_object_mut().unwrap();
+    limits.insert("max_artifact_records".into(), json!(10000));
+    limits.insert("max_event_records".into(), json!(100000));
+    limits.insert("max_graph_edges".into(), json!(1024));
     assert_eq!(
         hex::encode(Sha256::digest(
             origin_trace_backend::vm::canonical(&historical_profile).unwrap()
@@ -7388,9 +7604,15 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
             // The backend keeps derived indexes beside the stores on its own
             // timers, so a run can see them appear with no request causing them.
             let name = entry.file_name().to_string_lossy().into_owned();
-            if [".requests-v2", ".events-v1", ".edges-v1", ".lookup-v1"]
-                .iter()
-                .any(|suffix| name.contains(suffix))
+            if [
+                ".requests-v2",
+                ".events-v1",
+                ".edges-v1",
+                ".profiles-v1",
+                ".lookup-v1",
+            ]
+            .iter()
+            .any(|suffix| name.contains(suffix))
             {
                 continue;
             }
@@ -7871,6 +8093,18 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
     let end = call(json!({"action":"end","confirm":true})).await;
     let refused = assert_contract_response(end, "post", "/api/session/actions", 409).await;
     assert_eq!(code(refused), "target_unavailable");
+    // A relay that has not returned by its deadline is stopped. It may already
+    // have handed the URL over, so the outcome is unknown, and the session is
+    // left running rather than declared lost.
+    std::fs::write(&brave, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    let late = json!({"action":"open_url","url":"https://example.test/late"});
+    let stuck =
+        assert_contract_response(call(late).await, "post", "/api/session/actions", 409).await;
+    let stuck = serde_json::from_slice::<Value>(&stuck).unwrap();
+    assert_eq!(stuck["code"], "command_outcome_unknown");
+    let text = stuck["error"].as_str().unwrap();
+    assert!(text.contains("the session is still running"), "{text}");
+    assert!(!text.contains("Start a new live session"), "{text}");
     assert_eq!(server.get("/api/health").await.status(), 200);
 }
 
@@ -10197,6 +10431,21 @@ async fn vm_exact_request_projection_requires_acknowledged_creator_chain_and_ful
         document["selection"]["edge_semantics"],
         "exact-captured-response-body"
     );
+    // The findings view narrows the selection, counting what it leaves out.
+    let viewed = server.get(&format!("{path}&view=findings")).await;
+    assert_ne!(viewed.headers()["etag"], etag);
+    let viewed: Value = serde_json::from_slice(
+        &assert_contract_response(viewed, "get", "/api/analysis/vm", 200).await,
+    )
+    .unwrap();
+    let listed = usize::from(document["results"][0]["tier"] != "none");
+    assert_eq!(viewed["results"].as_array().unwrap().len(), listed);
+    assert_eq!(
+        viewed["results_view"],
+        json!({"kind":"findings","listed_results":listed,"omitted_results":1 - listed})
+    );
+    assert_eq!(viewed["selection"], document["selection"]);
+    assert_eq!(viewed["summary"], document["summary"]);
     for (from, to) in [
         ("session_id=9007199254740993", "session_id=2"),
         ("root_process_id=12", "root_process_id=13"),
@@ -10956,6 +11205,47 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     assert_eq!(entry["source_url"], "https://example.test/source.js");
     assert_eq!(entry["session_id"], "11");
     assert_eq!(entry["retained"]["state"], "matches");
+    // The saved script is found behind any number of newer artifacts, and a
+    // newer version at its URL is named beside it.
+    let manifest = server.root.path().join("artifacts/manifest.jsonl");
+    let blob = |bytes: &[u8]| {
+        let hash = hex::encode(Sha256::digest(bytes));
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+        (hash, bytes.len())
+    };
+    let filler = blob(b"other();");
+    let version = blob(b"f0=function(a){return a+1};");
+    let mut appended = String::new();
+    for id in 8..=6_008u64 {
+        let (url, (hash, size)) = if id == 6_008 {
+            ("https://example.test/source.js".to_owned(), &version)
+        } else {
+            (format!("https://cdn.example.test/{id}.js"), &filler)
+        };
+        appended.push_str(&format!("{}\n", json!({
+            "protocol_version":1,"artifact_id":id.to_string(),"session_id":"11","navigation_id":"13",
+            "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+            "execution_context_id":"23","capture_origin":"dynamic_javascript",
+            "kind":"javascript","url":url,"mime_type":"text/javascript",
+            "byte_size":size,"sha256":hash,"sensitive":false,
+            "content_path":format!("blobs/{hash}.bin")})));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&manifest)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let listed = set(assert_contract_response(
+        server.get("/api/js-invocation-sites").await,
+        "get",
+        "/api/js-invocation-sites",
+        200,
+    )
+    .await);
+    let retained = &listed["sites"][0]["retained"];
+    assert_eq!(retained["state"], "matches", "{retained}");
+    assert_eq!(retained["other_version_artifact_id"], "6008", "{retained}");
     // The file is the browser's exact format, user-only, in a private folder.
     let text = std::fs::read_to_string(&store).unwrap();
     assert_eq!(

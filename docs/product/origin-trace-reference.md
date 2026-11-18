@@ -72,25 +72,25 @@ Trace. The application continues to show the last valid evidence if the broker
 disconnects or the session expires and marks the capture as offline. Raw
 browser records stay on the Brave-to-broker socket; the UI reads the broker's
 normalized store. Live sessions enable all eight fingerprint families plus
-Network and Artifact for one hour by default with category mask `4095`;
-`REB_CAPTURE_CATEGORY_MASK` and `REB_CAPTURE_DURATION_SECONDS` change those
-low-level startup limits. The mask is decimal or `0x` hexadecimal, from 1 to
+Network and Artifact with category mask `4095`, and run until they are ended;
+`REB_CAPTURE_CATEGORY_MASK` changes the mask and, for `make live` only,
+`REB_CAPTURE_DURATION_SECONDS` sets an explicit time limit. The mask is decimal or `0x` hexadecimal, from 1 to
 4095; the launcher refuses any other text before starting a helper, and the
 packaged app reads the same grammar when it chooses its content defaults.
 
-`REB_CAPTURE_REQUEST_CONTENT=1 make live` retains request paths, queries and
-request bodies up to 16 MiB for that one session; without it Traffic rows stay
-host-only while still recording each body's length, type and SHA-256 (see
+`make live` retains request paths, queries and request bodies up to 16 MiB by
+default, as the packaged app's Content mode does; with
+`REB_CAPTURE_REQUEST_CONTENT=0` Traffic rows stay host-only while still
+recording each body's length, type and SHA-256 (see
 [Native network v2](../../protocol/native-network-v2.md)).
 
-`REB_CAPTURE_CANVAS_IMAGES=1 make live` additionally authorizes complete Canvas
-data URLs for that one session. The output is sensitive local evidence, limited
-to 2 MiB, and linked to the exact readback event. Without the switch, Canvas
-drawing and readback operation names remain visible but image bytes are not
-retained.
+It also retains complete Canvas data URLs by default. The output is sensitive
+local evidence, limited to 2 MiB, and linked to the exact readback event. With
+`REB_CAPTURE_CANVAS_IMAGES=0`, Canvas drawing and readback operation names
+remain visible but image bytes are not retained.
 
-The packaged app enables quiet mode by default (`REB_NATIVE_QUIET_MODE=0` opts
-out); set `REB_NATIVE_QUIET_MODE=1` with `make live` for a live capture with no
+The packaged app and `make live` enable quiet mode by default
+(`REB_NATIVE_QUIET_MODE=0` opts out), for a live capture with no
 DevTools endpoint or CDP connection to the page. The custom V8 runtime then ignores page-authored
 `debugger;` statements before Inspector handling. Native evidence capture and
 the Captured Sources catalog continue to work, while live Page debugging,
@@ -384,9 +384,9 @@ the same route through its bundled backend.
 
 Pass `--signal-store /path/to/request-signals.jsonl` when the request signal
 profile sidecar is not next to the default demo store. The endpoint selects an
-exact session, request, process, and sequence root, reads at most 10,000
-profiles, rejects records larger than 8 KiB, and supports entity-tag
-revalidation. Observed parent chains and correlated same-context activity stay
+exact session, request, process, and sequence root, finds its profile of any
+age through the store's disk index, rejects records larger than 16 KiB, and
+supports entity-tag revalidation. Observed parent chains and correlated same-context activity stay
 visibly distinct.
 
 Captured JavaScript and WebAssembly artifacts are analyzed automatically on

@@ -35,17 +35,34 @@ readonly trace_store_path="${session_directory}/origin-trace.jsonl"
 readonly signal_store_path="${session_directory}/request-signals.jsonl"
 readonly artifact_store_path="${session_directory}/artifacts"
 readonly token_path="${session_directory}/broker.token"
-readonly profile_path="${REB_BRAVE_PROFILE:-${session_directory}/brave-profile}"
+# Sessions share one persistent research profile, so logins, cookies and site
+# data survive into the next capture while each session's evidence stays in its
+# own folder above. It is never the researcher's own Brave profile. Each
+# Keychain mode keeps a profile of its own, because cookies encrypted under one
+# cannot be read under the other. REB_FRESH_PROFILE=1 gives one session a new,
+# empty profile in its session folder instead; REB_BRAVE_PROFILE names an exact
+# profile and wins over both.
+readonly fresh_profile="${REB_FRESH_PROFILE:-0}"
+readonly research_profile_root="${REB_RESEARCH_PROFILE_ROOT:-${live_session_root%/*}/research-profiles}"
 readonly native_console_directory="${session_directory}/native-console"
 readonly brave_cache_root="${REB_BRAVE_CACHE_ROOT:-}"
 readonly category_mask_setting="${REB_CAPTURE_CATEGORY_MASK:-4095}"
-readonly duration_seconds="${REB_CAPTURE_DURATION_SECONDS:-3600}"
+# A session runs until it is ended: Brave closes, the app or an agent ends it.
+# REB_CAPTURE_DURATION_SECONDS sets an explicit limit instead. The broker and
+# Brave both need a finite deadline, so an open-ended session is given a
+# century, which keeps every nanosecond deadline on both sides far inside the
+# signed 64-bit range of Chromium's TimeTicks.
+readonly open_ended_duration_seconds=3155760000
+readonly duration_setting="${REB_CAPTURE_DURATION_SECONDS:-}"
 readonly open_command="${REB_OPEN_COMMAND:-open}"
-readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-0}"
-readonly native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-0}"
-readonly native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-0}"
-readonly native_request_stacks="${REB_NATIVE_REQUEST_STACKS:-0}"
-readonly native_request_stacks_if_supported="${REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:-0}"
+# An unset or empty capture switch takes the packaged app's default
+# (LiveSessionCoordinator.captureDefaults), resolved once the category mask is
+# read below.
+readonly native_quiet_mode="${REB_NATIVE_QUIET_MODE:-1}"
+native_wasm_dispatch="${REB_NATIVE_WASM_DISPATCH:-}"
+native_wasm_call_indirect="${REB_NATIVE_WASM_CALL_INDIRECT:-}"
+native_request_stacks="${REB_NATIVE_REQUEST_STACKS:-}"
+native_request_stacks_if_supported="${REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED:-0}"
 readonly native_promise_stacks="${REB_NATIVE_PROMISE_STACKS:-0}"
 readonly native_wasm_samples_per_function="${REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:-}"
 readonly native_wasm_samples_per_indirect_site="${REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE:-}"
@@ -55,15 +72,15 @@ readonly native_wasm_module_allowlist="${REB_NATIVE_WASM_MODULE_ALLOWLIST:-}"
 readonly native_guest_adapter="${REB_NATIVE_WASM_GUEST_ADAPTER:-}"
 readonly native_js_dispatch_sites="${REB_NATIVE_JS_DISPATCH_SITES:-}"
 readonly native_js_invocation_sites="${REB_NATIVE_JS_INVOCATION_SITES:-}"
-readonly native_js_invocation_digests="${REB_NATIVE_JS_INVOCATION_DIGESTS:-0}"
+native_js_invocation_digests="${REB_NATIVE_JS_INVOCATION_DIGESTS:-}"
 # The packaged app sets this for the saved sites it arms in every capture: a
 # Brave without invocation capture then starts without them instead of failing.
 readonly native_js_invocation_if_supported="${REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:-0}"
-readonly console_document_start="${REB_CONSOLE_DOCUMENT_START:-0}"
-readonly capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-0}"
+readonly console_document_start="${REB_CONSOLE_DOCUMENT_START:-1}"
+capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-}"
 # Raw request paths, queries and bounded request bodies (native-network-v2.md).
 # Body length, type and digest are recorded whenever Network capture is on.
-readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
+capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-}"
 # Browser-internal pages (chrome:, devtools: and WebUI renderers) are excluded
 # and counted unless this is 1 (native-network-v3.md).
 readonly capture_browser_internal="${REB_CAPTURE_BROWSER_INTERNAL:-0}"
@@ -74,7 +91,9 @@ readonly request_content_budget_mib="${REB_REQUEST_CONTENT_BUDGET_MIB:-256}"
 # bytes per session, and whether element images, audio, video and fonts count.
 readonly response_body_budget_mib="${REB_RESPONSE_BODY_BUDGET_MIB:-512}"
 readonly capture_response_media="${REB_CAPTURE_RESPONSE_MEDIA:-0}"
-readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
+# Chromium's mock Keychain by default, as the app uses, so the browser neither
+# prompts for nor writes the macOS Keychain.
+readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-0}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
 readonly session_handshake="${REB_SESSION_HANDSHAKE:-}"
@@ -104,6 +123,51 @@ if (( category_mask < 1 || category_mask > 4095 )); then
   fail_live_session 2 "REB_CAPTURE_CATEGORY_MASK must be a category mask from 1 to 4095, written as up to 10 decimal digits or 0x and up to 8 hex digits."
 fi
 readonly category_mask
+
+# A default turns on only when the mask holds every category it needs, so a
+# narrower mask leaves it off instead of failing the launch. An explicit 1
+# still needs its categories and is refused below without them.
+mask_default() {
+  if (( (category_mask & $1) == $1 )); then echo 1; else echo 0; fi
+}
+# Wasm dispatch needs VM (512) and Artifact (1024).
+native_wasm_dispatch="${native_wasm_dispatch:-$(mask_default 1536)}"
+native_wasm_call_indirect="${native_wasm_call_indirect:-$(mask_default 1536)}"
+# Request stacks need Network (256) and Artifact (1024). The default is dropped,
+# with a launch log line, by a Brave that predates the flag; an explicit 1
+# keeps the strict check.
+if [[ -z "${native_request_stacks}" ]]; then
+  native_request_stacks="$(mask_default 1280)"
+  native_request_stacks_if_supported=1
+fi
+# Canvas images need Canvas (1) and Artifact (1024); request content needs
+# Network (256) and Artifact (1024).
+capture_canvas_images="${capture_canvas_images:-$(mask_default 1025)}"
+capture_request_content="${capture_request_content:-$(mask_default 1280)}"
+# Settled-value digests of armed calls are content capture: on, as in the app,
+# for explicit invocation sites in a session that keeps request content.
+if [[ -z "${native_js_invocation_digests}" ]]; then
+  if [[ -n "${native_js_invocation_sites}" && "${capture_request_content}" == 1 ]]; then
+    native_js_invocation_digests=1
+  else
+    native_js_invocation_digests=0
+  fi
+fi
+readonly native_wasm_dispatch native_wasm_call_indirect native_request_stacks \
+  native_request_stacks_if_supported capture_canvas_images capture_request_content \
+  native_js_invocation_digests
+
+if [[ -z "${duration_setting}" ]]; then
+  duration_seconds="${open_ended_duration_seconds}"
+  duration_limited=0
+elif [[ "${duration_setting}" =~ ^[123456789][0123456789]{0,9}$ ]] &&
+     (( 10#${duration_setting} <= open_ended_duration_seconds )); then
+  duration_seconds="$((10#${duration_setting}))"
+  duration_limited=1
+else
+  fail_live_session 2 "REB_CAPTURE_DURATION_SECONDS must be a whole number of seconds from 1 to ${open_ended_duration_seconds}, or unset so the session runs until it is ended."
+fi
+readonly duration_seconds duration_limited
 
 if [[ "${native_quiet_mode}" != 0 && "${native_quiet_mode}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_QUIET_MODE must be 0 or 1."
@@ -273,6 +337,23 @@ fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
 fi
+if [[ "${fresh_profile}" != 0 && "${fresh_profile}" != 1 ]]; then
+  fail_live_session 2 "REB_FRESH_PROFILE must be 0 or 1."
+fi
+if [[ -n "${REB_BRAVE_PROFILE:-}" ]]; then
+  profile_path="${REB_BRAVE_PROFILE}"
+  profile_kind=explicit
+elif [[ "${fresh_profile}" == 1 ]]; then
+  profile_path="${session_directory}/brave-profile"
+  profile_kind=fresh
+elif [[ "${use_system_keychain}" == 1 ]]; then
+  profile_path="${research_profile_root}/system-keychain"
+  profile_kind=research
+else
+  profile_path="${research_profile_root}/default"
+  profile_kind=research
+fi
+readonly profile_path profile_kind
 if [[ "${localhost_only}" != 0 && "${localhost_only}" != 1 ]]; then
   fail_live_session 2 "REB_LOCALHOST_ONLY must be 0 or 1."
 fi
@@ -299,7 +380,7 @@ chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}" "${n
 readonly wasm_budget_reset_file="${session_directory}/wasm-sample-budget-reset"
 printf '0\n' > "${wasm_budget_reset_file}"
 chmod 600 "${wasm_budget_reset_file}"
-if [[ -n "${brave_cache_root}" ]]; then
+if [[ -n "${brave_cache_root}" && "${profile_kind}" == fresh ]]; then
   readonly brave_cache_profile="${brave_cache_root}/${session_id}/brave-profile"
   mkdir -p "${brave_cache_profile}"
   chmod 700 "${brave_cache_root}" "${brave_cache_root}/${session_id}" "${brave_cache_profile}"
@@ -378,6 +459,35 @@ if ! brave_binary="$(resolve_physical_path "${brave_binary}")"; then
   fail_live_session 1 "Could not resolve the Brave executable path. Set REB_BRAVE_BINARY to the executable inside a complete Brave build."
 fi
 readonly brave_binary
+
+# Only one browser can hold a profile: a second launch hands its window to the
+# first and exits, so this session would record nothing. Chromium's
+# SingletonLock names the holder as host-PID. A holder whose command line still
+# names this profile is a running browser; a lock left by a crash is not.
+profile_holder() {
+  local target pid
+  target="$(readlink "${profile_path}/SingletonLock" 2>/dev/null)" || return 1
+  pid="${target##*-}"
+  [[ "${pid}" =~ ^[0123456789]+$ ]] || return 1
+  /bin/ps -ww -o command= -p "${pid}" 2>/dev/null |
+    grep -q -F -e "--user-data-dir=${profile_path}" || return 1
+  printf '%s\n' "${pid}"
+}
+# An ending session gives its Brave the 5-second cleanup grace before forcing
+# it, so a session started as another ends can find that Brave still closing.
+# Waiting out the grace, with slack for a loaded machine, starts the session
+# instead of refusing it; a Brave that holds the profile after that is in use.
+readonly profile_release_wait_seconds=10
+if [[ "${profile_kind}" != fresh ]] && profile_holder_pid="$(profile_holder)"; then
+  echo "Waiting for the Brave that holds ${profile_path} (PID ${profile_holder_pid}) to close."
+  profile_release_deadline=$((SECONDS + profile_release_wait_seconds))
+  while profile_holder_pid="$(profile_holder)"; do
+    if ((SECONDS >= profile_release_deadline)); then
+      fail_live_session 1 "The browser profile ${profile_path} is in use by a running Brave (PID ${profile_holder_pid}), so this session could not open it. End the session that uses it or quit that Brave, or start with a fresh profile (Fresh profile in New Live Session…, or REB_FRESH_PROFILE=1)."
+    fi
+    sleep 0.2
+  done
+fi
 
 # The project V8 flags are assembled before any helper starts, so a build that
 # cannot honor them is refused with nothing to stop and no window opened. Each
@@ -1016,6 +1126,16 @@ else
     --ui-url "${live_ui_url}"
 fi
 
+# How the summary says to turn a switch on: an app session's switches come
+# from the start panel, so it names the panel option; make live names the
+# environment setting.
+switch_hint() {
+  if [[ "${embedded_session}" == 1 ]]; then
+    printf 'turn on %s in New Live Session… Advanced options' "$1"
+  else
+    printf 'set %s' "$2"
+  fi
+}
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
 echo "Origin trace store: ${trace_store_path}"
@@ -1023,11 +1143,21 @@ echo "Request signal profile store: ${signal_store_path}"
 echo "Artifact store: ${artifact_store_path}"
 echo "Brave executable: ${brave_binary}"
 echo "Brave log: ${brave_log}"
-echo "Category mask: ${category_mask}; expires after ${duration_seconds} seconds"
+echo "Category mask: ${category_mask}"
+if [[ "${duration_limited}" == 1 ]]; then
+  echo "Session duration: capture stops after ${duration_seconds} seconds (REB_CAPTURE_DURATION_SECONDS)"
+else
+  echo "Session duration: runs until the session is ended"
+fi
+case "${profile_kind}" in
+  research) echo "Browser profile: the persistent research profile ${profile_path}; logins and site data carry over to the next session" ;;
+  fresh) echo "Browser profile: a fresh profile for this session only, ${profile_path}" ;;
+  *) echo "Browser profile: ${profile_path} (REB_BRAVE_PROFILE)" ;;
+esac
 if [[ "${capture_canvas_images}" == 1 ]]; then
   echo "Canvas image capture: enabled for this session; outputs may contain sensitive page content"
 else
-  echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
+  echo "Canvas image capture: disabled; $(switch_hint 'Canvas images (a Content capture option)' REB_CAPTURE_CANVAS_IMAGES=1) to enable it for one session"
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
   echo "Request content capture: enabled for this session; request paths, queries, headers, cookies and bodies are retained locally, at most ${request_content_budget_mib} MiB of unique content"
@@ -1038,19 +1168,19 @@ fi
 if [[ "${capture_browser_internal}" == 1 ]]; then
   echo "Browser-internal capture: enabled; chrome:, devtools: and WebUI renderer evidence is recorded"
 else
-  echo "Browser-internal capture: excluded and counted; set REB_CAPTURE_BROWSER_INTERNAL=1 to record it"
+  echo "Browser-internal capture: excluded and counted; $(switch_hint 'Browser-internal traffic' REB_CAPTURE_BROWSER_INTERNAL=1) to record it"
 fi
 if [[ "${capture_extension_traffic}" == 1 ]]; then
   echo "Extension worker traffic: recorded under each extension id"
 else
-  echo "Extension worker traffic: excluded and counted; set REB_CAPTURE_EXTENSION_TRAFFIC=1 to record it"
+  echo "Extension worker traffic: excluded and counted; $(switch_hint 'Extension traffic' REB_CAPTURE_EXTENSION_TRAFFIC=1) to record it"
 fi
 if [[ "${console_document_start}" == 1 && "${native_console_bound}" == 1 ]]; then
   echo "Console document-start scripts: permitted for this capture browser; nothing runs until a live Console connection arms a confirmed rule"
 elif [[ "${console_document_start}" == 1 ]]; then
   echo "Console document-start scripts: requested, but the live Console binding is unavailable, so Brave did not receive the permission"
 else
-  echo "Console document-start scripts: not permitted; set REB_CONSOLE_DOCUMENT_START=1 to permit them for one session"
+  echo "Console document-start scripts: not permitted; $(switch_hint 'Allow document-start Console scripts' REB_CONSOLE_DOCUMENT_START=1) to permit them for one session"
 fi
 if [[ "${request_stacks_state}" == browser_unsupported ]]; then
   echo "Request call stacks: unavailable; this Brave does not define --reb-request-stacks"
@@ -1068,6 +1198,66 @@ fi
 echo "Capture transport: native only"
 echo "Close Brave to stop this capture session."
 
+# How a stopped child ended, in `child_ending`. Bash keeps a background job's
+# status after it exits, so `wait` still returns it, but only in this shell:
+# these run outside command substitution, which could not wait for it.
+child_ending=""
+reap_child() {
+  local status=0
+  wait "$1" 2>/dev/null || status=$?
+  if (( status > 128 )); then
+    child_ending="was stopped by signal $(kill -l $((status - 128)) 2>/dev/null || echo $((status - 128)))"
+  else
+    child_ending="exited with status ${status}"
+  fi
+}
+
+# The last line a helper logged, without the counters it prints as it stops.
+last_log_line() {
+  local line
+  line="$(grep -v -e '^Broker stopped:' -e '^Origin trace stopped:' -e '^Request signal profile stopped:' \
+    -e '^[[:space:]]*$' "$1" 2>/dev/null | tail -n 1 | cut -c1-300)"
+  printf '%s\n' "${line:-nothing}"
+}
+
+# Why the session closed when Brave or a helper stopped on its own, in
+# `stop_cause`, and the launcher's exit status in `stop_status`: 0 for an end
+# the researcher chose, so the app does not show it as a fault. Quitting Brave
+# also closes its capture connection, which ends the broker, so a stopped
+# helper first waits briefly for Brave and reports Brave when Brave was the
+# cause.
+stop_cause=""
+stop_status=1
+brave_stopped() {
+  reap_child "${brave_pid}"
+  brave_pid=""
+  if [[ "${child_ending}" == "exited with status 0" ]]; then
+    stop_cause="Brave was closed, so the live session ended. Its evidence stays in ${session_directory}."
+    stop_status=0
+  else
+    stop_cause="Brave ${child_ending}, so the live session ended. See: ${brave_log}"
+  fi
+}
+helper_stopped() {
+  local name="$1" pid="$2" log="$3" deadline
+  deadline="$(grace_deadline 2)"
+  while ((SECONDS < deadline)) && kill -0 "${brave_pid}" 2>/dev/null; do
+    sleep 0.1
+  done
+  if ! kill -0 "${brave_pid}" 2>/dev/null; then
+    brave_stopped
+    return
+  fi
+  reap_child "${pid}"
+  if [[ "${name}" == "event broker" && "${duration_limited}" == 1 ]] &&
+     grep -q -F -x 'Capture session expired' "${log}" 2>/dev/null; then
+    stop_cause="This session reached its capture time limit of ${duration_seconds} seconds (REB_CAPTURE_DURATION_SECONDS), so capture stopped and the session closed. Its evidence stays in ${session_directory}."
+    stop_status=0
+  else
+    stop_cause="The ${name} ${child_ending}, so the live session closed. Its last log line: $(last_log_line "${log}") See: ${log}"
+  fi
+}
+
 if [[ "${embedded_session}" == 1 ]]; then
   # A PID is reused once its process exits, so the owner is the process with
   # this PID and this start time.
@@ -1075,13 +1265,24 @@ if [[ "${embedded_session}" == 1 ]]; then
   while [[ -n "${session_owner_started}" &&
            "$(/bin/ps -o lstart= -p "${session_owner_pid}" 2>/dev/null || true)" == "${session_owner_started}" ]]; do
     if ! kill -0 "${brave_pid}" 2>/dev/null; then
-      fail_live_session 1 "Brave stopped; the live capture connection has closed. See: ${brave_log}"
+      brave_stopped
+      fail_live_session "${stop_status}" "${stop_cause}"
     fi
-    for dependency in "${broker_pid}" "${artifact_receiver_pid}" "${ui_pid}"; do
-      if [[ -n "${dependency}" ]] && ! kill -0 "${dependency}" 2>/dev/null; then
-        fail_live_session 1 "A live capture helper stopped; the session has closed. See: ${session_directory}"
-      fi
-    done
+    if ! kill -0 "${broker_pid}" 2>/dev/null; then
+      helper_stopped "event broker" "${broker_pid}" "${broker_log}"
+      broker_pid=""
+      fail_live_session "${stop_status}" "${stop_cause}"
+    fi
+    if [[ -n "${artifact_receiver_pid}" ]] && ! kill -0 "${artifact_receiver_pid}" 2>/dev/null; then
+      helper_stopped "artifact receiver" "${artifact_receiver_pid}" "${artifact_receiver_log}"
+      artifact_receiver_pid=""
+      fail_live_session "${stop_status}" "${stop_cause}"
+    fi
+    if ! kill -0 "${ui_pid}" 2>/dev/null; then
+      helper_stopped "evidence backend" "${ui_pid}" "${ui_log}"
+      ui_pid=""
+      fail_live_session "${stop_status}" "${stop_cause}"
+    fi
     sleep 1
   done
 else
@@ -1104,7 +1305,7 @@ else
     kill -USR1 "${broker_pid}" 2>/dev/null || true
     wait "${broker_pid}" || true
     broker_pid=""
-    fail_live_session 1 "Brave exited, but the event broker was still waiting for its capture connection, so this session recorded no browser evidence. A Brave already running with this profile may have taken the launch; quit it or use a separate REB_BRAVE_PROFILE. See: ${brave_log}"
+    fail_live_session 1 "Brave exited, but the event broker was still waiting for its capture connection, so this session recorded no browser evidence. A Brave already running with this profile may have taken the launch; quit it, or start with REB_FRESH_PROFILE=1 or a separate REB_BRAVE_PROFILE. See: ${brave_log}"
   fi
   wait "${broker_pid}"
   broker_pid=""

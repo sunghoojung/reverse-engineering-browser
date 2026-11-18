@@ -55,6 +55,7 @@ impl Fixture {
         let indexes = Indexes::new(
             &root.path().join("events.jsonl"),
             &root.path().join("trace.jsonl"),
+            &root.path().join("signals.jsonl"),
         );
         Self {
             root,

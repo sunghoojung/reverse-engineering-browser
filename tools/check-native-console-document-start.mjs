@@ -105,7 +105,7 @@ export async function checkNativeConsoleDocumentStart(root) {
     status: permitted ? 'ok' : 'unavailable', permitted, generation: String(generation),
     renderer_processes: permitted ? 1 : 0, pending_renderer_processes: armed.length ? pendingProcesses : 0,
     scripts: armed,
-    message: permitted ? undefined : 'Rebuild the pinned browser, then start a session with document_start enabled, or relaunch the live capture with REB_CONSOLE_DOCUMENT_START=1.',
+    message: permitted ? undefined : 'Start a new live session with Allow document-start Console scripts in Advanced options of New Live Session….',
     output: {
       // Every retained record after the cursor: a page is bounded by the reply,
       // not by a record count.
@@ -211,7 +211,8 @@ export async function checkNativeConsoleDocumentStart(root) {
 
   // Disabled control: no session, nothing permitted, nothing armable.
   assert.equal(ds('badge').hidden, true, 'an unarmed experiment with no session shows no indicator');
-  assert.match(ds('state').textContent, /REB_CONSOLE_DOCUMENT_START/);
+  assert.match(ds('state').textContent, /Allow document-start Console scripts on, under Advanced options in New Live Session/);
+  assert.doesNotMatch(ds('state').textContent, /REB_/, 'the notice names the app control, not a variable');
   assert.equal(ds('arm').disabled, true);
   assert.equal(ds('clear').disabled, true);
   await ds('arm').click(); await settle();
@@ -230,12 +231,13 @@ export async function checkNativeConsoleDocumentStart(root) {
   assert.equal(ds('arm').disabled, true, 'permission is not a connection or consent');
   await ds('arm').click(); await settle();
   assert.equal(calls.length, 0, 'a permitted live capture arms nothing without a connection');
-  // An older browser, or an explicit REB_CONSOLE_DOCUMENT_START=0, lists no
+  // An older browser, or a session started with the option off, lists no
   // permission: no indicator, and the settings say why.
   liveSupported = false;
   await context.testConsole.initialize(true); await context.testConsole.documentStart.refresh(true); await settle();
   assert.equal(ds('badge').hidden, true);
-  assert.match(ds('state').textContent, /lacks the rebuilt overlay, or it was started with REB_CONSOLE_DOCUMENT_START=0/);
+  assert.match(ds('state').textContent, /lacks the rebuilt overlay, or Allow document-start Console scripts was off when it started/);
+  assert.doesNotMatch(ds('state').textContent, /REB_/);
   liveSupported = null;
   await context.testConsole.initialize(true); await context.testConsole.documentStart.refresh(true); await settle();
   assert.equal(ds('badge').hidden, true);

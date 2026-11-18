@@ -97,7 +97,7 @@ assert.deepEqual(lines, [
   'setTimeout',
   'schedule @ page:30:5',
   'Microtask',
-  'the call that registered it is not recorded: promise registration stacks were off (REB_NATIVE_PROMISE_STACKS=1 records them)',
+  'the call that registered it is not recorded: promise registration stacks were off (Promise stacks, under Advanced options in New Live Session…, records them)',
   'Earlier async callers were not recorded'
 ]);
 assert.equal(tree.querySelectorAll('img').length, 0, 'captured names are text, never markup');

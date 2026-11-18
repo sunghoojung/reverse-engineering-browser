@@ -1,8 +1,9 @@
 //! Starts a live capture session for `reb-api session start` and the MCP
 //! `start_live_session` tool. It runs the same launcher as `make live` and the
 //! packaged app, detached from the caller, with named capture options in place
-//! of environment variables. Every capture switch is off unless requested, so
-//! a session never inherits a switch from the caller's shell.
+//! of environment variables. A switch the start leaves unset takes the app's
+//! default (`StartOptions::resolve`), and none is inherited from the caller's
+//! shell.
 use crate::js_invocation_sites;
 use serde_json::{Value, json};
 use std::{
@@ -15,6 +16,8 @@ use std::{
 const READY_LINE: &str = "Origin Trace live session ";
 const FAILURE_LINE: &str = "REB_LIVE_SESSION_FAILURE: ";
 const POLL: Duration = Duration::from_millis(200);
+/// run-live-session.sh's open-ended duration, the longest limit it accepts.
+const MAX_DURATION_SECONDS: u32 = 3_155_760_000;
 
 /// Capture options named after the launcher's environment switches.
 #[derive(Clone, Debug, Default)]
@@ -53,9 +56,20 @@ pub struct StartOptions {
     pub response_media: bool,
     /// Record the JavaScript and Wasm stack that started each renderer request.
     pub request_stacks: bool,
+    /// Set when request_stacks took its default: a Brave that predates the
+    /// flag then starts without stacks and says so, as in the app.
+    pub request_stacks_if_supported: bool,
     /// Permit document-start Console scripts in this capture browser. Arming
     /// one stays a separate confirmed Console action.
     pub document_start: bool,
+    /// Record browser-internal pages (chrome:, devtools: and WebUI), which are
+    /// otherwise excluded and counted.
+    pub browser_internal: bool,
+    /// Record extension worker traffic, otherwise excluded and counted.
+    pub extension_traffic: bool,
+    /// A new, empty browser profile for this session only, in place of the
+    /// agent sessions' research profile (`agent_profile_root`).
+    pub fresh_profile: bool,
     /// A site file the agent wrote, armed from a private copy.
     pub js_invocation_sites: Option<PathBuf>,
     /// The agent's own saved site set, never the researcher's.
@@ -70,10 +84,50 @@ pub struct StartOptions {
     pub sessions_root: Option<PathBuf>,
 }
 
+/// The capture switches as a start names them: None leaves one to its default.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Switches {
+    pub wasm_dispatch: Option<bool>,
+    pub wasm_call_indirect: Option<bool>,
+    pub quiet: Option<bool>,
+    pub canvas_images: Option<bool>,
+    pub request_content: Option<bool>,
+    pub request_stacks: Option<bool>,
+    pub document_start: Option<bool>,
+    pub js_invocation_digests: Option<bool>,
+}
+
 impl StartOptions {
+    /// Gives each switch the start left unset the packaged app's default
+    /// (LiveSessionOptions.defaults and LiveSessionCoordinator.captureDefaults),
+    /// so an agent's session records what a researcher's would. As in the
+    /// launcher, a default whose categories category_mask lacks is off, while
+    /// an explicit true still needs them and is refused. Content capture
+    /// defaults on only for a start confirmed with confirm_sensitive_capture.
+    /// Call it after category_mask, the invocation sites and the confirmation
+    /// are set.
+    pub fn resolve(&mut self, switches: Switches) {
+        let mask = self.category_mask.unwrap_or(4095);
+        let holds = |bits: u32| mask & bits == bits;
+        let confirmed = self.confirm_sensitive_capture;
+        let invocation = self.js_invocation_sites.is_some() || self.js_invocation_saved_sites;
+        self.wasm_dispatch = switches.wasm_dispatch.unwrap_or(holds(1536));
+        self.wasm_call_indirect = switches.wasm_call_indirect.unwrap_or(holds(1536));
+        self.quiet = switches.quiet.unwrap_or(true);
+        self.request_stacks = switches.request_stacks.unwrap_or(holds(1280));
+        self.request_stacks_if_supported = switches.request_stacks.is_none();
+        self.document_start = switches.document_start.unwrap_or(true);
+        self.canvas_images = switches.canvas_images.unwrap_or(confirmed && holds(1025));
+        self.request_content = switches.request_content.unwrap_or(confirmed && holds(1280));
+        self.js_invocation_digests = switches
+            .js_invocation_digests
+            .unwrap_or(confirmed && invocation && self.request_content);
+    }
+
     /// Reads options already checked against the `LiveSessionStart` schema.
     pub fn from_json(value: &Value) -> Self {
         let flag = |key: &str| value[key].as_bool().unwrap_or(false);
+        let switch = |key: &str| value[key].as_bool();
         let path = |key: &str| value[key].as_str().map(PathBuf::from);
         let mut wasm_budget_malformed = false;
         let cap = |key: &str, malformed: &mut bool| match &value[key] {
@@ -129,10 +183,8 @@ impl StartOptions {
                 Vec::new()
             }
         };
-        Self {
+        let mut options = Self {
             url: value["url"].as_str().map(str::to_owned),
-            wasm_dispatch: flag("wasm_dispatch"),
-            wasm_call_indirect: flag("wasm_call_indirect"),
             wasm_samples_per_function: cap("wasm_samples_per_function", &mut wasm_budget_malformed),
             wasm_samples_per_indirect_site: cap(
                 "wasm_samples_per_indirect_site",
@@ -144,12 +196,12 @@ impl StartOptions {
             wasm_budget_malformed,
             guest_adapter: path("guest_adapter"),
             js_dispatch_sites: path("js_dispatch_sites"),
-            quiet: flag("quiet"),
             category_mask: value["category_mask"].as_u64().map(|n| n as u32),
-            duration_seconds: value["duration_seconds"].as_u64().map(|n| n as u32),
+            // Saturated, so a value past u32 is refused instead of wrapping.
+            duration_seconds: value["duration_seconds"]
+                .as_u64()
+                .map(|n| n.min(u64::from(u32::MAX)) as u32),
             localhost_only: flag("localhost_only"),
-            canvas_images: flag("canvas_images"),
-            request_content: flag("request_content"),
             request_content_budget_mib: value["request_content_budget_mib"]
                 .as_u64()
                 .map(|n| n.min(u64::from(u32::MAX)) as u32),
@@ -157,17 +209,29 @@ impl StartOptions {
                 .as_u64()
                 .map(|n| n.min(u64::from(u32::MAX)) as u32),
             response_media: flag("response_media"),
-            request_stacks: flag("request_stacks"),
-            document_start: flag("document_start"),
+            browser_internal: flag("browser_internal"),
+            extension_traffic: flag("extension_traffic"),
+            fresh_profile: flag("fresh_profile"),
             js_invocation_sites: path("js_invocation_sites"),
             js_invocation_saved_sites: flag("js_invocation_saved_sites"),
-            js_invocation_digests: flag("js_invocation_digests"),
             confirm_sensitive_capture: flag("confirm_sensitive_capture"),
             publish_canonical_endpoint: flag("publish_canonical_endpoint"),
             brave_binary: path("brave_binary"),
             timeout_seconds: value["timeout_seconds"].as_u64(),
             sessions_root: None,
-        }
+            ..Self::default()
+        };
+        options.resolve(Switches {
+            wasm_dispatch: switch("wasm_dispatch"),
+            wasm_call_indirect: switch("wasm_call_indirect"),
+            quiet: switch("quiet"),
+            canvas_images: switch("canvas_images"),
+            request_content: switch("request_content"),
+            request_stacks: switch("request_stacks"),
+            document_start: switch("document_start"),
+            js_invocation_digests: switch("js_invocation_digests"),
+        });
+        options
     }
 
     /// Cross-field rules a JSON Schema cannot state clearly. The launcher
@@ -324,11 +388,15 @@ impl StartOptions {
         if wasm_budget && mask & (512 | 1024) != (512 | 1024) {
             return Err("Wasm sample budget options need the VM and Artifact category bits (512 and 1024) in category_mask".into());
         }
+        // A session runs until it is ended. A limit is optional, and the
+        // launcher's longest (a century) is the upper bound.
         if self
             .duration_seconds
-            .is_some_and(|seconds| !(60..=3600).contains(&seconds))
+            .is_some_and(|seconds| !(60..=MAX_DURATION_SECONDS).contains(&seconds))
         {
-            return Err("duration_seconds must be between 60 and 3600".into());
+            return Err(format!(
+                "duration_seconds must be from 60 to {MAX_DURATION_SECONDS}; leave it unset so the session runs until it is ended"
+            ));
         }
         if self
             .timeout_seconds
@@ -351,7 +419,6 @@ impl StartOptions {
             "wasm_module_allowlist": self.wasm_module_allowlist,
             "quiet": self.quiet,
             "category_mask": self.category_mask.unwrap_or(4095),
-            "duration_seconds": self.duration_seconds.unwrap_or(3600),
             "localhost_only": self.localhost_only,
             "canvas_images": self.canvas_images,
             "request_content": self.request_content,
@@ -360,6 +427,9 @@ impl StartOptions {
             "response_media": self.response_media,
             "request_stacks": self.request_stacks,
             "document_start": self.document_start,
+            "browser_internal": self.browser_internal,
+            "extension_traffic": self.extension_traffic,
+            "fresh_profile": self.fresh_profile,
             "js_invocation_saved_sites": self.js_invocation_saved_sites,
             "js_invocation_digests": self.js_invocation_digests,
             "publish_canonical_endpoint": self.publish_canonical_endpoint,
@@ -377,6 +447,10 @@ impl StartOptions {
         }
         if let Some(url) = &self.url {
             value["url"] = json!(url);
+        }
+        // Unset, the session runs until it is ended.
+        if let Some(seconds) = self.duration_seconds {
+            value["duration_seconds"] = json!(seconds);
         }
         if self.confirm_sensitive_capture {
             value["confirm_sensitive_capture"] = json!(true);
@@ -589,6 +663,10 @@ fn with_option_names(cause: &str) -> String {
         ("REB_CAPTURE_RESPONSE_MEDIA", "response_media"),
         ("REB_NATIVE_REQUEST_STACKS", "request_stacks"),
         ("REB_CONSOLE_DOCUMENT_START", "document_start"),
+        ("REB_CAPTURE_BROWSER_INTERNAL", "browser_internal"),
+        ("REB_CAPTURE_EXTENSION_TRAFFIC", "extension_traffic"),
+        ("REB_FRESH_PROFILE", "fresh_profile"),
+        ("REB_CAPTURE_DURATION_SECONDS", "duration_seconds"),
         (
             "REB_NATIVE_JS_INVOCATION_SITES",
             "js_invocation_sites or js_invocation_saved_sites",
@@ -637,6 +715,14 @@ fn with_option_names(cause: &str) -> String {
 /// with `js_invocation_saved_sites`.
 pub fn agent_site_store(home: &Path) -> PathBuf {
     home.join(".config/origin-trace/agent-sessions/js-invocation-sites-v1.json")
+}
+
+/// The browser profile agent sessions under this HOME share, so a sign-in
+/// carries over to the next agent session as it does for the researcher's.
+/// It is never the app's own research profile: an agent can use the logins in
+/// this one, and a researcher signs in to it only for that.
+pub fn agent_profile_root(home: &Path) -> PathBuf {
+    home.join(".config/origin-trace/agent-sessions/research-profiles")
 }
 
 /// One lowercase digest per line. Brave reads this file; an empty list is not
@@ -870,7 +956,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
         "REB_NATIVE_REQUEST_STACKS",
         "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
+        // Request stacks are on by default, so an inherited Promise stacks
+        // switch would now apply silently; agent options name no such switch.
+        "REB_NATIVE_PROMISE_STACKS",
         "REB_BRAVE_BINARY",
+        "REB_CAPTURE_DURATION_SECONDS",
     ] {
         command.env_remove(name);
     }
@@ -897,11 +987,22 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             "REB_CAPTURE_REQUEST_CONTENT",
             switch(options.request_content),
         )
-        // Strict, like named invocation sites: a Brave without the flag refuses.
+        // A named request is strict, like named invocation sites: a Brave
+        // without the flag refuses. The default is dropped by one, as in the app.
         .env("REB_NATIVE_REQUEST_STACKS", switch(options.request_stacks))
-        // Browser-internal and extension evidence are debugging opt-ins, never inherited.
-        .env("REB_CAPTURE_BROWSER_INTERNAL", "0")
-        .env("REB_CAPTURE_EXTENSION_TRAFFIC", "0")
+        .env(
+            "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
+            switch(options.request_stacks_if_supported),
+        )
+        // Browser-internal and extension evidence are opt-ins, never inherited.
+        .env(
+            "REB_CAPTURE_BROWSER_INTERNAL",
+            switch(options.browser_internal),
+        )
+        .env(
+            "REB_CAPTURE_EXTENSION_TRAFFIC",
+            switch(options.extension_traffic),
+        )
         // Document-start Console scripts run code in new matching documents.
         // The browser-session permission comes only from document_start, never
         // from an inherited switch, and it arms nothing by itself.
@@ -913,16 +1014,19 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         )
         .env("REB_LOCALHOST_ONLY", switch(options.localhost_only))
         // An agent cannot answer a macOS Keychain prompt, so agent sessions use
-        // a prompt-free isolated profile. Do not save passwords in it.
+        // Chromium's prompt-free mock Keychain, in a research profile of their
+        // own. Do not save passwords in it.
         .env("REB_USE_SYSTEM_KEYCHAIN", "0")
+        .env("REB_RESEARCH_PROFILE_ROOT", agent_profile_root(&home))
+        .env("REB_FRESH_PROFILE", switch(options.fresh_profile))
         .env(
             "REB_CAPTURE_CATEGORY_MASK",
             options.category_mask.unwrap_or(4095).to_string(),
-        )
-        .env(
-            "REB_CAPTURE_DURATION_SECONDS",
-            options.duration_seconds.unwrap_or(3600).to_string(),
         );
+    // Unset, the session runs until it is ended.
+    if let Some(seconds) = options.duration_seconds {
+        command.env("REB_CAPTURE_DURATION_SECONDS", seconds.to_string());
+    }
     if let Some(budget) = options.request_content_budget_mib {
         command.env("REB_REQUEST_CONTENT_BUDGET_MIB", budget.to_string());
     }
@@ -1095,7 +1199,7 @@ mod tests {
                 "credentials",
             ),
             (
-                json!({"guest_adapter":"/tmp/a.json"}),
+                json!({"guest_adapter":"/tmp/a.json","wasm_dispatch":false}),
                 "requires wasm_dispatch",
             ),
             (
@@ -1104,7 +1208,15 @@ mod tests {
             ),
             (json!({"canvas_images":true}), "confirm_sensitive_capture"),
             (json!({"category_mask":0}), "category_mask"),
-            (json!({"duration_seconds":7200}), "duration_seconds"),
+            (json!({"duration_seconds":59}), "duration_seconds"),
+            (
+                json!({"duration_seconds":3_155_760_001_u64}),
+                "until it is ended",
+            ),
+            (
+                json!({"duration_seconds":u64::from(u32::MAX) + 60}),
+                "until it is ended",
+            ),
             (json!({"request_content":true}), "confirm_sensitive_capture"),
             (
                 json!({"request_content":true,"confirm_sensitive_capture":true,"category_mask":1024}),
@@ -1152,7 +1264,7 @@ mod tests {
             ),
             (json!({"js_invocation_sites":"s.json"}), "absolute"),
             (
-                json!({"wasm_samples_per_function":2}),
+                json!({"wasm_samples_per_function":2,"wasm_dispatch":false,"wasm_call_indirect":false}),
                 "require wasm_dispatch",
             ),
             (
@@ -1180,7 +1292,7 @@ mod tests {
             assert!(error.contains(message), "{value}: {error}");
         }
         let effective = StartOptions::from_json(&json!({"quiet":true})).effective();
-        assert_eq!(effective["wasm_dispatch"], false);
+        assert_eq!(effective["wasm_dispatch"], true);
         assert!(effective["wasm_samples_per_function"].is_null());
         assert!(effective["wasm_samples_per_indirect_site"].is_null());
         assert_eq!(effective["wasm_function_allow"], json!([]));
@@ -1198,16 +1310,78 @@ mod tests {
         assert!(bodies.validate().is_ok());
         assert_eq!(bodies.effective()["response_body_budget_mib"], 512);
         assert_eq!(bodies.effective()["response_media"], true);
-        // Every switch an agent can name is shown, off unless named.
+        // Every switch an agent can name is shown with the app's default.
+        // Content capture defaults on only for a confirmed start.
+        for (key, on) in [
+            ("wasm_call_indirect", true),
+            ("request_stacks", true),
+            ("document_start", true),
+            ("request_content", false),
+            ("canvas_images", false),
+            ("js_invocation_saved_sites", false),
+            ("js_invocation_digests", false),
+            ("browser_internal", false),
+            ("extension_traffic", false),
+            ("fresh_profile", false),
+        ] {
+            assert_eq!(effective[key], on, "{key}");
+        }
+        assert!(
+            effective.get("duration_seconds").is_none(),
+            "a session runs until it is ended"
+        );
+        let limited = StartOptions::from_json(&json!({"duration_seconds":7200}));
+        assert!(limited.validate().is_ok());
+        assert_eq!(limited.effective()["duration_seconds"], 7200);
+        let confirmed = StartOptions::from_json(
+            &json!({"confirm_sensitive_capture":true,"js_invocation_saved_sites":true}),
+        );
+        assert!(confirmed.validate().is_ok());
+        for key in ["request_content", "canvas_images", "js_invocation_digests"] {
+            assert_eq!(confirmed.effective()[key], true, "{key}");
+        }
+        // Digests go with content, and need sites to digest.
+        let no_sites = StartOptions::from_json(&json!({"confirm_sensitive_capture":true}));
+        assert!(no_sites.validate().is_ok());
+        assert_eq!(no_sites.effective()["js_invocation_digests"], false);
+        // A mask without a default's categories leaves it off; named
+        // switches win over every default.
+        let narrow =
+            StartOptions::from_json(&json!({"category_mask":256,"confirm_sensitive_capture":true}));
+        assert!(narrow.validate().is_ok(), "{:?}", narrow.validate());
         for key in [
+            "wasm_dispatch",
+            "wasm_call_indirect",
+            "request_stacks",
             "request_content",
+            "canvas_images",
+        ] {
+            assert_eq!(narrow.effective()[key], false, "{key}");
+        }
+        let named =
+            StartOptions::from_json(&json!({"wasm_dispatch":false,"wasm_call_indirect":false,
+            "quiet":false,"request_stacks":false,"document_start":false,"request_content":false,
+            "canvas_images":false,"confirm_sensitive_capture":true,"js_invocation_saved_sites":true,
+            "js_invocation_digests":false}));
+        assert!(named.validate().is_ok());
+        for key in [
+            "wasm_dispatch",
+            "wasm_call_indirect",
+            "quiet",
             "request_stacks",
             "document_start",
-            "js_invocation_saved_sites",
+            "request_content",
+            "canvas_images",
             "js_invocation_digests",
         ] {
-            assert_eq!(effective[key], false, "{key}");
+            assert_eq!(named.effective()[key], false, "{key}");
         }
+        // A default request is dropped by a Brave without the flag; a named
+        // one is strict.
+        assert!(StartOptions::from_json(&json!({})).request_stacks_if_supported);
+        assert!(
+            !StartOptions::from_json(&json!({"request_stacks":true})).request_stacks_if_supported
+        );
         let content = |extra: Value| {
             let mut value = json!({"request_content":true,"confirm_sensitive_capture":true});
             value
@@ -1271,6 +1445,10 @@ mod tests {
             with_option_names("turn that capture off with REB_NATIVE_REQUEST_STACKS=0.").ends_with(
                 "(For this start: REB_NATIVE_REQUEST_STACKS is the option request_stacks.)"
             )
+        );
+        assert!(
+            with_option_names("or start with a fresh profile (Fresh profile in New Live Session…, or REB_FRESH_PROFILE=1).")
+                .ends_with("(For this start: REB_FRESH_PROFILE is the option fresh_profile.)")
         );
     }
 

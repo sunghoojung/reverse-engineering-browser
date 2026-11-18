@@ -322,9 +322,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.vmHostLinksGeneration += 1;
           state.selectedVmHandlerKey = null;
         }
-        const query = selection ? `?${new URLSearchParams({request_id: selection.request_id,
+        // The lab lists findings, so a session of many plain scripts reads as
+        // a count rather than one result per artifact.
+        const query = `?${new URLSearchParams({...(selection ? {request_id: selection.request_id,
           session_id: selection.root_event.session_id, root_process_id: String(selection.root_event.process_id),
-          root_sequence_number: selection.root_event.sequence_number})}` : '';
+          root_sequence_number: selection.root_event.sequence_number} : {}), view: 'findings'})}`;
         const headers = state.vmAnalysisEtag ? {'If-None-Match': state.vmAnalysisEtag} : {};
         state.vmAnalysisStatus = 'loading';
         state.vmAnalysisError = null;
@@ -816,7 +818,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (capture.calls.length === 0 || !capture.width || !capture.height || !capture.demo) {
           frame.classList.add('unavailable');
           const explanation = capturedOutput && !state.canvasImageCaptureEnabled
-            ? 'Image capture is off for this session. Restart with REB_CAPTURE_CANVAS_IMAGES=1 to retain sensitive Canvas output.'
+            ? 'Image capture is off for this session. To retain sensitive Canvas output, start a Content session with Canvas images on, under Advanced options in New Live Session….'
             : capturedOutput && capture.artifact
               ? capture.artifact.canvasPreviewNotice || owner?.imageError || capture.previewReason || capture.artifact.loadError || (capture.artifact.loading
                 ? 'Loading the retained Canvas preview…' : 'Canvas preview is waiting for a bounded read slot.')
@@ -1299,11 +1301,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const offline = state.broker === 'unavailable' || failed;
         const retainedLabel = signalEvents.length ? 'Evidence retained' : 'Disconnected';
         elements.signalSessionBadge.textContent = failed ? retainedLabel
+          : state.sessionEnded ? 'Session ended'
           : state.captureStopped ? 'Probes stopped'
           : offline ? retainedLabel
           : state.sessionMode === 'demo' ? 'Demo evidence'
             : state.sessionMode === 'live' ? 'Live native capture' : 'No capture';
-        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
+        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.sessionEnded ? 'idle'
+          : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
 
         elements.signalViewTabs.forEach(button => {
           const selected = button.dataset.signalView === state.signalView;
@@ -1537,20 +1541,23 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           (!state.artifactReceiverConnected || state.artifactReceiverError);
         const offline = brokerOffline;
         const connecting = live && state.broker === 'connecting';
-        const modeLabel = live ? (offline ? 'Live offline'
+        const ended = live && state.sessionEnded;
+        const modeLabel = ended ? 'Ended session' : live ? (offline ? 'Live offline'
           : artifactOffline ? 'Live degraded' : 'Live session')
           : idle ? 'Ready' : preview ? 'Preview' : 'Demo evidence';
-        const captureLabel = connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
-          : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
+        const captureLabel = ended ? 'Ended' : connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
+          : live && state.captureStopped ? 'Stopped' : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
         elements.sessionMode.textContent = modeLabel;
-        elements.sessionMode.dataset.kind = state.sessionMode;
-        elements.sessionMode.title = live
-          ? 'Only native broker evidence is shown; sample rows are hidden.'
-          : idle
-            ? 'No evidence is bundled. Start a live capture to populate the workspace.'
-            : preview
+        elements.sessionMode.dataset.kind = ended ? 'ended' : state.sessionMode;
+        elements.sessionMode.title = ended
+          ? 'An ended live session opened for review. Its evidence stays in its session folder; it captures nothing more.'
+          : live
+            ? 'Only native broker evidence is shown; sample rows are hidden.'
+            : idle
               ? 'No evidence is bundled. Start a live capture to populate the workspace.'
-              : 'Deterministic developer evidence is loaded.';
+              : preview
+                ? 'No evidence is bundled. Start a live capture to populate the workspace.'
+                : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
         const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies',
@@ -1571,8 +1578,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
         elements.capture.classList.toggle('preview', preview);
-        // No session is a neutral state; the ok color belongs to a live broker.
-        elements.capture.classList.toggle('idle', idle && !offline && !artifactOffline);
+        // No session and an ended one are neutral; the ok color belongs to a
+        // live broker.
+        elements.capture.classList.toggle('idle', (idle || ended) && !offline && !artifactOffline);
         elements.capture.querySelector('span:last-child').textContent = captureLabel;
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
         elements.broker.classList.toggle('offline', offline);
@@ -1667,6 +1675,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const field = document.createElement('div'); field.className = 'vm-field';
         field.append(textElement('span', '', label), textElement('strong', '', value));
         return field;
+      }
+
+      function vmRuntimeContextText(result) {
+        const context = result.runtime_context;
+        if (!context) return result.runtime === 'mixed' ? 'see each linked artifact' : 'not recorded';
+        const count = (value, word) => `${value.toLocaleString('en-US')} ${word}${value === 1 ? '' : 's'}`;
+        const total = key => context.signal_records.reduce((sum, signal) => sum + signal[key], 0);
+        const own = `${count(total('observed'), 'browser-signal record')} naming this artifact`;
+        if (context.frame_attribution === 'unavailable') return `frame unknown · ${own}`;
+        return `frame ${context.frame_id} · ${count(context.request_records, 'request record')} · ` +
+          `${own} · ${count(total('correlated'), 'other signal record')}`;
       }
 
       function vmSessionPresentation(targetState) {
@@ -2330,6 +2349,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         banner.textContent = view.headline;
         section.append(banner);
+        if (view.countLine) section.append(textElement('p', 'vm-workspace-empty', view.countLine));
         if (row) {
           for (const omission of view.omissionLines) {
             const item = document.createElement('p');
@@ -2814,7 +2834,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           fields.append(
             vmField('tier', selected.confidence),
             vmField('source artifact', selected.sourceArtifactId),
-            vmField('correlated requests (session context only)', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('frame context (correlation only)', vmRuntimeContextText(result)),
             vmField('exact response-body links', result.exact_request_links?.map(link =>
               `${link.request_id} · session ${link.root_event.session_id} · process ${link.root_event.process_id} · root ${link.root_event.sequence_number} → response ${link.response_event.sequence_number} → capture ${link.capture_event.sequence_number}`).join('; ') || 'unlinked'),
             vmField('evidence families', result.evidence_families?.join(', ') || 'none'),
@@ -2938,7 +2958,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (state.malformedVmFindings > 0) {
           setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
         } else if (state.vmFindings.length === 0) {
-          const empty = state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.';
+          const omitted = state.vmAnalysisDocument?.results_view?.omitted_results ?? 0;
+          const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
+          const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain} The lab waits for observed or explicitly inferred evidence.`;
           setVmNotice(vmLimits ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
         } else if (gapCount > 0n || vmLimits) {
           setVmNotice('gap', [
@@ -3890,10 +3912,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficLoadingId = id;
         const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
         row?.setAttribute('aria-busy', 'true');
-        // WebKit rejects a timed-out fetch with AbortError; the deadline says whether it was reached.
-        const deadline = AbortSignal.timeout(10000);
         try {
-          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, deadline]));
+          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, controller.signal);
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
@@ -3915,8 +3935,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (controller.signal.aborted) return;
           if (select) {
-            const reason = deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message;
-            const message = trafficUnreadSelectionText(indexed, reason, state.selectedRequestId !== null);
+            const message = trafficUnreadSelectionText(indexed, error.message, state.selectedRequestId !== null);
             const bar = document.querySelector('#investigation-navigation');
             // A later valid poll reads it again (retryTrafficUnreadSelection).
             state.trafficUnreadSelection = {id, indexed, message,
@@ -4085,7 +4104,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.signalProfileKey = selection.key;
             state.signalProfileEtag = response.headers.get('ETag');
           } else {
-            if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
+            if (!response.ok) {
+              // A 503 says how far the profile index has got; the next refresh asks again.
+              const failure = response.status === 503 ? await response.json().catch(() => null) : null;
+              throw new Error(typeof failure?.error === 'string' ? failure.error.slice(0, 1024)
+                : `Request signal profile store returned ${response.status}`);
+            }
             const body = await response.json();
             if (!ownsSelection()) return;
             if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');
@@ -4568,7 +4592,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             renderInspectorDetails([
               { key: 'First event', value: request.firstTimestamp, type: 'ns' },
               { key: 'Last event', value: request.lastTimestamp, type: 'ns' },
-              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              // Exact here; the Traffic column shows it compact.
+              { key: 'Duration', value: request.time === 'pending' ? trafficTimeLabel(request.time) : String(request.time), type: 'time' },
               { key: 'Lifecycle', value: request.operation, type: 'state' },
               { key: 'Events', value: request.events.length, type: 'count' },
               { key: 'Phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
@@ -9224,6 +9249,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.eventEtag = response.headers.get('ETag');
           const brokerConnected = body.broker_connected !== false;
           state.captureStopped = body.capture_stopped === true;
+          state.sessionEnded = body.session_ended === true;
           state.captureControlsAvailable = body.capture_controls_available === true;
           const nextSessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';

@@ -14,6 +14,9 @@
 //! A trace refuses a damaged store as it always refused a damaged window: the
 //! first oversized, malformed or duplicate record is kept as the index's damage
 //! and every trace over that store returns it.
+//!
+//! A third index maps each request root of the signal store to its newest
+//! request signal profile, so Traffic's Signals finds a profile of any age.
 use crate::{
     error::{Error, Result},
     event_window::{self, NamedGap},
@@ -32,12 +35,17 @@ use std::{
 
 pub const EVENTS_SUFFIX: &str = ".events-v1";
 pub const EDGES_SUFFIX: &str = ".edges-v1";
+pub const PROFILES_SUFFIX: &str = ".profiles-v1";
 /// The second layout adds the gap totals, the third the summary's counts,
 /// the fourth the flow graph's record kind.
 const EVENTS_FORMAT: &str = "reb-event-index-v1/4";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
+const PROFILES_FORMAT: &str = "reb-signal-profile-index-v1";
 /// The largest event or edge record a trace reads.
 pub const RECORD_BYTES: usize = 4096;
+/// The largest request signal profile record: 8 KiB of profile with room
+/// for the broker's encoding.
+const PROFILE_BYTES: usize = 16384;
 /// Bytes folded per call, so a reader never waits on the index for long.
 const FOLD_BYTES: u64 = 64 * 1024 * 1024;
 /// How long a trace read may spend bringing its indexes up to the stores.
@@ -122,6 +130,23 @@ const EDGE_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS edges_source ON edges(session, process, sequence);
     CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0),
         status INTEGER NOT NULL, message TEXT NOT NULL);";
+
+// A profile is immutable once written; a later record for the same root
+// replaces it, as the newest record did when the store was read backward.
+const PROFILE_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS profiles(session TEXT NOT NULL, request TEXT NOT NULL,
+        process INTEGER NOT NULL, sequence TEXT NOT NULL, start INTEGER NOT NULL,
+        end INTEGER NOT NULL, PRIMARY KEY(session, request, process, sequence)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0),
+        status INTEGER NOT NULL, message TEXT NOT NULL);";
+
+/// The exact request root a signal profile is selected by.
+pub struct ProfileKey<'a> {
+    pub session: &'a str,
+    pub request: &'a str,
+    pub process: u64,
+    pub sequence: &'a str,
+}
 
 /// What one event record is to a trace.
 enum Event {
@@ -514,6 +539,63 @@ fn fold_edge(
     Ok(())
 }
 
+fn malformed_profile() -> Error {
+    Error::new(
+        500,
+        "The evidence store contains a malformed request signal profile",
+    )
+}
+
+/// Indexes one profile by its request root. A damaged line stops every
+/// lookup, as it did when the newest profiles were read and validated whole.
+fn fold_profile(
+    transaction: &rusqlite::Transaction<'_>,
+    line: &[u8],
+    start: u64,
+    end: u64,
+) -> Result<()> {
+    if line.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    if line.len() > PROFILE_BYTES {
+        return damage(
+            transaction,
+            &Error::new(
+                500,
+                "The evidence store contains an oversized request signal profile",
+            ),
+        );
+    }
+    let Ok(profile) = serde_json::from_slice::<Value>(line) else {
+        return damage(transaction, &malformed_profile());
+    };
+    let root = &profile["root_event"];
+    let (Some(session), Some(request), Some(process), Some(sequence)) = (
+        profile["session_id"].as_str(),
+        profile["request_id"].as_str(),
+        root["process_id"].as_u64(),
+        root["sequence_number"].as_str(),
+    ) else {
+        return damage(transaction, &malformed_profile());
+    };
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO profiles(session, request, process, sequence, start, end)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .sql()?
+        .execute(params![
+            session,
+            request,
+            index_db::key(process),
+            sequence,
+            start as i64,
+            end as i64
+        ])
+        .sql()?;
+    Ok(())
+}
+
 fn duplicate_event() -> Error {
     Error::bad("Origin trace input contains a duplicate event reference")
 }
@@ -523,6 +605,8 @@ struct StoreIndex {
     index: Indexed,
     fold: Box<dyn index_db::Fold + Send>,
     oversized: &'static str,
+    /// The longest unterminated tail that can still become a record.
+    max_line: usize,
 }
 
 impl StoreIndex {
@@ -539,7 +623,7 @@ impl StoreIndex {
                 &position,
                 FOLD_BYTES,
                 deadline,
-                RECORD_BYTES,
+                self.max_line,
                 self.oversized,
                 self.fold.as_mut(),
             )?;
@@ -716,29 +800,96 @@ pub struct FlowRows {
 pub struct Indexes {
     events: StoreIndex,
     edges: StoreIndex,
+    profiles: StoreIndex,
 }
 
 impl Indexes {
-    pub fn new(store: &Path, trace_store: &Path) -> Self {
+    pub fn new(store: &Path, trace_store: &Path, signal_store: &Path) -> Self {
         Self {
             events: StoreIndex {
                 index: Indexed::new(store, EVENTS_SUFFIX, EVENTS_FORMAT, EVENT_SCHEMA),
                 fold: Box::<EventFold>::default(),
                 oversized: "The evidence store contains an oversized event",
+                max_line: RECORD_BYTES,
             },
             edges: StoreIndex {
                 index: Indexed::new(trace_store, EDGES_SUFFIX, EDGES_FORMAT, EDGE_SCHEMA),
                 fold: Box::new(fold_edge),
                 oversized: "The evidence store contains an oversized origin trace edge",
+                max_line: RECORD_BYTES,
+            },
+            profiles: StoreIndex {
+                index: Indexed::new(
+                    signal_store,
+                    PROFILES_SUFFIX,
+                    PROFILES_FORMAT,
+                    PROFILE_SCHEMA,
+                ),
+                fold: Box::new(fold_profile),
+                oversized: "The evidence store contains an oversized request signal profile",
+                max_line: PROFILE_BYTES,
             },
         }
     }
 
-    /// Folds appended records into both indexes until `deadline`.
+    /// Folds appended records into every index until `deadline`. One store's
+    /// failure does not stop the others from catching up.
     pub fn catch_up(&mut self, deadline: Instant) -> Result<()> {
-        self.events.refresh(deadline)?;
-        self.edges.refresh(deadline)?;
-        Ok(())
+        let events = self.events.refresh(deadline);
+        let edges = self.edges.refresh(deadline);
+        let profiles = self.profiles.refresh(deadline);
+        events.and(edges).and(profiles).map(|_| ())
+    }
+
+    /// The newest request signal profile of one request root, from a signal
+    /// store of any length; None when no indexed profile has that root. A
+    /// root the index has not reached yet past `deadline` is refused with how
+    /// far it got, since its profile may sit in the unindexed bytes.
+    pub fn signal_profile(&mut self, key: &ProfileKey, deadline: Instant) -> Result<Option<Value>> {
+        let Some((mut file, position)) = self.profiles.refresh(deadline)? else {
+            return Ok(None);
+        };
+        if let Some(error) = self.profiles.damage()? {
+            return Err(error);
+        }
+        let range: Option<(i64, i64)> = self
+            .profiles
+            .index
+            .sidecar()
+            .connection()
+            .prepare_cached(
+                "SELECT start, end FROM profiles
+                 WHERE session = ?1 AND request = ?2 AND process = ?3 AND sequence = ?4",
+            )
+            .sql()?
+            .query_row(
+                params![
+                    key.session,
+                    key.request,
+                    index_db::key(key.process),
+                    key.sequence
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .sql()?;
+        let Some((start, end)) = range else {
+            if !position.caught_up() {
+                return Err(Error::new(
+                    503,
+                    format!(
+                        "The request signal profiles are still being indexed ({} of {} MiB). Try again shortly.",
+                        position.indexed_to >> 20,
+                        position.file_end.div_ceil(1 << 20)
+                    ),
+                ));
+            }
+            return Ok(None);
+        };
+        let bytes = index_db::record(&mut file, start, end)?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| malformed_profile())
     }
 
     /// The event store's gap totals once its index has caught up, folding
@@ -819,10 +970,11 @@ impl Indexes {
         }))
     }
 
-    /// Removes both indexes, before a capture clear empties their stores.
+    /// Removes every index, before a capture clear empties their stores.
     pub fn discard(&mut self) -> Result<()> {
         self.events.index.discard()?;
-        self.edges.index.discard()
+        self.edges.index.discard()?;
+        self.profiles.index.discard()
     }
 
     /// The whole stores as one trace reads them, once both indexes are caught
@@ -1098,7 +1250,11 @@ mod tests {
                 for terminated in [true, false] {
                     write(&events_path, &events, terminated);
                     write(&edges_path, &edges, terminated);
-                    let mut indexes = Indexes::new(&events_path, &edges_path);
+                    let mut indexes = Indexes::new(
+                        &events_path,
+                        &edges_path,
+                        &root.path().join("signals.jsonl"),
+                    );
                     let stored = run(indexes.trace(root.path(), far()), &bodies, &query);
                     match (&stored, &sliced) {
                         (Ok(stored), Ok(sliced)) => assert_eq!(stored, sliced, "{name}"),
@@ -1169,7 +1325,11 @@ mod tests {
         events.extend((3..40_003).map(|sequence| network(sequence, sequence, "request_started")));
         write(&events_path, &events, true);
         write(&edges_path, &[parent(2, 1, 1)], true);
-        let mut indexes = Indexes::new(&events_path, &edges_path);
+        let mut indexes = Indexes::new(
+            &events_path,
+            &edges_path,
+            &root.path().join("signals.jsonl"),
+        );
         assert_eq!(steps(&mut indexes, root.path(), 1), ["2", "1"]);
 
         let mut file = std::fs::OpenOptions::new()
@@ -1207,7 +1367,11 @@ mod tests {
             .map(|sequence| network(sequence, sequence, "request_started"))
             .collect();
         write(&events_path, &events, true);
-        let mut indexes = Indexes::new(&events_path, &edges_path);
+        let mut indexes = Indexes::new(
+            &events_path,
+            &edges_path,
+            &root.path().join("signals.jsonl"),
+        );
         let refused = indexes.trace(root.path(), Instant::now()).err().unwrap();
         assert_eq!(refused.status, 503);
         assert!(
@@ -1234,7 +1398,11 @@ mod tests {
                 (500, "The evidence store contains a malformed event")
             );
         }
-        let mut reopened = Indexes::new(&events_path, &edges_path);
+        let mut reopened = Indexes::new(
+            &events_path,
+            &edges_path,
+            &root.path().join("signals.jsonl"),
+        );
         assert_eq!(
             reopened.trace(root.path(), far()).err().unwrap().status,
             500
@@ -1278,7 +1446,11 @@ mod tests {
             }
         }
         std::fs::write(&store, &text).unwrap();
-        let mut indexes = Indexes::new(&store, &root.path().join("trace.jsonl"));
+        let mut indexes = Indexes::new(
+            &store,
+            &root.path().join("trace.jsonl"),
+            &root.path().join("signals.jsonl"),
+        );
         // A store the index has not folded yet has no totals.
         assert_eq!(indexes.event_totals(Instant::now()).unwrap(), None);
         let totals = indexes.event_totals(far()).unwrap().unwrap();

@@ -140,7 +140,9 @@ enum PackageOperation {
 }
 struct VmDocumentsCache {
     signature: String,
-    analysis: Value,
+    /// Shared, never copied per read: a long session's analysis lists every
+    /// artifact, so its results stay on disk and a full read streams them.
+    analysis: Arc<vm::Analysis>,
     opcode_workspace: Result<Value>,
     host_links: Result<Value>,
 }
@@ -224,6 +226,12 @@ const INDEX_INTERVAL: Duration = Duration::from_secs(1);
 /// How long an event poll folds appended records into the gap totals; the
 /// background fold keeps the index within a second of the store.
 const EVENT_TOTALS_FOLD: Duration = Duration::from_millis(100);
+/// Script-text digests kept by content SHA-256 before the cache starts over:
+/// a few MiB, so listing saved sites reads each script version once.
+const TEXT_DIGESTS: usize = 65_536;
+/// How long a signal profile lookup may spend bringing its index up to the
+/// signal store before it answers that indexing is still under way.
+const SIGNAL_PROFILE_FOLD: Duration = Duration::from_secs(2);
 
 impl App {
     pub async fn stop(&self) {
@@ -295,6 +303,7 @@ impl App {
             indexes: Arc::new(std::sync::Mutex::new(crate::event_index::Indexes::new(
                 &options.store,
                 &options.trace_store,
+                &options.signal_store,
             ))),
             initiator_frames: Arc::default(),
             observation_sites: Arc::default(),
@@ -412,7 +421,7 @@ impl App {
         .await
         .map_err(|e| Error::new(500, e.to_string()))?
     }
-    async fn vm_documents(&self) -> Result<(Value, Result<Value>)> {
+    async fn vm_documents(&self) -> Result<(Arc<vm::Analysis>, Result<Value>)> {
         let signature = format!(
             "{}:{}:{}",
             analysis_input_signature(&self.options.artifacts.join("manifest.jsonl")),
@@ -432,7 +441,7 @@ impl App {
                 .await?;
             *cache = Some(VmDocumentsCache {
                 signature,
-                analysis: documents.analysis,
+                analysis: Arc::new(documents.analysis),
                 opcode_workspace: documents.opcode_workspace,
                 host_links: documents.host_links,
             });
@@ -1587,27 +1596,27 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                let path = self.options.signal_store.clone();
+                let indexes = self.indexes.clone();
                 self.blocking(move || {
-                    let profiles = evidence::recent(&path, 10000, 16384, "request signal profile")?;
-                    for profile in &profiles {
+                    let key = crate::event_index::ProfileKey {
+                        session: &session,
+                        request: &request,
+                        process,
+                        sequence: &sequence,
+                    };
+                    let profile = indexes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .signal_profile(&key, std::time::Instant::now() + SIGNAL_PROFILE_FOLD)?;
+                    if let Some(profile) = &profile {
                         validation::schema("SignalProfile", profile, 500)?;
                     }
-                    profiles
-                        .into_iter()
-                        .rev()
-                        .find(|p| {
-                            p["session_id"] == session
-                                && p["request_id"] == request
-                                && p["root_event"]["process_id"] == process
-                                && p["root_event"]["sequence_number"] == sequence
-                        })
-                        .ok_or_else(|| {
-                            Error::new(
-                                404,
-                                "No request signal profile matches the selected request",
-                            )
-                        })
+                    profile.ok_or_else(|| {
+                        Error::new(
+                            404,
+                            "No request signal profile matches the selected request",
+                        )
+                    })
                 })
                 .await?
             }
@@ -1635,25 +1644,61 @@ impl App {
                 } else {
                     0
                 };
-                let (mut value, _) = self.vm_documents().await?;
-                if selected {
-                    crate::vm_request_links::select(
-                        &mut value,
-                        request.unwrap(),
-                        session.unwrap(),
-                        process_id,
-                        sequence.unwrap(),
-                    );
-                }
-                etag = Some(format!(
-                    "\"{}-{}-{}-{}-{}\"",
-                    value["document_digest"].as_str().unwrap(),
+                let findings = match q.one("view")? {
+                    None => false,
+                    Some("findings") => true,
+                    Some(_) => return Err(Error::bad("view must be findings")),
+                };
+                let (analysis, _) = self.vm_documents().await?;
+                let etag = format!(
+                    "\"{}-{}-{}-{}-{}{}\"",
+                    analysis.digest(),
                     request.unwrap_or("all"),
                     session.unwrap_or("all"),
                     process.unwrap_or("all"),
-                    sequence.unwrap_or("all")
-                ));
-                value
+                    sequence.unwrap_or("all"),
+                    if findings { "-findings" } else { "" }
+                );
+                if matches_etag(headers, Some(&etag)) {
+                    return Ok(not_modified(&etag));
+                }
+                let selection = selected
+                    .then(|| [request, session, sequence].map(|value| value.unwrap().to_owned()));
+                let mut response = if selection.is_none() && !findings {
+                    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                    let length = analysis.byte_length();
+                    tokio::task::spawn_blocking(move || vm::document::stream(analysis, sender));
+                    let mut response = bytes_response(
+                        Body::from_stream(request_har::Chunks(receiver)),
+                        "application/json",
+                    );
+                    response
+                        .headers_mut()
+                        .insert("content-length", HeaderValue::from(length));
+                    response
+                } else {
+                    let bytes = self
+                        .blocking(move || {
+                            let document = match selection {
+                                Some([request, session, sequence]) => {
+                                    let mut document = analysis
+                                        .select(&request, &session, process_id, &sequence)?;
+                                    if findings {
+                                        vm::document::findings_of(&mut document);
+                                    }
+                                    document
+                                }
+                                None => analysis.findings()?,
+                            };
+                            Ok(serde_json::to_vec(&document)?)
+                        })
+                        .await?;
+                    bytes_response(bytes, "application/json")
+                };
+                response
+                    .headers_mut()
+                    .insert("etag", HeaderValue::from_str(&etag).unwrap());
+                return Ok(response);
             }
             "/api/flow-graph" => {
                 q.only(&["session_id", "generation", "cursor", "limit"], &[])?;
@@ -2231,45 +2276,47 @@ impl App {
         let root = self.options.artifacts.clone();
         let digests = self.text_digests.clone();
         let listed = saved.clone();
+        let _lookup = self.artifact_lookup.lock().await;
         let retained = self
             .blocking(move || {
-                // A store without a manifest has retained nothing yet.
-                let artifacts = if root.join("manifest.jsonl").exists() {
-                    evidence::artifacts(&root, 5000)?
-                } else {
-                    Vec::new()
-                };
-                // At most four same-URL artifacts are read per listing; their
-                // digests are cached by content SHA-256, which never changes.
-                let mut reads = 0;
-                Ok(listed
+                let deadline = std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE;
+                listed
                     .iter()
                     .map(|saved| {
-                        js_invocation_sites::retained(saved, &artifacts, |artifact| {
-                            let sha = artifact["sha256"].as_str()?.to_owned();
-                            if let Some(known) = digests.lock().ok()?.get(&sha) {
-                                return Some(known.clone());
-                            }
-                            if reads >= 4 {
-                                return None;
-                            }
-                            reads += 1;
-                            let raw = evidence::content(
-                                &root,
-                                artifact,
-                                js_invocation_sites::MAX_SOURCE_BYTES,
-                            )
-                            .ok()?;
-                            let digest = js_invocation_sites::text_digest(&raw)?;
-                            let mut cache = digests.lock().ok()?;
-                            if cache.len() >= 256 {
-                                cache.clear();
-                            }
-                            cache.insert(sha, digest.clone());
-                            Some(digest)
-                        })
+                        // Every retained version of the script, from the whole
+                        // manifest: its exact bytes, or its URL.
+                        let artifacts = crate::artifact_lookup::scripts(
+                            &root,
+                            &saved.site.artifact_sha256,
+                            saved.source_url.as_deref(),
+                            deadline,
+                        )?;
+                        Ok(js_invocation_sites::retained(
+                            saved,
+                            &artifacts,
+                            |artifact| {
+                                // Digests are cached by content SHA-256, which never changes.
+                                let sha = artifact["sha256"].as_str()?.to_owned();
+                                if let Some(known) = digests.lock().ok()?.get(&sha) {
+                                    return Some(known.clone());
+                                }
+                                let raw = evidence::content(
+                                    &root,
+                                    artifact,
+                                    js_invocation_sites::MAX_SOURCE_BYTES,
+                                )
+                                .ok()?;
+                                let digest = js_invocation_sites::text_digest(&raw)?;
+                                let mut cache = digests.lock().ok()?;
+                                if cache.len() >= TEXT_DIGESTS {
+                                    cache.clear();
+                                }
+                                cache.insert(sha, digest.clone());
+                                Some(digest)
+                            },
+                        ))
                     })
-                    .collect::<Vec<_>>())
+                    .collect::<Result<Vec<_>>>()
             })
             .await?;
         Ok(js_invocation_sites::set_document(

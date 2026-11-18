@@ -212,7 +212,7 @@ REB_NATIVE_PROMISE_STACKS=1 "$REB_API" session start \
   --url http://127.0.0.1:<port>/ --localhost-only \
   --request-content --confirm-sensitive-capture --canvas-images \
   --request-stacks --document-start --wasm-dispatch --wasm-call-indirect \
-  --brave-binary "$BRAVE" --sessions-root "$(mktemp -d)" \
+  --fresh-profile --brave-binary "$BRAVE" --sessions-root "$(mktemp -d)" \
   --duration-seconds 3600 > session.json
 EP="$(python3 -c 'import json; print(json.load(open("session.json"))["endpoint_file"])')"
 "$REB_API" call get_session_context --read-only --endpoint-file "$EP"
@@ -243,7 +243,7 @@ debugger observations. An agent connected with
 | Disk reserve session (the content start with `REB_ARTIFACT_DISK_RESERVE_MIB` above the free space) | A request and a response body are `not_captured_disk_reserve`, none is stored, and `get_session_summary` counts them under that reason | #436 |
 | Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation | #434 phase 1 |
 | Metadata session (the same start without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images`) | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` | #427, #429, #430 |
-| Session without `--request-stacks` | No stack walk runs | #429 |
+| Session with `--request-stacks=false` in place of `--request-stacks` (request stacks are on unless a start turns them off) | No stack walk runs | #429 |
 | Not runnable from Origin Trace | The pausing debugger: conditional breakpoint, scopes, step, resume, navigation and idle disarm, the lease deadline and the review cases in [native-debugger-v1.md](../product/native-debugger-v1.md#acceptance-still-required) | #434 phase 3 |
 
 One acceptance item needs a profiler rather than a fixture: "the inactive probe

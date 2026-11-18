@@ -25,9 +25,12 @@ from live_acceptance.pages import document
 from live_acceptance.report import Report
 from live_acceptance.run import Options, Run, brotli_encoder
 
-# The step 7 start command of docs/development/paired-release.md.
+# The step 7 start command of docs/development/paired-release.md. Agent sessions
+# otherwise share one research profile, so each kind takes a fresh one: no
+# cookie, cache or service worker carries from one fixture session to the next,
+# and the volume check finds its browser by the session's own profile.
 CONTENT_FLAGS = ["--localhost-only", "--request-content", "--confirm-sensitive-capture", "--canvas-images",
-                 "--request-stacks", "--document-start", "--wasm-dispatch", "--wasm-call-indirect"]
+                 "--request-stacks", "--document-start", "--wasm-dispatch", "--wasm-call-indirect", "--fresh-profile"]
 METADATA_DROPS = {"--request-content", "--confirm-sensitive-capture", "--canvas-images"}
 SETTLE_SECONDS = 3
 # A session always turns the probes on, so the inactive path is measured outside one.
@@ -55,7 +58,8 @@ KINDS = {
     "reserve": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"}, [reserve], 900, reserve.environment),
     "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS],
                      {"REB_NATIVE_PROMISE_STACKS": "1"}, [metadata], 900),
-    "no-stacks": Kind([flag for flag in CONTENT_FLAGS if flag != "--request-stacks"],
+    # Request stacks are on unless a start turns them off.
+    "no-stacks": Kind([flag for flag in CONTENT_FLAGS if flag != "--request-stacks"] + ["--request-stacks=false"],
                       {"REB_NATIVE_PROMISE_STACKS": "0"}, [nostacks], 900),
 }
 AREAS = {area.NAME: area for kind in KINDS.values() for area in kind.areas}

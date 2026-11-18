@@ -90,14 +90,19 @@ struct LiveSessionOptions: Equatable {
     })
   }
 
+  // Fresh profile is a choice for this app run only. Saved, it would start
+  // every later run's automatic session signed out, with no panel on screen
+  // to show why.
+  private static let savedFields = fields.filter { $0.key != "fresh_profile" }
+
   var stored: [String: Bool] {
-    Dictionary(uniqueKeysWithValues: Self.fields.map { ($0.key, self[keyPath: $0.path]) })
+    Dictionary(uniqueKeysWithValues: Self.savedFields.map { ($0.key, self[keyPath: $0.path]) })
   }
 
   // A saved record: a known name with a boolean value is taken, anything else
   // keeps its default, so a file from another version still loads.
   init(stored: [String: Any]) {
-    for field in Self.fields {
+    for field in Self.savedFields {
       if let number = stored[field.key] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() {
         self[keyPath: field.path] = number.boolValue
       }
@@ -152,9 +157,9 @@ struct LiveSessionOptions: Equatable {
 }
 
 // The start panel's last choices, saved for the next app run: the capture
-// mode and the session options. The content limits are not saved. A file the
-// app cannot read is ignored, and the panel starts from the environment and
-// the defaults instead.
+// mode and the session options other than Fresh profile. The content limits
+// are not saved. A file the app cannot read is ignored, and the panel starts
+// from the environment and the defaults instead.
 struct LiveSessionPreferences: Equatable {
   var mode: LiveCaptureMode?
   var options: LiveSessionOptions?

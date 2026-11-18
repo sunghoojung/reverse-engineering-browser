@@ -1056,7 +1056,9 @@ which budgets the session ran with.
 The start panel saves its capture mode and Advanced options for later app runs
 in `~/Library/Application Support/Origin Trace/live-session-preferences-v1.json`
 (user-only; `REB_LIVE_SESSION_PREFERENCES` names another path), and opens with
-them; the content limits are not saved. While any choice differs from its
+them. The content limits are not saved, and neither is **Fresh profile**: it
+holds for the rest of that app run, and the next run's automatic session opens
+the research profile again. While any choice differs from its
 default, **Advanced options** says how many (for example **2 changed**).
 `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.

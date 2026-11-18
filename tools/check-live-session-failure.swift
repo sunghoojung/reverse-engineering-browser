@@ -446,15 +446,23 @@ enum LiveSessionFailureChecks {
     for (name, value) in optionRefusals {
       guard case .failure = LiveSessionOptions.parse(value) else { preconditionFailure("options refused: \(name)") }
     }
-    precondition(LiveSessionOptions(stored: allOn.stored) == allOn
-      && LiveSessionOptions(stored: ["fresh_profile": NSNumber(value: 1), "later": yes]) == optionDefaults,
-      "a saved record keeps known booleans and defaults the rest")
+    // Fresh profile is never saved, so a later app run starts in the research
+    // profile; every other choice round trips.
+    var allOnSaved = allOn
+    allOnSaved.freshProfile = false
+    precondition(allOn.stored["fresh_profile"] == nil && LiveSessionOptions(stored: allOn.stored) == allOnSaved
+      && LiveSessionOptions(stored: ["fresh_profile": yes]) == optionDefaults
+      && LiveSessionOptions(stored: ["wasm_dispatch": NSNumber(value: 0), "later": yes]) == optionDefaults,
+      "a saved record keeps known booleans other than Fresh profile and defaults the rest")
     let state = optionDefaults.panelState["request_stacks"] as? [String: Any]
     precondition(state?["value"] as? Bool == true && state?["default"] as? Bool == true
       && optionDefaults.panelState.count == LiveSessionOptions.keys.count, "panel state")
     // Each environment switch seeds its option, and outranks a saved choice.
+    var seeded = optionDefaults
+    seeded.freshProfile = true
+    seeded.wasmDispatch = false
     precondition(LiveSessionOptions.configured(["REB_FRESH_PROFILE": "1", "REB_NATIVE_WASM_DISPATCH": "0", "REB_CAPTURE_BROWSER_INTERNAL": "x"])
-      == LiveSessionOptions(stored: ["fresh_profile": yes, "wasm_dispatch": no]), "environment seeds")
+      == seeded, "environment seeds")
     precondition(LiveSessionOptions.configured([:], saved: allOn) == allOn
       && !LiveSessionOptions.configured(["REB_CAPTURE_EXTENSION_TRAFFIC": "0"], saved: allOn).extensionTraffic, "saved choices")
     let switchCases: [(UInt32, LiveSessionOptions, [String: String])] = [
@@ -504,20 +512,22 @@ enum LiveSessionFailureChecks {
     precondition(LiveSessionPreferences.load(preferenceStore) == LiveSessionPreferences(), "missing preferences")
     let remembered = LiveSessionPreferences(mode: .metadata, options: allOn)
     try! remembered.write(to: preferenceStore)
-    precondition(LiveSessionPreferences.load(preferenceStore) == remembered, "preferences round trip")
+    precondition(LiveSessionPreferences.load(preferenceStore) == LiveSessionPreferences(mode: .metadata, options: allOnSaved),
+      "preferences round trip, without Fresh profile")
     let fileMode = ((try? FileManager.default.attributesOfItem(atPath: preferenceStore.path))?[.posixPermissions] as? NSNumber)?.intValue
     precondition(fileMode == 0o600, "user-only preferences")
     for bad in ["", "[]", "{\"version\":2,\"mode\":\"metadata\"}", "{\"mode\":\"metadata\"}"] {
       try! bad.write(to: preferenceStore, atomically: true, encoding: .utf8)
       precondition(LiveSessionPreferences.load(preferenceStore) == LiveSessionPreferences(), "unreadable preferences \(bad)")
     }
-    try! "{\"version\":1,\"mode\":\"everything\",\"options\":{\"fresh_profile\":true}}".write(to: preferenceStore, atomically: true, encoding: .utf8)
+    try! "{\"version\":1,\"mode\":\"everything\",\"options\":{\"fresh_profile\":true,\"wasm_dispatch\":false}}".write(to: preferenceStore, atomically: true, encoding: .utf8)
     precondition(LiveSessionPreferences.load(preferenceStore)
-      == LiveSessionPreferences(mode: nil, options: LiveSessionOptions(stored: ["fresh_profile": yes])), "partly readable preferences")
+      == LiveSessionPreferences(mode: nil, options: LiveSessionOptions(stored: ["wasm_dispatch": no])), "partly readable preferences")
+    precondition(LiveSessionPreferences.load(preferenceStore).options?.freshProfile == false, "a saved Fresh profile is ignored")
     precondition(LiveSessionPreferences.storeURL(environment: ["REB_LIVE_SESSION_PREFERENCES": "/a/p.json"], applicationSupport: preferenceFolder).path == "/a/p.json"
       && LiveSessionPreferences.storeURL(environment: [:], applicationSupport: preferenceFolder).lastPathComponent == LiveSessionPreferences.fileName,
       "preferences location")
-    print("PASS native saved start choices: round trip, user-only file, unreadable or other-version files ignored, unknown values defaulted, explicit location")
+    print("PASS native saved start choices: round trip without Fresh profile, user-only file, unreadable or other-version files ignored, unknown values defaulted, explicit location")
 
     // Open Recent Session lists recorded sessions newest first and leaves out
     // one a broker still writes.

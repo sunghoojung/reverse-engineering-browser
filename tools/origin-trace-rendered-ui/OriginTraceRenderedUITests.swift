@@ -3981,11 +3981,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
       try await startFails("chosen")
 
-      // Saved for the next app run, exactly as chosen.
+      // Saved for the next app run as chosen, except Fresh profile, which is
+      // for this run only: a later run's automatic session keeps the sign-ins.
       let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: expected.sessionPreferences))) as? [String: Any]
       XCTAssertEqual(saved?["version"] as? Int, 1, "\(String(describing: saved))")
       XCTAssertEqual(saved?["mode"] as? String, "metadata", "\(String(describing: saved))")
-      XCTAssertEqual(saved?["options"] as? [String: Bool], ["fresh_profile": true, "request_stacks": true, "promise_stacks": true,
+      XCTAssertEqual(saved?["options"] as? [String: Bool], ["request_stacks": true, "promise_stacks": true,
         "wasm_dispatch": false, "ignore_debugger_statements": true, "canvas_images": true, "invocation_digests": true,
         "document_start": true, "browser_internal": true, "extension_traffic": false], "the saved options: \(String(describing: saved))")
       let mode = (try FileManager.default.attributesOfItem(atPath: expected.sessionPreferences)[.posixPermissions] as? NSNumber)?.intValue

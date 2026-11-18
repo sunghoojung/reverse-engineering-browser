@@ -71,8 +71,16 @@ segments that name scheduling stacks no record here describes.
   the edge's `label`. Each task segment gives a `task` edge from the innermost
   frame of the stack that scheduled the task to the task's first frame: the
   last awaiter of the await chain, else the outermost synchronous frame, and
-  for an earlier segment the outermost frame of the later one. Frameless
-  microtask hops between them are listed in `via`. A stack deeper than 1,024
+  for an earlier segment the outermost frame of the later one. A microtask
+  segment that carries the stack that registered its reaction (kind 9, state
+  1, recorded with promise registration stacks on) is such a segment: its
+  `task` edge, task `microtask`, runs from the innermost frame of the
+  registration to the reaction's first frame, its `label` is the registering
+  call (`Promise.then`, `Promise.catch`, `Promise.finally` or `await`), and the
+  chain goes on from the registration's outermost frame. Microtask hops that
+  recorded no registration (state 6) are listed in `via` on the next task
+  edge; one whose registration was not retained (state 4 or 5) cuts the
+  chain. A stack deeper than 1,024
   frames gives one `omitted` edge across the dropped run. The innermost frame
   gets a `request`, `navigation` or `cookie_write` edge to each sink its records
   name. A stack that walks an edge more than once (a recursion, two segments

@@ -688,6 +688,16 @@ fn origin(url: &str) -> Option<String> {
     }
 }
 
+/// The call that registered a promise reaction, as the Initiator tab names it.
+fn registration(registration: u8) -> &'static str {
+    match registration {
+        1 => "Promise.then",
+        2 => "Promise.catch",
+        3 => "Promise.finally",
+        _ => "await",
+    }
+}
+
 fn combinator(frame: &Frame) -> &'static str {
     match frame.combinator {
         1 => "Promise.all",
@@ -1123,9 +1133,12 @@ impl<'a> Builder<'a> {
                 Some((frames, at)) if !frames.is_empty() => {
                     let nodes = self.run(visit, *at, frames, None);
                     if let Some(from) = nodes[0] {
+                        // A microtask's segment carries the stack that
+                        // registered its reaction: the call is the label.
                         let detail = Detail {
                             site: self.site(*at, &frames[0]),
                             via: std::mem::take(&mut via),
+                            label: (segment.kind == 9).then(|| registration(segment.registration)),
                             ..Detail::default()
                         };
                         let key = (from, to, "task", Some(task));
@@ -1143,7 +1156,8 @@ impl<'a> Builder<'a> {
                     }
                     target = outer;
                 }
-                _ if segment.kind == 9 => via.push(task),
+                // A microtask hop that recorded no registration.
+                _ if segment.kind == 9 && segment.state == 6 => via.push(task),
                 _ if segment.ends_chain() => {
                     // No script scheduled this task (the browser, the parser
                     // or a native callback queued it), or its message origin
@@ -1328,7 +1342,7 @@ fn decode(
     let segments = segments
         .into_iter()
         .map(|segment| {
-            if segment.kind == 9 || segment.state != 1 {
+            if segment.state != 1 {
                 return (segment, None);
             }
             let frames = segments_seen
@@ -1568,7 +1582,7 @@ fn decode_walks(
         .iter()
         .flatten()
         .flat_map(|(_, _, _, _, segments)| segments.iter())
-        .filter(|segment| segment.kind != 9 && segment.state == 1)
+        .filter(|segment| segment.state == 1)
         .filter(|segment| !artifacts.stacks.contains_key(&segment.digest))
         .map(|segment| hex::encode(segment.digest))
         .collect();
@@ -2664,6 +2678,71 @@ mod tests {
             (reaction["chain_cut"].as_bool(), reaction.get("chain_ends")),
             (Some(true), None)
         );
+    }
+
+    /// With promise registration stacks on, a request in a `.then` reaction
+    /// names the stack that called `.then` in its microtask segment (kind 9,
+    /// state 1). That call is a task edge into the reaction, labelled by the
+    /// registration, and the chain goes on from the registration's
+    /// outermost frame. A registration that was not retained is a cut.
+    #[test]
+    fn promise_registrations_join_their_reaction() {
+        use crate::request_stack::tests::scoped_artifact;
+        let mut f = Fixture::new();
+        let text = "function onClick() {\n  send();\n}\nfunction send() {\n  fetch('/x');\n}\nfunction arm() {\n  p.then(onClick);\n}\nfunction boot() {\n  arm();\n}\nboot();\nfunction later() {\n  send();\n}\n";
+        let at = |needle: &str| text.find(needle).unwrap() as u32;
+        let start = |name: &str| at(&format!("function {name}(")) + 9 + name.len() as u32;
+        f.artifact("javascript", "https://t.test/app.js", text.as_bytes());
+        f.event(
+            "script_identity",
+            41,
+            0,
+            7,
+            &identity_bytes(1, 2, 10, (0, 0), 99, text.as_bytes()),
+        );
+        let send = frame(1, 0, 10, at("fetch"), start("send"));
+        let click = frame(1, 0, 10, at("send();"), start("onClick"));
+        let arm = frame(1, 0, 10, at("p.then"), start("arm"));
+        let boot = frame(1, 2, 10, at("boot();\nfunction later"), 0);
+        let registered = scoped_artifact(41, 1, 0, &[arm.clone(), boot], &[], 0);
+        let digest = hex::decode(f.artifact("stack", "reb-stack:then", &registered)).unwrap();
+        let mut record = scheduling_record(9, 2, &digest, &arm);
+        (record[0], record[6], record[80]) = (2, 1, 1);
+        f.event("async_task_stack", 41, 0, 6, &record);
+        let mut then = segment(9, 1, 2, &digest);
+        then[3] = 1;
+        document_request(&mut f, 1, &[send.clone(), click], &[then]);
+        // The same kind of reaction whose registration stack was not retained.
+        let later = frame(1, 0, 10, at("send();\n}\n"), start("later"));
+        let mut lost = segment(9, 4, 2, &[9; 32]);
+        lost[3] = 1;
+        document_request(&mut f, 2, &[send, later], &[lost]);
+        let g = graph(&f);
+        assert_eq!(g["coverage"]["malformed_records"], 0, "{}", g["coverage"]);
+        let joined = edge(&g, "arm", "onClick");
+        assert_eq!(
+            (
+                joined["kind"].as_str(),
+                joined["task"].as_str(),
+                joined["label"].as_str()
+            ),
+            (Some("task"), Some("microtask"), Some("Promise.then"))
+        );
+        assert_eq!(joined["sites"][0]["line"], 8, "the .then call");
+        assert_eq!(node(&g, "onClick").get("chain_cut"), None);
+        assert_eq!(node(&g, "later")["chain_cut"], true);
+        assert_eq!(
+            g["stacks"]["unresolved"]["segment_not_retained"],
+            Value::Null
+        );
+        // The chain goes on to the top-level script that called boot.
+        let top = g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["top_level"] == true)
+            .unwrap();
+        assert_eq!(top["entries"], 2, "this request and arm's own record");
     }
 
     #[test]

@@ -7,7 +7,8 @@
 //! never runs in the server. A request's graphs go to a contained
 //! `--graph-layout-worker` process, at most two run at once, and a graph that
 //! hangs, crashes or exhausts memory costs only itself: a new worker
-//! continues with the graphs after it until the request deadline.
+//! continues with the graphs after it. A request has no size limit or
+//! deadline; one that goes away drops its future, which kills its worker.
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdout},
     sync::Semaphore,
 };
@@ -26,19 +27,7 @@ pub(crate) const WORKER_FLAG: &str = "--graph-layout-worker";
 pub(crate) const WORKER_TEST_VALUE: &str = "graph-layout";
 const ENGINE_REVISION: &str = "196ba112eba992c1460af3097c038defcf7a7e45";
 const SCHEMA: &str = "graph-layout-v1";
-const MAX_GRAPHS: usize = 64;
-const MAX_TOTAL_NODES: usize = 8_000;
-// Measured Triskel cost on tree-like graphs with some back edges: 1,000 nodes
-// 0.6 s, 3,000 nodes 6.6 s, 8,000 nodes 85 s. The per-graph limits keep one
-// graph well inside the request deadline.
-const MAX_GRAPH_NODES: usize = 2_000;
-const MAX_GRAPH_EDGES: usize = 8_000;
 const MAX_NODE_SIZE: f64 = 100_000.0;
-const DEADLINE: Duration = Duration::from_secs(10);
-/// The admitted body is at most 8 MiB; its re-encoding for the worker is
-/// bounded by the same counts.
-const MAX_WORKER_INPUT: u64 = 64 << 20;
-const MAX_REPLY_LINE: u64 = 64 << 20;
 /// Resident memory at which the worker exits. Triskel allocates with C++
 /// `new`, which the Rust allocator ceiling of the JavaScript workers does not
 /// see, so a watchdog thread samples the process peak instead.
@@ -104,9 +93,6 @@ enum Outcome {
         height: Coord,
         elapsed_ms: u64,
     },
-    TooLarge {
-        reason: String,
-    },
     Failed {
         reason: String,
     },
@@ -136,7 +122,7 @@ pub(crate) async fn route(bytes: Vec<u8>) -> Result<Vec<u8>> {
     let graphs = tokio::task::spawn_blocking(move || parse(&bytes))
         .await
         .map_err(|_| Error::new(500, "Graph layout validation failed"))??;
-    let graphs = lay_out_all(graphs, DEADLINE).await;
+    let graphs = lay_out_all(graphs).await;
     let elapsed_ms = millis(started.elapsed());
     tokio::task::spawn_blocking(move || {
         serde_json::to_vec(&Response {
@@ -162,21 +148,6 @@ fn parse(bytes: &[u8]) -> Result<Vec<Graph>> {
             "The graph layout body is malformed JSON"
         })
     })?;
-    if request.graphs.len() > MAX_GRAPHS {
-        return Err(Error::bad(format!(
-            "A graph layout request holds at most {MAX_GRAPHS} graphs"
-        )));
-    }
-    let total = request
-        .graphs
-        .iter()
-        .map(|graph| graph.nodes.len())
-        .sum::<usize>();
-    if total > MAX_TOTAL_NODES {
-        return Err(Error::bad(format!(
-            "A graph layout request holds at most {MAX_TOTAL_NODES} nodes in all"
-        )));
-    }
     let size = |value: f64| value.is_finite() && value > 0.0 && value <= MAX_NODE_SIZE;
     for (index, graph) in request.graphs.iter().enumerate() {
         if let Some(node) = graph.nodes.iter().position(|&[w, h]| !size(w) || !size(h)) {
@@ -198,14 +169,17 @@ fn parse(bytes: &[u8]) -> Result<Vec<Graph>> {
     Ok(request.graphs)
 }
 
-async fn lay_out_all(graphs: Vec<Graph>, deadline: Duration) -> Vec<Outcome> {
-    let mut outcomes = graphs.iter().map(admit).collect::<Vec<_>>();
+async fn lay_out_all(graphs: Vec<Graph>) -> Vec<Outcome> {
+    let mut outcomes = graphs
+        .iter()
+        .map(|graph| graph.nodes.is_empty().then(empty))
+        .collect::<Vec<_>>();
     let pending = (0..graphs.len())
         .filter(|&index| outcomes[index].is_none())
         .collect::<Vec<_>>();
     if !pending.is_empty() {
         let replies = match encode(graphs, pending.clone()).await {
-            Some(jobs) => in_worker(&jobs, deadline).await,
+            Some(jobs) => in_worker(&jobs).await,
             None => vec![
                 Outcome::Failed {
                     reason: "The layout request could not be encoded".to_owned(),
@@ -221,20 +195,6 @@ async fn lay_out_all(graphs: Vec<Graph>, deadline: Duration) -> Vec<Outcome> {
         .into_iter()
         .map(|outcome| outcome.expect("every graph has an outcome"))
         .collect()
-}
-
-/// The result decided without Triskel, if any.
-fn admit(graph: &Graph) -> Option<Outcome> {
-    if graph.nodes.len() > MAX_GRAPH_NODES || graph.edges.len() > MAX_GRAPH_EDGES {
-        return Some(Outcome::TooLarge {
-            reason: format!(
-                "This graph has {} nodes and {} edges; one graph is laid out with at most {MAX_GRAPH_NODES} nodes and {MAX_GRAPH_EDGES} edges",
-                graph.nodes.len(),
-                graph.edges.len()
-            ),
-        });
-    }
-    graph.nodes.is_empty().then(empty)
 }
 
 fn empty() -> Outcome {
@@ -255,17 +215,22 @@ struct Job {
 }
 
 impl Job {
-    /// Measured Triskel time grows with the square of the node count (about 2
-    /// µs times n squared on a loaded machine); four times that, and at least
-    /// 1 s, separates a slow layout from one that will never finish.
+    /// Measured Triskel time grows with the square of the graph's size (about
+    /// 2 µs times n squared on a loaded machine; tree-like graphs: 1,000
+    /// nodes 0.6 s, 3,000 nodes 6.6 s, 8,000 nodes 85 s), and edges count too
+    /// (2 nodes with 8,001 parallel edges take 1.5 s). Four times that for
+    /// nodes and edges together, and at least 1 s, separates a slow layout
+    /// from one that will never finish (the `init_rank` loop in
+    /// `vendor/README.md`). It grows with the graph, so it limits no size.
     fn budget(&self) -> Duration {
-        let nodes = self.nodes as u64;
-        Duration::from_secs(1) + Duration::from_nanos(8_000 * nodes * nodes)
+        let size = (self.nodes + self.edges) as u64;
+        Duration::from_secs(1)
+            + Duration::from_nanos(8_000u64.saturating_mul(size.saturating_mul(size)))
     }
 }
 
 /// The pending graphs encoded for the worker, off the async runtime: a request
-/// holds up to 8 MiB of numbers.
+/// can hold tens of MiB of numbers.
 async fn encode(graphs: Vec<Graph>, pending: Vec<usize>) -> Option<Vec<Job>> {
     tokio::task::spawn_blocking(move || {
         pending
@@ -288,8 +253,6 @@ async fn encode(graphs: Vec<Graph>, pending: Vec<usize>) -> Option<Vec<Job>> {
 /// Why one worker stopped before every graph it was given had a result.
 enum Stop {
     Complete,
-    /// The request deadline passed: no graph left gets a layout.
-    RequestDeadline,
     /// The graph in progress overran its own budget.
     Budget(Duration),
     /// The graph in progress crashed the worker or produced an invalid result.
@@ -300,16 +263,15 @@ enum Stop {
 
 /// Lays out `jobs` in order, one worker at a time. Triskel can loop forever
 /// or crash on some graphs (see `vendor/README.md`), so each graph has its own
-/// budget inside the request deadline: a graph that overruns it, crashes the
-/// worker or exhausts its memory gets `timeout` or `failed`, and a new worker
-/// continues with the graphs after it.
-async fn in_worker(jobs: &[Job], deadline: Duration) -> Vec<Outcome> {
+/// budget: a graph that overruns it, crashes the worker or exhausts its
+/// memory gets `timeout` or `failed`, and a new worker continues with the
+/// graphs after it.
+async fn in_worker(jobs: &[Job]) -> Vec<Outcome> {
     let mut outcomes = Vec::with_capacity(jobs.len());
     let _slot = WORKERS.acquire().await;
-    let end = tokio::time::Instant::now() + deadline;
     while outcomes.len() < jobs.len() {
         let rest = &jobs[outcomes.len()..];
-        let missing = match exchange(rest, end, &mut outcomes).await {
+        let missing = match exchange(rest, &mut outcomes).await {
             Stop::Complete => continue,
             Stop::Budget(budget) => {
                 outcomes.push(Outcome::Timeout {
@@ -324,12 +286,6 @@ async fn in_worker(jobs: &[Job], deadline: Duration) -> Vec<Outcome> {
                 outcomes.push(Outcome::Failed { reason });
                 continue;
             }
-            Stop::RequestDeadline => Outcome::Timeout {
-                reason: format!(
-                    "The layout did not finish within the {} s request deadline",
-                    deadline.as_secs_f64()
-                ),
-            },
             Stop::Abandon(reason) => Outcome::Failed { reason },
         };
         outcomes.resize(jobs.len(), missing);
@@ -354,12 +310,14 @@ fn start_worker() -> Option<(Child, Option<crate::worker::ProcessGroup>)> {
     #[cfg(unix)]
     command.process_group(0);
     let child = command.spawn().ok()?;
+    #[cfg(test)]
+    tests::WORKER.set(child.id());
     let group = child.id().map(crate::worker::ProcessGroup);
     Some((child, group))
 }
 
 /// One worker for `jobs`; each result that arrives is pushed to `outcomes`.
-async fn exchange(jobs: &[Job], end: tokio::time::Instant, outcomes: &mut Vec<Outcome>) -> Stop {
+async fn exchange(jobs: &[Job], outcomes: &mut Vec<Outcome>) -> Stop {
     let not_started = || Stop::Abandon("The layout worker could not start".to_owned());
     // The group guard kills the worker's whole process group on every return path.
     let Some((mut child, _group)) = start_worker() else {
@@ -372,7 +330,9 @@ async fn exchange(jobs: &[Job], end: tokio::time::Instant, outcomes: &mut Vec<Ou
     // The worker reads its whole request, one JSON array of the graphs,
     // before it replies. One that exits early breaks the pipe, and its exit
     // status says why.
-    let written = tokio::time::timeout_at(end, async move {
+    // A write error is the worker exiting early; its replies and exit
+    // status below say why.
+    let _ = async move {
         for (index, job) in jobs.iter().enumerate() {
             stdin
                 .write_all(if index == 0 { b"[" } else { b"," })
@@ -380,33 +340,23 @@ async fn exchange(jobs: &[Job], end: tokio::time::Instant, outcomes: &mut Vec<Ou
             stdin.write_all(&job.json).await?;
         }
         stdin.write_all(b"]").await
-    });
-    if written.await.is_err() {
-        return Stop::RequestDeadline;
     }
+    .await;
     let mut reader = BufReader::new(stdout);
     for job in jobs {
         let budget = job.budget();
-        let until = end.min(started + budget);
         let reply = async {
             match next_reply(&mut reader).await? {
                 Some(line) => parse_reply(line, job).await.map(Some),
                 None => Ok(None),
             }
         };
-        let reply = match tokio::time::timeout_at(until, reply).await {
-            Err(_) if until < end => return Stop::Budget(budget),
-            Err(_) => return Stop::RequestDeadline,
-            Ok(reply) => reply,
+        let Ok(reply) = tokio::time::timeout_at(started + budget, reply).await else {
+            return Stop::Budget(budget);
         };
         match reply {
             Ok(Some(outcome)) => outcomes.push(outcome),
-            Ok(None) => {
-                return match tokio::time::timeout_at(end, child.wait()).await {
-                    Err(_) => Stop::RequestDeadline,
-                    Ok(status) => stopped(status),
-                };
-            }
+            Ok(None) => return stopped(child.wait().await),
             Err(reason) => return Stop::Graph(reason.to_owned()),
         }
         started = tokio::time::Instant::now();
@@ -422,18 +372,13 @@ async fn next_reply(
     let mut line = Vec::new();
     loop {
         line.clear();
-        let read = (&mut *reader)
-            .take(MAX_REPLY_LINE + 1)
+        reader
             .read_until(b'\n', &mut line)
             .await
             .map_err(|_| INVALID)?;
         if line.last() != Some(&b'\n') {
             // End of output, possibly mid-line: the exit status says why.
-            return if read as u64 > MAX_REPLY_LINE {
-                Err(INVALID)
-            } else {
-                Ok(None)
-            };
+            return Ok(None);
         }
         if line.starts_with(REPLY) {
             return Ok(Some(line));
@@ -485,7 +430,7 @@ fn checked(
             if valid { Ok(outcome) } else { Err(INVALID) }
         }
         Outcome::Failed { .. } => Ok(outcome),
-        Outcome::TooLarge { .. } | Outcome::Timeout { .. } => Err(INVALID),
+        Outcome::Timeout { .. } => Err(INVALID),
     }
 }
 
@@ -536,12 +481,7 @@ pub(crate) fn worker_main() -> i32 {
         return 71;
     }
     let mut input = Vec::new();
-    if std::io::stdin()
-        .lock()
-        .take(MAX_WORKER_INPUT)
-        .read_to_end(&mut input)
-        .is_err()
-    {
+    if std::io::stdin().lock().read_to_end(&mut input).is_err() {
         return 72;
     }
     let Ok(graphs) = serde_json::from_slice::<Vec<Graph>>(&input) else {
@@ -606,11 +546,6 @@ fn lay_out(graph: &Graph) -> Outcome {
     let started = Instant::now();
     if graph.nodes.is_empty() {
         return empty();
-    }
-    if graph.nodes.len() > MAX_GRAPH_NODES || graph.edges.len() > MAX_GRAPH_EDGES {
-        return Outcome::Failed {
-            reason: "The graph exceeds the layout limits".to_owned(),
-        };
     }
     let parts = parts(graph);
     let drawings = parts
@@ -1086,6 +1021,9 @@ mod tests {
         /// The fault the workers a test starts on this thread inject.
         pub(super) static FAULT: std::cell::Cell<Option<&'static str>> =
             const { std::cell::Cell::new(None) };
+        /// The process id of the last worker a test on this thread started.
+        pub(super) static WORKER: std::cell::Cell<Option<u32>> =
+            const { std::cell::Cell::new(None) };
     }
 
     /// Test-only faults in the re-executed worker, after the first graph's
@@ -1244,7 +1182,7 @@ mod tests {
             ("single node", graph(&[[120.0, 40.0]], &[])),
         ];
         let graphs = shapes.iter().map(|(_, shape)| shape.clone()).collect();
-        let outcomes = lay_out_all(graphs, DEADLINE).await;
+        let outcomes = lay_out_all(graphs).await;
         for ((label, shape), outcome) in shapes.iter().zip(&outcomes) {
             assert_sound(shape, outcome, label);
         }
@@ -1283,7 +1221,7 @@ mod tests {
         let parts = parts(&forest);
         assert_eq!(parts.len(), 90);
         assert_eq!(parts[0].0.len(), 5, "largest part first");
-        let outcomes = lay_out_all(vec![forest.clone()], DEADLINE).await;
+        let outcomes = lay_out_all(vec![forest.clone()]).await;
         assert_sound(&forest, &outcomes[0], "forest");
         let Outcome::LaidOut { width, height, .. } = &outcomes[0] else {
             unreachable!()
@@ -1294,62 +1232,38 @@ mod tests {
         );
     }
 
+    /// Past the former 2,000-node, 8,000-edge and 8,000-nodes-per-request
+    /// limits: every graph is laid out.
     #[tokio::test]
-    async fn oversized_graphs_are_refused_alone() {
+    async fn graphs_of_any_size_are_laid_out() {
         let graphs = vec![
-            graph(&sized(MAX_GRAPH_NODES + 1), &[]),
-            graph(&sized(2), &[[0, 1]]),
-            graph(&sized(2), &vec![[0, 1]; MAX_GRAPH_EDGES + 1]),
+            graph(&sized(8_001), &[]),
+            graph(&sized(2), &vec![[0, 1]; 8_001]),
         ];
-        let outcomes = lay_out_all(graphs, DEADLINE).await;
-        for index in [0, 2] {
-            let Outcome::TooLarge { reason } = &outcomes[index] else {
-                panic!("{:?}", outcomes[index]);
-            };
-            assert!(
-                reason.contains("at most 2000 nodes and 8000 edges"),
-                "{reason}"
-            );
+        let outcomes = lay_out_all(graphs.clone()).await;
+        for (index, (graph, outcome)) in graphs.iter().zip(&outcomes).enumerate() {
+            assert_sound(graph, outcome, &format!("large graph {index}"));
         }
-        assert_sound(
-            &graph(&sized(2), &[[0, 1]]),
-            &outcomes[1],
-            "beside oversized graphs",
-        );
     }
 
     #[tokio::test]
     async fn a_stopped_graph_costs_only_itself() {
         let small = || graph(&sized(3), &[[0, 1], [1, 2]]);
-        for (fault, deadline, kept, words) in [
-            ("hang", 5_000, true, "this graph's 1.0 s budget"),
-            ("hang", 600, false, "0.6 s request deadline"),
-            ("crash", 5_000, true, "signal 6 while laying out this graph"),
-            ("memory", 5_000, true, "2 GiB memory limit on this graph"),
+        for (fault, words) in [
+            ("hang", "this graph's 1.0 s budget"),
+            ("crash", "signal 6 while laying out this graph"),
+            ("memory", "2 GiB memory limit on this graph"),
         ] {
             FAULT.set(Some(fault));
-            let outcomes = lay_out_all(
-                vec![small(), small(), small()],
-                Duration::from_millis(deadline),
-            )
-            .await;
-            let label = format!("{fault} in {deadline} ms");
-            assert_sound(&small(), &outcomes[0], &label);
+            let outcomes = lay_out_all(vec![small(), small(), small()]).await;
+            assert_sound(&small(), &outcomes[0], fault);
             let reason = match (&outcomes[1], fault) {
                 (Outcome::Timeout { reason }, "hang") | (Outcome::Failed { reason }, _) => reason,
-                (outcome, _) => panic!("{label}: {outcome:?}"),
+                (outcome, _) => panic!("{fault}: {outcome:?}"),
             };
-            assert!(reason.contains(words), "{label}: {reason}");
-            if kept {
-                // A new worker lays out the graphs after the stopped one.
-                assert_sound(&small(), &outcomes[2], &label);
-            } else {
-                assert!(
-                    matches!(&outcomes[2], Outcome::Timeout { reason: rest } if rest == reason),
-                    "{label}: {:?}",
-                    outcomes[2]
-                );
-            }
+            assert!(reason.contains(words), "{fault}: {reason}");
+            // A new worker lays out the graphs after the stopped one.
+            assert_sound(&small(), &outcomes[2], fault);
         }
     }
 
@@ -1365,7 +1279,7 @@ mod tests {
         );
         let diamond = graph(&sized(4), &[[0, 1], [0, 2], [1, 3], [2, 3]]);
         let started = Instant::now();
-        let outcomes = lay_out_all(vec![looping, diamond.clone()], DEADLINE).await;
+        let outcomes = lay_out_all(vec![looping, diamond.clone()]).await;
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
@@ -1378,22 +1292,59 @@ mod tests {
         assert_sound(&diamond, &outcomes[1], "after a looping graph");
     }
 
+    /// A request has no deadline: the client that goes away drops its
+    /// future, and that stops the worker laying out its graphs.
     #[tokio::test]
-    async fn the_request_deadline_stops_a_real_layout() {
-        let outcomes = lay_out_all(vec![tree(1_500)], Duration::from_millis(20)).await;
-        let Outcome::Timeout { reason } = &outcomes[0] else {
-            panic!("{:?}", outcomes[0]);
+    async fn a_dropped_request_stops_its_worker() {
+        FAULT.set(Some("hang"));
+        WORKER.set(None);
+        let small = || graph(&sized(3), &[[0, 1], [1, 2]]);
+        // The worker hangs after the first reply. Another test may hold both
+        // worker slots for a while, so wait for this request's worker, then
+        // drop the request well inside the second graph's 1 s budget.
+        let mut layout = Box::pin(lay_out_all(vec![small(), small()]));
+        let waited = Instant::now();
+        let pid = loop {
+            if let Ok(outcomes) = tokio::time::timeout(Duration::from_millis(20), &mut layout).await
+            {
+                panic!("the layout finished: {outcomes:?}");
+            }
+            if let Some(pid) = WORKER.get() {
+                break pid;
+            }
+            assert!(
+                waited.elapsed() < Duration::from_secs(60),
+                "no worker started"
+            );
         };
-        assert!(reason.contains("0.02 s"), "{reason}");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut layout)
+                .await
+                .is_err()
+        );
+        drop(layout);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout);
+            if state.trim().is_empty() || state.trim_start().starts_with('Z') {
+                break;
+            }
+            assert!(Instant::now() < deadline, "worker {pid} survived: {state}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
     async fn a_third_request_waits_for_a_worker_slot() {
         let small = || vec![graph(&sized(3), &[[0, 1], [1, 2]])];
         let (first, second, third) = tokio::join!(
-            lay_out_all(small(), DEADLINE),
-            lay_out_all(small(), DEADLINE),
-            lay_out_all(small(), DEADLINE)
+            lay_out_all(small()),
+            lay_out_all(small()),
+            lay_out_all(small())
         );
         for outcomes in [first, second, third] {
             assert_sound(&graph(&sized(3), &[[0, 1], [1, 2]]), &outcomes[0], "queued");
@@ -1420,7 +1371,7 @@ mod tests {
                 graph(&sized(count as usize), &edges)
             })
             .collect::<Vec<_>>();
-        let outcomes = lay_out_all(graphs.clone(), DEADLINE).await;
+        let outcomes = lay_out_all(graphs.clone()).await;
         let mut laid_out = 0;
         for (index, (graph, outcome)) in graphs.iter().zip(&outcomes).enumerate() {
             match outcome {
@@ -1434,7 +1385,6 @@ mod tests {
                         "{reason}"
                     );
                 }
-                Outcome::TooLarge { .. } => panic!("{outcome:?}"),
             }
         }
         assert!(laid_out >= 60, "{laid_out} of 64 laid out");
@@ -1495,18 +1445,9 @@ mod tests {
                 vec!["[1,1]"; nodes].join(",")
             )
         }
-        assert!(bad(&graphs(MAX_GRAPHS, 1)).is_none());
-        assert!(
-            bad(&graphs(MAX_GRAPHS + 1, 1))
-                .unwrap()
-                .contains("at most 64 graphs")
-        );
-        assert!(bad(&graphs(4, 2_000)).is_none());
-        assert!(
-            bad(&graphs(5, 1_601))
-                .unwrap()
-                .contains("8000 nodes in all")
-        );
+        // No count limit: past the former 64 graphs and 8,000 nodes in all.
+        assert!(bad(&graphs(65, 1)).is_none());
+        assert!(bad(&graphs(5, 2_001)).is_none());
     }
 
     #[test]

@@ -17,12 +17,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
     fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
 };
 
 pub const VERSION: u32 = 1;
@@ -39,24 +37,21 @@ const HIGH_ENTROPY_BITS: u8 = 7;
 const HIGH_UNITS: u8 = HIGH_ENTROPY_BITS * 30;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_HIGHEST_RANGES: usize = 8;
-const MAX_WASM_FRAMES: usize = 4096;
 const WASM_HEADER_BYTES: u64 = 8;
 /// Set on a kind cell when the window holds more than one kind.
 const MIXED_FLAG: u8 = 0x80;
-const DEADLINE: Duration = Duration::from_secs(60);
 /// The VM opcode workspace the analyzer publishes into the artifact store.
 const VM_WORKSPACE_DOCUMENT: &str = "analysis/vm-opcode-workspace-v2.json";
 /// The analyzer attributes VM bytes only inside this retained preview.
 const VM_ANALYZED_BYTES: u64 = 4096;
 
-fn check(deadline: Instant, cancelled: &AtomicBool) -> Result<()> {
+/// The map has no deadline: a large artifact takes as long as its one read
+/// does, and the request that started it stops it by going away.
+fn check(cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Relaxed) {
         return Err(
             Error::new(499, "Artifact map request was cancelled").with_code(Code::Cancelled)
         );
-    }
-    if Instant::now() >= deadline {
-        return Err(Error::new(408, "Artifact map exceeded its deadline").with_code(Code::Timeout));
     }
     Ok(())
 }
@@ -133,7 +128,6 @@ fn entropy_pass(
     artifact: &Value,
     byte_length: u64,
     cell_count: u64,
-    deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<Entropy> {
     let mut cells = vec![0u8; cell_count as usize];
@@ -150,7 +144,7 @@ fn entropy_pass(
     let mut sum_bits = 0.0f64;
     let mut max_bits = 0.0f64;
     loop {
-        check(deadline, cancelled)?;
+        check(cancelled)?;
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -358,13 +352,30 @@ struct Frame {
     end: u64,
     id: u8,
 }
+/// Every data segment's byte range, in module order, from one streaming pass
+/// over the module's sections.
+fn data_segments(bytes: &[u8], cancelled: &AtomicBool) -> Result<Vec<(u64, u64)>> {
+    let bad = |_| Error::bad("The data section did not decode");
+    let mut segments = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        if let wasmparser::Payload::DataSection(reader) = payload.map_err(bad)? {
+            for entry in reader.into_iter_with_offsets() {
+                if segments.len() % 4096 == 0 {
+                    check(cancelled)?;
+                }
+                let (offset, entry) = entry.map_err(bad)?;
+                segments.push((offset as u64, entry.range.end as u64));
+            }
+        }
+    }
+    Ok(segments)
+}
 
 /// Reads only each section's id and size, then seeks over its payload, so the
 /// walk costs one small header per section however large the module is.
 fn wasm_frames(
     file: &mut File,
     byte_length: u64,
-    deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<(Vec<Frame>, u64, Option<String>)> {
     let mut header = [0u8; 8];
@@ -378,16 +389,7 @@ fn wasm_frames(
     let mut frames = Vec::new();
     let mut position = WASM_HEADER_BYTES;
     while position < byte_length {
-        check(deadline, cancelled)?;
-        if frames.len() >= MAX_WASM_FRAMES {
-            return Ok((
-                frames,
-                position,
-                Some(format!(
-                    "Stopped after {MAX_WASM_FRAMES} sections; the rest is the undecoded tail."
-                )),
-            ));
-        }
+        check(cancelled)?;
         let mut raw = [0u8; 6];
         file.seek(SeekFrom::Start(position))?;
         let available = (byte_length - position).min(raw.len() as u64) as usize;
@@ -432,50 +434,29 @@ fn wasm_kinds(
     file: &mut File,
     byte_length: u64,
     cell_count: u64,
-    deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<Kinds> {
     let table = wasm_kind_table();
     let mut counts = KindCounts::new(table.len(), cell_count, byte_length, WASM_TAIL_KIND);
-    let (frames, decoded_end, stopped) = wasm_frames(file, byte_length, deadline, cancelled)?;
+    let (frames, decoded_end, stopped) = wasm_frames(file, byte_length, cancelled)?;
     let mut notes = Vec::new();
     if decoded_end > 0 {
         counts.add(0, WASM_HEADER_BYTES, 0);
     }
     let mut segments = Vec::<(u64, u64)>::new();
     let has_data = frames.iter().any(|frame| frame.id == 11);
-    if has_data && byte_length <= wasm::MAX_BYTES as u64 {
-        // Inspect is the existing decoder for segment boundaries; its 2 MiB
-        // input bound is why larger modules keep the data section as one kind.
-        let bytes = evidence::content(root, artifact, wasm::MAX_BYTES)?;
-        let inspected = wasm::inspect(&bytes, Some(&BTreeSet::from([11u8])));
-        match inspected {
-            Ok(report) => {
-                segments = report["rows"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter(|row| row["kind"] == "data")
-                    .filter_map(|row| row["byte_offset"].as_u64().zip(row["byte_end"].as_u64()))
-                    .collect();
-                // A filtered document is always partial, so read the data section's
-                // own coverage instead of the overall status.
-                let analyzed = report["coverage"]["analyzed_sections"].as_array();
-                if !analyzed.is_some_and(|names| names.iter().any(|name| name == "data")) {
-                    notes.push(
-                        "Inspect stopped before every data segment was listed; the remaining bytes keep the data section kind.".to_owned(),
-                    );
-                }
-            }
+    if has_data {
+        let bytes = evidence::read(root, artifact)?;
+        match data_segments(&bytes, cancelled) {
+            Ok(listed) => segments = listed,
+            Err(error) if error.status == 499 => return Err(error),
             Err(_) => {
-                notes.push("Inspect could not list data segments for this module.".to_owned());
+                notes.push(
+                    "The data section did not decode; its bytes keep the data section kind."
+                        .to_owned(),
+                );
             }
         }
-    } else if has_data {
-        notes.push(format!(
-            "Data segments are listed for modules of at most {} MiB, the Inspect input bound; the data section is shown as one kind.",
-            wasm::MAX_BYTES / (1024 * 1024)
-        ));
     }
     let mut segment_rows = 0;
     for frame in &frames {
@@ -516,7 +497,6 @@ fn script_kinds(
     artifact: &Value,
     byte_length: u64,
     cell_count: u64,
-    deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<Kinds> {
     let table = vec![
@@ -531,18 +511,7 @@ fn script_kinds(
             group: "string",
         },
     ];
-    let limit = crate::source_facts::MAX_SOURCE_BYTES as u64;
-    if byte_length > limit {
-        return Ok(unclassified(
-            byte_length,
-            cell_count,
-            &format!(
-                "String literals are identified in scripts of at most {} MiB, the JavaScript facts bound.",
-                limit / (1024 * 1024)
-            ),
-        ));
-    }
-    let bytes = evidence::content(root, artifact, limit as usize)?;
+    let bytes = evidence::read(root, artifact)?;
     let Ok(source) = String::from_utf8(bytes) else {
         return Ok(unclassified(
             byte_length,
@@ -560,7 +529,7 @@ fn script_kinds(
             string_bytes += (token.end - token.start) as u64;
         }
         if index.is_multiple_of(65536) {
-            check(deadline, cancelled)?;
+            check(cancelled)?;
         }
     }
     let (cells, kinds) = counts.finish(table);
@@ -764,17 +733,9 @@ pub fn build(root: &Path, artifact: &Value, cancelled: &AtomicBool) -> Result<Va
             "Request bodies and Canvas images are not mapped in Sources",
         ));
     }
-    let deadline = Instant::now() + DEADLINE;
     let (mut file, byte_length) = open_blob(root, artifact)?;
     let (side, cell_count) = grid(byte_length);
-    let entropy = entropy_pass(
-        &mut file,
-        artifact,
-        byte_length,
-        cell_count,
-        deadline,
-        cancelled,
-    )?;
+    let entropy = entropy_pass(&mut file, artifact, byte_length, cell_count, cancelled)?;
     let kinds = match kind {
         _ if cell_count == 0 => unclassified(0, 0, "This artifact has no bytes."),
         "wasm" => wasm_kinds(
@@ -783,10 +744,9 @@ pub fn build(root: &Path, artifact: &Value, cancelled: &AtomicBool) -> Result<Va
             &mut file,
             byte_length,
             cell_count,
-            deadline,
             cancelled,
         )?,
-        "javascript" => script_kinds(root, artifact, byte_length, cell_count, deadline, cancelled)?,
+        "javascript" => script_kinds(root, artifact, byte_length, cell_count, cancelled)?,
         "bytecode_buffer" => vm_kinds(root, artifact, byte_length, cell_count),
         _ => unclassified(
             byte_length,
@@ -1115,24 +1075,20 @@ mod tests {
         );
     }
 
+    /// Modules past the old 2 MiB Inspect bound list their data segments too.
     #[test]
-    fn large_module_keeps_framing_and_says_data_segments_are_not_split() {
+    fn large_module_lists_its_data_segments() {
         let root = tempfile::tempdir().unwrap();
-        let bytes = wasm_module(wasm::MAX_BYTES + 1024);
+        let bytes = wasm_module(3 * 1024 * 1024);
         let record = artifact(root.path(), "1", "wasm", &bytes);
         let report = run(root.path(), &record).unwrap();
         assert_eq!(report["facts"]["complete"], true);
-        assert_eq!(report["facts"]["data_segments"], 0);
-        assert!(
-            report["facts"]["notes"][0]
-                .as_str()
-                .unwrap()
-                .contains("Data segments are listed for modules")
-        );
+        assert_eq!(report["facts"]["data_segments"], 1);
+        assert_eq!(report["facts"]["notes"], json!([]));
     }
 
     #[test]
-    fn javascript_strings_are_counted_and_oversized_scripts_say_why_they_are_unclassified() {
+    fn javascript_strings_are_counted_in_scripts_of_any_size() {
         let root = tempfile::tempdir().unwrap();
         let source = format!("var a = \"{}\";\nvar b = 1;\n", "x".repeat(4096));
         let record = artifact(root.path(), "1", "javascript", source.as_bytes());
@@ -1145,16 +1101,11 @@ mod tests {
                 .iter()
                 .any(|cell| kinds[(cell & !MIXED_FLAG) as usize]["id"] == "string")
         );
-        let large = vec![b'x'; crate::source_facts::MAX_SOURCE_BYTES + 1];
-        let record = artifact(root.path(), "2", "javascript", &large);
+        let large = format!("var s = '{}';", "x".repeat(5 * 1024 * 1024));
+        let record = artifact(root.path(), "2", "javascript", large.as_bytes());
         let report = run(root.path(), &record).unwrap();
-        assert_eq!(report["facts"]["source"], "none");
-        assert!(
-            report["facts"]["notes"][0]
-                .as_str()
-                .unwrap()
-                .contains("at most 4 MiB")
-        );
+        assert_eq!(report["facts"]["source"], "javascript_lexer");
+        assert_eq!(report["facts"]["string_literals"], 1);
     }
 
     #[test]

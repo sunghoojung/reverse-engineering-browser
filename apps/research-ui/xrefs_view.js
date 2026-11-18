@@ -628,7 +628,7 @@
     if (!state.sourceWasm) return;
     const element = event.target.closest?.('.source-line');
     if (!element) return;
-    const row = state.sourceEditorView?.view?.wasmRows?.[Number(element.dataset.localLine)];
+    const row = state.sourceEditorView?.view?.wasm?.row(Number(element.dataset.localLine));
     const source = selectedSource();
     if (!row || row.byte_offset == null || !source) return;
     wasmRow = {artifactId: source.artifact_id, byteOffset: row.byte_offset};

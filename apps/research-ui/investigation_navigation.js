@@ -114,7 +114,7 @@ function investigationSnapshot() {
     sourceFormatted: state.sourceFormatted, sourceDeobfuscated: state.sourceDeobfuscated, sourceWasm: state.sourceWasm, sourcePane: state.sourcePane,
     sourceWindow: screen === 'sources' && state.sourceEditorView?.window ? {line:state.sourceEditorView.window.line, column:state.sourceEditorView.window.column,
       version:state.sourceEditorView.view.sourceVersion ?? null, assumption:Boolean(state.deobfuscationAssumeIntrinsics),
-      kind:[Boolean(state.sourceEditorView.view.derived),Boolean(state.sourceEditorView.view.formatted),Boolean(state.sourceEditorView.view.wasmRows)].join(':'), length:state.sourceEditorView.content.length} : null,
+      kind:[Boolean(state.sourceEditorView.view.derived),Boolean(state.sourceEditorView.view.formatted),Boolean(state.sourceEditorView.view.wasm)].join(':'), length:state.sourceEditorView.content.length} : null,
     focus: investigationSelector(document.activeElement, root, true), scroll,
     notice: document.querySelector('#investigation-notice').textContent.slice(0,1024)};
 }
@@ -208,7 +208,7 @@ function resumeInvestigationReturn() {
     let restoreSourcePixels = true;
     if (entry.screen === 'sources' && entry.sourceWindow && state.sourceEditorView) {
       const editor = state.sourceEditorView;
-      const kind = [Boolean(editor.view.derived),Boolean(editor.view.formatted),Boolean(editor.view.wasmRows)].join(':');
+      const kind = [Boolean(editor.view.derived),Boolean(editor.view.formatted),Boolean(editor.view.wasm)].join(':');
       if (kind === entry.sourceWindow.kind && editor.content.length === entry.sourceWindow.length &&
           (editor.view.sourceVersion ?? null) === entry.sourceWindow.version &&
           (!editor.view.derived || Boolean(state.deobfuscationAssumeIntrinsics) === entry.sourceWindow.assumption)) {
@@ -229,8 +229,7 @@ function investigationReturnLoading(entry) {
   if (entry.screen !== 'sources') return false;
   const source = selectedSource();
   return Boolean(source?.loading && sourceFactsPanel.original(source) === undefined ||
-    entry.sourceWasm && source?.kind === 'wasm' && !state.wasmCache.has(wasmKey(source)) &&
-    state.wasmRequests.get(wasmKey(source))?.status === 'loading');
+    entry.sourceWasm && source?.kind === 'wasm' && wasmInspection.state(source)?.status === 'loading');
 }
 
 function investigationSelectedGap() {

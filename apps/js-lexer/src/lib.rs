@@ -1,5 +1,7 @@
 //! One JavaScript token pass shared by the lexical analyzers that run without a
-//! parser: literal masking and the parser stack admission guard.
+//! parser: literal masking and the parser stack measurement in [`nesting`].
+//! The Origin Trace backend and the deobfuscation worker both size the stack
+//! of their recursive Oxc passes from it, so they share this crate.
 //!
 //! Comments, strings, template text and regular-expression literals are single
 //! tokens; template substitutions re-enter code. A slash starts a regular
@@ -13,7 +15,7 @@
 //! parser; consumers that bound it must not trust these guesses alone.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub enum Kind {
     /// `//` up to its line terminator, or `/* */` (to the end if unterminated).
     Comment,
     /// A quoted string. An unescaped line terminator ends an unterminated one.
@@ -35,7 +37,7 @@ pub(crate) enum Kind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Token {
+pub struct Token {
     pub kind: Kind,
     pub start: usize,
     pub end: usize,
@@ -71,7 +73,7 @@ enum Frame {
     Substitution,
 }
 
-pub(crate) struct Lexer<'a> {
+pub struct Lexer<'a> {
     bytes: &'a [u8],
     index: usize,
     previous: Previous,
@@ -111,7 +113,7 @@ fn word_byte(byte: u8) -> bool {
 }
 
 impl<'a> Lexer<'a> {
-    pub(crate) fn new(source: &'a str) -> Self {
+    pub fn new(source: &'a str) -> Self {
         Self {
             bytes: source.as_bytes(),
             index: 0,
@@ -367,6 +369,75 @@ impl Iterator for Lexer<'_> {
     }
 }
 
+/// The deepest syntactic nesting a recursive parser can reach on `source`, in
+/// levels, from one iterative token pass that never allocates per byte.
+///
+/// A level is an open delimiter, or a link in an operator, call or index chain
+/// inside one delimiter: `f()()` and `a[0][1]` nest one level per link with no
+/// operator between, `new`, `typeof`, `void`, `delete`, `await` and `yield`
+/// each add one, and so does each tagged template in `` a`x``y` ``. Literals
+/// and comments are single tokens and template substitutions re-enter syntax.
+/// A literal read where valid code may divide instead also counts its brackets
+/// and operators, so either reading of that slash stays inside the measure.
+///
+/// This only sizes a stack. It refuses nothing and cannot authorize any
+/// meaning; Oxc still owns parsing and every semantic decision. Callers turn
+/// levels into bytes with the per-level frame cost they measured for their own
+/// parser and visitors, and reserve that much stack before parsing.
+pub fn nesting(source: &str) -> usize {
+    const OPERATORS: &[u8] = b"=+-!~?&|*/%<>^.";
+    let mut delimiters = Vec::new();
+    let mut chain = 0usize;
+    let mut deepest = 0usize;
+    let mut after_call_or_index = false;
+    for token in Lexer::new(source) {
+        let text = &source.as_bytes()[token.start..token.end];
+        let mut uncertain = 0;
+        if after_call_or_index && matches!(text[0], b'(' | b'[') {
+            chain += 1;
+        }
+        if token.kind != Kind::Comment {
+            after_call_or_index = token.kind == Kind::Close && matches!(text[0], b')' | b']');
+        }
+        match token.kind {
+            Kind::Open => {
+                delimiters.push(chain);
+                chain = 0;
+            }
+            Kind::Close => chain = delimiters.pop().unwrap_or(0),
+            Kind::TemplateText if text[0] == b'`' => chain += 1,
+            Kind::Word
+                if matches!(
+                    text,
+                    b"new" | b"typeof" | b"void" | b"delete" | b"await" | b"yield"
+                ) =>
+            {
+                chain += 1;
+            }
+            Kind::Punct => {
+                for byte in text {
+                    if b";,:".contains(byte) {
+                        chain = 0;
+                    } else if OPERATORS.contains(byte) {
+                        chain += 1;
+                    }
+                }
+            }
+            Kind::Regex {
+                uncertain: true, ..
+            } => {
+                uncertain = text
+                    .iter()
+                    .filter(|byte| b"([{".contains(byte) || OPERATORS.contains(byte))
+                    .count();
+            }
+            _ => (),
+        }
+        deepest = deepest.max((delimiters.len() + uncertain).max(chain + uncertain));
+    }
+    deepest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,5 +560,42 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(regexes(&source).is_empty());
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn nesting_counts_delimiters_and_chains() {
+        assert_eq!(nesting(""), 0);
+        assert_eq!(nesting("a;"), 0);
+        assert_eq!(nesting("((1));"), 2);
+        assert_eq!(nesting("a+b+c+d;"), 3);
+        assert_eq!(nesting("f()()();"), 2);
+        assert_eq!(nesting("x = '((((((((';"), 1);
+        assert_eq!(nesting("// ((((((((\n1"), 0);
+        assert_eq!(nesting("new new new A;"), 3);
+    }
+
+    /// A divisor's nesting stays in the measure: the parser nests on these
+    /// parentheses whichever way the slash before them is read.
+    #[test]
+    fn nesting_after_a_division_or_an_uncertain_literal_is_counted() {
+        let levels = 20_000;
+        for prefix in [
+            "a++",
+            "a--",
+            "a[0]",
+            "f(a)",
+            "a = {}",
+            "f = function(){}",
+            "await",
+        ] {
+            let source = format!(
+                "var a=0,f;{prefix} / {}1{} / 2;",
+                "(".repeat(levels),
+                ")".repeat(levels)
+            );
+            assert!(nesting(&source) >= levels, "{prefix}");
+        }
+        assert!(nesting("a++ / 2 / 3;") < 8);
+        assert!(nesting("function f(){}\n/[(]/.test(s);") < 8);
     }
 }

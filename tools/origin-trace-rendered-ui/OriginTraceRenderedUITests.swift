@@ -2423,16 +2423,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) pretty-printed source map")
       try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed source map")
       try await ui.screenshot("sources-pretty-printed-\(size.name)")
-      // A file past the preview limit states it above the code. The record is marked rather than
-      // retained at 16 MiB, which would dominate this suite; the loader has its own check.
-      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = true; renderSources(); return true; })()")
-      try await ui.waitUntil("!document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice did not appear")
-      let limit = try await ui.value("document.querySelector('#source-limit-notice').innerText") as? String ?? ""
-      XCTAssertTrue(limit.contains("first 16 MiB"), "\(size.name): the notice states the limit: \(limit)")
-      try await assertLayout(ui, "#screen-sources", "\(size.name) source past the preview limit")
-      try await ui.screenshot("sources-limit-notice-\(size.name)")
-      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = false; renderSources(); return true; })()")
-      try await ui.waitUntil("document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice stayed after the record changed")
+      // Sources reads every byte of a file, so no preview limit is stated above the code.
+      let whole = try await ui.json("""
+        (() => { const source = state.artifacts.find(item => item.artifact_id === state.selectedArtifactId);
+          return {noticeHidden: document.querySelector('#source-limit-notice').hidden, truncated: Boolean(source?.contentTruncated)}; })()
+        """)
+      XCTAssertEqual(whole["noticeHidden"] as? Bool, true, "\(size.name): a whole source states no preview limit: \(whole)")
+      XCTAssertEqual(whole["truncated"] as? Bool, false, "\(size.name): the source is read whole: \(whole)")
       try await ui.click("#source-window-next")
       try await ui.waitUntil("document.querySelector('.source-line[data-line=\"1001\"]') && \(settled) && document.querySelectorAll('#source-code .syntax-string').length > 0",
         "\(size.name): the window after line 1,000 lost its colors")
@@ -2652,10 +2649,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   // The bundled reb:// workspace answers its requests natively. A request the
-  // page no longer owns, because the page reloaded while the analyst runner
-  // held it for its 2 second limit, must not be answered: WebKit raises on a
-  // reply to a stopped request, which ended the app. The runner slot must also
-  // come back, so the next run gets its own answer instead of 409.
+  // page no longer owns, because the page reloaded while a run that never
+  // ends held it, must not be answered: WebKit raises on a reply to a stopped
+  // request, which ended the app. A run has no deadline, so stopping its
+  // request must terminate the runner and free its slot, and the next run
+  // gets its own answer instead of 409.
   @MainActor
   func test21StoppedRequestIsNotAnswered() async throws {
     let ui = try Harness()
@@ -2679,9 +2677,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
         const files = current.files.map(({content_bytes, created_at_ms, updated_at_ms, ...file}) => file);
         const id = Math.max(0, ...files.map(file => file.id)) + 1, source = 'for (;;) {}';
         let body = {action: 'replace_local_analyst_workspace', expected_generation: current.generation, folders: current.folders,
-          files: [...files, {id, folder_id: 1, name: '__stopped-request.js', kind: 'analyst-script', language: 'javascript', content: source}]};
+          files: [...files, {id, folder_id: 1, name: '__stopped-request.js', kind: 'analyst-script', language: 'javascript', content: source},
+            {id: id + 1, folder_id: 1, name: '__next-run.js', kind: 'analyst-script', language: 'javascript', content: 'return 1;'}]};
         const library = await fetch('/api/local-analyst/actions', \(post)).then(response => response.json());
-        window.__rebRun = {action: 'run_local_analyst_script', protocol_version: 1, run_id: 1, script_id: id,
+        window.__rebRun = {action: 'run_local_analyst_script', protocol_version: 2, run_id: 1, script_id: id,
           library_generation: library.generation, source, variables: {}, evidence: {events: [], artifacts: [], trace_edges: [],
           signal_profiles: [], vm_analysis: null, selected_artifact: null, summary: {}}, confirmed: true, confirmed_sensitive: false};
         body = window.__rebRun;
@@ -2695,14 +2694,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
     ui.webView.reload()
     try await ui.waitUntil("window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object'",
       timeout: 30, "the bundled workspace did not reload")
-    // The runner gives up after 2 seconds and replies to the request the reload stopped.
-    try await ui.waitUntil("\(runner).then(state => state.active_run_id === null)", timeout: 10, "the analyst runner slot was not released")
-    try await Task.sleep(nanoseconds: 1_000_000_000)
+    // The reload stops the request, which terminates the runner at once.
+    try await ui.waitUntil("\(runner).then(state => state.active_run_id === null)", timeout: 10, "stopping the request did not end its run")
     let second = try await ui.json(
-      "(async () => { const body = {...JSON.parse(\(String(reflecting: run))), run_id: 2}; " +
+      "(async () => { const run = JSON.parse(\(String(reflecting: run))); " +
+      "const body = {...run, run_id: 2, script_id: run.script_id + 1, source: 'return 1;'}; " +
       "const response = await fetch('/api/local-analyst/actions', \(post)); return {status: response.status, outcome: (await response.json()).outcome}; })()")
     XCTAssertEqual(second["status"] as? Int, 200, "the next run gets its own answer: \(second)")
-    XCTAssertEqual(second["outcome"] as? String, "timed_out", "the next run reaches the runner: \(second)")
+    XCTAssertEqual(second["outcome"] as? String, "completed", "the next run reaches the runner: \(second)")
     let files = try XCTUnwrap(saved["files"] as? String)
     let generation = try XCTUnwrap(saved["generation"] as? Int)
     _ = try await ui.value(
@@ -3261,13 +3260,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"440\"]", containing: "webassembly compile")
       try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the value-flow module")
       try await ui.click("#source-wasm")
-      try await ui.waitUntil("(state.sourceEditorView?.view?.wasmRows ?? []).some(row => row.byte_offset === 0xd0)", timeout: 30, "the inspection rows did not load")
+      try await ui.waitUntil("(state.sourceEditorView?.view?.wasm?.rows ?? []).some(row => row.byte_offset === 0xd0)", timeout: 30, "the inspection rows did not load")
       try await ui.waitUntil("!document.querySelector('#value-flow').hidden", "the Trace value panel follows Inspect")
       let idle = try await ui.value("document.querySelector('#value-flow-run').disabled") as? Bool
       XCTAssertEqual(idle, true, "\(size.name): nothing to trace before a row is chosen")
       // Bring the import call row into view, then pick it with the pointer.
       _ = try await ui.value("""
-        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0xd0);
+        (() => { const page = state.sourceEditorView.view.wasm, line = page.lineBase + page.rows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0xd0);
           moveSourceWindow(line, 0, {focus: false});
           const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testTarget = '1'; return line; })()
         """)
@@ -3311,7 +3310,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let reached = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
       XCTAssertTrue(reached.hasPrefix("0x7e"), "\(size.name): arrow keys reach the load: \(reached)")
       try await ui.key(36, "\r")
-      try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasmRows[Number(line.dataset.localLine)].byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
+      try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasm.row(Number(line.dataset.localLine))?.byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
       try await ui.waitUntil("document.activeElement.closest('.source-line').dataset.valueFlow === 'source'", "the revealed load is marked as a source")
       _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
       try await Task.sleep(nanoseconds: 600_000_000)
@@ -3327,7 +3326,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.querySelectorAll('#source-code .source-line[data-value-flow]').length === 0", "Clear removes the marks")
       // A store row offers its two operands before any trace.
       _ = try await ui.value("""
-        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0x89);
+        (() => { const page = state.sourceEditorView.view.wasm, line = page.lineBase + page.rows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0x89);
           moveSourceWindow(line, 0, {focus: false});
           const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testStore = '1'; return line; })()
         """)
@@ -3336,6 +3335,58 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-wasm")
       try await ui.waitUntil("document.querySelector('#value-flow').hidden", "Hex hides the Trace value panel")
     }
+  }
+
+  // Real-size sources in the packaged app: a 24 MB bundle and a 57 MB module
+  // (artifacts 950 and 951, present only when REB_RENDERED_UI_LARGE_SOURCES
+  // names their directory). Prints how long each view takes to show its first
+  // answer, and resident memory after it.
+  @MainActor
+  func test43LargeSourcesOpenWhole() async throws {
+    let ui = try await prepare(windowSizes[0])
+    try await show(ui, "sources")
+    // The catalog loads after the screen opens; decide only once it has.
+    try await ui.waitUntil("state.artifacts.length > 0", "the artifact catalog did not load")
+    guard try await ui.value("state.artifacts.some(artifact => artifact.artifact_id === '951')") as? Bool == true else {
+      throw XCTSkip("Set REB_RENDERED_UI_LARGE_SOURCES to a directory with bundle.js and module.wasm")
+    }
+    var timings: [String] = []
+    func timed(_ label: String, _ step: () async throws -> Void) async throws {
+      let start = Date()
+      try await step()
+      let seconds = Date().timeIntervalSince(start)
+      let rss = try memorySample(ui, label)
+      timings.append(String(format: "%@ %.2f s web=%d MiB backend=%d MiB", label, seconds, (rss["web"] ?? 0) / 1024, (rss["backend"] ?? 0) / 1024))
+    }
+    let artifact = { (id: String) in "state.artifacts.find(artifact => artifact.artifact_id === '\(id)')" }
+    try await timed("open 24 MB bundle") {
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"950\"]", containing: "bundle")
+      try await ui.waitUntil("\(artifact("950"))?.contentVerified === true && document.querySelectorAll('#source-code .source-line').length > 0",
+        timeout: 300, "the bundle did not open whole")
+    }
+    let bytes = try await ui.value("\(artifact("950")).byte_size") as? Int ?? 0
+    XCTAssertGreaterThan(bytes, 20 << 20, "the bundle is real-size: \(bytes) bytes")
+    try await ui.screenshot("large-sources-bundle")
+    try await timed("find every function in the bundle") {
+      _ = try await ui.value("(() => { const input = document.querySelector('#source-search'); input.value = 'function'; input.dispatchEvent(new Event('input', {bubbles: true})); return true; })()")
+      try await ui.waitUntil("/^[0-9,]+ of [0-9,]+ matches/.test(document.querySelector('#source-position').textContent) && !/[+]|finding/.test(document.querySelector('#source-position').textContent)",
+        timeout: 300, "Find did not count the whole bundle")
+    }
+    let found = try await ui.value("document.querySelector('#source-position').textContent") as? String ?? ""
+    try await ui.screenshot("large-sources-bundle-find")
+    try await timed("open 57 MB module as hex") {
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"951\"]", containing: "module")
+      try await ui.waitUntil("\(artifact("951"))?.contentVerified === true && document.querySelectorAll('#source-code .source-line').length > 0",
+        timeout: 300, "the module did not open whole")
+    }
+    try await ui.screenshot("large-sources-module-hex")
+    try await timed("first Inspect window of the module") {
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the module")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("(state.sourceEditorView?.view?.wasm?.rows ?? []).length > 0", timeout: 300, "the first Inspect window did not load")
+    }
+    try await ui.screenshot("large-sources-module-inspect")
+    print("RENDERED_UI_LARGE_SOURCES find=\(found)\n" + timings.map { "RENDERED_UI_LARGE_SOURCES \($0)" }.joined(separator: "\n"))
   }
 
   // One resident-size sample from `ps`: the app, its web content process, the

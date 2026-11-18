@@ -17,7 +17,10 @@ use std::{
 const COLUMN_CHECKPOINT: usize = 4096;
 const MAX_SITES: usize = 4096;
 const PARSER_STACK: usize = 32 << 20;
-const MAX_SYNTAX_DEPTH: usize = 8192;
+/// Stack reserved per measured nesting level on top of `PARSER_STACK`. Debug
+/// Oxc needs about 3.3 KB per parenthesis level to parse; the semantic builder
+/// and the visitors here recurse on the same tree.
+const STACK_PER_LEVEL: usize = 8 << 10;
 
 #[cfg(test)]
 thread_local! { static PARSER_ARENA: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -2300,73 +2303,15 @@ fn unavailable(meter: &Meter, reason: &str, detail: &'static str) -> Classified 
     }
 }
 
-/// Iterative lexical admission over the shared token pass. Literals and
-/// comments are single tokens; template substitutions re-enter syntax. A
-/// literal read where valid code may divide instead also counts its bytes as
-/// nesting, so either reading of that slash stays inside the reserved stack.
-/// This pass only limits parser stack growth and cannot authorize a site. Oxc
-/// still owns parsing and all semantic decisions.
-pub(crate) fn syntax_stack(source: &str) -> Option<usize> {
-    use crate::vm::js_lexer::{Kind, Lexer};
-    const OPERATORS: &[u8] = b"=+-!~?&|*/%<>^.";
-    let mut delimiters = Vec::new();
-    let mut chain = 0usize;
-    let mut stack = PARSER_STACK;
-    let mut after_call_or_index = false;
-    for token in Lexer::new(source) {
-        let text = &source.as_bytes()[token.start..token.end];
-        let mut uncertain = 0;
-        // `f()()` and `a[0][1]` nest one level per link with no operator between.
-        if after_call_or_index && matches!(text[0], b'(' | b'[') {
-            chain += 1;
-        }
-        if token.kind != Kind::Comment {
-            after_call_or_index = token.kind == Kind::Close && matches!(text[0], b')' | b']');
-        }
-        match token.kind {
-            Kind::Open => {
-                delimiters.push(chain);
-                chain = 0;
-            }
-            Kind::Close => chain = delimiters.pop().unwrap_or(0),
-            // Each tagged template in `a`x``y`` nests one level as well.
-            Kind::TemplateText if text[0] == b'`' => chain += 1,
-            Kind::Word
-                if matches!(
-                    text,
-                    b"new" | b"typeof" | b"void" | b"delete" | b"await" | b"yield"
-                ) =>
-            {
-                chain += 1;
-            }
-            Kind::Punct => {
-                for byte in text {
-                    if b";,:".contains(byte) {
-                        chain = 0;
-                    } else if OPERATORS.contains(byte) {
-                        chain += 1;
-                    }
-                }
-            }
-            Kind::Regex {
-                uncertain: true, ..
-            } => {
-                uncertain = text
-                    .iter()
-                    .filter(|byte| b"([{".contains(byte) || OPERATORS.contains(byte))
-                    .count();
-            }
-            _ => (),
-        }
-        let (depth, chain) = (delimiters.len() + uncertain, chain + uncertain);
-        if depth > MAX_SYNTAX_DEPTH || chain > MAX_SYNTAX_DEPTH {
-            return None;
-        }
-        if depth > 1024 || chain > 1024 {
-            stack = PARSER_STACK * 2;
-        }
-    }
-    Some(stack)
+/// Parser stack for `source`: a fixed base plus a per-level reserve for the
+/// nesting the shared iterative token pass measures. The stack is mapped, not
+/// committed, so only the depth the parser reaches costs memory, and deep
+/// input is parsed rather than refused. This pass only sizes the stack and
+/// cannot authorize a site; Oxc still owns parsing and all semantic decisions.
+pub(crate) fn syntax_stack(source: &str) -> usize {
+    reb_js_lexer::nesting(source)
+        .saturating_mul(STACK_PER_LEVEL)
+        .saturating_add(PARSER_STACK)
 }
 
 fn classify_local(source: &str, meter: &Meter) -> Classified {
@@ -2379,13 +2324,7 @@ fn classify_local(source: &str, meter: &Meter) -> Classified {
         meter.count_unexamined(1);
         failure = Some("JavaScript parser memory or work admission limit reached.");
     }
-    let stack = match syntax_stack(source) {
-        Some(stack) => stack,
-        None => {
-            failure = Some("JavaScript parser nesting or expression admission limit reached.");
-            PARSER_STACK
-        }
-    };
+    let stack = syntax_stack(source);
     if failure.is_none() {
         let result = stacker::grow(stack, || {
             for source_type in [SourceType::mjs().with_script(true), SourceType::mjs()] {
@@ -2693,8 +2632,8 @@ fn classify_with_heap(source: &str, meter: &Meter, heap: u64) -> Classified {
                     .block_on(crate::worker::run(
                         &mut command,
                         &input,
-                        MAX_REPLY,
-                        worker_deadline(source.len()),
+                        Some(MAX_REPLY),
+                        Some(worker_deadline(source.len())),
                     ))
                     .map_err(|error| match error.reason.code {
                         crate::error::Code::Timeout => "timeout",
@@ -2910,12 +2849,12 @@ fn worker_drops_inherited_environment_descriptors_and_network() {
 }
 
 /// A divisor's nesting stays in the stack estimate. Debug Oxc needs about
-/// 3.3 KB of stack per parenthesis level, so 20,000 levels the guard did not
-/// see overflowed the 32 MiB parser stack: the worker crashed and every retry
-/// refused to save any analysis. Too-deep input is a counted refusal instead.
+/// 3.3 KB of stack per parenthesis level, so 20,000 levels the estimate did
+/// not see once overflowed a fixed 32 MiB parser stack and crashed the worker.
+/// Deep input now reserves its stack and is parsed instead of refused.
 #[cfg(test)]
 #[test]
-fn nesting_after_a_division_or_an_uncertain_literal_is_counted() {
+fn nesting_after_a_division_or_an_uncertain_literal_is_parsed() {
     let levels = 20_000;
     for prefix in [
         "a++",
@@ -2931,14 +2870,21 @@ fn nesting_after_a_division_or_an_uncertain_literal_is_counted() {
             "(".repeat(levels),
             ")".repeat(levels)
         );
-        assert_eq!(syntax_stack(&source), None, "{prefix}");
+        assert!(syntax_stack(&source) >= PARSER_STACK + levels * STACK_PER_LEVEL);
         let result = classify(&source, &Meter::new());
-        assert_eq!(
-            result.omissions[0]["reason"], "classification-work-limit",
-            "{prefix}"
+        assert!(
+            result
+                .omissions
+                .iter()
+                .all(|omission| omission["detail"] != WORKER_FAILED),
+            "{prefix}: {:?}",
+            result.omissions
         );
     }
     for source in ["a++ / 2 / 3;", "function f(){}\n/[(]/.test(s);"] {
-        assert_eq!(syntax_stack(source), Some(PARSER_STACK), "{source}");
+        assert!(
+            syntax_stack(source) < PARSER_STACK + 8 * STACK_PER_LEVEL,
+            "{source}"
+        );
     }
 }

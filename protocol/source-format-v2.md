@@ -1,14 +1,19 @@
-# Source format v1
+# Source format v2
 
 `GET /api/source-format` (`get_source_format`) returns a Prettier-style layout
 of one immutable JavaScript artifact, or of a JavaScript or JSON request or
 response body. It is a derived display layer: the artifact and its retained
 bytes never change.
 
+v2 removes the size and nesting bounds of v1: `limits` no longer reports
+`max_source_bytes` or `max_output_ratio`, and the `output-limit` and
+`nesting-limit` reasons are gone. A source of any size and depth is laid out.
+
 ## Request
 
-- `session_id` and `artifact_id` select one artifact exactly. The blob must be
-  at most 16 MiB, match its size and SHA-256, and decode as strict UTF-8.
+- `session_id` and `artifact_id` select one artifact exactly. The blob must
+  match its size and SHA-256 and decode as strict UTF-8. Any size is accepted
+  up to the 4 GiB that Oxc's 32-bit offsets address.
 - A `javascript` artifact is JavaScript. A `request_body` or `response_body`
   artifact is JSON when its MIME type is `application/json`, `text/json` or
   `*+json`, JavaScript when it is a JavaScript MIME type, and refused
@@ -62,16 +67,22 @@ the layout. Origin Trace reads large layouts this way.
 
 ## Containment and cost
 
-- The formatter runs in the contained JavaScript worker process: no network,
-  no file access, a heap ceiling of 64 MiB plus 128 bytes per source byte
-  (measured peaks are 80 to 100), and a deadline of 30 seconds plus 15 seconds
-  per MiB. A 12 MiB bundle formats in about 5 seconds in a debug build.
+- The formatter runs in the contained JavaScript worker process: no network
+  and no file access. Its heap ceiling is the machine's physical memory less a
+  reserve for the rest of the system (an eighth, at least 2 GiB and at most
+  half), so a source is refused only when this machine cannot hold its parse.
+  Measured peaks are 80 to 100 bytes of heap per source byte.
+- The worker's stack is sized from the source's lexical nesting before it
+  parses, so deep nesting is laid out instead of overflowing a fixed stack.
+- There is no deadline. A layout runs until it finishes or its request goes
+  away, which stops the worker. A 12 MiB bundle formats in about 5 seconds in
+  a debug build.
 - One formatter runs at a time. Results are cached in memory by SHA-256 and
-  language: at most 4 entries and 96 MiB of text.
+  language: at most 4 entries and 96 MiB of text, always keeping the newest.
 
 ## Response
 
-`schema: "source-format-v1"`, the public artifact identity in `source`,
+`schema: "source-format-v2"`, the public artifact identity in `source`,
 `language` (`javascript` or `json`), `engine`, `layout`, `mapping`,
 `line_count`, `window`, `anchors`, `text`, `cached` and `limits`.
 
@@ -82,11 +93,8 @@ response with `text`, `line_count`, `window` and `anchors` null and one
 | Reason | Meaning |
 | --- | --- |
 | `parse-failed` | The source is not a valid script or module. |
-| `output-limit` | The layout would exceed four times the source size. |
 | `fidelity-check-failed` | The layout did not reproduce the original tokens. |
-| `memory-limit` | The worker reached its heap ceiling. |
-| `nesting-limit` | The source nests deeper than the parser admission limit. |
+| `memory-limit` | The parse needs more memory than this machine can give the worker. |
 
-Worker start failures are 503, deadlines are 408, and a crash or malformed
-reply is 502. No fallback layout is ever returned; Origin Trace falls back to
+Worker start failures are 503, and a crash or malformed reply is 502. No fallback layout is ever returned; Origin Trace falls back to
 its in-page formatter and says so.

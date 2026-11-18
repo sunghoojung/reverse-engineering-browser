@@ -1886,8 +1886,13 @@ const flowGraphLayout = (() => {
   }
 
   /** The layered layout, then Triskel for the realms the client keeps when
-   * `engine` is triskel; the engine report says why each other realm stayed. */
-  async function runAsync({graph, metrics = METRICS, engine}) {
+   * `engine` is triskel. The engine report says why each other realm
+   * stayed: Triskel would draw it much wider (a wide fan of calls, which
+   * Triskel does not stack) or taller, it is past the size Triskel runs on
+   * unasked (`all` asks), it was stopped, or the route is missing or fails.
+   * `progress` hears {stage: 'triskel'} once a request is sent; `signal`
+   * stops it and keeps the layered layout. */
+  async function runAsync({graph, metrics = METRICS, engine, all = false}, {signal = null, progress = null} = {}) {
     const m = {...METRICS, ...metrics}, state = layered(graph, m), {I} = state;
     const outcomes = I.bands.map(band => ({reason: {code: band.cards.length < 2 ? 'one_card' : 'not_served'}}));
     const report = {revision: null, failure: null};
@@ -1906,7 +1911,7 @@ const flowGraphLayout = (() => {
         sized.push({band, graph: {nodes: band.cards.map(v => [state.w[v], state.h[v]]), edges: band.triskelEdges.map(e => [localIndex.get(graph.from[e]), localIndex.get(graph.to[e])]),
           width: own.contentW + own.gutterW, height: own.contentH}});
       }
-      const answer = await graphLayoutClient.layOut(sized.map(item => item.graph));
+      const answer = await graphLayoutClient.layOut(sized.map(item => item.graph), {all, signal, onSend: () => progress?.({stage: 'triskel'})});
       sized.forEach((item, index) => { outcomes[item.band.index] = answer.outcomes[index]; });
       report.revision = answer.revision;
       report.failure = answer.failure;
@@ -1920,12 +1925,21 @@ const flowGraphLayout = (() => {
 
 if (typeof importScripts === 'function') {
   importScripts('graph_layout_client.js');
+  // The block graph worker's protocol: {cancel: id} stops Triskel for that
+  // job, and {id, progress} reports a stage before the answer.
+  const running = new Map();
   self.onmessage = async event => {
+    const {id, cancel} = event.data;
+    if (cancel !== undefined) { running.get(cancel)?.abort(); return; }
+    const controller = new AbortController();
+    running.set(id, controller);
     try {
-      const result = await flowGraphLayout.runAsync(event.data);
-      self.postMessage({id: event.data.id, ok: true, result}, flowGraphLayout.transfer(result));
+      const result = await flowGraphLayout.runAsync(event.data, {signal: controller.signal, progress: stage => self.postMessage({id, progress: stage})});
+      self.postMessage({id, ok: true, result}, flowGraphLayout.transfer(result));
     } catch (error) {
-      self.postMessage({id: event.data.id, ok: false, error: error?.message ?? 'Layout failed.'});
+      self.postMessage({id, ok: false, error: error?.message ?? 'Layout failed.'});
+    } finally {
+      running.delete(id);
     }
   };
 }

@@ -207,7 +207,7 @@ a b c {
   const client = model.createSourceFormatClient({request: async url => replies.shift()(url), onChange: changed => changes.push(changed.artifact_id),
     layouts: model.createSourceLayoutWorker({spawn: null, defer: callback => callback()})});
   const reply = (status, body) => url => ({ok: status === 200, status, json: async () => ({...body, url})});
-  const document = (extra, sha256 = source.sha256) => ({schema: 'source-format-v1', mapping: 'whitespace-only', source: {artifact_id: '7', sha256}, ...extra});
+  const document = (extra, sha256 = source.sha256) => ({schema: 'source-format-v2', mapping: 'whitespace-only', source: {artifact_id: '7', sha256}, ...extra});
   const settle = () => new Promise(resolve => setImmediate(resolve));
   replies.push(reply(200, document({status: 'formatted', text: formatted})));
   assert.equal(client.view(source, original).pending, true);
@@ -246,7 +246,11 @@ a b c {
   client.view(body, '[1,2]');
   await settle();
   assert.equal(client.view(body, '[1,2]').text, '[1, 2]');
-  assert.equal(client.view({...body, byte_size: 5 * 1024 * 1024, sha256: 'c'.repeat(64)}, '[1,2]').notice, 'Oxc lays out bodies up to 4 MiB here');
+  const large = {...body, byte_size: 5 * 1024 * 1024, sha256: 'c'.repeat(64)};
+  replies.push(reply(200, document({status: 'formatted', text: '[1, 2]'}, large.sha256)));
+  assert.equal(client.view(large, '[1,2]').pending, true, 'A body of any size asks Oxc for its layout');
+  await settle();
+  assert.equal(client.view(large, '[1,2]').text, '[1, 2]');
 
   // Paged layouts: whole 1,000-line pages, each checked against its slice of the original between two anchors.
   const unit = 'var a=[1,2],b=function(){return 3};';
@@ -260,7 +264,7 @@ a b c {
     anchors.push(at);
   }
   const bigSource = {...source, artifact_id: '9', sha256: 'd'.repeat(64), byte_size: big.length, content: big};
-  const pageReply = (block, extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v1', mapping: 'whitespace-only',
+  const pageReply = (block, extra = {}) => url => ({ok: true, status: 200, json: async () => ({schema: 'source-format-v2', mapping: 'whitespace-only',
     source: {artifact_id: '9', sha256: bigSource.sha256}, status: 'formatted', language: 'javascript', line_count: lines.length,
     anchors: {lines: 1000, source_utf16: anchors}, window: {start_line: block * 1000 + 1, line_count: Math.min(1000, lines.length - block * 1000)},
     text: lines.slice(block * 1000, block * 1000 + 1000).join('\n'), url, ...extra})});
@@ -329,7 +333,7 @@ a b c {
   assert.equal(JSON.stringify(viewRows.map(row => [row.line, row.columnStart, row.text.length])), '[[0,0,1],[1,0,4095],[1,4095,3],[2,0,0]]');
 
   assert(timers.every(timer => timer.delay === 180000), 'Each request has a deadline');
-  console.log('PASS source format UI: TextMate-scope token kinds for JavaScript, JSON, CSS and HTML fixtures, Rosé Pine Moon/Dawn values and Increase Contrast in app.css, exact whitespace-only map in any lookup order and raw ranges, layout worker reply/fallback/entry, client pending/formatted/fallback/retry, body languages and the 4 MiB whole-body bound, paged layouts checked per page against their anchors with the last page kept while another loads, absolute page lines, page-to-original mapping and inverse walk, a page seeded with the original lexer state, shared code view rows (shipped modules, not rendered QA)');
+  console.log('PASS source format UI: TextMate-scope token kinds for JavaScript, JSON, CSS and HTML fixtures, Rosé Pine Moon/Dawn values and Increase Contrast in app.css, exact whitespace-only map in any lookup order and raw ranges, layout worker reply/fallback/entry, client pending/formatted/fallback/retry, body languages and whole bodies of any size, paged layouts checked per page against their anchors with the last page kept while another loads, absolute page lines, page-to-original mapping and inverse walk, a page seeded with the original lexer state, shared code view rows (shipped modules, not rendered QA)');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await checkSourceFormatUI(fileURLToPath(new URL('..', import.meta.url)));

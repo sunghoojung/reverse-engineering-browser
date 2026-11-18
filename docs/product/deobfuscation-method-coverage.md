@@ -29,39 +29,27 @@ code stays visible, and Sources reports these omissions.
 
 ## Bounds and correctness
 
-The evaluator has a depth limit of 64, a 250,000-step budget, a 16 KiB value
-limit, and at most 4,096 rewrites with 512 KiB total replacement text. Constant
-storage is capped at 64 primitive bindings and 16 local tables of at most 256
-entries per statement list. Table recovery rejects all non-index references,
+Each top-level evaluation has a depth limit of 64, its own 250,000-step
+allowance and a 16 KiB inline value limit. There is no rewrite count, constant
+count or table count limit; replacement text may grow the source to at most
+eight times its size. Table recovery rejects all non-index references,
 mutations, duplicate binding names, dynamic scope and global script bindings.
 It never assumes that `const` makes an array immutable.
 
 Each rewrite uses original UTF-8 byte ranges. Replacements are parenthesized to
 preserve precedence, member syntax and directive prologues. The worker chooses
 a non-overlapping outer expression when recursive evaluation succeeds, without
-reparsing generated nodes or looping to a fixed point. Exhausted rewrite, work or evaluation-depth budgets mark
-the representation truncated and retain the remaining source.
+reparsing generated nodes or looping to a fixed point. An evaluation that runs
+out of its allowance or depth, or a rewrite past the growth bound, marks the
+representation truncated and leaves that expression as written; the rest of the
+source is still folded.
 
-A heap-backed Tree-sitter preflight iteratively checks syntax-tree depth before
-Oxc parsing. Sources above depth 128, 2,097,152 syntax nodes, or a parse that
-asks its allocator for more than 384 MiB are rejected with a recoverable
-diagnostic. The node bound is one node per two bytes of the 4 MiB source cap,
-which admits any source up to 1,048,576 bytes whatever its shape and dense
-minified bundles to roughly 1.9 MB; the byte cap stays unreachable for the
-densest code. The depth and node bounds read a finished tree, so the parse heap
-ceiling is the one bound enforced during the parse, from its progress callback;
-it holds a refused pathological source to a measured 441.2 MiB where the same
-source previously reached 2,011.7 MiB before being refused. The traversal is
-bounded by node count and depth and never by elapsed time, and the heap ceiling
-is a byte total that follows the grammar and the source, so admission is a
-function of the supplied bytes rather than of machine speed. Only the parse
-keeps a wall-clock backstop, four seconds, sized so it cannot refuse a source
-the node bound admits. Error-recovery trees are
-rejected rather than used to infer a depth bound. This adds a conservative
-grammar admission boundary: syntax accepted by Oxc but unsupported by the
-preflight grammar remains unavailable. Literal/comment punctuation does not
-count as nesting. The worker preserves the source and can process the next
-framed request after rejection. Adapter wall-clock deadlines remain five seconds.
+No source is refused for its size, nesting or node count. The worker measures
+lexical nesting with a parser-free token pass before parsing and runs Oxc on a
+native stack sized from it, so a 196,608-deep expression is parsed rather than
+refused. Malformed syntax is the only refusal; the worker preserves the source
+and can process the next framed request after it. There is no adapter deadline:
+an analysis runs until it finishes or its request goes away.
 
 ## Validation and engines
 
@@ -136,9 +124,10 @@ nested sparse-array comparison. Arrays themselves are never emitted as replaceme
 values or propagated as immutable constants; holes remain holes in retained code.
 Object identity comparisons stay unresolved. Known intrinsic conflicts suppress
 the model even when requested.
-Owned value copies reserve cached whole-tree costs before cloning, with a shared
-8 MiB modeled allocation-work allowance, 250,000 nodes and depth 64. String
-aliases and temporary coercions consume the same monotonic budget. Tiny nested
+Owned value copies reserve cached whole-tree costs before cloning, with an
+8 MiB modeled allocation-work allowance, 250,000 nodes and depth 64 for each
+top-level evaluation. String aliases and temporary coercions consume the same
+monotonic allowance. Tiny nested
 array fixtures and symbolic cost tests cover exhaustion without executing an
 explosive growth program. This is a work budget, not a process RSS measurement.
 
@@ -163,10 +152,11 @@ still runs its update. Post-incremented indices and sequence expressions are
 supported only within the isolated local interpreter.
 
 With the explicit intrinsic assumption, literal-separator string splitting yields
-at most 256 entries. Empty separators use UTF-16 units; unrepresentable lone
+every entry. Empty separators use UTF-16 units; unrepresentable lone
 surrogates remain unresolved. No regex separator or custom split hook is run.
-Each loop admits at most 4,096 iterations and all nested loops share the
-250,000-step budget. Cycles retain the original call and mark the result truncated.
+Every statement a loop runs spends a step, so loops run until they complete or
+their evaluation's 250,000-step allowance is spent. Cycles retain the original
+call and mark the result truncated.
 
 This recovers the result of a closed dispatcher call, with original byte-range
 provenance. It does not restructure arbitrary top-level control-flow graphs.

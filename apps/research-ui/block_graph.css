@@ -49,6 +49,8 @@
 .block-graph-title { flex: 0 0 auto; max-width: 40%; overflow: hidden; color: var(--text); font: 600 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .block-graph-stats { flex: 0 1 auto; min-width: 0; overflow: hidden; color: var(--muted); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .block-graph-evidence { flex: 0 0 auto; color: var(--accent); font: 11px var(--mono); }
+.block-graph-engine-run { flex: 0 0 auto; color: var(--muted); font: 11px var(--sans); white-space: nowrap; }
+.block-graph-engine-run[hidden], .block-graph-triskel[hidden] { display: none; }
 .block-graph-tools { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-left: auto; }
 .block-graph-tool[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--text); }
 .block-graph-zoom-bar { display: flex; align-items: center; gap: 2px; }

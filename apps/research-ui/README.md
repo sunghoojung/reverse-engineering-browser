@@ -531,7 +531,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -1240,23 +1240,29 @@ captured path and query, and its Payload tab shows them parsed:
   Clicking a token shows its exact raw range. Form bodies are a name/value table and
   multipart bodies list each part's name, filename, type and size, with the
   boundary read from the first line. Other text is colored by its type. Binary
-  bytes are only shown as hex. Long sources render as they scroll, in blocks
+  bytes are only shown as hex: every byte, 256 KiB at a time with **Previous
+  256 KiB** and **Next 256 KiB**. Long sources render as they scroll, in blocks
   of at most 200 rows and 64 KiB, and no more than 64 KiB of them a frame, so
   a one-line body never lays out at once.
-- **Find**, **Copy value** and **Copy as JSON** act on the selected row, or on
-  the whole payload. Arrow keys move through, open and close tree rows.
+- **Find** counts every match in the query string and the body, with no match
+  cap: tree keys and leaf values, form fields and parts as listed, or in Source
+  the whole text, layout or every hex row. Source is counted in the background
+  as in Sources (`N of M+ · finding X%` until the exact count), and a hex match
+  in another window opens that window. **Copy value** and **Copy as JSON** act
+  on the selected row, or on the whole payload. Arrow keys move through, open
+  and close tree rows.
 - **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
   kind and artifact ID. A body cut at the capture limit or a cut target is
-  noted at the top. Bodies are read 2 MiB at a time, and a body that parses
-  (JSON, form or multipart) reads on by itself until every byte is read, showing
-  how much is read instead of its unparsed prefix; other text uses **Show the
-  next 2 MiB**.
+  noted at the top. A body is read whole in one request of any size: while it
+  arrives Payload says how many bytes have been read and then that the SHA-256
+  is checked, with **Cancel**; a cancelled read offers **Read the body**. There
+  is no deadline.
 
 Without content capture, Payload still shows the body's length, type and digest
 and says that content capture was off. File, blob and stream bodies are read
 in content sessions; one that could not be read whole says why. Password form
 bodies keep neither bytes nor a digest. A body read
-that times out or gets an error status keeps the last read copy and its reason
+that fails or gets an error status keeps the last read copy and its reason
 and is read again on the next refresh; a size or SHA-256 mismatch, whether the
 bytes differ, the store reports `artifact_integrity`, or the request record's digest
 differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
@@ -1286,7 +1292,11 @@ The native stored-evidence scheme and the live HTTP backend share exactly one
 `Contents/Resources/research-ui/` directory. `index.html` resolves CSS and scripts
 relative to that directory; both Analyst adapters pass its `analyst_runner_core.js`
 to the bundled native runner. `analyst_runner_node.js` remains available for the
-backend's supported Node fallback. The runners are not public UI routes.
+backend's supported Node fallback. The runners are not public UI routes. The
+packaging script re-signs only `OriginTraceAnalystRunner` with
+[`OriginTraceAnalystRunner.entitlements`](macos/OriginTraceAnalystRunner.entitlements)
+(`com.apple.security.cs.allow-jit`), then re-seals the app: JavaScriptCore
+without it interprets every analyst script.
 `OriginTrace.icns` and `run-live-session.sh` stay at the Resources root.
 
 The `reb://` workspace answers what only Rust implements (the request index,
@@ -1398,12 +1408,17 @@ blocks ([native network v3](../../protocol/native-network-v3.md)). Response
 (`traffic_response.js`) shows a body's capture state, codings, lengths and
 digest, then its bytes in the shared code view with pretty print (the Oxc
 layout for JavaScript and JSON, else the in-page one with the reason), raw
-ranges of laid-out tokens, wrap, find, copy and hex, read 2 MiB at a time and
-rechecked by SHA-256. Hex shows 256 KiB at a time with **Previous** and
-**Next**, paged to the end of the retained body; a window past the loaded
-bytes reads the next range itself, and Copy copies the window shown. A body
+ranges of laid-out tokens, wrap, find, copy and hex. The body is read whole in
+one request of any size and rechecked by SHA-256; while it arrives Response says
+how many bytes have been read and then that the digest is checked, with
+**Cancel**, and a cancelled read offers **Read the body**. There is no deadline.
+Hex shows 256 KiB at a time with **Previous** and **Next**, paged to the end of
+the retained body, and Copy copies the window shown. Find counts every match of
+the whole text, its layout or every hex row in the background, as Sources does
+(`N of M+ · finding X%` until the exact count), marks only the rows on screen,
+and opens the hex window of a match. A body
 still arriving says how many bytes had arrived, when, and whether it was sealed
-at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Preview reads every remaining range itself. Text that is
+at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
@@ -1748,6 +1763,7 @@ capture, fetch anything or change a row.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `wasm_inspection.js` | Paged Inspect: 1,000-row pages of `inspect_wasm` read as the editor moves, byte-offset location and backend Find over every row, with Cancel for the first index |
 | `wasm_identification.js`, `wasm_identification.css` | The Inspect identification summary, its Details list and the Functions menu badges, all read from `get_wasm_identification` |
 | `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
@@ -1771,12 +1787,12 @@ capture, fetch anything or change a row.
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
 | `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
-| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one bounded value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
+| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one cancellable value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
-| `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
+| `source_search.js` | Search all files: the paged, cancellable client of the backend's artifact search, coverage notes and the results panel; `app.js` supplies the catalog's text kinds, names and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
-| `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
+| `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks drawn per block from a whole-document count, 256 KiB hex windows, layouts with raw ranges and the colored textarea editor |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion; the live document the debugger sidebar arms rules through |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -1807,9 +1823,9 @@ ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
 over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
-cancelled and cannot restore obsolete source text. Artifact loads have a
-10-second deadline, including body reads; a timed-out load can be retried
-explicitly.
+cancelled and cannot restore obsolete source text. Artifact loads, including
+Canvas previews, have no deadline: they show bytes read so far and can be
+stopped, and a stopped or failed load can be retried explicitly.
 
 ## Validate
 
@@ -1962,12 +1978,12 @@ reconstructs both images locally from its visible, bounded call sequence; it
 does not present those pixels as native capture. A live readback lists up to 128
 supported Canvas operation names observed earlier in the same renderer stream.
 When the session explicitly enables Canvas image capture, the exact bounded
-`toDataURL` result is shown as captured output. The UI keeps the newest 24
-readbacks. Only the visible Rendering gallery loads previews, scoped to its
-current readbacks. Canvas owns a separate maximum of 24 previews and 8 MiB of
-UTF-16 text reservations/retained text; each descriptor reserves twice its
-encoded byte size before admission (at most 2 MiB encoded bytes per preview).
-Newest previews have priority, and budget omissions remain labeled without
+`toDataURL` result is shown as captured output. The gallery lists every
+readback, newest first, 24 to a page; **Newer** and **Older** move between
+pages and keep focus on a page control. Only the visible Rendering gallery
+loads previews, and only for its current page, so retained preview text
+follows one page, not the session. A preview of any encoded size loads whole
+and is verified against its SHA-256. Omissions remain labeled without
 refetching on every refresh. Unchanged polling retains the same cards, native
 disclosure controls and admitted image nodes, including across pointer press
 and release. Changed render inputs or exact source ownership invalidate that
@@ -1975,12 +1991,12 @@ reuse; updated disclosures preserve their expanded state and focus.
 At most two unfinished preview reads are allowed,
 including retired reads whose fetch or response-body/reader cancellation has
 not settled. Header/body errors remain visible immediately; explicit retries
-do not bypass cancellation credits. Their bounded streaming
-read buffers total at most 4 MiB; transient text, hashing and image decoding are
-separate from the retained-text budget. A ten-second deadline aborts a read;
-failed reads expose an explicit Retry preview action.
+do not bypass cancellation credits. A read has no deadline: its card shows
+the bytes read so far and a **Stop** button, which keeps the read's slot until
+the fetch settles. Stopped and failed reads expose an explicit Retry preview
+action.
 
-Activity, leaving Signals, changing the visible readback scope, catalog
+Activity, leaving Signals, changing the visible page or readback scope, catalog
 replacement/emptying and catalog failures retire obsolete preview ownership,
 abort pending reads and remove image sources from the gallery DOM. Late
 responses cannot restore retired payloads. Artifact metadata and immutable
@@ -2103,10 +2119,10 @@ evidence, or relink documents.
 Find searches the selected document's owned retained text, independently of
 which lines are mounted. It uses a case-insensitive single-line literal of at
 most 512 UTF-16 code units. Multiline pastes are refused before the browser can
-join their lines. Enter advances and Shift+Enter goes back through the first
-1,000 matches, including late matches in minified lines and after line 20,000.
-A visible `+` discloses the match cap. Search never fetches more bytes or runs an
-analyzer. Complete text, retained prefixes, lossy displays and unavailable or
+join their lines. Enter advances and Shift+Enter goes back through every
+match, including late matches in minified lines and after line 20,000; a `+`
+stays on the count until the background count ends (see Find in Sources
+below). Search never fetches more bytes or runs an analyzer. Complete text, retained prefixes, lossy displays and unavailable or
 evicted previews have separate coverage labels; an incomplete negative is never
 reported as absence from the complete source. Loading/truncation notices are
 excluded. Pretty/Deob Find names the retained display representation, with
@@ -2114,39 +2130,45 @@ transformation completeness separate from search coverage.
 
 **Search** beside **Captured** in the Sources navigator searches the text of
 every retained file at once, for the string constants, endpoint paths and magic
-numbers that are usually the first thread to pull. The query is a literal single
-line of at most 512 UTF-16 code units, case-insensitive unless **Match case** is
-on. No pattern syntax is offered, because captured scripts are adversarial and a
-regular expression could backtrack catastrophically on crafted input. Typing
-retires the running search at once and searches again after a short pause;
-Enter searches immediately. The command palette's **Search all sources** entry
-opens this view with its query and runs it; typing in the palette never reads
-artifact bytes.
+numbers that are usually the first thread to pull. The query is one line of
+text, case-insensitive (Unicode simple case folding, as Find folds) unless
+**Match case** is on. With **Regex** it is a regular expression in the Rust
+`regex` syntax: that engine's matching time is linear in the text whatever the
+pattern, so a crafted script cannot make a search backtrack. Typing retires the
+running search at once and searches again after a short pause; Enter searches
+immediately. The command palette's **Search all sources** entry opens this view
+with its query and runs it; typing in the palette never reads artifact bytes.
 
-Each file is read once through `/api/artifacts/{artifact_id}/content` with a
-2 MiB limit and the Sources preview's byte-size and SHA-256 checks. A loaded
-preview is reused without a request, and other text is kept in a separate cache
-of at most 8 Mi UTF-16 code units, so the next query does not refetch it; files
-that leave the catalog leave that cache. One search reads at most 32 MiB and
-collects at most 100 matches per file and 1,000 overall. WebAssembly and guest
-bytecode are binary and are not searched. The status line counts files as they
-finish ("Searched 12 of 40 files"), and a note above the results names every
-file that was not searched completely: binary files, files that failed to load
-(with the reason), files over the 2 MiB size cap where only their first 2 MiB
-was searched, files that are not valid UTF-8 (a miss there is not proof of
-absence), files that stopped at the per-file match cap, and files left unsearched
-by the overall match cap or read budget. Nothing is dropped without a note.
+One request to the backend's artifact search (`search_artifact_text`,
+[`reb-artifact-search-v2`](../../protocol/http-api.md)) covers every text kind
+the Sources list shows. The backend reads each file whole, whatever its size,
+verifies it against its SHA-256, searches the files on every core and counts
+every match exactly; nothing is skipped for size and there is no deadline.
+While it runs the status line shows the elapsed seconds and **Cancel** (or
+Escape), and a cancelled or replaced search stops the backend's work. The
+results then name the exact total and the files that hold matches ("4,812
+matches in 37 files · searched 40 of 40 files"). The first 200 matches are
+shown, and **Show the next 200 of N remaining matches** at the end loads the
+next page: the backend kept the count, so a page reads only the files it lists.
+WebAssembly and guest bytecode are not text; a note names how many there are,
+and Find in their Hex or Inspect view searches every byte or row. A note also
+names every file that could not be read or verified (search again to retry) and
+every file that is not valid UTF-8, where a miss is not proof of absence.
 
-Results are grouped by file with its name, match count and URL. Each match shows
-`line:column` and its line with the match marked; captured text is inserted as
-text nodes. Arrow keys move through the matches (Arrow Down from the field enters
-them), and Enter or a click opens that file at the match: the same Sources
-selection as the tree, revealing the line and marking the match like Find. Opened
-from Sources, the previous view becomes a Back stop, so Back returns to the
-results with their scroll and focus. A file that changed or left the catalog
-after the search is refused rather than reopened. `node tools/check-source-search.mjs`
-(part of `make check`) exercises the matcher, caps, cancellation, partial-result
-notes, reader checks and this open-and-Back path in the shipped scripts.
+Results are grouped by file with its name, exact match count and URL. Each
+match shows `line:column` and up to twelve characters before it on its line,
+with the match marked; captured text is inserted as text nodes. Arrow keys move
+through the matches (Arrow Down from the field enters them, and from the last
+match reaches the next-page control, after which focus lands on the first new
+match), and Enter or a click opens that file at the match: the same Sources
+selection as the tree, revealing the line and marking the match like Find.
+Opened from Sources, the previous view becomes a Back stop, so Back returns to
+the results with their scroll and focus. A file that changed or left the
+catalog after the search is refused rather than reopened.
+`node tools/check-source-search.mjs` (part of `make check`) exercises the
+controller, paging, cancellation, coverage notes, the panel's keyboard use and
+this open-and-Back path in the shipped scripts, and `make e2e` runs it against
+the built backend over a real store with a 17 MiB file.
 
 The editor mounts at most 1,000 lines. A row above and below them reaches the
 previous and next 1,000 lines, and **Go to line** (Ctrl+G, or **More**) takes a
@@ -2277,7 +2299,7 @@ the detected source type. JavaScript, CSS and JSON with a line over 16 KiB open
 pretty-printed, shown as **Pretty-printed · Show original**; the choice either
 way is remembered per artifact for the session. The gutter numbers formatted
 lines; its tooltip names the original line and column. A complete JavaScript artifact is laid out by the
-backend's Oxc formatter (`get_source_format`, [Source format v1](../../protocol/source-format-v1.md)):
+backend's Oxc formatter (`get_source_format`, [Source format v2](../../protocol/source-format-v2.md)):
 Prettier's layout at 80 columns, with every token printed as captured. Sources
 reads it one 1,000-line page at a time; each page's anchor names its first
 original offset, so the editor maps every character back by walking that
@@ -2287,7 +2309,7 @@ lexer state where it starts. The page shown stays while the next is read, and
 Find searches the complete evidence text and opens the page that shows each
 match. While the first page is read the original stays on screen. If
 the source does not parse, the backend is unavailable, or the text is derived,
-truncated or another language, the in-page formatter is used: the status bar
+lossy or another language, the in-page formatter is used: the status bar
 names the whitespace layout and the row above the code says why. It runs in a Web Worker (on the page, after one task, where
 workers are unavailable). It can format either the original evidence or the
 active deobfuscated representation, so an unchanged deobfuscation result does
@@ -2295,10 +2317,9 @@ not leave a minified bundle on one line. Pretty printing changes only display
 whitespace, keeps source-line mappings back to the captured bytes, and never
 rewrites stored evidence. Both layouts map back through one sync point per
 4 Ki formatted units rather than a segment per change. The in-page formatter
-streams its tokens, accepts the 16 MiB artifact cap and stops when its output
-exceeds three times that.
-**Details > Static cleanup** shows analysis, limits, omissions, and retry actions. The native app ships a Rust/Oxc worker for bounded static AST rewriting
-over captured artifacts. It needs no Python runtime. Building the app
+streams its tokens over text of any size.
+**Details > Static cleanup** shows analysis, assumptions, omissions, and retry actions. The native app ships a Rust/Oxc worker for static AST rewriting
+over captured artifacts of any size. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
 The Rust backend preserves classification, formatting, and literal-table
 analysis for captured artifacts. The Deobfuscation details
@@ -2307,25 +2328,29 @@ restricted to non-escaping local tables with proven own-index reads.
 
 Failed analysis remains visible until **Retry analysis** is selected. A failed
 retry retains the last successful result. Source selection does not switch the
-Sources editor away from original evidence. The UI retains at most eight analysis
-documents and distinguishes source hashes and artifact identities in its cache.
-The report retains the last successful summary and snippets during a retry or
-failure. **Cancel analysis** retires the current request; a worker may still
-finish, but its late response cannot replace the report. Cancellation and errors
-require an explicit retry.
+Sources editor away from original evidence. The whole artifact is analyzed and
+every change, table and segment of the report is admitted. Analysis has no
+deadline: the report shows the elapsed seconds while it runs, and **Cancel
+analysis** stops the backend worker and retires the request, so a late response
+cannot replace the report. The UI keeps the newest analysis whatever its size,
+and up to seven earlier ones while all fit in 64 Mi UTF-16 units of text; an
+evicted one is analyzed again on request, from the backend's cache of recent
+results by source SHA-256. The cache distinguishes source hashes and artifact
+identities. The report retains the last successful summary and snippets during
+a retry or failure. Cancellation and errors require an explicit retry.
 
 The report's changed-span inspector shows one validated replacement at a time,
 with Previous/Next, exact half-open UTF-8 ranges, and original/derived snippets
 limited to 2,048 UTF-16 units each. Snippets scroll independently; truncation is
 visible and never splits a surrogate pair. In the HTTP live workspace or browser
-development UI, **Reveal original range** verifies captured original bytes
-through the existing Facts path. Stored-evidence native mode displays an explicit
-unavailable reason for that navigation. Neither path executes source. Pretty printing remains a separate display layer.
+development UI, and in the stored-evidence window, **Reveal original range**
+verifies captured original bytes through the existing Facts path. It never
+executes source. Pretty printing remains a separate display layer.
 
 Transformation families, heuristic classification signals, recovered table
-summaries, and assumptions/limits have explicit counts and four-row paging.
+summaries, and assumptions have explicit counts and four-row paging.
 Generic omissions do not hide recovered tables. Raw table entries are not shown;
-only bounded admitted summary fields and previews are displayed. Family totals
+only admitted summary fields and each table's 512-character decoded preview are displayed. Family totals
 are whole-report metadata, not invented explanations for a selected replacement.
 Classification is labelled as a heuristic, not a probability or equivalence proof.
 Missing legacy change metadata is shown as unavailable; code-point maps do not
@@ -2377,23 +2402,26 @@ matching rules are in the
 ## Captured JavaScript facts
 
 In **Sources**, select a captured JavaScript artifact and choose **Facts**.
-The existing Rust/Oxc worker returns bounded lexical scopes, declarations,
-callables, regions and operations for that exact session, artifact and SHA-256.
-This is an explicit, inert analysis action. Derived text is not accepted. The Details pane shows complete-within-profile, partial,
-unavailable and truncated states, diagnostics and unknown-effect frontiers.
-Each category displays 100 rows per page; fact details are capped at 4,096
-characters. In **Bindings**, search declaration names and choose **Find lexical
-operations** to inspect exact-ID references, reads, writes, calls and constructs.
-The kind filter and paging keep long reports bounded. Same-name declarations in
-different scopes remain distinct; operation rows can return to their declaration
-explorer. Ambiguous targets offer an explicit candidate chooser and remain
-candidate links. Unresolved/dynamic names and property targets never become
-binding links. Counts describe static operations, which can share one source
-occurrence, not runtime uses or dataflow. Call targets remain unknown.
-This panel always analyzes the whole selected artifact; the API's
-`region_start_byte`/`region_end_byte` scope is not exposed here, so a bundle
-that reports a reached budget is narrowed through `reb-api call
-get_source_facts` instead.
+The existing Rust/Oxc worker analyzes the whole artifact, whatever its size, and
+returns every lexical scope, declaration, callable, region and operation for
+that exact session, artifact and SHA-256. This is an explicit, inert analysis
+action. Derived text is not accepted. While it runs the status shows the elapsed
+seconds, and **Cancel** stops the worker; there is no deadline. A 9 MB bundle
+analyzes in about two seconds, and analyzing the same bytes again reuses the
+backend's report. The Details pane shows complete-within-profile, partial and
+unavailable states, diagnostics and unknown-effect frontiers. The category menu
+counts each table, and each category reads 100 rows per page from the backend.
+In **Bindings**, search declaration names and choose **Find lexical
+operations** to inspect exact-ID references, reads, writes, calls and constructs;
+the backend answers both, so a report of a million rows is never sent to the
+page. Same-name declarations in different scopes remain distinct; operation rows
+can return to their declaration explorer, and **Back** returns to the list it
+came from. Ambiguous targets offer an explicit candidate chooser listing every
+duplicate declaration and remain candidate links. Unresolved/dynamic names and
+property targets never become binding links. Counts describe static operations,
+which can share one source occurrence, not runtime uses or dataflow. Call
+targets remain unknown. This panel always analyzes the whole selected artifact;
+the API's `region_start_byte`/`region_end_byte` scope is not exposed here.
 **Reveal declaration** and operation **Original bytes** actions use the same
 verified UTF-8 reader. Changing the explorer selection cancels its pending
 reveal. Source identity changes and successful reanalysis clear selected fact
@@ -2403,8 +2431,8 @@ adds capture, or persists an index. Shadowed declarations retain distinct IDs an
 remain candidates. Neither is proof of initialized values, dataflow or runtime
 call targets; region-local order is conditional on entry and normal completion.
 
-An **Original bytes** link loads the complete original artifact through the
-existing verified 2 MiB chunk endpoint (at most 4 MiB total), checks its SHA-256,
+An **Original bytes** link loads the complete original artifact in one
+request to the content route, checks its SHA-256,
 and strictly decodes UTF-8 while retaining a byte-order mark. It then switches
 the existing editor to original source and reveals the selected half-open byte
 range. The start-line span is highlighted when browser highlights are available;
@@ -2414,22 +2442,21 @@ a different session, changed hash or derived representation is never used as a
 byte-coordinate substitute.
 
 Cancel, closing Facts, source changes and leaving Sources discard pending
-responses. An already started bounded worker may finish, but its result is not
-applied. Response readers own a bounded byte buffer: at most 33 MiB for facts
-and 2 MiB per original-source chunk. They reject more than 65,536 stream chunks,
-including empty chunks, and yield every 256 chunks so fragmented responses cannot
-starve cancellation or deadlines. Cancelling does not wait for producer cleanup.
-Requests have a ten-second deadline including response-body reads;
-retries are explicit, and a failed retry preserves the last successful report
-for the same exact source. Only one report and one verified original source are
-retained by this view.
+responses, and a request that goes away stops its worker. A newer page retires
+the older page read, and a cancelled page leaves the view on the rows it shows.
+Response readers copy each body into one buffer that grows with it; an
+original-source chunk must be exactly its declared length. They yield every 256
+chunks so fragmented responses cannot starve cancellation, and cancelling does
+not wait for producer cleanup. Retries are explicit, and a failed retry
+preserves the last successful report for the same exact source. Only one
+report summary, one page and one verified original source are retained by this
+view.
 
 The native app's live workspace loads the bundled Rust HTTP backend and shares
-this feature with browser development. The separate `reb://` stored-evidence
-native interface does not have the reviewed adapter: Facts is disabled with a
-visible explanation in Details, and direct requests return structured HTTP 503
-`dependency_unavailable`. No Swift parser or duplicate validator is substituted.
-See [JavaScript source facts v1](../../protocol/javascript-source-facts-v1.md).
+this feature with browser development. The `reb://` stored-evidence window
+forwards both Facts routes to the backend it runs over the same stores, so it
+has the same feature; no Swift parser or duplicate validator is substituted.
+See [JavaScript source facts v2](../../protocol/javascript-source-facts-v2.md).
 
 ## Programmatic HTTP access
 
@@ -2526,23 +2553,33 @@ The layout runs in a Web Worker. When the backend serves
 `POST /api/graph-layout` ([HTTP API](../../protocol/http-api.md#graph-layout)),
 the function is laid out by [Triskel](https://github.com/triskellib/triskel), a
 CFG layout engine built on single-entry single-exit regions. It is vendored in
-the backend and runs in a separate worker process with size and time limits.
-The project-authored region layout in `block_graph_layout.js` stays in four
-cases:
+the backend and runs in a separate worker process, with no size limit or
+deadline. While it runs, the view counts its seconds and offers **Use the
+region layout**, which stops it. The project-authored region layout in
+`block_graph_layout.js` draws any function, and stays in four cases:
 - Triskel would draw the function more than 1.6 times wider and over 1,400 px.
   A flattened dispatcher's fan is the usual case: the region layout stacks it
   into a grid, where Triskel puts every arm in one row.
-- The function has more than 2,000 blocks or 8,000 edges.
+- The function has more than 2,000 blocks or 8,000 edges. Triskel is not run
+  unasked there: on structured control flow it takes about 10 s at 8,000
+  blocks and a minute at 16,000, and at this revision it places nodes on top
+  of each other in most functions over about 1,000 blocks. The region layout,
+  close to linear in the block count, is drawn at once and the header offers **Lay
+  out with Triskel**, which runs it on the drawn function with no size limit.
+  The drawing stays while it runs, the header counts its seconds, and the
+  button becomes **Cancel**.
 - Triskel's answer does not match the function.
 - The route is missing or fails, as in the stored-evidence window.
 
-The header says `Triskel layout` when Triskel was used, and hovering the counts
-says why the region layout stayed. The region layout also stays when Triskel's
-drawing would be more than 1.6 times taller and over 1,600 px taller, as nested
-loops can make it. Both layout workers reach the route through
-`graph_layout_client.js`, which holds its limits, the 20 s request budget, the
-answer check and this acceptance rule, and gives each graph it does not lay out
-a reason code that each view words for itself. Triskel's and fmt's licence
+The header says `Triskel layout` when Triskel was used, `region layout` with
+the reason otherwise (stopped, failed, wider or taller), and hovering the
+counts says why the region layout stayed. The region layout also stays when
+Triskel's drawing would be more than 1.6 times taller and over 1,600 px
+taller, as nested loops can make it. Both layout workers reach the route
+through `graph_layout_client.js`, which holds the size Triskel runs on unasked,
+the answer check and this acceptance rule, and gives each graph it does not lay
+out a reason code that each view words for itself. It sets no timeout: the
+caller's signal stops a request, and the backend then stops its worker. Triskel's and fmt's licence
 texts ship as `Contents/Resources/GraphLayoutLicenses.txt`.
 
 The region layout uses dominator regions: each subtree is entered once, so it
@@ -2568,13 +2605,15 @@ stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
 operands as soon as the row is chosen; calls and branches list theirs after
 the first trace, from its `operand_count`. The panel reads one
 [`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
-`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and a
-ten-second timeout, aborts a superseded read, and keeps the last slice when a
-read fails. Rows are ordered seed, backward, forward, then by distance, and show
+`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and no
+deadline: while it runs the status counts elapsed seconds and **Trace value**
+becomes **Cancel**, which stops the request and its backend analysis. A
+superseded read is aborted, and the last slice stays when a read fails or is
+cancelled. Rows are ordered seed, backward, forward, then by distance, and show
 offset, role, kind and the instruction as inert text; a join row lists its
 incoming edges. Arrow keys, Home and End move through the rows; Enter or a click
-reveals that offset in Inspect and focuses its gutter. Offsets with no retained
-Inspect row stay disabled. The slice's mounted rows carry `data-value-flow`
+asks the backend for the Inspect row at that offset, moves to its page and
+focuses its gutter. The slice's mounted rows carry `data-value-flow`
 (seed, source, sink or step), reapplied as the listing remounts. **×** clears
 the trace; Hex or another module hides the panel and drops it. While the block
 graph is open the panel and its marks are hidden, since the graph owns that
@@ -2607,7 +2646,7 @@ pane, tab or layout never changes the selection.
   module's name section. Empty, it says how to fill it. **Sources** opens the
   module in Sources at the function's first byte (its body's start), revealed
   the way the entropy map reveals a byte once the module's bytes are held; a
-  byte the hex view does not hold says so in the status bar. The function's
+  byte past the end of the module says so in the status bar. The function's
   blocks are read only while the CFG pane is shown. A card picked in the graph
   waits 150 ms first, so moving across cards reads only the card it stops on;
   a function already loading is not read twice, and the last four functions
@@ -3112,23 +3151,26 @@ same engine report either way, on card sizes measured from their text.
   width.
 
 **Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
-to 2,000 cards is then sent to
-[Triskel](https://github.com/triskellib/triskel), in band order, at most 64
-realms and 8,000 cards per request; a realm past either total keeps the layered
-layout and says which total it hit. The layout worker keeps Triskel's last 64
+to 2,000 cards and up to 8,000 calls is then sent to
+[Triskel](https://github.com/triskellib/triskel) in one request, in band
+order, with no deadline. While it runs over no drawing, the view counts its
+seconds and offers **Use the layered layout**; over a drawing, the status bar
+counts them beside **Cancel**. A larger realm keeps the layered layout, and the
+status bar offers **Lay out with Triskel**, which sends every realm whatever
+its size until the session changes or a run is stopped. The layout worker keeps Triskel's last 64
 answers by realm, so a new layout of mostly the same realms, such as a chain
 folded or a refresh, sends only the realms that changed. A realm takes Triskel's coordinates and waypoints unless Triskel would
 draw it more than 1.6 times wider than the layered layout and over 1,400 px,
 or more than 1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would
 otherwise run off to the side. The layered layout also stays when Triskel's
-answer is missing, too large or the wrong shape. Either way the bands keep the
-layered order and are stacked, aligned and routed between the same way. The
+answer is missing, failed or the wrong shape. Either way the bands keep the
+layered order and are packed into columns and routed between the same way. The
 status bar says `Triskel layout`, or how many realms it took, and hovering it
 gives each other realm's reason.
 
 Ten thousand cards lay out in under half a second in Node, fifty thousand in
-about two and a half. The canvas is one bounded
+under three. The canvas is one bounded
 backing store, released with the minimap while the view is hidden, and only
 visible bands, cards and edges are drawn. Card text is cut to its card once
 per layout, not per frame, and a selection reads per-model path indexes and
@@ -3157,14 +3199,21 @@ the graph footer and starts the linear scrollport below it, so no row can
 scroll under the divider. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
 
-Captured WASM opens in Hex. **Inspect** shows bounded sections, types, imports,
-exports and function disassembly with byte-offset links back to original bytes.
-Function indexes include imports. **Find** searches retained Hex text or
-offset-bearing inspection rows with an explicit inspection label. Inspection
-headings and omission messages are excluded; partial coverage stays visible. Failures
-provide **Retry inspection**. Partial coverage and display limits are explicit.
-The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
-the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
+Captured WASM opens in Hex. **Inspect** lists every section, type, import,
+export, data segment and function body of a module of any size, one row per
+line with its original byte offset in the gutter. `wasm_inspection.js` reads the
+rows 1,000 at a time from `inspect_wasm` as the editor moves, keeps 16 pages
+per module, and asks the backend for the row at a byte when an offset link, the
+map or Trace value reveals one. The first read indexes the whole module; it
+shows elapsed seconds and **Cancel**, which stops the backend decode, and Hex
+stays available. Function indexes include imports. **Find** in Inspect searches
+the text of every row on the backend (`search_wasm_inspection`), says how many
+matches the whole module holds, and moves to each match's page; in Hex it
+searches the Hex text. Inspection headings and omission messages are excluded;
+partial coverage stays visible. Failures provide **Retry inspection**.
+The stored-evidence window forwards inspection, graphs, identification,
+pseudocode, value flow, module diff and the artifact map to its bundled backend,
+so it runs the same Rust provider as HTTP. See [WASM Inspection v2](../../protocol/wasm-inspection-v2.md).
 
 **More > Run offline…** on a captured Wasm module opens a dialog that runs one
 function in the backend's local sandbox: the `wasmi` interpreter, offline, with
@@ -3207,8 +3256,10 @@ entropy on a 0 to 8 bits per byte scale. **Kind** colors it by the dominant
 recorded fact: Wasm section or data segment, string, VM instruction coverage, or
 undecoded tail. Hover, or move the focused cell with the arrow keys, to read the
 byte range, kind and entropy. A click or Enter opens that byte in Hex or the
-Inspect disassembly, and a text script opens at its line. Bytes past what the
-existing view holds stay in the map and say so.
+Inspect disassembly, and a text script opens at its line. Every byte of the
+artifact opens. The map is computed however long that takes: while it runs it
+shows the elapsed seconds and **Cancel**, and a cancelled or failed map offers
+**Retry**.
 
 A window is marked high-entropy only by the 7.0 bits per byte test stated beside
 the map. That mark says nothing about compression or encryption. Windows are
@@ -3356,18 +3407,26 @@ successful analysis for the same identity. URLs are display/search hints, not
 proof of ownership.
 
 Artifact catalog refreshes preserve an exact pending preview owner. Changing
-its session, hash or descriptor retires that read. Preview failures and deadlines
-show **Retry source**; they do not silently retry during refresh. Preview bodies
-reuse the Facts bounded streaming reader in 2 MiB pages: a text preview reads
-the whole artifact up to the 16 MiB artifact cap, and a larger one keeps its first
-16 MiB, and a notice above the code states the limit in the pretty-printed and
-Original views. Binary previews read 2 MiB, and an analyzer
-envelope 33 MiB, with at most 65,536 chunks per page. Analyzer deadlines are ten
-seconds; a preview has five seconds plus five per page, including SHA-256 work. Cancellation
-retires ownership without waiting for a stalled producer's cleanup. Full artifact
-previews verify SHA-256 when WebCrypto is available; partial or lossy text is
-visibly a preview. Exact byte navigation still belongs to the existing Facts
-verified-original reader.
+its session, hash or descriptor retires that read. Preview failures show
+**Retry source**; they do not silently retry during refresh. A preview reads the
+whole artifact, whatever its size, in one request to the content route (the
+backend hashes the whole file for every range, so one request is the cheapest
+way to read it all), streamed through the Facts reader. While it reads, the
+editor says how many bytes have arrived and then that SHA-256 is being checked,
+with **Cancel**; there is no deadline. A cancelled read keeps the stored
+artifact and offers **Retry source**. Cancellation retires ownership without
+waiting for a stalled producer's cleanup. Full artifact previews verify SHA-256
+when WebCrypto is available; text that is not valid UTF-8 shows with
+replacement characters and is visibly a lossy preview. Exact byte navigation
+still belongs to the Facts verified-original reader.
+
+Find in Sources searches the whole document, text or hex, 64 Ki UTF-16 units
+at a time in 12 ms slices between frames, so typing stays responsive in a file
+of any size. It keeps one match count per chunk (memory proportional to the
+document, not to its matches), shows `N of M+ matches · finding X%` while it
+runs and the exact count when it ends, and re-finds a match by rescanning its
+one chunk. A match on a page that is not mounted opens that page. Changing the
+query, the file or closing it cancels the search.
 
 The editor retains at most eight preview owners and 32 Mi UTF-16 units of
 preview text across captured files. The selected owner is pinned; older preview
@@ -3378,14 +3437,16 @@ Tab, navigator, Quick Open and retry handlers retain descriptors only; obsolete
 empty/retry controls are removed when the editor becomes ready. Hidden UI
 closures cannot keep evicted preview or analysis payloads alive. This never
 deletes captured evidence. Canvas thumbnails and the existing bounded
-Facts/WASM inspectors retain their separate ownership contracts. WASM Hex formats
-every retained byte whose text fits in 8 Mi UTF-16 units, about 1.6 MiB of
-module bytes. A longer module keeps a labeled prefix, and Find covers that prefix.
+Facts/WASM inspectors retain their separate ownership contracts. Hex (Wasm
+modules and guest bytecode) shows every retained byte: the editor keeps the
+verified bytes and formats 1,000 rows at a time as it moves, with addresses
+wide enough for the whole module, and the status bar names the byte under the
+caret. Inspect's byte links and the entropy map open the row of any byte.
 
 Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
 250,000 map segments and 32 MiB of serialized response data in total. In-page
 formatting retains at most eight layouts and 64 Mi UTF-16 units of input and
-output text; Oxc layouts at most four (16 pages each in Sources, or one body of at most 4 MiB) and 64 Mi units. The newest layout is kept
+output text; Oxc layouts at most four (16 pages each in Sources, or one whole body) and 64 Mi units. The newest layout is kept
 even when it alone exceeds its budget. These are explicit text/entry
 budgets, not JavaScript heap or process-RSS guarantees. The editor DOM and Facts'
 independently verified original also use memory; no duplicate history of source

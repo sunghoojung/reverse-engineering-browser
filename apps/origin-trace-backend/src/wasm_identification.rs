@@ -9,7 +9,7 @@
 //! analyzer output kept apart from captured names and from analyst names, and
 //! the module is never executed. Raw evidence is not changed.
 use crate::{
-    error::{Error, Result},
+    error::{Error, Result, check_cancelled},
     wasm_constants::{self, ConstantSet, Encoding, Run, Width},
     wasm_graph,
 };
@@ -17,19 +17,21 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
-    time::{Duration, Instant},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use wasmparser::{
     BinaryReader, DataKind, Encoding as BinaryEncoding, ExternalKind, KnownCustom, Name, Operator,
     Parser, Payload, TypeRef,
 };
 
-/// The block graph's input budget: real modules are tens of MiB.
-pub const MAX_BYTES: usize = wasm_graph::MAX_BYTES;
-/// Counted from the start of `load`, before the artifact is read and hashed,
-/// and well inside the native helper's five-second process kill, so a partial
-/// report still reaches the app.
-const DEADLINE: Duration = Duration::from_millis(3500);
+/// What a cancelled request names.
+const WHAT: &str = "WASM identification";
+/// Whole reports kept by module SHA-256, so paging the suggestions of one
+/// module identifies it once.
+const CACHED_REPORTS: usize = 4;
 const MAX_CONCLUSIONS: usize = 32;
 const MAX_EVIDENCE: usize = 8;
 const MAX_PRODUCERS: usize = 16;
@@ -38,17 +40,7 @@ const MAX_CUSTOM_SECTIONS: usize = 32;
 /// The longest list a page carries: producers, features and custom sections.
 const MAX_LISTED: usize = 32;
 const MAX_SUGGESTIONS_PER_FUNCTION: usize = 4;
-/// Suggestions kept in one report. Each is one compact row; pages of them
-/// are cut to the page byte budget.
-const MAX_SUGGESTIONS: usize = 16_384;
 pub const SUGGESTION_PAGE: usize = 1024;
-/// Records read and kept from one module: the rest are counted. A module
-/// can declare millions of names; labeling stops at the deadline anyway.
-const MAX_STORED_RECORDS: usize = 65_536;
-/// Data runs and candidate matches kept before merging and suppression.
-/// A table repeated across a whole segment costs a count past these.
-const MAX_RUNS: usize = 8192;
-const MAX_CANDIDATES: usize = 512;
 const MAX_MATCHES: usize = 64;
 const MAX_REFERENCES: usize = 4;
 const MAX_SITES: usize = 4;
@@ -252,38 +244,18 @@ struct Module<'a> {
     imports: Vec<Import<'a>>,
     exports: Vec<Export<'a>>,
     names: Vec<(u32, &'a str, usize)>,
-    /// Every record read, including the ones past `MAX_STORED_RECORDS`.
-    import_count: usize,
-    export_count: usize,
-    name_count: usize,
     module_name: Option<(&'a str, usize)>,
     name_section: Option<usize>,
     customs: Vec<Custom<'a>>,
     defined_functions: usize,
     imported_functions: u32,
     segments: Vec<Segment<'a>>,
-    segment_count: usize,
-    /// The deadline passed while sections were still being read.
-    stopped: bool,
-    /// Custom sections read, including the ones past `MAX_STORED_RECORDS`.
-    custom_count: usize,
     omissions: Omissions,
 }
 
-/// Records past the storage limit are counted; storing stops. The first
-/// time a kind reaches it, the omission says so.
-fn keep<T>(list: &mut Vec<T>, count: &mut usize, item: T, kind: &str, omissions: &mut Omissions) {
-    *count += 1;
-    if list.len() < MAX_STORED_RECORDS {
-        list.push(item);
-    } else if list.len() == MAX_STORED_RECORDS && *count == MAX_STORED_RECORDS + 1 {
-        omissions.push(format!(
-            "{kind} limit of {MAX_STORED_RECORDS} reached; later ones are counted, not read."
-        ));
-    }
-}
-
-fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
+/// Every record of the module is kept: a record borrows its text from the
+/// module bytes, so millions of names cost a few words each.
+fn read_module<'a>(bytes: &'a [u8], cancelled: &AtomicBool) -> Result<Module<'a>> {
     if bytes.is_empty() {
         return Err(Error::protocol("The WASM module is empty"));
     }
@@ -291,29 +263,23 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
         imports: Vec::new(),
         exports: Vec::new(),
         names: Vec::new(),
-        import_count: 0,
-        export_count: 0,
-        name_count: 0,
         module_name: None,
         name_section: None,
         customs: Vec::new(),
         defined_functions: 0,
         imported_functions: 0,
         segments: Vec::new(),
-        segment_count: 0,
-        stopped: false,
-        custom_count: 0,
         omissions: Omissions::default(),
     };
     let mut ended = false;
     let mut read = 0usize;
-    // Polled every 4096 records of any kind, so a million tiny records
-    // cannot outlast the report's one deadline.
+    // Polled every 4096 records of any kind, so a million tiny records stop
+    // soon after the request is cancelled.
     let mut expired = || {
         read += 1;
-        read.is_multiple_of(4096) && Instant::now() > deadline
+        read.is_multiple_of(4096) && cancelled.load(Ordering::Relaxed)
     };
-    'payloads: for payload in Parser::new(0).parse_all(bytes) {
+    for payload in Parser::new(0).parse_all(bytes) {
         match payload.map_err(bad)? {
             Payload::Version {
                 num: 1,
@@ -328,8 +294,7 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
             Payload::ImportSection(reader) => {
                 for entry in reader.into_iter_with_offsets() {
                     if expired() {
-                        module.stopped = true;
-                        break 'payloads;
+                        return Err(Error::cancelled(WHAT));
                     }
                     let (offset, import) = entry.map_err(bad)?;
                     let function = if matches!(import.ty, TypeRef::Func(_)) {
@@ -345,20 +310,13 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                         offset,
                         function,
                     };
-                    keep(
-                        &mut module.imports,
-                        &mut module.import_count,
-                        item,
-                        "Import",
-                        &mut module.omissions,
-                    );
+                    module.imports.push(item);
                 }
             }
             Payload::ExportSection(reader) => {
                 for entry in reader.into_iter_with_offsets() {
                     if expired() {
-                        module.stopped = true;
-                        break 'payloads;
+                        return Err(Error::cancelled(WHAT));
                     }
                     let (offset, export) = entry.map_err(bad)?;
                     let item = Export {
@@ -367,28 +325,20 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                         index: export.index,
                         offset,
                     };
-                    keep(
-                        &mut module.exports,
-                        &mut module.export_count,
-                        item,
-                        "Export",
-                        &mut module.omissions,
-                    );
+                    module.exports.push(item);
                 }
             }
             // Bodies are read again by the immediate scan, so none is kept.
             Payload::CodeSectionEntry(_) => {
                 module.defined_functions += 1;
                 if expired() {
-                    module.stopped = true;
-                    break 'payloads;
+                    return Err(Error::cancelled(WHAT));
                 }
             }
             Payload::DataSection(reader) => {
                 for entry in reader.into_iter() {
                     if expired() {
-                        module.stopped = true;
-                        break 'payloads;
+                        return Err(Error::cancelled(WHAT));
                     }
                     let entry = entry.map_err(bad)?;
                     let address = match &entry.kind {
@@ -402,18 +352,12 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                         DataKind::Passive => None,
                     };
                     let item = Segment {
-                        index: module.segment_count as u32,
+                        index: module.segments.len() as u32,
                         data: entry.data,
                         data_offset: entry.range.end - entry.data.len(),
                         address,
                     };
-                    keep(
-                        &mut module.segments,
-                        &mut module.segment_count,
-                        item,
-                        "Data segment",
-                        &mut module.omissions,
-                    );
+                    module.segments.push(item);
                 }
             }
             Payload::CustomSection(reader) => {
@@ -428,19 +372,12 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                             Ok(Name::Function(map)) => {
                                 for naming in map.into_iter_with_offsets() {
                                     if expired() {
-                                        module.stopped = true;
-                                        break 'payloads;
+                                        return Err(Error::cancelled(WHAT));
                                     }
                                     match naming {
                                         Ok((offset, naming)) => {
                                             let item = (naming.index, naming.name, offset);
-                                            keep(
-                                                &mut module.names,
-                                                &mut module.name_count,
-                                                item,
-                                                "Name",
-                                                &mut module.omissions,
-                                            );
+                                            module.names.push(item);
                                         }
                                         Err(_) => {
                                             module.omissions.push(
@@ -464,8 +401,7 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                     }
                 }
                 if expired() {
-                    module.stopped = true;
-                    break 'payloads;
+                    return Err(Error::cancelled(WHAT));
                 }
                 let item = Custom {
                     name: reader.name(),
@@ -477,23 +413,13 @@ fn read_module(bytes: &[u8], deadline: Instant) -> Result<Module<'_>> {
                         _ => None,
                     },
                 };
-                keep(
-                    &mut module.customs,
-                    &mut module.custom_count,
-                    item,
-                    "Custom section",
-                    &mut module.omissions,
-                );
+                module.customs.push(item);
             }
             Payload::End(_) => ended = true,
             _ => {}
         }
     }
-    if module.stopped {
-        module.omissions.push(
-            "Identification deadline reached while reading sections; later records and sections were not read, and counts cover what was read.",
-        );
-    } else if !ended {
+    if !ended {
         module
             .omissions
             .push("Module traversal stopped before its end.");
@@ -1056,8 +982,6 @@ struct Labeler<'a> {
     /// Hashes of the labels each function already has, so a function that
     /// is both exported and named under one name gets its label once.
     per_function: HashMap<u32, Vec<u64>>,
-    /// Suggestions found past `MAX_SUGGESTIONS`, counted and not stored.
-    dropped: usize,
     /// Labels a function had past `MAX_SUGGESTIONS_PER_FUNCTION`.
     beyond_per_function: usize,
     /// The producers section declares C or C++.
@@ -1087,10 +1011,6 @@ impl Labeler<'_> {
             return;
         }
         labels.push(hash);
-        if self.suggestions.len() >= MAX_SUGGESTIONS {
-            self.dropped += 1;
-            return;
-        }
         self.suggestions.push(Suggestion {
             function,
             label,
@@ -1496,7 +1416,7 @@ struct Declared {
     features: Vec<Value>,
     producers_cut: bool,
     features_cut: bool,
-    /// Producer values read, polled against the deadline.
+    /// Producer values read, polled for cancellation.
     values_read: usize,
 }
 
@@ -1525,30 +1445,30 @@ fn target_features(custom: &Custom<'_>, declared: &mut Declared, omissions: &mut
     }
 }
 
-/// Reads one producers section; false when the deadline passed inside it.
+/// Reads one producers section.
 fn producers(
     custom: &Custom<'_>,
     conclusions: &mut Conclusions,
     declared: &mut Declared,
     omissions: &mut Omissions,
-    deadline: Instant,
-) -> bool {
+    cancelled: &AtomicBool,
+) -> Result<()> {
     let Some(KnownCustom::Producers(reader)) = &custom.known else {
-        return true;
+        return Ok(());
     };
     for field in reader.clone().into_iter_with_offsets() {
         let Ok((_, field)) = field else {
             omissions.push("A producers section is malformed; its later fields were not read.");
-            return true;
+            return Ok(());
         };
         for value in field.values.into_iter_with_offsets() {
             declared.values_read += 1;
-            if declared.values_read.is_multiple_of(4096) && Instant::now() > deadline {
-                return false;
+            if declared.values_read.is_multiple_of(4096) {
+                check_cancelled(cancelled, WHAT)?;
             }
             let Ok((offset, value)) = value else {
                 omissions.push("A producers section is malformed; its later values were not read.");
-                return true;
+                return Ok(());
             };
             let name = bounded(value.name, LABEL_TEXT_BYTES);
             let version = bounded(value.version, LABEL_TEXT_BYTES);
@@ -1579,7 +1499,7 @@ fn producers(
             }
         }
     }
-    true
+    Ok(())
 }
 
 /// One run of a data match: its module bytes and, when the segment's offset
@@ -1718,36 +1638,33 @@ fn data_match(run: &Run, segment: &Segment<'_>) -> Match {
     entry
 }
 
-/// Candidate matches kept so far, the ones counted past `MAX_CANDIDATES`,
-/// and whether the deadline stopped the work.
+/// Every candidate match found so far.
 #[derive(Default)]
 struct Candidates {
     kept: Vec<Match>,
-    dropped: usize,
-    expired: bool,
 }
 
 impl Candidates {
     fn push(&mut self, entry: Match) {
-        if self.kept.len() < MAX_CANDIDATES {
-            self.kept.push(entry);
-        } else {
-            self.dropped += 1;
-        }
+        self.kept.push(entry);
     }
 }
 
 /// Runs of one set and encoding in one segment become one match when each
 /// run continues the table where the previous one stopped. One pass over the
-/// runs sorted by position; the deadline is polled every 1024 runs.
-fn cluster(mut runs: Vec<Run>, segment: &Segment<'_>, deadline: Instant, out: &mut Candidates) {
+/// runs sorted by position; cancellation is polled every 1024 runs.
+fn cluster(
+    mut runs: Vec<Run>,
+    segment: &Segment<'_>,
+    cancelled: &AtomicBool,
+    out: &mut Candidates,
+) -> Result<()> {
     let catalog = wasm_constants::catalog();
     runs.sort_unstable_by_key(|run| (run.set, run.encoding as u8, run.start));
     let mut current: Option<Match> = None;
     for (position, run) in runs.iter().enumerate() {
-        if position.is_multiple_of(1024) && Instant::now() > deadline {
-            out.expired = true;
-            return;
+        if position.is_multiple_of(1024) {
+            check_cancelled(cancelled, WHAT)?;
         }
         let set = &catalog[run.set];
         let span = set.total() * element_width(set);
@@ -1781,6 +1698,7 @@ fn cluster(mut runs: Vec<Run>, segment: &Segment<'_>, deadline: Instant, out: &m
     if let Some(done) = current {
         out.push(done);
     }
+    Ok(())
 }
 
 /// A table split across segments whose memory addresses touch, as Binaryen's
@@ -1846,7 +1764,7 @@ fn explains(entry_size: usize, entry: &Match, container_size: usize, container: 
 /// that start at or before a match, the one reaching furthest (from a
 /// different match) is the only container it needs to be compared with. A
 /// match with more runs than it kept is no container.
-fn suppress_data(matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> Vec<Match> {
+fn suppress_data(matches: Vec<Match>, cancelled: &AtomicBool) -> Result<Vec<Match>> {
     let mut order = (0..matches.len()).collect::<Vec<_>>();
     order.sort_unstable_by_key(|index| {
         let entry = &matches[*index];
@@ -1874,12 +1792,8 @@ fn suppress_data(matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> 
     let mut next = 0usize;
     let mut drop = vec![false; matches.len()];
     for (position, index) in order.iter().enumerate() {
-        if position.is_multiple_of(1024) && Instant::now() > deadline {
-            *expired = true;
-            for later in &order[position..] {
-                drop[*later] = true;
-            }
-            break;
+        if position.is_multiple_of(1024) {
+            check_cancelled(cancelled, WHAT)?;
         }
         let entry = &matches[*index];
         while next < runs.len() && runs[next].0 <= entry.byte_offset {
@@ -1933,7 +1847,7 @@ fn suppress_data(matches: Vec<Match>, deadline: Instant, expired: &mut bool) -> 
         .map(|(rank, index)| (*index, rank))
         .collect::<HashMap<_, _>>();
     keep.sort_unstable_by_key(|(index, _)| rank[index]);
-    keep.into_iter().map(|(_, entry)| entry).collect()
+    Ok(keep.into_iter().map(|(_, entry)| entry).collect())
 }
 
 /// The same rule for one function's immediate matches, by value sets. A
@@ -1993,7 +1907,6 @@ fn memarg_offset(op: &Operator<'_>) -> Option<u64> {
 struct Scan {
     functions_scanned: usize,
     immediates: usize,
-    stopped: bool,
 }
 
 /// Where data matches sit in memory: an exact start address, which a
@@ -2049,7 +1962,7 @@ fn scan_functions(
     bytes: &[u8],
     imported_functions: u32,
     data_matches: &mut [Match],
-    deadline: Instant,
+    cancelled: &AtomicBool,
     out: &mut Candidates,
 ) -> Result<Scan> {
     let table = wasm_constants::immediates();
@@ -2058,7 +1971,6 @@ fn scan_functions(
     let mut scan = Scan {
         functions_scanned: 0,
         immediates: 0,
-        stopped: false,
     };
     let mut position = 0u32;
     for payload in Parser::new(0).parse_all(bytes) {
@@ -2067,10 +1979,7 @@ fn scan_functions(
             Payload::DataSection(_) | Payload::End(_) => break,
             _ => continue,
         };
-        if Instant::now() > deadline {
-            scan.stopped = true;
-            break;
-        }
+        check_cancelled(cancelled, WHAT)?;
         let function = imported_functions + position;
         position += 1;
         let mut hits: BTreeMap<u16, Hit> = BTreeMap::new();
@@ -2139,9 +2048,8 @@ fn scan_functions(
         };
         while !reader.eof() {
             count += 1;
-            if count.is_multiple_of(4096) && Instant::now() > deadline {
-                scan.stopped = true;
-                break;
+            if count.is_multiple_of(4096) {
+                check_cancelled(cancelled, WHAT)?;
             }
             let (op, offset) = reader.read_with_offset().map_err(bad)?;
             if let Some((value, at)) = held.take()
@@ -2214,9 +2122,6 @@ fn scan_functions(
                 }
             }
         }
-        if scan.stopped {
-            break;
-        }
         scan.functions_scanned += 1;
         let mut found = Vec::new();
         for (set_number, hit) in hits {
@@ -2267,22 +2172,41 @@ fn scan_functions(
     Ok(scan)
 }
 
-/// The identification report for one stored artifact.
-pub fn load(root: &Path, id: &str, offset: usize, limit: usize) -> Result<Value> {
-    load_started(root, id, offset, limit, Instant::now())
-}
-
-/// `load` with the instant its deadline counts from: reading and hashing up
-/// to 64 MiB is part of the budget.
-fn load_started(
+/// One page of the identification report for one stored artifact. A
+/// module of any size is identified whole, with no deadline: the work stops
+/// only when `cancelled` is set, because the request went away. The whole
+/// report is kept by the module's SHA-256, so later pages only cut rows.
+pub fn load(
     root: &Path,
     id: &str,
     offset: usize,
     limit: usize,
-    started: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<Value> {
+    static REPORTS: Mutex<Vec<(String, Arc<Report>)>> = Mutex::new(Vec::new());
     let artifact = wasm_graph::artifact(root, id)?;
-    let mut document = identify_until(&artifact.bytes, offset, limit, started + DEADLINE)?;
+    let key = artifact.sha256.as_str().unwrap_or_default().to_owned();
+    let cached = REPORTS.lock().ok().and_then(|reports| {
+        reports
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, report)| report.clone())
+    });
+    let report = match cached {
+        Some(report) => report,
+        None => {
+            let report = Arc::new(Report::build(&artifact.bytes, cancelled)?);
+            if let Ok(mut reports) = REPORTS.lock() {
+                reports.retain(|(k, _)| *k != key);
+                reports.push((key, report.clone()));
+                if reports.len() > CACHED_REPORTS {
+                    reports.remove(0);
+                }
+            }
+            report
+        }
+    };
+    let mut document = report.page(offset, limit)?;
     document["artifact_id"] = artifact.artifact_id;
     document["sha256"] = artifact.sha256;
     Ok(document)
@@ -2298,23 +2222,72 @@ fn serialized(value: &Value) -> usize {
 /// Builds the report. `offset` and `limit` page the suggestion rows only;
 /// every other part is whole on every page, held to `FIXED_BYTES`.
 pub fn identify(bytes: &[u8], offset: usize, limit: usize) -> Result<Value> {
-    identify_until(bytes, offset, limit, Instant::now() + DEADLINE)
+    Report::build(bytes, &AtomicBool::new(false))?.page(offset, limit)
 }
 
-/// `identify` with its time budget named, so the deadline paths are tested
-/// without a module large enough to reach the real one.
-#[cfg(test)]
-fn identify_within(bytes: &[u8], offset: usize, limit: usize, budget: Duration) -> Result<Value> {
-    identify_until(bytes, offset, limit, Instant::now() + budget)
+/// A whole report: the part every page repeats, laid out once, and every
+/// suggestion, which pages cut into rows.
+struct Report {
+    document: Value,
+    document_bytes: usize,
+    suggestions: Vec<Suggestion>,
 }
 
-/// One deadline for the whole report: reading, labeling, both scans and the
-/// merge all poll it, and each says where it stopped.
-fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) -> Result<Value> {
-    if bytes.len() > MAX_BYTES {
-        return Err(Error::bad("WASM identification input exceeds 64 MiB"));
+impl Report {
+    /// Reading, labeling, both scans and the merge all poll `cancelled`.
+    fn build(bytes: &[u8], cancelled: &AtomicBool) -> Result<Self> {
+        identify_whole(bytes, cancelled)
     }
-    let module = read_module(bytes, deadline)?;
+
+    /// Suggestion rows fill what the page budget leaves; at least one row is
+    /// returned so paging always advances. A row pretty-prints as nine lines
+    /// three levels deep, six spaces more indented than on its own, plus its
+    /// separator.
+    fn page(&self, offset: usize, limit: usize) -> Result<Value> {
+        let suggestions = &self.suggestions;
+        if offset > suggestions.len() {
+            return Err(Error::bad("row_offset exceeds the suggestion count"));
+        }
+        let mut document = self.document.clone();
+        let mut room = PAGE_BYTES.saturating_sub(self.document_bytes);
+        let mut window = Vec::new();
+        for entry in suggestions.iter().skip(offset).take(limit) {
+            let row = json!([
+                entry.function,
+                entry.label,
+                entry.category,
+                entry.library,
+                entry.confidence.name(),
+                entry.source,
+                entry.byte_offset
+            ]);
+            let size = serialized(&row) + 9 * 6 + 2;
+            if !window.is_empty() && size > room {
+                break;
+            }
+            room = room.saturating_sub(size);
+            window.push(row);
+        }
+        let place = |document: &mut Value, window: &[Value]| {
+            let next = offset + window.len();
+            document["functions"]["suggestion_window"] = json!({"offset":offset,"rows":window.len(),
+                "total_rows":suggestions.len(),"next_offset":if next < suggestions.len() {json!(next)} else {Value::Null}});
+            document["functions"]["suggestions"] = Value::Array(window.to_vec());
+        };
+        place(&mut document, &window);
+        // The estimate is checked against the page itself: rows come off the
+        // end until it fits, always leaving one.
+        while window.len() > 1 && serialized(&document) > PAGE_BYTES {
+            let cut = (window.len() / 16).max(1);
+            window.truncate(window.len() - cut);
+            place(&mut document, &window);
+        }
+        Ok(document)
+    }
+}
+
+fn identify_whole(bytes: &[u8], cancelled: &AtomicBool) -> Result<Report> {
+    let module = read_module(bytes, cancelled)?;
     let mut omissions = module.omissions.clone();
     let mut conclusions = Conclusions::default();
 
@@ -2322,33 +2295,17 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
     let mut source_map = Value::Null;
     let mut debug_info = Value::Null;
     let mut custom_rows = Vec::new();
-    let mut customs_read = 0usize;
     for custom in &module.customs {
-        if Instant::now() > deadline {
-            omissions.push(format!(
-                "Identification deadline reached while reading custom sections; {customs_read} of {} were read.",
-                module.customs.len()
-            ));
-            break;
-        }
-        customs_read += 1;
+        check_cancelled(cancelled, WHAT)?;
         custom_conclusions(custom, &mut conclusions);
         match custom.name {
-            "producers" => {
-                if !producers(
-                    custom,
-                    &mut conclusions,
-                    &mut declared,
-                    &mut omissions,
-                    deadline,
-                ) {
-                    omissions.push(format!(
-                        "Identification deadline reached while reading custom sections; {customs_read} of {} were read.",
-                        module.customs.len()
-                    ));
-                    break;
-                }
-            }
+            "producers" => producers(
+                custom,
+                &mut conclusions,
+                &mut declared,
+                &mut omissions,
+                cancelled,
+            )?,
             "target_features" => target_features(custom, &mut declared, &mut omissions),
             "sourceMappingURL" => {
                 source_map = json!({"url":custom_string(custom),"byte_offset":custom.data_offset});
@@ -2363,10 +2320,10 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
                 "byte_end":custom.end,"bytes":custom.data.len()}));
         }
     }
-    if module.custom_count > MAX_CUSTOM_SECTIONS {
+    if module.customs.len() > MAX_CUSTOM_SECTIONS {
         omissions.push(format!(
             "Custom section limit of {MAX_CUSTOM_SECTIONS} reached; {} later custom sections are not listed.",
-            module.custom_count - MAX_CUSTOM_SECTIONS
+            module.customs.len() - MAX_CUSTOM_SECTIONS
         ));
     }
     if declared.producers_cut {
@@ -2389,20 +2346,15 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
     let mut labeler = Labeler {
         suggestions: Vec::new(),
         per_function: HashMap::new(),
-        dropped: 0,
         beyond_per_function: 0,
         cpp_declared,
         conclusions: &mut conclusions,
     };
-    let mut labeled = 0usize;
-    let mut labeling_stopped = false;
     let records = module.imports.len() + module.exports.len() + module.names.len();
     for position in 0..records {
-        if position.is_multiple_of(4096) && Instant::now() > deadline {
-            labeling_stopped = true;
-            break;
+        if position.is_multiple_of(4096) {
+            check_cancelled(cancelled, WHAT)?;
         }
-        labeled += 1;
         if let Some(import) = module.imports.get(position) {
             labeler.import(import);
         } else if let Some(export) = module.exports.get(position - module.imports.len()) {
@@ -2414,12 +2366,6 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
             labeler.symbol(name, Some(index), "name", offset);
         }
     }
-    if labeling_stopped {
-        omissions.push(format!(
-            "Identification deadline reached while labeling; {labeled} of {records} imports, exports and names were read."
-        ));
-    }
-    let dropped_suggestions = labeler.dropped;
     if labeler.beyond_per_function > 0 {
         omissions.push(format!(
             "Per-function label limit of {MAX_SUGGESTIONS_PER_FUNCTION} reached; {} further labels are counted, not listed.",
@@ -2429,15 +2375,7 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
     let labeled_functions = labeler.per_function.len();
     let mut suggestions = labeler.suggestions;
     suggestions.sort_by_key(|entry| entry.function);
-    let suggestion_total = suggestions.len() + dropped_suggestions;
-    if dropped_suggestions > 0 {
-        omissions.push(format!(
-            "Suggestion limit reached; {dropped_suggestions} later suggestions are counted, not listed."
-        ));
-    }
-    if offset > suggestions.len() {
-        return Err(Error::bad("row_offset exceeds the suggestion count"));
-    }
+    let suggestion_total = suggestions.len();
 
     // Data first: immediates look for references to the tables it finds.
     let mut candidates = Candidates::default();
@@ -2447,69 +2385,27 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
         .map(|segment| segment.data.len())
         .sum();
     let mut data_scanned = 0usize;
-    let mut data_stopped = module.stopped;
-    let mut room = MAX_RUNS;
-    let mut runs_dropped = 0usize;
     for segment in &module.segments {
-        let mut expired = || Instant::now() > deadline;
-        let scan = wasm_constants::scan_data(segment.data, &mut expired, &mut room);
+        let scan =
+            wasm_constants::scan_data(segment.data, &mut || cancelled.load(Ordering::Relaxed));
         data_scanned += scan.scanned;
-        runs_dropped += scan.dropped;
-        cluster(scan.runs, segment, deadline, &mut candidates);
-        if scan.stop.is_some() || candidates.expired {
-            data_stopped = true;
-            omissions.push(format!(
-                "Identification deadline reached in data segment {}; {} of {data_bytes} data bytes were scanned.",
-                segment.index, data_scanned
-            ));
-            break;
-        }
+        check_cancelled(cancelled, WHAT)?;
+        cluster(scan.runs, segment, cancelled, &mut candidates)?;
     }
-    if runs_dropped > 0 {
-        omissions.push(format!(
-            "Data run limit of {MAX_RUNS} reached; {runs_dropped} later runs of known tables are counted, not matched."
-        ));
-    }
-    let data_dropped = std::mem::take(&mut candidates.dropped);
-    let mut suppress_stopped = false;
     let (merged, separate) = merge_segments(std::mem::take(&mut candidates.kept));
     if separate > 0 {
         omissions.push(format!(
             "A table spans more than {MAX_MATCH_SEGMENTS} segments; {separate} later parts are listed as separate matches."
         ));
     }
-    let mut data_matches = suppress_data(merged, deadline, &mut suppress_stopped);
-    if suppress_stopped {
-        omissions.push("Identification deadline reached while merging data matches; later candidates were dropped.");
-    }
-    // A module the deadline stopped reading is not read again for bodies.
-    let scan = if module.stopped {
-        Scan {
-            functions_scanned: 0,
-            immediates: 0,
-            stopped: true,
-        }
-    } else {
-        scan_functions(
-            bytes,
-            module.imported_functions,
-            &mut data_matches,
-            deadline,
-            &mut candidates,
-        )?
-    };
-    if scan.stopped || (module.stopped && scan.functions_scanned < module.defined_functions) {
-        omissions.push(format!(
-            "Identification deadline reached; constant immediates of {} of {} function bodies were scanned.",
-            scan.functions_scanned, module.defined_functions
-        ));
-    }
-    let candidates_dropped = data_dropped + candidates.dropped;
-    if candidates_dropped > 0 {
-        omissions.push(format!(
-            "Constant candidate limit of {MAX_CANDIDATES} reached; {candidates_dropped} later candidates are counted, not merged or listed."
-        ));
-    }
+    let mut data_matches = suppress_data(merged, cancelled)?;
+    let scan = scan_functions(
+        bytes,
+        module.imported_functions,
+        &mut data_matches,
+        cancelled,
+        &mut candidates,
+    )?;
     let mut matches = data_matches;
     matches.extend(candidates.kept);
     // Complete and larger matches first, so a cut keeps the strongest.
@@ -2521,7 +2417,7 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
             entry.byte_offset,
         )
     });
-    let match_total = matches.len() + candidates_dropped;
+    let match_total = matches.len();
     let complete_matches = matches.iter().filter(|entry| entry.complete()).count();
 
     let mut ordered = conclusions.by_id.into_iter().collect::<Vec<_>>();
@@ -2590,23 +2486,23 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
                 "source_mapping_url":source_map,"external_debug_info":debug_info,"custom_sections":list(&custom_rows),
                 "name_section":{"present":module.name_section.is_some(),"byte_offset":module.name_section,
                     "module_name":module.module_name.map(|(name, _)| bounded(name, LABEL_TEXT_BYTES)),
-                    "function_names":module.name_count}},
+                    "function_names":module.names.len()}},
             "functions":{"imported_functions":module.imported_functions,"defined_functions":module.defined_functions,
                 "labeled_functions":labeled_functions,
                 "suggestion_fields":["function_index","label","category","library","confidence","source","byte_offset"],
                 "suggestions":[],
-                "suggestion_window":{"offset":offset,"rows":0,"total_rows":suggestions.len(),"next_offset":null}},
+                "suggestion_window":{"offset":0,"rows":0,"total_rows":suggestions.len(),"next_offset":null}},
             "constants":{"matches":matches.iter().take(match_limit)
                 .map(|entry| entry.json(bytes, detail_limit, detail_limit)).collect::<Vec<_>>()},
-            "coverage":{"data_segments":module.segment_count,"data_bytes":data_bytes,"data_bytes_scanned":data_scanned,
-                "data_scan_complete":!data_stopped,"functions_scanned":scan.functions_scanned,
+            "coverage":{"data_segments":module.segments.len(),"data_bytes":data_bytes,"data_bytes_scanned":data_scanned,
+                "data_scan_complete":data_scanned == data_bytes,"functions_scanned":scan.functions_scanned,
                 "immediates_scanned":scan.immediates},
             "omissions":level_omissions.render(),
-            "limits":{"max_input_bytes":MAX_BYTES,"deadline_ms":DEADLINE.as_millis() as u64,"max_conclusions":MAX_CONCLUSIONS,
-                "max_evidence_per_conclusion":MAX_EVIDENCE,"max_suggestions":MAX_SUGGESTIONS,"suggestion_page":SUGGESTION_PAGE,
+            "limits":{"max_conclusions":MAX_CONCLUSIONS,
+                "max_evidence_per_conclusion":MAX_EVIDENCE,"suggestion_page":SUGGESTION_PAGE,
                 "max_suggestions_per_function":MAX_SUGGESTIONS_PER_FUNCTION,"max_constant_matches":MAX_MATCHES,
                 "max_references_per_match":MAX_REFERENCES,"max_sites_per_match":MAX_SITES,"match_preview_bytes":MATCH_PREVIEW_BYTES,
-                "max_label_text_bytes":LABEL_TEXT_BYTES,"max_stored_records":MAX_STORED_RECORDS,
+                "max_label_text_bytes":LABEL_TEXT_BYTES,
                 "page_bytes":PAGE_BYTES,"fixed_bytes":FIXED_BYTES},
             "notice":"Static identification only. Labels and toolchain conclusions are analyzer suggestions from the cited bytes, never captured or analyst names; a constant match shows the values are present, not that an algorithm runs; an address reference is an immediate naming a matched table's start or a load offset inside it, not an observed load. Nothing is concluded from absence."
         });
@@ -2615,44 +2511,12 @@ fn identify_until(bytes: &[u8], offset: usize, limit: usize, deadline: Instant) 
         }
     }
 
-    // Suggestion rows fill what the page budget leaves; at least one row is
-    // returned so paging always advances. A row pretty-prints as nine lines
-    // three levels deep, six spaces more indented than on its own, plus its
-    // separator.
-    let mut room = PAGE_BYTES.saturating_sub(serialized(&document));
-    let mut window = Vec::new();
-    for entry in suggestions.iter().skip(offset).take(limit) {
-        let row = json!([
-            entry.function,
-            entry.label,
-            entry.category,
-            entry.library,
-            entry.confidence.name(),
-            entry.source,
-            entry.byte_offset
-        ]);
-        let size = serialized(&row) + 9 * 6 + 2;
-        if !window.is_empty() && size > room {
-            break;
-        }
-        room = room.saturating_sub(size);
-        window.push(row);
-    }
-    let place = |document: &mut Value, window: &[Value]| {
-        let next = offset + window.len();
-        document["functions"]["suggestion_window"] = json!({"offset":offset,"rows":window.len(),
-            "total_rows":suggestions.len(),"next_offset":if next < suggestions.len() {json!(next)} else {Value::Null}});
-        document["functions"]["suggestions"] = Value::Array(window.to_vec());
-    };
-    place(&mut document, &window);
-    // The estimate is checked against the page itself: rows come off the end
-    // until it fits, always leaving one.
-    while window.len() > 1 && serialized(&document) > PAGE_BYTES {
-        let cut = (window.len() / 16).max(1);
-        window.truncate(window.len() - cut);
-        place(&mut document, &window);
-    }
-    Ok(document)
+    let document_bytes = serialized(&document);
+    Ok(Report {
+        document,
+        document_bytes,
+        suggestions,
+    })
 }
 
 fn tool_label(id: &str) -> &'static str {
@@ -2666,6 +2530,7 @@ fn tool_label(id: &str) -> &'static str {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     fn fixtures() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/wasm-identification")
@@ -2906,8 +2771,6 @@ mod tests {
         );
         let component = identify(b"\0asm\x0d\0\x01\0", 0, 1).unwrap_err();
         assert_eq!(component.status, 422);
-        let oversized = identify(&vec![0; MAX_BYTES + 1], 0, 1).unwrap_err();
-        assert_eq!(oversized.status, 400);
         // A malformed name section is advisory: the report names it.
         let mut bytes = wat::parse_str(r#"(module (func $f))"#).unwrap();
         let name = bytes
@@ -2976,12 +2839,10 @@ mod tests {
     }
 
     #[test]
-    fn an_expired_data_scan_stops_and_says_so() {
+    fn a_cancelled_data_scan_stops_at_once() {
         let data = vec![0u8; 200_000];
-        let mut expired = || true;
-        let mut room = 8;
-        let scan = wasm_constants::scan_data(&data, &mut expired, &mut room);
-        assert!(scan.runs.is_empty() && scan.scanned == 0 && scan.stop.is_some());
+        let scan = wasm_constants::scan_data(&data, &mut || true);
+        assert!(scan.runs.is_empty() && scan.scanned == 0);
     }
 
     /// Raw module builders, as the review's generators wrote them: some
@@ -3106,12 +2967,12 @@ mod tests {
     }
 
     #[test]
-    fn a_table_repeated_across_a_segment_is_counted_not_merged_pairwise() {
+    fn a_table_repeated_across_a_segment_is_matched_whole_not_pairwise() {
         let quarter = raw::words(&wasm_constants::SHA256_K[..4]);
         let segment = quarter.repeat(32_000);
         let bytes = raw::module(&[raw::memory(8), raw::data(&[(1024, segment)])]);
         let started = Instant::now();
-        let report = identify_within(&bytes, 0, 16, Duration::from_secs(300)).unwrap();
+        let report = identify(&bytes, 0, 16).unwrap();
         // Pairwise merging of these runs took 28 s in a release build; the
         // bound leaves room for a debug build on a loaded machine.
         assert!(
@@ -3119,15 +2980,21 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
-        assert_eq!(report["status"], "partial");
+        // Every repetition is a counted match; the page lists the first few.
+        assert_eq!(
+            report["summary"]["constant_matches"], 32_000,
+            "{:#}",
+            report["summary"]
+        );
         assert!(report["constants"]["matches"].as_array().unwrap().len() <= MAX_MATCHES);
+        assert_eq!(report["coverage"]["data_scan_complete"], true);
         let omissions = report["omissions"].to_string();
-        assert!(omissions.contains("Data run limit"), "{omissions}");
-        assert!(omissions.contains("candidate limit"), "{omissions}");
+        assert!(!omissions.contains("Data run limit"), "{omissions}");
+        assert!(!omissions.contains("candidate limit"), "{omissions}");
     }
 
     #[test]
-    fn merging_and_suppression_stop_at_the_deadline_and_say_so() {
+    fn every_phase_stops_when_the_request_is_cancelled() {
         let quarter = raw::words(&wasm_constants::SHA256_K[..4]);
         let segment_bytes = quarter.repeat(4096);
         let segment = Segment {
@@ -3136,67 +3003,50 @@ mod tests {
             data_offset: 0,
             address: Some(1024),
         };
-        let mut room = MAX_RUNS;
-        let scan = wasm_constants::scan_data(&segment_bytes, &mut || false, &mut room);
+        let scan = wasm_constants::scan_data(&segment_bytes, &mut || false);
         assert_eq!(scan.runs.len(), 4096);
-        let past = Instant::now() - Duration::from_millis(1);
+        let (running, cancelled) = (AtomicBool::new(false), AtomicBool::new(true));
         let mut late = Candidates::default();
-        cluster(scan.runs.clone(), &segment, past, &mut late);
-        assert!(late.expired && late.kept.is_empty());
+        let error = cluster(scan.runs.clone(), &segment, &cancelled, &mut late).unwrap_err();
+        assert_eq!(error.status, 499);
         let mut timely = Candidates::default();
-        cluster(scan.runs, &segment, Instant::now() + DEADLINE, &mut timely);
+        cluster(scan.runs, &segment, &running, &mut timely).unwrap();
+        assert_eq!(timely.kept.len(), 4096);
         assert_eq!(
-            (timely.kept.len(), timely.dropped),
-            (MAX_CANDIDATES, 4096 - MAX_CANDIDATES)
+            suppress_data(timely.kept, &cancelled).err().unwrap().status,
+            499
         );
-        let mut expired = false;
-        let kept = suppress_data(timely.kept, past, &mut expired);
-        assert!(expired && kept.is_empty());
-        // The whole report keeps one deadline: every phase says it stopped.
         let bytes = raw::module(&[
             raw::memory(2),
             raw::data(&[(1024, quarter.repeat(64))]),
             raw::names(&[(0, "malloc".into())]),
         ]);
-        let report = identify_within(&bytes, 0, 16, Duration::ZERO).unwrap();
-        let omissions = report["omissions"].to_string();
-        assert!(
-            omissions.contains("deadline reached while labeling"),
-            "{omissions}"
-        );
-        assert!(
-            omissions.contains("deadline reached in data segment 0"),
-            "{omissions}"
-        );
-        assert_eq!(report["coverage"]["data_scan_complete"], false);
+        let Err(error) = Report::build(&bytes, &cancelled) else {
+            panic!("a cancelled report was built");
+        };
+        assert_eq!(error.status, 499, "{}", error.message);
     }
 
     #[test]
-    fn millions_of_names_are_counted_past_the_stored_limit() {
-        let count = MAX_STORED_RECORDS + 4000;
+    fn every_name_of_a_module_is_read_and_labeled() {
+        let count = 70_000;
         let names = (0..count as u32)
             .map(|index| (index, format!("core::fmt::f{index}")))
             .collect::<Vec<_>>();
         let bytes = raw::module(&[raw::names(&names)]);
-        // Counting is under test, not the deadline: a debug build on a loaded
-        // machine can need more than four seconds to label this many names.
-        let report = identify_within(&bytes, 0, 8, Duration::from_secs(300)).unwrap();
+        let report = identify(&bytes, 0, 8).unwrap();
         assert_eq!(report["toolchain"]["name_section"]["function_names"], count);
         let omissions = report["omissions"].to_string();
-        assert!(
-            omissions.contains("Name limit of 65536 reached"),
-            "{omissions}"
-        );
-        assert!(
-            omissions.contains("Suggestion limit reached"),
-            "{omissions}"
-        );
-        assert_eq!(report["summary"]["suggestions"], MAX_STORED_RECORDS);
-        assert_eq!(report["functions"]["labeled_functions"], MAX_STORED_RECORDS);
+        assert!(!omissions.contains("limit"), "{omissions}");
+        assert_eq!(report["summary"]["suggestions"], count);
+        assert_eq!(report["functions"]["labeled_functions"], count);
         assert_eq!(
             report["functions"]["suggestion_window"]["total_rows"],
-            MAX_SUGGESTIONS
+            count
         );
+        assert!(report["limits"].get("max_stored_records").is_none());
+        assert!(report["limits"].get("deadline_ms").is_none());
+        assert!(report["limits"].get("max_input_bytes").is_none());
     }
 
     #[test]
@@ -3545,12 +3395,11 @@ mod tests {
 
     #[test]
     fn a_match_is_contained_only_by_a_run_of_another() {
-        let mut expired = false;
-        let late = Instant::now() + DEADLINE;
+        let running = AtomicBool::new(false);
         // A span bridging two runs, merged or clustered, holds nothing in its gap.
         let merged = synthetic("crc32_table", &[(0, 512), (1500, 2000)], vec![0, 1], 256);
         let inside = synthetic("md5_h", &[(600, 616)], vec![1], 4);
-        let kept = suppress_data(vec![merged, inside], late, &mut expired);
+        let kept = suppress_data(vec![merged, inside], &running).unwrap();
         assert_eq!(
             kept.len(),
             2,
@@ -3560,14 +3409,18 @@ mod tests {
         let container = synthetic("sha1_h", &[(600, 620)], vec![1], 5);
         let inside = synthetic("md5_h", &[(600, 616)], vec![1], 4);
         assert_eq!(
-            suppress_data(vec![container, inside], late, &mut expired).len(),
+            suppress_data(vec![container, inside], &running)
+                .unwrap()
+                .len(),
             1
         );
         // A second run of a larger match explains too.
         let container = synthetic("base64_standard", &[(0, 40), (100, 164)], vec![0], 64);
         let inside = synthetic("base62_alphanumeric", &[(100, 162)], vec![0], 62);
         assert_eq!(
-            suppress_data(vec![container, inside], late, &mut expired).len(),
+            suppress_data(vec![container, inside], &running)
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -3801,7 +3654,7 @@ mod tests {
     }
 
     #[test]
-    fn the_deadline_counts_from_the_start_of_load() {
+    fn load_identifies_a_module_once_and_pages_from_the_kept_report() {
         let root = tempfile::tempdir().unwrap();
         let bytes = std::fs::read(fixtures().join("rust-wasm-bindgen.wasm")).unwrap();
         let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
@@ -3812,15 +3665,18 @@ mod tests {
             "mime_type":"application/wasm","byte_size":bytes.len(),"sha256":hash,"sensitive":false,
             "content_path":format!("blobs/{hash}.bin")});
         std::fs::write(root.path().join("manifest.jsonl"), format!("{row}\n")).unwrap();
-        assert_eq!(load(root.path(), "1", 0, 16).unwrap()["status"], "complete");
-        // A read that already spent the budget leaves a partial report.
-        let report = load_started(root.path(), "1", 0, 16, Instant::now() - DEADLINE).unwrap();
-        assert_eq!(report["status"], "partial");
-        assert!(
-            report["omissions"].to_string().contains("deadline"),
-            "{report:#}"
-        );
-        assert!(DEADLINE <= Duration::from_millis(3500));
+        let running = AtomicBool::new(false);
+        let first = load(root.path(), "1", 0, 1, &running).unwrap();
+        assert_eq!(first["status"], "complete");
+        assert_eq!(first["sha256"], hash);
+        // A later page comes from the kept report, so a request cancelled
+        // before it starts still gets its page.
+        let next = first["functions"]["suggestion_window"]["next_offset"].clone();
+        if let Some(offset) = next.as_u64() {
+            let page = load(root.path(), "1", offset as usize, 1, &AtomicBool::new(true)).unwrap();
+            assert_eq!(page["functions"]["suggestion_window"]["offset"], offset);
+            assert_eq!(page["summary"], first["summary"]);
+        }
     }
 
     #[test]
@@ -3853,7 +3709,7 @@ mod tests {
         assert!(lines.len() <= 3, "{lines:#?}");
         assert!(
             lines.contains(
-                &"A target_features section is malformed; it was not read. (65536 times)"
+                &"A target_features section is malformed; it was not read. (70000 times)"
                     .to_owned()
             ),
             "{lines:#?}"
@@ -3861,14 +3717,14 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("Custom section limit of 65536 reached")),
+                .any(|line| line.starts_with("Custom section limit of 32 reached")),
             "{lines:#?}"
         );
         assert!(serde_json::to_vec(&report).unwrap().len() < 16_384);
     }
 
     #[test]
-    fn reading_and_custom_sections_stop_at_the_deadline() {
+    fn reading_and_custom_sections_stop_when_cancelled() {
         // Enough imports to reach the reader's poll, which runs every 4096 records.
         let imports = (0..5000)
             .map(|index| {
@@ -3884,22 +3740,17 @@ mod tests {
             raw::section(1, &[1, 0x60, 0, 0]),
             raw::section(2, &raw::vector(&imports)),
         ]);
-        let report = identify_within(&bytes, 0, 16, Duration::ZERO).unwrap();
-        let omissions = report["omissions"].to_string();
-        assert!(
-            omissions.contains("deadline reached while reading sections"),
-            "{omissions}"
-        );
-        assert!(report["functions"]["imported_functions"].as_u64().unwrap() < 5000);
+        let cancelled = AtomicBool::new(true);
+        assert_eq!(read_module(&bytes, &cancelled).err().unwrap().status, 499);
+        let report = identify(&bytes, 0, 16).unwrap();
+        assert_eq!(report["functions"]["imported_functions"], 5000);
         let sections = (0..4)
             .map(|_| custom("target_features", &features(2)))
             .collect::<Vec<_>>();
-        let report = identify_within(&raw::module(&sections), 0, 16, Duration::ZERO).unwrap();
-        let omissions = report["omissions"].to_string();
-        assert!(
-            omissions.contains("deadline reached while reading custom sections; 0 of 4"),
-            "{omissions}"
-        );
+        let Err(error) = Report::build(&raw::module(&sections), &cancelled) else {
+            panic!("a cancelled report was built");
+        };
+        assert_eq!(error.status, 499);
     }
 
     #[test]

@@ -110,10 +110,11 @@
       "operations": [
         "get_artifact_text",
         "search_artifact_text",
+        "search_wasm_inspection",
         "run_wasm_function",
         "get_wasm_runs"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -955,7 +956,7 @@
       "get": {
         "operationId": "get_deobfuscation",
         "summary": "get deobfuscation",
-        "description": "Supply artifact_id of a captured UTF-8 JavaScript artifact. assume_intrinsics=1 requires Rust worker. Analysis may populate worker caches. Other uncaught filesystem/manifest exceptions do not have a guaranteed JSON response.",
+        "description": "Supply artifact_id of a captured UTF-8 JavaScript artifact of any size; the whole source is analyzed with no deadline. assume_intrinsics=1 requires Rust worker. Analyses are cached by source SHA-256 and assumption, so the same bytes are analyzed once; analyses queue behind one worker in arrival order, and a request that goes away leaves the queue or stops its worker. Other uncaught filesystem/manifest exceptions do not have a guaranteed JSON response.",
         "tags": [
           "deobfuscation"
         ],
@@ -1000,26 +1001,6 @@
           },
           "404": {
             "description": "Requested record not found.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "408": {
-            "description": "Bounded worker timed out or busy.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "State conflict, unavailable live session, or stale generation.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1120,7 +1101,7 @@
               "effects": [
                 "process-stop"
               ],
-              "when": "The analysis worker process group is cleaned up on completion or failure."
+              "when": "The analysis worker process group is cleaned up on completion, failure or when the request goes away."
             }
           ],
           "uncertainties": [],
@@ -1131,11 +1112,11 @@
             },
             {
               "id": "deobfuscator-ready",
-              "condition": "The analysis helper must be executable and idle. Exactly one captured JavaScript artifact is required."
+              "condition": "The analysis helper must be executable. Analyses share one worker queue and run in arrival order. Exactly one captured JavaScript artifact is required."
             }
           ],
           "confirmations": [],
-          "notes": "Runs the bounded Rust JavaScript analysis helper; source is parsed/transformed rather than evaluated.",
+          "notes": "Runs the Rust JavaScript analysis helper over the whole source; source is parsed/transformed rather than evaluated.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/deobfuscation.rs",
@@ -3480,8 +3461,8 @@
     "/api/artifacts/search": {
       "get": {
         "operationId": "search_artifact_text",
-        "summary": "Search retained artifacts for literal text",
-        "description": "Captured content: finds a literal of 1 to 256 bytes on one line in retained artifacts, oldest artifact first, as Sources Search does. There is no pattern language, because captured text is adversarial. Header blocks and cookie lists are never searched, so no match shows a credential or cookie value. match_case false folds ASCII letters only. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. Each match has its artifact, byte_offset, 1-based line and column (characters), and up to 48 bytes of the same line before and after it. At most 100 matches are taken from one file, files over 16 MiB are skipped, one call reads at most 64 MiB and stops after 10 seconds; coverage names each file not fully searched and complete says whether the scope was searched whole. offset skips matches and next_offset continues. The MCP projection lists this operation only with --allow-content (--permission full).",
+        "summary": "Search retained artifacts for text or a regular expression",
+        "description": "Captured content: finds q, literal text or (with regex true) a regular expression, on one line, in every selected retained artifact, oldest artifact first, as Sources Search does. Each artifact is searched whole, whatever its size, and verified against its manifest digest; nothing is skipped for size and there is no deadline. Regular expressions use the Rust regex syntax, whose matching time is linear in the text, so captured text cannot make a search backtrack; ^ and $ match at line breaks, and an empty match is not counted. Without match_case, letters fold by Unicode simple case folding. Header blocks and cookie lists are never searched, so no match shows a credential or cookie value. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. total_matches counts every match exactly; matches is one page of them from offset, and next_offset continues. Each match has its artifact, byte_offset and byte_length, 1-based line, column (characters) and utf16_column, utf16_length, at most 256 bytes of the match, and up to 48 bytes of the same line before and after it. files gives each artifact on the page its exact match count. coverage names each artifact that could not be read or verified, and each whose bytes are not valid UTF-8. The count is kept for the query and artifact set, so a later page reads only the files it lists. A request that goes away stops the search (499). The MCP projection lists this operation only with --allow-content (--permission full).",
         "tags": [
           "artifacts"
         ],
@@ -3490,18 +3471,27 @@
             "name": "q",
             "in": "query",
             "required": true,
-            "description": "The literal text, 1 to 256 bytes, no line breaks.",
+            "description": "Literal text, or a regular expression with regex true, on one line (no line breaks, U+2028 or U+2029).",
             "schema": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 256
+              "minLength": 1
+            }
+          },
+          {
+            "name": "regex",
+            "in": "query",
+            "required": false,
+            "description": "When true, q is a regular expression in the Rust regex syntax. Default false.",
+            "schema": {
+              "type": "boolean",
+              "default": false
             }
           },
           {
             "name": "match_case",
             "in": "query",
             "required": false,
-            "description": "Default false.",
+            "description": "Default false: letters fold by Unicode simple case folding.",
             "schema": {
               "type": "boolean",
               "default": false
@@ -3590,7 +3580,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..200, default 50.",
+            "description": "Matches in this page, clamped to 1..200, default 50. Every match is counted; next_offset reaches the rest.",
             "schema": {
               "type": "integer",
               "default": 50
@@ -3609,7 +3599,7 @@
             }
           },
           "400": {
-            "description": "Missing or invalid q, or an unknown, duplicate or malformed parameter.",
+            "description": "Missing or invalid q, an invalid regular expression, or an unknown, duplicate or malformed parameter.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3649,7 +3639,17 @@
             }
           },
           "500": {
-            "description": "Store, read or validation failure.",
+            "description": "Store, read or validation failure, or an artifact that changed between the count and its page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and the search stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3672,7 +3672,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads retained artifacts within fixed byte, match and time budgets. Returns captured content; nothing is changed.",
+          "notes": "Reads every selected artifact whole, on every core, and keeps the match count per artifact for later pages. Returns captured content; nothing is changed.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -3841,7 +3841,7 @@
       "get": {
         "operationId": "get_artifact_content",
         "summary": "get artifact content",
-        "description": "Bounded raw byte chunk, HTTP 200 even for partial content. Use query offsets, not HTTP Range. Invalid artifact identifiers map to 404; invalid numeric query values or manifest/content mismatch map to 500.",
+        "description": "Raw byte range, HTTP 200 even for partial content. Use query offsets, not HTTP Range. The whole file is SHA-256 verified for every range, so a reader of a whole artifact asks for it in one request. Invalid artifact identifiers map to 404; invalid numeric query values or manifest/content mismatch map to 500.",
         "tags": [
           "artifacts"
         ],
@@ -3950,7 +3950,7 @@
             }
           },
           "408": {
-            "description": "Artifact manifest lookup exceeded its five-second deadline, or full artifact verification exceeded its thirty-second deadline.",
+            "description": "Artifact manifest lookup exceeded its five-second deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3959,6 +3959,16 @@
               }
             },
             "x-source": "apps/origin-trace-backend/src/evidence.rs"
+          },
+          "499": {
+            "description": "The request went away and its verified read stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -3987,7 +3997,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..2097152 bytes. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
+            "description": "Bytes to return from offset, at least 1 (smaller values are raised to 1). Any larger value returns the rest of the artifact; 2097152 when omitted. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
             "schema": {
               "type": "integer",
               "default": 2097152
@@ -4507,7 +4517,7 @@
         "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
-          "description": "JSON object. Explicit decimal Content-Length required; 1..1114112 encoded bytes. Chunked request bodies are not supported.",
+          "description": "JSON object. Explicit decimal Content-Length required; 1..1073741824 encoded bytes. Chunked request bodies are not supported. The limit only bounds one request's buffer: a run's selected artifact is read from the store, not sent, and a library or evidence snapshot the page holds fits.",
           "content": {
             "application/json": {
               "schema": {
@@ -4516,7 +4526,7 @@
             }
           }
         },
-        "x-max-body-bytes": 1114112,
+        "x-max-body-bytes": 1073741824,
         "x-reb-execution": {
           "kind": "action-dependent",
           "effects": null,
@@ -4578,7 +4588,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4588,7 +4598,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4598,7 +4608,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4608,7 +4618,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4618,7 +4628,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4702,7 +4722,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4712,7 +4732,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4722,7 +4742,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4732,7 +4752,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4742,7 +4762,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4791,7 +4821,7 @@
       "get": {
         "operationId": "get_wasm_value_flow",
         "summary": "Value flow for one WebAssembly operand or local",
-        "description": "Declared static value flow inside one defined function of a hash-verified core WASM artifact. Seed with offset (an instruction's original byte offset) and optionally operand (text order), or with local. backward lists what feeds the seed: params, locals, globals, constants, memory loads with their address slice, call and import call results; forward lists where it goes: stores (address or value side), call and call_indirect arguments, import calls (the JS crossing), br_table, br_if, if and select selectors, globals and returns. Joins at block, loop, if and try merges list every incoming edge. A load follows a store only for the same constant address in the same block with nothing between. interprocedural=true adds one step to direct call sites. Bounded by max_nodes, max_depth and a deadline; truncated and omissions say what was cut. text and expression are content (instruction text) and are omitted below Full access; kinds, offsets, indices and edges are structure. Never executes the module.",
+        "description": "Declared static value flow inside one defined function of a hash-verified core WASM artifact. Seed with offset (an instruction's original byte offset) and optionally operand (text order), or with local. backward lists what feeds the seed: params, locals, globals, constants, memory loads with their address slice, call and import call results; forward lists where it goes: stores (address or value side), call and call_indirect arguments, import calls (the JS crossing), br_table, br_if, if and select selectors, globals and returns. Joins at block, loop, if and try merges list every incoming edge. A load follows a store only for the same constant address in the same block with nothing between. interprocedural=true adds one step to direct call sites. Bounded by max_nodes and max_depth, with no deadline: a request that goes away stops the slice and is answered 499 cancelled; truncated and omissions say what was cut. text and expression are content (instruction text) and are omitted below Full access; kinds, offsets, indices and edges are structure. Never executes the module.",
         "tags": [
           "artifacts"
         ],
@@ -4907,7 +4937,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4917,7 +4947,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4927,7 +4957,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4937,7 +4967,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4947,7 +4977,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5000,7 +5040,7 @@
       "get": {
         "operationId": "get_wasm_module_diff",
         "summary": "Match the functions of two captured WebAssembly modules",
-        "description": "Static function matching between two hash-verified core WASM artifacts (A is artifact_id, B is compare_artifact_id), for example two builds of one site's module. Matching runs in a fixed order: import names, byte-identical bodies of the same signature that name nothing by a renumberable index, normalized-identical bodies (call targets, renumbered locals, globals and types, and static data addresses ignored), export names, name-section names, call-graph propagation, then structural similarity with a score. Rows report matched functions with method and score as identical (equal bytes and normalized hashes, and every call and ref.func target matched), renumbered or changed, plus added and removed functions. Tied candidates are never forced into a pair: each member of a tie is its own ambiguous row with its group. Each side names its function index, and a.sha256 and b.sha256 with that index identify a function. Structure only: no instruction text, constant value or data byte is returned. Bounded by module size, function count, comparisons and one deadline checked inside every body and loop; a stopped step leaves its functions unclassified, and partial status and omissions name it. Page with row_offset and row_limit, and narrow with status; only a complete report pages reliably, since each page of a partial one is compared again. Never executes either module.",
+        "description": "Static function matching between two hash-verified core WASM artifacts (A is artifact_id, B is compare_artifact_id), for example two builds of one site's module. Matching runs in a fixed order: import names, byte-identical bodies of the same signature that name nothing by a renumberable index, normalized-identical bodies (call targets, renumbered locals, globals and types, and static data addresses ignored), export names, name-section names, call-graph propagation, then structural similarity with a score. Rows report matched functions with method and score as identical (equal bytes and normalized hashes, and every call and ref.func target matched), renumbered or changed, plus added and removed functions. Tied candidates are never forced into a pair: each member of a tie is its own ambiguous row with its group. Each side names its function index, and a.sha256 and b.sha256 with that index identify a function. Structure only: no instruction text, constant value or data byte is returned. Modules of any size are compared whole. Bounded by a cap on similarity scores; a step it stops leaves its functions unclassified, and partial status and omissions name it. There is no deadline: cancellation is checked inside every body and loop, and a request that goes away is answered 499 cancelled. Page with row_offset and row_limit, and narrow with status; every page of a pair is cut from one kept report. Never executes either module.",
         "tags": [
           "artifacts"
         ],
@@ -5074,7 +5114,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5084,7 +5124,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5094,7 +5134,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5104,7 +5144,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5114,7 +5154,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5460,7 +5510,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5470,7 +5520,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5480,7 +5530,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5490,7 +5540,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5500,7 +5550,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5528,7 +5588,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Verifies captured artifact bytes, then reads sections, names and constant immediates under a five-second deadline. Static identification only; the module is never executed and nothing is written.",
+          "notes": "Verifies captured artifact bytes, then reads every section, name and constant immediate with no deadline; a request that goes away stops the work. The whole report is kept by module SHA-256, so later pages only cut rows. Static identification only; the module is never executed and nothing is written.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm_identification.rs",
@@ -5611,7 +5671,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5621,7 +5681,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5631,7 +5691,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5641,7 +5701,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5651,7 +5711,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5704,7 +5774,7 @@
       "get": {
         "operationId": "inspect_wasm",
         "summary": "Inspect a captured WebAssembly module",
-        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. The optional sections filter decodes rows for only the named sections, so export, type, import, custom and data tables stay reachable when code-section instructions would otherwise exhaust the 8,192-row budget. Per-function declaration rows appear only when sections names function. coverage names what was analyzed, excluded and truncated, and a filtered document is never decoded. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior. Researcher names (Analyst evidence names, keyed by module SHA-256 and function index) appear as analyst_name on function, import, declaration and start rows and as target_analyst_name beside target_function_index on call, return_call and ref.func rows, with the module's names in analyst_names; captured text is unchanged.",
+        "description": "Inert decoding of a hash-verified core WASM artifact of any size, read as a window of rows. Never executes the module. The first request indexes where every section, entry run and function body's rows begin and keeps that index by module SHA-256 and section request; a window decodes only the units it shows, so every row of a module is reachable with row_offset, or with byte_offset at the row for an original byte. row_window names the window and total_rows; next_offset continues. The optional sections filter decodes rows for only the named sections. coverage names what was analyzed, excluded and left opaque, and a filtered document is never decoded. decoded does not assert type validity or runtime behavior. A request that goes away stops the decode and is answered 499. search_wasm_inspection finds text in every row. Researcher names (Analyst evidence names, keyed by module SHA-256 and function index) appear as analyst_name on function, import, declaration and start rows and as target_analyst_name beside target_function_index on call, return_call and ref.func rows, with the module's names in analyst_names; captured text is unchanged.",
         "tags": [
           "artifacts"
         ],
@@ -5734,7 +5804,7 @@
             "name": "row_offset",
             "in": "query",
             "required": false,
-            "description": "First row of a row window. With row_offset or row_limit the document keeps only that window of rows and adds row_window, so a module whose rows exceed an inline limit can be read page by page. Default 0.",
+            "description": "First row of the window. Default 0. Exclusive with byte_offset.",
             "schema": {
               "type": "integer",
               "minimum": 0,
@@ -5749,7 +5819,18 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 2048
+              "maximum": 2048,
+              "default": 2048
+            }
+          },
+          {
+            "name": "byte_offset",
+            "in": "query",
+            "required": false,
+            "description": "Start the window at the row for this original byte instead: the first row whose byte_offset equals it, or else the last row that starts before it. row_window.offset names that row. A byte before the first row or past the module is refused. Exclusive with row_offset.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
             }
           }
         ],
@@ -5765,7 +5846,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5775,7 +5856,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5785,7 +5866,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5795,7 +5876,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5805,7 +5886,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its decode stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5829,19 +5920,191 @@
             },
             {
               "id": "stored-wasm-artifact",
-              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification."
             },
             {
               "id": "requested-sections",
               "condition": "A supplied sections value must be a comma separated list of known core section names; an empty or unknown name is refused instead of widening to the whole module."
+            },
+            {
+              "id": "one-start",
+              "condition": "Pass row_offset or byte_offset, not both. row_offset may not exceed total_rows."
             }
           ],
           "confirmations": [],
-          "notes": "Verifies captured artifact bytes and performs bounded inert WebAssembly decoding without executing the module. An optional sections filter decodes rows for only the named sections; an excluded section is never read, so nothing is claimed about its entries or function bodies. coverage reports the scope the response used, and a filtered document is always partial. Compare coverage.requested_sections with the filter you sent before reading a document as scoped.",
+          "notes": "Verifies the captured artifact bytes on every request and decodes them inertly without executing the module. The row index is kept by module SHA-256 and section request, so later windows decode only the units they show. An optional sections filter decodes rows for only the named sections; an excluded section is never read, so nothing is claimed about its entries or function bodies. coverage reports the scope the response used, and a filtered document is always partial. Compare coverage.requested_sections with the filter you sent before reading a document as scoped.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm.rs",
               "symbol": "load"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/wasm/search": {
+      "get": {
+        "operationId": "search_wasm_inspection",
+        "summary": "Find text in a WebAssembly module's inspection rows",
+        "description": "Captured content: finds every nonoverlapping case-insensitive occurrence of a single-line literal in the text of every inspect_wasm row of one module, with the same section request. Case folds by Unicode simple lowercase, as a JavaScript giu search does. Row text is searched, not analyst names or original bytes. The first request for a query reads the whole inspection and keeps how many matches each unit holds, by module SHA-256, section request and query, so total_matches is exact and a later page decodes only the units it lists. A request that goes away stops the search and is answered 499. Each match names its row (an inspect_wasm row_offset), the row's byte_offset, and a UTF-16 column and length in the row's text. match_offset skips matches and next_offset continues. The MCP projection lists this operation only with --allow-content (--permission full).",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "The literal, with no line separator.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "sections",
+            "in": "query",
+            "required": false,
+            "description": "Optional comma separated core section names to decode: custom, type, import, function, table, memory, global, export, start, element, code, data, data_count, tag. Omit it to request the whole module. An empty or unknown name is refused rather than widened, and the response echoes the scope it used in coverage.requested_sections.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag)(,(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag))*$"
+            }
+          },
+          {
+            "name": "match_offset",
+            "in": "query",
+            "required": false,
+            "description": "Matches to skip. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "match_limit",
+            "in": "query",
+            "required": false,
+            "description": "Matches in the page, 1 to 1000. Default 1000.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of matches with the exact total.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmInspectionSearch"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid q, an unknown or malformed parameter, a match_offset past the matches, or not a WebAssembly artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The module does not decode.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its search stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read or integrity failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Searches the inspection rows of verified module bytes without executing the module. Returns where captured disassembly text matches; nothing is changed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm.rs",
+              "symbol": "search"
             }
           ]
         },
@@ -7393,7 +7656,7 @@
       "get": {
         "operationId": "get_source_facts",
         "summary": "Get exact JavaScript source facts",
-        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact. The complete blob must pass size and SHA256 verification and strict UTF-8 decoding. Rejects extra parameters, live scripts, ambiguous manifests, oversized source and identity mismatch without a fallback. The optional region pair narrows analysis to the innermost callable body containing that original byte range, so a bundle whose whole-program analysis reaches a budget can still produce facts for one callable; coverage.analyzed_range reports what was analyzed and references leaving it stay explicitly unresolved. Unavailable/partial lexical coverage is a successful structured result; inspect ok and coverage.",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact of any size. The complete blob must pass size and SHA256 verification and strict UTF-8 decoding. Rejects extra parameters, live scripts, ambiguous manifests and identity mismatch without a fallback. Returns the admitted report's coverage and the row count of each table; read rows with list_source_fact_rows. Reports are cached by source SHA-256 and region, and the same bytes always produce the same IDs. The optional region pair narrows analysis to the innermost callable body containing that original byte range; coverage.analyzed_range reports what was analyzed and references leaving it stay explicitly unresolved. A request that goes away stops its analysis. Unavailable/partial lexical coverage is a successful structured result; inspect ok and coverage.",
         "tags": [
           "source-facts"
         ],
@@ -7446,36 +7709,6 @@
               }
             }
           },
-          "408": {
-            "description": "Bounded worker timed out or busy.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "State conflict, unavailable live session, or stale generation.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Worker/protocol response or input processing failure.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "502": {
             "description": "JavaScript source facts worker terminated or returned an invalid response.",
             "content": {
@@ -7498,6 +7731,16 @@
           },
           "500": {
             "description": "Local artifact, evidence-store, or worker I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7557,11 +7800,10 @@
               "effects": [
                 "process-stop"
               ],
-              "when": "The bounded local JavaScript worker process group is cleaned up on completion or failure."
+              "when": "The local JavaScript worker process group is cleaned up on completion, failure or when the request goes away."
             }
           ],
           "uncertainties": [
-            "A reached budget returns empty fact tables rather than resolutions against an incomplete declaration table, so absent facts are never evidence that the syntax is absent.",
             "Region-scoped coverage is partial by construction: names that leave the analyzed callable body are reported outside-analyzed-region, which does not distinguish a skipped sibling declaration from a genuine global."
           ],
           "prerequisites": [
@@ -7571,7 +7813,7 @@
             },
             {
               "id": "exact-source",
-              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact of at most 4 MiB."
+              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact."
             },
             {
               "id": "region-in-source",
@@ -7579,7 +7821,7 @@
             },
             {
               "id": "deobfuscator-ready",
-              "condition": "The local Rust/Oxc worker must be executable and idle; it shares the existing analysis worker lock."
+              "condition": "The local Rust/Oxc worker must be executable. Analyses share one worker queue and run in arrival order."
             }
           ],
           "confirmations": [],
@@ -7591,11 +7833,276 @@
             },
             {
               "path": "apps/origin-trace-backend/src/source_facts.rs",
-              "symbol": "load"
+              "symbol": "admit"
             },
             {
               "path": "apps/origin-trace-backend/src/deobfuscation.rs",
               "symbol": "Deobfuscator::source_facts"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/source_facts.rs",
+              "symbol": "SourceFacts::report"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/source-facts/rows": {
+      "get": {
+        "operationId": "list_source_fact_rows",
+        "summary": "List one page of JavaScript source fact rows",
+        "description": "One page of rows from the same admitted report get_source_facts describes, for the same session_id, artifact_id and optional region. table names scopes, bindings, callables, regions, operations or frontiers; offset and limit (1 to 1000, default 100) select the page and total counts every row the filter selects. binding_id selects operations whose exact or ambiguous lexical target names that binding, and kind narrows operations to one kind. name selects bindings whose name contains the text, ignoring case, and candidates_of selects the declarations an ambiguous operation names. A cache miss runs the same analysis first, which yields identical rows.",
+        "tags": [
+          "source-facts"
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JavaScriptSourceFactRows"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Requested record not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JavaScript source facts worker terminated or returned an invalid response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Required worker unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Local artifact, evidence-store, or worker I/O failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "description": "Exact captured artifact identity; no fallback selection.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "region_start_byte",
+            "in": "query",
+            "required": false,
+            "description": "Optional inclusive start of an original UTF-8 byte range inside the verified source, at a Unicode scalar boundary. Requires region_end_byte. The analysis unit is the innermost callable body containing the range, never the byte slice itself.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "region_end_byte",
+            "in": "query",
+            "required": false,
+            "description": "Optional exclusive end of the same original UTF-8 byte range, at a Unicode scalar boundary and at or after region_start_byte. Requires region_start_byte. Equal offsets address one cursor position.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "required": true,
+            "description": "The row table to page through.",
+            "schema": {
+              "enum": [
+                "scopes",
+                "bindings",
+                "callables",
+                "regions",
+                "operations",
+                "frontiers"
+              ]
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "Rows of the filtered table to skip. Defaults to 0.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Rows in this page, 1 to 1000. Defaults to 100.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            }
+          },
+          {
+            "name": "binding_id",
+            "in": "query",
+            "required": false,
+            "description": "Operations only: those whose admitted lexical target names this binding.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "description": "Operations only: one operation kind.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "required": false,
+            "description": "Bindings only: names containing this text, ignoring case.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "candidates_of",
+            "in": "query",
+            "required": false,
+            "description": "Bindings only: the declarations this ambiguous operation names.",
+            "schema": {
+              "$ref": "#/components/schemas/Uint64String"
+            }
+          }
+        ],
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis",
+            "process-launch"
+          ],
+          "state_dependent_effects": [
+            {
+              "effects": [
+                "process-stop"
+              ],
+              "when": "The local JavaScript worker process group is cleaned up on completion, failure or when the request goes away."
+            }
+          ],
+          "uncertainties": [
+            "Region-scoped coverage is partial by construction: names that leave the analyzed callable body are reported outside-analyzed-region, which does not distinguish a skipped sibling declaration from a genuine global."
+          ],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "exact-source",
+              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact."
+            },
+            {
+              "id": "region-in-source",
+              "condition": "A supplied region pair must be a complete half-open original byte range inside the verified source, at Unicode scalar boundaries."
+            },
+            {
+              "id": "deobfuscator-ready",
+              "condition": "The local Rust/Oxc worker must be executable. Analyses share one worker queue and run in arrival order."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Read-only paging of an admitted lexical facts report. A cache miss runs the same local analysis. No runtime execution, browser control, model call, network request, artifact mutation or source fallback.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/app.rs",
+              "symbol": "App::get"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/source_facts.rs",
+              "symbol": "Report::page"
             }
           ]
         },
@@ -7608,7 +8115,7 @@
       "get": {
         "operationId": "get_source_format",
         "summary": "Get a Prettier-style layout of one JavaScript artifact or JavaScript or JSON body",
-        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact, or a request_body or response_body artifact whose MIME type (or the optional language) is JavaScript or JSON, of at most 16 MiB that passes size, SHA256 and strict UTF-8 checks. JSON is laid out as one parenthesized expression whose parentheses are removed. A contained Oxc worker lays the tokens out at 80 columns with 2-space indentation; every token and comment is printed as its original source slice and only whitespace between them changes, so mapping is whitespace-only: removing ECMAScript whitespace from text and from the original yields identical strings. The worker re-lexes its output and the service repeats the whitespace check before returning or caching (by SHA-256) a result. Source that does not parse, layouts over four times the source size, fidelity failures and the memory ceiling are a successful unavailable result with a reason, never a fallback layout. Optional start_line and line_count return one window of formatted lines; line_count always reports the whole layout, and anchors name the original UTF-16 offset of every 1000th formatted line so a window of whole anchor blocks maps exactly without the rest of the layout. Through MCP this operation returns JavaScript artifacts only: a request_body or response_body is refused, and only the local Origin Trace UI reads its layout.",
+        "description": "Requires exact session_id and artifact_id for an immutable JavaScript artifact, or a request_body or response_body artifact whose MIME type (or the optional language) is JavaScript or JSON, of any size that passes size, SHA256 and strict UTF-8 checks. JSON is laid out as one parenthesized expression whose parentheses are removed. A contained Oxc worker lays the tokens out at 80 columns with 2-space indentation; every token and comment is printed as its original source slice and only whitespace between them changes, so mapping is whitespace-only: removing ECMAScript whitespace from text and from the original yields identical strings. The worker re-lexes its output and the service repeats the whitespace check before returning or caching (by SHA-256) a result. Source that does not parse, fidelity failures and a parse larger than this machine's memory are a successful unavailable result with a reason, never a fallback layout. There is no deadline: a layout stops only when its request goes away. Optional start_line and line_count return one window of formatted lines; line_count always reports the whole layout, and anchors name the original UTF-16 offset of every 1000th formatted line so a window of whole anchor blocks maps exactly without the rest of the layout. Through MCP this operation returns JavaScript artifacts only: a request_body or response_body is refused, and only the local Origin Trace UI reads its layout.",
         "tags": [
           "source-format"
         ],
@@ -7764,7 +8271,7 @@
               "effects": [
                 "process-stop"
               ],
-              "when": "The contained JavaScript formatter worker process group is cleaned up on completion or failure."
+              "when": "The contained JavaScript formatter worker process group is cleaned up on completion, failure or when the request goes away."
             }
           ],
           "uncertainties": [
@@ -7777,7 +8284,7 @@
             },
             {
               "id": "exact-source",
-              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact, or JavaScript or JSON request or response body, of at most 16 MiB."
+              "condition": "Exact session_id and artifact_id select one verified immutable UTF-8 JavaScript artifact, or JavaScript or JSON request or response body."
             },
             {
               "id": "formatter-worker",
@@ -7810,12 +8317,12 @@
       "post": {
         "operationId": "post_graph_layout",
         "summary": "Lay out graphs with the vendored Triskel engine",
-        "description": "Side-effect-free layout of caller-supplied graphs for Flow graph and the Sources Graph view: node widths and heights and from, to edges in; each node's top-left corner and each edge's Triskel waypoints out, in request order. Triskel (SESE regions and Sugiyama layering, pinned revision) runs in a contained worker process, never in the server, with a 10 s deadline per request; at most two workers run at once and later requests wait for a slot. At most 64 graphs and 8000 nodes in all per request. A graph over 2000 nodes or 8000 edges is not laid out and gets too_large while the others are; a deadline, crash or memory limit marks every graph without a result timeout or failed. Coordinates are rounded to 2 decimals and moved so the drawing starts at 0, 0. Reads no evidence, writes nothing and never echoes input values.",
+        "description": "Side-effect-free layout of caller-supplied graphs for Flow graph and the Sources Graph view: node widths and heights and from, to edges in; each node's top-left corner and each edge's Triskel waypoints out, in request order. Triskel (SESE regions and Sugiyama layering, pinned revision) runs in a contained worker process, never in the server; at most two workers run at once and later requests wait for a slot. A request has no size limit beyond its body and no deadline: a client that closes the connection stops its worker. Each graph has a budget of 1 s plus 8 µs times the square of its node and edge count together, which separates a slow layout from Triskel's known non-terminating one and grows with the graph; a graph past its budget is timeout, and one that crashes the worker or reaches its memory limit is failed, while a new worker lays out the graphs after it. Coordinates are rounded to 2 decimals and moved so the drawing starts at 0, 0. Reads no evidence, writes nothing and never echoes input values.",
         "tags": [
           "graph-layout"
         ],
         "x-source": "apps/origin-trace-backend/src/graph_layout.rs",
-        "x-max-body-bytes": 8388608,
+        "x-max-body-bytes": 67108864,
         "requestBody": {
           "required": true,
           "content": {
@@ -7852,7 +8359,7 @@
             }
           },
           "400": {
-            "description": "Invalid framing or body size, malformed JSON, an unknown or missing member, a node size that is not a finite number above 0 and at most 100000, an edge index that is not an integer naming a node of its graph, more than 64 graphs or more than 8000 nodes in all. No input values are echoed.",
+            "description": "Invalid framing or body size, malformed JSON, an unknown or missing member, a node size that is not a finite number above 0 and at most 100000, or an edge index that is not an integer naming a node of its graph. No input values are echoed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9479,7 +9986,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 16777216,
+        "x-max-body-bytes": 1073741824,
         "requestBody": {
           "required": true,
           "content": {
@@ -9521,7 +10028,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Documents and reports of any size; only nesting past 128 levels is refused. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/vm_pack.rs",
@@ -9621,7 +10128,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 16777216,
+        "x-max-body-bytes": 1073741824,
         "requestBody": {
           "required": true,
           "content": {
@@ -9677,7 +10184,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Documents and reports of any size; only nesting past 128 levels is refused. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/vm_pack.rs",
@@ -21452,8 +21959,7 @@
             ]
           },
           "content": {
-            "type": "string",
-            "x-max-utf8-bytes": 32768
+            "type": "string"
           }
         },
         "required": [
@@ -21495,8 +22001,7 @@
             ]
           },
           "content": {
-            "type": "string",
-            "x-max-utf8-bytes": 32768
+            "type": "string"
           },
           "content_bytes": {
             "type": "integer"
@@ -21722,7 +22227,7 @@
                 "type": "string"
               },
               "protocol_version": {
-                "const": 1,
+                "const": 2,
                 "type": "integer"
               },
               "run_id": {
@@ -21735,8 +22240,7 @@
                 "$ref": "#/components/schemas/SafeInteger"
               },
               "source": {
-                "type": "string",
-                "x-max-utf8-bytes": 32768
+                "type": "string"
               },
               "variables": {
                 "type": "object",
@@ -21790,7 +22294,21 @@
                     "anyOf": [
                       {
                         "type": "object",
-                        "additionalProperties": true
+                        "properties": {
+                          "artifact_id": {
+                            "type": "string"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          }
+                        },
+                        "required": [
+                          "artifact_id",
+                          "sha256"
+                        ],
+                        "additionalProperties": false,
+                        "description": "A stored artifact by ID and the SHA-256 the caller selected. A different stored SHA-256 is refused with 409."
                       },
                       {
                         "type": "null"
@@ -21819,7 +22337,7 @@
               },
               "confirmed_sensitive": {
                 "type": "boolean",
-                "description": "Must be true when selected_artifact.sensitive is true."
+                "description": "Must be true when the stored record of the selected artifact is sensitive. The host reads sensitivity from the manifest, not from the request."
               }
             },
             "required": [
@@ -21848,7 +22366,7 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Completion, timeout, cancellation, or a dropped request cleans up the owned helper process group."
+                  "when": "Completion, cancellation, or a dropped request cleans up the owned helper process group."
                 }
               ],
               "uncertainties": [],
@@ -21860,6 +22378,10 @@
                 {
                   "id": "saved-analyst-script",
                   "condition": "library_generation, script_id, and source must match the current saved JavaScript analyst script."
+                },
+                {
+                  "id": "sensitive-selected-artifact",
+                  "condition": "confirmed_sensitive must be true when the stored record of evidence.selected_artifact is sensitive."
                 }
               ],
               "confirmations": [
@@ -21873,34 +22395,18 @@
                   "value": true,
                   "when": {
                     "type": "object",
-                    "required": [
-                      "evidence"
-                    ],
+                    "required": ["evidence"],
                     "properties": {
                       "evidence": {
                         "type": "object",
-                        "required": [
-                          "selected_artifact"
-                        ],
-                        "properties": {
-                          "selected_artifact": {
-                            "type": "object",
-                            "required": [
-                              "sensitive"
-                            ],
-                            "properties": {
-                              "sensitive": {
-                                "const": true
-                              }
-                            }
-                          }
-                        }
+                        "required": ["selected_artifact"],
+                        "properties": {"selected_artifact": {"type": "object"}}
                       }
                     }
                   }
                 }
               ],
-              "notes": "Executes an explicitly selected saved script in the bounded disposable analyst helper using caller-supplied frozen evidence. The helper is separate from the browser.",
+              "notes": "Executes an explicitly selected saved script in a disposable analyst helper, separate from the browser, over caller-supplied frozen evidence and the selected artifact's verified stored bytes. There is no execution deadline, CPU limit or input, result or log size limit.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/analyst.rs",
@@ -21911,7 +22417,8 @@
                   "symbol": "normalize"
                 }
               ]
-            }
+            },
+            "description": "Runs a saved script once, with no deadline: it runs until the script settles, cancel_local_analyst_script stops it, or this request goes away. Protocol 2 names the selected artifact by artifact_id and sha256; the host reads its stored, SHA-256 verified bytes, whatever their size, and refuses protocol 1."
           },
           {
             "type": "object",
@@ -21984,8 +22491,7 @@
             "enum": [
               "completed",
               "failed",
-              "cancelled",
-              "timed_out"
+              "cancelled"
             ]
           },
           "result_type": {
@@ -25943,23 +26449,27 @@
       "ArtifactSearchResult": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Literal matches with bounded same-line context. Snippets are captured content.",
+        "description": "Every match, counted exactly and returned a page at a time, with bounded same-line context. Snippets are captured content.",
         "required": [
           "format",
           "query",
+          "total_matches",
+          "files_with_matches",
           "matches",
+          "files",
           "next_offset",
           "coverage"
         ],
         "properties": {
           "format": {
-            "const": "reb-artifact-search-v1"
+            "const": "reb-artifact-search-v2"
           },
           "query": {
             "type": "object",
             "additionalProperties": false,
             "required": [
               "q_bytes",
+              "regex",
               "match_case",
               "filters",
               "offset",
@@ -25968,8 +26478,10 @@
             "properties": {
               "q_bytes": {
                 "type": "integer",
-                "minimum": 1,
-                "maximum": 256
+                "minimum": 1
+              },
+              "regex": {
+                "type": "boolean"
               },
               "match_case": {
                 "type": "boolean"
@@ -25988,6 +26500,14 @@
               }
             }
           },
+          "total_matches": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "files_with_matches": {
+            "type": "integer",
+            "minimum": 0
+          },
           "matches": {
             "type": "array",
             "maxItems": 200,
@@ -25999,11 +26519,17 @@
                 "session_id",
                 "kind",
                 "byte_offset",
+                "byte_length",
                 "line",
                 "column",
+                "utf16_column",
+                "utf16_length",
                 "before",
                 "match",
-                "after"
+                "match_complete",
+                "after",
+                "clipped_before",
+                "clipped_after"
               ],
               "properties": {
                 "artifact_id": {
@@ -26019,11 +26545,25 @@
                   "type": "integer",
                   "minimum": 0
                 },
+                "byte_length": {
+                  "type": "integer",
+                  "minimum": 1
+                },
                 "line": {
                   "type": "integer",
                   "minimum": 1
                 },
                 "column": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "1-based, in characters; each invalid UTF-8 sequence is one U+FFFD."
+                },
+                "utf16_column": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "1-based, in UTF-16 code units, as the Sources editor counts columns."
+                },
+                "utf16_length": {
                   "type": "integer",
                   "minimum": 1
                 },
@@ -26033,11 +26573,56 @@
                 },
                 "match": {
                   "type": "string",
-                  "maxLength": 256
+                  "maxLength": 256,
+                  "description": "The matched text, or its first 256 bytes when match_complete is false."
+                },
+                "match_complete": {
+                  "type": "boolean"
                 },
                 "after": {
                   "type": "string",
                   "maxLength": 48
+                },
+                "clipped_before": {
+                  "type": "boolean",
+                  "description": "The line continues before `before`."
+                },
+                "clipped_after": {
+                  "type": "boolean",
+                  "description": "The line continues after `after`."
+                }
+              }
+            }
+          },
+          "files": {
+            "type": "array",
+            "maxItems": 200,
+            "description": "Each artifact with a match on this page, in page order.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "artifact_id",
+                "matches",
+                "first_match",
+                "valid_utf8"
+              ],
+              "properties": {
+                "artifact_id": {
+                  "$ref": "#/components/schemas/Uint64String"
+                },
+                "matches": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Every match in this artifact."
+                },
+                "first_match": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The offset of its first match."
+                },
+                "valid_utf8": {
+                  "type": "boolean"
                 }
               }
             }
@@ -26056,9 +26641,10 @@
               "artifacts_selected",
               "artifacts_searched",
               "bytes_searched",
-              "stopped",
-              "not_fully_searched",
-              "not_fully_searched_count",
+              "not_searched",
+              "not_searched_count",
+              "not_valid_utf8",
+              "not_valid_utf8_count",
               "complete"
             ],
             "properties": {
@@ -26074,16 +26660,10 @@
                 "type": "integer",
                 "minimum": 0
               },
-              "stopped": {
-                "enum": [
-                  "deadline",
-                  "total_bytes",
-                  null
-                ]
-              },
-              "not_fully_searched": {
+              "not_searched": {
                 "type": "array",
                 "maxItems": 32,
+                "description": "The first 32 artifacts that could not be read or verified; not_searched_count counts them all.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -26097,20 +26677,31 @@
                     },
                     "reason": {
                       "enum": [
-                        "larger_than_16_mib",
-                        "unreadable_or_integrity",
-                        "file_match_limit"
+                        "unreadable_or_integrity"
                       ]
                     }
                   }
                 }
               },
-              "not_fully_searched_count": {
+              "not_searched_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "not_valid_utf8": {
+                "type": "array",
+                "maxItems": 32,
+                "description": "The first 32 searched artifacts whose bytes are not valid UTF-8, so text in them may be replacement characters; not_valid_utf8_count counts them all.",
+                "items": {
+                  "$ref": "#/components/schemas/Uint64String"
+                }
+              },
+              "not_valid_utf8_count": {
                 "type": "integer",
                 "minimum": 0
               },
               "complete": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Every selected artifact was searched."
               }
             }
           }
@@ -26130,14 +26721,14 @@
           "imported_functions",
           "instructions",
           "rows",
+          "row_window",
           "omissions",
           "coverage",
-          "notice",
-          "limits"
+          "notice"
         ],
         "properties": {
           "schema": {
-            "const": "wasm-inspection-v1"
+            "const": "wasm-inspection-v2"
           },
           "artifact_id": {
             "type": "string",
@@ -26149,8 +26740,7 @@
           },
           "byte_size": {
             "type": "integer",
-            "minimum": 8,
-            "maximum": 2097152
+            "minimum": 8
           },
           "status": {
             "enum": [
@@ -26176,7 +26766,7 @@
           },
           "rows": {
             "type": "array",
-            "maxItems": 8192,
+            "maxItems": 2048,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -26185,8 +26775,7 @@
                 "byte_offset",
                 "byte_end",
                 "function_index",
-                "text",
-                "text_truncated"
+                "text"
               ],
               "properties": {
                 "kind": {
@@ -26227,10 +26816,7 @@
                 },
                 "text": {
                   "type": "string",
-                  "maxLength": 540
-                },
-                "text_truncated": {
-                  "type": "boolean"
+                  "description": "One line. Names are quoted with escaped control characters; a branch table lists every target and a type every parameter and result. A data segment's text previews its first 32 bytes, and Hex shows every byte of its range."
                 },
                 "target_function_index": {
                   "type": "integer",
@@ -26250,6 +26836,41 @@
                   "maxLength": 80,
                   "description": "Researcher name of target_function_index. Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
                 }
+              }
+            },
+            "description": "This window of rows, in binary order: byte_offset never decreases from one row to the next."
+          },
+          "row_window": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "The window rows holds. It stops at row_limit rows or 98,304 serialized bytes; next_offset continues, and is null at the last row.",
+            "required": [
+              "offset",
+              "rows",
+              "total_rows",
+              "next_offset"
+            ],
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rows": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2048
+              },
+              "total_rows": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Every row of the module under this section request."
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
               }
             }
           },
@@ -26300,7 +26921,7 @@
                 ]
               },
               "truncated_sections": {
-                "description": "Sections present in these bytes that were requested but are not completely covered, because a limit stopped decoding or this version cannot decode them. omissions names which.",
+                "description": "Sections present in these bytes that were requested but left opaque because this version cannot decode them. omissions names which.",
                 "allOf": [
                   {
                     "$ref": "#/components/schemas/WasmSectionNames"
@@ -26308,7 +26929,7 @@
                 ]
               },
               "section_map_complete": {
-                "description": "True when traversal reached the module end, so the three lists together name every section in these bytes and a requested section absent from all three is absent from the module.",
+                "description": "True when traversal reached the module end, so the three lists together name every section in these bytes and a requested section absent from all three is absent from the module. A module that decodes always reaches its end.",
                 "type": "boolean"
               }
             }
@@ -26317,14 +26938,104 @@
             "type": "string",
             "maxLength": 512
           },
-          "row_window": {
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
+          }
+        }
+      },
+      "WasmInspectionSearch": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Every case-insensitive occurrence of a literal in the text of a module's inspection rows, paged.",
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "query",
+          "requested_sections",
+          "total_matches",
+          "total_rows",
+          "matches",
+          "match_window"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-inspection-search-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requested_sections": {
+            "description": "The section request searched, or null for the whole module.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WasmSectionNames"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_matches": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_rows": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The inspection's total_rows under the same section request, so row indexes join to inspect_wasm windows."
+          },
+          "matches": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "row",
+                "byte_offset",
+                "column",
+                "length"
+              ],
+              "properties": {
+                "row": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The row index, as row_offset names it."
+                },
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The row's byte_offset."
+                },
+                "column": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Where the match starts in the row's text, in UTF-16 code units as JavaScript counts them."
+                },
+                "length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "The match's length in UTF-16 code units of the row's text."
+                }
+              }
+            }
+          },
+          "match_window": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Present only when row_offset or row_limit was given. rows holds this window, which stops at row_limit rows or 98,304 serialized bytes.",
             "required": [
               "offset",
-              "rows",
-              "total_rows",
+              "matches",
               "next_offset"
             ],
             "properties": {
@@ -26332,15 +27043,10 @@
                 "type": "integer",
                 "minimum": 0
               },
-              "rows": {
+              "matches": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 2048
-              },
-              "total_rows": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 8192
+                "maximum": 1000
               },
               "next_offset": {
                 "type": [
@@ -26350,37 +27056,6 @@
                 "minimum": 0
               }
             }
-          },
-          "limits": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "max_bytes",
-              "max_rows",
-              "max_sections",
-              "max_text_bytes",
-              "deadline_ms"
-            ],
-            "properties": {
-              "max_bytes": {
-                "const": 2097152
-              },
-              "max_rows": {
-                "const": 8192
-              },
-              "max_sections": {
-                "const": 128
-              },
-              "max_text_bytes": {
-                "const": 512
-              },
-              "deadline_ms": {
-                "const": 2000
-              }
-            }
-          },
-          "analyst_names": {
-            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },
@@ -33330,8 +34005,7 @@
             "maximum": 4294967295
           },
           "name": {
-            "type": "string",
-            "maxLength": 4194304
+            "type": "string"
           },
           "range": {
             "$ref": "#/components/schemas/JavaScriptSourceRange"
@@ -33670,7 +34344,6 @@
               "external-or-implicit",
               "implicit-arguments-environment",
               "this-environment",
-              "binding-candidate-limit",
               "duplicate-declarations",
               "unsupported-assignment-target",
               "property-key-coercion",
@@ -33712,9 +34385,7 @@
         "additionalProperties": false,
         "required": [
           "status",
-          "truncated",
           "diagnostics",
-          "frontiers",
           "analyzed_range"
         ],
         "properties": {
@@ -33725,22 +34396,10 @@
               "unavailable"
             ]
           },
-          "truncated": {
-            "type": "boolean"
-          },
           "diagnostics": {
             "type": "array",
-            "maxItems": 64,
             "items": {
-              "type": "string",
-              "maxLength": 1024
-            }
-          },
-          "frontiers": {
-            "type": "array",
-            "maxItems": 256,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceFrontier"
+              "type": "string"
             }
           },
           "analyzed_range": {
@@ -33753,194 +34412,8 @@
               }
             ]
           }
-        }
-      },
-      "JavaScriptSourceFactsWorker": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "schema",
-          "ok",
-          "source_bytes",
-          "offset_unit",
-          "profile",
-          "coverage",
-          "scopes",
-          "bindings",
-          "callables",
-          "regions",
-          "operations",
-          "limits"
-        ],
-        "properties": {
-          "schema": {
-            "const": "reb-javascript-source-facts-v1"
-          },
-          "ok": {
-            "type": "boolean"
-          },
-          "source_bytes": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 25231360
-          },
-          "offset_unit": {
-            "const": "utf-8-byte"
-          },
-          "profile": {
-            "const": "lexical-effects-v1"
-          },
-          "coverage": {
-            "$ref": "#/components/schemas/JavaScriptSourceCoverage"
-          },
-          "scopes": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceScope"
-            }
-          },
-          "bindings": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceBinding"
-            }
-          },
-          "callables": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceCallable"
-            }
-          },
-          "regions": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceRegion"
-            }
-          },
-          "operations": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceOperation"
-            }
-          },
-          "limits": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "max_source_bytes",
-              "max_ast_nodes",
-              "max_facts",
-              "max_frontiers",
-              "preflight_depth",
-              "preflight_nodes",
-              "preflight_parse_heap_bytes",
-              "max_binding_candidates"
-            ],
-            "properties": {
-              "max_source_bytes": {
-                "const": 4194304
-              },
-              "max_ast_nodes": {
-                "const": 262144
-              },
-              "max_facts": {
-                "const": 16384
-              },
-              "max_frontiers": {
-                "const": 256
-              },
-              "preflight_depth": {
-                "const": 128
-              },
-              "preflight_nodes": {
-                "const": 2097152
-              },
-              "preflight_parse_heap_bytes": {
-                "const": 402653184
-              },
-              "max_binding_candidates": {
-                "const": 64
-              }
-            }
-          }
         },
-        "description": "Bounded Rust/Oxc lexical facts. IDs are local to exactly the supplied source bytes. Total facts across the five arrays cannot exceed max_facts. See protocol/javascript-source-facts-v1.md.",
-        "allOf": [
-          {
-            "if": {
-              "properties": {
-                "coverage": {
-                  "properties": {
-                    "status": {
-                      "const": "unavailable"
-                    }
-                  }
-                }
-              }
-            },
-            "then": {
-              "properties": {
-                "ok": {
-                  "const": false
-                },
-                "scopes": {
-                  "maxItems": 0
-                },
-                "bindings": {
-                  "maxItems": 0
-                },
-                "callables": {
-                  "maxItems": 0
-                },
-                "regions": {
-                  "maxItems": 0
-                },
-                "operations": {
-                  "maxItems": 0
-                }
-              }
-            },
-            "else": {
-              "properties": {
-                "ok": {
-                  "const": true
-                }
-              }
-            }
-          },
-          {
-            "if": {
-              "properties": {
-                "coverage": {
-                  "properties": {
-                    "status": {
-                      "const": "complete"
-                    }
-                  }
-                }
-              }
-            },
-            "then": {
-              "properties": {
-                "coverage": {
-                  "properties": {
-                    "truncated": {
-                      "const": false
-                    },
-                    "frontiers": {
-                      "maxItems": 0
-                    }
-                  }
-                }
-              }
-            }
-          }
-        ]
+        "description": "Coverage of a source facts report. Unknown frontiers are a row table of their own, counted in counts.frontiers and read with list_source_fact_rows."
       },
       "JavaScriptSourceFacts": {
         "type": "object",
@@ -33952,25 +34425,20 @@
           "offset_unit",
           "profile",
           "coverage",
-          "scopes",
-          "bindings",
-          "callables",
-          "regions",
-          "operations",
-          "limits",
+          "counts",
+          "cached",
           "source"
         ],
         "properties": {
           "schema": {
-            "const": "reb-javascript-source-facts-v1"
+            "const": "reb-javascript-source-facts-v2"
           },
           "ok": {
             "type": "boolean"
           },
           "source_bytes": {
             "type": "integer",
-            "minimum": 0,
-            "maximum": 4194304
+            "minimum": 0
           },
           "offset_unit": {
             "const": "utf-8-byte"
@@ -33981,80 +34449,48 @@
           "coverage": {
             "$ref": "#/components/schemas/JavaScriptSourceCoverage"
           },
-          "scopes": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceScope"
-            }
-          },
-          "bindings": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceBinding"
-            }
-          },
-          "callables": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceCallable"
-            }
-          },
-          "regions": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceRegion"
-            }
-          },
-          "operations": {
-            "type": "array",
-            "maxItems": 16384,
-            "items": {
-              "$ref": "#/components/schemas/JavaScriptSourceOperation"
-            }
-          },
-          "limits": {
+          "counts": {
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "max_source_bytes",
-              "max_ast_nodes",
-              "max_facts",
-              "max_frontiers",
-              "preflight_depth",
-              "preflight_nodes",
-              "preflight_parse_heap_bytes",
-              "max_binding_candidates"
+              "scopes",
+              "bindings",
+              "callables",
+              "regions",
+              "operations",
+              "frontiers"
             ],
             "properties": {
-              "max_source_bytes": {
-                "const": 4194304
+              "scopes": {
+                "type": "integer",
+                "minimum": 0
               },
-              "max_ast_nodes": {
-                "const": 262144
+              "bindings": {
+                "type": "integer",
+                "minimum": 0
               },
-              "max_facts": {
-                "const": 16384
+              "callables": {
+                "type": "integer",
+                "minimum": 0
               },
-              "max_frontiers": {
-                "const": 256
+              "regions": {
+                "type": "integer",
+                "minimum": 0
               },
-              "preflight_depth": {
-                "const": 128
+              "operations": {
+                "type": "integer",
+                "minimum": 0
               },
-              "preflight_nodes": {
-                "const": 2097152
-              },
-              "preflight_parse_heap_bytes": {
-                "const": 402653184
-              },
-              "max_binding_candidates": {
-                "const": 64
+              "frontiers": {
+                "type": "integer",
+                "minimum": 0
               }
-            }
+            },
+            "description": "Rows in each table of this report. Rows are read in pages with list_source_fact_rows."
+          },
+          "cached": {
+            "type": "boolean",
+            "description": "True when these exact bytes and region were analyzed before and the admitted report was reused."
           },
           "source": {
             "allOf": [
@@ -34065,16 +34501,13 @@
                 "properties": {
                   "kind": {
                     "const": "javascript"
-                  },
-                  "byte_size": {
-                    "maximum": 4194304
                   }
                 }
               }
             ]
           }
         },
-        "description": "Worker facts bound to fully verified immutable JavaScript artifact identity. Original source is never executed or rewritten. Complete coverage means complete within the declared lexical profile, not runtime or cross-artifact proof.",
+        "description": "The admitted facts report for a fully verified immutable JavaScript artifact of any size, without its rows. Original source is never executed or rewritten. Complete coverage means complete within the declared lexical profile, not runtime or cross-artifact proof.",
         "allOf": [
           {
             "if": {
@@ -34093,20 +34526,24 @@
                 "ok": {
                   "const": false
                 },
-                "scopes": {
-                  "maxItems": 0
-                },
-                "bindings": {
-                  "maxItems": 0
-                },
-                "callables": {
-                  "maxItems": 0
-                },
-                "regions": {
-                  "maxItems": 0
-                },
-                "operations": {
-                  "maxItems": 0
+                "counts": {
+                  "properties": {
+                    "scopes": {
+                      "const": 0
+                    },
+                    "bindings": {
+                      "const": 0
+                    },
+                    "callables": {
+                      "const": 0
+                    },
+                    "regions": {
+                      "const": 0
+                    },
+                    "operations": {
+                      "const": 0
+                    }
+                  }
                 }
               }
             },
@@ -34132,12 +34569,16 @@
             },
             "then": {
               "properties": {
+                "counts": {
+                  "properties": {
+                    "frontiers": {
+                      "const": 0
+                    }
+                  }
+                },
                 "coverage": {
                   "properties": {
-                    "truncated": {
-                      "const": false
-                    },
-                    "frontiers": {
+                    "diagnostics": {
                       "maxItems": 0
                     }
                   }
@@ -34146,6 +34587,150 @@
             }
           }
         ]
+      },
+      "JavaScriptSourceFactRows": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "source",
+          "analyzed_range",
+          "table",
+          "filter",
+          "offset",
+          "total",
+          "rows",
+          "bindings"
+        ],
+        "properties": {
+          "schema": {
+            "const": "reb-javascript-source-fact-rows-v2"
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Artifact"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "javascript"
+                  }
+                }
+              }
+            ]
+          },
+          "analyzed_range": {
+            "$ref": "#/components/schemas/JavaScriptSourceRange"
+          },
+          "table": {
+            "enum": [
+              "scopes",
+              "bindings",
+              "callables",
+              "regions",
+              "operations",
+              "frontiers"
+            ]
+          },
+          "filter": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "binding_id",
+              "kind",
+              "name",
+              "candidates_of"
+            ],
+            "properties": {
+              "binding_id": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "kind": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "candidates_of": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Rows the filter selects in the whole table, not only this page."
+          },
+          "rows": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/JavaScriptSourceScope"
+                },
+                {
+                  "$ref": "#/components/schemas/JavaScriptSourceBinding"
+                },
+                {
+                  "$ref": "#/components/schemas/JavaScriptSourceCallable"
+                },
+                {
+                  "$ref": "#/components/schemas/JavaScriptSourceRegion"
+                },
+                {
+                  "$ref": "#/components/schemas/JavaScriptSourceOperation"
+                },
+                {
+                  "$ref": "#/components/schemas/JavaScriptSourceFrontier"
+                }
+              ]
+            }
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JavaScriptSourceBinding"
+            },
+            "description": "On an operations page, the binding each exact target in the page names and the filter's binding, so the page is readable without the whole binding table. Empty on other tables."
+          }
+        },
+        "description": "One page of rows from an admitted source facts report. IDs are positions in the report's tables and are stable for the same bytes and region."
       },
       "SourceFormat": {
         "type": "object",
@@ -34169,7 +34754,7 @@
         ],
         "properties": {
           "schema": {
-            "const": "source-format-v1"
+            "const": "source-format-v2"
           },
           "source": {
             "type": "object",
@@ -34189,10 +34774,8 @@
               {
                 "enum": [
                   "parse-failed",
-                  "output-limit",
                   "fidelity-check-failed",
-                  "memory-limit",
-                  "nesting-limit"
+                  "memory-limit"
                 ]
               }
             ]
@@ -34307,17 +34890,9 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "max_source_bytes",
-              "max_output_ratio",
               "max_window_lines"
             ],
             "properties": {
-              "max_source_bytes": {
-                "const": 16777216
-              },
-              "max_output_ratio": {
-                "const": 4
-              },
               "max_window_lines": {
                 "const": 10000
               }
@@ -34360,8 +34935,7 @@
                 ]
               },
               "name": {
-                "type": "string",
-                "maxLength": 4194304
+                "type": "string"
               }
             }
           },
@@ -34383,7 +34957,6 @@
               "binding_ids": {
                 "type": "array",
                 "minItems": 2,
-                "maxItems": 64,
                 "uniqueItems": true,
                 "items": {
                   "type": "integer",
@@ -34397,8 +34970,7 @@
                 ]
               },
               "name": {
-                "type": "string",
-                "maxLength": 4194304
+                "type": "string"
               }
             }
           },
@@ -34434,13 +35006,11 @@
                   "external-or-implicit",
                   "implicit-arguments-environment",
                   "this-environment",
-                  "binding-candidate-limit",
                   "outside-analyzed-region"
                 ]
               },
               "name": {
-                "type": "string",
-                "maxLength": 4194304
+                "type": "string"
               }
             }
           },
@@ -34654,7 +35224,6 @@
           },
           "argument_ranges": {
             "type": "array",
-            "maxItems": 32768,
             "items": {
               "$ref": "#/components/schemas/JavaScriptSourceRange"
             }
@@ -34985,11 +35554,10 @@
         "required": [
           "graphs"
         ],
-        "description": "Graphs to lay out, at most 64 and 8000 nodes in all.",
+        "description": "Graphs to lay out, any number of any size.",
         "properties": {
           "graphs": {
             "type": "array",
-            "maxItems": 64,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -35161,7 +35729,6 @@
             "properties": {
               "status": {
                 "enum": [
-                  "too_large",
                   "failed",
                   "timeout"
                 ]

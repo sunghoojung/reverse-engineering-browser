@@ -2945,6 +2945,76 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // The block graph shapes of artifacts 341 to 345, cold at each size: the
+  // time from the native click on Graph to the frame after the first drawing
+  // (decode, transfer, layout and draw), and frame times while Shift+Arrow
+  // pans at the opening zoom and fitted whole. The numbers are printed as
+  // RENDERED_UI_GRAPH lines; only a frame past a second fails, since the
+  // frame rate of a hosted test window is not the display's.
+  @MainActor
+  func test25bBlockGraphShapes() async throws {
+    let shapes = [("341", "ladder"), ("342", "dispatch256"), ("343", "loops"), ("344", "exceptions"), ("345", "large")]
+    for size in windowSizes + [("wide", 1440, 900)] {
+      let ui = try await prepare(size)
+      try await show(ui, "sources")
+      for (id, name) in shapes {
+        let context = "\(size.name) \(name)"
+        try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"\(id)\"]")
+        try await ui.waitUntil("!document.querySelector('#source-graph').hidden && document.querySelector('#source-graph').getAttribute('aria-pressed') !== 'true'", "\(context): Graph is offered and closed")
+        _ = try await ui.value("""
+          (() => { const host = document.querySelector('#source-graph-host'); window.__rebGraphPaint = null;
+            document.querySelector('#source-graph').addEventListener('click', () => {
+              const started = performance.now();
+              const ready = () => host.querySelector('.block-graph-state').hidden && (host.querySelector('.block-graph-stats')?.textContent ?? '').includes('blocks');
+              const poll = () => requestAnimationFrame(() => {
+                if (!ready()) { if (performance.now() - started < 60000) poll(); return; }
+                requestAnimationFrame(() => { window.__rebGraphPaint = performance.now() - started; });
+              });
+              poll();
+            }, {capture: true, once: true});
+            return true; })()
+          """)
+        try await ui.click("#source-graph")
+        try await ui.waitUntil("typeof window.__rebGraphPaint === 'number'", timeout: 60, "\(context): the graph did not draw")
+        let paint = try await ui.value("window.__rebGraphPaint") as? Double ?? -1
+        let stats = try await ui.value("document.querySelector('#source-graph-host .block-graph-stats').textContent") as? String ?? ""
+        let error = try await ui.value("document.querySelector('#source-graph-host .block-graph-state').dataset.kind") as? String ?? ""
+        XCTAssertNotEqual(error, "error", "\(context): the graph drew without an error")
+        if name == "exceptions" {
+          let key = try await ui.value("document.querySelector('#source-graph-host .block-graph-legend').textContent") as? String ?? ""
+          XCTAssertTrue(key.contains("exception") && key.contains("unresolved"), "\(context): the key names exception and unresolved edges: \(key)")
+        }
+        try await assertLayout(ui, "#screen-sources", context)
+        try await assertInert(ui, context)
+        try await ui.screenshot("block-graph-\(name)-\(size.name)")
+        var frames: [String: Any] = [:]
+        for view in ["open", "fit"] {
+          if view == "fit" {
+            _ = try await ui.value("document.querySelector('#source-graph-host .block-graph-canvas').dispatchEvent(new KeyboardEvent('keydown', {key: '0', bubbles: true, cancelable: true}))")
+            try await assertLayout(ui, "#screen-sources", "\(context) fitted")
+            try await ui.screenshot("block-graph-\(name)-fit-\(size.name)")
+          }
+          // Shift+Arrow is dispatched once a frame, so each frame draws the last pan.
+          let result = try await ui.json("""
+            (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+              const press = key => canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+              const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, times = [];
+              await new Promise(done => { let last = 0, count = 0;
+                const tick = now => { if (last) times.push(now - last); last = now;
+                  if (count++ === 90) { done(); return; } press(count % 2 ? 'ArrowRight' : 'ArrowDown'); requestAnimationFrame(tick); };
+                requestAnimationFrame(tick); });
+              times.sort((a, b) => a - b);
+              return {zoom, p50: times[times.length >> 1], p95: times[Math.floor(times.length * 0.95)], max: times[times.length - 1]}; })()
+            """)
+          frames[view] = result
+          XCTAssertLessThan(result["max"] as? Double ?? .infinity, 1000, "\(context) \(view): a pan frame took over a second: \(result)")
+        }
+        print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
+        try await ui.click("#source-graph")
+      }
+    }
+  }
+
   // Run offline: the dialog names the local sandbox above every field, sends
   // nothing before the confirmation, and shows a stubbed import's trap, then a
   // return, with captured export names kept as text.

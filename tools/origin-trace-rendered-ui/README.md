@@ -216,6 +216,20 @@ graph's minimum, where the Functions menu must open whole, and to the linear
 view's minimum, repeating the sweep at each, and Home on the divider forgets
 the drag.
 
+`test25bBlockGraphShapes` opens the measured
+[block graph shapes](../fixtures/wasm-block-graph/README.md) in Graph, cold at
+both sizes and at 1440 by 900: a 1,000-case switch ladder (341), a 256-arm
+interpreter loop (342), two nests of eight loops (343), the exception fixture (344)
+and a 19,459-block interpreter loop (345). Each must draw without an error state
+and without layout defects or clipped text, the exception function's key must
+name exception and unresolved edges, and each is photographed at its opening
+zoom and fitted whole with `0`. It prints a `RENDERED_UI_GRAPH` line per shape
+and size: the time from the native click on Graph to the frame after the first
+drawing, which spans decode, transfer, layout and draw, and the median, 95th
+percentile and slowest frame while Shift+Arrow pans once a frame at each zoom.
+Only a frame slower than a second fails, because a hosted test window's frame
+rate is not the display's.
+
 `test35MissingFinalHeaders` opens a content-session request the HTTP cache
 answered, which has only a provisional request block that the session budget
 refused ([missing final blocks](../../protocol/native-network-v3.md#missing-final-blocks)).

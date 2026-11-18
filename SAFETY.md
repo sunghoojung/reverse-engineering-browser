@@ -206,8 +206,9 @@ it.
   the app starts or retries gets no request content, Canvas images or
   invocation value digests, whatever the environment holds, and Retry starts
   with the failed start's content switches, never a new reading of the
-  environment. The start panel saves its mode and session options for later
-  app runs, and a choice made there holds for the rest of that app run. The
+  environment. The start panel saves its mode and session options other than
+  Fresh profile for later app runs, and a choice made there holds for the rest
+  of that app run. The
   standalone `make live` launcher retains request content and Canvas images
   as the app does, when the category mask holds them, unless set to `0`.
   Agent-started sessions (`reb-api session start`, MCP `start_live_session`)

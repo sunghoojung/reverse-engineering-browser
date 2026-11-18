@@ -628,7 +628,7 @@ const pendingWindow = t => {
   assert.equal(events.length, 400, 'Every page of a member is read');
   assert.equal(partial, false, 'A complete read is not partial');
   assert.match(detailReads[1], /after=50/);
-  // Absence after a partial read is unknown: the page cap, a damaged line, a short read.
+  // Absence after a partial read is unknown: a cursor that stops, a damaged line, a short read.
   const readWith = async (pages, rowOverride = {}) => {
     let calls = 0;
     const reader = t.api.createTrafficIndex({fetcher: async () => respond(200, pages[Math.min(calls++, pages.length - 1)])});
@@ -636,9 +636,13 @@ const pendingWindow = t => {
   };
   const part = (query, count = 200) => ({events: eventsOf('1', count).map((event, i) => ({...event, sequence_number: String(i + calls())})), query});
   let serial = 1000; function calls() { serial += 1000; return serial; }
-  const full = {next_after: '2', limited: true, budget_exhausted: false};
-  const capped = await readWith(Array.from({length: 17}, () => part(full, 20)));
-  assert.equal(capped.partial, true, 'Stopping at the page cap with records unread is partial');
+  let cursor = 0;
+  const moving = () => ({next_after: String(cursor += 10), limited: true, budget_exhausted: false});
+  const long = await readWith(Array.from({length: 20}, () => part(moving(), 20)));
+  assert.equal(long.partial, false, 'A long request is read page after page until every record is in');
+  assert.equal(long.events.length, 400, 'No page count stops a long request');
+  const stuck = await readWith([part({next_after: '0', limited: true, budget_exhausted: false}, 20)]);
+  assert.equal(stuck.partial, true, 'A cursor that does not move stops the read as partial');
   assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false, malformed_lines: 1}, 400)])).partial, true, 'A damaged line is partial');
   assert.equal((await readWith([part({next_after: '1', limited: false, budget_exhausted: false}, 300)])).partial, true, 'Fewer records than indexed is partial');
   const broken = t.api.createTrafficIndex({fetcher: async () => respond(200, {events: 'no'})});

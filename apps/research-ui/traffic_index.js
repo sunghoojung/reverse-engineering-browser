@@ -1,8 +1,7 @@
 /* Traffic rows from the backend request index (protocol/request-index-v2.md).
  * One read in flight at a time; a failed read keeps the last answer. */
 const TRAFFIC_INDEX_DEADLINE_MS = 10000;
-const TRAFFIC_DETAIL_PAGE = 200;
-const TRAFFIC_DETAIL_PAGES = 16;
+const TRAFFIC_DETAIL_PAGE = 2000;
 
 function trafficIndexParameters({sort, direction, needle, tabId, domain, type, named, flags = {}, range = null}) {
   const parameters = new URLSearchParams({sort, order: direction < 0 ? 'desc' : 'asc'});
@@ -123,17 +122,28 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
       return {status: 'ready', capped: Number(document.matching) > document.requests.length,
         rows: document.requests.map(row => trafficIndexRequest(row, answer?.origin ?? 'live'))};
     },
-    // Each member is read forward from the row's first offset, up to its record count.
-    // `partial` means some records were not read, so a missing one is unknown, not absent.
+    // Each member is read forward from the row's first offset, page by page,
+    // until it has every record the index counted or the row's last offset is
+    // passed. Each page has its own deadline, so a long request keeps reading
+    // while the store answers, and the caller's signal stops it. `partial`
+    // means some records were not read, so a missing one is unknown, not absent.
     async events(row, signal) {
       const events = new Map();
       let partial = false;
       for (const member of row.members) {
         let after = row.first_offset, remaining = member.records;
-        for (let page = 0; page < TRAFFIC_DETAIL_PAGES && remaining > 0; page += 1) {
+        while (remaining > 0) {
           const parameters = new URLSearchParams({session_id: member.session_id, process_id: String(member.process_id),
             request_id: member.request_id, category: 'network', after, limit: String(Math.min(remaining, TRAFFIC_DETAIL_PAGE))});
-          const response = await fetcher(`/api/events?${parameters}`, {cache: 'no-store', signal});
+          const deadline = AbortSignal.timeout(TRAFFIC_INDEX_DEADLINE_MS);
+          let response;
+          try {
+            response = await fetcher(`/api/events?${parameters}`, {cache: 'no-store', signal: AbortSignal.any([signal, deadline])});
+          } catch (error) {
+            // WebKit rejects a timed-out fetch with AbortError; the deadline says whether it was reached.
+            if (deadline.aborted && !signal.aborted) throw new Error(`the backend did not answer a page within ${TRAFFIC_INDEX_DEADLINE_MS / 1000} seconds`);
+            throw error;
+          }
           if (!response.ok) throw new Error(`the event store returned HTTP ${response.status}`);
           const body = await response.json();
           if (!Array.isArray(body?.events) || !body.query) throw new Error('the event store answer is malformed');
@@ -142,6 +152,8 @@ function createTrafficIndex({fetcher = (input, init) => fetch(input, init), onCh
           if (body.query.malformed_lines > 0) partial = true;
           const next = body.query.next_after;
           if (!(body.query.limited || body.query.budget_exhausted) || BigInt(next) >= BigInt(row.end_offset)) break;
+          // A cursor that does not move would read the same page forever.
+          if (BigInt(next) <= BigInt(after)) { partial = true; break; }
           after = next;
         }
         if (remaining > 0) partial = true;

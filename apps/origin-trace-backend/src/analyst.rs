@@ -1,6 +1,6 @@
 use crate::{
     config::Options,
-    error::{Code, Error, Phase, Reason, Result},
+    error::{Code, Confirmation, Error, Phase, Reason, Result},
     validation, worker, workspace,
 };
 use serde_json::{Value, json};
@@ -60,10 +60,15 @@ impl Run {
                 "The selected artifact changed; select it again before running",
             ));
         }
+        // Only the stored record says whether the artifact is sensitive, so
+        // the contract cannot ask for this confirmation before a run names
+        // one. The refusal names the field, before any byte is read.
         if artifact["sensitive"] == true && !self.confirmed_sensitive {
-            return Err(Error::bad(
-                "Confirm inclusion of sensitive selected artifact bytes before running",
-            ));
+            return Err(Error::new(
+                400,
+                "The selected artifact is sensitive; confirm inclusion of its bytes with confirmed_sensitive before running",
+            )
+            .with_reason(Reason::confirmation(Confirmation::ConfirmedSensitive)));
         }
         Ok(())
     }

@@ -854,7 +854,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             let entry = &variant["x-reb-execution"];
             check(entry, action);
             assert_eq!(entry["kind"], "action");
-            let fields = entry["confirmations"]
+            let mut fields = entry["confirmations"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -868,6 +868,20 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
                     field
                 })
                 .collect::<BTreeSet<_>>();
+            // A confirmation that stored state decides is listed once, apart
+            // from the request predicates.
+            for confirmation in entry["state_dependent_confirmations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                let field = confirmation["field"].as_str().unwrap();
+                assert!(
+                    variant["properties"].get(field).is_some(),
+                    "Unknown confirmation: {action}/{field}"
+                );
+                assert!(fields.insert(field), "Listed twice: {action}/{field}");
+            }
             let expected = variant["properties"]
                 .as_object()
                 .unwrap()
@@ -1065,20 +1079,18 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
     assert!(predicate.is_valid(&json!({"algorithm":"none"})));
     assert!(!predicate.is_valid(&json!({"algorithm":"HS256"})));
     assert!(!predicate.is_valid(&json!({})));
+    // Only the stored record says whether the named artifact is sensitive. A
+    // request predicate would ask for the confirmation on every run that
+    // names one, so it is a state-dependent confirmation the host asks for.
     let run = action("AnalystAction", "run_local_analyst_script");
-    let sensitive = run["confirmations"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["field"] == "confirmed_sensitive")
-        .unwrap();
-    // Only the stored manifest says whether the named artifact is sensitive,
-    // so the confirmation is listed whenever a run names one.
-    let predicate = jsonschema::validator_for(&sensitive["when"]).unwrap();
-    assert!(predicate.is_valid(
-        &json!({"evidence":{"selected_artifact":{"artifact_id":"1","sha256":"0".repeat(64)}}})
-    ));
-    assert!(!predicate.is_valid(&json!({"evidence":{"selected_artifact":null}})));
+    assert_eq!(
+        run["confirmations"],
+        json!([{"field":"confirmed","value":true,"when":{}}])
+    );
+    assert_eq!(
+        run["state_dependent_confirmations"][0]["field"],
+        "confirmed_sensitive"
+    );
     // Empty records or invented-safe effects are not valid metadata.
     let schema =
         jsonschema::validator_for(&spec["components"]["schemas"]["RebExecutionMetadata"]).unwrap();
@@ -6078,7 +6090,8 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
     assert_eq!(result["result_truncated"], false);
     eprintln!("20 MiB text artifact run: {:?}", started.elapsed());
 
-    // The binary artifact: sensitivity comes from the manifest, not the request.
+    // The binary artifact: sensitivity comes from the manifest, not the
+    // request, and the refusal names the confirmation it needs.
     let reference = json!({"artifact_id":"2","sha256":sha(&binary)});
     let refused = server
         .action(
@@ -6086,7 +6099,13 @@ async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits(
             run(2, reference.clone(), false),
         )
         .await;
-    assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+    let bytes = assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+    let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(refusal["code"], "confirmation_required");
+    assert_eq!(
+        refusal["details"],
+        json!({"confirmation":"confirmed_sensitive"})
+    );
     let response = server
         .action("/api/local-analyst/actions", run(3, reference, true))
         .await;

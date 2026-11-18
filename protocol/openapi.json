@@ -22367,7 +22367,7 @@
               },
               "confirmed_sensitive": {
                 "type": "boolean",
-                "description": "Must be true when the stored record of the selected artifact is sensitive. The host reads sensitivity from the manifest, not from the request."
+                "description": "The researcher's confirmation that a sensitive selected artifact's bytes may be included. The host reads sensitivity from the stored record at run time, not from the request; a sensitive artifact without it is refused with confirmation_required before any byte is read, and a non-sensitive one or none runs with false."
               }
             },
             "required": [
@@ -22408,10 +22408,6 @@
                 {
                   "id": "saved-analyst-script",
                   "condition": "library_generation, script_id, and source must match the current saved JavaScript analyst script."
-                },
-                {
-                  "id": "sensitive-selected-artifact",
-                  "condition": "confirmed_sensitive must be true when the stored record of evidence.selected_artifact is sensitive."
                 }
               ],
               "confirmations": [
@@ -22419,21 +22415,13 @@
                   "field": "confirmed",
                   "value": true,
                   "when": {}
-                },
+                }
+              ],
+              "state_dependent_confirmations": [
                 {
                   "field": "confirmed_sensitive",
                   "value": true,
-                  "when": {
-                    "type": "object",
-                    "required": ["evidence"],
-                    "properties": {
-                      "evidence": {
-                        "type": "object",
-                        "required": ["selected_artifact"],
-                        "properties": {"selected_artifact": {"type": "object"}}
-                      }
-                    }
-                  }
+                  "when": "The stored record of evidence.selected_artifact is sensitive, as its sensitive field in get_artifacts shows."
                 }
               ],
               "notes": "Executes an explicitly selected saved script in a disposable analyst helper, separate from the browser, over caller-supplied frozen evidence and the selected artifact's verified stored bytes. There is no execution deadline, CPU limit or input, result or log size limit.",
@@ -22445,6 +22433,10 @@
                 {
                   "path": "apps/origin-trace-backend/src/analyst.rs",
                   "symbol": "normalize"
+                },
+                {
+                  "path": "apps/origin-trace-backend/src/analyst.rs",
+                  "symbol": "Run::admit"
                 }
               ]
             },
@@ -22495,7 +22487,7 @@
             }
           }
         ],
-        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. selected_artifact.sensitive=true requires confirmed_sensitive=true. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
+        "description": "Run IDs and script IDs must be positive. Run requires the current saved JavaScript script, matching source and workspace generation. A selected artifact whose stored record is sensitive requires confirmed_sensitive=true, checked at run time. Cancellation is a separate concurrent request. Replacement enforces root id=1/name=Analyst Workspace, tree and cumulative size limits in src/workspace.rs."
       },
       "AnalystRunResult": {
         "type": "object",
@@ -31588,6 +31580,33 @@
               }
             }
           },
+          "state_dependent_confirmations": {
+            "type": "array",
+            "description": "Confirmations needed only when stored state that the request cannot show holds, such as a sensitive selected artifact. Absent means none. The host reads that state when the request arrives; when it holds and field is not true, the request is refused with confirmation_required and details.confirmation naming field, before anything is read or run. A client asks the researcher then, or earlier when it already knows the state holds, and never sets the field by default.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "value",
+                "when"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "value": {
+                  "const": true
+                },
+                "when": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The stored state that makes the confirmation necessary."
+                }
+              }
+            }
+          },
           "notes": {
             "type": "string",
             "minLength": 1
@@ -32152,14 +32171,15 @@
           "idle_backend",
           "native_capture_unavailable",
           "debugger_unavailable",
-          "artifact_integrity"
+          "artifact_integrity",
+          "confirmation_required"
         ],
-        "description": "Stable bounded application reason. artifact_integrity means retained bytes no longer match the size or SHA-256 in their manifest record, so reading them again cannot help. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
+        "description": "Stable bounded application reason. artifact_integrity means retained bytes no longer match the size or SHA-256 in their manifest record, so reading them again cannot help. confirmation_required means the stored state behind the request, such as a sensitive selected artifact, needs the confirmation that details.confirmation names; nothing was read or run, and a retry needs the researcher's confirmation, never a default. invalid_request/state_conflict/protocol_error are coarse classifications; precise reasons are only supplied by migrated source paths. application_failed does not imply rollback or no side effects. A command-exchange timeout or lost/malformed reply uses command_outcome_unknown, not a confirmed-no-op claim. This can include interrupted queued or partial writes and does not prove a send completed."
       },
       "ErrorDetails": {
         "type": "object",
         "additionalProperties": false,
-        "maxProperties": 7,
+        "maxProperties": 8,
         "properties": {
           "phase": {
             "type": "string",
@@ -32183,6 +32203,13 @@
           },
           "current_generation": {
             "$ref": "#/components/schemas/SafeInteger"
+          },
+          "confirmation": {
+            "type": "string",
+            "enum": [
+              "confirmed_sensitive"
+            ],
+            "description": "With confirmation_required: the request field that must be true for what the request names in the current stored state."
           },
           "selection_reason": {
             "type": "string",

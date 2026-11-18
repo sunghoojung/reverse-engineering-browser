@@ -68,7 +68,7 @@ site, and starts one visibly labeled `--localhost-only` session per kind:
 
 | Session | Start | Areas |
 | --- | --- | --- |
-| `content` | The runbook's content flags, promise stacks on | baseline, #425 tabs, #427 headers, #428 bodies, #429 stacks, #430 cookies, #434 phase 1 debugger, #436 limits |
+| `content` | The runbook's content flags, promise stacks on | baseline, #425 tabs, #427 headers, #428 bodies, #429 stacks, #430 cookies, #434 phase 1 debugger, #436 limits, Wasm sampling windows and reset |
 | `budget` | The content flags with 1 MiB request and response budgets | #428 and #436 budgets run out and are shown |
 | `metadata` | Without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images` | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` |
 | `no-stacks` | Without `--request-stacks` | No stack walk runs |

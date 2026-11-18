@@ -216,7 +216,7 @@ The payload is exactly128bytes, explicitly little-endian:
 |8|module instruction offset|u32|
 |12|unsigned selector|u32|
 |16|explicit table arm count|u32|
-|20|sample index (0–15)|u32|
+|20|sample index (0 to 4294967294)|u32|
 |24|reserved, all zero|104bytes|
 
 Version 2 replaces the first 8 reserved bytes with the JavaScript invocation
@@ -409,7 +409,7 @@ The artifact ID, scope and identity rules are those of
 | 16 | dynamic slot | u32 |
 | 20 | callee function index | u32 |
 | 24 | resolution (0 to 4) | u32 |
-| 28 | sample index (0 to 15) | u32 |
+| 28 | sample index (0 to 4294967294) | u32 |
 | 32 | reserved, all zero | 96 bytes |
 
 Version 2 adds the JavaScript invocation context at bytes 32..40, as for

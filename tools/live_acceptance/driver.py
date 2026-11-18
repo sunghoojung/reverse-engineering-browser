@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 
 from live_acceptance import (baseline, bodies, budget, cookies, debugger, headers, limits, metadata, nostacks,
-                             stacks, tabs)
+                             stacks, tabs, wasm)
 from live_acceptance.evidence import Session, StartError, start_session
 from live_acceptance.fixture import Fixture
 from live_acceptance.pages import document
@@ -47,7 +47,7 @@ class Kind:
 
 KINDS = {
     "content": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"},
-                    [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs], 3600),
+                    [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs, wasm], 3600),
     "budget": Kind([*CONTENT_FLAGS, "--request-content-budget-mib", str(budget.BUDGET_MIB),
                     "--response-body-budget-mib", str(budget.BUDGET_MIB)],
                    {"REB_NATIVE_PROMISE_STACKS": "1"}, [budget], 1800),

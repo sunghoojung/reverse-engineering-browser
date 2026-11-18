@@ -213,12 +213,8 @@
     {id: 'full', label: 'Full access', short: 'Full access',
       text: 'Also reads content and runs its own sessions.'},
   ]);
-  const REMEMBERED_CEILING = 'ask';
   const permissionRank = id => PERMISSIONS.findIndex(level => level.id === id);
   const permissionInfo = id => PERMISSIONS[Math.max(0, permissionRank(id))];
-  // Never remembered above Ask for actions: higher levels are chosen again.
-  const rememberable = id => (permissionRank(id) < 0 ? 'read-only'
-    : permissionRank(id) > permissionRank(REMEMBERED_CEILING) ? REMEMBERED_CEILING : id);
   // Consent is the only confirmation, so these say plainly what changes.
   const AUTO_WARNING = 'Actions run without asking you first: capture controls such as Stop and Clear, the Console in a connected document, saved local state (Collection, notebook, Analyst scripts, invocation sites) and the owned VM fixture.';
   const STAYS_VISIBLE = 'Every call and its result stays in the transcript, and Stop or Turn off ends it at once.';
@@ -226,11 +222,10 @@
   const FULL_LEAVES = Object.freeze(['JavaScript and other source text', 'Wasm bytes and disassembly', 'VM bytecode',
     'Request and response bodies', 'Cookie values and credential headers such as Authorization',
     'Every content field of tool results']);
-  const FULL_SESSIONS = 'Actions run without asking, and it runs its own live capture sessions, with real clicks and keys.';
-  const SENSITIVE_TEXT = 'Request content, response media, Canvas images and invocation digests in its sessions, only if your authorization covers them.';
+  const FULL_SESSIONS = 'Actions run without asking, and it runs its own live capture sessions, with real clicks and keys. They capture what yours do, request content and Canvas images included.';
 
   globalThis.RebAgentModel = {parseMarkdown, parseInline, parseCitation, clipPin, createTranscriptModel, verifyCitation, formatBytes,
-    WEB_BUDGET_BYTES, PIN_BYTES, PIN_TOTAL_BYTES, PERMISSIONS, rememberable, AUTO_WARNING, FULL_LEAVES, SENSITIVE_TEXT};
+    WEB_BUDGET_BYTES, PIN_BYTES, PIN_TOTAL_BYTES, PERMISSIONS, AUTO_WARNING, FULL_LEAVES};
 
   /* ---- View ---- */
 
@@ -262,7 +257,7 @@
   const view = {
     open: false, native: false, status: null, surfaceError: '', provider: 'claude', models: {}, model: {},
     auth: {claude: 'key', chatgpt: 'key', grok: 'subscription'}, subs: {}, checking: {}, signingIn: false,
-    phase: 'off', running: false, sessionKey: null, consenting: false, permission: 'read-only', sensitive: false, turning: false, follow: true,
+    phase: 'off', running: false, sessionKey: null, consenting: false, permission: 'read-only', turning: false, follow: true,
     usage: null, olderBefore: null, olderAvailable: false, pins: [], selectionKey: '', copied: null, setupNotice: '',
   };
   const transcript = createTranscriptModel();
@@ -271,14 +266,16 @@
   let framePending = false, frameTranscript = false, lastWindow = '', approvalFocus = null;
   // The mounted rows by id, with what each was drawn from (rowSignature).
   const mountedRows = new Map();
-  try {
-    const remembered = localStorage.getItem('origin-trace.agent.provider');
-    if (PROVIDERS.some(([id]) => id === remembered)) view.provider = remembered;
-    const auth = JSON.parse(localStorage.getItem('origin-trace.agent.auth') ?? '{}');
-    for (const [id] of PROVIDERS) if (auth?.[id] === 'key' || auth?.[id] === 'subscription') view.auth[id] = auth[id];
-    view.permission = rememberable(localStorage.getItem('origin-trace.agent.permission'));
-  } catch { /* Preferences are optional. */ }
-  const rememberPermission = id => { try { localStorage.setItem('origin-trace.agent.permission', rememberable(id)); } catch { /* Optional. */ } };
+  // The choices native saved in an earlier app run (AgentPreferences), taken
+  // once, from the first status, so they never undo a choice made since.
+  let preferencesApplied = false;
+  function applyPreferences(saved) {
+    if (preferencesApplied || !saved) return;
+    preferencesApplied = true;
+    if (PROVIDERS.some(([id]) => id === saved.provider)) view.provider = saved.provider;
+    for (const [id] of PROVIDERS) if (saved.auth?.[id] === 'key' || saved.auth?.[id] === 'subscription') view.auth[id] = saved.auth[id];
+    if (permissionRank(saved.permission) >= 0) view.permission = saved.permission;
+  }
 
   // Icons are fixed markup from this file. Captured and model text never
   // reaches innerHTML; it is always a text node.
@@ -593,6 +590,12 @@
     badge.textContent = level.short;
     badge.title = `Permission: ${level.label}. ${level.text}${level.id === 'read-only' ? '' : ' Lower it from More.'}`;
     badge.setAttribute('aria-label', `Permission: ${level.label}`);
+    // The titlebar toggle carries the running level as well, so it shows
+    // while the dock is closed.
+    const named = on ? `Agent, on at ${level.label}` : 'Agent';
+    if (on) toggle.dataset.level = level.id; else delete toggle.dataset.level;
+    toggle.setAttribute('aria-label', named);
+    toggle.title = `${named} (⌘ / Ctrl + Shift + A)`;
     newButton.hidden = moreButton.hidden = !usable;
     newButton.disabled = view.phase === 'off' || view.running || view.turning || !transcript.rows().length;
   }
@@ -948,7 +951,6 @@
       radio.addEventListener('change', () => {
         if (!radio.checked) return;
         view.permission = level.id;
-        if (level.id !== 'full') view.sensitive = false;
         renderConsentDetails();
         // At a short window the box and the button come into view.
         accept.scrollIntoView?.({block: 'nearest'});
@@ -994,22 +996,6 @@
       }
       const kept = view.provider === 'grok' && authFor() === 'subscription' ? ' Grok also keeps its own record in ~/.grok/sessions.' : '';
       warning.append(element('p', 'agent-warning-text agent-warning-quiet', `${STAYS_VISIBLE}${kept}`));
-      if (level.id === 'full') {
-        const sensitiveLabel = element('label', 'agent-check agent-check-sensitive');
-        const sensitive = element('input');
-        sensitive.type = 'checkbox';
-        sensitive.id = 'agent-sensitive';
-        sensitive.dataset.focusKey = 'sensitive';
-        sensitive.checked = view.sensitive;
-        sensitive.setAttribute('aria-describedby', 'agent-sensitive-text');
-        sensitive.addEventListener('change', () => { view.sensitive = sensitive.checked; });
-        const words = element('span', 'agent-level-words');
-        const detail = element('span', 'agent-level-text', SENSITIVE_TEXT);
-        detail.id = 'agent-sensitive-text';
-        words.append(element('span', 'agent-level-name', 'Also allow sensitive capture options'), detail);
-        sensitiveLabel.append(sensitive, words);
-        warning.append(sensitiveLabel);
-      }
       details.append(warning);
     }
     renderConsentDetails();
@@ -1749,6 +1735,7 @@
   async function refreshStatus() {
     try {
       view.status = await call('status');
+      applyPreferences(view.status.preferences);
       syncEngine(view.status.engine);
       view.surfaceError = '';
       if (view.status.available) {
@@ -1869,16 +1856,19 @@
   // is signed in only when its subscription is chosen.
   function setChoice(id, mode) {
     if (view.phase !== 'off') return;
+    let remember = false;
     if (view.provider !== id) {
       view.provider = id;
       view.setupNotice = '';
-      try { localStorage.setItem('origin-trace.agent.provider', id); } catch { /* Optional. */ }
+      remember = true;
     }
     if (mode && providerInfo(id)?.supportsKey !== false && view.auth[id] !== mode) {
       view.auth[id] = mode;
       view.setupNotice = '';
-      try { localStorage.setItem('origin-trace.agent.auth', JSON.stringify(view.auth)); } catch { /* Optional. */ }
+      remember = true;
     }
+    // Native saves the provider and payment for the next app run.
+    if (remember && view.native) call('remember', {provider: id, auth: authFor(id)}).catch(() => {});
     if (authFor(id) === 'subscription' && loopFor(id) === 'cli' && subscriptionOf(id).signedIn === undefined) checkSubscription(id);
     if (credential(id).ready) refreshModels();
     render();
@@ -1943,9 +1933,9 @@
   }
 
   // Enables native for one session and builds the loop that drives it.
-  async function startAgent({provider, auth, model, permission, sensitive, key}) {
+  async function startAgent({provider, auth, model, permission, key}) {
     view.sessionKey = key;
-    const result = await call('enable', {provider, auth, model, permission, sensitive: permission === 'full' && Boolean(sensitive), sessionKey: key});
+    const result = await call('enable', {provider, auth, model, permission, sessionKey: key});
     if ((result.engine?.loop ?? loopFor(provider, auth)) === 'cli') {
       runtime = createCliRuntime();
     } else {
@@ -1955,7 +1945,7 @@
       runtime = api.createAgentRuntime({
         bridge: {call, onFetchEvent: listener => { fetchListener = listener; }},
         provider, model: result.engine?.model ?? model, tools: result.tools ?? [], emit: handleRuntimeEvent,
-        permission: result.engine?.permission ?? 'read-only', sensitive: Boolean(result.engine?.sensitive),
+        permission: result.engine?.permission ?? 'read-only',
       });
     }
     view.status = result;
@@ -1970,11 +1960,9 @@
     try {
       const key = await sessionKey();
       const level = view.permission;
-      await startAgent({provider: view.provider, auth: authFor(), model: view.model[modelKey()] ?? '', permission: level, sensitive: view.sensitive, key});
-      // The next consent starts from what may be remembered, never higher.
-      rememberPermission(level);
-      view.permission = rememberable(level);
-      view.sensitive = false;
+      // Native saves the level, provider and payment once it is on; the
+      // next consent, in this run or a later one, starts from them.
+      await startAgent({provider: view.provider, auth: authFor(), model: view.model[modelKey()] ?? '', permission: level, key});
       const page = await call('transcript', {});
       view.olderBefore = page.before ?? null;
       view.olderAvailable = view.olderBefore !== null;
@@ -2002,7 +1990,7 @@
     if (view.phase === 'off' || view.running || view.turning) return;
     const engine = view.status?.engine ?? {};
     const choice = {provider: engine.provider ?? view.provider, auth: engine.auth ?? authFor(), model: engine.model ?? '',
-      permission: engine.permission ?? 'read-only', sensitive: Boolean(engine.sensitive)};
+      permission: engine.permission ?? 'read-only'};
     const had = transcript.rows().length > 0 || view.olderAvailable;
     view.turning = true;
     render();
@@ -2058,9 +2046,8 @@
       const result = await call('lowerPermission', {permission: level});
       view.status = result;
       syncEngine(result.engine);
-      runtime?.setPermission?.({permission: level, sensitive: false, tools: result.tools ?? []});
-      rememberPermission(level);
-      view.permission = rememberable(level);
+      runtime?.setPermission?.({permission: level, tools: result.tools ?? []});
+      view.permission = level;
       const info = permissionInfo(level);
       appendNotice(`Permission lowered to ${info.label}. ${info.text}`);
       persist({role: 'notice', text: `Permission lowered to ${info.label}.`});

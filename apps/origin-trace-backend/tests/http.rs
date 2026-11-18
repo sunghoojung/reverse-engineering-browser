@@ -73,7 +73,10 @@ impl Server {
             }
         }
         let mut child = child.args(args).spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // The first launches of a freshly linked binary wait on macOS code
+        // signing assessment, which takes longer than ten seconds on a loaded
+        // machine. A started backend writes its endpoint in under a second.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let url = loop {
             if let Ok(url) = std::fs::read_to_string(&endpoint) {
                 break url.trim().to_owned();
@@ -1070,8 +1073,12 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
         .iter()
         .find(|c| c["field"] == "confirmed_sensitive")
         .unwrap();
+    // Only the stored manifest says whether the named artifact is sensitive,
+    // so the confirmation is listed whenever a run names one.
     let predicate = jsonschema::validator_for(&sensitive["when"]).unwrap();
-    assert!(predicate.is_valid(&json!({"evidence":{"selected_artifact":{"sensitive":true}}})));
+    assert!(predicate.is_valid(
+        &json!({"evidence":{"selected_artifact":{"artifact_id":"1","sha256":"0".repeat(64)}}})
+    ));
     assert!(!predicate.is_valid(&json!({"evidence":{"selected_artifact":null}})));
     // Empty records or invented-safe effects are not valid metadata.
     let schema =
@@ -1080,6 +1087,69 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
     let mut altered = action("CaptureAction", "clear");
     altered["effects"] = json!(["read-only"]);
     assert!(!schema.is_valid(&altered));
+}
+
+/// A profile is found by its exact root however many newer profiles follow
+/// it, a later record for the same root replaces it, and a damaged line stops
+/// every lookup rather than answering from the records around it.
+#[tokio::test]
+async fn signal_profiles_are_found_at_any_age_by_their_root() {
+    let server = Server::start().await;
+    let profile = |request: u64, sequence: u64, count: &str| {
+        json!({"protocol_version":1,"document_kind":"request-signal-profile","session_id":"1",
+            "request_id":request.to_string(),"root_event":{"process_id":7,"sequence_number":sequence.to_string()},
+            "initiator_event":null,"navigation_id":"1","frame_id":"1",
+            "signals":[{"category":"canvas","relation":"same_context","confidence":"correlated",
+                "event_count":count,"first_event":{"process_id":7,"sequence_number":"1"},
+                "last_event":{"process_id":7,"sequence_number":"1"}}],
+            "coverage":{"parent_depth":0,"parent_depth_limit":32,"copied_from_initiator":false,
+                "retention_truncated":false,"parent_depth_limited":false,"count_saturated":false}})
+        .to_string()
+    };
+    let path = server.root.path().join("signals.jsonl");
+    let mut lines = vec![profile(1, 2, "3")];
+    lines.extend((2..12_002).map(|request| profile(request, request * 2, "1")));
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let route = |request: u64, sequence: u64| {
+        format!(
+            "/api/request-signal-profile?session_id=1&request_id={request}&root_process_id=7&root_sequence_number={sequence}"
+        )
+    };
+    let response = server.get(&route(1, 2)).await;
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(
+        body["request_id"], "1",
+        "the oldest of 12,001 profiles is found"
+    );
+    assert_eq!(body["signals"][0]["event_count"], "3");
+    assert_eq!(
+        server.get(&route(1, 3)).await.status(),
+        404,
+        "only the exact root selects it"
+    );
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, (profile(1, 2, "9") + "\n").as_bytes()).unwrap();
+    let body: Value = server.get(&route(1, 2)).await.json().await.unwrap();
+    assert_eq!(
+        body["signals"][0]["event_count"], "9",
+        "a later record replaces it"
+    );
+
+    std::io::Write::write_all(&mut file, b"{\"truncated\":\n").unwrap();
+    let response = server.get(&route(1, 2)).await;
+    assert_eq!(response.status(), 500);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("malformed request signal profile")
+    );
 }
 
 #[tokio::test]
@@ -1333,7 +1403,7 @@ async fn openapi_action_envelopes_and_stored_failures_are_json_errors() {
             assert_contract_response(response, "post", route, 400).await;
         }
     }
-    let mut analyst = json!({"action":"run_local_analyst_script","protocol_version":1,
+    let mut analyst = json!({"action":"run_local_analyst_script","protocol_version":2,
         "run_id":1,"script_id":1,"library_generation":0,"source":"return 1;",
         "variables":{},"evidence":{"events":[],"artifacts":[],"trace_edges":[],
             "signal_profiles":[],"vm_analysis":null,"selected_artifact":null,"summary":{}},
@@ -2964,6 +3034,44 @@ fn analyze_vm(root: &Path, events: &[Value]) -> Value {
     document
 }
 #[test]
+fn vm_identical_bytes_give_each_artifact_its_own_result() {
+    // The pass analyzes a content once; each artifact must still read as if
+    // it were analyzed alone, under its own ID, URL, frame and signals.
+    for source in [
+        "function run(code) { let pc=0, stack=[]; while (pc<code.length) { switch(code[pc++]) { case 1: stack.push(1); break; default: return; } } }",
+        "const answer = 42; navigator.userAgent;",
+        "not javascript {",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let first = vm_artifact(root.path(), source.as_bytes(), "3");
+        let mut second = first.clone();
+        second["artifact_id"] = json!("2");
+        second["frame_id"] = json!("4");
+        second["url"] = json!("https://synthetic.test/reloaded.js");
+        let events = [
+            vm_event("web_audio", 1, 10, "2"),
+            vm_event("canvas", 2, 10, "0"),
+        ];
+        let alone = |artifact: &Value| {
+            std::fs::write(
+                root.path().join("manifest.jsonl"),
+                jsonl(std::slice::from_ref(artifact)),
+            )
+            .unwrap();
+            analyze_vm(root.path(), &events)["results"][0].clone()
+        };
+        let expected = [alone(&first), alone(&second)];
+        std::fs::write(
+            root.path().join("manifest.jsonl"),
+            jsonl(&[first.clone(), second.clone()]),
+        )
+        .unwrap();
+        let document = analyze_vm(root.path(), &events);
+        assert_eq!(document["results"], json!(expected), "{source}");
+        assert_ne!(expected[0], expected[1]);
+    }
+}
+#[test]
 fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
     for source in [
         "function run(code) { let pc=0, stack=[]; while (pc<code.length) { switch(code[pc++]) { case 1: stack.push(1); break; default: return; } } }",
@@ -3012,18 +3120,26 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
             json!({"session_id":"1","process_id":10,"sequence_number":"2"})
         );
         assert!(observations[0].get("coordinate").is_none());
+        // The rule's representative is a graph node; the rest of the frame
+        // is counted, with the get_events filter that lists it.
         let nodes = result["graph"]["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), 5);
-        assert!(nodes.iter().any(|n| n["id"] == "event:1:10:1"));
+        assert_eq!(nodes.len(), 3);
         assert!(
             result["graph"]["edges"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
+                .any(|e| e["from"] == "event:1:10:2" && e["state"] == "observed")
+        );
+        assert_eq!(
+            result["runtime_context"],
+            json!({"session_id":"1","navigation_id":"2","frame_id":"3","frame_attribution":"available",
+                "request_records":0,
+                "signal_records":[{"rule_id":"antibot.runtime-web-audio","observed":2,"correlated":1}],
+                "events_filter":{"session_id":"1","navigation_id":"2","frame_id":"3"}})
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.10.0");
+        assert_eq!(document["producer"]["version"], "1.11.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -3073,33 +3189,35 @@ fn vm_runtime_identity_disambiguates_processes_and_rejects_conflicts() {
     }
     let document = analyze_vm(root.path(), &events);
     assert_eq!(document["input_coverage"]["complete"], false);
+    // Omissions are counted per reason, with the line each was first seen on.
+    let omissions = document["input_coverage"]["omissions"].as_array().unwrap();
     assert_eq!(
-        document["input_coverage"]["omissions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        8
+        omissions
+            .iter()
+            .map(|o| (
+                o["reason"].as_str().unwrap(),
+                o["observed_records"].as_u64().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("conflicting-event-identity", 1),
+            ("invalid-event-contract", 7)
+        ]
     );
-    assert_eq!(
-        document["input_coverage"]["omissions"][0]["reason"],
-        "conflicting-event-identity"
-    );
+    assert_eq!(omissions[0]["line"], 7);
+    assert_eq!(omissions[1]["line"], 9);
     let result = &document["results"][0];
     assert_eq!(result["anti_bot_score"], 50);
-    assert_eq!(result["related_request_ids"], json!(["55"]));
+    // Both processes' request starts count; neither is copied into the result.
+    assert_eq!(result["runtime_context"]["request_records"], 2);
     let nodes = result["graph"]["nodes"].as_array().unwrap();
-    assert_eq!(nodes.len(), 6);
+    assert_eq!(nodes.len(), 4);
     let ids = nodes
         .iter()
         .map(|n| n["id"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids.len(), nodes.len());
-    for id in [
-        "event:1:10:1",
-        "event:1:11:1",
-        "request:1:10:2",
-        "request:1:11:2",
-    ] {
+    for id in ["event:1:10:1", "event:1:11:1"] {
         assert!(ids.contains(id), "{id}");
     }
     assert!(!ids.contains("event:1:10:3"));
@@ -3160,22 +3278,24 @@ fn vm_runtime_unknown_frames_do_not_invent_shared_context() {
     );
 }
 #[test]
-fn vm_runtime_graph_limit_is_explicit_and_preserves_representative() {
+fn vm_runtime_frame_context_is_counted_and_keeps_the_attributed_representative() {
     let root = tempfile::tempdir().unwrap();
     vm_artifact(root.path(), b"const answer=42;", "3");
     let mut events = (1..=1030)
         .map(|sequence| vm_event("web_audio", sequence, 10, "0"))
         .collect::<Vec<_>>();
-    // Stronger attribution remains visible even when it arrived after the cap.
+    // The attribution arriving last is still the representative.
     events[1029]["artifact_id"] = json!("1");
     events.push(vm_event("network", 1031, 10, "0"));
     let document = analyze_vm(root.path(), &events);
     let result = &document["results"][0];
     assert_eq!(result["anti_bot_score"], 25);
-    assert_eq!(result["status"], "partial");
-    assert_eq!(result["graph"]["edges"].as_array().unwrap().len(), 1024);
-    assert_eq!(result["graph"]["nodes"].as_array().unwrap().len(), 1025);
+    assert_eq!(result["status"], "complete");
+    assert_eq!(result["coverage"]["omissions"], json!([]));
+    assert_eq!(result["graph"]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(result["graph"]["nodes"].as_array().unwrap().len(), 3);
     assert_eq!(result["anti_bot_observations"][0]["event_sequence"], "1030");
+    assert_eq!(result["anti_bot_observations"][0]["state"], "observed");
     assert!(
         result["graph"]["nodes"]
             .as_array()
@@ -3184,28 +3304,11 @@ fn vm_runtime_graph_limit_is_explicit_and_preserves_representative() {
             .any(|n| n["id"] == "event:1:10:1030")
     );
     assert_eq!(
-        result["coverage"]["omissions"],
-        json!([{"reason":"runtime-graph-edge-limit","omitted_records":8}])
-    );
-    let network = events.last().unwrap();
-    let request_id = network["request_id"].as_str().unwrap();
-    assert_eq!(result["related_request_ids"], json!([request_id]));
-    assert!(
-        result["graph"]["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|n| {
-                n["id"]
-                    == format!(
-                        "request:{}:{}:{}",
-                        network["session_id"].as_str().unwrap(),
-                        network["process_id"].as_u64().unwrap(),
-                        network["sequence_number"].as_str().unwrap()
-                    )
-                    && n["kind"] == "request"
-                    && n["request_id"] == request_id
-            })
+        result["runtime_context"],
+        json!({"session_id":"1","navigation_id":"2","frame_id":"3","frame_attribution":"available",
+            "request_records":1,
+            "signal_records":[{"rule_id":"antibot.runtime-web-audio","observed":1,"correlated":1029}],
+            "events_filter":{"session_id":"1","navigation_id":"2","frame_id":"3"}})
     );
 }
 #[tokio::test]
@@ -3312,6 +3415,143 @@ async fn vm_ranked_static_candidate_workspace_roundtrips_http_and_schema() {
 }
 
 #[tokio::test]
+async fn vm_full_read_streams_every_result_and_findings_view_counts_the_rest() {
+    let server = Server::start().await;
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../../tools/fixtures/vm-dynamic-debug/wasm-ranked-dispatch.json"
+    ))
+    .unwrap();
+    let root = server.root.path().join("artifacts");
+    let bytes = hex::decode(fixture["module_hex"].as_str().unwrap()).unwrap();
+    let mut module = vm_artifact(&root, &bytes, "3");
+    module["kind"] = json!("wasm");
+    module["mime_type"] = json!("application/wasm");
+    let plain = vm_artifact(&root, b"const answer = 42;", "3");
+    let manifest = [module]
+        .into_iter()
+        .chain((2..=4).map(|id| {
+            let mut artifact = plain.clone();
+            artifact["artifact_id"] = json!(id.to_string());
+            artifact
+        }))
+        .collect::<Vec<_>>();
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+
+    let response = server.get("/api/analysis/vm").await;
+    let length = response.headers()["content-length"].clone();
+    let full_etag = response.headers()["etag"].clone();
+    let streamed = assert_contract_response(response, "get", "/api/analysis/vm", 200).await;
+    assert_eq!(length.to_str().unwrap(), streamed.len().to_string());
+    let full: Value = serde_json::from_slice(&streamed).unwrap();
+    assert_vm_document(&full);
+    // The read is the published canonical document, byte for byte.
+    assert_eq!(
+        streamed,
+        std::fs::read(root.join("analysis/vm-analysis-v1.json")).unwrap()
+    );
+    assert_eq!(
+        streamed,
+        origin_trace_backend::vm::canonical(&full).unwrap()
+    );
+    // reb-api streams the body whole into a new private file or stdout,
+    // prints serde_json's pretty form, and never replaces a file.
+    let call = |output: Option<&std::ffi::OsStr>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
+        command.args(["call", "get_vm_analysis", "--base-url", &server.url]);
+        if let Some(output) = output {
+            command.arg("--output").arg(output);
+        }
+        command.output().unwrap()
+    };
+    let saved = server.root.path().join("cli").join("vm.json");
+    std::fs::create_dir(saved.parent().unwrap()).unwrap();
+    let written = call(Some(saved.as_os_str()));
+    assert!(written.status.success(), "{written:?}");
+    assert!(written.stdout.is_empty());
+    assert_eq!(std::fs::read(&saved).unwrap(), streamed);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&saved).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let refused = call(Some(saved.as_os_str()));
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(std::fs::read(&saved).unwrap(), streamed);
+    assert_eq!(
+        std::fs::read_dir(saved.parent().unwrap()).unwrap().count(),
+        1,
+        "no temporary file is left beside the output"
+    );
+    let piped = call(Some(std::ffi::OsStr::new("-")));
+    assert!(piped.status.success(), "{piped:?}");
+    assert_eq!(piped.stdout, streamed);
+    let printed = call(None);
+    assert!(printed.status.success(), "{printed:?}");
+    assert_eq!(
+        String::from_utf8(printed.stdout).unwrap(),
+        format!("{}\n", serde_json::to_string_pretty(&full).unwrap())
+    );
+    let tiers = full["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["tier"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(tiers, ["candidate", "none", "none", "none"]);
+
+    let response = server.get("/api/analysis/vm?view=findings").await;
+    let etag = response.headers()["etag"].clone();
+    assert_ne!(etag, full_etag);
+    let findings: Value = serde_json::from_slice(
+        &assert_contract_response(response, "get", "/api/analysis/vm", 200).await,
+    )
+    .unwrap();
+    let spec = specification();
+    assert_schema(
+        &spec,
+        &spec["components"]["schemas"]["VmAnalysis"],
+        &findings,
+        "VM findings view",
+    );
+    assert_eq!(findings["results"], json!([full["results"][0]]));
+    assert_eq!(
+        findings["results_view"],
+        json!({"kind":"findings","listed_results":1,"omitted_results":3})
+    );
+    for key in [
+        "document_digest",
+        "summary",
+        "mixed_findings",
+        "input_coverage",
+    ] {
+        assert_eq!(findings[key], full[key], "{key}");
+    }
+    assert_contract_response(
+        server
+            .client
+            .get(format!("{}/api/analysis/vm?view=findings", server.url))
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .unwrap(),
+        "get",
+        "/api/analysis/vm",
+        304,
+    )
+    .await;
+    for query in ["view=all", "view=", "view=findings&view=findings"] {
+        assert_contract_response(
+            server.get(&format!("/api/analysis/vm?{query}")).await,
+            "get",
+            "/api/analysis/vm",
+            400,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
     let server = Server::start().await;
     vm_artifact(
@@ -3335,8 +3575,22 @@ async fn vm_host_links_are_digest_bound_payload_free_and_failure_isolated() {
         .validate(&document)
         .unwrap();
     assert!(!document.to_string().contains("PRIVATE HOST PAYLOAD"));
-    assert_eq!(document["workspaces"][0]["links"][0]["state"], "unknown");
-    assert!(document["workspaces"][0]["links"][0]["guest_position"].is_null());
+    // Without a VM parent no sample can position the host event, so it is
+    // counted in the frame rather than listed.
+    let row = &document["workspaces"][0];
+    assert_eq!(row["links"], json!([]));
+    assert_eq!(row["frame_host_records"], 1);
+    assert_eq!(row["attributed_host_records"], 1);
+    assert_eq!(
+        row["events_filter"],
+        json!({"session_id":"1","navigation_id":"2","frame_id":"3"})
+    );
+    assert!(
+        row["omissions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("dispatch-samples-unavailable"))
+    );
     let workspace: Value = server
         .get("/api/analysis/vm/opcodes")
         .await
@@ -3747,7 +4001,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.10.0");
+    assert_eq!(document["producer"]["version"], "1.11.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 3);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -5955,6 +6209,157 @@ async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
     );
 }
 
+/// The real Node runner, as `make e2e` and the browser development UI use it.
+#[tokio::test]
+async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits() {
+    let server = Server::start().await;
+    let runner: Value = server
+        .get("/api/local-analyst/runner")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runner["available"], true, "Node.js 22+ must be on PATH");
+    // A 20 MiB text artifact, and a sensitive binary one that is not UTF-8.
+    let mut text = vec![b'a'; 20 * 1024 * 1024];
+    text.extend_from_slice(b"end");
+    let binary: Vec<u8> = (0..3 * 1024 * 1024u32)
+        .map(|i| 0x80 | (i % 128) as u8)
+        .collect();
+    let mut records = String::new();
+    // A cookie list is never a script's input: Sources does not list it.
+    let cookies = b"session=private".to_vec();
+    for (id, bytes, kind) in [
+        ("1", &text, "javascript"),
+        ("2", &binary, "response_body"),
+        ("3", &cookies, "cookie_list"),
+    ] {
+        let hash = hex::encode(Sha256::digest(bytes));
+        records.push_str(&format!(
+            "{}\n",
+            json!({"protocol_version":1,"artifact_id":id,"session_id":"1",
+            "navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0",
+            "kind":kind,"url":format!("https://example.test/{id}"),
+            "mime_type":"application/octet-stream","byte_size":bytes.len(),"sha256":hash,
+            "sensitive":kind != "javascript","content_path":format!("blobs/{hash}.bin")})
+        ));
+        if kind == "cookie_list" {
+            // One browser network record creates a request's cookie list.
+            let mut record: Value = serde_json::from_str(records.lines().last().unwrap()).unwrap();
+            record["creator_event_id"] = json!("5");
+            record["execution_context_id"] = json!("0");
+            record["capture_origin"] = json!("network_request");
+            let kept = records.lines().count() - 1;
+            records = records
+                .lines()
+                .take(kept)
+                .map(|line| format!("{line}\n"))
+                .collect();
+            records.push_str(&format!("{record}\n"));
+        }
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    }
+    server.file("artifacts/manifest.jsonl", records.as_bytes());
+    let source = "const a = WB.Node.Evidence.selectedArtifact(); const b = WB.Node.Evidence.selectedArtifactBytes();\n\
+        for (let i = 0; i < 100; i++) console.log('line', i, 'z'.repeat(2000));\n\
+        return {events: WB.Node.Evidence.events().length, padding: 'p'.repeat(40000), artifact: a && {id: a.artifact_id,\n\
+        size: a.byte_size, text: a.content === null ? null : a.content.length, tail: a.content === null ? null : a.content.slice(-3),\n\
+        bytes: b.length, last: b[b.length - 1], sensitive: a.sensitive, path: a.content_path === undefined}};";
+    let saved = server.action("/api/local-analyst/actions", json!({"action":"replace_local_analyst_workspace",
+        "expected_generation":0,"folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
+        "files":[{"id":1,"folder_id":1,"name":"Whole","kind":"analyst-script","language":"javascript","content":source}]})).await;
+    assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+    let sha = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+    // 5,000 events: well past the 768 KiB snapshot the runner used to keep.
+    let events: Vec<_> = (0..5000)
+        .map(|id| json!({"event_id":id,"detail":"e".repeat(200)}))
+        .collect();
+    let run = |id: u64, selected: Value, sensitive: bool| {
+        json!({"action":"run_local_analyst_script","protocol_version":2,
+        "run_id":id,"script_id":1,"library_generation":1,"source":source,"variables":{},
+        "evidence":{"events":events,"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,
+            "selected_artifact":selected,"summary":{}},"confirmed":true,"confirmed_sensitive":sensitive})
+    };
+    let started = Instant::now();
+    let response = server
+        .action(
+            "/api/local-analyst/actions",
+            run(1, json!({"artifact_id":"1","sha256":sha(&text)}), false),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "completed", "{result}");
+    let value: Value = serde_json::from_str(result["result_text"].as_str().unwrap()).unwrap();
+    assert_eq!(value["events"], 5000);
+    assert_eq!(
+        value["padding"].as_str().unwrap().len(),
+        40000,
+        "results are kept whole"
+    );
+    assert_eq!(
+        value["artifact"],
+        json!({"id":"1","size":text.len(),"text":text.len(),"tail":"end",
+        "bytes":text.len(),"last":b'd',"sensitive":false,"path":true})
+    );
+    assert_eq!(
+        result["logs"].as_array().unwrap().len(),
+        100,
+        "every log is kept"
+    );
+    assert!(result["logs"][99]["text"].as_str().unwrap().len() > 2000);
+    assert_eq!(result["result_truncated"], false);
+    eprintln!("20 MiB text artifact run: {:?}", started.elapsed());
+
+    // The binary artifact: sensitivity comes from the manifest, not the request.
+    let reference = json!({"artifact_id":"2","sha256":sha(&binary)});
+    let refused = server
+        .action(
+            "/api/local-analyst/actions",
+            run(2, reference.clone(), false),
+        )
+        .await;
+    assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+    let response = server
+        .action("/api/local-analyst/actions", run(3, reference, true))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let value: Value = serde_json::from_str(result["result_text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        value["artifact"]["text"],
+        Value::Null,
+        "bytes that are not UTF-8 have no text"
+    );
+    assert_eq!(value["artifact"]["bytes"], binary.len());
+    assert_eq!(value["artifact"]["last"], *binary.last().unwrap());
+    assert_eq!(value["artifact"]["sensitive"], true);
+
+    // A kind Sources never lists, even confirmed and with its true SHA-256.
+    let cookie = server
+        .action(
+            "/api/local-analyst/actions",
+            run(6, json!({"artifact_id":"3","sha256":sha(&cookies)}), true),
+        )
+        .await;
+    let bytes = assert_contract_response(cookie, "post", "/api/local-analyst/actions", 400).await;
+    assert!(!String::from_utf8_lossy(&bytes).contains("private"));
+
+    // A reference whose stored SHA-256 differs, and protocol 1.
+    let stale = server
+        .action(
+            "/api/local-analyst/actions",
+            run(4, json!({"artifact_id":"1","sha256":sha(b"other")}), false),
+        )
+        .await;
+    assert_contract_response(stale, "post", "/api/local-analyst/actions", 409).await;
+    let mut old = run(5, Value::Null, false);
+    old["protocol_version"] = json!(1);
+    let response = server.action("/api/local-analyst/actions", old).await;
+    assert_eq!(response.status(), 400);
+    assert!(response.text().await.unwrap().contains("protocol 2"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_status() {
@@ -6003,7 +6408,7 @@ async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_
     let saved = server.action("/api/local-analyst/actions", json!({"action":"replace_local_analyst_workspace","expected_generation":0,
         "folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],"files":[{"id":1,"folder_id":1,"name":"Fixture","kind":"analyst-script","language":"javascript","content":"return 1;"}]})).await;
     assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
-    let request = json!({"action":"run_local_analyst_script","protocol_version":1,"run_id":1,"script_id":1,"library_generation":1,"source":"return 1;",
+    let request = json!({"action":"run_local_analyst_script","protocol_version":2,"run_id":1,"script_id":1,"library_generation":1,"source":"return 1;",
         "variables":{},"evidence":{"events":[],"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,"selected_artifact":null,"summary":{}},"confirmed":true,"confirmed_sensitive":false});
     let response = server
         .action("/api/local-analyst/actions", request.clone())
@@ -6036,20 +6441,13 @@ async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_
     assert_eq!(result["outcome"], "failed");
     assert_eq!(result["code"], "application_failed");
 
-    // The synthetic helper consumes input but neither evaluates source nor replies.
+    // The synthetic helper consumes input but neither evaluates source nor
+    // replies. A run has no deadline, so only cancellation ends it.
     std::fs::write(
         &helper,
         "#!/bin/sh\n/bin/cat >/dev/null\nexec /bin/sleep 60\n",
     )
     .unwrap();
-    let response = server
-        .action("/api/local-analyst/actions", request.clone())
-        .await;
-    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
-    let result: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(result["outcome"], "timed_out");
-    assert_eq!(result["code"], "timeout");
-    assert_eq!(result["details"], json!({"phase":"worker"}));
 
     let client = server.client.clone();
     let url = format!("{}/api/local-analyst/actions", server.url);
@@ -6416,7 +6814,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.10.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.11.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -6472,6 +6870,11 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         .unwrap()
         .remove("javascript_likely_vm_requires_handlers");
     historical_profile["javascript_scoring_version"] = json!(2);
+    // Producer 1.11.0 removed the record and graph limits it still had.
+    let limits = historical_profile["limits"].as_object_mut().unwrap();
+    limits.insert("max_artifact_records".into(), json!(10000));
+    limits.insert("max_event_records".into(), json!(100000));
+    limits.insert("max_graph_edges".into(), json!(1024));
     assert_eq!(
         hex::encode(Sha256::digest(
             origin_trace_backend::vm::canonical(&historical_profile).unwrap()
@@ -7534,9 +7937,15 @@ fn snapshot(root: &Path) -> std::collections::BTreeMap<std::path::PathBuf, Strin
             // The backend keeps derived indexes beside the stores on its own
             // timers, so a run can see them appear with no request causing them.
             let name = entry.file_name().to_string_lossy().into_owned();
-            if [".requests-v2", ".events-v1", ".edges-v1", ".lookup-v1"]
-                .iter()
-                .any(|suffix| name.contains(suffix))
+            if [
+                ".requests-v2",
+                ".events-v1",
+                ".edges-v1",
+                ".profiles-v1",
+                ".lookup-v1",
+            ]
+            .iter()
+            .any(|suffix| name.contains(suffix))
             {
                 continue;
             }
@@ -8017,6 +8426,18 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
     let end = call(json!({"action":"end","confirm":true})).await;
     let refused = assert_contract_response(end, "post", "/api/session/actions", 409).await;
     assert_eq!(code(refused), "target_unavailable");
+    // A relay that has not returned by its deadline is stopped. It may already
+    // have handed the URL over, so the outcome is unknown, and the session is
+    // left running rather than declared lost.
+    std::fs::write(&brave, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    let late = json!({"action":"open_url","url":"https://example.test/late"});
+    let stuck =
+        assert_contract_response(call(late).await, "post", "/api/session/actions", 409).await;
+    let stuck = serde_json::from_slice::<Value>(&stuck).unwrap();
+    assert_eq!(stuck["code"], "command_outcome_unknown");
+    let text = stuck["error"].as_str().unwrap();
+    assert!(text.contains("the session is still running"), "{text}");
+    assert!(!text.contains("Start a new live session"), "{text}");
     assert_eq!(server.get("/api/health").await.status(), 200);
 }
 
@@ -10561,6 +10982,21 @@ async fn vm_exact_request_projection_requires_acknowledged_creator_chain_and_ful
         document["selection"]["edge_semantics"],
         "exact-captured-response-body"
     );
+    // The findings view narrows the selection, counting what it leaves out.
+    let viewed = server.get(&format!("{path}&view=findings")).await;
+    assert_ne!(viewed.headers()["etag"], etag);
+    let viewed: Value = serde_json::from_slice(
+        &assert_contract_response(viewed, "get", "/api/analysis/vm", 200).await,
+    )
+    .unwrap();
+    let listed = usize::from(document["results"][0]["tier"] != "none");
+    assert_eq!(viewed["results"].as_array().unwrap().len(), listed);
+    assert_eq!(
+        viewed["results_view"],
+        json!({"kind":"findings","listed_results":listed,"omitted_results":1 - listed})
+    );
+    assert_eq!(viewed["selection"], document["selection"]);
+    assert_eq!(viewed["summary"], document["summary"]);
     for (from, to) in [
         ("session_id=9007199254740993", "session_id=2"),
         ("root_process_id=12", "root_process_id=13"),
@@ -11319,6 +11755,47 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     assert_eq!(entry["source_url"], "https://example.test/source.js");
     assert_eq!(entry["session_id"], "11");
     assert_eq!(entry["retained"]["state"], "matches");
+    // The saved script is found behind any number of newer artifacts, and a
+    // newer version at its URL is named beside it.
+    let manifest = server.root.path().join("artifacts/manifest.jsonl");
+    let blob = |bytes: &[u8]| {
+        let hash = hex::encode(Sha256::digest(bytes));
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+        (hash, bytes.len())
+    };
+    let filler = blob(b"other();");
+    let version = blob(b"f0=function(a){return a+1};");
+    let mut appended = String::new();
+    for id in 8..=6_008u64 {
+        let (url, (hash, size)) = if id == 6_008 {
+            ("https://example.test/source.js".to_owned(), &version)
+        } else {
+            (format!("https://cdn.example.test/{id}.js"), &filler)
+        };
+        appended.push_str(&format!("{}\n", json!({
+            "protocol_version":1,"artifact_id":id.to_string(),"session_id":"11","navigation_id":"13",
+            "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+            "execution_context_id":"23","capture_origin":"dynamic_javascript",
+            "kind":"javascript","url":url,"mime_type":"text/javascript",
+            "byte_size":size,"sha256":hash,"sensitive":false,
+            "content_path":format!("blobs/{hash}.bin")})));
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&manifest)
+        .unwrap();
+    std::io::Write::write_all(&mut file, appended.as_bytes()).unwrap();
+    drop(file);
+    let listed = set(assert_contract_response(
+        server.get("/api/js-invocation-sites").await,
+        "get",
+        "/api/js-invocation-sites",
+        200,
+    )
+    .await);
+    let retained = &listed["sites"][0]["retained"];
+    assert_eq!(retained["state"], "matches", "{retained}");
+    assert_eq!(retained["other_version_artifact_id"], "6008", "{retained}");
     // The file is the browser's exact format, user-only, in a private folder.
     let text = std::fs::read_to_string(&store).unwrap();
     assert_eq!(
@@ -11903,11 +12380,11 @@ async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
     }
 }
 
-/// A cookie spans the session: a script write older than provenance's newest
-/// 5,000 records is still listed, found through the request index, and a
-/// write of another name stays out of the answer.
+/// A cookie spans the session: the response that set it, a script write and
+/// the request that sent it are all listed with 6,000 records between them,
+/// found through the request index, and a write of another name stays out.
 #[tokio::test]
-async fn cookie_provenance_lists_a_script_write_older_than_its_window() {
+async fn cookie_provenance_reads_every_list_and_script_call_of_the_session() {
     let server = Server::start().await;
     let spec = specification();
     let write = |name: &[u8], value: &[u8]| {
@@ -11920,25 +12397,108 @@ async fn cookie_provenance_lists_a_script_write_older_than_its_window() {
         out[104..104 + name.len()].copy_from_slice(name);
         out
     };
-    let mut lines = String::new();
-    let mut sequence = 0u64;
-    let mut push = |kind: &str, request: u64, payload: &[u8]| {
-        sequence += 1;
-        let event = json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
-            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
-            "parent_event_id":"0","request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+    // One included cookie, as protocol/native-network-v3.md lays a list out.
+    let list = |sent: bool, name: &[u8], value: &[u8]| {
+        let mut out = b"RBCK".to_vec();
+        out.extend_from_slice(&[1, 0, if sent { 1 } else { 2 }, 0]);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        let strings: [&[u8]; 6] = [name, value, b".a.test", b"/", b"", b""];
+        let mut fixed = [0u8; 64];
+        fixed[16..24].copy_from_slice(&1_700_000_000_000i64.to_le_bytes());
+        (fixed[24], fixed[25], fixed[26], fixed[27], fixed[28]) = (1, 3, 2, 2, 2);
+        fixed[32..36].copy_from_slice(&443i32.to_le_bytes());
+        for (index, string) in strings.iter().enumerate() {
+            fixed[36 + 4 * index..40 + 4 * index]
+                .copy_from_slice(&(string.len() as u32).to_le_bytes());
+        }
+        out.extend_from_slice(&fixed);
+        for string in strings {
+            out.extend_from_slice(string);
+        }
+        out
+    };
+    let list_record = |sent: bool, bytes: &[u8]| {
+        let mut out = vec![0u8; 128];
+        (out[0], out[2], out[4], out[5]) = (1, 128, if sent { 1 } else { 2 }, 1);
+        out[8..12].copy_from_slice(&1u32.to_le_bytes());
+        out[16..20].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out[32..64].copy_from_slice(&Sha256::digest(bytes));
+        out
+    };
+    let artifacts = server.root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    let mut events = Vec::new();
+    let mut manifest = Vec::new();
+    let push = |events: &mut Vec<Value>,
+                kind: &str,
+                request: u64,
+                parent: u64,
+                artifact: &str,
+                payload: &[u8]| {
+        let sequence = events.len() as u64 + 1;
+        events.push(json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":artifact,
+            "parent_event_id":parent.to_string(),"request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
             "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
             "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
-            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false});
-        lines.push_str(&event.to_string());
-        lines.push('\n');
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false}));
+        sequence
     };
-    push("script_cookie", 0, &write(b"sid", b"1"));
-    push("script_cookie", 0, &write(b"other", b"2"));
-    for request in 1..=6_000u64 {
-        push("request_started", request, b"GET a.test");
+    // A request that sets or sends sid=value-1, with its list as artifact `id`.
+    let cookie_list = |events: &mut Vec<Value>,
+                       manifest: &mut Vec<Value>,
+                       request: u64,
+                       id: &str,
+                       sent: bool| {
+        let start = push(events, "request_started", request, 0, "0", b"GET a.test");
+        let bytes = list(sent, b"sid", b"value-1");
+        let hash = hex::encode(Sha256::digest(&bytes));
+        std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+        let creator = push(
+            events,
+            "cookie_list",
+            request,
+            start,
+            id,
+            &list_record(sent, &bytes),
+        );
+        manifest.push(json!({"protocol_version":1,"artifact_id":id,"session_id":"1","navigation_id":"0",
+            "frame_id":"9","parent_artifact_id":"0","creator_event_id":creator.to_string(),
+            "execution_context_id":"0","capture_origin":"network_request","kind":"cookie_list",
+            "url":"https://a.test/","mime_type":"application/x-reb-cookie-list","byte_size":bytes.len(),
+            "sha256":hash,"sensitive":true,"content_path":format!("blobs/{hash}.bin")}));
+    };
+    cookie_list(&mut events, &mut manifest, 1, "1", false);
+    push(
+        &mut events,
+        "script_cookie",
+        0,
+        0,
+        "0",
+        &write(b"sid", b"1"),
+    );
+    push(
+        &mut events,
+        "script_cookie",
+        0,
+        0,
+        "0",
+        &write(b"other", b"2"),
+    );
+    for request in 2..=6_001u64 {
+        push(
+            &mut events,
+            "request_started",
+            request,
+            0,
+            "0",
+            b"GET a.test",
+        );
     }
-    server.file("events.jsonl", lines.as_bytes());
+    cookie_list(&mut events, &mut manifest, 6_002, "2", true);
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+    server.file("events.jsonl", &jsonl(&events));
     let document: Value = server
         .get("/api/cookie-provenance?session_id=1&name=sid")
         .await
@@ -11951,16 +12511,33 @@ async fn cookie_provenance_lists_a_script_write_older_than_its_window() {
         &document,
         "provenance",
     );
-    assert_eq!(document["coverage"]["limited"], true, "{document}");
-    assert_eq!(document["coverage"]["complete"], false);
+    assert_eq!(document["coverage"]["scope"], "store", "{document}");
+    assert_eq!(document["coverage"]["complete"], true);
+    assert_eq!(document["coverage"]["limited"], false);
+    let set_by = document["set_by"].as_array().unwrap();
+    assert_eq!(set_by.len(), 1, "{document}");
+    assert_eq!(set_by[0]["request_id"], "1");
+    assert_eq!(set_by[0]["sequence_number"], "2");
+    assert_eq!(
+        (&set_by[0]["value_withheld"], &set_by[0]["value_bytes"]),
+        (&json!(true), &json!(7))
+    );
+    let sent_with = document["sent_with"].as_array().unwrap();
+    assert_eq!(sent_with.len(), 1, "{document}");
+    assert_eq!(sent_with[0]["request_id"], "6002");
     let script = document["script"].as_array().unwrap();
     assert_eq!(script.len(), 1, "{document}");
     assert_eq!(script[0]["api"], "document.cookie set");
-    assert_eq!(script[0]["sequence_number"], "1");
+    assert_eq!(script[0]["sequence_number"], "3");
+    assert_eq!(
+        (&document["lists_read"], &document["lists_unread"]),
+        (&json!(2), &json!(0))
+    );
     assert_eq!(
         document["script_coverage"],
-        json!({"complete": true, "located_outside_window": 2, "unreadable": 0})
+        json!({"complete": true, "located_outside_window": 0, "unreadable": 0})
     );
+    assert!(!document.to_string().contains("value-1"));
 }
 
 #[tokio::test]
@@ -12344,10 +12921,10 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         "q=",
         "q=a%0Ab",
         "q=a&match_case=yes",
+        "q=a&credential_values=yes",
         "q=a&regex=yes",
         "q=(&regex=true",
         "q=a%E2%80%A8b",
-        "q=a&credential_values=yes",
         "q=a&after=1",
         "match_case=true",
     ] {

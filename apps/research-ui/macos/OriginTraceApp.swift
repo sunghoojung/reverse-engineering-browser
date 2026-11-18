@@ -90,12 +90,43 @@ private struct SchemeTaskRegistry {
   }
 }
 
+// The four evidence stores the offline workspace reads: the ones the app was
+// started with, or an ended live session's folder opened for review.
+private struct EvidenceStores: Equatable {
+  var events: URL
+  var trace: URL
+  var signals: URL
+  var artifacts: URL
+  // The ended session folder these are in, or nil for the configured stores.
+  var endedSession: URL?
+
+  // The stores at the paths the launcher writes in each session folder
+  // (scripts/run-live-session.sh).
+  static func session(_ folder: URL) -> EvidenceStores {
+    EvidenceStores(
+      events: folder.appendingPathComponent("events.jsonl"),
+      trace: folder.appendingPathComponent("origin-trace.jsonl"),
+      signals: folder.appendingPathComponent("request-signals.jsonl"),
+      artifacts: folder.appendingPathComponent("artifacts", isDirectory: true),
+      endedSession: folder)
+  }
+}
+
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
-  private let eventStoreURL: URL
-  private let traceStoreURL: URL
-  private let signalStoreURL: URL
-  private let artifactStoreURL: URL
+  // Open Session replaces the stores while scheme tasks read them on
+  // background queues, so every read takes them under this lock.
+  private let storesLock = NSLock()
+  private var openStores: EvidenceStores
+  var stores: EvidenceStores {
+    storesLock.lock()
+    defer { storesLock.unlock() }
+    return openStores
+  }
+  private var eventStoreURL: URL { stores.events }
+  private var traceStoreURL: URL { stores.trace }
+  private var signalStoreURL: URL { stores.signals }
+  private var artifactStoreURL: URL { stores.artifacts }
   private let apiCollectionStoreURL: URL
   private let localAnalystStoreURL: URL
   private let analystRunnerURL: URL
@@ -111,14 +142,12 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let analystRunnerLock = NSLock()
   private var activeAnalystProcess: Process?
   private var activeAnalystRunID: Int?
+  private var activeAnalystTask: ObjectIdentifier?
   private var analystCancelRequested = false
 
   init(
     indexURL: URL,
-    eventStoreURL: URL,
-    traceStoreURL: URL,
-    signalStoreURL: URL,
-    artifactStoreURL: URL,
+    stores: EvidenceStores,
     apiCollectionStoreURL: URL,
     localAnalystStoreURL: URL,
     analystRunnerURL: URL,
@@ -129,10 +158,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     demoEvidenceEnabled: Bool
   ) {
     self.indexURL = indexURL
-    self.eventStoreURL = eventStoreURL
-    self.traceStoreURL = traceStoreURL
-    self.signalStoreURL = signalStoreURL
-    self.artifactStoreURL = artifactStoreURL
+    openStores = stores
     self.apiCollectionStoreURL = apiCollectionStoreURL
     self.localAnalystStoreURL = localAnalystStoreURL
     self.analystRunnerURL = analystRunnerURL
@@ -147,11 +173,21 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     storedBackend.stop()
   }
 
+  // Points the offline workspace, and the bundled backend's Rust-only reads,
+  // at other stores. The caller then loads the page again.
+  func open(_ stores: EvidenceStores, backendArguments: [String]) {
+    storesLock.lock()
+    openStores = stores
+    storesLock.unlock()
+    storedBackend.replace(arguments: backendArguments)
+  }
+
   deinit {
     analystRunnerLock.lock()
     activeAnalystProcess?.terminate()
     activeAnalystProcess = nil
     activeAnalystRunID = nil
+    activeAnalystTask = nil
     analystRunnerLock.unlock()
   }
 
@@ -184,7 +220,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/wasm_inspection.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js", "/traffic_copy.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/wasm_inspection.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/traffic_copy.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -314,6 +350,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
     tasks.stop(urlSchemeTask)
+    // A run has no deadline, so the page that started it ending it is what
+    // frees the runner when nothing is left to read its result.
+    analystRunnerLock.lock()
+    if activeAnalystTask == ObjectIdentifier(urlSchemeTask) {
+      analystCancelRequested = true
+      activeAnalystProcess?.terminate()
+    }
+    analystRunnerLock.unlock()
     // A page that aborts a forwarded analysis stops its backend work too.
     forwarded.removeValue(forKey: ObjectIdentifier(urlSchemeTask))?.cancel()
   }
@@ -767,28 +811,36 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func apiCollectionRequestBody(_ request: URLRequest) throws -> Data {
+    try requestBody(
+      request, label: "API Collection action", maximumBytes: 2 * 1_024 * 1_024 + 64 * 1_024
+    )
+  }
+
+  /// A request body read whole; nil `maximumBytes` reads one of any size.
+  private func requestBody(_ request: URLRequest, label: String, maximumBytes: Int?) throws -> Data {
+    let fits = { (count: Int) in maximumBytes.map { count <= $0 } ?? true }
     if let body = request.httpBody {
-      guard body.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
-        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      guard fits(body.count) else {
+        throw LocalHTTPError(status: 413, message: "\(label) is oversized")
       }
       return body
     }
     guard let stream = request.httpBodyStream else {
-      throw LocalHTTPError(status: 400, message: "API Collection action body is missing")
+      throw LocalHTTPError(status: 400, message: "\(label) body is missing")
     }
     stream.open()
     defer { stream.close() }
     var data = Data()
-    var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
+    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
     while stream.hasBytesAvailable {
       let count = stream.read(&buffer, maxLength: buffer.count)
       if count < 0 {
-        throw LocalHTTPError(status: 400, message: "API Collection action body could not be read")
+        throw LocalHTTPError(status: 400, message: "\(label) body could not be read")
       }
       if count == 0 { break }
       data.append(buffer, count: count)
-      guard data.count <= 2 * 1_024 * 1_024 + 64 * 1_024 else {
-        throw LocalHTTPError(status: 413, message: "API Collection action is oversized")
+      guard fits(data.count) else {
+        throw LocalHTTPError(status: 413, message: "\(label) is oversized")
       }
     }
     return data
@@ -887,23 +939,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
+  // The library has no byte limit and a run no deadline or size limit, as in
+  // the Rust backend's workspace::Kind::Analyst.
   private func localAnalystLimits() -> [String: Int] {
     [
       "folders": 32,
       "files": 64,
       "folder_depth": 4,
-      "file_bytes": 32 * 1_024,
-      "total_file_bytes": 512 * 1_024,
-      "document_bytes": 1_024 * 1_024,
       "variables": 32,
       "variable_value_bytes": 4 * 1_024,
       "variable_bytes": 16 * 1_024,
-      "evidence_bytes": 768 * 1_024,
-      "selected_artifact_bytes": 64 * 1_024,
-      "execution_timeout_ms": 2_000,
-      "logs": 64,
-      "log_bytes": 1_024,
-      "result_bytes": 32 * 1_024,
     ]
   }
 
@@ -930,11 +975,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let controls = content.unicodeScalars.contains {
       $0.value < 0x20 && ![0x09, 0x0a, 0x0d].contains($0.value)
     }
-    guard content.utf8.count <= 32 * 1_024, !controls else {
-      throw LocalHTTPError(
-        status: 400,
-        message: "Analyst file content is oversized or contains controls"
-      )
+    guard !controls else {
+      throw LocalHTTPError(status: 400, message: "Analyst file content contains controls")
     }
     return (content, content.utf8.count)
   }
@@ -1044,9 +1086,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       ),
       try apiCollectionInteger(document["contract_version"], label: "Analyst contract version") == 1,
       document["document_kind"] as? String == "local-analyst-workspace",
-      NSDictionary(dictionary: document["limits"] as? [String: Any] ?? [:]).isEqual(
-        to: localAnalystLimits()
-      ),
+      // A document written under other limits still reads; the next save
+      // records these.
+      document["limits"] is [String: Any],
       let rawFolders = document["folders"] as? [Any],
       (1...32).contains(rawFolders.count),
       let rawFiles = document["files"] as? [Any],
@@ -1101,7 +1143,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
     }
     var fileIDs = Set<Int>()
-    var totalContentBytes = 0
     for file in files {
       let identifier = file["id"] as! Int
       let folderID = file["folder_id"] as! Int
@@ -1111,10 +1152,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       else {
         throw LocalHTTPError(status: 400, message: "Analyst file ID, folder, or name is invalid")
       }
-      totalContentBytes += file["content_bytes"] as! Int
-    }
-    guard totalContentBytes <= 512 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst file content exceeds 512 KiB")
     }
     let normalized: [String: Any] = [
       "contract_version": 1,
@@ -1125,9 +1162,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "files": files.sorted { ($0["id"] as! Int) < ($1["id"] as! Int) },
       "limits": localAnalystLimits(),
     ]
-    guard try JSONSerialization.data(withJSONObject: normalized).count <= 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst workspace document exceeds 1 MiB")
-    }
     if generation == 0 {
       guard updatedAt == 0, folders.count == 1, files.isEmpty else {
         throw LocalHTTPError(status: 400, message: "Analyst workspace generation zero must be empty")
@@ -1154,26 +1188,22 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     defer { Darwin.close(descriptor) }
     var metadata = stat()
     guard fstat(descriptor, &metadata) == 0,
-      (metadata.st_mode & S_IFMT) == S_IFREG,
-      metadata.st_size <= 1_024 * 1_024
+      (metadata.st_mode & S_IFMT) == S_IFREG
     else {
-      throw LocalHTTPError(status: 500, message: "Analyst workspace store must be a bounded regular file")
+      throw LocalHTTPError(status: 500, message: "Analyst workspace store must be a regular file")
     }
     do {
-      let maximumBytes = 1_024 * 1_024
       var data = Data()
-      var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
-      while data.count <= maximumBytes {
-        let requested = min(buffer.count, maximumBytes + 1 - data.count)
-        let count = Darwin.read(descriptor, &buffer, requested)
+      data.reserveCapacity(Int(metadata.st_size))
+      var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+      while true {
+        let count = Darwin.read(descriptor, &buffer, buffer.count)
         if count < 0 {
+          if errno == EINTR { continue }
           throw LocalHTTPError(status: 500, message: "Analyst workspace store could not be read")
         }
         if count == 0 { break }
         data.append(buffer, count: count)
-      }
-      guard data.count <= maximumBytes else {
-        throw LocalHTTPError(status: 500, message: "Analyst workspace store exceeds 1 MiB")
       }
       return try decodeLocalAnalyst(data)
     } catch let error as LocalHTTPError where error.status == 500 {
@@ -1198,18 +1228,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func writeLocalAnalyst(_ workspace: [String: Any], lease: NativeWorkspaceLease) throws {
     var data = try JSONSerialization.data(withJSONObject: workspace)
     data.append(0x0a)
-    guard data.count <= 1_024 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst workspace store exceeds 1 MiB")
-    }
     try lease.write(data)
-  }
-
-  private func localAnalystRequestBody(_ request: URLRequest) throws -> Data {
-    let data = try apiCollectionRequestBody(request)
-    guard data.count <= 1_024 * 1_024 + 64 * 1_024 else {
-      throw LocalHTTPError(status: 413, message: "Analyst workspace action is oversized")
-    }
-    return data
   }
 
   private func replaceLocalAnalyst(_ action: [String: Any]) throws -> (Data, Int, [String: String]) {
@@ -1224,7 +1243,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       action["expected_generation"], label: "Expected analyst workspace generation"
     )
     let lease = try NativeWorkspaceLease(
-      at: localAnalystStoreURL, label: "Analyst workspace", maximumBytes: 1_024 * 1_024
+      at: localAnalystStoreURL, label: "Analyst workspace", maximumBytes: nil
     )
     defer { lease.close() }
     let current = try decodeLocalAnalyst(lease.read())
@@ -1298,6 +1317,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func normalizeLocalAnalystRun(_ action: [String: Any]) throws -> (Data, Int) {
+    guard try apiCollectionInteger(action["protocol_version"], label: "Analyst protocol version") == 2
+    else {
+      throw LocalHTTPError(
+        status: 400,
+        message: "Analyst runs use protocol 2, which names the selected artifact by artifact_id and sha256"
+      )
+    }
     guard apiCollectionExactKeys(
       action,
       [
@@ -1305,14 +1331,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "source", "variables", "evidence", "confirmed", "confirmed_sensitive",
       ]
     ), action["action"] as? String == "run_local_analyst_script",
-      try apiCollectionInteger(action["protocol_version"], label: "Analyst protocol version") == 1,
       action["confirmed"] as? Bool == true,
+      let confirmedSensitive = action["confirmed_sensitive"] as? Bool,
       let source = action["source"] as? String,
       !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-      source.utf8.count <= 32 * 1_024,
       let variables = action["variables"] as? [String: Any],
       variables.count <= 32,
-      let evidence = action["evidence"] as? [String: Any],
+      var evidence = action["evidence"] as? [String: Any],
       apiCollectionExactKeys(
         evidence,
         [
@@ -1320,15 +1345,13 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "selected_artifact", "summary",
         ]
       ),
-      let events = evidence["events"] as? [Any], events.count <= 500,
-      let artifacts = evidence["artifacts"] as? [Any], artifacts.count <= 500,
-      let traceEdges = evidence["trace_edges"] as? [Any], traceEdges.count <= 1_000,
-      let profiles = evidence["signal_profiles"] as? [Any], profiles.count <= 256,
+      evidence["events"] is [Any], evidence["artifacts"] is [Any],
+      evidence["trace_edges"] is [Any], evidence["signal_profiles"] is [Any],
       evidence["vm_analysis"] is NSNull || evidence["vm_analysis"] is [String: Any],
       evidence["selected_artifact"] is NSNull || evidence["selected_artifact"] is [String: Any],
       evidence["summary"] is [String: Any]
     else {
-      throw LocalHTTPError(status: 400, message: "Analyst run action is malformed or oversized")
+      throw LocalHTTPError(status: 400, message: "Analyst run action is malformed")
     }
     let runID = try apiCollectionInteger(action["run_id"], label: "Analyst run ID", minimum: 1)
     let scriptID = try apiCollectionInteger(
@@ -1348,21 +1371,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       }
       variableBytes += name.utf8.count + value.utf8.count
     }
-    guard variableBytes <= 16 * 1_024,
-      try JSONSerialization.data(withJSONObject: evidence).count <= 768 * 1_024
-    else {
-      throw LocalHTTPError(status: 400, message: "Analyst variables or evidence are oversized")
-    }
-    if let selected = evidence["selected_artifact"] as? [String: Any] {
-      guard let content = selected["content"] as? String,
-        content.utf8.count <= 64 * 1_024,
-        selected["sensitive"] as? Bool != true || action["confirmed_sensitive"] as? Bool == true
-      else {
-        throw LocalHTTPError(
-          status: 400,
-          message: "Confirm bounded sensitive selected artifact bytes before running"
-        )
-      }
+    guard variableBytes <= 16 * 1_024 else {
+      throw LocalHTTPError(status: 400, message: "Analyst variables exceed 16 KiB")
     }
     let workspace = try loadLocalAnalyst()
     guard workspace["generation"] as? Int == generation,
@@ -1378,8 +1388,59 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         message: "Only the current saved JavaScript analyst script can execute"
       )
     }
+    // The script reads the stored, SHA-256 verified bytes of the artifact the
+    // page selected, whatever their size, and its manifest record.
+    var selectedBytes = Data()
+    if let reference = evidence["selected_artifact"] as? [String: Any] {
+      guard apiCollectionExactKeys(reference, ["artifact_id", "sha256"]),
+        let artifactID = reference["artifact_id"] as? String,
+        let sha256 = reference["sha256"] as? String,
+        sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+      else {
+        throw LocalHTTPError(status: 400, message: "Analyst selected artifact reference is invalid")
+      }
+      guard let artifact = try artifactEntries().first(where: {
+        $0["artifact_id"] as? String == artifactID
+      }) else {
+        throw LocalHTTPError(status: 404, message: "Artifact not found")
+      }
+      // The kinds Sources never lists are read only with their own evidence,
+      // never by a script, as in the Rust backend's analyst::Run::admit.
+      guard ![
+        "canvas_data_url", "request_body", "request_target", "request_headers",
+        "response_headers", "cookie_list", "stack",
+      ].contains(artifact["kind"] as? String ?? "") else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "Only an artifact Sources lists can be a run's selected artifact"
+        )
+      }
+      guard artifact["sha256"] as? String == sha256 else {
+        throw LocalHTTPError(
+          status: 409,
+          message: "The selected artifact changed; select it again before running"
+        )
+      }
+      guard artifact["sensitive"] as? Bool != true || confirmedSensitive else {
+        throw LocalHTTPError(
+          status: 400,
+          message: "Confirm inclusion of sensitive selected artifact bytes before running"
+        )
+      }
+      selectedBytes = try verifiedArtifactBytes(artifact)
+      var metadata: [String: Any] = [:]
+      for field in [
+        "protocol_version", "artifact_id", "session_id", "navigation_id", "frame_id",
+        "parent_artifact_id", "creator_event_id", "execution_context_id", "capture_origin",
+        "kind", "origin", "url", "mime_type", "byte_size", "sha256", "sensitive",
+      ] {
+        if let value = artifact[field], !(value is NSNull) { metadata[field] = value }
+      }
+      metadata["byte_size"] = selectedBytes.count
+      evidence["selected_artifact"] = metadata
+    }
     let runnerInput: [String: Any] = [
-      "protocol_version": 1,
+      "protocol_version": 2,
       "run_id": runID,
       "script_id": scriptID,
       "library_generation": generation,
@@ -1387,11 +1448,29 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       "variables": variables,
       "evidence": evidence,
     ]
-    let data = try JSONSerialization.data(withJSONObject: runnerInput)
-    guard data.count <= 800 * 1_024 else {
-      throw LocalHTTPError(status: 400, message: "Analyst runner input exceeds 800 KiB")
-    }
+    // Runner input v2: one JSON line, then the selected artifact's bytes.
+    var data = try JSONSerialization.data(withJSONObject: runnerInput)
+    data.reserveCapacity(data.count + 1 + selectedBytes.count)
+    data.append(0x0a)
+    data.append(selectedBytes)
     return (data, runID)
+  }
+
+  /// A stored artifact's whole content, checked against its manifest's byte
+  /// size and SHA-256 before anything reads it.
+  private func verifiedArtifactBytes(_ artifact: [String: Any]) throws -> Data {
+    guard let byteSize = artifact["byte_size"] as? Int,
+      let sha256 = artifact["sha256"] as? String
+    else {
+      throw LocalHTTPError(status: 500, message: "Artifact manifest record is malformed")
+    }
+    let data = try Data(contentsOf: artifactContentURL(artifact), options: .mappedIfSafe)
+    guard data.count == byteSize,
+      SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == sha256
+    else {
+      throw LocalHTTPError(status: 500, message: "Artifact content does not match its manifest")
+    }
+    return data
   }
 
   private func localAnalystFailure(
@@ -1413,7 +1492,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "result_truncated": false,
         "logs": [],
         "logs_truncated": false,
-        "duration_ms": min(max(duration, 0), 7_000),
+        "duration_ms": max(duration, 0),
         "error": String(message.prefix(512)),
       ]
     )
@@ -1423,8 +1502,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     _ data: Data,
     action: [String: Any]
   ) throws -> Data {
-    guard data.count <= 128 * 1_024,
-      let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any],
       apiCollectionExactKeys(
         result,
         [
@@ -1442,15 +1520,14 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         == apiCollectionInteger(action["library_generation"], label: "Analyst generation"),
       let ok = result["ok"] as? Bool,
       let outcome = result["outcome"] as? String,
-      ["completed", "failed", "cancelled", "timed_out"].contains(outcome),
+      ["completed", "failed", "cancelled"].contains(outcome),
       ok == (outcome == "completed"),
       let resultType = result["result_type"] as? String, resultType.utf8.count <= 64,
-      let resultText = result["result_text"] as? String, resultText.utf8.count <= 32 * 1_024,
+      result["result_text"] is String,
       result["result_truncated"] is Bool,
-      let logs = result["logs"] as? [[String: Any]], logs.count <= 64,
+      let logs = result["logs"] as? [[String: Any]],
       result["logs_truncated"] is Bool,
-      let duration = try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration"),
-      duration <= 7_000,
+      (try? apiCollectionInteger(result["duration_ms"], label: "Analyst duration")) != nil,
       let error = result["error"] as? String, error.utf8.count <= 512,
       ok ? error.isEmpty : !error.isEmpty
     else {
@@ -1460,8 +1537,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       guard apiCollectionExactKeys(log, ["level", "text"]),
         let level = log["level"] as? String,
         ["log", "info", "warn", "error"].contains(level),
-        let text = log["text"] as? String,
-        text.utf8.count <= 1_024
+        log["text"] is String
       else {
         throw LocalHTTPError(status: 422, message: "Analyst runner returned a malformed log")
       }
@@ -1469,8 +1545,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     return data
   }
 
+  /// Runs until the script settles, the researcher cancels it, or the page
+  /// that asked goes away (`task`); there is no deadline.
   private func runLocalAnalyst(
-    _ action: [String: Any]
+    _ action: [String: Any],
+    task: ObjectIdentifier
   ) throws -> Data {
     guard FileManager.default.isExecutableFile(atPath: analystRunnerURL.path),
       FileManager.default.isReadableFile(atPath: analystRunnerCoreURL.path)
@@ -1499,6 +1578,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       try process.run()
       activeAnalystProcess = process
       activeAnalystRunID = normalized.1
+      activeAnalystTask = task
       analystCancelRequested = false
       analystRunnerLock.unlock()
     } catch {
@@ -1527,23 +1607,16 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       outputGroup.leave()
     }
     let started = Date()
-    // The deadline covers the input too: a runner that never reads it must not
-    // hold this write, and with it the only runner slot. A write after the
-    // runner ended fails with EPIPE instead of signalling this app.
+    // The input is written apart from this wait, so a runner that never reads
+    // it can still be cancelled. A write after the runner ended fails with
+    // EPIPE instead of signalling this app.
     let input = inputPipe.fileHandleForWriting
     _ = fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1)
     DispatchQueue.global(qos: .userInitiated).async {
       try? input.write(contentsOf: normalized.0)
       try? input.close()
     }
-    let timedOut = terminated.wait(timeout: .now() + 2.5) == .timedOut
-    if timedOut {
-      process.terminate()
-      if terminated.wait(timeout: .now() + 0.25) == .timedOut {
-        kill(process.processIdentifier, SIGKILL)
-        _ = terminated.wait(timeout: .now() + 0.25)
-      }
-    }
+    terminated.wait()
     // Ending the runner closes its output, unless something it started still
     // holds the pipe. The slot is released either way.
     let drained = outputGroup.wait(timeout: .now() + 1) == .success
@@ -1553,6 +1626,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     if activeAnalystProcess === process {
       activeAnalystProcess = nil
       activeAnalystRunID = nil
+      activeAnalystTask = nil
       analystCancelRequested = false
     }
     analystRunnerLock.unlock()
@@ -1561,14 +1635,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         action: action,
         outcome: "cancelled",
         message: "Analyst script cancelled",
-        duration: duration
-      )
-    }
-    if timedOut {
-      return try localAnalystFailure(
-        action: action,
-        outcome: "timed_out",
-        message: "Analyst script exceeded the 2 second execution limit",
         duration: duration
       )
     }
@@ -1656,7 +1722,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   ) {
     let action: [String: Any]
     do {
-      let body = try localAnalystRequestBody(request)
+      let body = try requestBody(request, label: "Analyst action", maximumBytes: nil)
       guard let value = try JSONSerialization.jsonObject(with: body) as? [String: Any],
         let kind = value["action"] as? String
       else {
@@ -1697,7 +1763,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     DispatchQueue.global(qos: .userInitiated).async {
       do {
         self.send(
-          try self.runLocalAnalyst(action),
+          try self.runLocalAnalyst(action, task: ObjectIdentifier(task)),
           contentType: "application/json; charset=utf-8",
           status: 200,
           headers: [:],
@@ -1714,8 +1780,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private func eventPollOverlay() -> StoredEvidenceBackend.Overlay {
     let connected = brokerConnected()
     let mode = captureMode()
+    // An ended session opened for review captures nothing more.
+    let ended = stores.endedSession != nil
     return StoredEvidenceBackend.Overlay(
-      fields: ["broker_connected": connected, "capture_mode": mode], tag: "\(mode)-\(connected ? 1 : 0)")
+      fields: ["broker_connected": connected, "capture_mode": mode, "session_ended": ended],
+      tag: "\(mode)-\(connected ? 1 : 0)-\(ended ? 1 : 0)")
   }
 
   private func artifactEntries() throws -> [[String: Any]] {
@@ -1867,7 +1936,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let artifactID = String(components[2])
     guard artifactID.range(of: #"^(?:0|[1-9][0-9]*)$"#, options: .regularExpression) != nil,
       let artifact = try artifactEntries().first(where: { ($0["artifact_id"] as? String) == artifactID }),
-      let relativePath = artifact["content_path"] as? String,
       let byteSize = artifact["byte_size"] as? Int,
       byteSize >= 0
     else {
@@ -1878,15 +1946,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       )
     }
 
-    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
-    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
-    guard contentURL.path.hasPrefix(root.path + "/") else {
-      throw NSError(
-        domain: "OriginTrace",
-        code: 6,
-        userInfo: [NSLocalizedDescriptionKey: "Artifact content path escapes the artifact store"]
-      )
-    }
+    let contentURL = try artifactContentURL(artifact)
     let attributes = try FileManager.default.attributesOfItem(atPath: contentURL.path)
     guard let storedSize = attributes[.size] as? NSNumber, storedSize.intValue == byteSize else {
       throw NSError(
@@ -1924,6 +1984,28 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "X-Artifact-Truncated": offset + data.count < byteSize ? "1" : "0",
       ]
     )
+  }
+
+  /// The stored file a manifest record names, refused when its path leaves
+  /// the artifact store.
+  private func artifactContentURL(_ artifact: [String: Any]) throws -> URL {
+    guard let relativePath = artifact["content_path"] as? String else {
+      throw NSError(
+        domain: "OriginTrace",
+        code: 5,
+        userInfo: [NSLocalizedDescriptionKey: "Artifact not found"]
+      )
+    }
+    let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
+    let contentURL = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
+    guard contentURL.path.hasPrefix(root.path + "/") else {
+      throw NSError(
+        domain: "OriginTrace",
+        code: 6,
+        userInfo: [NSLocalizedDescriptionKey: "Artifact content path escapes the artifact store"]
+      )
+    }
+    return contentURL
   }
 
   private func vmAnalysisResponse(for requestURL: URL) throws -> Data {
@@ -2237,7 +2319,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func captureMode() -> String {
-    if brokerSocketURL != nil { return "live" }
+    if brokerSocketURL != nil || stores.endedSession != nil { return "live" }
     if demoEvidenceEnabled { return "demo" }
     return FileManager.default.fileExists(atPath: eventStoreURL.path) ? "live" : "idle"
   }
@@ -2292,7 +2374,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 }
 
-private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation {
+private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation, NSMenuDelegate {
   private var window: NSWindow?
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
@@ -2304,10 +2386,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
+  // The start panel's last mode and session options, saved for later app
+  // runs (LiveSessionPreferences). An explicit environment switch still
+  // decides at launch.
+  private lazy var preferencesURL = LiveSessionPreferences.storeURL(
+    environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL())
+  private lazy var savedPreferences = LiveSessionPreferences.load(preferencesURL)
   // The researcher's capture mode for this app run. It starts from the
-  // environment and follows the start panel, so a later panel or reopen never
-  // replaces Metadata with the default.
-  private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
+  // environment and the saved choice and follows the start panel, so a later
+  // panel or reopen never replaces Metadata with the default.
+  private lazy var selectedCaptureMode = LiveCaptureMode.configured(
+    ProcessInfo.processInfo.environment, saved: savedPreferences.mode)
+  // The session options for this app run, held and saved as the mode is.
+  private lazy var selectedOptions = LiveSessionOptions.configured(
+    ProcessInfo.processInfo.environment, saved: savedPreferences.options)
   // The content limits last chosen in the panel, held for the run as the mode
   // is. Nil until the panel starts a Content session: until then a session
   // takes them from the environment, and the panel offers those.
@@ -2328,6 +2420,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var openLiveWorkspaceWhenLoaded = false
   // When the app last reloaded after the web content process stopped.
   private var lastContentProcessReload: Date?
+  // The stores the app was started with, which the offline workspace shows
+  // again once a session opened for review is left by New Live Session.
+  private var configuredStores: EvidenceStores?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     if smokeTest {
@@ -2354,21 +2449,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let analystRunnerCoreURL = researchUIURL.appendingPathComponent("analyst_runner_core.js")
     let decoderExecutableURL = Bundle.main.bundleURL
       .appendingPathComponent("Contents/MacOS/OriginTraceDecoder")
+    let stores = EvidenceStores(
+      events: eventStoreURL, trace: traceStoreURL, signals: signalStoreURL, artifacts: artifactStoreURL)
+    configuredStores = stores
     let storedBackend = StoredEvidenceBackend(
       executableURL: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/OriginTraceBackend"),
-      arguments: [
-        "--store", eventStoreURL.path, "--trace-store", traceStoreURL.path,
-        "--signal-store", signalStoreURL.path, "--artifacts", artifactStoreURL.path,
-        "--api-collection", apiCollectionStoreURL.path, "--local-analyst", localAnalystStoreURL.path,
-        "--js-invocation-site-store", InvocationSiteSet.storeURL(
-          environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL()).path,
-      ])
+      arguments: storedBackendArguments(stores))
     let handler = LocalContentHandler(
       indexURL: indexURL,
-      eventStoreURL: eventStoreURL,
-      traceStoreURL: traceStoreURL,
-      signalStoreURL: signalStoreURL,
-      artifactStoreURL: artifactStoreURL,
+      stores: stores,
       apiCollectionStoreURL: apiCollectionStoreURL,
       localAnalystStoreURL: localAnalystStoreURL,
       analystRunnerURL: analystRunnerURL,
@@ -2468,6 +2557,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       liveSessionCoordinator.start(
         braveExecutableURL: resourcesURL.appendingPathComponent("__missing_smoke_browser__"),
         content: content,
+        options: .defaults,
         useSystemKeychain: false,
         ready: { _ in
           print("SMOKE_ERROR Unexpected live session readiness")
@@ -2596,6 +2686,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       LiveCaptureContent.resolve(
         environment: ProcessInfo.processInfo.environment, mode: selectedCaptureMode,
         limits: selectedCaptureMode.capturesNetworkContent ? selectedContentLimits : nil, modeChosen: panelChoseMode),
+      options: selectedOptions,
       useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
@@ -2610,6 +2701,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     // preselects Metadata (LiveCaptureMode.configured), and the panel says so.
     let environment = ProcessInfo.processInfo.environment
     sessionPanel.modeNote = !panelChoseMode && LiveCaptureMode.requestContentOptedOut(environment) ? LiveCaptureMode.optOutNote : nil
+    sessionPanel.options = selectedOptions
+    sessionPanel.researchProfile = LiveSessionOptions.researchProfile(
+      environment: environment, originTrace: originTraceSupportURL(), systemKeychain: false)
     sessionPanel.content = .choose(
       mode: selectedCaptureMode,
       limits: selectedContentLimits ?? ContentLimits.configured(environment))
@@ -2620,38 +2714,58 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func answerLiveSessionPanel(_ choice: NativeSessionPanel.Choice) {
     guard let sessionPanel else { return }
     switch (choice, sessionPanel.content) {
-    // A session the panel starts or retries uses the isolated, prompt-free
-    // research profile; the page cannot ask for the macOS Keychain.
-    case (.start(let mode, let limits), .choose):
+    // A session the panel starts or retries uses the prompt-free mock
+    // Keychain; the page cannot ask for the macOS Keychain.
+    case (.start(let mode, let limits, let options), .choose):
       automaticSessionSuppressed = false
       selectedCaptureMode = mode
+      selectedOptions = options
       panelChoseMode = true
       // A Metadata start keeps the last Content limits for a later Content one.
       if let limits { selectedContentLimits = limits }
+      saveLiveSessionPreferences()
       // The panel names limits only for a session they apply to: a category
       // mask without Network and Artifact keeps no request content.
       let content = LiveCaptureContent.resolve(
         environment: ProcessInfo.processInfo.environment, mode: mode, limits: limits, modeChosen: true)
       // Not a decision, so the start below is not refused as one behind it.
       sessionPanel.content = .starting(content)
-      startAutomaticLiveSession(content, useSystemKeychain: false)
-    // Exactly the failed start's content switches, never a new reading of the
-    // environment, so the session is the one the panel names.
+      startAutomaticLiveSession(content, options: options, useSystemKeychain: false)
+    // Exactly the failed start's content switches and options, never a new
+    // reading of the environment, so the session is the one the panel names.
     case (.retry, .failed(_, let content)):
+      let options = sessionPanel.options
       sessionPanel.content = .starting(content)
       liveSessionCoordinator.stop()
-      startAutomaticLiveSession(content, useSystemKeychain: false)
+      startAutomaticLiveSession(content, options: options, useSystemKeychain: false)
     case (.offline, .choose), (.offline, .failed):
       sessionPanel.content = .hidden
       automaticSessionSuppressed = true
       presentOriginTraceWindow()
       leaveEndedLiveWorkspace()
+    case (.review(let folder), .failed):
+      reviewSession(folder)
     default:
       break
     }
   }
 
-  private func startAutomaticLiveSession(_ content: LiveCaptureContent, useSystemKeychain: Bool) {
+  private func saveLiveSessionPreferences() {
+    let preferences = LiveSessionPreferences(mode: selectedCaptureMode, options: selectedOptions)
+    guard preferences != savedPreferences else { return }
+    do {
+      try preferences.write(to: preferencesURL)
+      savedPreferences = preferences
+    } catch {
+      // The session still starts with these choices; only the next app run
+      // offers the earlier ones.
+      NSLog("Origin Trace could not save the start panel choices to %@: %@", preferencesURL.path, error.localizedDescription)
+    }
+  }
+
+  private func startAutomaticLiveSession(
+    _ content: LiveCaptureContent, options: LiveSessionOptions, useSystemKeychain: Bool
+  ) {
     guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
@@ -2669,9 +2783,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       )
       return
     }
+    // The panel holds the options of the session starting, so Retry and Start
+    // Again repeat them.
+    sessionPanel?.options = options
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,
       content: content,
+      options: options,
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self else { return }
@@ -2752,6 +2870,104 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     })
   }
 
+  // The bundled backend's arguments: these evidence stores and the app's own.
+  private func storedBackendArguments(_ stores: EvidenceStores) -> [String] {
+    [
+      "--store", stores.events.path, "--trace-store", stores.trace.path,
+      "--signal-store", stores.signals.path, "--artifacts", stores.artifacts.path,
+      "--api-collection", configuredApiCollectionStore().path, "--local-analyst", configuredLocalAnalystStore().path,
+      "--js-invocation-site-store", InvocationSiteSet.storeURL(
+        environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL()).path,
+    ]
+  }
+
+  // Opens an ended session's folder in the offline workspace, asking first
+  // about unsaved work in the current document. A running session keeps
+  // running; Open Live Workspace returns to it.
+  private func reviewSession(_ folder: URL) {
+    guard let contentHandler, let localApplicationURL else { return }
+    guard let session = RecordedSession.at(folder) else {
+      presentSessionReviewError(
+        "\((folder.path as NSString).abbreviatingWithTildeInPath) holds no event store, so it is not a live session folder.")
+      return
+    }
+    guard !RecordedSession.recording(session.folder) else {
+      presentSessionReviewError(
+        "This session is still recording. Open Live Workspace shows it while it runs; open it here once it has ended.")
+      return
+    }
+    closeGuard?.replaceDocument(.init(
+      question: "Open this session with unsaved or unconfirmed changes?",
+      actionTitle: "Open Session"
+    ) { [weak self] in
+      guard let self else { return }
+      self.sessionPanel?.content = .hidden
+      // As after Continue Offline, a reopen starts nothing behind the review.
+      self.automaticSessionSuppressed = true
+      let stores = EvidenceStores.session(session.folder)
+      contentHandler.open(stores, backendArguments: self.storedBackendArguments(stores))
+      self.load(localApplicationURL)
+      self.presentOriginTraceWindow()
+    })
+  }
+
+  private func presentSessionReviewError(_ message: String) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Origin Trace could not open this session"
+    alert.informativeText = message
+    if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+  }
+
+  private var recordedSessionsRoot: URL {
+    RecordedSession.root(environment: ProcessInfo.processInfo.environment, originTrace: originTraceSupportURL())
+  }
+
+  @objc private func openSession(_ sender: Any?) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    panel.canCreateDirectories = false
+    panel.directoryURL = recordedSessionsRoot
+    panel.prompt = "Open Session"
+    panel.message = "Choose a live session folder to open its evidence in the offline workspace."
+    let open = { [weak self] (response: NSApplication.ModalResponse) in
+      guard response == .OK, let url = panel.url else { return }
+      self?.reviewSession(url)
+    }
+    if let window { panel.beginSheetModal(for: window, completionHandler: open) } else { open(panel.runModal()) }
+  }
+
+  @objc private func openRecentSession(_ sender: NSMenuItem) {
+    guard let folder = sender.representedObject as? URL else { return }
+    reviewSession(folder)
+  }
+
+  @objc private func showSessionFolders(_ sender: Any?) {
+    try? FileManager.default.createDirectory(
+      at: recordedSessionsRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    NSWorkspace.shared.open(recordedSessionsRoot)
+  }
+
+  // Open Recent Session lists the newest ended sessions each time it opens.
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    menu.removeAllItems()
+    let sessions = RecordedSession.recent(in: recordedSessionsRoot, limit: 10)
+    if sessions.isEmpty {
+      menu.addItem(withTitle: "No Ended Sessions", action: nil, keyEquivalent: "").isEnabled = false
+    }
+    for session in sessions {
+      let item = menu.addItem(withTitle: session.title, action: #selector(openRecentSession(_:)), keyEquivalent: "")
+      item.target = self
+      item.representedObject = session.folder
+      item.toolTip = (session.folder.path as NSString).abbreviatingWithTildeInPath
+    }
+    menu.addItem(.separator())
+    menu.addItem(withTitle: "Show Session Folders in Finder", action: #selector(showSessionFolders(_:)), keyEquivalent: "")
+      .target = self
+  }
+
   private func configuredAutomaticSystemKeychain() -> Bool {
     ProcessInfo.processInfo.environment["REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN"] == "1"
   }
@@ -2767,6 +2983,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       self.automaticSessionSuppressed = false
       self.liveSessionCoordinator.stop()
       self.sessionPanel?.content = .hidden
+      if let contentHandler = self.contentHandler, let configured = self.configuredStores, contentHandler.stores != configured {
+        contentHandler.open(configured, backendArguments: self.storedBackendArguments(configured))
+      }
       if let localApplicationURL = self.localApplicationURL { self.load(localApplicationURL) }
       self.presentLiveSessionSetup()
     })
@@ -3024,6 +3243,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       action: #selector(openLiveWorkspace(_:)),
       keyEquivalent: ""
     ).target = self
+    applicationMenu.addItem(
+      withTitle: "Open Session…",
+      action: #selector(openSession(_:)),
+      keyEquivalent: "o"
+    ).target = self
+    let recentMenu = NSMenu(title: "Open Recent Session")
+    recentMenu.delegate = self
+    applicationMenu.addItem(withTitle: "Open Recent Session", action: nil, keyEquivalent: "").submenu = recentMenu
     applicationMenu.addItem(.separator())
     applicationMenu.addItem(
       withTitle: "Hide Origin Trace",
@@ -3092,8 +3319,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     NSApp.terminate(nil)
   }
 
-  // A failed or ended session is a decision in the start panel, with Retry
-  // and Continue Offline, over whichever workspace the window shows.
+  // A failed or ended session is a decision in the start panel over whichever
+  // workspace the window shows: Retry or Continue Offline for a failed start,
+  // Start Again or Review Session for an ended session.
   private func presentLiveSessionError(_ failure: LiveSessionCoordinator.Failure, content: LiveCaptureContent) {
     // No modal any more, so a failure at launch, before the event loop runs,
     // is held by the panel and drawn once the page loads.
@@ -3301,7 +3529,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
             const updated = await replacement.json();
             if (!isLocalAnalystWorkspace(updated)) throw new Error('Analyst POST returned a malformed workspace');
             const run = {
-              action: 'run_local_analyst_script', protocol_version: 1, run_id: 1, script_id: scriptID,
+              action: 'run_local_analyst_script', protocol_version: 2, run_id: 1, script_id: scriptID,
               library_generation: updated.generation, source, variables: {seed: 'native-verified'},
               evidence: {events: [{sequence_number: '1'}], artifacts: [], trace_edges: [],
                 signal_profiles: [], vm_analysis: null, selected_artifact: null,

@@ -14,6 +14,9 @@
 //! A trace refuses a damaged store as it always refused a damaged window: the
 //! first oversized, malformed or duplicate record is kept as the index's damage
 //! and every trace over that store returns it.
+//!
+//! A third index maps each request root of the signal store to its newest
+//! request signal profile, so Traffic's Signals finds a profile of any age.
 use crate::{
     error::{Error, Result},
     event_window::{self, NamedGap},
@@ -32,11 +35,17 @@ use std::{
 
 pub const EVENTS_SUFFIX: &str = ".events-v1";
 pub const EDGES_SUFFIX: &str = ".edges-v1";
-/// The second layout adds the gap totals, the third the summary's counts.
-const EVENTS_FORMAT: &str = "reb-event-index-v1/3";
+pub const PROFILES_SUFFIX: &str = ".profiles-v1";
+/// The second layout adds the gap totals, the third the summary's counts,
+/// the fourth the debugger threads.
+const EVENTS_FORMAT: &str = "reb-event-index-v1/4";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
+const PROFILES_FORMAT: &str = "reb-signal-profile-index-v1";
 /// The largest event or edge record a trace reads.
 pub const RECORD_BYTES: usize = 4096;
+/// The largest request signal profile record: 8 KiB of profile with room
+/// for the broker's encoding.
+const PROFILE_BYTES: usize = 16384;
 /// Bytes folded per call, so a reader never waits on the index for long.
 const FOLD_BYTES: u64 = 64 * 1024 * 1024;
 /// How long a trace read may spend bringing its indexes up to the stores.
@@ -111,13 +120,44 @@ pub(crate) const EVENT_SCHEMA: &str = "
         renderer_kind INTEGER, renderer_frame INTEGER NOT NULL, browser_kind INTEGER, reason TEXT,
         UNIQUE(browser, session, process, high, low, request));
     CREATE INDEX IF NOT EXISTS summary_tabs_unresolved ON summary_tabs(ordinal)
-        WHERE reason IS NOT NULL;";
+        WHERE reason IS NOT NULL;
+    -- Debugger threads (protocol/native-debugger-observation-v1.md): the
+    -- native frame of every valid observation record, every
+    -- debugger_observation_budget gap, and the worker of every request a
+    -- worker started (loader kind 17 to 19), each with its newest record.
+    CREATE TABLE IF NOT EXISTS observed_frames(session INTEGER NOT NULL, process INTEGER NOT NULL,
+        frame INTEGER NOT NULL, records INTEGER NOT NULL, last_sequence INTEGER NOT NULL,
+        last_start INTEGER NOT NULL, PRIMARY KEY(session, process, frame)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS observation_budget_gaps(start INTEGER PRIMARY KEY,
+        session INTEGER NOT NULL, process INTEGER NOT NULL, frame INTEGER NOT NULL,
+        sequence INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS workers(process INTEGER NOT NULL, context INTEGER NOT NULL,
+        session INTEGER NOT NULL, kind INTEGER NOT NULL, requests INTEGER NOT NULL,
+        last_sequence INTEGER NOT NULL, last_start INTEGER NOT NULL,
+        PRIMARY KEY(process, context)) WITHOUT ROWID;";
 const EDGE_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS edges(start INTEGER PRIMARY KEY, end INTEGER NOT NULL,
         session INTEGER NOT NULL, process INTEGER NOT NULL, sequence INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS edges_source ON edges(session, process, sequence);
     CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0),
         status INTEGER NOT NULL, message TEXT NOT NULL);";
+
+// A profile is immutable once written; a later record for the same root
+// replaces it, as the newest record did when the store was read backward.
+const PROFILE_SCHEMA: &str = "
+    CREATE TABLE IF NOT EXISTS profiles(session TEXT NOT NULL, request TEXT NOT NULL,
+        process INTEGER NOT NULL, sequence TEXT NOT NULL, start INTEGER NOT NULL,
+        end INTEGER NOT NULL, PRIMARY KEY(session, request, process, sequence)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0),
+        status INTEGER NOT NULL, message TEXT NOT NULL);";
+
+/// The exact request root a signal profile is selected by.
+pub struct ProfileKey<'a> {
+    pub session: &'a str,
+    pub request: &'a str,
+    pub process: u64,
+    pub sequence: &'a str,
+}
 
 /// What one event record is to a trace.
 enum Event {
@@ -367,6 +407,74 @@ impl EventFold {
     }
 }
 
+fn identifier(value: &Value) -> i64 {
+    value.as_str().map_or(0, number)
+}
+
+/// A valid debugger observation counts for its native frame, and a request a
+/// worker started counts for that worker; each keeps its newest record.
+fn thread_record(transaction: &Transaction<'_>, event: &Value, start: u64) -> Result<()> {
+    let kind = event["type"].as_str().unwrap_or("");
+    let (session, process) = (
+        identifier(&event["session_id"]),
+        event["process_id"].as_i64().unwrap_or(0),
+    );
+    let sequence = identifier(&event["sequence_number"]);
+    if crate::debugger_observation::TYPES.contains(&kind) {
+        if crate::debugger_observation::decode(event).is_none() {
+            return Ok(());
+        }
+        transaction
+            .prepare_cached(
+                "INSERT INTO observed_frames(session, process, frame, records, last_sequence, last_start)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5)
+                 ON CONFLICT(session, process, frame) DO UPDATE SET records = records + 1,
+                     last_sequence = excluded.last_sequence, last_start = excluded.last_start",
+            )
+            .sql()?
+            .execute(params![session, process, identifier(&event["frame_id"]), sequence, start as i64])
+            .sql()?;
+    } else if kind == "request_initiated"
+        && let Some(worker @ 17..=19) = event["loader_kind"].as_i64()
+    {
+        transaction
+            .prepare_cached(
+                "INSERT INTO workers(process, context, session, kind, requests, last_sequence, last_start)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
+                 ON CONFLICT(process, context) DO UPDATE SET session = excluded.session,
+                     kind = excluded.kind, requests = requests + 1,
+                     last_sequence = excluded.last_sequence, last_start = excluded.last_start",
+            )
+            .sql()?
+            .execute(params![process, identifier(&event["frame_id"]), session, worker, sequence, start as i64])
+            .sql()?;
+    }
+    Ok(())
+}
+
+/// A renderer that ran out of its observation budget leaves one named gap.
+fn budget_gap(transaction: &Transaction<'_>, event: &Value, start: u64) -> Result<()> {
+    if event_window::named_gap(event).is_some_and(|named| {
+        named.0 == "runtime" && named.1 == crate::debugger_observation::BUDGET_REASON
+    }) {
+        transaction
+            .prepare_cached(
+                "INSERT INTO observation_budget_gaps(start, session, process, frame, sequence)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .sql()?
+            .execute(params![
+                start as i64,
+                identifier(&event["session_id"]),
+                event["process_id"].as_i64().unwrap_or(0),
+                identifier(&event["frame_id"]),
+                identifier(&event["sequence_number"])
+            ])
+            .sql()?;
+    }
+    Ok(())
+}
+
 impl index_db::Fold for EventFold {
     fn begin(&mut self) {
         *self = Self::default();
@@ -391,6 +499,7 @@ impl index_db::Fold for EventFold {
                 self.malformed += u64::from(!counted);
                 if counted {
                     self.summary.record(&event);
+                    thread_record(transaction, &event, start)?;
                 }
                 self.record(transaction, &reference, &event, start, end, counted)
             }
@@ -402,6 +511,7 @@ impl index_db::Fold for EventFold {
                 if counted(&event) {
                     self.summary.record(&event);
                     self.gap(transaction, &reference, &event)?;
+                    budget_gap(transaction, &event, start)?;
                 } else {
                     self.malformed += 1;
                 }
@@ -510,6 +620,63 @@ fn fold_edge(
     Ok(())
 }
 
+fn malformed_profile() -> Error {
+    Error::new(
+        500,
+        "The evidence store contains a malformed request signal profile",
+    )
+}
+
+/// Indexes one profile by its request root. A damaged line stops every
+/// lookup, as it did when the newest profiles were read and validated whole.
+fn fold_profile(
+    transaction: &rusqlite::Transaction<'_>,
+    line: &[u8],
+    start: u64,
+    end: u64,
+) -> Result<()> {
+    if line.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    if line.len() > PROFILE_BYTES {
+        return damage(
+            transaction,
+            &Error::new(
+                500,
+                "The evidence store contains an oversized request signal profile",
+            ),
+        );
+    }
+    let Ok(profile) = serde_json::from_slice::<Value>(line) else {
+        return damage(transaction, &malformed_profile());
+    };
+    let root = &profile["root_event"];
+    let (Some(session), Some(request), Some(process), Some(sequence)) = (
+        profile["session_id"].as_str(),
+        profile["request_id"].as_str(),
+        root["process_id"].as_u64(),
+        root["sequence_number"].as_str(),
+    ) else {
+        return damage(transaction, &malformed_profile());
+    };
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO profiles(session, request, process, sequence, start, end)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .sql()?
+        .execute(params![
+            session,
+            request,
+            index_db::key(process),
+            sequence,
+            start as i64,
+            end as i64
+        ])
+        .sql()?;
+    Ok(())
+}
+
 fn duplicate_event() -> Error {
     Error::bad("Origin trace input contains a duplicate event reference")
 }
@@ -519,6 +686,8 @@ struct StoreIndex {
     index: Indexed,
     fold: Box<dyn index_db::Fold + Send>,
     oversized: &'static str,
+    /// The longest unterminated tail that can still become a record.
+    max_line: usize,
 }
 
 impl StoreIndex {
@@ -535,7 +704,7 @@ impl StoreIndex {
                 &position,
                 FOLD_BYTES,
                 deadline,
-                RECORD_BYTES,
+                self.max_line,
                 self.oversized,
                 self.fold.as_mut(),
             )?;
@@ -612,6 +781,21 @@ fn tail(file: &mut File, position: &Position) -> Result<Option<Vec<u8>>> {
     }
     let complete = serde_json::from_slice::<Value>(&bytes).is_ok_and(|value| value.is_object());
     Ok(complete.then_some(bytes))
+}
+
+/// How long a record lookup folds appended records before it answers from
+/// where the index stands; the background indexer keeps it within a second
+/// of the store.
+pub const LOCATE_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Where one record sits: its byte range when the indexed prefix holds it,
+/// and how far that prefix reaches. Absent from a caught-up index is absent
+/// from the store, but for an unterminated record still being written.
+pub struct Located {
+    pub range: Option<(u64, u64)>,
+    pub indexed_to: u64,
+    pub store_end: u64,
+    pub caught_up: bool,
 }
 
 /// The whole event store's gap totals, with the polling window's rules.
@@ -702,29 +886,96 @@ pub struct SummaryIndex<'a> {
 pub struct Indexes {
     events: StoreIndex,
     edges: StoreIndex,
+    profiles: StoreIndex,
 }
 
 impl Indexes {
-    pub fn new(store: &Path, trace_store: &Path) -> Self {
+    pub fn new(store: &Path, trace_store: &Path, signal_store: &Path) -> Self {
         Self {
             events: StoreIndex {
                 index: Indexed::new(store, EVENTS_SUFFIX, EVENTS_FORMAT, EVENT_SCHEMA),
                 fold: Box::<EventFold>::default(),
                 oversized: "The evidence store contains an oversized event",
+                max_line: RECORD_BYTES,
             },
             edges: StoreIndex {
                 index: Indexed::new(trace_store, EDGES_SUFFIX, EDGES_FORMAT, EDGE_SCHEMA),
                 fold: Box::new(fold_edge),
                 oversized: "The evidence store contains an oversized origin trace edge",
+                max_line: RECORD_BYTES,
+            },
+            profiles: StoreIndex {
+                index: Indexed::new(
+                    signal_store,
+                    PROFILES_SUFFIX,
+                    PROFILES_FORMAT,
+                    PROFILE_SCHEMA,
+                ),
+                fold: Box::new(fold_profile),
+                oversized: "The evidence store contains an oversized request signal profile",
+                max_line: PROFILE_BYTES,
             },
         }
     }
 
-    /// Folds appended records into both indexes until `deadline`.
+    /// Folds appended records into every index until `deadline`. One store's
+    /// failure does not stop the others from catching up.
     pub fn catch_up(&mut self, deadline: Instant) -> Result<()> {
-        self.events.refresh(deadline)?;
-        self.edges.refresh(deadline)?;
-        Ok(())
+        let events = self.events.refresh(deadline);
+        let edges = self.edges.refresh(deadline);
+        let profiles = self.profiles.refresh(deadline);
+        events.and(edges).and(profiles).map(|_| ())
+    }
+
+    /// The newest request signal profile of one request root, from a signal
+    /// store of any length; None when no indexed profile has that root. A
+    /// root the index has not reached yet past `deadline` is refused with how
+    /// far it got, since its profile may sit in the unindexed bytes.
+    pub fn signal_profile(&mut self, key: &ProfileKey, deadline: Instant) -> Result<Option<Value>> {
+        let Some((mut file, position)) = self.profiles.refresh(deadline)? else {
+            return Ok(None);
+        };
+        if let Some(error) = self.profiles.damage()? {
+            return Err(error);
+        }
+        let range: Option<(i64, i64)> = self
+            .profiles
+            .index
+            .sidecar()
+            .connection()
+            .prepare_cached(
+                "SELECT start, end FROM profiles
+                 WHERE session = ?1 AND request = ?2 AND process = ?3 AND sequence = ?4",
+            )
+            .sql()?
+            .query_row(
+                params![
+                    key.session,
+                    key.request,
+                    index_db::key(key.process),
+                    key.sequence
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .sql()?;
+        let Some((start, end)) = range else {
+            if !position.caught_up(PROFILE_BYTES as u64) {
+                return Err(Error::new(
+                    503,
+                    format!(
+                        "The request signal profiles are still being indexed ({} of {} MiB). Try again shortly.",
+                        position.indexed_to >> 20,
+                        position.file_end.div_ceil(1 << 20)
+                    ),
+                ));
+            }
+            return Ok(None);
+        };
+        let bytes = index_db::record(&mut file, start, end)?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| malformed_profile())
     }
 
     /// The event store's gap totals once its index has caught up, folding
@@ -741,8 +992,64 @@ impl Indexes {
         totals(self.events.index.sidecar().connection(), &position).map(Some)
     }
 
+    /// Where the record `(session, process, sequence)` sits in an event store
+    /// of any length, folding until `deadline`; None when there is no store.
+    /// With no session, each session with a stream of `process` is looked up.
+    /// A line the index cannot fold stops it there, and the answer says so.
+    pub fn locate(
+        &mut self,
+        session: Option<u64>,
+        process: u32,
+        sequence: u64,
+        deadline: Instant,
+    ) -> Result<Option<Located>> {
+        let (position, stopped) = match self.events.refresh(deadline) {
+            Ok(None) => return Ok(None),
+            Ok(Some((_, position))) => (position, false),
+            Err(_) => match self.events.index.open()? {
+                Some((_, position)) => (position, true),
+                None => return Ok(None),
+            },
+        };
+        let connection = self.events.index.sidecar().connection();
+        let sessions: Vec<i64> = match session {
+            Some(session) => vec![index_db::key(session)],
+            None => connection
+                .prepare_cached("SELECT session FROM streams WHERE process = ?1")
+                .sql()?
+                .query_map([i64::from(process)], |row| row.get(0))
+                .sql()?
+                .collect::<rusqlite::Result<_>>()
+                .sql()?,
+        };
+        let mut range = None;
+        for session in sessions {
+            range = connection
+                .prepare_cached(
+                    "SELECT start, end FROM events WHERE session = ?1 AND process = ?2 AND sequence = ?3",
+                )
+                .sql()?
+                .query_row(
+                    params![session, i64::from(process), index_db::key(sequence)],
+                    |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+                )
+                .optional()
+                .sql()?;
+            if range.is_some() {
+                break;
+            }
+        }
+        Ok(Some(Located {
+            range,
+            indexed_to: position.indexed_to,
+            store_end: position.file_end,
+            caught_up: !stopped && position.caught_up(RECORD_BYTES as u64),
+        }))
+    }
+
     /// The event index brought up to the store until `deadline`, for the
-    /// session summary, and where it stands; None when there is no store.
+    /// session summary and the debugger threads, and where it stands; None
+    /// when there is no store.
     /// Its counts and gap totals describe the same indexed prefix. A record
     /// the index cannot read stops it there, with that error beside it.
     pub fn summary_index(&mut self, deadline: Instant) -> Result<Option<SummaryIndex<'_>>> {
@@ -761,10 +1068,11 @@ impl Indexes {
         }))
     }
 
-    /// Removes both indexes, before a capture clear empties their stores.
+    /// Removes every index, before a capture clear empties their stores.
     pub fn discard(&mut self) -> Result<()> {
         self.events.index.discard()?;
-        self.edges.index.discard()
+        self.edges.index.discard()?;
+        self.profiles.index.discard()
     }
 
     /// The whole stores as one trace reads them, once both indexes are caught
@@ -1040,7 +1348,11 @@ mod tests {
                 for terminated in [true, false] {
                     write(&events_path, &events, terminated);
                     write(&edges_path, &edges, terminated);
-                    let mut indexes = Indexes::new(&events_path, &edges_path);
+                    let mut indexes = Indexes::new(
+                        &events_path,
+                        &edges_path,
+                        &root.path().join("signals.jsonl"),
+                    );
                     let stored = run(indexes.trace(root.path(), far()), &bodies, &query);
                     match (&stored, &sliced) {
                         (Ok(stored), Ok(sliced)) => assert_eq!(stored, sliced, "{name}"),
@@ -1111,7 +1423,11 @@ mod tests {
         events.extend((3..40_003).map(|sequence| network(sequence, sequence, "request_started")));
         write(&events_path, &events, true);
         write(&edges_path, &[parent(2, 1, 1)], true);
-        let mut indexes = Indexes::new(&events_path, &edges_path);
+        let mut indexes = Indexes::new(
+            &events_path,
+            &edges_path,
+            &root.path().join("signals.jsonl"),
+        );
         assert_eq!(steps(&mut indexes, root.path(), 1), ["2", "1"]);
 
         let mut file = std::fs::OpenOptions::new()
@@ -1149,7 +1465,11 @@ mod tests {
             .map(|sequence| network(sequence, sequence, "request_started"))
             .collect();
         write(&events_path, &events, true);
-        let mut indexes = Indexes::new(&events_path, &edges_path);
+        let mut indexes = Indexes::new(
+            &events_path,
+            &edges_path,
+            &root.path().join("signals.jsonl"),
+        );
         let refused = indexes.trace(root.path(), Instant::now()).err().unwrap();
         assert_eq!(refused.status, 503);
         assert!(
@@ -1176,7 +1496,11 @@ mod tests {
                 (500, "The evidence store contains a malformed event")
             );
         }
-        let mut reopened = Indexes::new(&events_path, &edges_path);
+        let mut reopened = Indexes::new(
+            &events_path,
+            &edges_path,
+            &root.path().join("signals.jsonl"),
+        );
         assert_eq!(
             reopened.trace(root.path(), far()).err().unwrap().status,
             500
@@ -1220,7 +1544,11 @@ mod tests {
             }
         }
         std::fs::write(&store, &text).unwrap();
-        let mut indexes = Indexes::new(&store, &root.path().join("trace.jsonl"));
+        let mut indexes = Indexes::new(
+            &store,
+            &root.path().join("trace.jsonl"),
+            &root.path().join("signals.jsonl"),
+        );
         // A store the index has not folded yet has no totals.
         assert_eq!(indexes.event_totals(Instant::now()).unwrap(), None);
         let totals = indexes.event_totals(far()).unwrap().unwrap();

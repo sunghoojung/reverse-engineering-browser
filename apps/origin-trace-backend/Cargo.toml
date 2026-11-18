@@ -38,12 +38,12 @@ oxc_semantic = "=0.155.0"
 oxc_span = "=0.155.0"
 oxc_syntax = "=0.155.0"
 stacker = "=0.1.25"
-# The parser-free token pass shared with the deobfuscation worker.
-reb-js-lexer = { path = "../js-lexer" }
 # Disk-backed indexes of the append-only stores (src/index_db.rs), so a long
 # session is indexed whole with bounded memory. Bundled: the system library's
 # version and options differ between macOS and Linux.
 rusqlite = { version = "=0.43.0", default-features = false, features = ["bundled", "functions", "collation", "cache"] }
+# The parser-free token pass shared with the deobfuscation worker.
+reb-js-lexer = { path = "../js-lexer" }
 
 [build-dependencies]
 # Compiles the vendored Triskel graph layout engine; see vendor/README.md.

@@ -113,11 +113,14 @@ record of another category.
 bytes the index names for a request (from the first to the last record of each
 row that has it as a member) instead of the newest window, so a request stays
 readable after more than 64 MiB of newer events. Without a row they read the
-newest 64 MiB. `get_cookie_provenance` spans a session and has no byte range; it
-reads the newest 64 MiB and 5,000 of the network records it uses, plus every
-`script_cookie` record of the session that the index located before that window.
-The index keeps every one's byte range; `script_coverage` is not complete only
-while the index is still catching up with the store.
+newest 64 MiB. `get_cookie_provenance` spans a session and has no byte range;
+the index keeps the byte range of every `script_cookie` record of a session and
+of every `cookie_list` record of its indexed requests (layout 3), and the read
+folds them all in store order. Each distinct list is read once and keeps only
+the asked name's cookies, and each distinct script position resolves to source
+once, so the answer costs the session's cookie records, not a scan. Its
+`coverage` and `script_coverage` are not complete only while the index is still
+catching up with the store.
 
 Each answer carries `coverage`:
 

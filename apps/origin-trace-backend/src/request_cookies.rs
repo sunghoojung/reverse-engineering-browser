@@ -11,7 +11,6 @@ use std::path::Path;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::event_window;
 use crate::evidence;
 use crate::request_headers::{
     Credentials, Drops, STATES, child_payload, le, lifecycle_of, provisional_hops, qualified,
@@ -21,9 +20,6 @@ use crate::request_stack;
 
 const LIST_LIMIT: usize = 2 * 1024 * 1024;
 const NAME_PREFIX: usize = 24;
-const PROVENANCE_LISTS: usize = 256;
-/// Distinct script positions resolved to source per provenance answer.
-const PROVENANCE_STACKS: usize = 64;
 const EXCLUSIONS: [&str; 30] = [
     "unknown_error",
     "http_only",
@@ -295,28 +291,104 @@ fn read_list(
     artifacts: &[Value],
     root: &Path,
 ) -> Result<Vec<Cookie>, &'static str> {
-    // A created list names this record; a shared one an earlier record's.
-    let mut matching = artifacts.iter().filter(|artifact| {
-        artifact["artifact_id"] == event["artifact_id"]
-            && artifact["session_id"] == event["session_id"]
-            && artifact["kind"] == "cookie_list"
-            && artifact["capture_origin"] == "network_request"
-            && (list.state == 2 || artifact["creator_event_id"] == event["sequence_number"])
-    });
+    let mut matching = artifacts
+        .iter()
+        .filter(|artifact| names_list(event, list, artifact));
     let artifact = match (matching.next(), matching.next()) {
         (Some(artifact), None) => artifact,
         _ => return Err("missing"),
     };
     match evidence::content(root, artifact, LIST_LIMIT) {
-        Ok(bytes)
-            if bytes.len() == list.length as usize
-                && Sha256::digest(&bytes).as_slice() == list.digest =>
-        {
-            parse_list(&bytes, list.sent, list.count).ok_or("malformed")
-        }
-        Ok(_) => Err("mismatch"),
+        Ok(bytes) => verified_list(&bytes, list),
         Err(_) => Err("unreadable"),
     }
+}
+
+/// Whether `artifact` is the list `event` names: a created list names this
+/// record, a shared one an earlier record's.
+fn names_list(event: &Value, list: &List, artifact: &Value) -> bool {
+    artifact["artifact_id"] == event["artifact_id"]
+        && artifact["session_id"] == event["session_id"]
+        && artifact["kind"] == "cookie_list"
+        && artifact["capture_origin"] == "network_request"
+        && (list.state == 2 || artifact["creator_event_id"] == event["sequence_number"])
+}
+
+/// The cookies of a list's content, when it is the content its record describes.
+fn verified_list(bytes: &[u8], list: &List) -> Result<Vec<Cookie>, &'static str> {
+    if bytes.len() != list.length as usize || Sha256::digest(bytes).as_slice() != list.digest {
+        return Err("mismatch");
+    }
+    parse_list(bytes, list.sent, list.count).ok_or("malformed")
+}
+
+/// The parsed cookies named `wanted` in each job's list, None when the list
+/// could not be read. Jobs whose records name the same stored content read
+/// it once, and distinct contents are read on parallel threads.
+fn read_lists(
+    root: &Path,
+    jobs: &[(&List, Option<&Value>)],
+    wanted: &[u8],
+) -> Vec<Option<Vec<Cookie>>> {
+    let mut contents = HashMap::<(&str, u64, &str), Vec<usize>>::new();
+    for (index, (_, artifact)) in jobs.iter().enumerate() {
+        if let Some(artifact) = artifact {
+            let identity = (
+                artifact["content_path"].as_str().unwrap_or(""),
+                artifact["byte_size"].as_u64().unwrap_or(u64::MAX),
+                artifact["sha256"].as_str().unwrap_or(""),
+            );
+            contents.entry(identity).or_default().push(index);
+        }
+    }
+    let contents = contents.into_values().collect::<Vec<_>>();
+    // Only hands out group indexes; joining the workers publishes their results.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(contents.len());
+    let mut read = (0..jobs.len()).map(|_| None).collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        let workers = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    while let Some(group) =
+                        contents.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                    {
+                        let artifact = jobs[group[0]].1.expect("grouped jobs name an artifact");
+                        let bytes = evidence::content(root, artifact, LIST_LIMIT);
+                        for &index in group {
+                            let cookies = bytes
+                                .as_ref()
+                                .ok()
+                                .and_then(|bytes| verified_list(bytes, jobs[index].0).ok())
+                                .map(|cookies| {
+                                    cookies
+                                        .into_iter()
+                                        .filter(|cookie| {
+                                            cookie.flags & 1 != 0
+                                                && cookie.strings[0].as_slice() == wanted
+                                        })
+                                        .collect::<Vec<_>>()
+                                });
+                            out.push((index, cookies));
+                        }
+                    }
+                    out
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            let done = worker
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            for (index, cookies) in done {
+                read[index] = cookies;
+            }
+        }
+    });
+    read
 }
 
 fn describe_list(
@@ -628,17 +700,6 @@ pub(crate) fn decode_script(event: &Value) -> Option<Script> {
     valid.then_some(script)
 }
 
-/// Whether `provenance` reads this `script_cookie` record for `name`: a call
-/// naming it, a nameless read it counts, or a malformed record it reports.
-/// Records of other names change nothing in its answer.
-pub fn script_record_used(event: &Value, name: &str) -> bool {
-    decode_script(event).is_none_or(|script| {
-        script.read_record
-            || names_match(&script, name.as_bytes())
-            || (matches!(script.api, 4 | 5) && script.name_length == 0)
-    })
-}
-
 fn names_match(script: &Script, name: &[u8]) -> bool {
     script.name_length as usize == name.len()
         && script.prefix[..name.len().min(NAME_PREFIX)] == name[..name.len().min(NAME_PREFIX)]
@@ -674,218 +735,340 @@ fn describe_script(event: &Value, script: &Script) -> Value {
     })
 }
 
-/// A renderer's script identities outside the records `provenance` read, and
-/// whether an identity absent from them is absent from the store.
+/// A renderer's script identities from the request index, and whether an
+/// identity absent from them is absent from the store.
 pub type IndexedIdentities = (
     HashMap<request_stack::IdentityKey, request_stack::Identity>,
     bool,
 );
 
-/// Everything in `events` that touched cookie `name` in `session_id`.
-#[allow(clippy::too_many_arguments)]
-pub fn provenance(
-    events: &[Value],
-    drops: &Drops,
-    artifacts: &[Value],
-    root: &Path,
-    session: &str,
-    name: &str,
-    indexed_identities: &dyn Fn(u64) -> IndexedIdentities,
+/// The manifest records of artifact IDs, keyed by ID and absent when the
+/// manifest has none; `Err` when it could not be read in time.
+pub type ArtifactLookup<'a> = dyn Fn(&[&str]) -> Result<HashMap<String, Value>, ()> + 'a;
+
+/// List records resolved together: the manifest is caught up once per batch
+/// and their distinct contents are read in parallel. Every list is read; the
+/// batch only bounds the records held between reads.
+const LIST_BATCH: usize = 1024;
+
+/// One distinct script position and every call at it, which share one
+/// resolved stack.
+struct Position {
+    event: Value,
+    scope: request_stack::Scope,
+    frame: [u8; 16],
+    stack: Option<[u8; 32]>,
+    calls: Vec<usize>,
+}
+
+/// Everything that touched cookie `name` in `session_id`, folded from the
+/// session's `script_cookie` and `cookie_list` records in store order. No
+/// window bounds it: the request index locates every one, each distinct list
+/// is read once and keeps only this name's cookies, and each distinct script
+/// position is resolved once in `finish`.
+pub struct Provenance<'a> {
+    root: &'a Path,
+    session: &'a str,
+    name: &'a str,
     credentials: Credentials,
-) -> Value {
-    let wanted = name.as_bytes();
-    let starts = hop_starts(events, session);
-    let mut set_by = Vec::new();
-    let mut sent_with = Vec::new();
-    let mut scripts = Vec::new();
-    let mut malformed = Vec::new();
-    let mut lists: HashMap<String, Option<Vec<Cookie>>> = HashMap::new();
-    let mut unread = BTreeSet::new();
-    let mut identities: HashMap<u64, HashMap<request_stack::IdentityKey, request_stack::Identity>> =
-        HashMap::new();
-    for event in events
-        .iter()
-        .filter(|event| event["session_id"] == session && event["type"] == "script_identity")
-    {
-        let decoded = event["payload"]
-            .as_str()
-            .and_then(|payload| hex::decode(payload).ok())
-            .and_then(|bytes| request_stack::decode_identity(&bytes));
-        if let (Some((isolate, script, identity)), Some(process)) =
-            (decoded, event["process_id"].as_u64())
-        {
-            identities
-                .entry(process)
-                .or_default()
-                .insert((process as u32, isolate, script), identity);
-        }
-    }
-    let mut known_identities: HashMap<u64, bool> = HashMap::new();
-    let no_identities = HashMap::new();
-    let read = |artifact: &Value, limit: usize| evidence::content(root, artifact, limit);
-    let mut stacks: HashMap<(u64, request_stack::Scope, [u8; 16], [u8; 32]), Value> =
-        HashMap::new();
-    let mut stacks_unresolved = 0u64;
+    lookup: &'a ArtifactLookup<'a>,
+    set_by: Vec<Value>,
+    sent_with: Vec<Value>,
+    scripts: Vec<Value>,
+    malformed: Vec<Value>,
+    /// This name's cookies in each distinct list read, None when it could not be.
+    lists: HashMap<String, Option<Vec<Cookie>>>,
+    /// Lists whose manifest record could not be read in time.
+    unread: BTreeSet<String>,
+    /// List records folded since the last batch was resolved, in store order.
+    pending: Vec<(Value, List)>,
+    positions: HashMap<(u64, request_stack::Scope, [u8; 16], [u8; 32]), Position>,
     // document.cookie reads that returned the jar without naming each cookie
     // in it: they may include this name, so `script` is then not complete.
-    let mut whole_jar_reads = 0u64;
-    let mut unrecorded_reads = 0u64;
-    let mut unrecorded_names = 0u64;
-    // cookieStore.get or getAll with no name reads every cookie it can, and
-    // a record a full queue dropped may have named this one.
-    let mut unnamed_store_reads = 0u64;
-    let mut ordered: Vec<&Value> = events
-        .iter()
-        .filter(|event| event["session_id"] == session && event["category"] == "network")
-        .collect();
-    ordered.sort_by_key(|event| {
-        event["monotonic_time_ns"]
-            .as_str()
-            .and_then(|text| text.parse::<u64>().ok())
-            .unwrap_or(0)
-    });
-    // A full queue may have dropped a record that named this cookie: a gap of
-    // any category, since a renderer's gap takes the category of the last
-    // record drained before it, at or after the oldest record read.
-    let oldest = ordered
-        .first()
-        .and_then(|event| event_window::unsigned(&event["monotonic_time_ns"]))
-        .unwrap_or(0);
-    for event in ordered {
+    whole_jar_reads: u64,
+    unrecorded_reads: u64,
+    unrecorded_names: u64,
+    // cookieStore.get or getAll with no name reads every cookie it can.
+    unnamed_store_reads: u64,
+}
+
+impl<'a> Provenance<'a> {
+    pub fn new(
+        root: &'a Path,
+        session: &'a str,
+        name: &'a str,
+        credentials: Credentials,
+        lookup: &'a ArtifactLookup<'a>,
+    ) -> Self {
+        Self {
+            root,
+            session,
+            name,
+            credentials,
+            lookup,
+            set_by: Vec::new(),
+            sent_with: Vec::new(),
+            scripts: Vec::new(),
+            malformed: Vec::new(),
+            lists: HashMap::new(),
+            unread: BTreeSet::new(),
+            pending: Vec::new(),
+            positions: HashMap::new(),
+            whole_jar_reads: 0,
+            unrecorded_reads: 0,
+            unrecorded_names: 0,
+            unnamed_store_reads: 0,
+        }
+    }
+
+    /// Folds one record; anything but this session's cookie records is ignored.
+    pub fn record(&mut self, event: &Value) {
+        if event["session_id"] != self.session || event["category"] != "network" {
+            return;
+        }
         match event["type"].as_str() {
-            Some("script_cookie") => match decode_script(event) {
-                Some(script) if script.read_record => {
-                    if script.flags & 16 == 0 {
-                        whole_jar_reads += u64::from(script.count);
-                    } else if script.unrecorded_names != 0 {
-                        unrecorded_reads += u64::from(script.count);
-                        unrecorded_names += u64::from(script.unrecorded_names);
-                    }
-                }
-                Some(script)
-                    if names_match(&script, wanted)
-                        || (matches!(script.api, 4 | 5) && script.name_length == 0) =>
-                {
-                    if matches!(script.api, 4 | 5) && script.name_length == 0 {
-                        unnamed_store_reads += u64::from(script.count);
-                        if !names_match(&script, wanted) {
-                            continue;
-                        }
-                    }
-                    let mut item = describe_script(event, &script);
-                    if let (true, Some(scope)) = (script.flags & 2 != 0, script.scope) {
-                        let process = event["process_id"].as_u64().unwrap_or(0);
-                        let key = (process, scope, script.frame, script.stack);
-                        if let Some(stack) = stacks.get(&key) {
-                            item["stack"] = stack.clone();
-                        } else if stacks.len() < PROVENANCE_STACKS {
-                            // The newest records need not hold this renderer's
-                            // identities; the index has the whole session's.
-                            let known = *known_identities.entry(process).or_insert_with(|| {
-                                let (indexed, exhaustive) = indexed_identities(process);
-                                let table = identities.entry(process).or_default();
-                                for (key, identity) in indexed {
-                                    table.entry(key).or_insert(identity);
-                                }
-                                exhaustive
-                            });
-                            let mut stack = request_stack::resolve_call(
-                                event,
-                                scope,
-                                &script.frame,
-                                (script.flags & 4 != 0).then_some(script.stack),
-                                identities.get(&process).unwrap_or(&no_identities),
-                                artifacts,
-                                &read,
-                            );
-                            if !known {
-                                request_stack::mark_identities_outside_scan(&mut stack);
-                            }
-                            item["stack"] = stack.clone();
-                            stacks.insert(key, stack);
-                        } else {
-                            stacks_unresolved += 1;
-                        }
-                    }
-                    scripts.push(item)
-                }
-                Some(_) => {}
-                None => malformed.push(event["sequence_number"].clone()),
-            },
-            Some("cookie_list") => {
-                let Some(list) = decode_list(event) else {
-                    malformed.push(event["sequence_number"].clone());
-                    continue;
-                };
-                let Some(request) = starts.get(&parent_key(event)) else {
-                    continue;
-                };
-                if !matches!(list.state, 1 | 2) {
-                    continue;
-                }
-                let key = event["artifact_id"].as_str().unwrap_or("0").to_owned();
-                if !lists.contains_key(&key) {
-                    if lists.len() >= PROVENANCE_LISTS {
-                        unread.insert(key);
-                        continue;
-                    }
-                    let read = read_list(event, &list, artifacts, root).ok();
-                    lists.insert(key.clone(), read);
-                }
-                let Some(Some(cookies)) = lists.get(&key) else {
-                    continue;
-                };
-                for cookie in cookies.iter().filter(|cookie| {
-                    cookie.flags & 1 != 0 && cookie.strings[0].as_slice() == wanted
-                }) {
-                    let mut item = describe_cookie(cookie, credentials);
-                    item["request_id"] = json!(request);
-                    item["hop"] = json!(list.hop);
-                    item["sequence_number"] = event["sequence_number"].clone();
-                    item["monotonic_time_ns"] = event["monotonic_time_ns"].clone();
-                    if list.sent {
-                        sent_with.push(item);
-                    } else {
-                        set_by.push(item);
-                    }
-                }
-            }
+            Some("script_cookie") => self.script(event),
+            Some("cookie_list") => self.list(event),
             _ => {}
         }
     }
-    let records_dropped = drops.between(oldest, None);
-    // A sent value equal to a script write's value names that write.
-    for item in &mut sent_with {
-        let written: Vec<Value> = scripts
-            .iter()
-            .filter(|script| script["value_sha256"] == item["value_sha256"])
-            .map(|script| json!({"process_id": script["process_id"], "sequence_number": script["sequence_number"]}))
-            .collect();
-        item["written_by_script"] = json!(written);
+
+    fn script(&mut self, event: &Value) {
+        let Some(script) = decode_script(event) else {
+            self.malformed.push(event["sequence_number"].clone());
+            return;
+        };
+        if script.read_record {
+            if script.flags & 16 == 0 {
+                self.whole_jar_reads += u64::from(script.count);
+            } else if script.unrecorded_names != 0 {
+                self.unrecorded_reads += u64::from(script.count);
+                self.unrecorded_names += u64::from(script.unrecorded_names);
+            }
+            return;
+        }
+        if matches!(script.api, 4 | 5) && script.name_length == 0 {
+            self.unnamed_store_reads += u64::from(script.count);
+        }
+        if !names_match(&script, self.name.as_bytes()) {
+            return;
+        }
+        if let (true, Some(scope)) = (script.flags & 2 != 0, script.scope) {
+            let process = event["process_id"].as_u64().unwrap_or(0);
+            let call = self.scripts.len();
+            self.positions
+                .entry((process, scope, script.frame, script.stack))
+                .or_insert_with(|| Position {
+                    event: event.clone(),
+                    scope,
+                    frame: script.frame,
+                    stack: (script.flags & 4 != 0).then_some(script.stack),
+                    calls: Vec::new(),
+                })
+                .calls
+                .push(call);
+        }
+        self.scripts.push(describe_script(event, &script));
     }
-    json!({
-        "session_id": session,
-        "name": name,
-        "set_by": set_by,
-        "script": scripts,
-        "sent_with": sent_with,
-        "lists_read": lists.len(),
-        "lists_unread": unread.len(),
-        "stacks_unresolved": stacks_unresolved,
-        "read_coverage": {
-            "complete": whole_jar_reads == 0
-                && unrecorded_reads == 0
-                && unnamed_store_reads == 0
-                && records_dropped == 0,
-            "whole_jar_reads": whole_jar_reads,
-            "reads_with_unrecorded_names": unrecorded_reads,
-            "unrecorded_names": unrecorded_names,
-            "unnamed_store_reads": unnamed_store_reads,
-            "records_dropped": records_dropped,
-        },
-        "malformed_records": malformed,
-        "credential_values": credentials.name(),
-    })
+
+    fn list(&mut self, event: &Value) {
+        let Some(list) = decode_list(event) else {
+            self.malformed.push(event["sequence_number"].clone());
+            return;
+        };
+        if !matches!(list.state, 1 | 2) || event["request_id"].as_str().unwrap_or("0") == "0" {
+            return;
+        }
+        self.pending.push((event.clone(), list));
+        if self.pending.len() >= LIST_BATCH {
+            self.resolve_pending();
+        }
+    }
+
+    /// Reads the lists the pending records name for the first time, then
+    /// adds this name's cookies of every pending record.
+    fn resolve_pending(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        // A list's first record decides how it reads, as it would read alone.
+        let mut first = HashMap::<&str, usize>::new();
+        for (index, (event, _)) in pending.iter().enumerate() {
+            let key = event["artifact_id"].as_str().unwrap_or("0");
+            if !self.lists.contains_key(key) && !self.unread.contains(key) {
+                first.entry(key).or_insert(index);
+            }
+        }
+        if !first.is_empty() {
+            let keys = first.keys().copied().collect::<Vec<_>>();
+            match (self.lookup)(&keys) {
+                Ok(found) => {
+                    let jobs = keys
+                        .iter()
+                        .map(|key| {
+                            let (event, list) = &pending[first[key]];
+                            let artifact = found
+                                .get(*key)
+                                .filter(|artifact| names_list(event, list, artifact));
+                            (list, artifact)
+                        })
+                        .collect::<Vec<_>>();
+                    let read = read_lists(self.root, &jobs, self.name.as_bytes());
+                    for (key, cookies) in keys.into_iter().zip(read) {
+                        self.lists.insert(key.to_owned(), cookies);
+                    }
+                }
+                Err(()) => self.unread.extend(keys.into_iter().map(str::to_owned)),
+            }
+        }
+        for (event, list) in &pending {
+            let key = event["artifact_id"].as_str().unwrap_or("0");
+            let Some(Some(cookies)) = self.lists.get(key) else {
+                continue;
+            };
+            for cookie in cookies {
+                let mut item = describe_cookie(cookie, self.credentials);
+                item["request_id"] = event["request_id"].clone();
+                item["hop"] = json!(list.hop);
+                item["sequence_number"] = event["sequence_number"].clone();
+                item["monotonic_time_ns"] = event["monotonic_time_ns"].clone();
+                if list.sent {
+                    self.sent_with.push(item);
+                } else {
+                    self.set_by.push(item);
+                }
+            }
+        }
+    }
+
+    /// The answer. Each distinct script position resolves through the index's
+    /// script identities and the manifest records `select` returns for the
+    /// stack and source digests they name, or None when it could not read them.
+    pub fn finish(
+        mut self,
+        drops: &Drops,
+        identities_of: &dyn Fn(u64) -> IndexedIdentities,
+        select: &dyn Fn(&BTreeSet<String>) -> Option<Vec<Value>>,
+    ) -> Value {
+        self.resolve_pending();
+        let mut stacks_unresolved = 0u64;
+        if !self.positions.is_empty() {
+            let mut identities = HashMap::new();
+            for (process, ..) in self.positions.keys() {
+                identities
+                    .entry(*process)
+                    .or_insert_with(|| identities_of(*process));
+            }
+            let wanted = identities
+                .values()
+                .flat_map(|(table, _)| table.values())
+                .filter_map(|identity| identity.sha256)
+                .chain(
+                    self.positions
+                        .values()
+                        .filter_map(|position| position.stack),
+                )
+                .map(hex::encode)
+                .collect::<BTreeSet<_>>();
+            match select(&wanted) {
+                Some(artifacts) => {
+                    // A source several positions share is read once.
+                    let sources = std::cell::RefCell::new(HashMap::<String, Vec<u8>>::new());
+                    let read = |artifact: &Value, limit: usize| -> crate::error::Result<Vec<u8>> {
+                        let key = artifact["sha256"].as_str().unwrap_or("").to_owned();
+                        if let Some(bytes) = sources.borrow().get(&key) {
+                            return Ok(bytes.clone());
+                        }
+                        let bytes = evidence::content(self.root, artifact, limit)?;
+                        let mut kept = sources.borrow_mut();
+                        if kept.values().map(Vec::len).sum::<usize>() + bytes.len()
+                            <= 4 * request_stack::MAX_SOURCE
+                        {
+                            kept.insert(key, bytes.clone());
+                        }
+                        Ok(bytes)
+                    };
+                    for ((process, ..), position) in &self.positions {
+                        let (table, exhaustive) = &identities[process];
+                        let mut stack = request_stack::resolve_call(
+                            &position.event,
+                            position.scope,
+                            &position.frame,
+                            position.stack,
+                            table,
+                            &artifacts,
+                            &read,
+                        );
+                        if !exhaustive {
+                            request_stack::mark_identities_outside_scan(&mut stack);
+                        }
+                        for call in &position.calls {
+                            self.scripts[*call]["stack"] = stack.clone();
+                        }
+                    }
+                }
+                None => {
+                    stacks_unresolved = self
+                        .positions
+                        .values()
+                        .map(|position| position.calls.len() as u64)
+                        .sum();
+                }
+            }
+        }
+        let time = |item: &Value| {
+            item["monotonic_time_ns"]
+                .as_str()
+                .and_then(|text| text.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        for items in [&mut self.set_by, &mut self.sent_with, &mut self.scripts] {
+            items.sort_by_key(time);
+        }
+        // A full queue may have dropped a record that named this cookie: a gap
+        // of any category of the session, since a renderer's gap takes the
+        // category of the last record drained before it.
+        let records_dropped = drops.between(0, None);
+        // A sent value equal to a script write's value names that write.
+        let mut writes = HashMap::<&str, Vec<Value>>::new();
+        for script in &self.scripts {
+            if let Some(digest) = script["value_sha256"].as_str() {
+                writes.entry(digest).or_default().push(json!({
+                    "process_id": script["process_id"],
+                    "sequence_number": script["sequence_number"],
+                }));
+            }
+        }
+        for item in &mut self.sent_with {
+            let written = item["value_sha256"]
+                .as_str()
+                .and_then(|digest| writes.get(digest))
+                .cloned()
+                .unwrap_or_default();
+            item["written_by_script"] = json!(written);
+        }
+        json!({
+            "session_id": self.session,
+            "name": self.name,
+            "set_by": self.set_by,
+            "script": self.scripts,
+            "sent_with": self.sent_with,
+            "lists_read": self.lists.len(),
+            "lists_unread": self.unread.len(),
+            "stacks_unresolved": stacks_unresolved,
+            "read_coverage": {
+                "complete": self.whole_jar_reads == 0
+                    && self.unrecorded_reads == 0
+                    && self.unnamed_store_reads == 0
+                    && records_dropped == 0,
+                "whole_jar_reads": self.whole_jar_reads,
+                "reads_with_unrecorded_names": self.unrecorded_reads,
+                "unrecorded_names": self.unrecorded_names,
+                "unnamed_store_reads": self.unnamed_store_reads,
+                "records_dropped": records_dropped,
+            },
+            "malformed_records": self.malformed,
+            "credential_values": self.credentials.name(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -894,6 +1077,62 @@ mod tests {
 
     fn no_index(_process: u64) -> IndexedIdentities {
         (HashMap::new(), true)
+    }
+
+    /// The route's fold over `events`, with the index answering for their
+    /// script identities as it does once it has folded them, and for the
+    /// others as `indexed` says; artifacts come from `artifacts`.
+    #[allow(clippy::too_many_arguments)]
+    fn provenance(
+        events: &[Value],
+        drops: &Drops,
+        artifacts: &[Value],
+        root: &Path,
+        session: &str,
+        name: &str,
+        indexed: &dyn Fn(u64) -> IndexedIdentities,
+        credentials: Credentials,
+    ) -> Value {
+        let lookup = |ids: &[&str]| {
+            Ok(artifacts
+                .iter()
+                .filter_map(|artifact| {
+                    let id = artifact["artifact_id"].as_str()?;
+                    ids.contains(&id).then(|| (id.to_owned(), artifact.clone()))
+                })
+                .collect())
+        };
+        let mut fold = Provenance::new(root, session, name, credentials, &lookup);
+        for event in events {
+            fold.record(event);
+        }
+        let identities = |process: u64| {
+            let (mut table, exhaustive) = indexed(process);
+            for event in events.iter().filter(|event| {
+                event["type"] == "script_identity"
+                    && event["session_id"] == session
+                    && event["process_id"] == process
+            }) {
+                let payload = hex::decode(event["payload"].as_str().unwrap()).unwrap();
+                if let Some((isolate, script, identity)) = request_stack::decode_identity(&payload)
+                {
+                    table
+                        .entry((process as u32, isolate, script))
+                        .or_insert(identity);
+                }
+            }
+            (table, exhaustive)
+        };
+        let select = |wanted: &BTreeSet<String>| {
+            Some(
+                artifacts
+                    .iter()
+                    .filter(|a| a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha)))
+                    .cloned()
+                    .collect(),
+            )
+        };
+        fold.finish(drops, &identities, &select)
     }
 
     fn record(kind: &str, sequence: u64, parent: u64, payload: &[u8], artifact: &str) -> Value {
@@ -1392,6 +1631,8 @@ mod tests {
         );
         assert_eq!(lost["read_coverage"]["records_dropped"], 2);
         assert_eq!(lost["read_coverage"]["complete"], false);
+        // The whole session is read, so a drop before its first cookie
+        // record may have lost one too.
         let older = provenance(
             window,
             &Drops::of(&[gap(11, "4", "canvas", "2")], "7"),
@@ -1402,7 +1643,8 @@ mod tests {
             &no_index,
             Credentials::Withheld,
         );
-        assert_eq!(older["read_coverage"]["complete"], true);
+        assert_eq!(older["read_coverage"]["records_dropped"], 2);
+        assert_eq!(older["read_coverage"]["complete"], false);
         let reason = gap(11, "6", "network", "service_worker_end_lost");
         let kept = provenance(
             window,

@@ -47,11 +47,14 @@ swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
 stored_evidence_backend_source="${repo_root}/apps/research-ui/macos/StoredEvidenceBackend.swift"
 workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
+analyst_runner_entitlements="${repo_root}/apps/research-ui/macos/OriginTraceAnalystRunner.entitlements"
 close_smoke_source="${repo_root}/apps/research-ui/macos/NativeCloseGuardSmoke.swift"
 close_guard_source="${repo_root}/apps/research-ui/macos/NativeCloseGuard.swift"
 client_project_export_source="${repo_root}/apps/research-ui/macos/ClientProjectExport.swift"
 client_project_smoke_source="${repo_root}/apps/research-ui/macos/ClientProjectExportSmoke.swift"
 live_session_source="${repo_root}/apps/research-ui/macos/LiveSessionCoordinator.swift"
+live_session_options_source="${repo_root}/apps/research-ui/macos/LiveSessionOptions.swift"
+recorded_session_source="${repo_root}/apps/research-ui/macos/RecordedSession.swift"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
 agent_core_source="${repo_root}/apps/research-ui/macos/AgentCore.swift"
@@ -193,7 +196,7 @@ smoke env REB_WORKSPACE_LEASE_TEST_HELPER="${repo_root}/build/check-native-works
   workspace_native_lock_interoperability -- --ignored
 
 smoke "${swiftc[@]}" -parse-as-library \
-  "${live_session_source}" "${repo_root}/tools/check-live-session-failure.swift" \
+  "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${repo_root}/tools/check-live-session-failure.swift" \
   -o "${repo_root}/build/check-live-session-failure"
 smoke "${repo_root}/build/check-live-session-failure"
 
@@ -220,7 +223,7 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url
@@ -232,6 +235,12 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -o "${macos_path}/OriginTraceAnalystRunner"
 
 codesign --force --deep --sign - "${app_path}" >/dev/null
+# Without allow-jit, JavaScriptCore interprets every analyst script: summing a
+# 57 MB artifact's bytes takes 4.4 s instead of 0.09 s. Only the runner gets
+# it, and the app is sealed again over the re-signed runner.
+codesign --force --sign - --entitlements "${analyst_runner_entitlements}" \
+  "${macos_path}/OriginTraceAnalystRunner" >/dev/null
+codesign --force --sign - "${app_path}" >/dev/null
 # macOS opens the app on any release LSMinimumSystemVersion admits, but will
 # not start a helper built for a newer one. Never replace the bundle with one
 # that has such a helper.

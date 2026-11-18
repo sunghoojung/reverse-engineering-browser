@@ -1180,6 +1180,7 @@
           (body.capture_mode === undefined || ['live', 'demo', 'idle'].includes(body.capture_mode)) &&
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
           (body.capture_stopped === undefined || typeof body.capture_stopped === 'boolean') &&
+          (body.session_ended === undefined || typeof body.session_ended === 'boolean') &&
           (body.capture_controls_available === undefined || typeof body.capture_controls_available === 'boolean') &&
           (body.stealth_session === undefined || typeof body.stealth_session === 'boolean') &&
           (body.native_stealth === undefined || typeof body.native_stealth === 'boolean') &&
@@ -1952,6 +1953,22 @@
           typeof observation.detail === 'string';
       }
 
+      // Frame context is counted, never listed: get_events with events_filter
+      // lists the records, so a busy frame never grows a result.
+      function isVmRuntimeContext(context) {
+        const id = value => isCanonicalInteger(value, 0n, uint64Max);
+        const count = value => isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER);
+        const filter = context?.events_filter;
+        return isPlainObject(context) && id(context.session_id) && id(context.navigation_id) && id(context.frame_id) &&
+          ['available', 'unavailable'].includes(context.frame_attribution) &&
+          (context.frame_attribution === 'unavailable') === (context.frame_id === '0') &&
+          count(context.request_records) && Array.isArray(context.signal_records) &&
+          context.signal_records.every(signal => isPlainObject(signal) && typeof signal.rule_id === 'string' &&
+            signal.rule_id.length > 0 && count(signal.observed) && count(signal.correlated)) &&
+          isPlainObject(filter) && id(filter.session_id) && Object.entries(filter).every(([key, value]) =>
+            ['session_id', 'navigation_id', 'frame_id', 'artifact_id'].includes(key) && id(value));
+      }
+
       function isVmAnalysisResult(result) {
         if (!isPlainObject(result) || !isCanonicalInteger(result.artifact_id, 0n, uint64Max) ||
             (result.artifact_sha256 !== undefined && !vmWorkspaceDigest(result.artifact_sha256)) ||
@@ -1970,14 +1987,23 @@
           isSafeIntegerInRange(result.anti_bot_score, 0, 100) &&
           Array.isArray(result.evidence_families) && result.evidence_families.every(value => typeof value === 'string') &&
           Array.isArray(result.observations) && result.observations.every(isVmAnalysisObservation) &&
-          Array.isArray(result.related_request_ids) && result.related_request_ids.every(value => isCanonicalInteger(value, 0n, uint64Max)) &&
+          isVmRuntimeContext(result.runtime_context) &&
           isPlainObject(result.coverage) && typeof result.coverage.complete === 'boolean';
+      }
+
+      // A findings view lists failures and VM-like tiers and counts the rest.
+      function isVmResultsView(view, results) {
+        return isPlainObject(view) && Object.keys(view).length === 3 && view.kind === 'findings' &&
+          view.listed_results === results.length && isSafeIntegerInRange(view.omitted_results, 0, Number.MAX_SAFE_INTEGER) &&
+          results.every(result => result.tier !== 'none');
       }
 
       function isVmAnalysisDocument(document) {
         return isPlainObject(document) && document.contract_version === 1 &&
           document.document_kind === 'vm-analysis' &&
           (document.selection === undefined || isVmRequestSelection(document.selection)) &&
+          (document.results_view === undefined ||
+            (Array.isArray(document.results) && isVmResultsView(document.results_view, document.results))) &&
           (document.capture_mode === undefined || vmWorkspaceMode(document.capture_mode)) &&
           (document.inputs?.capture_provenance_digest === undefined ||
             document.inputs.capture_provenance_digest === null ||
@@ -2025,6 +2051,26 @@
           analysis: result
         }));
         return findings.sort((left, right) => (right.analysis?.vm_score ?? 0) - (left.analysis?.vm_score ?? 0));
+      }
+
+      // A failed analysis is listed in every view but is never a finding, so
+      // VM Lab counts failures by error code. Counted once per document.
+      const vmAnalysisFailureNotices = new WeakMap();
+      function vmAnalysisFailureNotice(document) {
+        if (!document) return '';
+        if (!vmAnalysisFailureNotices.has(document)) {
+          const codes = new Map();
+          for (const result of document.results) {
+            if (result.status === 'failed') codes.set(result.error.code, (codes.get(result.error.code) ?? 0) + 1);
+          }
+          let total = 0;
+          for (const count of codes.values()) total += count;
+          const byCode = [...codes].sort((left, right) => right[1] - left[1] || (left[0] < right[0] ? -1 : 1))
+            .map(([code, count]) => `${code} ${count.toLocaleString('en-US')}`).join(', ');
+          vmAnalysisFailureNotices.set(document, total === 0 ? ''
+            : `${total.toLocaleString('en-US')} ${total === 1 ? 'artifact' : 'artifacts'} could not be analyzed (${byCode}).`);
+        }
+        return vmAnalysisFailureNotices.get(document);
       }
 
       function hasOnlyKeys(value, allowed) {
@@ -3478,12 +3524,19 @@
           !Array.isArray(document.workspaces) || document.workspaces.length > 256) return false;
         const categories = ['canvas', 'webgl', 'web_audio', 'navigator', 'permissions', 'storage', 'webrtc', 'network', 'runtime'];
         const types = ['api_call', 'property_read', 'request_started', 'request_initiated', 'request_redirected', 'response_started', 'response_completed', 'request_completed', 'request_failed'];
-        const omissions = ['dispatch-samples-unavailable', 'dispatch-sample-retention-limit', 'host-link-limit', 'host-events-unavailable'];
-        const sources = new Set(); let total = 0;
+        const omissions = ['dispatch-samples-unavailable', 'dispatch-sample-retention-limit', 'host-events-unavailable'];
+        const count = value => isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER);
+        const id = value => isCanonicalInteger(value, 0n, uint64Max);
+        const sources = new Set();
         for (const row of document.workspaces) {
-          if (!vmWorkspaceExact(row, ['interpreter_artifact_id', 'source_artifact_sha256', 'links', 'omissions']) ||
-            sources.has(row.interpreter_artifact_id) || !Array.isArray(row.links) || row.links.length > 256 ||
-            !Array.isArray(row.omissions) || row.omissions.length > 4 || new Set(row.omissions).size !== row.omissions.length ||
+          if (!vmWorkspaceExact(row, ['interpreter_artifact_id', 'source_artifact_sha256', 'links', 'frame_host_records',
+            'attributed_host_records', 'events_filter', 'omissions']) ||
+            sources.has(row.interpreter_artifact_id) || !Array.isArray(row.links) ||
+            !count(row.frame_host_records) || !count(row.attributed_host_records) ||
+            row.attributed_host_records > row.frame_host_records || row.links.length > row.attributed_host_records ||
+            !vmWorkspaceExact(row.events_filter, ['session_id', 'navigation_id', 'frame_id']) ||
+            !Object.values(row.events_filter).every(id) ||
+            !Array.isArray(row.omissions) || row.omissions.length > 3 || new Set(row.omissions).size !== row.omissions.length ||
             !row.omissions.every(reason => omissions.includes(reason))) return false;
           sources.add(row.interpreter_artifact_id);
           const workspace = workspaceDocument.workspaces.find(item => item.interpreter_artifact_id === row.interpreter_artifact_id &&
@@ -3514,9 +3567,8 @@
                 sample.invocation_id === position.invocation_id && sample.instruction_pointer === position.instruction_pointer &&
                 sample.instruction_pointer_units === position.instruction_pointer_units)) return false;
           }
-          total += row.links.length;
         }
-        return total <= 4096;
+        return true;
       }
 
       function vmBrowserInternalSourceUrl(url) {
@@ -3531,7 +3583,6 @@
         return {
           'dispatch-samples-unavailable': 'No retained native dispatch samples. guest_position stays null. Static handlers can still be listed. This is the missing sampler, not an empty workspace.',
           'dispatch-sample-retention-limit': 'Accepted samples were dropped from the retained set, so those samples cannot prove a guest position.',
-          'host-link-limit': 'Host-link retention reached its cap. Further same-scope events are omitted.',
           'host-events-unavailable': 'No host event shared this interpreter session, navigation, and frame.'
         }[reason] ?? String(reason ?? '');
       }
@@ -3543,6 +3594,19 @@
           ? `guest_position PC ${position.instruction_pointer} (${position.instruction_pointer_units})`
           : 'guest_position null';
         return `${link?.category}/${link?.type} · event ${event.session_id}:${event.process_id}:${event.sequence_number} · state ${link?.state} · reason ${link?.reason} · ${positionText}`;
+      }
+
+      // Rows are the host events a retained VM record directly parents; the
+      // rest of the frame is a count the Events API lists with events_filter.
+      function vmHostRecordCountText(row) {
+        const frame = Number.isSafeInteger(row?.frame_host_records) ? row.frame_host_records : 0;
+        const named = Number.isSafeInteger(row?.attributed_host_records) ? row.attributed_host_records : 0;
+        const listed = Array.isArray(row?.links) ? row.links.length : 0;
+        const records = value => `${value.toLocaleString('en-US')} host event${value === 1 ? '' : 's'}`;
+        if (frame === 0) return null;
+        const share = frame === 1 ? 'shares' : 'share', name = named === 1 ? 'names' : 'name';
+        return `${records(frame)} ${share} this frame and ${named.toLocaleString('en-US')} ${name} this interpreter. ` +
+          `${listed.toLocaleString('en-US')} with a VM-record parent ${listed === 1 ? 'is' : 'are'} listed; the others have no guest position to show.`;
       }
 
       function vmHostLinksView(row) {
@@ -3560,9 +3624,10 @@
         const staticOnly = omissions.includes('dispatch-samples-unavailable') && links.every(link =>
           link?.state === 'unknown' && link?.reason === 'dispatch-samples-unavailable' &&
           (link.guest_position === null || link.guest_position === undefined));
+        const frameHosts = Number.isSafeInteger(row.frame_host_records) ? row.frame_host_records : 0;
         let headline;
-        if (staticOnly && links.length > 0) {
-          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every row. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored artifacts only.';
+        if (staticOnly && frameHosts > 0) {
+          headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null on every listed row and unknown for every counted host event. Same session, navigation, and frame is correlation, not a proven Wasm loader and not request-value provenance. Static handlers stay listed. This is the missing sampler, not an empty workspace. Session sources lists stored artifacts only.';
         } else if (staticOnly) {
           headline = 'Static only. Reason dispatch-samples-unavailable. guest_position is null because no native dispatch samples were retained, and no host event shared this session, navigation, and frame (host-events-unavailable). This is not an empty workspace.';
         } else if (links.length === 0) {
@@ -3574,6 +3639,7 @@
           bound: true,
           staticOnly,
           headline,
+          countLine: vmHostRecordCountText(row),
           omissionLines: omissions.map(reason => ({reason, detail: vmHostLinkOmissionText(reason)})),
           lines: links.map(vmHostLinkLine)
         };

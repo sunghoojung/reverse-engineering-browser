@@ -5,7 +5,10 @@
 //! complete scan of it would. Content integrity is never cached: a caller
 //! verifies the bytes a record names when it reads them. The index also
 //! counts the manifest for the session summary: records by kind, and the
-//! unique bytes each content budget's artifacts hold.
+//! unique bytes each content budget's artifacts hold. JavaScript artifacts are
+//! also kept by content digest and URL, so a saved invocation site finds the
+//! retained versions of its script in a manifest of any length, and Wasm
+//! modules by ID, so the session context lists the newest of them.
 use crate::{
     error::{Error, Result},
     evidence,
@@ -14,6 +17,7 @@ use crate::{
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -22,8 +26,9 @@ use std::{
 };
 
 pub const SUFFIX: &str = ".lookup-v1";
-/// The second layout adds the summary's counts and manifest order.
-const FORMAT: &str = "reb-artifact-lookup-v1/2";
+/// The second layout adds the summary's counts and manifest order, the
+/// third JavaScript artifacts by digest and URL, the fourth Wasm modules.
+const FORMAT: &str = "reb-artifact-lookup-v1/4";
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, parent INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS artifacts_parent ON artifacts(parent) WHERE parent != 0;
@@ -35,7 +40,11 @@ const SCHEMA: &str = "
     -- digest is kept as its first 64 bits.
     CREATE TABLE IF NOT EXISTS budget_digests(budget TEXT NOT NULL, digest INTEGER NOT NULL,
         PRIMARY KEY(budget, digest)) WITHOUT ROWID;
-    CREATE TABLE IF NOT EXISTS budget_bytes(budget TEXT PRIMARY KEY, bytes INTEGER NOT NULL) WITHOUT ROWID;";
+    CREATE TABLE IF NOT EXISTS budget_bytes(budget TEXT PRIMARY KEY, bytes INTEGER NOT NULL) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL, url TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS scripts_sha256 ON scripts(sha256);
+    CREATE INDEX IF NOT EXISTS scripts_url ON scripts(url);
+    CREATE TABLE IF NOT EXISTS wasm(id INTEGER PRIMARY KEY);";
 /// A manifest line, its newline included, as the receiver writes it.
 pub const RECORD_BYTES: usize = 8192;
 /// Bytes folded per call, so a lookup never holds the index for long.
@@ -88,6 +97,14 @@ pub fn find(root: &Path, id: &str, deadline: Instant) -> Result<Value> {
     index.find(id, deadline)
 }
 
+/// The validated manifest records of `ids` the manifest has, keyed by ID,
+/// after one catch-up for all of them.
+pub fn find_many(root: &Path, ids: &[&str], deadline: Instant) -> Result<HashMap<String, Value>> {
+    let index = index(root);
+    let mut index = lock(&index);
+    index.find_many(ids, deadline)
+}
+
 /// Brings the index of `root` up to its manifest within `deadline`, for the
 /// backend's background indexer. Returns whether it is caught up.
 pub fn catch_up(root: &Path, deadline: Instant) -> Result<bool> {
@@ -105,6 +122,19 @@ pub fn children(root: &Path, parent: u64, deadline: Instant) -> Result<Vec<Value
     let index = index(root);
     let mut index = lock(&index);
     index.children(parent, deadline)
+}
+
+/// The validated JavaScript records whose content has `sha256` or whose URL
+/// is `url`, from the whole manifest in manifest order.
+pub fn scripts(
+    root: &Path,
+    sha256: &str,
+    url: Option<&str>,
+    deadline: Instant,
+) -> Result<Vec<Value>> {
+    let index = index(root);
+    let mut index = lock(&index);
+    index.scripts(sha256, url, deadline)
 }
 
 fn not_found() -> Error {
@@ -225,37 +255,48 @@ impl ArtifactIndex {
     }
 
     fn find(&mut self, id: &str, deadline: Instant) -> Result<Value> {
+        self.find_many(&[id], deadline)?
+            .remove(id)
+            .ok_or_else(not_found)
+    }
+
+    fn find_many(&mut self, ids: &[&str], deadline: Instant) -> Result<HashMap<String, Value>> {
+        let mut found = HashMap::new();
         let Some(mut ready) = self.ready(deadline)? else {
-            return Err(not_found());
+            return Ok(found);
         };
-        let Some(key) = id.parse::<u64>().ok().filter(|key| key.to_string() == id) else {
-            return Err(not_found());
-        };
-        if let Some(value) = ready
-            .unterminated
-            .take()
-            .filter(|value| artifact_key(value) == key)
-        {
-            return Ok(value);
+        for &id in ids {
+            let Some(key) = id.parse::<u64>().ok().filter(|key| key.to_string() == id) else {
+                continue;
+            };
+            if let Some(value) = ready
+                .unterminated
+                .as_ref()
+                .filter(|value| artifact_key(value) == key)
+            {
+                found.insert(id.to_owned(), value.clone());
+                continue;
+            }
+            let range: Option<(i64, i64)> = self
+                .index
+                .sidecar()
+                .connection()
+                .prepare_cached("SELECT start, end FROM artifacts WHERE id = ?1")
+                .sql()?
+                .query_row([index_db::key(key)], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()
+                .sql()?;
+            let Some((start, end)) = range else {
+                continue;
+            };
+            let value = self.row(&mut ready.file, start, end)?;
+            // The anchors cover only the prefix ends; the row itself must still say so.
+            if value["artifact_id"] != id {
+                return Err(Error::new(500, "Artifact manifest changed during lookup"));
+            }
+            found.insert(id.to_owned(), value);
         }
-        let range: Option<(i64, i64)> = self
-            .index
-            .sidecar()
-            .connection()
-            .query_row(
-                "SELECT start, end FROM artifacts WHERE id = ?1",
-                [index_db::key(key)],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .sql()?;
-        let (start, end) = range.ok_or_else(not_found)?;
-        let value = self.row(&mut ready.file, start, end)?;
-        // The anchors cover only the prefix ends; the row itself must still say so.
-        if value["artifact_id"] != id {
-            return Err(Error::new(500, "Artifact manifest changed during lookup"));
-        }
-        Ok(value)
+        Ok(found)
     }
 
     fn children(&mut self, parent: u64, deadline: Instant) -> Result<Vec<Value>> {
@@ -289,6 +330,42 @@ impl ArtifactIndex {
     }
 }
 
+impl ArtifactIndex {
+    fn scripts(
+        &mut self,
+        sha256: &str,
+        url: Option<&str>,
+        deadline: Instant,
+    ) -> Result<Vec<Value>> {
+        let Some(mut ready) = self.ready(deadline)? else {
+            return Ok(Vec::new());
+        };
+        // Each arm of the OR reads its own index.
+        let ranges: Vec<(i64, i64)> = self
+            .index
+            .sidecar()
+            .connection()
+            .prepare_cached(
+                "SELECT a.start, a.end FROM scripts s JOIN artifacts a ON a.id = s.id
+                 WHERE s.sha256 = ?1 OR s.url = ?2 ORDER BY a.start",
+            )
+            .sql()?
+            .query_map(params![sha256, url], |row| Ok((row.get(0)?, row.get(1)?)))
+            .sql()?
+            .collect::<rusqlite::Result<_>>()
+            .sql()?;
+        let mut scripts = ranges
+            .into_iter()
+            .map(|(start, end)| self.row(&mut ready.file, start, end))
+            .collect::<Result<Vec<_>>>()?;
+        scripts.extend(ready.unterminated.filter(|value| {
+            value["kind"] == "javascript"
+                && (value["sha256"] == sha256 || url.is_some_and(|url| value["url"] == url))
+        }));
+        Ok(scripts)
+    }
+}
+
 struct Ready {
     file: File,
     /// The manifest's last record when it still lacks its newline.
@@ -300,9 +377,28 @@ fn artifact_key(value: &Value) -> u64 {
     value["artifact_id"].as_str().unwrap().parse().unwrap()
 }
 
-/// Counts one indexed record for the summary.
+/// Counts one indexed record for the summary, keeps a script by its digest
+/// and URL, and a Wasm module by its ID.
 fn count(transaction: &rusqlite::Transaction<'_>, value: &Value) -> Result<()> {
     let kind = value["kind"].as_str().unwrap_or("");
+    if kind == "wasm" {
+        transaction
+            .prepare_cached("INSERT INTO wasm(id) VALUES (?1)")
+            .sql()?
+            .execute([index_db::key(artifact_key(value))])
+            .sql()?;
+    }
+    if kind == "javascript" {
+        transaction
+            .prepare_cached("INSERT INTO scripts(id, sha256, url) VALUES (?1, ?2, ?3)")
+            .sql()?
+            .execute(params![
+                index_db::key(artifact_key(value)),
+                value["sha256"].as_str().unwrap_or(""),
+                value["url"].as_str().unwrap_or("")
+            ])
+            .sql()?;
+    }
     transaction
         .prepare_cached(
             "INSERT INTO kinds(kind, count) VALUES (?1, 1)
@@ -359,10 +455,66 @@ pub struct Summary {
 }
 
 /// The manifest's counts and its `items` newest records, from the index
-/// brought up to the manifest until `deadline`. A bad row is left out of the
-/// counts and named, where a lookup fails on it; a record the index cannot
-/// read stops the counts there.
+/// brought up to the manifest until `deadline`.
 pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> {
+    counted(root, deadline, |connection, file, summary| {
+        let pairs = |sql: &str| -> Result<Vec<(String, u64)>> {
+            connection
+                .prepare_cached(sql)
+                .sql()?
+                .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))
+                .sql()?
+                .map(|row| row.sql())
+                .collect()
+        };
+        summary.by_kind = pairs("SELECT kind, count FROM kinds ORDER BY kind")?;
+        summary.total = summary
+            .by_kind
+            .iter()
+            .fold(0u64, |sum, (_, count)| sum.saturating_add(*count));
+        summary.retained = pairs("SELECT budget, bytes FROM budget_bytes")?;
+        summary.newest = newest(
+            connection,
+            file,
+            "SELECT start, end FROM artifacts ORDER BY start DESC LIMIT ?1",
+            items,
+        )?;
+        Ok(())
+    })
+}
+
+/// The manifest's Wasm modules as far as it is indexed: their count as
+/// `total` and `by_kind`, and the `items` newest as `newest`, in the
+/// summary's form.
+pub fn wasm(root: &Path, items: usize, deadline: Instant) -> Result<Summary> {
+    counted(root, deadline, |connection, file, summary| {
+        summary.total = connection
+            .query_row("SELECT count FROM kinds WHERE kind = 'wasm'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()
+            .sql()?
+            .map_or(0, |count| count as u64);
+        summary.by_kind = vec![("wasm".to_owned(), summary.total)];
+        summary.newest = newest(
+            connection,
+            file,
+            "SELECT a.start, a.end FROM wasm w JOIN artifacts a ON a.id = w.id
+             ORDER BY a.start DESC LIMIT ?1",
+            items,
+        )?;
+        Ok(())
+    })
+}
+
+/// Brings the index up to the manifest until `deadline`, then lets `fill`
+/// read its counts. A bad row is left out of the counts and named, where a
+/// lookup fails on it; a record the index cannot read stops the counts there.
+fn counted(
+    root: &Path,
+    deadline: Instant,
+    fill: impl FnOnce(&rusqlite::Connection, &mut File, &mut Summary) -> Result<()>,
+) -> Result<Summary> {
     let index = index(root);
     let mut index = lock(&index);
     let Some((mut file, position)) = index.open()? else {
@@ -379,24 +531,32 @@ pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> 
         },
     };
     let connection = index.index.sidecar().connection();
-    let damage = connection
-        .query_row("SELECT message FROM damage WHERE id = 0", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()
-        .sql()?;
-    let pairs = |sql: &str| -> Result<Vec<(String, u64)>> {
-        connection
-            .prepare_cached(sql)
-            .sql()?
-            .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))
-            .sql()?
-            .map(|row| row.sql())
-            .collect()
+    let mut summary = Summary {
+        complete: stopped.is_none() && position.caught_up(RECORD_BYTES as u64),
+        damage: connection
+            .query_row("SELECT message FROM damage WHERE id = 0", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .sql()?,
+        stopped,
+        indexed_to: position.indexed_to,
+        file_end: position.file_end,
+        ..Summary::default()
     };
-    let by_kind = pairs("SELECT kind, count FROM kinds ORDER BY kind")?;
+    fill(connection, &mut file, &mut summary)?;
+    Ok(summary)
+}
+
+/// The records `sql` ranges, newest first, with public fields only.
+fn newest(
+    connection: &rusqlite::Connection,
+    file: &mut File,
+    sql: &str,
+    items: usize,
+) -> Result<Vec<Value>> {
     let ranges: Vec<(i64, i64)> = connection
-        .prepare_cached("SELECT start, end FROM artifacts ORDER BY start DESC LIMIT ?1")
+        .prepare_cached(sql)
         .sql()?
         .query_map([i64::try_from(items).unwrap_or(i64::MAX)], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -404,26 +564,13 @@ pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> 
         .sql()?
         .collect::<rusqlite::Result<_>>()
         .sql()?;
-    let newest = ranges
+    ranges
         .into_iter()
         .map(|(start, end)| {
-            parse(&index_db::record(&mut file, start, end)?)
+            parse(&index_db::record(file, start, end)?)
                 .map(|value| evidence::public_artifact(&value))
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Summary {
-        complete: stopped.is_none() && position.caught_up(RECORD_BYTES as u64),
-        damage,
-        stopped,
-        indexed_to: position.indexed_to,
-        file_end: position.file_end,
-        total: by_kind
-            .iter()
-            .fold(0u64, |sum, (_, count)| sum.saturating_add(*count)),
-        by_kind,
-        retained: pairs("SELECT budget, bytes FROM budget_bytes")?,
-        newest,
-    })
+        .collect()
 }
 
 /// Records why the manifest cannot answer; the first reason stands.

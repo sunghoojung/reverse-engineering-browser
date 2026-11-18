@@ -179,20 +179,28 @@ impl<'a> Index<'a> {
         )
     }
 }
+/// The document restricted to results with an exact link to the request
+/// root. Unselected results are never copied.
+/// `head` is the document; any results it has are replaced by the matching
+/// ones of `results`.
 pub(crate) fn select(
-    document: &mut Value,
+    head: &Value,
+    results: Vec<Value>,
     request: &str,
     session: &str,
     process: u64,
     sequence: &str,
-) {
+) -> Value {
     let root = json!({"session_id":session,"process_id":process,"sequence_number":sequence});
-    document["selection"] = json!({"kind":"request","request_id":request,"root_event":root,
-        "edge_semantics":"exact-captured-response-body"});
-    document["results"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|result| {
+    let mut selected = serde_json::Map::new();
+    for (key, value) in head.as_object().unwrap() {
+        if key != "results" {
+            selected.insert(key.clone(), value.clone());
+        }
+    }
+    let results = results
+        .into_iter()
+        .filter(|result| {
             result["exact_request_links"]
                 .as_array()
                 .is_some_and(|links| {
@@ -200,14 +208,19 @@ pub(crate) fn select(
                         .iter()
                         .any(|link| link["request_id"] == request && link["root_event"] == root)
                 })
-        });
+        })
+        .collect::<Vec<_>>();
+    let mut document = Value::Object(selected);
+    document["selection"] = json!({"kind":"request","request_id":request,"root_event":root,
+        "edge_semantics":"exact-captured-response-body"});
     // One linked constituent cannot establish an exact mixed-artifact relation.
     document["mixed_findings"] = json!([]);
-    let results = document["results"].as_array().unwrap();
     document["summary"] = json!({"analyzed_artifacts":results.len(),
         "candidate_count":results.iter().filter(|result| result["tier"] == "candidate").count(),
         "likely_vm_count":results.iter().filter(|result| result["tier"] == "likely-vm").count(),
         "failed_count":0,"mixed_count":0});
+    document["results"] = json!(results);
+    document
 }
 
 #[cfg(test)]
@@ -307,8 +320,15 @@ mod tests {
         let (artifact, events) = fixture();
         let links = Index::new(events.iter()).links(&artifact);
         let document = json!({"results":[{"artifact_id":"21","exact_request_links":links},{"artifact_id":"22","related_request_ids":["9007199254740995"]}],"mixed_findings":[{}]});
-        let mut exact = document.clone();
-        select(&mut exact, "9007199254740995", "9007199254740993", 12, "10");
+        let results = document["results"].as_array().unwrap().clone();
+        let exact = select(
+            &document,
+            results.clone(),
+            "9007199254740995",
+            "9007199254740993",
+            12,
+            "10",
+        );
         assert_eq!(exact["results"].as_array().unwrap().len(), 1);
         assert_eq!(exact["mixed_findings"], json!([]));
         for (session, process, sequence) in [
@@ -316,8 +336,14 @@ mod tests {
             ("9007199254740993", 13, "10"),
             ("9007199254740993", 12, "11"),
         ] {
-            let mut wrong = document.clone();
-            select(&mut wrong, "9007199254740995", session, process, sequence);
+            let wrong = select(
+                &document,
+                results.clone(),
+                "9007199254740995",
+                session,
+                process,
+                sequence,
+            );
             assert_eq!(wrong["results"], json!([]));
         }
     }

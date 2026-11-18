@@ -337,9 +337,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.vmHostLinksGeneration += 1;
           state.selectedVmHandlerKey = null;
         }
-        const query = selection ? `?${new URLSearchParams({request_id: selection.request_id,
+        // The lab lists findings, so a session of many plain scripts reads as
+        // a count rather than one result per artifact.
+        const query = `?${new URLSearchParams({...(selection ? {request_id: selection.request_id,
           session_id: selection.root_event.session_id, root_process_id: String(selection.root_event.process_id),
-          root_sequence_number: selection.root_event.sequence_number})}` : '';
+          root_sequence_number: selection.root_event.sequence_number} : {}), view: 'findings'})}`;
         const headers = state.vmAnalysisEtag ? {'If-None-Match': state.vmAnalysisEtag} : {};
         state.vmAnalysisStatus = 'loading';
         state.vmAnalysisError = null;
@@ -478,8 +480,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         ['storage', 'Storage'], ['webrtc', 'WebRTC'], ['runtime', 'Runtime']
       ]);
       const signalEventDisplayLimit = 500;
-      const nativeCanvasCaptureDisplayLimit = 24;
-      const canvasPreviewByteLimit = 8 * 1024 * 1024; // Reserved/retained UTF-16 text bytes, not decoded pixels.
+      const nativeCanvasCaptureDisplayLimit = 24; // Readbacks per Rendering gallery page.
       const canvasPreviewReadLimit = 2;
       const canvasPreviewAxisLimit = 4096;
       const canvasPreviewPixelLimit = 4 * 1024 * 1024;
@@ -505,8 +506,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // https://www.w3.org/TR/png-3/ sections 5 and 11. No compressed data is inflated.
       function inspectCanvasPng(content) {
         const reject = reason => ({reason: `${reason} Original evidence is unchanged.`});
-        if (typeof content !== 'string' || content.length > 2097152 || !canvasDataUrlPattern.test(content)) {
-          return reject('The retained bytes do not pass the bounded image data URL validator.');
+        if (typeof content !== 'string' || !canvasDataUrlPattern.test(content)) {
+          return reject('The retained bytes do not pass the image data URL validator.');
         }
         if (!content.startsWith('data:image/png;base64,')) return reject('Preview format is unsupported: only static PNG is admitted.');
         const encoded = content.slice('data:image/png;base64,'.length);
@@ -702,7 +703,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const delta = integerValue(left.evidenceEvent, 'monotonic_time_ns') -
             integerValue(right.evidenceEvent, 'monotonic_time_ns');
           return delta < 0n ? -1 : delta > 0n ? 1 : 0;
-        }).slice(-nativeCanvasCaptureDisplayLimit).reverse();
+        }).reverse();
       }
 
       function canvasGalleryVisible() {
@@ -744,23 +745,19 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         const previous = state.canvasPreviewOwners ?? new Map();
         const owners = new Map();
-        let reservedBytes = 0;
-        for (const capture of captures.slice(0, nativeCanvasCaptureDisplayLimit)) {
+        for (const capture of captures) {
           const artifact = capture.artifact;
           if (!artifact || artifact.kind !== 'canvas_data_url') continue;
           const identity = sourceIdentity(artifact);
           if (owners.has(identity)) continue;
           let reason = '';
           if (!sourceIsCurrent(artifact)) reason = 'The exact Canvas artifact identity is unavailable or ambiguous.';
-          else if (!Number.isSafeInteger(artifact.byte_size) || artifact.byte_size <= 0 || artifact.byte_size > 2097152) {
-            reason = 'Canvas preview exceeds the 2 MiB encoded-byte limit or has an invalid size.';
-          } else if (reservedBytes + artifact.byte_size * 2 > canvasPreviewByteLimit) {
-            reason = 'Canvas preview evicted by the 8 MiB gallery text budget. Original evidence is unchanged.';
+          else if (!Number.isSafeInteger(artifact.byte_size) || artifact.byte_size <= 0) {
+            reason = 'Canvas preview has an invalid size.';
           }
           if (reason) { releaseCanvasPreview(artifact, reason); continue; }
-          // Reserve the maximum UTF-16 cost before reading, so completion order
-          // cannot overcommit the cache or evict/reload the same 24 cards forever.
-          reservedBytes += artifact.byte_size * 2;
+          // Previews of any size: only the current page owns text, so memory
+          // follows the page, not the session.
           const prior = previous.get(identity);
           owners.set(identity, prior?.artifact === artifact ? prior : {artifact, identity});
           delete artifact.canvasPreviewNotice;
@@ -793,6 +790,27 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             if (canvasGalleryVisible()) renderFingerprintActivity();
           });
         }
+      }
+
+      // A preview read has no deadline. Stop keeps its read slot until the
+      // fetch settles, and the preview then waits for an explicit Retry.
+      function stopCanvasPreview(identity) {
+        const artifact = state.canvasPreviewOwners?.get(identity)?.artifact;
+        if (!artifact?.loading) return;
+        artifact.loadError = 'Preview read stopped. Original evidence is unchanged.';
+        artifact.controller?.abort();
+        renderFingerprintActivity();
+      }
+
+      function canvasPreviewProgress(artifact) {
+        // A size never wraps between its number and unit.
+        const size = bytes => formatByteSize(bytes).replace(' ', '\u00a0');
+        return `Reading the retained Canvas preview · ${size(artifact.loadedBytes ?? 0)} of ${size(artifact.byte_size)}`;
+      }
+
+      function showCanvasGalleryPage(delta) {
+        state.canvasGalleryPage = Math.max(0, (state.canvasGalleryPage ?? 0) + delta);
+        renderFingerprintActivity();
       }
 
       function retryCanvasPreview(identity) {
@@ -831,17 +849,25 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (capture.calls.length === 0 || !capture.width || !capture.height || !capture.demo) {
           frame.classList.add('unavailable');
           const explanation = capturedOutput && !state.canvasImageCaptureEnabled
-            ? 'Image capture is off for this session. Restart with REB_CAPTURE_CANVAS_IMAGES=1 to retain sensitive Canvas output.'
+            ? 'Image capture is off for this session. To retain sensitive Canvas output, start a Content session with Canvas images on, under Advanced options in New Live Session….'
             : capturedOutput && capture.artifact
               ? capture.artifact.canvasPreviewNotice || owner?.imageError || capture.previewReason || capture.artifact.loadError || (capture.artifact.loading
-                ? 'Loading the retained Canvas preview…' : 'Canvas preview is waiting for a bounded read slot.')
+                ? canvasPreviewProgress(capture.artifact) : 'Canvas preview is waiting for a read slot.')
               : capture.calls.length
                 ? 'Operation names were retained, but arguments were not, so a faithful local replay cannot be generated.'
                 : 'This capture retained the readback call, but no supported earlier drawing operations.';
-          frame.append(
-            textElement('strong', '', 'Preview unavailable'),
-            textElement('span', '', explanation)
-          );
+          const detail = textElement('span', '', explanation);
+          frame.append(textElement('strong', '', 'Preview unavailable'), detail);
+          const artifact = capture.artifact;
+          if (capturedOutput && artifact && owner?.artifact === artifact && artifact.loading && !artifact.loadError &&
+              !artifact.canvasPreviewNotice && !owner.imageError && !capture.previewReason) {
+            // The read reports its progress here without rebuilding the gallery.
+            owner.progress = detail;
+            const stop = textElement('button', 'secondary-button', 'Stop');
+            stop.type = 'button';
+            stop.addEventListener('click', stopCanvasPreview.bind(null, owner.identity));
+            frame.append(stop);
+          }
           if (capturedOutput && capture.artifact?.loadError && !capture.artifact.canvasPreviewNotice) {
             const retry = textElement('button', 'secondary-button', 'Retry preview');
             retry.type = 'button';
@@ -949,7 +975,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function renderFingerprintRendering(signalEvents) {
-        const captures = canvasRenderCaptures(signalEvents);
+        // Every readback, newest first, a page at a time.
+        const all = canvasRenderCaptures(signalEvents);
+        const pages = Math.max(1, Math.ceil(all.length / nativeCanvasCaptureDisplayLimit));
+        const page = state.canvasGalleryPage = Math.min(state.canvasGalleryPage ?? 0, pages - 1);
+        const first = page * nativeCanvasCaptureDisplayLimit;
+        const captures = all.slice(first, first + nativeCanvasCaptureDisplayLimit);
         syncCanvasPreviews(captures);
         if (!canvasGalleryVisible()) return;
         renderSignalSurfaceOverview(signalEvents);
@@ -970,14 +1001,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           owner.mounted = true;
           capture.width = owner.imageInfo.width; capture.height = owner.imageInfo.height;
         }
-        const readbackCount = signalEvents.filter(event => event.category === 'canvas' &&
-          canvasReadbackName(decodePayload(event))).length;
-        elements.signalRenderCount.textContent = String(captures.length);
-        elements.signalRenderSummary.textContent = readbackCount
-          ? captures.length < readbackCount
-            ? `${captures.length} newest of ${readbackCount} canvas readbacks`
-            : `${captures.length} canvas ${captures.length === 1 ? 'readback' : 'readbacks'}`
-          : 'No canvas readbacks';
+        const pageText = `Readbacks ${(first + 1).toLocaleString()}-${(first + captures.length).toLocaleString()} of ${all.length.toLocaleString()}, newest first`;
+        elements.signalRenderCount.textContent = String(all.length);
+        elements.signalRenderSummary.textContent = pages > 1 ? pageText : all.length
+          ? `${all.length} canvas ${all.length === 1 ? 'readback' : 'readbacks'}` : 'No canvas readbacks';
         // Keep the native activation target alive across unchanged polling,
         // including a refresh between pointer-down and pointer-up. The stamp
         // contains only bounded render inputs, never another copy of image text.
@@ -985,7 +1012,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         // old image and handlers even when its visible metadata is unchanged.
         const owners = captures.map(capture => capture.artifact &&
           state.canvasPreviewOwners?.get(sourceIdentity(capture.artifact)));
-        const stamp = JSON.stringify([state.canvasImageCaptureEnabled, state.artifactReceiverError, captures.map((capture, index) => {
+        const stamp = JSON.stringify([state.canvasImageCaptureEnabled, state.artifactReceiverError, page, pages, all.length, captures.map((capture, index) => {
           const artifact = capture.artifact, owner = owners[index];
           return [capture.id, capture.context, capture.width, capture.height, capture.readback,
             capture.demo, capture.calls, capture.callsTruncated, capture.operationHash,
@@ -1000,7 +1027,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             owners.every((owner, index) => owner === previous.owners[index] &&
               captures[index].artifact === previous.artifacts[index])) return;
         delete elements.signalRenderList.canvasRender;
-        for (const owner of state.canvasPreviewOwners?.values() ?? []) delete owner.image;
+        for (const owner of state.canvasPreviewOwners?.values() ?? []) { delete owner.image; delete owner.progress; }
         if (!captures.length) {
           elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
           elements.signalRenderList.replaceChildren(textElement(
@@ -1014,8 +1041,30 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           .map(detail => detail.dataset.captureKey));
         const focused = document.activeElement?.matches('summary')
           ? document.activeElement.parentElement.dataset.captureKey : null;
+        const focusedPage = document.activeElement?.dataset?.canvasPage ?? null;
         elements.signalRenderList.querySelectorAll('img').forEach(image => image.removeAttribute('src'));
-        elements.signalRenderList.replaceChildren(...captures.map(renderCanvasCapture));
+        const pager = [];
+        if (pages > 1) {
+          const nav = document.createElement('nav');
+          nav.className = 'signal-render-pager';
+          nav.setAttribute('aria-label', 'Canvas readback pages');
+          const button = (label, direction, disabled) => {
+            const control = textElement('button', 'secondary-button signal-render-page', label);
+            control.type = 'button'; control.disabled = disabled; control.dataset.canvasPage = label.toLowerCase();
+            control.addEventListener('click', showCanvasGalleryPage.bind(null, direction));
+            return control;
+          };
+          nav.append(button('Newer', -1, page === 0), textElement('span', '', `Page ${(page + 1).toLocaleString()} of ${pages.toLocaleString()}`),
+            button('Older', 1, page === pages - 1));
+          pager.push(nav);
+        }
+        elements.signalRenderList.replaceChildren(...pager, ...captures.map(renderCanvasCapture));
+        if (focusedPage) {
+          // Paging replaces its buttons; keep focus on one the researcher can press.
+          const controls = [...elements.signalRenderList.querySelectorAll('.signal-render-page')];
+          (controls.find(control => control.dataset.canvasPage === focusedPage && !control.disabled) ??
+            controls.find(control => !control.disabled))?.focus({preventScroll: true});
+        }
         elements.signalRenderList.querySelectorAll('details').forEach(detail => {
           detail.open = expanded.has(detail.dataset.captureKey);
           if (focused && detail.dataset.captureKey === focused) detail.querySelector('summary').focus({preventScroll: true});
@@ -1314,11 +1363,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const offline = state.broker === 'unavailable' || failed;
         const retainedLabel = signalEvents.length ? 'Evidence retained' : 'Disconnected';
         elements.signalSessionBadge.textContent = failed ? retainedLabel
+          : state.sessionEnded ? 'Session ended'
           : state.captureStopped ? 'Probes stopped'
           : offline ? retainedLabel
           : state.sessionMode === 'demo' ? 'Demo evidence'
             : state.sessionMode === 'live' ? 'Live native capture' : 'No capture';
-        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
+        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.sessionEnded ? 'idle'
+          : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
 
         elements.signalViewTabs.forEach(button => {
           const selected = button.dataset.signalView === state.signalView;
@@ -1552,20 +1603,23 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           (!state.artifactReceiverConnected || state.artifactReceiverError);
         const offline = brokerOffline;
         const connecting = live && state.broker === 'connecting';
-        const modeLabel = live ? (offline ? 'Live offline'
+        const ended = live && state.sessionEnded;
+        const modeLabel = ended ? 'Ended session' : live ? (offline ? 'Live offline'
           : artifactOffline ? 'Live degraded' : 'Live session')
           : idle ? 'Ready' : preview ? 'Preview' : 'Demo evidence';
-        const captureLabel = connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
-          : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
+        const captureLabel = ended ? 'Ended' : connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
+          : live && state.captureStopped ? 'Stopped' : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
         elements.sessionMode.textContent = modeLabel;
-        elements.sessionMode.dataset.kind = state.sessionMode;
-        elements.sessionMode.title = live
-          ? 'Only native broker evidence is shown; sample rows are hidden.'
-          : idle
-            ? 'No evidence is bundled. Start a live capture to populate the workspace.'
-            : preview
+        elements.sessionMode.dataset.kind = ended ? 'ended' : state.sessionMode;
+        elements.sessionMode.title = ended
+          ? 'An ended live session opened for review. Its evidence stays in its session folder; it captures nothing more.'
+          : live
+            ? 'Only native broker evidence is shown; sample rows are hidden.'
+            : idle
               ? 'No evidence is bundled. Start a live capture to populate the workspace.'
-              : 'Deterministic developer evidence is loaded.';
+              : preview
+                ? 'No evidence is bundled. Start a live capture to populate the workspace.'
+                : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
         const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies',
@@ -1586,8 +1640,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
         elements.capture.classList.toggle('preview', preview);
-        // No session is a neutral state; the ok color belongs to a live broker.
-        elements.capture.classList.toggle('idle', idle && !offline && !artifactOffline);
+        // No session and an ended one are neutral; the ok color belongs to a
+        // live broker.
+        elements.capture.classList.toggle('idle', (idle || ended) && !offline && !artifactOffline);
         elements.capture.querySelector('span:last-child').textContent = captureLabel;
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
         elements.broker.classList.toggle('offline', offline);
@@ -1682,6 +1737,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const field = document.createElement('div'); field.className = 'vm-field';
         field.append(textElement('span', '', label), textElement('strong', '', value));
         return field;
+      }
+
+      function vmRuntimeContextText(result) {
+        const context = result.runtime_context;
+        if (!context) return result.runtime === 'mixed' ? 'see each linked artifact' : 'not recorded';
+        const count = (value, word) => `${value.toLocaleString('en-US')} ${word}${value === 1 ? '' : 's'}`;
+        const total = key => context.signal_records.reduce((sum, signal) => sum + signal[key], 0);
+        const own = `${count(total('observed'), 'browser-signal record')} naming this artifact`;
+        if (context.frame_attribution === 'unavailable') return `frame unknown · ${own}`;
+        return `frame ${context.frame_id} · ${count(context.request_records, 'request record')} · ` +
+          `${own} · ${count(total('correlated'), 'other signal record')}`;
       }
 
       function vmSessionPresentation(targetState) {
@@ -2345,6 +2411,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         banner.textContent = view.headline;
         section.append(banner);
+        if (view.countLine) section.append(textElement('p', 'vm-workspace-empty', view.countLine));
         if (row) {
           for (const omission of view.omissionLines) {
             const item = document.createElement('p');
@@ -2829,7 +2896,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           fields.append(
             vmField('tier', selected.confidence),
             vmField('source artifact', selected.sourceArtifactId),
-            vmField('correlated requests (session context only)', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('frame context (correlation only)', vmRuntimeContextText(result)),
             vmField('exact response-body links', result.exact_request_links?.map(link =>
               `${link.request_id} · session ${link.root_event.session_id} · process ${link.root_event.process_id} · root ${link.root_event.sequence_number} → response ${link.response_event.sequence_number} → capture ${link.capture_event.sequence_number}`).join('; ') || 'unlinked'),
             vmField('evidence families', result.evidence_families?.join(', ') || 'none'),
@@ -2940,6 +3007,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmSessionStatus();
         const gapCount = shownSequenceGaps();
         const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
+        const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
+        const withFailures = message => failures ? `${message} ${failures}` : message;
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
         } else if (state.vmAnalysisStatus === 'loading' && state.vmAnalysisSelection) {
@@ -2949,16 +3018,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (state.vmAnalysisStatus === 'unavailable') {
           setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmAnalysisError ? `${state.vmAnalysisError} ` : ''}${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
         } else if (state.broker === 'unavailable') {
-          setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
+          setVmNotice('disconnected', withFailures(state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.'));
         } else if (state.malformedVmFindings > 0) {
-          setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
+          setVmNotice('malformed', withFailures(`${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`));
         } else if (state.vmFindings.length === 0) {
-          const empty = state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.';
-          setVmNotice(vmLimits ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
-        } else if (gapCount > 0n || vmLimits) {
+          const omitted = state.vmAnalysisDocument?.results_view?.omitted_results ?? 0;
+          const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
+          const failed = failures ? ` ${failures}` : '';
+          const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain}${failed} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain}${failed} The lab waits for observed or explicitly inferred evidence.`;
+          setVmNotice(vmLimits || failures ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
+        } else if (gapCount > 0n || vmLimits || failures) {
           setVmNotice('gap', [
             gapCount > 0n ? `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).` : '',
-            vmLimits
+            vmLimits,
+            failures
           ].filter(Boolean).join(' '));
         } else if (state.vmAnalysisSelection) {
           const selection = state.vmAnalysisSelection;
@@ -3905,10 +3978,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficLoadingId = id;
         const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
         row?.setAttribute('aria-busy', 'true');
-        // WebKit rejects a timed-out fetch with AbortError; the deadline says whether it was reached.
-        const deadline = AbortSignal.timeout(10000);
         try {
-          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, deadline]));
+          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, controller.signal);
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
@@ -3930,8 +4001,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (controller.signal.aborted) return;
           if (select) {
-            const reason = deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message;
-            const message = trafficUnreadSelectionText(indexed, reason, state.selectedRequestId !== null);
+            const message = trafficUnreadSelectionText(indexed, error.message, state.selectedRequestId !== null);
             const bar = document.querySelector('#investigation-navigation');
             // A later valid poll reads it again (retryTrafficUnreadSelection).
             state.trafficUnreadSelection = {id, indexed, message,
@@ -4100,7 +4170,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.signalProfileKey = selection.key;
             state.signalProfileEtag = response.headers.get('ETag');
           } else {
-            if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
+            if (!response.ok) {
+              // A 503 says how far the profile index has got; the next refresh asks again.
+              const failure = response.status === 503 ? await response.json().catch(() => null) : null;
+              throw new Error(typeof failure?.error === 'string' ? failure.error.slice(0, 1024)
+                : `Request signal profile store returned ${response.status}`);
+            }
             const body = await response.json();
             if (!ownsSelection()) return;
             if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');
@@ -4572,7 +4647,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             renderInspectorDetails([
               { key: 'First event', value: request.firstTimestamp, type: 'ns' },
               { key: 'Last event', value: request.lastTimestamp, type: 'ns' },
-              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              // Exact here; the Traffic column shows it compact.
+              { key: 'Duration', value: request.time === 'pending' ? trafficTimeLabel(request.time) : String(request.time), type: 'time' },
               { key: 'Lifecycle', value: request.operation, type: 'state' },
               { key: 'Events', value: request.events.length, type: 'count' },
               { key: 'Phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
@@ -5672,7 +5748,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           siblingNames.add(key);
         }
         const fileIds = new Set();
-        let totalBytes = 0;
         for (const file of workspace.files) {
           if (!analystExactKeys(file, ['id', 'folder_id', 'name', 'kind', 'language', 'content',
             'content_bytes', 'created_at_ms', 'updated_at_ms']) ||
@@ -5681,7 +5756,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             !['analyst-script', 'scratchpad'].includes(file.kind) ||
             !['javascript', 'json', 'markdown', 'text'].includes(file.language) ||
             (file.kind === 'analyst-script' && file.language !== 'javascript') ||
-            !isBoundedText(file.content, 32 * 1024) || /[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(file.content) ||
+            typeof file.content !== 'string' || /[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(file.content) ||
             file.content_bytes !== utf8ByteLength(file.content) ||
             !isSafeIntegerInRange(file.created_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
             !isSafeIntegerInRange(file.updated_at_ms, file.created_at_ms, Number.MAX_SAFE_INTEGER)) return false;
@@ -5689,9 +5764,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (siblingNames.has(key)) return false;
           siblingNames.add(key);
           fileIds.add(file.id);
-          totalBytes += file.content_bytes;
         }
-        if (totalBytes > 512 * 1024) return false;
         return workspace.generation !== 0 || (workspace.updated_at_ms === 0 && workspace.files.length === 0 &&
           workspace.folders.length === 1);
       }
@@ -5706,19 +5779,19 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function isLocalAnalystResult(result, run) {
-        const code = result?.outcome === 'cancelled' ? 'cancelled' : result?.outcome === 'timed_out' ? 'timeout' : 'application_failed';
+        const code = result?.outcome === 'cancelled' ? 'cancelled' : 'application_failed';
         if (!resultHasOptionalReason(result, ['protocol_version', 'run_id', 'script_id', 'library_generation', 'ok',
           'outcome', 'result_type', 'result_text', 'result_truncated', 'logs', 'logs_truncated',
           'duration_ms', 'error'], code, 'worker') || result.protocol_version !== 1 || result.run_id !== run.run_id ||
           result.script_id !== run.script_id || result.library_generation !== run.library_generation ||
-          typeof result.ok !== 'boolean' || !['completed', 'failed', 'cancelled', 'timed_out'].includes(result.outcome) ||
+          typeof result.ok !== 'boolean' || !['completed', 'failed', 'cancelled'].includes(result.outcome) ||
           result.ok !== (result.outcome === 'completed') || !isBoundedText(result.result_type, 64) ||
-          !isBoundedText(result.result_text, 32 * 1024) || typeof result.result_truncated !== 'boolean' ||
-          !Array.isArray(result.logs) || result.logs.length > 64 || typeof result.logs_truncated !== 'boolean' ||
-          !isSafeIntegerInRange(result.duration_ms, 0, 7000) || !isBoundedText(result.error, 512) ||
+          typeof result.result_text !== 'string' || typeof result.result_truncated !== 'boolean' ||
+          !Array.isArray(result.logs) || typeof result.logs_truncated !== 'boolean' ||
+          !isSafeIntegerInRange(result.duration_ms, 0, Number.MAX_SAFE_INTEGER) || !isBoundedText(result.error, 512) ||
           (result.ok ? result.error.length !== 0 : result.error.length === 0)) return false;
         return result.logs.every(log => analystExactKeys(log, ['level', 'text']) &&
-          ['log', 'info', 'warn', 'error'].includes(log.level) && isBoundedText(log.text, 1024));
+          ['log', 'info', 'warn', 'error'].includes(log.level) && typeof log.text === 'string');
       }
 
       function analystFolder(folderId = state.analystSelectedFolderId) {
@@ -5835,22 +5908,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         event.returnValue = '';
       }
 
-      // A deadline covers both headers and bounded body reads, even if transport
-      // cancellation cannot stop a server commit. Such writes must be reconciled.
+      // No deadline or size limit: the library grows with the researcher's
+      // files, and the backend can be slow to answer while long analyses hold
+      // its readers. A write whose transport fails is reconciled against the
+      // stored generation, never retried.
       async function analystReadJSON(path, options = {}) {
-        const controller = new AbortController();
-        let timer;
-        const deadline = new Promise((_, reject) => {
-          timer = setTimeout(() => { controller.abort(); reject(new Error('timed out')); }, 15000);
-        });
-        try {
-          return await Promise.race([deadline, (async () => {
-            const response = await fetch(path, {...options, signal: controller.signal});
-            if (response.status === 304) return {response, body: null};
-            const bytes = await sourceFactsReadBytes(response, 4 * 1024 * 1024, controller.signal);
-            return {response, body: JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
-          })()]);
-        } finally { clearTimeout(timer); }
+        const response = await fetch(path, options);
+        if (response.status === 304) return {response, body: null};
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        return {response, body: JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
       }
 
       function admitAnalystWorkspace(body, confirmed = false) {
@@ -6235,9 +6301,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         colorAnalystEditor();
       }
 
+      // Any stored artifact selected in Sources, text or binary, loaded in the
+      // page or not: the runner's host reads its verified bytes from the store.
       function selectedAnalystArtifact() {
         const source = selectedSource();
-        if (source?.source_type !== 'artifact' || typeof source.content !== 'string') return null;
+        if (source?.source_type !== 'artifact' || typeof source.artifact_id !== 'string' ||
+          !/^[0-9a-f]{64}$/u.test(source.sha256 ?? '')) return null;
         return source;
       }
 
@@ -6271,56 +6340,38 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return metadata;
       }
 
+      // Everything the page holds for each chosen kind, whole. The selected
+      // artifact is named, not copied: its host reads the stored bytes.
       function buildAnalystEvidence() {
         const selected = analystElements.includeSelected.checked ? selectedAnalystArtifact() : null;
         if (analystElements.includeSelected.checked && !selected) {
-          throw new TypeError('Load one captured artifact before including its bytes.');
+          throw new TypeError('Select one stored artifact in Sources before including its bytes.');
         }
         if (selected?.sensitive && !analystElements.confirmSensitive.checked) {
           throw new TypeError('Separately confirm inclusion of sensitive selected artifact bytes.');
         }
-        const events = analystElements.includeEvents.checked ? state.events.slice(-500) : [];
-        const artifacts = analystElements.includeArtifacts.checked
-          ? state.artifacts.slice(-500).map(analystArtifactMetadata) : [];
-        const traceEdges = analystElements.includeTrace.checked ? (state.originTrace?.steps ?? []).slice(-1000) : [];
+        const events = analystElements.includeEvents.checked ? state.events : [];
+        const artifacts = analystElements.includeArtifacts.checked ? state.artifacts.map(analystArtifactMetadata) : [];
+        const traceEdges = analystElements.includeTrace.checked ? (state.originTrace?.steps ?? []) : [];
         const signalProfiles = analystElements.includeSignals.checked && state.signalProfile ? [state.signalProfile] : [];
         const vmAnalysis = analystElements.includeVm.checked ? {
           status: state.vmAnalysisStatus,
           request_id: state.vmAnalysisRequestId,
           selection: state.vmAnalysisSelection,
-          findings: state.vmFindings.slice(0, 256),
+          findings: state.vmFindings,
           malformed_findings: state.malformedVmFindings
         } : null;
-        const selectedArtifact = selected ? {...analystArtifactMetadata(selected), content: selected.content} : null;
-        const original = {events: events.length, artifacts: artifacts.length, trace_edges: traceEdges.length,
-          signal_profiles: signalProfiles.length};
-        const evidence = {
+        return {
           events, artifacts, trace_edges: traceEdges, signal_profiles: signalProfiles, vm_analysis: vmAnalysis,
-          selected_artifact: selectedArtifact,
+          selected_artifact: selected ? {artifact_id: selected.artifact_id, sha256: selected.sha256} : null,
           summary: {
             captured_at_ms: Date.now(),
             workspace_generation: state.localAnalyst.generation,
             selected_request_id: state.selectedRequestId,
-            original,
-            included: {...original},
-            dropped: {events: 0, artifacts: 0, trace_edges: 0, signal_profiles: 0}
+            included: {events: events.length, artifacts: artifacts.length, trace_edges: traceEdges.length,
+              signal_profiles: signalProfiles.length, selected_artifact_bytes: selected?.byte_size ?? 0}
           }
         };
-        const byteSize = () => utf8ByteLength(JSON.stringify(evidence));
-        const collections = [['events', evidence.events], ['artifacts', evidence.artifacts],
-          ['trace_edges', evidence.trace_edges], ['signal_profiles', evidence.signal_profiles]];
-        let guard = 0;
-        while (byteSize() > 768 * 1024 && ++guard < 128) {
-          const entry = collections.reduce((largest, candidate) => candidate[1].length > largest[1].length ? candidate : largest,
-            collections[0]);
-          if (!entry[1].length) break;
-          const remove = Math.max(1, Math.ceil(entry[1].length / 8));
-          entry[1].splice(0, remove);
-          evidence.summary.dropped[entry[0]] += remove;
-          evidence.summary.included[entry[0]] = entry[1].length;
-        }
-        if (byteSize() > 768 * 1024) throw new TypeError('The selected evidence exceeds the 768 KiB snapshot limit.');
-        return evidence;
       }
 
       function renderAnalystExecution() {
@@ -6335,15 +6386,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!selected) analystElements.includeSelected.checked = false;
         analystElements.sensitiveRow.hidden = !(selected?.sensitive && analystElements.includeSelected.checked);
         if (analystElements.sensitiveRow.hidden) analystElements.confirmSensitive.checked = false;
-        const snapshotCount = (analystElements.includeEvents.checked ? Math.min(500, state.events.length) : 0) +
-          (analystElements.includeArtifacts.checked ? Math.min(500, state.artifacts.length) : 0) +
-          (analystElements.includeTrace.checked ? Math.min(1000, state.originTrace?.steps?.length ?? 0) : 0) +
+        const snapshotCount = (analystElements.includeEvents.checked ? state.events.length : 0) +
+          (analystElements.includeArtifacts.checked ? state.artifacts.length : 0) +
+          (analystElements.includeTrace.checked ? state.originTrace?.steps?.length ?? 0 : 0) +
           (analystElements.includeSignals.checked && state.signalProfile ? 1 : 0) +
           (analystElements.includeVm.checked && state.vmAnalysisStatus === 'ready' ? state.vmFindings.length : 0);
         analystElements.snapshotBadge.textContent = `${snapshotCount} records`;
         const runnable = file?.kind === 'analyst-script' && !state.analystDraftDirty && !state.localAnalystNeedsReload &&
           !state.localAnalystPendingSave && runnerAvailable && !runnerBusy &&
-          !state.analystRunPending && state.analystTotalRuns < 256;
+          !state.analystRunPending;
         analystElements.run.disabled = !runnable;
         analystElements.cancel.disabled = !state.analystRunPending ||
           (state.analystCancelRunId !== null && state.analystCancelRunId === state.analystActiveRunId);
@@ -6364,12 +6415,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           analystElements.resultMeta.textContent = run ? `run ${run.run_id} is executing in a fresh helper process` : 'Select a completed run.';
           analystElements.resultBadge.dataset.kind = 'offline';
           analystElements.resultBadge.textContent = run ? 'Running' : 'No result';
-          analystElements.result.replaceChildren(textElement('div', 'analyst-empty', run ? 'Waiting for the bounded runner result…' : 'No run selected.'));
+          analystElements.result.replaceChildren(textElement('div', 'analyst-empty', run ? 'Waiting for the runner result…' : 'No run selected.'));
           return;
         }
-        const included = run.evidence_summary ? Object.values(run.evidence_summary.included).reduce((sum, value) => sum + value, 0) : 0;
-        const dropped = run.evidence_summary ? Object.values(run.evidence_summary.dropped).reduce((sum, value) => sum + value, 0) : 0;
-        analystElements.resultMeta.textContent = `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${run.duration_ms} ms · ${included} evidence records${dropped ? ` · ${dropped} dropped by snapshot limit` : ''}`;
+        analystElements.resultMeta.textContent = `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${run.duration_ms} ms · ${analystEvidenceText(run.evidence_summary)}`;
         analystElements.resultBadge.dataset.kind = run.ok ? '' : 'error';
         analystElements.resultBadge.textContent = run.outcome.replaceAll('_', ' ');
         const nodes = [];
@@ -6385,8 +6434,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           nodes.push(logs);
         }
         if (run.result_truncated || run.logs_truncated) nodes.push(textElement('p', 'experiment-privacy',
-          `${run.result_truncated ? 'Result' : 'Logs'} reached the visible retention limit.`));
+          `${run.result_truncated ? 'The result' : 'A log entry'} nests deeper than 256 levels or could not be serialized; those values are marked.`));
         analystElements.result.replaceChildren(...nodes);
+      }
+
+      function analystEvidenceText(summary) {
+        const included = summary?.included ?? {};
+        const records = (included.events ?? 0) + (included.artifacts ?? 0) + (included.trace_edges ?? 0) +
+          (included.signal_profiles ?? 0);
+        return `${records.toLocaleString()} records${included.selected_artifact_bytes
+          ? ` + ${formatByteSize(included.selected_artifact_bytes)} artifact` : ''}`;
       }
 
       function renderAnalystHistory() {
@@ -6406,10 +6463,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           row.tabIndex = run.run_id === state.analystSelectedRunId ? 0 : -1;
           const outcome = textElement('strong', '', run.pending ? 'running' : run.outcome.replaceAll('_', ' '));
           if (!run.pending && !run.ok) outcome.dataset.kind = 'error';
-          const included = run.evidence_summary ? Object.values(run.evidence_summary.included).reduce((sum, value) => sum + value, 0) : 0;
-          const dropped = run.evidence_summary ? Object.values(run.evidence_summary.dropped).reduce((sum, value) => sum + value, 0) : 0;
           row.append(textElement('span', '', run.file_name), outcome,
-            textElement('small', '', `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${included} records${dropped ? ` · ${dropped} dropped` : ''}${run.completed_at_ms ? ` · ${new Date(run.completed_at_ms).toLocaleTimeString()}` : ''}`));
+            textElement('small', '', `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${analystEvidenceText(run.evidence_summary)}${run.completed_at_ms ? ` · ${new Date(run.completed_at_ms).toLocaleTimeString()}` : ''}`));
           row.addEventListener('click', () => { state.analystSelectedRunId = run.run_id; renderAnalystHistory(); });
           row.addEventListener('keydown', event => {
             if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
@@ -7095,16 +7150,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         try {
           if (state.analystDraftDirty || state.localAnalystNeedsReload || state.localAnalystPendingSave) throw new TypeError('Resolve the draft and reload any uncertain save before running this script.');
           if (!analystElements.confirm.checked) throw new TypeError('Confirm access to the selected evidence snapshot before running.');
-          if (state.analystTotalRuns >= 256) throw new TypeError('The 256-run session limit was reached. Clear history to begin a fresh session.');
           const run = {
-            action: 'run_local_analyst_script', protocol_version: 1,
+            action: 'run_local_analyst_script', protocol_version: 2,
             run_id: state.analystNextRunId++, script_id: file.id,
             library_generation: state.localAnalyst.generation, source: file.content,
             variables: analystVariables(), evidence: buildAnalystEvidence(), confirmed: true,
             confirmed_sensitive: Boolean(selectedAnalystArtifact()?.sensitive && analystElements.includeSelected.checked &&
               analystElements.confirmSensitive.checked)
           };
-          state.analystTotalRuns += 1;
           state.analystRunPending = true;
           state.analystActiveRunId = run.run_id;
           const pending = {
@@ -7121,7 +7174,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.analystHistoryEvictions += 1;
           }
           state.analystSelectedRunId = run.run_id;
-          setAnalystNotice('running', `Run ${run.run_id} is executing in a fresh isolated helper process.`);
+          state.analystRunStartedAt = performance.now();
+          analystRunTick(run.run_id);
           renderLocalAnalyst();
           const response = await fetch('/api/local-analyst/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(run)
@@ -7143,6 +7197,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           setAnalystNotice('error', `Analyst run failed: ${error.message}`);
         } finally {
           state.analystRunPending = false;
+          state.analystRunStartedAt = null;
           state.analystActiveRunId = null;
           state.analystCancelRunId = null;
           analystElements.confirm.checked = false;
@@ -7150,6 +7205,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           await refreshLocalAnalyst();
           renderLocalAnalyst();
         }
+      }
+
+      // A run has no deadline, so the notice counts its seconds until it
+      // settles or is cancelled.
+      function analystRunTick(runId) {
+        if (state.analystActiveRunId !== runId || state.analystRunStartedAt === null) return;
+        if (state.analystCancelRunId !== runId) {
+          const seconds = Math.floor((performance.now() - state.analystRunStartedAt) / 1000);
+          setAnalystNotice('running', `Run ${runId} is running in a fresh isolated helper process · ${seconds} s. Cancel stops it.`);
+        }
+        setTimeout(() => analystRunTick(runId), 1000);
       }
 
       // A requested cancellation is state, so a render while the run is
@@ -8243,7 +8309,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const fallback = view?.formatted && view.formatted.engine !== 'oxc' && view.formatNotice && !state.sourceDeobfuscated
           ? `Pretty-printed with the whitespace layout because ${view.formatNotice}.` : '';
         const limit = [sourceLimitText(source, view), fallback].filter(Boolean).join(' ');
-        if (elements.sourceLimitNotice) {elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;}
+        if (elements.sourceLimitNotice) {
+          elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;
+          // The Inspect summary describes rows; Graph and Readable give its space to their own view.
+          elements.sourceLimitNotice.dataset.kind = view?.wasm ? 'inspection' : 'layout';
+        }
         // The status bar names the evidence state; the full provenance is its tooltip.
         const label = sourceViewLabel(source, view);
         elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || !sourcePreviewLoaded(source) ? label
@@ -8890,9 +8960,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!sourceIsCurrent(artifact) || sourcePreviewLoaded(artifact) || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
-        // Sources reads every byte in one verified request (the backend hashes
-        // the whole file for any range). A canvas preview reads its first 2 MiB.
-        const wanted = canvasOwner ? Math.min(artifact.byte_size, 2097152) : artifact.byte_size;
+        // Sources and canvas previews read every byte in one verified request
+        // (the backend hashes the whole file for any range).
+        const wanted = artifact.byte_size;
         artifact.loading = true; artifact.loadError = null; artifact.controller = controller; artifact.loadedBytes = 0;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
         if (!canvasOwner) boundSourcePreviews(artifact);
@@ -8901,18 +8971,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         let painted = 0;
         const progress = bytes => {
           artifact.loadedBytes = bytes;
-          if (canvasOwner || (bytes < wanted && Date.now() - painted < 100) || !current()) return;
+          if (canvasOwner) {
+            if (canvasOwner.progress?.isConnected && current()) canvasOwner.progress.textContent = canvasPreviewProgress(artifact);
+            return;
+          }
+          if ((bytes < wanted && Date.now() - painted < 100) || !current()) return;
           painted = Date.now();
           renderSourceLoading(artifact, {create: false});
         };
-        // Only a gallery thumbnail still gives up on a read, so one stalled
-        // read cannot hold a gallery read credit.
-        const timeout = canvasOwner ? setTimeout(() => {
-          if (artifact.controller !== controller) return;
-          artifact.loading = false; artifact.loadError = 'Artifact loading timed out. Retry explicitly.';
-          delete artifact.controller; controller.abort();
-          if (canvasGalleryVisible()) renderFingerprintActivity();
-        }, 10000) : 0;
         if (!canvasOwner) renderSources();
         let responseCancellation = null;
         try {
@@ -8950,7 +9016,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             try {content = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(buffer); artifact.contentLossy = false;}
             catch {content = new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer); artifact.contentLossy = true;}
             if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
-              throw new Error('The retained bytes do not pass the bounded image data URL validator.');
+              throw new Error('The retained bytes do not pass the image data URL validator.');
             }
             if (canvasOwner) {
               const inspection = inspectCanvasPng(content);
@@ -8969,7 +9035,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             artifact.loadError = `Artifact bytes are unavailable: ${String(error.message).slice(0, 1024)}`;
           }
         } finally {
-          clearTimeout(timeout);
           if (artifact.controller === controller) {artifact.loading = false; delete artifact.controller;}
           if (canvasOwner && responseCancellation) {
             // Expose the failure/retirement now, but do not refund its credit.
@@ -9398,6 +9463,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.eventEtag = response.headers.get('ETag');
           const brokerConnected = body.broker_connected !== false;
           state.captureStopped = body.capture_stopped === true;
+          state.sessionEnded = body.session_ended === true;
           state.captureControlsAvailable = body.capture_controls_available === true;
           const nextSessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';
@@ -10229,7 +10295,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.analystRunPending) return;
         state.analystRuns = [];
         state.analystSelectedRunId = null;
-        state.analystTotalRuns = 0;
         state.analystHistoryEvictions = 0;
         state.analystNextRunId = 1;
         setAnalystNotice(state.localAnalyst.files.length ? 'ready' : 'empty', 'Ephemeral analyst run history was cleared. Saved files were not changed.');

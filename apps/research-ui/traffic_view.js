@@ -264,7 +264,10 @@ function trafficTableTypeLabel(type) {
   return Object.hasOwn(TRAFFIC_TABLE_TYPE_LABELS, type) ? TRAFFIC_TABLE_TYPE_LABELS[type] : 'Other';
 }
 
+// A captured row carries its exact duration as "N.NNN ms" text; the label is
+// compact like a number's, so a long request fits the column.
 function trafficTimeLabel(time) {
+  if (typeof time === 'string') time = trafficTimeValue({time}) ?? time;
   if (typeof time !== 'number' || !Number.isFinite(time)) return time === 'pending' ? '—' : String(time ?? '—');
   if (time < 1) return `${time.toFixed(2)} ms`;
   if (time < 100) return `${time.toFixed(1)} ms`;
@@ -652,8 +655,10 @@ function renderTrafficRows(container, requests, options) {
       size.append(trafficNode('span', 'size-transfer', sizeCell.transfer));
       if (sizeCell.resource) size.append(trafficNode('span', 'size-resource', sizeCell.resource));
       const timeLabel = trafficTimeLabel(request.time);
+      // The tooltip keeps the exact duration.
       const timeCell = cell('time', 'request-time', timeLabel,
-        request.time === 'pending' ? 'No terminal record yet.' : `${timeLabel} from the first to the last record.`);
+        request.time === 'pending' ? 'No terminal record yet.'
+          : `${typeof request.time === 'string' ? request.time : timeLabel} from the first to the last record.`);
       const waterfall = cell('waterfall', 'request-waterfall', undefined, trafficWaterfallTitle(request, scale));
       const geometry = trafficWaterfall(request, scale);
       if (geometry && !geometry.outside) {

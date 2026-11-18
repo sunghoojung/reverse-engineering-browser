@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -106,17 +106,17 @@ enum Action {
         /// One ordered level in place of the individual flags: read-only, ask,
         /// auto or full. read-only, ask and auto omit captured content; ask and
         /// auto list effects (the client decides whether it asks); full adds
-        /// session start and the content reads. See x-reb-mcp.permission.
+        /// session start, with the app's content defaults, and the content
+        /// reads. See x-reb-mcp.permission.
         #[arg(
             long,
             value_parser = ["read-only", "ask", "auto", "full"],
             conflicts_with_all = ["allow_effects", "allow_session_start", "omit_content", "allow_content"]
         )]
         permission: Option<String>,
-        /// With --permission full, let start_live_session name sensitive
-        /// capture options (canvas_images, request_content, response_media,
-        /// js_invocation_digests). Not authorization.
-        #[arg(long, requires = "permission")]
+        /// Accepted and ignored, so an older configuration still starts:
+        /// --permission full now includes sensitive capture options.
+        #[arg(long, hide = true)]
         allow_sensitive_capture: bool,
         /// Require live capture and a running or paused debugger at startup
         /// and before every tool call. Does not authorize capture or effects.
@@ -136,17 +136,20 @@ enum SessionCommand {
     /// Start a visibly labeled live capture session with named options, the
     /// same launcher as `make live`, detached from this command. Prints JSON
     /// with the session directory and endpoint once capture is ready. Start
-    /// only for an authorized target; every switch is off unless named.
+    /// only for an authorized target. A switch left unset takes the Origin
+    /// Trace app's default; =false turns a default off. The session runs
+    /// until it is ended.
     Start {
         /// Open this HTTP or HTTPS page once capture is ready.
         #[arg(long)]
         url: Option<String>,
-        /// Sample Wasm br_table dispatch (at most 16 observations per configuration).
-        #[arg(long)]
-        wasm_dispatch: bool,
-        /// Sample Wasm call_indirect targets.
-        #[arg(long)]
-        wasm_call_indirect: bool,
+        /// Sample Wasm br_table dispatch (at most 16 observations per
+        /// configuration). Default: on when --category-mask holds 512 and 1024.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        wasm_dispatch: Option<bool>,
+        /// Sample Wasm call_indirect targets. Default: as --wasm-dispatch.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        wasm_call_indirect: Option<bool>,
         /// Keep at most this many samples of each function on each Wasm stream (1..16).
         #[arg(long)]
         wasm_samples_per_function: Option<u32>,
@@ -168,26 +171,31 @@ enum SessionCommand {
         /// Absolute path of a JavaScript dispatch-site file.
         #[arg(long, value_name = "FILE")]
         js_dispatch_sites: Option<PathBuf>,
-        /// Ignore page debugger statements.
-        #[arg(long)]
-        quiet: bool,
+        /// Ignore page debugger statements. Default: on.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        quiet: Option<bool>,
         /// Native capture category mask, 1..4095 (default 4095).
         #[arg(long)]
         category_mask: Option<u32>,
-        /// Capture lifetime in seconds, 60..3600 (default 3600).
+        /// Stop capture after this many seconds, at least 60. Unset, the
+        /// session runs until it is ended.
         #[arg(long)]
         duration_seconds: Option<u32>,
         /// Route the capture browser's traffic to loopback only.
         #[arg(long)]
         localhost_only: bool,
         /// Store Canvas images, which can contain sensitive page content.
-        #[arg(long, requires = "confirm_sensitive_capture")]
-        canvas_images: bool,
+        /// Default: on with --confirm-sensitive-capture.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
+            requires_if("true", "confirm_sensitive_capture"))]
+        canvas_images: Option<bool>,
         /// Retain request paths, queries and bounded bodies, request and response
         /// headers including Cookie, Set-Cookie and Authorization, each request's
-        /// cookies, and response bodies (sensitive).
-        #[arg(long, requires = "confirm_sensitive_capture")]
-        request_content: bool,
+        /// cookies, and response bodies (sensitive). Default: on with
+        /// --confirm-sensitive-capture.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
+            requires_if("true", "confirm_sensitive_capture"))]
+        request_content: Option<bool>,
         /// MiB of unique request bodies and targets to retain, 1..4096 (default 256).
         #[arg(long, requires = "request_content")]
         request_content_budget_mib: Option<u32>,
@@ -197,13 +205,26 @@ enum SessionCommand {
         /// Also retain images, audio, video and fonts that page elements load.
         #[arg(long, requires = "request_content")]
         response_media: bool,
-        /// Record the JavaScript and Wasm stack that started each renderer request.
-        #[arg(long)]
-        request_stacks: bool,
+        /// Record the JavaScript and Wasm stack that started each renderer
+        /// request. Default: on when --category-mask holds 256 and 1024, and
+        /// dropped by a Brave without the flag; naming it is strict.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        request_stacks: Option<bool>,
         /// Permit document-start Console scripts in this capture browser.
-        /// Arming one is still a separate confirmed Console action.
+        /// Arming one is still a separate confirmed Console action. Default: on.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        document_start: Option<bool>,
+        /// Record browser-internal pages (chrome:, devtools: and WebUI), which
+        /// are otherwise excluded and counted.
         #[arg(long)]
-        document_start: bool,
+        browser_internal: bool,
+        /// Record extension worker traffic, otherwise excluded and counted.
+        #[arg(long)]
+        extension_traffic: bool,
+        /// Start signed out, in a new, empty profile for this session only,
+        /// instead of the agent sessions' research profile.
+        #[arg(long)]
+        fresh_profile: bool,
         /// Absolute path of a JavaScript invocation site file to arm.
         #[arg(
             long,
@@ -215,10 +236,14 @@ enum SessionCommand {
         #[arg(long)]
         js_invocation_saved_sites: bool,
         /// Hash settled values of armed calls (sensitive). Needs sites.
-        #[arg(long, requires = "confirm_sensitive_capture")]
-        js_invocation_digests: bool,
-        /// Confirm the researcher authorized the sensitive capture named here:
-        /// Canvas images, request content or invocation value digests.
+        /// Default: on with sites, request content and
+        /// --confirm-sensitive-capture.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
+            requires_if("true", "confirm_sensitive_capture"))]
+        js_invocation_digests: Option<bool>,
+        /// Confirm the researcher authorized sensitive capture for this
+        /// target: Canvas images, request content and invocation value
+        /// digests, which then default on as in the app.
         #[arg(long)]
         confirm_sensitive_capture: bool,
         /// Also publish the canonical endpoint used by default MCP configs.
@@ -238,6 +263,8 @@ enum SessionCommand {
 }
 #[path = "reb_api/mcp.rs"]
 mod mcp;
+#[path = "reb_api/pretty.rs"]
+mod pretty;
 fn specification() -> Result<Value, serde_json::Error> {
     serde_json::from_str(include_str!("../../../../protocol/openapi.json"))
 }
@@ -805,10 +832,12 @@ fn wait_allowance(definition: &Value, params: &BTreeMap<String, String>) -> f64 
 /// A backend that predates filtered reads ignores the filter parameters and
 /// returns the unfiltered tail. Operations that echo their filters declare the
 /// echo key; its absence after a filtered call means the filters were ignored.
+/// A spooled body is read from `spool` and left at its start.
 fn ignored_filters(
     definition: &Value,
     params: &BTreeMap<String, String>,
     completed: &CompletedExchange,
+    spool: Option<&mut std::fs::File>,
 ) -> Option<String> {
     let key = definition["x-reb-filter-echo"].as_str()?;
     let filtered = params
@@ -817,8 +846,15 @@ fn ignored_filters(
     if !filtered || completed.status != 200 || completed.unreadable {
         return None;
     }
-    let value: Value = serde_json::from_slice(&completed.bytes).ok()?;
-    if value.get(key).is_some() {
+    let echoed = match spool.filter(|_| completed.spooled) {
+        Some(file) => {
+            let echoed = has_key(std::io::BufReader::new(&mut *file), key);
+            file.seek(SeekFrom::Start(0)).ok()?;
+            echoed
+        }
+        None => has_key(completed.bytes.as_slice(), key),
+    };
+    if echoed? {
         return None;
     }
     Some(format!(
@@ -827,6 +863,53 @@ fn ignored_filters(
             .as_str()
             .unwrap_or("this operation")
     ))
+}
+/// Whether a JSON document is an object with top-level `key`, read as a
+/// stream: a spooled body can be larger than memory. `None` when it is not
+/// JSON.
+fn has_key(body: impl Read, key: &str) -> Option<bool> {
+    use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
+    struct Keys<'a>(&'a str);
+    impl<'de> Visitor<'de> for Keys<'_> {
+        type Value = bool;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a JSON document")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let mut found = false;
+            while let Some(name) = map.next_key::<String>()? {
+                map.next_value::<IgnoredAny>()?;
+                found |= name == self.0;
+            }
+            Ok(found)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
+            while seq.next_element::<IgnoredAny>()?.is_some() {}
+            Ok(false)
+        }
+        fn visit_bool<E>(self, _: bool) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_i64<E>(self, _: i64) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_u64<E>(self, _: u64) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_f64<E>(self, _: f64) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_str<E>(self, _: &str) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_unit<E>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+    }
+    let mut deserializer = serde_json::Deserializer::from_reader(body);
+    let found = serde::Deserializer::deserialize_any(&mut deserializer, Keys(key)).ok()?;
+    deserializer.end().ok()?;
+    Some(found)
 }
 fn check_timeout(timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
     if !timeout.is_finite() || timeout <= 0.0 || timeout > 3600.0 {
@@ -837,10 +920,18 @@ fn check_timeout(timeout: f64) -> Result<(), Box<dyn std::error::Error>> {
 struct CompletedExchange {
     status: u16,
     headers: BTreeMap<String, String>,
+    /// The body, unless it was spooled.
     bytes: Vec<u8>,
+    /// The success body was streamed whole to the request's spool, which is
+    /// left at its start.
+    spooled: bool,
     /// The body could not be read. `bytes` is a fixed diagnostic, not a partial response.
     unreadable: bool,
 }
+/// The most of a body read into memory: an error body, or a success body
+/// the MCP projection parses whole to omit content and summarize. A CLI
+/// success body is spooled instead, with no limit.
+const MEMORY_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 struct ExchangeRequest<'a> {
     method: &'a str,
     path: &'a str,
@@ -852,6 +943,9 @@ struct ExchangeRequest<'a> {
     json_errors: bool,
     missing_body: &'a str,
     expected_instance: Option<&'a str>,
+    /// Where a success body streams. Evidence package exports and
+    /// comparisons are validated in memory within their own byte limits.
+    spool: Option<&'a mut std::fs::File>,
 }
 async fn exchange(
     request: ExchangeRequest<'_>,
@@ -867,6 +961,7 @@ async fn exchange(
         json_errors,
         missing_body,
         expected_instance,
+        spool,
     } = request;
     let mut url = root_url(base)?;
     let mut route = path.to_owned();
@@ -978,16 +1073,40 @@ async fn exchange(
             status: 304,
             headers: response_headers,
             bytes: Vec::new(),
+            spooled: false,
+            unreadable: false,
+        });
+    }
+    let compare = definition["operationId"] == "compare_evidence_packages";
+    if let Some(file) = spool.filter(|_| status.is_success() && !export_package && !compare) {
+        let mut writer = std::io::BufWriter::new(&mut *file);
+        while let Some(chunk) = response.chunk().await? {
+            writer.write_all(&chunk)?;
+        }
+        writer.flush()?;
+        drop(writer);
+        file.seek(SeekFrom::Start(0))?;
+        if !binary {
+            serde_json::from_reader::<_, serde::de::IgnoredAny>(std::io::BufReader::new(
+                &mut *file,
+            ))?;
+            file.seek(SeekFrom::Start(0))?;
+        }
+        return Ok(CompletedExchange {
+            status: status.as_u16(),
+            headers: response_headers,
+            bytes: Vec::new(),
+            spooled: true,
             unreadable: false,
         });
     }
     let mut bytes = Vec::new();
     let response_limit = if export_package && status.is_success() {
         origin_trace_backend::evidence_package::MAX_BYTES
-    } else if definition["operationId"] == "compare_evidence_packages" && status.is_success() {
+    } else if compare && status.is_success() {
         origin_trace_backend::evidence_comparison::MAX_RESULT_BYTES
     } else {
-        64 * 1024 * 1024
+        MEMORY_RESPONSE_BYTES
     };
     loop {
         let chunk = match response.chunk().await {
@@ -997,6 +1116,7 @@ async fn exchange(
                     status: status.as_u16(),
                     headers: response_headers,
                     bytes: br#"{"error":"API error response could not be read"}"#.to_vec(),
+                    spooled: false,
                     unreadable: true,
                 });
             }
@@ -1011,11 +1131,16 @@ async fn exchange(
                     status: status.as_u16(),
                     headers: response_headers,
                     bytes: br#"{"error":"API response exceeds 64 MiB"}"#.to_vec(),
+                    spooled: false,
                     unreadable: true,
                 });
             }
             return Err(if export_package {
                 "Evidence package response exceeds its byte limit"
+            } else if compare {
+                "Evidence comparison response exceeds its byte limit"
+            } else if status.is_success() {
+                "API response exceeds the 64 MiB a result is read into memory to omit content and summarize. Narrow the read with the operation's view, filter, limit or paging parameters"
             } else {
                 "API response exceeds 64 MiB"
             }
@@ -1037,6 +1162,7 @@ async fn exchange(
         status: status.as_u16(),
         headers: response_headers,
         bytes,
+        spooled: false,
         unreadable: false,
     })
 }
@@ -1068,13 +1194,13 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             omit_content,
             allow_content,
             permission,
-            allow_sensitive_capture,
+            allow_sensitive_capture: _,
             require_live,
             timeout,
         } => {
             check_timeout(timeout)?;
             let admission = match permission.as_deref() {
-                Some(level) => mcp::Admission::for_level(&spec, level, allow_sensitive_capture)?,
+                Some(level) => mcp::Admission::for_level(&spec, level)?,
                 None => mcp::Admission::flags(
                     allow_effects,
                     allow_session_start,
@@ -1207,6 +1333,19 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 None
             };
             let base = endpoint_text(base_url, endpoint_file)?;
+            // A success body streams whole into its destination directory,
+            // or for stdout into an unnamed private file, and is published
+            // only once it is complete and, unless binary, valid JSON.
+            let mut destination = match output.as_deref() {
+                Some(path) if path != "-" => {
+                    Some(origin_trace_backend::NoclobberFile::new(Path::new(path))?)
+                }
+                _ => None,
+            };
+            let mut unnamed = match destination {
+                Some(_) => None,
+                None => Some(tempfile::tempfile()?),
+            };
             let completed = exchange(ExchangeRequest {
                 method,
                 path,
@@ -1218,6 +1357,10 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 json_errors,
                 missing_body: "Operation requires --body-file PATH or --body-file -",
                 expected_instance: None,
+                spool: destination
+                    .as_mut()
+                    .map(origin_trace_backend::NoclobberFile::file)
+                    .or(unnamed.as_mut()),
             })
             .await?;
             if show_headers {
@@ -1254,23 +1397,36 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
                 }
                 return Ok(1);
             }
-            if let Some(error) = ignored_filters(definition, &values, &completed) {
+            let spool = destination
+                .as_mut()
+                .map(origin_trace_backend::NoclobberFile::file)
+                .or(unnamed.as_mut());
+            if let Some(error) = ignored_filters(definition, &values, &completed, spool) {
                 eprintln!("{error}");
                 return Ok(1);
             }
-            if let Some(path) = output {
-                if path == "-" {
-                    std::io::stdout().write_all(&completed.bytes)?;
-                } else {
-                    origin_trace_backend::write_private_noclobber(
-                        std::path::Path::new(&path),
-                        &completed.bytes,
-                    )?;
+            let mut stdout = std::io::stdout().lock();
+            if let Some(mut destination) = destination {
+                if !completed.spooled {
+                    destination.file().write_all(&completed.bytes)?;
                 }
+                destination.persist()?;
+            } else if let Some(file) = unnamed.as_mut().filter(|_| completed.spooled) {
+                if output.is_some() {
+                    std::io::copy(file, &mut stdout)?;
+                } else {
+                    let mut printed = std::io::BufWriter::new(&mut stdout);
+                    pretty::write(std::io::BufReader::new(file), &mut printed)?;
+                    writeln!(printed)?;
+                    printed.flush()?;
+                }
+            } else if output.is_some() {
+                stdout.write_all(&completed.bytes)?;
             } else {
-                let value: Value = serde_json::from_slice(&completed.bytes)?;
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                pretty::write(completed.bytes.as_slice(), &mut stdout)?;
+                writeln!(stdout)?;
             }
+            stdout.flush()?;
             Ok(0)
         }
     }
@@ -1301,6 +1457,9 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         response_media,
         request_stacks,
         document_start,
+        browser_internal,
+        extension_traffic,
+        fresh_profile,
         js_invocation_sites,
         js_invocation_saved_sites,
         js_invocation_digests,
@@ -1310,10 +1469,8 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         sessions_root,
         timeout_seconds,
     } = command;
-    let options = origin_trace_backend::session_launch::StartOptions {
+    let mut options = origin_trace_backend::session_launch::StartOptions {
         url,
-        wasm_dispatch,
-        wasm_call_indirect,
         wasm_samples_per_function,
         wasm_samples_per_indirect_site,
         wasm_function_allow,
@@ -1322,26 +1479,34 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         wasm_budget_malformed: false,
         guest_adapter,
         js_dispatch_sites,
-        quiet,
         category_mask,
         duration_seconds,
         localhost_only,
-        canvas_images,
-        request_content,
         request_content_budget_mib,
         response_body_budget_mib,
         response_media,
-        request_stacks,
-        document_start,
+        browser_internal,
+        extension_traffic,
+        fresh_profile,
         js_invocation_sites,
         js_invocation_saved_sites,
-        js_invocation_digests,
         confirm_sensitive_capture,
         publish_canonical_endpoint,
         brave_binary,
         timeout_seconds,
         sessions_root,
+        ..Default::default()
     };
+    options.resolve(origin_trace_backend::session_launch::Switches {
+        wasm_dispatch,
+        wasm_call_indirect,
+        quiet,
+        canvas_images,
+        request_content,
+        request_stacks,
+        document_start,
+        js_invocation_digests,
+    });
     match origin_trace_backend::session_launch::launch(&options).await {
         Ok(started) => {
             println!(
@@ -1429,14 +1594,40 @@ mod tests {
             status: 200,
             headers: BTreeMap::new(),
             bytes: body.as_bytes().to_vec(),
+            spooled: false,
             unreadable: false,
         };
         let filtered = params(&[("type", "gap"), ("limit", "5")]);
-        let error = ignored_filters(events, &filtered, &completed(r#"{"events":[]}"#)).unwrap();
-        assert!(error.contains("ignored the filters"), "{error}");
-        assert!(ignored_filters(events, &filtered, &completed(r#"{"query":{}}"#)).is_none());
-        assert!(ignored_filters(events, &params(&[("limit", "5")]), &completed("{}")).is_none());
-        assert!(ignored_filters(wait, &filtered, &completed("{}")).is_none());
+        for unfiltered in [r#"{"events":[]}"#, "[]", "1"] {
+            let error = ignored_filters(events, &filtered, &completed(unfiltered), None).unwrap();
+            assert!(error.contains("ignored the filters"), "{error}");
+        }
+        assert!(ignored_filters(events, &filtered, &completed(r#"{"query":{}}"#), None).is_none());
+        assert!(ignored_filters(events, &filtered, &completed("not json"), None).is_none());
+        assert!(
+            ignored_filters(events, &params(&[("limit", "5")]), &completed("{}"), None).is_none()
+        );
+        assert!(ignored_filters(wait, &filtered, &completed("{}"), None).is_none());
+        // A spooled body is read from its file, which is left at its start.
+        for (body, ignored) in [
+            (r#"{"events":[],"query":{"type":"gap"}}"#, false),
+            (r#"{"events":[{"query":1}]}"#, true),
+        ] {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(body.as_bytes()).unwrap();
+            file.seek(SeekFrom::Start(0)).unwrap();
+            let spooled = CompletedExchange {
+                spooled: true,
+                ..completed("")
+            };
+            assert_eq!(
+                ignored_filters(events, &filtered, &spooled, Some(&mut file)).is_some(),
+                ignored
+            );
+            let mut read = String::new();
+            file.read_to_string(&mut read).unwrap();
+            assert_eq!(read, body);
+        }
     }
 
     #[test]

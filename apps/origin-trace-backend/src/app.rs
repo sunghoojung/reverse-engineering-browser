@@ -141,7 +141,9 @@ enum PackageOperation {
 }
 struct VmDocumentsCache {
     signature: String,
-    analysis: Value,
+    /// Shared, never copied per read: a long session's analysis lists every
+    /// artifact, so its results stay on disk and a full read streams them.
+    analysis: Arc<vm::Analysis>,
     opcode_workspace: Result<Value>,
     host_links: Result<Value>,
 }
@@ -226,6 +228,12 @@ const INDEX_INTERVAL: Duration = Duration::from_secs(1);
 /// How long an event poll folds appended records into the gap totals; the
 /// background fold keeps the index within a second of the store.
 const EVENT_TOTALS_FOLD: Duration = Duration::from_millis(100);
+/// Script-text digests kept by content SHA-256 before the cache starts over:
+/// a few MiB, so listing saved sites reads each script version once.
+const TEXT_DIGESTS: usize = 65_536;
+/// How long a signal profile lookup may spend bringing its index up to the
+/// signal store before it answers that indexing is still under way.
+const SIGNAL_PROFILE_FOLD: Duration = Duration::from_secs(2);
 
 impl App {
     pub async fn stop(&self) {
@@ -298,6 +306,7 @@ impl App {
             indexes: Arc::new(std::sync::Mutex::new(crate::event_index::Indexes::new(
                 &options.store,
                 &options.trace_store,
+                &options.signal_store,
             ))),
             initiator_frames: Arc::default(),
             observation_sites: Arc::default(),
@@ -322,7 +331,9 @@ impl App {
         app.native_console.arm_live_bridge().await;
         // Keeps the disk indexes up with their stores, so a lookup in a long
         // session reads an index instead of building one, and opening stored
-        // evidence indexes it once in the background.
+        // evidence indexes it once in the background. The gap tally is kept
+        // up the same way: its first scan reads the whole store, so a Headers,
+        // Cookies or provenance read finds it done.
         let weak = Arc::downgrade(&app);
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(INDEX_INTERVAL);
@@ -332,14 +343,16 @@ impl App {
                     break;
                 };
                 let (root, indexes) = (app.options.artifacts.clone(), app.indexes.clone());
+                let (store, gaps) = (app.options.store.clone(), app.gaps.clone());
                 drop(app);
                 let _ = tokio::task::spawn_blocking(move || {
                     let deadline = std::time::Instant::now() + INDEX_INTERVAL;
                     let _ = crate::artifact_lookup::catch_up(&root, deadline);
-                    indexes
+                    let _ = indexes
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .catch_up(deadline)
+                        .catch_up(deadline);
+                    let _ = gaps.drops(&store, "");
                 })
                 .await;
             }
@@ -426,7 +439,7 @@ impl App {
         let _cancel = CancelOnDrop(cancelled.clone());
         self.blocking(move || work(&cancelled)).await
     }
-    async fn vm_documents(&self) -> Result<(Value, Result<Value>)> {
+    async fn vm_documents(&self) -> Result<(Arc<vm::Analysis>, Result<Value>)> {
         let signature = format!(
             "{}:{}:{}",
             analysis_input_signature(&self.options.artifacts.join("manifest.jsonl")),
@@ -446,7 +459,7 @@ impl App {
                 .await?;
             *cache = Some(VmDocumentsCache {
                 signature,
-                analysis: documents.analysis,
+                analysis: Arc::new(documents.analysis),
                 opcode_workspace: documents.opcode_workspace,
                 host_links: documents.host_links,
             });
@@ -792,11 +805,11 @@ impl App {
                 let query = native_debugger_query(&q)?;
                 let console = self.native_console.state().await;
                 let watch = self.native_console.watch();
-                let store = self.options.store.clone();
+                let (store, indexes) = (self.options.store.clone(), self.indexes.clone());
                 // The peer exchange blocks, like the live Wasm read.
                 let pause = self.native_debugger_pause.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::native_debugger::state(&store, &console, watch, &query, &pause)
+                    crate::native_debugger::state(&store, &indexes, &console, watch, &query, &pause)
                 })
                 .await
                 .map_err(|_| Error::new(500, "Native debugger state read failed"))??
@@ -1157,19 +1170,20 @@ impl App {
                     ));
                 };
                 let value = q.number(name, None, 64, true)?;
-                let (store, artifacts, requests) = (
+                let (store, artifacts, requests, events) = (
                     self.options.store.clone(),
                     self.options.artifacts.clone(),
                     self.requests.clone(),
+                    self.indexes.clone(),
                 );
                 let names = self.names_reader();
                 self.blocking(move || {
                     let mut document = match name {
                         "navigation_sequence" => crate::request_stack::navigation_document(
-                            &store, &artifacts, &requests, session, process, value,
+                            &store, &artifacts, &requests, &events, session, process, value,
                         ),
                         "observation_sequence" => crate::request_stack::observation_document(
-                            &store, &artifacts, &requests, session, process, value,
+                            &store, &artifacts, &requests, &events, session, process, value,
                         ),
                         _ => crate::request_stack::document(
                             &store, &artifacts, &requests, session, process, value,
@@ -1607,11 +1621,9 @@ impl App {
                 if name.len() > 4096 {
                     return Err(Error::bad("name is longer than 4096 bytes"));
                 }
-                // Only the records provenance reads, so its window spans more of
-                // the session than every network record would.
+                // The session's script calls and cookie lists, wherever they sit.
                 let filter = event_query::event_filter(&Query::new(&format!(
-                    "session_id={session}&category=network&type=cookie_list,request_started,\
-                     request_redirected,script_cookie,script_identity"
+                    "session_id={session}&category=network&type=cookie_list,script_cookie"
                 )))?;
                 let options = self.options.clone();
                 let progress = self.requests.lock().await.progress_marker();
@@ -1629,66 +1641,76 @@ impl App {
                 let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
-                    // A cookie spans the session, so no one request's bytes bound it.
-                    let mut detail =
-                        event_query::read_request_records(&options.store, None, 5000, &filter)?;
-                    // Its script calls are read wherever they sit: the index
-                    // locates every script_cookie record, and those older than
-                    // the window join it when they concern this name.
-                    let (located, exhaustive) =
-                        requests.blocking_lock().script_cookies(&session)?;
-                    let older: Vec<_> = located
-                        .into_iter()
-                        .filter(|range| range.end <= detail.coverage.scan_start())
-                        .collect();
-                    let (earlier, unreadable) =
-                        event_query::read_records_at(&options.store, &older, |event| {
-                            filter.matches(event)
-                                && request_cookies::script_record_used(event, &name)
+                    // A cookie spans the session, so no one request's bytes
+                    // bound it: the index locates every script call and
+                    // every list of an indexed request, read in store order.
+                    let (mut ranges, caught_up, (indexed_to, store_end)) = {
+                        let mut index = requests.blocking_lock();
+                        let (scripts, scripts_caught_up) = index.script_cookies(&session)?;
+                        let (lists, lists_caught_up) = index.cookie_lists(&session)?;
+                        let mut ranges = scripts;
+                        ranges.extend(lists);
+                        (ranges, scripts_caught_up && lists_caught_up, index.extent())
+                    };
+                    ranges.sort_by_key(|range| range.first);
+                    let lookup = |ids: &[&str]| {
+                        crate::artifact_lookup::find_many(
+                            &options.artifacts,
+                            ids,
+                            std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE,
+                        )
+                        .map_err(|_| ())
+                    };
+                    let mut fold = request_cookies::Provenance::new(
+                        &options.artifacts,
+                        &session,
+                        &name,
+                        credentials,
+                        &lookup,
+                    );
+                    let unreadable =
+                        event_query::visit_records_at(&options.store, &ranges, |event| {
+                            if filter.matches(&event) {
+                                fold.record(&event);
+                            }
                         })?;
-                    let script_coverage = json!({
-                        "complete": exhaustive && unreadable == 0,
-                        "located_outside_window": older.len(),
-                        "unreadable": unreadable,
-                    });
-                    detail.records.splice(0..0, earlier);
-                    // Script writes resolve through this session's stacks and sources.
-                    let artifacts =
-                        evidence::artifacts_named(&options.artifacts, &detail.records, |a| {
-                            a["session_id"].as_str() == Some(session.as_str())
-                                && matches!(
-                                    a["kind"].as_str(),
-                                    Some("stack" | "javascript" | "wasm")
-                                )
-                        })?;
-                    let complete = detail.coverage.complete();
                     let identities = |process: u64| {
                         requests
                             .blocking_lock()
                             .identities(&session, process as u32)
-                            .map_or((HashMap::new(), complete), |(indexed, exhaustive)| {
+                            .map_or((HashMap::new(), false), |(indexed, exhaustive)| {
                                 (
                                     crate::request_stack::decode_indexed_identities(
                                         process as u32,
                                         &indexed,
                                     ),
-                                    exhaustive || complete,
+                                    exhaustive,
                                 )
                             })
                     };
+                    // Script writes resolve through this session's stacks and sources.
+                    let select = |wanted: &std::collections::BTreeSet<String>| {
+                        evidence::select_artifacts(&options.artifacts, |a| {
+                            a["session_id"].as_str() == Some(session.as_str())
+                                && matches!(
+                                    a["kind"].as_str(),
+                                    Some("stack" | "javascript" | "wasm")
+                                )
+                                && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
+                        })
+                        .ok()
+                    };
                     let drops = gaps.drops(&options.store, &session)?;
-                    let mut document = request_cookies::provenance(
-                        &detail.records,
-                        &drops,
-                        &artifacts,
-                        &options.artifacts,
-                        &session,
-                        &name,
-                        &identities,
-                        credentials,
-                    );
-                    document["coverage"] = detail.coverage.to_json();
-                    document["script_coverage"] = script_coverage;
+                    let mut document = fold.finish(&drops, &identities, &select);
+                    document["coverage"] = event_query::Coverage::located(
+                        indexed_to, store_end, caught_up, unreadable,
+                    )
+                    .to_json();
+                    document["script_coverage"] = json!({
+                        "complete": caught_up && unreadable == 0,
+                        "located_outside_window": 0,
+                        "unreadable": unreadable,
+                    });
                     Ok(document)
                 })
                 .await?
@@ -1708,27 +1730,27 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                let path = self.options.signal_store.clone();
+                let indexes = self.indexes.clone();
                 self.blocking(move || {
-                    let profiles = evidence::recent(&path, 10000, 16384, "request signal profile")?;
-                    for profile in &profiles {
+                    let key = crate::event_index::ProfileKey {
+                        session: &session,
+                        request: &request,
+                        process,
+                        sequence: &sequence,
+                    };
+                    let profile = indexes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .signal_profile(&key, std::time::Instant::now() + SIGNAL_PROFILE_FOLD)?;
+                    if let Some(profile) = &profile {
                         validation::schema("SignalProfile", profile, 500)?;
                     }
-                    profiles
-                        .into_iter()
-                        .rev()
-                        .find(|p| {
-                            p["session_id"] == session
-                                && p["request_id"] == request
-                                && p["root_event"]["process_id"] == process
-                                && p["root_event"]["sequence_number"] == sequence
-                        })
-                        .ok_or_else(|| {
-                            Error::new(
-                                404,
-                                "No request signal profile matches the selected request",
-                            )
-                        })
+                    profile.ok_or_else(|| {
+                        Error::new(
+                            404,
+                            "No request signal profile matches the selected request",
+                        )
+                    })
                 })
                 .await?
             }
@@ -1756,25 +1778,63 @@ impl App {
                 } else {
                     0
                 };
-                let (mut value, _) = self.vm_documents().await?;
-                if selected {
-                    crate::vm_request_links::select(
-                        &mut value,
-                        request.unwrap(),
-                        session.unwrap(),
-                        process_id,
-                        sequence.unwrap(),
-                    );
-                }
-                etag = Some(format!(
-                    "\"{}-{}-{}-{}-{}\"",
-                    value["document_digest"].as_str().unwrap(),
+                let findings = match q.one("view")? {
+                    None => false,
+                    Some("findings") => true,
+                    Some(_) => return Err(Error::bad("view must be findings")),
+                };
+                let (analysis, _) = self.vm_documents().await?;
+                let etag = format!(
+                    "\"{}-{}-{}-{}-{}{}\"",
+                    analysis.digest(),
                     request.unwrap_or("all"),
                     session.unwrap_or("all"),
                     process.unwrap_or("all"),
-                    sequence.unwrap_or("all")
-                ));
-                value
+                    sequence.unwrap_or("all"),
+                    if findings { "-findings" } else { "" }
+                );
+                if matches_etag(headers, Some(&etag)) {
+                    return Ok(not_modified(&etag));
+                }
+                let selection = selected
+                    .then(|| [request, session, sequence].map(|value| value.unwrap().to_owned()));
+                // The whole document and its findings view are streamed: every
+                // failure is listed, so the view can be as long as the document.
+                let mut response = if let Some([request, session, sequence]) = selection {
+                    let bytes = self
+                        .blocking(move || {
+                            let mut document =
+                                analysis.select(&request, &session, process_id, &sequence)?;
+                            if findings {
+                                vm::document::findings_of(&mut document);
+                            }
+                            Ok(serde_json::to_vec(&document)?)
+                        })
+                        .await?;
+                    bytes_response(bytes, "application/json")
+                } else {
+                    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                    let length = if findings {
+                        analysis.findings_length()?
+                    } else {
+                        analysis.byte_length()
+                    };
+                    tokio::task::spawn_blocking(move || {
+                        vm::document::stream(analysis, findings, sender)
+                    });
+                    let mut response = bytes_response(
+                        Body::from_stream(request_har::Chunks(receiver)),
+                        "application/json",
+                    );
+                    response
+                        .headers_mut()
+                        .insert("content-length", HeaderValue::from(length));
+                    response
+                };
+                response
+                    .headers_mut()
+                    .insert("etag", HeaderValue::from_str(&etag).unwrap());
+                return Ok(response);
             }
             "/api/flow-graph" => {
                 q.only(&["session_id"], &[])?;
@@ -2300,40 +2360,42 @@ impl App {
         let root = self.options.artifacts.clone();
         let digests = self.text_digests.clone();
         let listed = saved.clone();
+        let _lookup = self.artifact_lookup.lock().await;
         let retained = self
             .blocking(move || {
-                // A store without a manifest has retained nothing yet.
-                let artifacts = if root.join("manifest.jsonl").exists() {
-                    evidence::artifacts(&root, 5000)?
-                } else {
-                    Vec::new()
-                };
-                // At most four same-URL artifacts are read per listing; their
-                // digests are cached by content SHA-256, which never changes.
-                let mut reads = 0;
-                Ok(listed
+                let deadline = std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE;
+                listed
                     .iter()
                     .map(|saved| {
-                        js_invocation_sites::retained(saved, &artifacts, |artifact| {
-                            let sha = artifact["sha256"].as_str()?.to_owned();
-                            if let Some(known) = digests.lock().ok()?.get(&sha) {
-                                return Some(known.clone());
-                            }
-                            if reads >= 4 {
-                                return None;
-                            }
-                            reads += 1;
-                            let raw = evidence::read(&root, artifact).ok()?;
-                            let digest = js_invocation_sites::text_digest(&raw)?;
-                            let mut cache = digests.lock().ok()?;
-                            if cache.len() >= 256 {
-                                cache.clear();
-                            }
-                            cache.insert(sha, digest.clone());
-                            Some(digest)
-                        })
+                        // Every retained version of the script, from the whole
+                        // manifest: its exact bytes, or its URL.
+                        let artifacts = crate::artifact_lookup::scripts(
+                            &root,
+                            &saved.site.artifact_sha256,
+                            saved.source_url.as_deref(),
+                            deadline,
+                        )?;
+                        Ok(js_invocation_sites::retained(
+                            saved,
+                            &artifacts,
+                            |artifact| {
+                                // Digests are cached by content SHA-256, which never changes.
+                                let sha = artifact["sha256"].as_str()?.to_owned();
+                                if let Some(known) = digests.lock().ok()?.get(&sha) {
+                                    return Some(known.clone());
+                                }
+                                let raw = evidence::read(&root, artifact).ok()?;
+                                let digest = js_invocation_sites::text_digest(&raw)?;
+                                let mut cache = digests.lock().ok()?;
+                                if cache.len() >= TEXT_DIGESTS {
+                                    cache.clear();
+                                }
+                                cache.insert(sha, digest.clone());
+                                Some(digest)
+                            },
+                        ))
                     })
-                    .collect::<Vec<_>>())
+                    .collect::<Result<Vec<_>>>()
             })
             .await?;
         Ok(js_invocation_sites::set_document(
@@ -2456,7 +2518,31 @@ impl App {
                 "run_local_analyst_script" => {
                     let store = self.workspace.clone();
                     let workspace = self.blocking(move || store.load()).await?;
-                    self.analyst.run(value, &workspace).await
+                    let run = crate::analyst::Run::new(value, &workspace)?;
+                    // The script reads the stored, SHA-256 verified bytes of
+                    // the artifact the page selected, whatever their size.
+                    let selected = match run.selected() {
+                        Some(id) => {
+                            let artifact = self.find_artifact(id).await?;
+                            run.admit(&artifact)?;
+                            let root = self.options.artifacts.clone();
+                            let record = artifact.clone();
+                            let bytes = self
+                                .cancellable(move |cancelled| {
+                                    evidence::verified_range_cancellable(
+                                        &root,
+                                        &record,
+                                        0,
+                                        usize::MAX,
+                                        cancelled,
+                                    )
+                                })
+                                .await?;
+                            Some((artifact, bytes))
+                        }
+                        None => None,
+                    };
+                    self.analyst.run(run, selected).await
                 }
                 "set_wasm_function_name" => {
                     let store = self.workspace.clone();
@@ -2713,7 +2799,11 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             } else {
                 None
             };
-            let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(body, maximum))
+            // The deadline only stops a stalled client from holding admission.
+            // It grows by a second per declared 16 MiB, so a large body on a
+            // busy machine is never refused for its size.
+            let deadline = Duration::from_secs(5 + (length >> 24) as u64);
+            let bytes = tokio::time::timeout(deadline, to_bytes(body, maximum))
                 .await
                 .map_err(|_| {
                     Error::new(408, "The request body deadline was exceeded")

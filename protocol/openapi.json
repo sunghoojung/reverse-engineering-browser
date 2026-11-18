@@ -39,7 +39,7 @@
     "message_limit_bytes": 33554432,
     "permission": {
       "flag": "--permission",
-      "description": "One ordered setting for clients that let a model act. Each level names the individual flags it stands for, and the server applies exactly those. read-only, ask and auto also omit captured content from every result (--omit-content). ask and auto list the same tools: whether a person approves each effectful call is the client's own setting, and get_session_context reports the level so the model can say which applies. full adds starting, driving and ending its own live capture sessions and the content reads; its sensitive capture options also need --allow-sensitive-capture. The levels are not authorization, and the individual flags keep working on their own.",
+      "description": "One ordered setting for clients that let a model act. Each level names the individual flags it stands for, and the server applies exactly those. read-only, ask and auto also omit captured content from every result (--omit-content). ask and auto list the same tools: whether a person approves each effectful call is the client's own setting, and get_session_context reports the level so the model can say which applies. full adds starting, driving and ending its own live capture sessions and the content reads. Those sessions take the Origin Trace app's defaults, request content and its other sensitive capture included, so choosing full is the researcher's one consent to them; no start asks again. The levels are not authorization, and the individual flags keep working on their own.",
       "levels": [
         {
           "name": "read-only",
@@ -73,19 +73,7 @@
             "--allow-content"
           ]
         }
-      ],
-      "sensitive_capture": {
-        "flag": "--allow-sensitive-capture",
-        "requires": "--permission full",
-        "options": [
-          "canvas_images",
-          "request_content",
-          "response_media",
-          "js_invocation_digests",
-          "confirm_sensitive_capture"
-        ],
-        "description": "Under --permission full, start_live_session refuses these options before launching anything unless this flag is also set. The legacy --allow-session-start flag keeps accepting them with confirm_sensitive_capture, as before."
-      }
+      ]
     },
     "paused_values": {
       "flag": "--allow-content",
@@ -140,7 +128,7 @@
         "get_wasm_runs",
         "export_requests_har"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused. An analyst_action run_local_analyst_script that names a selected_artifact reads that stored artifact whole, so without --allow-content it is refused before any request."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -152,7 +140,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). request_stacks records the call stack that started each renderer request (get_request_stack). request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. response_body_budget_mib (1 to 16384, default 512) sets how much unique response content is kept, and response_media also keeps element images, audio, video and fonts; both need request_content. Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. response_body_budget_mib (1 to 16384, default 512) sets how much unique response content is kept, and response_media also keeps element images, audio, video and fonts; both need request_content. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -173,7 +161,7 @@
             "effects": [
               "sensitive-capture"
             ],
-            "when": "canvas_images, request_content or js_invocation_digests is true."
+            "when": "canvas_images, request_content or js_invocation_digests is on, as each is by default."
           }
         ],
         "uncertainties": [
@@ -185,51 +173,8 @@
             "condition": "run-live-session.sh beside this reb-api build, or REB_LIVE_SESSION_SCRIPT, and a Brave build that defines the requested native V8 flags."
           }
         ],
-        "confirmations": [
-          {
-            "field": "confirm_sensitive_capture",
-            "value": true,
-            "when": {
-              "properties": {
-                "canvas_images": {
-                  "const": true
-                }
-              },
-              "required": [
-                "canvas_images"
-              ]
-            }
-          },
-          {
-            "field": "confirm_sensitive_capture",
-            "value": true,
-            "when": {
-              "properties": {
-                "request_content": {
-                  "const": true
-                }
-              },
-              "required": [
-                "request_content"
-              ]
-            }
-          },
-          {
-            "field": "confirm_sensitive_capture",
-            "value": true,
-            "when": {
-              "properties": {
-                "js_invocation_digests": {
-                  "const": true
-                }
-              },
-              "required": [
-                "js_invocation_digests"
-              ]
-            }
-          }
-        ],
-        "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended, Brave is closed, or capture expires.",
+        "confirmations": [],
+        "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended (session_action end) or Brave is closed, or until duration_seconds when that is set.",
         "sources": [
           {
             "path": "apps/origin-trace-backend/src/session_launch.rs",
@@ -247,7 +192,7 @@
       "get": {
         "operationId": "get_session_context",
         "summary": "Get compact session context and capture options",
-        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, content_limits with the content session's budgets and media choice, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and up to 16 retained Wasm artifacts from a 256 KiB manifest tail, without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
+        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, content_limits with the content session's budgets and media choice, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and the 16 newest retained Wasm artifacts of the whole manifest with a count of the rest (list_artifacts with kind=wasm pages them), without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
         "tags": [
           "health"
         ],
@@ -335,7 +280,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Reads allowlisted local state and a bounded artifact manifest tail. Probes the configured broker socket. Does not fetch source, launch helpers, reconnect, infer joins or authorize effects; inventories are not one atomic evidence snapshot.",
+          "notes": "Reads allowlisted local state and the artifact lookup index of the whole manifest. Probes the configured broker socket. Does not fetch source, launch helpers, reconnect, infer joins or authorize effects; inventories are not one atomic evidence snapshot.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/app.rs",
@@ -548,7 +493,7 @@
             }
           },
           "409": {
-            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed.",
+            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed, except that a relay stopped at its deadline (command_outcome_unknown) may still have opened the page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1664,7 +1609,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from the newest 5000 cookie list, request start, redirect, script call and script identity records within the last 64 MiB of events and at most 256 distinct retained cookie lists, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false when older records were not read, so an absent response or request is unknown. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
+        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from every cookie list of the session's indexed requests, also located by the index and each distinct list read once, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false while the index is still catching up with the store, so an absent response or request is then unknown. Each distinct script position resolves to source once. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
         "tags": [
           "request-cookies"
         ],
@@ -1814,7 +1759,7 @@
       "get": {
         "operationId": "get_request_signal_profile",
         "summary": "get request signal profile",
-        "description": "Exact identity lookup over the most recent 10000 profiles. A 404 may also carry ETag; an exact conditional request can return 304 before redoing lookup.",
+        "description": "Exact identity lookup over every profile in the signal store, through its disk index (`request-signals.jsonl.profiles-v1`); a later record for the same root replaces an earlier one. While the index has not reached a root it returns 503 with how far it got. A malformed or oversized profile line fails every lookup with 500. A 404 may also carry ETag; an exact conditional request can return 304 before redoing lookup.",
         "tags": [
           "request-signal-profile"
         ],
@@ -1874,6 +1819,16 @@
           },
           "500": {
             "description": "Store, read, validation, or internal failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The signal profile index is still catching up with the store. Retry shortly.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2077,7 +2032,7 @@
       "get": {
         "operationId": "get_request_stack",
         "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
-        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md. Wasm frames carry module_sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer; a navigation or observation record is found by its identity anywhere in the store through the event index. Every recorded frame is listed innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md. Wasm frames carry module_sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
         "tags": [
           "events"
         ],
@@ -3581,7 +3536,7 @@
       "get": {
         "operationId": "get_vm_analysis",
         "summary": "get vm analysis",
-        "description": "May calculate and write local analysis cache even on GET. Optional exact native request projection requires request_id, session_id, root_process_id and root_sequence_number together, or all four omitted. It selects only an explicit request-start to response-start to acknowledged captured response-body chain; absent or ambiguous linkage yields no matching results, never a URL/time/CDP heuristic or related_request_ids fallback. related_request_ids remains correlation, not causation. A 304 check happens after loading analysis; the full selector is included in the ETag.",
+        "description": "May calculate and write local analysis cache even on GET. Lists every analyzed artifact: the full document is streamed from the published canonical bytes, so a long session's read costs no more memory than a short one's. view=findings lists only failed results and candidate or likely-vm tiers and counts the rest in results_view. Optional exact native request projection requires request_id, session_id, root_process_id and root_sequence_number together, or all four omitted. It selects only an explicit request-start to response-start to acknowledged captured response-body chain; absent or ambiguous linkage yields no matching results, never a URL/time/CDP heuristic or frame-correlation fallback. runtime_context counts frame records as correlation, not causation. A 304 check happens after loading analysis; the full selector and the view are included in the ETag.",
         "tags": [
           "analysis"
         ],
@@ -3656,7 +3611,7 @@
             }
           },
           "400": {
-            "description": "Invalid, blank, duplicate, zero, out-of-range, or incomplete exact request selectors; supply all four selectors together or omit all four.",
+            "description": "Invalid, blank, duplicate, zero, out-of-range, or incomplete exact request selectors, or a view other than findings; supply all four selectors together or omit all four.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3704,6 +3659,16 @@
             "description": "Exact native request-start sequence number. Canonical nonzero uint64 decimal string. Optional only as a complete set with request_id, session_id, root_process_id and root_sequence_number; otherwise omit all four. Invalid, blank, duplicate, zero, or out-of-range values return 400.",
             "schema": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/nonzeroUint64"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "description": "findings lists only failed results and those with a candidate or likely-vm tier, and counts the tier-none results in results_view. Omit it for every result. Combines with an exact request selection.",
+            "schema": {
+              "const": "findings",
+              "type": "string"
             }
           },
           {
@@ -4984,7 +4949,7 @@
         "x-source": "apps/origin-trace-backend/src/app.rs",
         "requestBody": {
           "required": true,
-          "description": "JSON object. Explicit decimal Content-Length required; 1..1114112 encoded bytes. Chunked request bodies are not supported.",
+          "description": "JSON object. Explicit decimal Content-Length required; 1..1073741824 encoded bytes. Chunked request bodies are not supported. The limit only bounds one request's buffer: a run's selected artifact is read from the store, not sent, and a library or evidence snapshot the page holds fits.",
           "content": {
             "application/json": {
               "schema": {
@@ -4993,7 +4958,7 @@
             }
           }
         },
-        "x-max-body-bytes": 1114112,
+        "x-max-body-bytes": 1073741824,
         "x-reb-execution": {
           "kind": "action-dependent",
           "effects": null,
@@ -10289,8 +10254,8 @@
     "/api/analysis/vm/host-links": {
       "get": {
         "operationId": "get_vm_host_links",
-        "summary": "Read bounded host-event links to retained guest dispatch positions",
-        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis. state=unknown, reason=dispatch-samples-unavailable, and guest_position null means no dispatch samples were retained. That is static-only correlation for the shared session, navigation, and frame, not an empty workspace and not a guest program counter.",
+        "summary": "Read host-event links to retained guest dispatch positions",
+        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis. state=unknown, reason=dispatch-samples-unavailable, and guest_position null means no dispatch samples were retained. That is static-only correlation for the shared session, navigation, and frame, not an empty workspace and not a guest program counter. Rows list host events whose direct parent is a VM record; frame_host_records and attributed_host_records count the rest, and events_filter lists them through get_events.",
         "tags": [
           "analysis"
         ],
@@ -10503,7 +10468,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 16777216,
+        "x-max-body-bytes": 1073741824,
         "requestBody": {
           "required": true,
           "content": {
@@ -10545,7 +10510,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Documents and reports of any size; only nesting past 128 levels is refused. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/vm_pack.rs",
@@ -10645,7 +10610,7 @@
         "x-reb-execution-schema": {
           "$ref": "#/components/schemas/RebExecutionMetadata"
         },
-        "x-max-body-bytes": 16777216,
+        "x-max-body-bytes": 1073741824,
         "requestBody": {
           "required": true,
           "content": {
@@ -10701,7 +10666,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Combined body limit 16 MiB; report limit 32 MiB. No automatic retry.",
+          "notes": "Calls the same Rust library as origin-trace-vm-pack. Data-only local analysis; no code execution, filesystem writes, capture changes or outgoing network requests. Pack families are declarations, not authentication. Documents and reports of any size; only nesting past 128 levels is refused. No automatic retry.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/vm_pack.rs",
@@ -12187,7 +12152,7 @@
         "properties": {
           "index_behind": {
             "type": "boolean",
-            "description": "With outside_scan: the request index had not reached the end of the store, so a later read can name this request's bytes. False means another read would scan the same range."
+            "description": "With outside_scan: the index the read goes through (the request index for request_id, the event index for navigation_sequence and observation_sequence) had not reached the end of the store, so a later read can find the record. False means another read would scan the same range."
           },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
@@ -13197,16 +13162,16 @@
               "located_outside_window",
               "unreadable"
             ],
-            "description": "How script lists every script_cookie record of the session: the request index locates each one, so a call older than coverage's window is read too. An absent call is proof only when complete is true and read_coverage.complete is true.",
+            "description": "How script lists every script_cookie record of the session: the request index locates each one. An absent call is proof only when complete is true and read_coverage.complete is true.",
             "properties": {
               "complete": {
                 "type": "boolean",
-                "description": "The index has caught up with the store, located every script_cookie record, and each one older than the window was read back."
+                "description": "The index has caught up with the store, located every script_cookie record, and each one was read back."
               },
               "located_outside_window": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Located records older than coverage.scan_start, read back by byte range; script lists those of them that concern this name."
+                "description": "Located records older than coverage.scan_start. The read starts at byte 0, so this is 0; backends that read a newest-record window counted the older calls read back here."
               },
               "unreadable": {
                 "type": "integer",
@@ -13242,17 +13207,17 @@
           "lists_read": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 256
+            "description": "Distinct retained lists read. Backends before every list was read stopped at 256."
           },
           "lists_unread": {
             "type": "integer",
             "minimum": 0,
-            "description": "Distinct retained lists past the 256 read."
+            "description": "Distinct retained lists whose manifest record could not be read in time, so their cookies are unknown; a later read asks again. Backends before every list was read counted the lists past 256 here."
           },
           "stacks_unresolved": {
             "type": "integer",
             "minimum": 0,
-            "description": "Script calls not resolved to source because 64 distinct positions already were."
+            "description": "Script calls not resolved to source because the artifact manifest could not be read in time. Backends before every position was resolved counted the calls past 64 distinct positions here."
           },
           "read_coverage": {
             "type": "object",
@@ -13294,7 +13259,7 @@
               "records_dropped": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category at or after the oldest record read (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
+                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category anywhere in the session (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
               }
             }
           },
@@ -18284,14 +18249,13 @@
           },
           "results": {
             "type": "array",
-            "maxItems": 10000,
             "items": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/result"
-            }
+            },
+            "description": "Every analyzed artifact, in manifest order. Producers before 1.11.0 listed at most 10,000."
           },
           "mixed_findings": {
             "type": "array",
-            "maxItems": 10000,
             "items": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/mixedFinding"
             }
@@ -18356,6 +18320,29 @@
               }
             },
             "description": "Optional exact native request projection metadata outside the stored document digest. Only results with a matching exact_request_links request_id and full root_event are retained; mixed_findings is empty. related_request_ids remains correlation only and is not used for this projection."
+          },
+          "results_view": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "listed_results",
+              "omitted_results"
+            ],
+            "properties": {
+              "kind": {
+                "const": "findings"
+              },
+              "listed_results": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "omitted_results": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "description": "Optional view metadata outside the stored document digest, present in producer 1.11.0 and later when a read asks for view=findings. results then lists only failed results and those with a candidate or likely-vm tier, and omitted_results counts the tier-none results left out. The full document, or the selection without the view, lists them. summary still counts every result of the document or selection."
           }
         },
         "$defs": {
@@ -18584,6 +18571,93 @@
               }
             }
           },
+          "runtimeContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "session_id",
+              "navigation_id",
+              "frame_id",
+              "frame_attribution",
+              "request_records",
+              "signal_records",
+              "events_filter"
+            ],
+            "description": "Present in producer 1.11.0 and later. Records sharing the artifact's session, navigation and nonzero frame are counted here and listed by get_events with events_filter, never copied into each result. Correlation only: it establishes neither script attribution nor causation.",
+            "properties": {
+              "session_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "navigation_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "frame_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "frame_attribution": {
+                "enum": [
+                  "available",
+                  "unavailable"
+                ],
+                "description": "unavailable when frame_id is 0, for example in a worker: only records naming the artifact are counted, and coverage names the rest as runtime-frame-attribution-unavailable."
+              },
+              "request_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Native request_started and request_initiated records with a nonzero request ID in the frame."
+              },
+              "signal_records": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "rule_id",
+                    "observed",
+                    "correlated"
+                  ],
+                  "properties": {
+                    "rule_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "observed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Records of this browser-signal rule naming the artifact."
+                    },
+                    "correlated": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Other records of this rule in the frame."
+                    }
+                  }
+                }
+              },
+              "events_filter": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id"
+                ],
+                "description": "get_events parameters listing the frame's records, or the artifact's own records when frame attribution is unavailable.",
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "navigation_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "frame_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "artifact_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  }
+                }
+              }
+            }
+          },
           "exactRequestLink": {
             "type": "object",
             "additionalProperties": false,
@@ -18770,12 +18844,9 @@
                   "max_js_region_work_bytes",
                   "max_wasm_sections",
                   "max_wasm_section_bytes",
-                  "max_graph_edges",
                   "max_bytecode_snapshot_bytes",
                   "max_manifest_line_bytes",
                   "max_event_line_bytes",
-                  "max_artifact_records",
-                  "max_event_records",
                   "max_wasm_functions",
                   "max_wasm_instructions"
                 ],
@@ -18804,10 +18875,6 @@
                     "type": "integer",
                     "minimum": 1
                   },
-                  "max_graph_edges": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
                   "max_bytecode_snapshot_bytes": {
                     "type": "integer",
                     "minimum": 1
@@ -18820,14 +18887,6 @@
                     "type": "integer",
                     "minimum": 1
                   },
-                  "max_artifact_records": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "max_event_records": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
                   "max_wasm_functions": {
                     "type": "integer",
                     "minimum": 1
@@ -18835,6 +18894,21 @@
                   "max_wasm_instructions": {
                     "type": "integer",
                     "minimum": 1
+                  },
+                  "max_graph_edges": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: per-artifact runtime graph edges. Frame context is now counted in runtime_context."
+                  },
+                  "max_artifact_records": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: newest manifest records read. The whole manifest is now read."
+                  },
+                  "max_event_records": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: newest event records read. The whole event store is now read."
                   }
                 }
               }
@@ -19175,7 +19249,11 @@
                 "uniqueItems": true,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
-                }
+                },
+                "description": "Producers before 1.11.0 only: request IDs sharing the artifact's session context. Replaced by runtime_context."
+              },
+              "runtime_context": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/runtimeContext"
               },
               "exact_request_links": {
                 "type": "array",
@@ -19380,7 +19458,6 @@
                     "observations",
                     "anti_bot_score",
                     "anti_bot_observations",
-                    "related_request_ids",
                     "graph",
                     "frontend"
                   ]
@@ -22955,8 +23032,7 @@
             ]
           },
           "content": {
-            "type": "string",
-            "x-max-utf8-bytes": 32768
+            "type": "string"
           }
         },
         "required": [
@@ -22998,8 +23074,7 @@
             ]
           },
           "content": {
-            "type": "string",
-            "x-max-utf8-bytes": 32768
+            "type": "string"
           },
           "content_bytes": {
             "type": "integer"
@@ -23225,7 +23300,7 @@
                 "type": "string"
               },
               "protocol_version": {
-                "const": 1,
+                "const": 2,
                 "type": "integer"
               },
               "run_id": {
@@ -23238,8 +23313,7 @@
                 "$ref": "#/components/schemas/SafeInteger"
               },
               "source": {
-                "type": "string",
-                "x-max-utf8-bytes": 32768
+                "type": "string"
               },
               "variables": {
                 "type": "object",
@@ -23293,7 +23367,21 @@
                     "anyOf": [
                       {
                         "type": "object",
-                        "additionalProperties": true
+                        "properties": {
+                          "artifact_id": {
+                            "type": "string"
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          }
+                        },
+                        "required": [
+                          "artifact_id",
+                          "sha256"
+                        ],
+                        "additionalProperties": false,
+                        "description": "A stored artifact by ID and the SHA-256 the caller selected. A different stored SHA-256 is refused with 409."
                       },
                       {
                         "type": "null"
@@ -23322,7 +23410,7 @@
               },
               "confirmed_sensitive": {
                 "type": "boolean",
-                "description": "Must be true when selected_artifact.sensitive is true."
+                "description": "Must be true when the stored record of the selected artifact is sensitive. The host reads sensitivity from the manifest, not from the request."
               }
             },
             "required": [
@@ -23351,7 +23439,7 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Completion, timeout, cancellation, or a dropped request cleans up the owned helper process group."
+                  "when": "Completion, cancellation, or a dropped request cleans up the owned helper process group."
                 }
               ],
               "uncertainties": [],
@@ -23363,6 +23451,10 @@
                 {
                   "id": "saved-analyst-script",
                   "condition": "library_generation, script_id, and source must match the current saved JavaScript analyst script."
+                },
+                {
+                  "id": "sensitive-selected-artifact",
+                  "condition": "confirmed_sensitive must be true when the stored record of evidence.selected_artifact is sensitive."
                 }
               ],
               "confirmations": [
@@ -23376,34 +23468,18 @@
                   "value": true,
                   "when": {
                     "type": "object",
-                    "required": [
-                      "evidence"
-                    ],
+                    "required": ["evidence"],
                     "properties": {
                       "evidence": {
                         "type": "object",
-                        "required": [
-                          "selected_artifact"
-                        ],
-                        "properties": {
-                          "selected_artifact": {
-                            "type": "object",
-                            "required": [
-                              "sensitive"
-                            ],
-                            "properties": {
-                              "sensitive": {
-                                "const": true
-                              }
-                            }
-                          }
-                        }
+                        "required": ["selected_artifact"],
+                        "properties": {"selected_artifact": {"type": "object"}}
                       }
                     }
                   }
                 }
               ],
-              "notes": "Executes an explicitly selected saved script in the bounded disposable analyst helper using caller-supplied frozen evidence. The helper is separate from the browser.",
+              "notes": "Executes an explicitly selected saved script in a disposable analyst helper, separate from the browser, over caller-supplied frozen evidence and the selected artifact's verified stored bytes. There is no execution deadline, CPU limit or input, result or log size limit.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/analyst.rs",
@@ -23414,7 +23490,8 @@
                   "symbol": "normalize"
                 }
               ]
-            }
+            },
+            "description": "Runs a saved script once, with no deadline: it runs until the script settles, cancel_local_analyst_script stops it, or this request goes away. Protocol 2 names the selected artifact by artifact_id and sha256; the host reads its stored, SHA-256 verified bytes, whatever their size, and refuses protocol 1."
           },
           {
             "type": "object",
@@ -23487,8 +23564,7 @@
             "enum": [
               "completed",
               "failed",
-              "cancelled",
-              "timed_out"
+              "cancelled"
             ]
           },
           "result_type": {
@@ -30438,7 +30514,7 @@
                 "$ref": "#/components/schemas/DebuggerObservationDetail"
               },
               "site": {
-                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; every outcome is kept, one still waiting for its source artifact or its identity (source_artifact_missing, script_identity_outside_scan) until the artifact manifest or the request index moves, so reading the same cursor again resolves the next scripts at no cost for the ones already read. script_identity_outside_scan means the request index has not folded the identity yet or holds its 16,384 and keeps no more: read again once it moves, or read stack_read, which also scans the newest 4,096 identities.",
+                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; every outcome is kept, one still waiting for its source artifact or its identity (source_artifact_missing, script_identity_outside_scan) until the artifact manifest or the request index moves, so reading the same cursor again resolves the next scripts at no cost for the ones already read. script_identity_outside_scan means the request index, which keeps every identity of the session, has not folded this one yet: read again once it moves, or read stack_read, which while the index is behind also scans the newest 4,096 identities in the store's newest 64 MiB.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -30502,7 +30578,7 @@
                               "source_limit",
                               "site_read_failed"
                             ],
-                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
+                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read; read again. get_request_stack with stack_read reads the record wherever it sits in the store."
                           }
                         }
                       }
@@ -30515,7 +30591,7 @@
                 "description": "The operation stack_read is the arguments of."
               },
               "stack_read": {
-                "description": "The exact arguments of get_request_stack (stack_read_operation) that read this record's whole stack, resolved like a request's, with its site again under observation; pass it as it is. That read covers the newest 64 MiB of the store: an older record answers outside_scan.",
+                "description": "The exact arguments of get_request_stack (stack_read_operation) that read this record's whole stack, resolved like a request's, with its site again under observation; pass it as it is. That read finds the record by its identity anywhere in the store; it answers outside_scan, with index_behind, only while the event index is still catching up.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -30714,6 +30790,10 @@
             ],
             "description": "Console documents (frames, including out-of-process frames), the workers whose requests the renderer recorded, and the native frames that observation records came from. Console documents carry no native frame ID, so only observed frames scope observations exactly. Not a pausable thread list.",
             "properties": {
+              "coverage": {
+                "$ref": "#/components/schemas/DetailCoverage",
+                "description": "What workers, observed and observation_budget_gaps cover: the whole store (scope store) once the event index has caught up, else its indexed prefix."
+              },
               "console": {
                 "type": "string",
                 "maxLength": 32
@@ -30761,7 +30841,6 @@
               },
               "workers": {
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -30800,16 +30879,14 @@
                     },
                     "requests": {
                       "type": "integer",
-                      "minimum": 1,
-                      "maximum": 2048
+                      "minimum": 1
                     }
                   }
                 }
               },
               "observed": {
                 "type": "array",
-                "maxItems": 64,
-                "description": "Native frames of the observation records among the newest 2,048 records that are observations or gaps of any kind, within the newest 64 MiB of the store, newest first: the exact identity a thread scope filters by.",
+                "description": "The native frame of every valid observation record of the store, from the event index, newest first: the exact identity a thread scope filters by. records counts that frame's records.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -30840,8 +30917,7 @@
                     },
                     "records": {
                       "type": "integer",
-                      "minimum": 1,
-                      "maximum": 2048
+                      "minimum": 1
                     }
                   }
                 }
@@ -31064,8 +31140,7 @@
           },
           "observation_budget_gaps": {
             "type": "array",
-            "maxItems": 16,
-            "description": "debugger_observation_budget gap records in the newest observation scan, newest first: that renderer admitted 1,024 records in one capture configuration and refused the rest.",
+            "description": "Every debugger_observation_budget gap record of the store, from the event index, newest first: that renderer admitted 1,024 records in one capture configuration and refused the rest.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -32840,12 +32915,16 @@
             "required": [
               "items",
               "window_truncated",
-              "items_omitted"
+              "items_omitted",
+              "scope",
+              "scan_end",
+              "store_end"
             ],
             "properties": {
               "items": {
                 "type": "array",
                 "maxItems": 16,
+                "description": "The newest Wasm artifacts of the manifest, newest first.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -32890,13 +32969,32 @@
                 }
               },
               "window_truncated": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "True while scope is not store: the inventory covers the manifest only up to scan_end."
               },
               "items_omitted": {
-                "$ref": "#/components/schemas/SafeInteger"
+                "$ref": "#/components/schemas/SafeInteger",
+                "description": "Wasm artifacts of the indexed manifest that items does not list. list_artifacts with kind=wasm pages every one."
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "store",
+                  "indexing",
+                  "stopped"
+                ],
+                "description": "store: the whole manifest is indexed. indexing: the lookup index is still catching up, so read again shortly. stopped: the index cannot read past scan_end."
+              },
+              "scan_end": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Manifest bytes the lookup index covers."
+              },
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "The manifest's length when read."
               }
             },
-            "description": "Retained store inventory, not restricted or linked to a live target. May contain another session."
+            "description": "Retained store inventory over the whole artifact manifest, found through the artifact lookup index; not restricted or linked to a live target. May contain another session."
           },
           "debugger_etag": {
             "type": "string",
@@ -32926,8 +33024,7 @@
               "effects",
               "session_start",
               "content_reads",
-              "content_omitted",
-              "sensitive_capture"
+              "content_omitted"
             ],
             "properties": {
               "permission": {
@@ -32950,10 +33047,6 @@
               },
               "content_omitted": {
                 "type": "boolean"
-              },
-              "sensitive_capture": {
-                "type": "boolean",
-                "description": "start_live_session may name canvas_images, request_content, response_media or js_invocation_digests. False under --permission full without --allow-sensitive-capture."
               }
             }
           },
@@ -32988,7 +33081,7 @@
           "consistency": {
             "type": "string",
             "const": "independent_debugger_snapshot_and_manifest_tail",
-            "description": "Historical constant: the context and the manifest tail are read independently."
+            "description": "Historical constant: the context and the artifact inventory are read independently."
           },
           "capture_options": {
             "type": "object",
@@ -40200,6 +40293,9 @@
               "interpreter_artifact_id",
               "source_artifact_sha256",
               "links",
+              "frame_host_records",
+              "attributed_host_records",
+              "events_filter",
               "omissions"
             ],
             "properties": {
@@ -40213,19 +40309,52 @@
               },
               "links": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmHostLinks/$defs/link"
+                },
+                "description": "Host events naming the interpreter artifact whose direct parent is a VM record: the only host events a dispatch sample can position."
+              },
+              "frame_host_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Host events sharing the interpreter's session, navigation and frame, listed or not."
+              },
+              "attributed_host_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Those of them naming the interpreter artifact."
+              },
+              "events_filter": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id",
+                  "navigation_id",
+                  "frame_id"
+                ],
+                "description": "get_events parameters that list the frame's records.",
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "navigation_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "frame_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  }
                 }
               },
               "omissions": {
                 "type": "array",
-                "maxItems": 4,
+                "maxItems": 3,
                 "items": {
                   "enum": [
                     "dispatch-samples-unavailable",
                     "dispatch-sample-retention-limit",
-                    "host-link-limit",
                     "host-events-unavailable"
                   ]
                 },
@@ -41856,7 +41985,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 10 seconds. No page JavaScript runs.",
+              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 15 seconds, before Chromium would replace a busy capture browser; that refusal is command_outcome_unknown, since the page may still open. No page JavaScript runs.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/live_browser.rs",
@@ -42581,7 +42710,7 @@
       "LiveSessionStart": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Named capture options for a new live session. Every switch is off unless set, and none is inherited from the caller's environment.",
+        "description": "Named capture options for a new live session. A switch left unset takes the Origin Trace app's default (StartOptions::resolve in session_launch.rs), and none is inherited from the caller's environment. A default whose category bits category_mask lacks is off; a switch set to true still needs them and is refused without them.",
         "properties": {
           "url": {
             "type": "string",
@@ -42591,13 +42720,13 @@
           },
           "wasm_dispatch": {
             "type": "boolean",
-            "default": false,
-            "description": "Sample Wasm br_table dispatch. The configuration keeps at most 16 observations; a hot function can be limited with the sample budget options instead of raising that cap. Needs category bits 512 and 1024."
+            "default": true,
+            "description": "Sample Wasm br_table dispatch. The configuration keeps at most 16 observations; a hot function can be limited with the sample budget options instead of raising that cap. Needs category bits 512 and 1024. On by default when category_mask holds 512 and 1024."
           },
           "wasm_call_indirect": {
             "type": "boolean",
-            "default": false,
-            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024. Each stream still keeps at most 16 observations per configuration; sample budget options below restrict which of those 16 are kept."
+            "default": true,
+            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024. Each stream still keeps at most 16 observations per configuration; sample budget options below restrict which of those 16 are kept. On by default when category_mask holds 512 and 1024."
           },
           "wasm_samples_per_function": {
             "type": "integer",
@@ -42660,8 +42789,8 @@
           },
           "quiet": {
             "type": "boolean",
-            "default": false,
-            "description": "Ignore page debugger statements."
+            "default": true,
+            "description": "Ignore page debugger statements. On by default."
           },
           "category_mask": {
             "type": "integer",
@@ -42673,9 +42802,8 @@
           "duration_seconds": {
             "type": "integer",
             "minimum": 60,
-            "maximum": 3600,
-            "default": 3600,
-            "description": "Capture expires after this many seconds."
+            "maximum": 3155760000,
+            "description": "Stop capture after this many seconds. Unset, the session runs until it is ended: session_action end, closing Brave, or ending it in Origin Trace. The maximum is the launcher's open-ended limit, a century."
           },
           "localhost_only": {
             "type": "boolean",
@@ -42684,13 +42812,11 @@
           },
           "canvas_images": {
             "type": "boolean",
-            "default": false,
-            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
+            "description": "Store Canvas images, which can contain sensitive page content. On by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 1 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits."
           },
           "request_content": {
             "type": "boolean",
-            "default": false,
-            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session unless request_content_budget_mib) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session unless request_content_budget_mib) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture, on by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 256 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits. Off, Network capture still records each body's length, type and digest."
           },
           "request_content_budget_mib": {
             "type": "integer",
@@ -42711,13 +42837,28 @@
           },
           "request_stacks": {
             "type": "boolean",
-            "default": false,
-            "description": "Record the JavaScript and Wasm call stack that started each renderer request (request_initiator_stack events and stack artifacts, read with get_request_stack). Frames are identities, not values. Needs category bits 256 and 1024 and a Brave that defines --reb-request-stacks; a Brave without it refuses the start."
+            "default": true,
+            "description": "Record the JavaScript and Wasm call stack that started each renderer request (request_initiator_stack events and stack artifacts, read with get_request_stack). Frames are identities, not values. On by default when category_mask holds 256 and 1024; a Brave that does not define --reb-request-stacks then starts without stacks, and get_session_context capture_options says so. Set to true, it needs those category bits, and such a Brave refuses the start."
           },
           "document_start": {
             "type": "boolean",
+            "default": true,
+            "description": "Permit document-start Console scripts in this capture browser. On by default. Arms nothing: a rule still needs a live Console connection (connect_live) and a confirmed arm_document_start. Needs a Brave with the Native Console v3 overlay; get_native_console reports document_start_supported."
+          },
+          "browser_internal": {
+            "type": "boolean",
             "default": false,
-            "description": "Permit document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection (connect_live) and a confirmed arm_document_start. Needs a Brave with the Native Console v3 overlay; get_native_console reports document_start_supported."
+            "description": "Record browser-internal pages (chrome:, devtools: and WebUI renderers). Off, their requests are excluded and counted."
+          },
+          "extension_traffic": {
+            "type": "boolean",
+            "default": false,
+            "description": "Record extension worker traffic under each extension id. Off, it is excluded and counted."
+          },
+          "fresh_profile": {
+            "type": "boolean",
+            "default": false,
+            "description": "Start signed out, in a new, empty browser profile kept in this session's folder. Off, the session uses the browser profile agent sessions share (~/.config/origin-trace/agent-sessions/research-profiles), so sign-ins and site data carry over; that profile is never the app's, and a session that finds it held by a running Brave is refused."
           },
           "js_invocation_sites": {
             "type": "string",
@@ -42732,13 +42873,12 @@
           },
           "js_invocation_digests": {
             "type": "boolean",
-            "default": false,
-            "description": "Record SHA-256 and rolling-hash digests of settled string and byte values of armed calls. Sensitive capture: requires js_invocation_sites or js_invocation_saved_sites and confirm_sensitive_capture."
+            "description": "Record SHA-256 and rolling-hash digests of settled string and byte values of armed calls. Sensitive capture: requires js_invocation_sites or js_invocation_saved_sites. On by default for a confirmed start with request_content and armed sites. Set to true through the CLI, it requires confirm_sensitive_capture."
           },
           "confirm_sensitive_capture": {
             "const": true,
             "type": "boolean",
-            "description": "The researcher authorized the sensitive capture named in this start for this target: Canvas images, request content or invocation value digests. Required with canvas_images, request_content or js_invocation_digests; never set it by inference."
+            "description": "The researcher authorized sensitive capture for this target: Canvas images, request content and invocation value digests, which then default on as in the app. reb-api session start needs it for those; start_live_session is confirmed by the --permission full or --allow-session-start choice that lists it, so it need not be set there. Never set it by inference."
           },
           "publish_canonical_endpoint": {
             "type": "boolean",

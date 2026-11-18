@@ -1442,8 +1442,8 @@ artifact kinds.
 
 Header blocks carry credentials (`Authorization`, `Cookie`, `Set-Cookie`), so
 they use the request-content gate of v2 (`--reb-capture-request-content`,
-`REB_CAPTURE_REQUEST_CONTENT=1`, agent `request_content` with
-`confirm_sensitive_capture`). Metadata-only sessions emit no header record and
+`REB_CAPTURE_REQUEST_CONTENT=1`, agent `request_content`, on by default under
+the agent's session consent). Metadata-only sessions emit no header record and
 retain no header value. The receiver still refuses the sensitive kinds without
 `--allow-sensitive`.
 
@@ -1988,11 +1988,12 @@ a response), `no_raw_response`, since the received list comes with the
 response headers and what was sent was reported, or `record_dropped` in its
 place under the rule above. The backend reads the session's gap records of
 every category beside the request's own, from a tally it keeps per store: the
-first read scans the newest 64 MiB for gaps, a later one only the bytes
-appended since and none while the store is unchanged, and a store that shrank,
-was replaced or was cleared and written again (the bytes before the last
-boundary changed, as the request index checks) is scanned again. So a Headers,
-Cookies or provenance read costs its own records, not a 64 MiB scan.
+first read scans the whole store for gaps, so a drop early in a long session
+still counts, a later one only the bytes appended since and none while the
+store is unchanged, and a store that shrank, was replaced or was cleared and
+written again (the bytes before the last boundary changed, as the request index
+checks) is scanned again. So a Headers, Cookies or provenance read costs its
+own records, not a store scan.
 Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
 and the Cookies tab lists each such hop with it.
 

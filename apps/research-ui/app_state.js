@@ -39,18 +39,9 @@
           folders: 32,
           files: 64,
           folder_depth: 4,
-          file_bytes: 32 * 1024,
-          total_file_bytes: 512 * 1024,
-          document_bytes: 1024 * 1024,
           variables: 32,
           variable_value_bytes: 4 * 1024,
-          variable_bytes: 16 * 1024,
-          evidence_bytes: 768 * 1024,
-          selected_artifact_bytes: 64 * 1024,
-          execution_timeout_ms: 2000,
-          logs: 64,
-          log_bytes: 1024,
-          result_bytes: 32 * 1024
+          variable_bytes: 16 * 1024
         }
       });
 
@@ -267,7 +258,7 @@
         analystActiveRunId: null,
         analystCancelRunId: null,
         analystNextRunId: 1,
-        analystTotalRuns: 0,
+        analystRunStartedAt: null,
         analystHistoryEvictions: 0,
         analystRuns: [],
         analystSelectedRunId: null,
@@ -299,6 +290,9 @@
         signalKnownKeys: null,
         signalNewKeys: new Set(),
         captureStopped: false,
+        // An ended live session opened for review: its evidence stays, and it
+        // captures nothing more.
+        sessionEnded: false,
         captureControlsAvailable: false,
         // 'stop' or 'clear' while its POST runs. The generation changes when an
         // action starts and ends, so an overlapping event poll is discarded.

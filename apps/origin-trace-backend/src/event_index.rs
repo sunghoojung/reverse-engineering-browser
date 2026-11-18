@@ -1250,8 +1250,9 @@ impl origin_trace::Evidence for StoredEvidence<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::origin_trace::{RequestBodies, Retained, check_selectors, trace};
+    use crate::origin_trace::{RequestBodies, Retained, RetainedBody, check_selectors, trace};
     use serde_json::json;
+    use std::sync::atomic::AtomicBool;
 
     fn write(path: &Path, rows: &[Value], terminated: bool) {
         let mut text = rows
@@ -1305,6 +1306,7 @@ mod tests {
             session.as_deref(),
             *process,
             sequence.as_deref(),
+            &AtomicBool::new(false),
         )
     }
 
@@ -1340,7 +1342,7 @@ mod tests {
                     let parts: Vec<&str> = body["event"].as_str().unwrap().split(':').collect();
                     bodies.insert(
                         (parts[0].into(), parts[1].parse().unwrap(), parts[2].into()),
-                        hex::decode(body["hex"].as_str().unwrap()).unwrap(),
+                        RetainedBody::Read(hex::decode(body["hex"].as_str().unwrap()).unwrap()),
                     );
                 }
                 let query = query(case);
@@ -1390,9 +1392,16 @@ mod tests {
 
     fn steps(indexes: &mut Indexes, root: &Path, request: u64) -> Vec<String> {
         let mut evidence = indexes.trace(root, far()).unwrap();
-        let document =
-            origin_trace::build(&mut evidence, &request.to_string(), None, None, None, root)
-                .unwrap();
+        let document = origin_trace::build(
+            &mut evidence,
+            &request.to_string(),
+            None,
+            None,
+            None,
+            root,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         document["steps"]
             .as_array()
             .unwrap()

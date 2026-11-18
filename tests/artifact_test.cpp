@@ -310,15 +310,15 @@ void CheckStreams() {
     std::istringstream refusals(
         Open(30) + Chunk(Op::kData, 30, std::string(1000, 'a')) +
         Chunk(Op::kData, 30, std::string(100, 'b')) + Chunk(Op::kCheckpoint, 30, "", 34, 5) +
-        Chunk(Op::kData, 30, "c") + Open(31) +
-        Chunk(Op::kData, 31, "d") + Chunk(Op::kEnd, 31, "", 0, 1, 0xab) + Open(32) +
-        Chunk(Op::kData, 32, "e") + Chunk(Op::kAbort, 32) + Chunk(Op::kData, 32, "f") +
-        Chunk(Op::kEnd, 33, "", 0, 0) + Open(10));
+        Chunk(Op::kData, 30, "c") + Open(31) + Chunk(Op::kData, 31, "d") +
+        Chunk(Op::kEnd, 31, "", 0, 1, 0xab) + Open(32) + Chunk(Op::kData, 32, "e") +
+        Chunk(Op::kAbort, 32) + Chunk(Op::kData, 32, "f") + Chunk(Op::kEnd, 33, "", 0, 0) +
+        Open(10));
     for (const Status expected :
          {Status::kAccepted, Status::kAccepted, Status::kAccepted, Status::kInvalid,
-          Status::kInvalid, Status::kAccepted, Status::kAccepted, Status::kInvalid, Status::kAccepted,
-          Status::kAccepted, Status::kAccepted, Status::kInvalid, Status::kInvalid,
-          Status::kConflict}) {
+          Status::kInvalid, Status::kAccepted, Status::kAccepted, Status::kInvalid,
+          Status::kAccepted, Status::kAccepted, Status::kAccepted, Status::kInvalid,
+          Status::kInvalid, Status::kConflict}) {
       Expect(receiver.ReceiveOne(refusals) == expected &&
                  receiver.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary,
              "stream refusal keeps the boundary: " + receiver.LastError());
@@ -408,7 +408,8 @@ void CheckStreams() {
            "a stream cannot open while its volume is below the reserve");
     Expect(Receive(tight, Chunk(Op::kData, 76, "d")) == Status::kDiskReserve &&
                tight.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
-               tight.OpenStreams() == 0 && !std::filesystem::exists(reserve_store / "artifact-76.part"),
+               tight.OpenStreams() == 0 &&
+               !std::filesystem::exists(reserve_store / "artifact-76.part"),
            "a data frame past the reserve drops its stream and its file");
     g_free_bytes = kFree;
     Expect(Receive(tight, Open(79)) == Status::kAccepted &&

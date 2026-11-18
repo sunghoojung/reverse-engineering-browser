@@ -269,8 +269,7 @@ void NativeResponseBodyCapture::OnSnapshotTimer(const Key key, const std::uint64
   body.snapshot_timer = false;
   const std::uint64_t now = Now();
   // A body whose tee ended waits for its record; past expiry nothing is sent.
-  if (body.tee_done || body.refused || !body.stream.is_open() ||
-      now >= expires_at_monotonic_ns_) {
+  if (body.tee_done || body.refused || !body.stream.is_open() || now >= expires_at_monotonic_ns_) {
     return;
   }
   TrySnapshot(found, now);

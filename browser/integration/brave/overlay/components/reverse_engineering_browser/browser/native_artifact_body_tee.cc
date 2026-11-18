@@ -117,9 +117,9 @@ void NativeArtifactBodyTee::OnReadable(const MojoResult result, const mojo::Hand
   }
 
   const std::size_t taken = std::min(
-      data.size(), observer_.Run(std::span<const std::uint8_t>(data.data(), data.size()),
-                                 base::BindOnce(&NativeArtifactBodyTee::Resume,
-                                                weak_factory_.GetWeakPtr())));
+      data.size(),
+      observer_.Run(std::span<const std::uint8_t>(data.data(), data.size()),
+                    base::BindOnce(&NativeArtifactBodyTee::Resume, weak_factory_.GetWeakPtr())));
   waiting_ = taken < data.size();
   if (taken == 0) {
     source_->EndReadData(0);

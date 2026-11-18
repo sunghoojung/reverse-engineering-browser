@@ -23,6 +23,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 #include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
@@ -146,6 +147,7 @@ class NativeArtifactCaptureSink final {
                                 mojo_base::BigBuffer content);
   // `on_refused`, if set, runs once when the artifact is refused or lost, so a
   // renderer that claimed it captured can stop claiming it for later repeats.
+  // `content_released` runs once `content` is dropped, on every path.
   std::uint64_t CaptureGeneratedArtifact(NativeArtifactKind kind,
                                          NativeArtifactCaptureOrigin capture_origin,
                                          std::uint64_t creator_event_id,
@@ -154,7 +156,8 @@ class NativeArtifactCaptureSink final {
                                          std::string_view source_url,
                                          mojo_base::BigBuffer content,
                                          std::uint64_t parent_artifact_id = 0,
-                                         std::function<void()> on_refused = {});
+                                         std::function<void()> on_refused = {},
+                                         base::ScopedClosureRunner content_released = {});
 
   // UI sequence. Queues a request target whole; every loss after that is one
   // event parented to the creator.
@@ -204,6 +207,8 @@ class NativeArtifactCaptureSink final {
   // buffer as the pool drains.
   struct GeneratedStream final {
     mojo_base::BigBuffer content;
+    // Declared after content: the renderer's credit returns once it is gone.
+    base::ScopedClosureRunner content_released;
     std::size_t offset = 0;
     std::uint64_t frame_id = 0;
     NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
@@ -325,7 +330,8 @@ class NativeArtifactCaptureSink final {
                                                  mojo_base::BigBuffer content,
                                                  std::uint64_t parent_artifact_id,
                                                  bool native_wasm_runtime,
-                                                 std::function<void()> on_refused = {});
+                                                 std::function<void()> on_refused = {},
+                                                 base::ScopedClosureRunner content_released = {});
 
   // The tee's observer: takes what the pool has room for and waits for the rest.
   std::size_t OnBodyData(std::uint64_t artifact_id,

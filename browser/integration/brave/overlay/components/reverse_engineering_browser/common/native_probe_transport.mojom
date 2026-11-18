@@ -30,7 +30,7 @@ interface NativeProbeClient {
             // --reb-capture-request-content: renderer request targets,
             // script cookie records (protocol/native-network-v3.md), and
             // compiled script source that no response body carries
-            // (protocol/native-compiled-scripts-v1.md).
+            // (protocol/native-compiled-scripts-v2.md).
             bool capture_request_content,
             // --reb-capture-browser-internal: record internal schemes.
             bool capture_browser_internal);
@@ -51,6 +51,9 @@ interface NativeProbeClient {
   // The renderer forgets its digest, so an identical later stack is sent again
   // instead of claiming a captured artifact (protocol/native-network-v3.md).
   NativeStackArtifactRefused(uint64 creator_event_id);
+  // The browser copied out a generated artifact's content, so the renderer may
+  // send that many more bytes against kNativeRendererArtifactCreditBytes.
+  ReleaseArtifactCredit(uint64 bytes);
 };
 
 // Process-wide renderer connection. Event records travel through the shared
@@ -159,5 +162,8 @@ interface NativeProbeHost {
                            uint64 allocating_script_id,
                            bool allocating_script_is_eval,
                            mojo_base.mojom.BigBuffer allocating_script_source,
-                           uint64 allocating_script_session_id);
+                           uint64 allocating_script_session_id,
+                           // Bytes the renderer charged; released by
+                           // NativeProbeClient.ReleaseArtifactCredit.
+                           uint64 credit_bytes);
 };

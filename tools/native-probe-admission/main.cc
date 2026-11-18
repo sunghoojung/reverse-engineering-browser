@@ -398,7 +398,8 @@ void CaptureRuntimeMetadata(reb::NativeArtifactKind,
                             std::uint64_t,
                             std::string_view url,
                             std::span<const std::uint8_t>,
-                            const reb::NativeRuntimeScript&) noexcept {
+                            const reb::NativeRuntimeScript&,
+                            std::uint64_t) noexcept {
   captured_runtime_url = url;
 }
 reb::NativeProbeEmitStatus AcceptRuntimeEvent(const NativeProbeEvent&, std::uint64_t) noexcept {
@@ -2350,7 +2351,8 @@ int main() {
   Run<&CompiledScriptRetainsOnlyWhatSkippedTheNetwork>();
   Run<&CompiledScriptNeedsContentCapture>();
   Run<&CompiledScriptReportsMissingSource>();
-  Run<&CompiledScriptBudgetIsVisible>();
+  Run<&CompiledScriptBacklogIsVisible>();
+  Run<&CompiledScriptLargerThanTheCredit>();
   Run<&CompiledScriptRefusedRecordKeepsNothing>();
   Run<&CompiledScriptDisabledRecordsNothing>();
   std::cout << "Renderer ring admission only; no full Chromium/Mojo/runtime validation.\n";

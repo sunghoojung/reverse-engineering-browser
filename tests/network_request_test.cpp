@@ -158,8 +158,8 @@ reb::NativeRequestBodySummary Version1(const reb::NativeRequestBodyKind kind,
                                        const std::uint64_t captured = 0,
                                        const bool read = false) {
   using S = reb::RequestBodyState;
-  auto value = Summary(kind, static_cast<reb::NativeRequestBodyState>(state), content, length,
-                       captured);
+  auto value =
+      Summary(kind, static_cast<reb::NativeRequestBodyState>(state), content, length, captured);
   value.flags &= static_cast<std::uint8_t>(
       ~(reb::kNativeRequestBodyDigestPresent | reb::kNativeRequestBodyCredentialForm));
   value.sha256 = {};
@@ -169,9 +169,9 @@ reb::NativeRequestBodySummary Version1(const reb::NativeRequestBodyKind kind,
   if (read && (state == S::kEmpty || state == S::kCaptured || state == S::kCapturedTruncated)) {
     value.flags &= static_cast<std::uint8_t>(~reb::kNativeRequestBodyLengthPartial);
   }
-  const bool hashed = read ? state == S::kEmpty || state == S::kCaptured
-                           : kind == reb::NativeRequestBodyKind::kBytes &&
-                                 state != S::kNotCapturedCredentialForm;
+  const bool hashed =
+      read ? state == S::kEmpty || state == S::kCaptured
+           : kind == reb::NativeRequestBodyKind::kBytes && state != S::kNotCapturedCredentialForm;
   if (hashed && (read || length <= reb::kRequestBodyDigestBytes)) {
     value.flags |= reb::kNativeRequestBodyDigestPresent;
     value.sha256.fill(0xab);
@@ -358,8 +358,8 @@ void CheckBodyStates() {
        Version1(K::kBytes, V1::kCapturedTruncated, true, 300000, 262144), 902, kVersion1},
       {"version 1 truncated over digest bound",
        Version1(K::kBytes, V1::kCapturedTruncated, true, 5 * kMiB, 262144), 903, kVersion1},
-      {"version 1 session budget", Version1(K::kBytes, V1::kNotCapturedSessionBudget, true, 10),
-       0, kVersion1},
+      {"version 1 session budget", Version1(K::kBytes, V1::kNotCapturedSessionBudget, true, 10), 0,
+       kVersion1},
       {"version 1 stream body past the session budget before read",
        Version1(K::kChunkedDataPipe, V1::kNotCapturedSessionBudget, true, 0), 0, kVersion1},
       {"version 1 credential form, content",
@@ -444,8 +444,7 @@ void CheckBodyStates() {
       {"read refusal with digest", refused, 0, digest},
       {"read refusal keeping bytes", refused, 0, [](auto& s, auto&) { s.captured_length = 10; }},
       {"read in-memory refusal with partial length",
-       Read(K::kBytes, S::kNotCapturedTransferRefused, 816),
-       0,
+       Read(K::kBytes, S::kNotCapturedTransferRefused, 816), 0,
        [](auto& s, auto&) { s.flags |= 8; }},
       {"read stream of two elements", Read(K::kChunkedDataPipe, S::kCaptured, 40, 40), 905,
        [](auto& s, auto&) { s.element_count = 2; }},
@@ -456,7 +455,8 @@ void CheckBodyStates() {
       {"metadata read of an empty body", Read(K::kBytes, S::kMetadataOnly, 0, 0, false), 0, {}},
       {"metadata read of a credential form", metadata, 0, credential_flag},
       {"metadata read keeping bytes", Read(K::kBytes, S::kCaptured, 816, 816, false), 901, {}},
-      {"metadata read refused", Read(K::kBytes, S::kNotCapturedTransferRefused, 816, 0, false),
+      {"metadata read refused",
+       Read(K::kBytes, S::kNotCapturedTransferRefused, 816, 0, false),
        0,
        {}},
       {"content type dirty tail", captured, 901, payload(100, std::byte{'x'})},
@@ -527,27 +527,38 @@ void CheckBodyStates() {
       {"version 1 credential flag", Version1(K::kBytes, V1::kCaptured, true, 816, 816), 901,
        credential_flag, kVersion1},
       {"version 1 read capture past 16 MiB untruncated",
-       Version1(K::kFile, V1::kCaptured, true, 16 * kMiB + 1, 16 * kMiB + 1, true), 904, {},
+       Version1(K::kFile, V1::kCaptured, true, 16 * kMiB + 1, 16 * kMiB + 1, true),
+       904,
+       {},
        kVersion1},
       {"version 1 read truncation with a short prefix",
-       Version1(K::kFile, V1::kCapturedTruncated, true, 16 * kMiB + 9, 1024, true), 906, {},
+       Version1(K::kFile, V1::kCapturedTruncated, true, 16 * kMiB + 9, 1024, true),
+       906,
+       {},
        kVersion1},
       {"version 1 truncated without truncation",
-       Version1(K::kBytes, V1::kCapturedTruncated, true, 816, 816), 901, {}, kVersion1},
-      {"version 1 digest bound below limit", Version1(K::kBytes, V1::kMetadataOnly, false, 816),
-       0,
+       Version1(K::kBytes, V1::kCapturedTruncated, true, 816, 816),
+       901,
+       {},
+       kVersion1},
+      {"version 1 digest bound below limit", Version1(K::kBytes, V1::kMetadataOnly, false, 816), 0,
        [](auto& s, auto&) {
          s.flags = static_cast<std::uint8_t>((s.flags & ~2U) | 4U);
          s.sha256 = {};
        },
        kVersion1},
-      {"version 1 read flag on in-memory bytes",
-       Version1(K::kBytes, V1::kCaptured, true, 816, 816), 901,
-       [](auto& s, auto&) { s.flags |= reb::kNativeRequestBodyRead; }, kVersion1},
+      {"version 1 read flag on in-memory bytes", Version1(K::kBytes, V1::kCaptured, true, 816, 816),
+       901, [](auto& s, auto&) { s.flags |= reb::kNativeRequestBodyRead; }, kVersion1},
       {"version 1 read refused by the disk reserve",
-       Version1(K::kFile, V1::kNotCapturedDiskReserve, true, 65536, 0, true), 0, {}, kVersion1},
+       Version1(K::kFile, V1::kNotCapturedDiskReserve, true, 65536, 0, true),
+       0,
+       {},
+       kVersion1},
       {"version 1 session budget in metadata session",
-       Version1(K::kBytes, V1::kNotCapturedSessionBudget, false, 10), 0, {}, kVersion1},
+       Version1(K::kBytes, V1::kNotCapturedSessionBudget, false, 10),
+       0,
+       {},
+       kVersion1},
   };
   for (const Invalid& item : invalid) {
     // A mutation edits the summary before encoding, or the encoded record
@@ -1106,9 +1117,7 @@ void CheckArtifacts() {
           "default receiver refuses request bodies");
   }
   {
-    reb::ArtifactReceiver receiver(
-        root / "allowed",
-        {.allow_sensitive = true});
+    reb::ArtifactReceiver receiver(root / "allowed", {.allow_sensitive = true});
     std::istringstream stream(Frame(header, url, mime, content));
     Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
           "receiver started with --allow-sensitive keeps request bodies: " + receiver.LastError());
@@ -1122,9 +1131,7 @@ void CheckArtifacts() {
         "manifest records kind, origin, full URL and the sensitive flag");
   {
     // Reopening validates every retained manifest line again.
-    reb::ArtifactReceiver reopened(
-        root / "allowed",
-        {.allow_sensitive = true});
+    reb::ArtifactReceiver reopened(root / "allowed", {.allow_sensitive = true});
     std::istringstream duplicate(Frame(header, url, mime, content));
     Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
           "reopened store accepted the request body manifest line and kept its identity");
@@ -1146,17 +1153,13 @@ void CheckArtifacts() {
     auto other = block;
     other.capture_origin = reb::ArtifactCaptureOrigin::kNetworkResponse;
     Check(!reb::IsValidArtifactHeader(other), "header block artifact keeps the request origin");
-    reb::ArtifactReceiver receiver(
-        root / "allowed",
-        {.allow_sensitive = true});
+    reb::ArtifactReceiver receiver(root / "allowed", {.allow_sensitive = true});
     std::istringstream stream(Frame(block, url, "text/plain", text));
     Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
           "receiver keeps header blocks: " + receiver.LastError());
   }
   {
-    reb::ArtifactReceiver reopened(
-        root / "allowed",
-        {.allow_sensitive = true});
+    reb::ArtifactReceiver reopened(root / "allowed", {.allow_sensitive = true});
     std::istringstream duplicate(Frame(block, url, "text/plain", text));
     Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
           "reopened store accepted the header block manifest lines");
@@ -1176,9 +1179,7 @@ void CheckArtifacts() {
     auto plain = list;
     plain.flags = 0;
     Check(!reb::IsValidArtifactHeader(plain), "cookie list artifact must be sensitive");
-    reb::ArtifactReceiver receiver(
-        root / "allowed",
-        {.allow_sensitive = true});
+    reb::ArtifactReceiver receiver(root / "allowed", {.allow_sensitive = true});
     std::istringstream stream(
         Frame(list, url, "application/x-reb-cookie-list",
               std::string("RBCK\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16)));
@@ -1226,10 +1227,10 @@ reb::NativeResponseBodySummary ResponseSummary(const reb::NativeResponseBodyStat
   return value;
 }
 
-reb::EventRecord ResponseEvent(const reb::NativeResponseBodySummary& summary,
-                               const std::uint64_t artifact_id = 0,
-                               const std::uint16_t version =
-                                   reb::kNativeResponseBodyPayloadVersion) {
+reb::EventRecord ResponseEvent(
+    const reb::NativeResponseBodySummary& summary,
+    const std::uint64_t artifact_id = 0,
+    const std::uint16_t version = reb::kNativeResponseBodyPayloadVersion) {
   auto event = Event(reb::EventType::kResponseBody, reb::EncodeNativeResponseBodyPayload(summary));
   // Older records differ only in their version and the rules it selects.
   event.inline_payload[0] = static_cast<std::byte>(version);
@@ -1341,12 +1342,9 @@ void CheckResponseBodies() {
       {"response version 1", ResponseSummary(S::kCaptured, 900, 900), 911, 1},
       {"response version 2 truncated",
        ResponseSummary(older(Older::kCapturedTruncated), kCap + 5, kCap), 914, 2},
-      {"response version 2 partial past cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 916,
-       2},
-      {"response version 2 aborted past cap", ResponseSummary(S::kAborted, kCap * 3, kCap), 917,
-       2},
-      {"response version 2 type skipped", ResponseSummary(older(Older::kNotCapturedType), 0), 0,
-       2},
+      {"response version 2 partial past cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 916, 2},
+      {"response version 2 aborted past cap", ResponseSummary(S::kAborted, kCap * 3, kCap), 917, 2},
+      {"response version 2 type skipped", ResponseSummary(older(Older::kNotCapturedType), 0), 0, 2},
       {"response version 2 session budget",
        ResponseSummary(older(Older::kNotCapturedSessionBudget), 4096), 0, 2},
       {"response version 2 budget with snapshots withheld", withheld_budget, 0, 2},
@@ -1389,7 +1387,9 @@ void CheckResponseBodies() {
        ResponseSummary(older(Older::kCapturedTruncated), kCap + 5, kCap),
        914,
        {}},
-      {"response type skipped in version 3", ResponseSummary(older(Older::kNotCapturedType), 0), 0,
+      {"response type skipped in version 3",
+       ResponseSummary(older(Older::kNotCapturedType), 0),
+       0,
        {}},
       {"response session budget in version 3",
        ResponseSummary(older(Older::kNotCapturedSessionBudget), 4096),
@@ -1425,11 +1425,20 @@ void CheckResponseBodies() {
       {"response unobserved on aborted", ResponseSummary(S::kAborted, 0), 0,
        summary([](auto& value) { value.flags |= reb::kNativeResponseBodyCompletionUnobserved; })},
       {"response version 2 truncated under cap",
-       ResponseSummary(older(Older::kCapturedTruncated), kCap, kCap), 911, {}, 2},
-      {"response version 2 disk reserve", ResponseSummary(S::kNotCapturedDiskReserve, 4096), 0, {},
+       ResponseSummary(older(Older::kCapturedTruncated), kCap, kCap),
+       911,
+       {},
+       2},
+      {"response version 2 disk reserve",
+       ResponseSummary(S::kNotCapturedDiskReserve, 4096),
+       0,
+       {},
        2},
       {"response version 2 type skipped with length",
-       ResponseSummary(older(Older::kNotCapturedType), 3), 0, {}, 2},
+       ResponseSummary(older(Older::kNotCapturedType), 3),
+       0,
+       {},
+       2},
       {"response empty with bytes", ResponseSummary(S::kEmpty, 0), 0,
        summary([](auto& value) { value.body_length = 3; })},
       {"response redirect with length", ResponseSummary(S::kRedirected, 0), 0,

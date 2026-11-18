@@ -2368,7 +2368,7 @@ not reach them all; `coverage` says what was read:
   at the function start position. The join ignores capture origin: the identity
   and every retained source hash the same UTF-8 text V8 compiled, so a network
   response body, the `stack_script` artifact retained during the walk, and the
-  [compiled script](native-compiled-scripts-v1.md) artifacts (`compiled_script`
+  [compiled script](native-compiled-scripts-v2.md) artifacts (`compiled_script`
   for inline, inserted and `blob:` scripts, `dynamic_javascript` for `eval` and
   `new Function` text) all resolve the frame. When several hold the same bytes,
   the session's newest is shown. `eval` and `new Function` frames resolve the

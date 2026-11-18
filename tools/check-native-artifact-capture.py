@@ -63,6 +63,7 @@ HEADERS = (
     "brave/components/reverse_engineering_browser/browser/native_probe_session.h",
     "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h",
     "base/functional/callback.h",
+    "base/functional/callback_helpers.h",
     "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h",
     "base/memory/raw_ref.h",
     "base/memory/scoped_refptr.h",

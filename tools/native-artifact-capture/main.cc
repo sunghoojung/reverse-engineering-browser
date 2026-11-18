@@ -564,9 +564,8 @@ void RequestContentLimits(const std::filesystem::path& output) {
     return request;
   };
   // The open header's URL and type hold their share until written.
-  const std::size_t metadata =
-      std::string_view("https://api.fixture.test/collect").size() +
-      std::string_view("application/octet-stream").size();
+  const std::size_t metadata = std::string_view("https://api.fixture.test/collect").size() +
+                               std::string_view("application/octet-stream").size();
 
   // 5,000 small distinct bodies are all retained, each holding its bytes.
   configure();
@@ -716,9 +715,9 @@ void RequestContentLimits(const std::filesystem::path& output) {
 
   // The receiver's disk reserve refuses a read body after its record, named
   // as its own reason, and the next body is still offered.
-  reb::ArtifactReceiver full(output / "disk-reserve-request-receiver",
-                             {.disk_reserve_bytes = std::numeric_limits<std::uint64_t>::max(),
-                              .allow_sensitive = true});
+  reb::ArtifactReceiver full(
+      output / "disk-reserve-request-receiver",
+      {.disk_reserve_bytes = std::numeric_limits<std::uint64_t>::max(), .allow_sensitive = true});
   const auto reserved = post(with_body("{\"reserve\":1}"));
   Receive(full, reserved.header.artifact_id, true, reb::ArtifactReceiveStatus::kDiskReserve);
   Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
@@ -846,7 +845,8 @@ void ReadRequestBodies(const std::filesystem::path& output) {
   transfers.clear();
 
   // Lengths on and off the 64 KiB frame boundary read the same way.
-  for (const std::size_t length : {std::size_t{16} * 1024 * 1024, std::size_t{16} * 1024 * 1024 + 1}) {
+  for (const std::size_t length :
+       {std::size_t{16} * 1024 * 1024, std::size_t{16} * 1024 * 1024 + 1}) {
     configure();
     auto body = upload(network::DataElement(network::DataElementFile{}));
     start(body);
@@ -925,8 +925,7 @@ void ReadRequestBodies(const std::filesystem::path& output) {
           "A read waits while the pool stays full");
   }
   base::SequencedTaskRunner::RunPosted();
-  Check(state(record(LastOf(NativeProbeType::kRequestBody))) ==
-                reb::RequestBodyState::kCaptured &&
+  Check(state(record(LastOf(NativeProbeType::kRequestBody))) == reb::RequestBodyState::kCaptured &&
             !reb::NativeRequestBodyReader::Waiting(0),
         "The waiting read completes once the pool has room");
   transfers.clear();
@@ -1587,9 +1586,9 @@ void InFlightPool(NativeArtifactCaptureSink& sink,
   }
   std::uint64_t script_id = 0;
   {
-    auto held = reb::NativeArtifactReservation::Acquire(
-        sink.memory_pool(), sink.memory_pool().stream_mark() - kMiB,
-        reb::NativeArtifactPoolUse::kStream);
+    auto held = reb::NativeArtifactReservation::Acquire(sink.memory_pool(),
+                                                        sink.memory_pool().stream_mark() - kMiB,
+                                                        reb::NativeArtifactPoolUse::kStream);
     script_id = sink.CaptureGeneratedArtifact(
         reb::NativeArtifactKind::kJavaScript, reb::NativeArtifactCaptureOrigin::kDynamicJavaScript,
         9, 1, kFrame, "fixture://large-script", mojo_base::BigBuffer(script));
@@ -1668,8 +1667,7 @@ void Admission(const std::filesystem::path& output) {
   Check(Payload(events.back()) == "transfer_disconnected", "Queue rejection is visible");
   const int refused_data = Begin(request);
   client.reject_next = true;
-  Check(Finish(refused_data) == 0 &&
-            Payload(events.back()) == "transfer_disconnected" &&
+  Check(Finish(refused_data) == 0 && Payload(events.back()) == "transfer_disconnected" &&
             client.transfers.empty(),
         "A refused data frame aborts its stream visibly");
   Check(sink.in_flight_bytes() == 0, "Failed and refused bodies return their pool share");
@@ -2443,6 +2441,7 @@ int main(int argc, char** argv) {
     NativeProbeHostBrowserInternalScope();
     NativeProbeHostWorkerTabLinks();
     NativeProbeHostStackRefusal();
+    NativeProbeHostArtifactCredit();
     RequestBodyPolicy(output);
     ResponseBodyLimits(receiver, output);
     event_wire.flush();

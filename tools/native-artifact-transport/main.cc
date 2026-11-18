@@ -199,15 +199,9 @@ pid_t SpawnReceiver(const std::string& binary,
                     const std::vector<std::string>& extra = {}) {
   const std::string store = root + "/" + store_name;
   const std::string token = root + "/token";
-  std::vector<std::string> arguments = {binary,
-                                        "--store",
-                                        store,
-                                        "--socket",
-                                        socket_path,
-                                        "--token-file",
-                                        token,
-                                        "--session-id",
-                                        std::to_string(kSessionId)};
+  std::vector<std::string> arguments = {binary,     "--store",      store,
+                                        "--socket", socket_path,    "--token-file",
+                                        token,      "--session-id", std::to_string(kSessionId)};
   arguments.insert(arguments.end(), extra.begin(), extra.end());
   std::vector<char*> argv;
   for (std::string& argument : arguments) {
@@ -432,9 +426,9 @@ void CheckDiskReserve(const std::string& receiver, const std::string& root) {
               kSessionId, &reb::NativeArtifactCaptureSink::TransferCompleted, &ChannelLost),
           "start against a receiver past its disk reserve");
   using Op = reb::NativeArtifactStreamOp;
-  Require(Enqueue(MakeTransfer(40, 12)) &&
-              StatusOf(40) == NativeArtifactReceiveStatus::kDiskReserve,
-          "a whole artifact past the reserve reports disk_reserve");
+  Require(
+      Enqueue(MakeTransfer(40, 12)) && StatusOf(40) == NativeArtifactReceiveStatus::kDiskReserve,
+      "a whole artifact past the reserve reports disk_reserve");
   Require(Enqueue(OpenStream(41)) && Enqueue(StreamFrame(Op::kData, 41, 100)) &&
               Enqueue(StreamFrame(Op::kEnd, 41, 0, 100)) && Enqueue(MakeTransfer(42, 4)) &&
               StatusOf(42) == NativeArtifactReceiveStatus::kDiskReserve &&

@@ -28,7 +28,8 @@ inline constexpr std::uint16_t kArtifactFlagSensitive = 1U << 0U;
 // or manifest size limit: an admission that would leave less free space than
 // this is refused as kDiskReserve, a status of its own that the browser
 // records as such (services/artifact-receiver/README.md#disk-reserve).
-inline constexpr std::uint64_t kDefaultArtifactDiskReserveBytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::uint64_t kDefaultArtifactDiskReserveBytes =
+    4ULL * 1024ULL * 1024ULL * 1024ULL;
 // Version 2 streams an artifact: an open header, then stream frames
 // (docs/architecture/artifact-transfer-channel.md).
 inline constexpr std::uint16_t kArtifactStreamProtocolVersion = 2;

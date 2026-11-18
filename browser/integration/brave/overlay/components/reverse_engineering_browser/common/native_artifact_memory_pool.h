@@ -49,8 +49,7 @@ class NativeArtifactMemoryPool final {
   NativeArtifactMemoryPool& operator=(const NativeArtifactMemoryPool&) = delete;
 
   // Relaxed: the counter publishes no other memory.
-  [[nodiscard]] bool TryAcquire(const std::size_t bytes,
-                                const NativeArtifactPoolUse use) noexcept {
+  [[nodiscard]] bool TryAcquire(const std::size_t bytes, const NativeArtifactPoolUse use) noexcept {
     const std::size_t limit = use == NativeArtifactPoolUse::kStream ? stream_mark_ : capacity_;
     std::size_t current = used_.load(std::memory_order_relaxed);
     while (current <= limit && bytes <= limit - current) {

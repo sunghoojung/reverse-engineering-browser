@@ -343,10 +343,9 @@ namespace request_detail {
   const bool retained = state == kCaptured;
   // Retired: nothing is truncated, budgeted or too large to hash.
   if ((value.flags & kRequestBodyDigestSizeLimit) != 0 || state == kCapturedTruncated ||
-      state == kNotCapturedSessionBudget || digest == zero_digest ||
-      has_artifact != retained || (!retained && value.captured_length != 0) ||
-      none != (state == kNoBody) || (none && (credential || value.element_count != 0 ||
-                                              value.body_length != 0)) ||
+      state == kNotCapturedSessionBudget || digest == zero_digest || has_artifact != retained ||
+      (!retained && value.captured_length != 0) || none != (state == kNoBody) ||
+      (none && (credential || value.element_count != 0 || value.body_length != 0)) ||
       (!none && value.element_count == 0) ||
       (kind == RequestBodyKind::kChunkedDataPipe && value.element_count != 1)) {
     return false;

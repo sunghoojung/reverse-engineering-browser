@@ -279,7 +279,8 @@ class NativeRequestBodyReader {
       if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
         return false;
       }
-      if (!element.TryAs<network::DataElementBytes>() && !element.TryAs<network::DataElementFile>() &&
+      if (!element.TryAs<network::DataElementBytes>() &&
+          !element.TryAs<network::DataElementFile>() &&
           !element.TryAs<network::DataElementDataPipe>() &&
           !element.TryAs<network::DataElementChunkedDataPipe>()) {
         return false;

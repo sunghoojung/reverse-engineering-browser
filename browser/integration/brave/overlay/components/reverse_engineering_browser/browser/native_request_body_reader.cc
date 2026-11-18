@@ -556,8 +556,8 @@ bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
   return runner->PostTask(
       FROM_HERE, base::BindOnce(
                      [](scoped_refptr<network::ResourceRequestBody> body, std::vector<Part> parts,
-                        NativeArtifactStream stream,
-                        scoped_refptr<base::SequencedTaskRunner> reply, Done done) {
+                        NativeArtifactStream stream, scoped_refptr<base::SequencedTaskRunner> reply,
+                        Done done) {
                        (new PartsReader(std::move(body), std::move(parts), std::move(stream),
                                         std::move(reply), std::move(done)))
                            ->Next();

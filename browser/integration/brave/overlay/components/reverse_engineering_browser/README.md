@@ -253,16 +253,19 @@ configuration.
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are
-streamed by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
-request content share the 32 MiB in-flight pool in
+streamed whole, at any length, by an asynchronous Mojo tee, in frames of at
+most 64 KiB with an incremental SHA-256. Tees, request content and renderer
+content share the 32 MiB in-flight pool in
 `common/native_artifact_memory_pool.h`, charged with each queued data frame and
-returned when the writer drops it. Compiled script source that no response body
-carries and WASM byte-buffer API inputs use a separate one-way Mojo submission
-with the same per-artifact cap; see
-[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v1.md).
+returned when the writer drops it; a stream that finds the pool full waits for
+it to drain. Compiled script source that no response body carries and WASM
+byte-buffer API inputs use a separate one-way Mojo submission, charged to a
+256 MiB renderer credit that the browser returns once it no longer holds the
+buffer; see
+[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v2.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
-thread drains a bounded 32 MiB queue to the authenticated artifact socket.
+thread drains the pool's frames to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
 do not enter the renderer event ring. Other response bodies need request

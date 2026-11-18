@@ -58,8 +58,8 @@ NativeArtifactStream::NativeArtifactStream(NativeArtifactMemoryPool& pool,
   transfer->header.url_size = static_cast<std::uint32_t>(url.size());
   transfer->header.mime_type_size = static_cast<std::uint32_t>(mime_type.size());
   // The metadata already exists, so it may use the whole-item headroom.
-  transfer->reservation = NativeArtifactReservation::Acquire(
-      pool, url.size() + mime_type.size(), NativeArtifactPoolUse::kWhole);
+  transfer->reservation = NativeArtifactReservation::Acquire(pool, url.size() + mime_type.size(),
+                                                             NativeArtifactPoolUse::kWhole);
   if (!transfer->reservation.is_valid()) {
     state_ = NativeArtifactStreamState::kMemoryLimit;
     return;
@@ -143,8 +143,7 @@ void NativeArtifactStream::WaitForSpace(base::OnceClosure resume) {
   {
     SpaceWaiters& waiters = Waiters();
     base::AutoLock lock(waiters.lock);
-    waiters.waiting.emplace_back(base::SequencedTaskRunner::GetCurrentDefault(),
-                                 std::move(resume));
+    waiters.waiting.emplace_back(base::SequencedTaskRunner::GetCurrentDefault(), std::move(resume));
   }
   if (state_ != NativeArtifactStreamState::kOpen || !pool_->ArmSpaceHook()) {
     OnPoolSpace();

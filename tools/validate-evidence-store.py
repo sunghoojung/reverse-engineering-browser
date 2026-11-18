@@ -924,7 +924,7 @@ def valid_script_compiled(event: dict, payload: bytes) -> bool:
         or not 1 <= event["process_id"] <= 0xFFFFFFFF
         or not 1 <= event["thread_id"] <= 0xFFFFFFFF
         or len(payload) != 128
-        or int.from_bytes(payload[0:2], "little") != 1
+        or int.from_bytes(payload[0:2], "little") not in (1, 2)
         or int.from_bytes(payload[2:4], "little") != 128
     ):
         return False
@@ -932,16 +932,20 @@ def valid_script_compiled(event: dict, payload: bytes) -> bool:
     creator, position = int.from_bytes(payload[20:24], "little"), int.from_bytes(payload[72:76], "little")
     length = int.from_bytes(payload[32:40], "little")
     digest_is_zero = not any(payload[40:72])
+    # Version 1 did not hash past 16 MiB and had a source budget (5) and a size
+    # limit (6); version 2 hashes every source and names a transfer backlog (8).
+    limited = payload[0] == 1
     limit = 16 * 1024 * 1024
+    known = range(1, 8) if limited else (1, 2, 3, 4, 7, 8)
     if retention == 6:
         source_valid = length > limit and digest_is_zero
     elif retention == 7:
         source_valid = digest_is_zero
     else:
-        source_valid = 1 <= length <= limit and not digest_is_zero
+        source_valid = length != 0 and not digest_is_zero and (not limited or length <= limit)
     return (
         1 <= kind <= 5
-        and 1 <= retention <= 7
+        and retention in known
         and source_valid
         and int.from_bytes(payload[8:12], "little") != 0
         and int.from_bytes(payload[24:32], "little") != 0

@@ -691,9 +691,10 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
   if (credential_form) {
     summary.flags |= kNativeRequestBodyCredentialForm;
   }
-  std::string mime_type = summary.content_type_length != 0
-                              ? std::string(summary.content_type.data(), summary.content_type_length)
-                              : std::string("application/octet-stream");
+  std::string mime_type =
+      summary.content_type_length != 0
+          ? std::string(summary.content_type.data(), summary.content_type_length)
+          : std::string("application/octet-stream");
   NativeProbeEvent event = MakeChildEvent(NativeProbeType::kRequestBody, parent);
   if (summary.kind == NativeRequestBodyKind::kNone) {
     summary.state = NativeRequestBodyState::kNoBody;

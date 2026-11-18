@@ -485,8 +485,8 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
   } else {
     // The reader offers every byte and waits for room, so a complete read
     // kept the whole body.
-    outcome.state = stream.kept() == 0 ? NativeRequestBodyState::kEmpty
-                                       : NativeRequestBodyState::kCaptured;
+    outcome.state =
+        stream.kept() == 0 ? NativeRequestBodyState::kEmpty : NativeRequestBodyState::kCaptured;
     outcome.sha256 = stream.Digest();
     if (stream.kept() != 0) {
       outcome.artifact_id = stream.artifact_id();
@@ -675,10 +675,10 @@ void NativeArtifactCaptureSink::CaptureNativeGuest(const NativeGuestCapture& cap
       !capture.execution_context_id ||
       !(capture.document_token_high || capture.document_token_low) ||
       (carries_module && capture.module_bytes.size() < 8) ||
-      capture.module_bytes.size() > kNativeArtifactMaxContentBytes || capture.adapter_json.empty() ||
-      capture.adapter_json.size() > kNativeGuestAdapterLimit || capture.bytecode_bytes.empty() ||
-      capture.bytecode_bytes.size() > kNativeGuestSnapshotLimit || capture.source_url.empty() ||
-      capture.source_url.size() > kNativeArtifactMaxUrlBytes ||
+      capture.module_bytes.size() > kNativeArtifactMaxContentBytes ||
+      capture.adapter_json.empty() || capture.adapter_json.size() > kNativeGuestAdapterLimit ||
+      capture.bytecode_bytes.empty() || capture.bytecode_bytes.size() > kNativeGuestSnapshotLimit ||
+      capture.source_url.empty() || capture.source_url.size() > kNativeArtifactMaxUrlBytes ||
       GuestField(dispatch, 72, 4) != capture.bytecode_bytes.size() ||
       GuestField(dispatch, 40) >= capture.bytecode_bytes.size() || GuestField(dispatch, 56) ||
       !GuestField(dispatch, 24) || !GuestField(dispatch, 32) ||
@@ -1374,10 +1374,11 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifact(
     std::string_view source_url,
     mojo_base::BigBuffer content,
     std::uint64_t parent_artifact_id,
-    std::function<void()> on_refused) {
+    std::function<void()> on_refused,
+    base::ScopedClosureRunner content_released) {
   const std::uint64_t artifact_id = CaptureGeneratedArtifactInternal(
       kind, capture_origin, creator_event_id, execution_context_id, frame_id, source_url,
-      std::move(content), parent_artifact_id, false, on_refused);
+      std::move(content), parent_artifact_id, false, on_refused, std::move(content_released));
   if (artifact_id == 0 && on_refused) {
     on_refused();
   }
@@ -1394,7 +1395,8 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
     mojo_base::BigBuffer content,
     const std::uint64_t parent_artifact_id,
     const bool native_wasm_runtime,
-    std::function<void()> on_refused) {
+    std::function<void()> on_refused,
+    base::ScopedClosureRunner content_released) {
   const bool is_runtime_typed_array =
       kind == NativeArtifactKind::kBytecodeBuffer &&
       capture_origin == NativeArtifactCaptureOrigin::kRuntimeTypedArray;
@@ -1521,10 +1523,12 @@ std::uint64_t NativeArtifactCaptureSink::CaptureGeneratedArtifactInternal(
       return 0;
     }
     pending_.emplace(artifact_id, std::move(context));
-    generated_streams_.emplace(artifact_id, GeneratedStream{.content = std::move(content),
-                                                            .frame_id = frame_id,
-                                                            .result_category = result_category,
-                                                            .stream = std::move(stream)});
+    generated_streams_.emplace(artifact_id,
+                               GeneratedStream{.content = std::move(content),
+                                               .content_released = std::move(content_released),
+                                               .frame_id = frame_id,
+                                               .result_category = result_category,
+                                               .stream = std::move(stream)});
     PumpGeneratedStream(artifact_id, capture_generation);
     return artifact_id;
   }

@@ -21,7 +21,6 @@ bool reb::NativeRequestBodyReader::CanRead(const network::ResourceRequestBody&) 
 }
 bool reb::NativeRequestBodyReader::Start(network::ResourceRequestBody&,
                                          NativeArtifactStream,
-                                         std::size_t,
                                          Done) {
   return false;
 }
@@ -62,8 +61,9 @@ void EmitArtifact(reb::NativeArtifactKind kind,
                   std::uint64_t frame,
                   std::string_view url,
                   std::span<const std::uint8_t> bytes,
-                  const reb::NativeRuntimeScript& script) noexcept {
-  assert(kind == reb::NativeArtifactKind::kBytecodeBuffer);
+                  const reb::NativeRuntimeScript& script,
+                  std::uint64_t credit) noexcept {
+  assert(kind == reb::NativeArtifactKind::kBytecodeBuffer && credit == 0);
   assert(origin == reb::NativeArtifactCaptureOrigin::kRuntimeTypedArray);
   ++artifact_calls;
   // This adapter substitutes only Mojo delivery. Browser parent assignment and

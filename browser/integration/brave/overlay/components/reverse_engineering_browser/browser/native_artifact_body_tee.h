@@ -37,8 +37,8 @@ class NativeArtifactBodyTee final : public base::RefCounted<NativeArtifactBodyTe
   // instead of passing bytes capture could not keep. Taking fewer means the
   // observer is out of room, and it runs `resume` on this sequence once it can
   // take more. An observer that stopped capturing takes every byte.
-  using Observer = base::RepeatingCallback<
-      std::size_t(std::span<const std::uint8_t> chunk, base::OnceClosure resume)>;
+  using Observer = base::RepeatingCallback<std::size_t(std::span<const std::uint8_t> chunk,
+                                                       base::OnceClosure resume)>;
 
   // Returns the original source unchanged when a forwarding pipe cannot be
   // created. Otherwise, the returned consumer receives exactly the original

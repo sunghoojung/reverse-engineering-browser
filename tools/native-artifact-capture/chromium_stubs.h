@@ -523,7 +523,8 @@ class NativeRequestBodyReader {
       if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
         return false;
       }
-      if (!element.TryAs<network::DataElementBytes>() && !element.TryAs<network::DataElementFile>() &&
+      if (!element.TryAs<network::DataElementBytes>() &&
+          !element.TryAs<network::DataElementFile>() &&
           !element.TryAs<network::DataElementDataPipe>() &&
           !element.TryAs<network::DataElementChunkedDataPipe>()) {
         return false;
@@ -585,8 +586,9 @@ class NativeRequestBodyReader {
     constexpr std::size_t kChunk = 64U * 1024U;
     Read& read = reads.at(index);
     while (read.offset < read.bytes.size() && read.stream.is_open()) {
-      const auto chunk = std::span<const std::uint8_t>(read.bytes).subspan(
-          read.offset, std::min(kChunk, read.bytes.size() - read.offset));
+      const auto chunk =
+          std::span<const std::uint8_t>(read.bytes)
+              .subspan(read.offset, std::min(kChunk, read.bytes.size() - read.offset));
       const std::size_t taken = read.stream.Offer(chunk);
       read.offset += taken;
       if (taken < chunk.size() && read.stream.is_open()) {
@@ -729,6 +731,15 @@ class WeakPtrFactory {
  private:
   std::shared_ptr<T*> cell_;
 };
+// A method bound to a WeakPtr does nothing once its object is gone.
+template <class R, class T, class... Params, class... Bound>
+auto BindOnce(R (T::*method)(Params...), WeakPtr<T> target, Bound... bound) {
+  return [method, target, ... bound = std::move(bound)](auto&&... rest) mutable {
+    if (target) {
+      (target.operator->()->*method)(std::move(bound)..., std::forward<decltype(rest)>(rest)...);
+    }
+  };
+}
 struct UnguessableToken {
   std::uint64_t high = 0, low = 0;
   std::uint64_t GetHighForSerialization() const { return high; }
@@ -781,6 +792,7 @@ class NativeProbeClient {
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
   virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
+  virtual void ReleaseArtifactCredit(std::uint64_t) = 0;
 };
 class NativeProbeHost {
  public:
@@ -873,6 +885,7 @@ class NativeProbeHost {
                                         std::uint64_t,
                                         bool,
                                         mojo_base::BigBuffer,
+                                        std::uint64_t,
                                         std::uint64_t) = 0;
 };
 }  // namespace reb::mojom

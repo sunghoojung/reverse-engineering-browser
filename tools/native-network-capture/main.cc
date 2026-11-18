@@ -785,12 +785,13 @@ void RequestContent() {
   events.clear();
   start();
   assert(events.empty());
-  std::cout << "PASS native request content: metadata-only off-thread digest/type/length, content "
-               "target and body read, a 17 MiB body whole, file/blob/stream/mixed kinds, credential "
-               "form captured and flagged, unavailable/refused/URL/disk-reserve outcomes for bodies "
-               "and full targets, "
-               "redirect target, redirected and unavailable response bodies, tee parent and "
-               "completion hand-off\n";
+  std::cout
+      << "PASS native request content: metadata-only off-thread digest/type/length, content "
+         "target and body read, a 17 MiB body whole, file/blob/stream/mixed kinds, credential "
+         "form captured and flagged, unavailable/refused/URL/disk-reserve outcomes for bodies "
+         "and full targets, "
+         "redirect target, redirected and unavailable response bodies, tee parent and "
+         "completion hand-off\n";
 }
 
 reb::CookieListPayload Cookies(const reb::NativeProbeEvent& event) {

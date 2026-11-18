@@ -517,7 +517,7 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
     previous = at;
   }
   Check(copied <= reb::kNativeResponseBodySnapshotCopyFactor * sent +
-                       reb::kNativeResponseBodySnapshotSlackBytes,
+                      reb::kNativeResponseBodySnapshotSlackBytes,
         "One body's snapshots copy at most four times its bytes plus 64 MiB");
   Check(now - trickled.back().header.monotonic_time_ns <=
                 spacing(now - started) + static_cast<std::uint64_t>(10 * kSecond) &&
@@ -572,7 +572,8 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
   NativeArtifactBodyTee::Deliver(paced.pipe, std::vector<std::uint8_t>(12 * kMiB, 'q'));
   drop_copies();
   const auto grown = partials(paced);
-  Check(grown.size() == 11 && ResponseRecord(grown.back()).body_length == 12 * kMiB + 64 * kKiB + 12 &&
+  Check(grown.size() == 11 &&
+            ResponseRecord(grown.back()).body_length == 12 * kMiB + 64 * kKiB + 12 &&
             (ResponseRecord(grown.back()).flags & reb::kResponseBodySnapshotsWithheld) != 0 &&
             copied_by(paced) <= bound(ResponseRecord(grown.back()).body_length),
         "More kept bytes raise the bound; the next snapshot says one was withheld");
@@ -643,10 +644,8 @@ void ResponseBodySchedule(reb::ArtifactReceiver& receiver, const std::filesystem
     receive_snapshots();
   }
   const auto big_partials = partials(big);
-  Check(big_partials.size() == 3 &&
-            ResponseRecord(big_partials[0]).captured_length == 16 * kMiB &&
-            ResponseRecord(big_partials[1]).captured_length == 32 * kMiB &&
-            checkpoints() == 0,
+  Check(big_partials.size() == 3 && ResponseRecord(big_partials[0]).captured_length == 16 * kMiB &&
+            ResponseRecord(big_partials[1]).captured_length == 32 * kMiB && checkpoints() == 0,
         "A large open body is snapshotted by checkpoints of every byte so far");
   const auto big_end = Ended(big, {});
   const auto big_payload = ResponseRecord(big_end);
@@ -762,9 +761,9 @@ void ResponseBodyLimits(reb::ArtifactReceiver& receiver, const std::filesystem::
   // A body that ended before the disk reserve refused it already has a
   // record naming its artifact, so the refusal follows as a disk_reserve
   // failure joined to its creator.
-  reb::ArtifactReceiver full(output / "disk-reserve-response-receiver",
-                             {.disk_reserve_bytes = std::numeric_limits<std::uint64_t>::max(),
-                              .allow_sensitive = true});
+  reb::ArtifactReceiver full(
+      output / "disk-reserve-response-receiver",
+      {.disk_reserve_bytes = std::numeric_limits<std::uint64_t>::max(), .allow_sensitive = true});
   const auto reserved = Ended(Respond(next++), std::vector<std::uint8_t>(40 * kKiB, 'd'));
   Receive(full, reserved.header.artifact_id, true, reb::ArtifactReceiveStatus::kDiskReserve);
   Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&

@@ -1281,8 +1281,7 @@ const char* ArtifactReceiver::DiskReserveRefusal(const std::uint64_t bytes,
   constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
   const std::uint64_t available =
       block_size != 0 && blocks > kMax / block_size ? kMax : blocks * block_size;
-  if (available >= limits_.disk_reserve_bytes &&
-      bytes <= available - limits_.disk_reserve_bytes) {
+  if (available >= limits_.disk_reserve_bytes && bytes <= available - limits_.disk_reserve_bytes) {
     return nullptr;
   }
   status = ArtifactReceiveStatus::kDiskReserve;

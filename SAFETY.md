@@ -131,9 +131,8 @@ it.
   confirmed by guessing. Source text that no response body carried (`eval` and
   `Function` strings, inline, inserted and `blob:` scripts) is page content and
   is sensitive capture: it is retained only with `REB_CAPTURE_REQUEST_CONTENT=1`,
-  which the packaged app's default content mode sets, at most 16 MiB per script
-  and 64 MiB of distinct text per renderer and configuration. See
-  [Native compiled scripts](protocol/native-compiled-scripts-v1.md).
+  which the packaged app's default content mode sets, whole at any length. See
+  [Native compiled scripts](protocol/native-compiled-scripts-v2.md).
 - Standalone probes remain inactive without an enabled session. Enabled artifact
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,

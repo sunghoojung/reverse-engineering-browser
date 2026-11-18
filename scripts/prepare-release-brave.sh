@@ -65,17 +65,30 @@ if ((${#unfinished[@]})); then
   exit 1
 fi
 
-# Reuse the published browser bytes only while every browser input and wire
-# contract still matches the commit that built them.
+# Reuse the published browser bytes only while every input the Brave build
+# reads still matches the commit that built them: the pins, overlays and
+# patches under browser/, the scripts that bootstrap, synchronize, build and
+# package it, and the patch-stack helpers those scripts import to plan, apply
+# and record the overlay and patches. The build reads nothing under include,
+# src, protocol or services: overlay GN targets depend only on Chromium and
+# overlay targets, and overlay sources include only Chromium and overlay
+# headers. A change there therefore keeps the pair. Whether this browser still
+# speaks the contracts those consumers read is checked by make check, whose
+# native capture checks compile the overlay sources against include and src
+# (tools/check-native-probe-admission.sh and its neighbours), and by the
+# release's live acceptance of the pair.
+readonly browser_inputs=(
+  browser
+  scripts/bootstrap-brave.sh scripts/brave-toolchain.sh
+  scripts/build-brave-distribution.sh scripts/build-integrated-brave.sh
+  scripts/package-brave-distribution.sh scripts/sync-browser-integration.sh
+  tools/brave_patch_contract.py tools/check-integrated-brave-state.py
+)
 if ! git cat-file -e "${build_source}^{commit}" 2>/dev/null; then
   echo "Browser build commit ${build_source} is not in this checkout's history." >&2
   exit 1
 fi
-if ! git diff --exit-code "${build_source}" -- \
-  browser include src protocol services \
-  scripts/bootstrap-brave.sh scripts/brave-toolchain.sh \
-  scripts/build-brave-distribution.sh scripts/build-integrated-brave.sh \
-  scripts/package-brave-distribution.sh scripts/sync-browser-integration.sh; then
+if ! git diff --exit-code "${build_source}" -- "${browser_inputs[@]}"; then
   echo "Browser inputs changed since ${build_source} built ${brave_name}; build, package and pin a new browser." >&2
   exit 1
 fi

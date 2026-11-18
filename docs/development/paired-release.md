@@ -64,10 +64,15 @@ step 4.
 
 Build from the merge commit of #501, or a later `main` commit that changes no
 browser input. That commit becomes `build_source`. The release refuses the pair
-if any browser input (`browser`, `include`, `src`, `protocol`, `services` and
-the six Brave scripts named in `prepare-release-brave.sh`) differs between it
-and the released commit, so merge nothing that touches them until the pin PR in
-step 8 is merged.
+if any browser input differs between it and the released commit, so merge
+nothing that touches them until the pin PR in step 8 is merged. The browser
+inputs are exactly what the Brave build reads, listed in `browser_inputs` in
+`prepare-release-brave.sh`: `browser` (pins, overlays and patches), the six
+Brave scripts, and the two patch-stack helpers they import
+(`tools/brave_patch_contract.py` and `tools/check-integrated-brave-state.py`).
+`include`, `src`, `protocol`, `services` and the app are not inputs: no overlay
+source or GN target reads them. `make check` compiles the overlay sources
+against `include` and `src` to keep the browser and its consumers compatible.
 
 ```sh
 git clone https://github.com/sunghoojung/reverse-engineering-browser.git "$REPO"
@@ -293,8 +298,8 @@ REB_BRAVE_DIRECTORY=/absolute/path/to/src/brave \
 
 The packager prints the ZIP's SHA-256. After this, the browser inputs listed in
 [`scripts/prepare-release-brave.sh`](../../scripts/prepare-release-brave.sh)
-(`browser`, `include`, `src`, `protocol`, `services` and the Brave scripts)
-must not change before the release, or CI refuses the pair.
+(`browser`, the Brave scripts and their two patch-stack helpers) must not
+change before the release, or CI refuses the pair.
 
 ## 2. Record identity and provenance
 
@@ -370,7 +375,7 @@ including `brave_name`, `build_source` and both digests, and bump only the
 application version. The browser ZIP and provenance keep the name and
 `release` of the version they were built for, because the provenance digest is
 pinned and the record cannot be rewritten. CI still refuses the pair if any
-browser input or protocol byte differs from `build_source`. Set
+browser input differs from `build_source`. Set
 `REVIEWED_BRAVE_TAG` in
 [`publish-release-pair.py`](../../tools/publish-release-pair.py) to that
 browser release; v0.5.2 paired the v0.5.1 build this way. v0.6.0 does not:

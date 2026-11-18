@@ -212,6 +212,29 @@ is reported as `artifact_capture_failed` with `io_error`, and the browser emits
 one `artifact_channel_lost` gap. Capture admission refuses artifacts from then
 on, and that gap marks where they stop.
 
+### Throughput
+
+The writer sends one frame and waits for its acknowledgment before the next,
+so each 64 KiB data frame costs one round trip plus the receiver's work on it,
+and a stream that outruns that waits on the pool. Two choices keep the round
+trip short without a limit on what is captured:
+
+- Both ends ask for 1 MiB socket buffers. macOS starts a local stream socket
+  with 8 KiB, which would split each frame into eight writes, each waking both
+  processes. The pool still charges every byte until its acknowledgment, so the
+  buffers add no memory it does not bound.
+- The receiver hashes with the ARMv8 SHA-256 instructions every Apple silicon
+  processor has, about 22 microseconds per 64 KiB frame instead of about 258
+  with the portable rounds, which other processors still use.
+
+Measured on an Apple M5 Pro with loopback fixtures, a content session keeps
+96 MiB responses at about 300 MiB/s, where the same Brave without a session
+reads them at about 480 MiB/s, and the browser process grows by about 30 MiB,
+the pool. The receiver is then idle most of the time: what remains is the
+round trip itself. Sending data frames before earlier ones are acknowledged
+would shorten it further, at the cost of reporting refusals that arrive after
+later frames already left.
+
 ## Storage layout
 
 ```text

@@ -21,6 +21,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+#include <arm_neon.h>
+#endif
+
 namespace reb {
 namespace {
 
@@ -37,21 +41,32 @@ constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
     0xc67178f2U,
 };
 
+// Every stored byte is hashed on the receiver's one thread, so the digest
+// bounds how fast a session can store content. ARMv8 SHA-256 instructions,
+// which every Apple silicon processor has, hash about ten times faster than
+// the portable rounds, which remain for other processors.
 class Sha256 final {
  public:
   void Update(const std::uint8_t* data, std::size_t size) noexcept {
     total_size_ += size;
-    while (size > 0) {
+    if (block_size_ > 0) {
       const std::size_t copied = std::min(size, block_.size() - block_size_);
       std::copy_n(data, copied, block_.begin() + static_cast<std::ptrdiff_t>(block_size_));
       block_size_ += copied;
       data += copied;
       size -= copied;
-      if (block_size_ == block_.size()) {
-        Transform();
-        block_size_ = 0;
+      if (block_size_ < block_.size()) {
+        return;
       }
+      Transform(block_.data(), 1);
+      block_size_ = 0;
     }
+    const std::size_t blocks = size / block_.size();
+    Transform(data, blocks);
+    data += blocks * block_.size();
+    size -= blocks * block_.size();
+    std::copy_n(data, size, block_.begin());
+    block_size_ = size;
   }
 
   [[nodiscard]] std::array<std::uint8_t, 32> Final() noexcept {
@@ -59,14 +74,14 @@ class Sha256 final {
     block_[block_size_++] = 0x80U;
     if (block_size_ > 56) {
       std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.end(), 0U);
-      Transform();
+      Transform(block_.data(), 1);
       block_size_ = 0;
     }
     std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.begin() + 56, 0U);
     for (std::size_t index = 0; index < 8; ++index) {
       block_[63 - index] = static_cast<std::uint8_t>(bit_size >> (index * 8U));
     }
-    Transform();
+    Transform(block_.data(), 1);
 
     std::array<std::uint8_t, 32> digest{};
     for (std::size_t index = 0; index < state_.size(); ++index) {
@@ -79,14 +94,55 @@ class Sha256 final {
   }
 
  private:
-  void Transform() noexcept {
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+  void Transform(const std::uint8_t* data, std::size_t blocks) noexcept {
+    uint32x4_t abcd = vld1q_u32(state_.data());
+    uint32x4_t efgh = vld1q_u32(state_.data() + 4);
+    for (; blocks > 0; --blocks, data += 64) {
+      const uint32x4_t abcd_before = abcd;
+      const uint32x4_t efgh_before = efgh;
+      // Big-endian message words, four to a vector.
+      std::array<uint32x4_t, 4> words = {
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data))),
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16))),
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 32))),
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 48))),
+      };
+      // Four rounds per step; the first twelve steps also expand the next
+      // four schedule words in place of the ones just used.
+      for (std::size_t step = 0; step < 16; ++step) {
+        uint32x4_t& current = words[step % 4];
+        const uint32x4_t sum =
+            vaddq_u32(current, vld1q_u32(kSha256RoundConstants.data() + step * 4));
+        const uint32x4_t abcd_round = abcd;
+        abcd = vsha256hq_u32(abcd, efgh, sum);
+        efgh = vsha256h2q_u32(efgh, abcd_round, sum);
+        if (step < 12) {
+          current = vsha256su1q_u32(vsha256su0q_u32(current, words[(step + 1) % 4]),
+                                    words[(step + 2) % 4], words[(step + 3) % 4]);
+        }
+      }
+      abcd = vaddq_u32(abcd, abcd_before);
+      efgh = vaddq_u32(efgh, efgh_before);
+    }
+    vst1q_u32(state_.data(), abcd);
+    vst1q_u32(state_.data() + 4, efgh);
+  }
+#else
+  void Transform(const std::uint8_t* data, std::size_t blocks) noexcept {
+    for (; blocks > 0; --blocks, data += 64) {
+      TransformBlock(data);
+    }
+  }
+
+  void TransformBlock(const std::uint8_t* block) noexcept {
     std::array<std::uint32_t, 64> schedule{};
     for (std::size_t index = 0; index < 16; ++index) {
       const std::size_t offset = index * 4;
-      schedule[index] = (static_cast<std::uint32_t>(block_[offset]) << 24U) |
-                        (static_cast<std::uint32_t>(block_[offset + 1]) << 16U) |
-                        (static_cast<std::uint32_t>(block_[offset + 2]) << 8U) |
-                        static_cast<std::uint32_t>(block_[offset + 3]);
+      schedule[index] = (static_cast<std::uint32_t>(block[offset]) << 24U) |
+                        (static_cast<std::uint32_t>(block[offset + 1]) << 16U) |
+                        (static_cast<std::uint32_t>(block[offset + 2]) << 8U) |
+                        static_cast<std::uint32_t>(block[offset + 3]);
     }
     for (std::size_t index = 16; index < schedule.size(); ++index) {
       const std::uint32_t s0 = std::rotr(schedule[index - 15], 7) ^
@@ -130,6 +186,7 @@ class Sha256 final {
     state_[6] += g;
     state_[7] += h;
   }
+#endif
 
   std::array<std::uint32_t, 8> state_ = {
       0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,

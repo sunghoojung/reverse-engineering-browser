@@ -43,6 +43,10 @@ then data, checkpoint, end or abort frames, each acknowledged
 Any number of streams may be open at once; each holds only its metadata and a
 partial file. A stream still open when its connection closes, or when standard
 input ends, is discarded and counted as `streams_abandoned`.
+Every stored byte is hashed on the receiver's one thread, with the ARMv8
+SHA-256 instructions where the processor has them, and a socket connection asks
+for a 1 MiB receive buffer so a whole data frame arrives in one read
+([throughput](../../docs/architecture/artifact-transfer-channel.md#throughput)).
 
 The socket is mode 0600 and accepts only same-user peers that prove possession
 of the 256-bit token. Every frame must also match the authenticated session ID.

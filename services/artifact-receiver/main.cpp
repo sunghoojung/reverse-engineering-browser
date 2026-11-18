@@ -30,6 +30,10 @@ using reb::services::ScopedDescriptor;
 using reb::services::ScopedSocketPath;
 
 constexpr int kSocketTimeoutSeconds = 30;
+// macOS starts a local stream socket with 8 KiB buffers, so a 64 KiB data
+// frame would arrive in eight reads, each waking the browser's writer again.
+// Room for a whole frame lets it arrive in one.
+constexpr int kSocketBufferBytes = 1024 * 1024;
 
 volatile std::sig_atomic_t g_stop_requested = 0;
 
@@ -241,6 +245,9 @@ bool ReceiveSocketConnections(const int listener,
                 << "; waiting for reconnect\n";
       continue;
     }
+    // Only throughput depends on it, so a refusal keeps the default buffer.
+    static_cast<void>(setsockopt(connection.get(), SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes,
+                                 sizeof(kSocketBufferBytes)));
     if (!Authenticate(connection.get(), options.session_id, token)) {
       std::cerr
           << "Artifact connection closed after authentication failure; waiting for reconnect\n";

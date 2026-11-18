@@ -35,6 +35,12 @@ namespace {
 constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
 constexpr char kBrokerTokenFileSwitch[] = "reb-broker-token-file";
 constexpr int kTransferTimeoutSeconds = 30;
+// macOS starts a local stream socket with 8 KiB buffers, so a 64 KiB data
+// frame would cross in eight pieces, each waking the writer and the receiver.
+// With room for a whole frame it crosses in one write. The bytes stay charged
+// to the in-flight pool until their acknowledgment, so this adds no memory
+// the pool does not already bound.
+constexpr int kSocketBufferBytes = 1024 * 1024;
 // A local receiver that refuses every connection for about three seconds is
 // gone for the session; transfers wait in the queue meanwhile.
 constexpr std::array<int, 5> kReconnectDelaysMs = {100, 200, 400, 800, 1600};
@@ -266,6 +272,9 @@ int NativeArtifactSocketClient::Connect() const {
     close(descriptor);
     return -1;
   }
+  // Only throughput depends on it, so a refusal keeps the default buffer.
+  static_cast<void>(setsockopt(descriptor, SOL_SOCKET, SO_SNDBUF, &kSocketBufferBytes,
+                               sizeof(kSocketBufferBytes)));
   return descriptor;
 }
 

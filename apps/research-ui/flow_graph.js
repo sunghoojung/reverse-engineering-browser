@@ -414,21 +414,23 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   function triskelProgress(running) {
     if (!running) { stopTriskelWait(); return; }
     if (triskelRunning) return;
-    triskelRunning = true; engineRun.hidden = false;
+    triskelRunning = true;
     triskelWait = graphTriskelElapsed(text => { engineRun.textContent = text; });
     renderTriskel();
   }
   function stopTriskelWait() {
     triskelWait?.(); triskelWait = null; triskelRunning = false;
-    engineRun.textContent = ''; engineRun.hidden = true;
+    engineRun.textContent = '';
     renderTriskel();
   }
   function renderTriskel() {
     const realms = sessionLayout?.engine?.realms ?? [];
     const offered = available() && realms.some(item => item.reason?.code === 'large' || item.reason?.code === 'cancelled');
     const focused = host.ownerDocument?.activeElement === triskelButton;
-    // A lineage is laid out in the app; the session's realms wait behind it.
-    triskelButton.hidden = (lineageOn && lineage) || !(triskelRunning || offered);
+    // A lineage is laid out in the app; the session's realms run behind it.
+    const behind = Boolean(lineageOn && lineage);
+    engineRun.hidden = behind || !triskelRunning;
+    triskelButton.hidden = behind || !(triskelRunning || offered);
     triskelButton.textContent = triskelRunning ? 'Cancel' : 'Lay out with Triskel';
     triskelButton.setAttribute('aria-label', triskelRunning ? 'Stop Triskel and keep the layered layout' : 'Lay out the large realms with Triskel');
     triskelButton.title = triskelRunning ? 'Stop Triskel and keep the layered layout.'

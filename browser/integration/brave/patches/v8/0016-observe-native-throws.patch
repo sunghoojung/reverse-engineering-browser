@@ -1,5 +1,5 @@
 diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
-index 0665eec..6eac611 100644
+index df17fd6..887b9d8 100644
 --- a/include/v8-native-stack.h
 +++ b/include/v8-native-stack.h
 @@ -91,6 +91,30 @@ V8_EXPORT bool CaptureNativeStack(Isolate* isolate,

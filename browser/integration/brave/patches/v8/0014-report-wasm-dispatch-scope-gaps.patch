@@ -211,13 +211,14 @@ index 6464505..3d5bb35 100644
      uint32_t table_length = Read<int32_t>(code);
 diff --git a/src/wasm/reb-wasm-dispatch-scope.h b/src/wasm/reb-wasm-dispatch-scope.h
 new file mode 100644
-index 0000000..fa20247
+index 0000000..cc0a9f6
 --- /dev/null
 +++ b/src/wasm/reb-wasm-dispatch-scope.h
-@@ -0,0 +1,114 @@
-+// Copyright 2026 the V8 project authors. All rights reserved.
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in the LICENSE file.
+@@ -0,0 +1,115 @@
++// Copyright 2026 The Reverse Engineering Browser Authors
++// This Source Code Form is subject to the terms of the Mozilla Public
++// License, v. 2.0. If a copy of the MPL was not distributed with this file,
++// You can obtain one at https://mozilla.org/MPL/2.0/.
 +
 +#ifndef V8_WASM_REB_WASM_DISPATCH_SCOPE_H_
 +#define V8_WASM_REB_WASM_DISPATCH_SCOPE_H_

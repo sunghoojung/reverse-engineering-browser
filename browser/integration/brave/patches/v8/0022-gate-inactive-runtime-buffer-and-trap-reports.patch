@@ -12,11 +12,11 @@ index 0d913c0..b68dcd0 100644
      "include/v8-persistent-handle.h",
 diff --git a/include/v8-native-runtime-buffer.h b/include/v8-native-runtime-buffer.h
 new file mode 100644
-index 0000000..0d8d0b9
+index 0000000..04f6229
 --- /dev/null
 +++ b/include/v8-native-runtime-buffer.h
 @@ -0,0 +1,26 @@
-+// Copyright (c) 2026 The Brave Authors. All rights reserved.
++// Copyright 2026 The Reverse Engineering Browser Authors
 +// This Source Code Form is subject to the terms of the Mozilla Public
 +// License, v. 2.0. If a copy of the MPL was not distributed with this file,
 +// You can obtain one at https://mozilla.org/MPL/2.0/.

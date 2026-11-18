@@ -12,11 +12,11 @@ index 2b2c51f..0d913c0 100644
      "include/v8-primitive-object.h",
 diff --git a/include/v8-native-stack.h b/include/v8-native-stack.h
 new file mode 100644
-index 0000000..0665eec
+index 0000000..df17fd6
 --- /dev/null
 +++ b/include/v8-native-stack.h
 @@ -0,0 +1,96 @@
-+// Copyright (c) 2026 The Brave Authors. All rights reserved.
++// Copyright 2026 The Reverse Engineering Browser Authors
 +// This Source Code Form is subject to the terms of the Mozilla Public
 +// License, v. 2.0. If a copy of the MPL was not distributed with this file,
 +// You can obtain one at https://mozilla.org/MPL/2.0/.

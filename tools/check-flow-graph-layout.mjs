@@ -47,7 +47,7 @@ function callGraph(cards, realms, seed) {
   return {count: cards, lane, weight, from: Int32Array.from(from), to: Int32Array.from(to), w, h};
 }
 
-const layOut = graph => engine.runAsync({graph, metrics: engine.METRICS, engine: 'layered'});
+const layOut = (graph, metrics = {}) => engine.runAsync({graph, metrics: {...engine.METRICS, ...metrics}, engine: 'layered'});
 
 /** Route points with curves flattened the way flow_graph.js draws them. */
 function points(layout, e) {
@@ -93,7 +93,7 @@ function verify(name, graph, layout) {
   // recursion loop on its card's right edge), through no other card.
   const H = new Map(), V = new Map(), ends = [];
   const line = (map, key, run) => { let list = map.get(key); if (!list) map.set(key, list = []); list.push(run); };
-  let bends = 0;
+  let bends = 0, sideways = 0;
   for (let e = 0; e < edges; e += 1) {
     const p = points(layout, e), a = from[e], b = to[e], last = p.length - 2;
     assert(p.length >= 4, `${name}: call ${e} has a route`);
@@ -113,6 +113,7 @@ function verify(name, graph, layout) {
       const direction = near(y0, y1) ? 'h' : 'v';
       if (previous && direction !== previous) bends += 1;
       previous = direction;
+      if (direction === 'h' && graph.lane[a] === graph.lane[b]) sideways += Math.abs(x1 - x0);
       if (direction === 'h') line(H, Math.round(y0 * 2), [Math.min(x0, x1), Math.max(x0, x1), e]);
       else line(V, Math.round(x0 * 2), [Math.min(y0, y1), Math.max(y0, y1), e]);
     }
@@ -158,11 +159,11 @@ function verify(name, graph, layout) {
     if (graph.lane[from[e]] !== graph.lane[to[e]] || layout.back[e]) continue;
     assert(layout.layer[to[e]] > layout.layer[from[e]] && layout.y[to[e]] > layout.y[from[e]] + layout.h[from[e]], `${name}: call ${e} runs down to a later layer`);
   }
-  return {bendsPerEdge: edges ? bends / edges : 0, aspect: layout.width / layout.height};
+  return {bendsPerEdge: edges ? bends / edges : 0, aspect: layout.width / layout.height, sideways};
 }
 
-const run = async (name, graph) => {
-  const started = performance.now(), layout = await layOut(graph), ms = performance.now() - started;
+const run = async (name, graph, metrics = {}) => {
+  const started = performance.now(), layout = await layOut(graph, metrics), ms = performance.now() - started;
   return {layout, ms, measures: verify(name, graph, layout)};
 };
 
@@ -221,6 +222,16 @@ const run = async (name, graph) => {
   assert(band.w < rigid.w / 2, `a staircase is held under half its straight width: ${Math.round(band.w)} against ${Math.round(rigid.w)}`);
   assert(measures.bendsPerEdge < 6, `a staircase's calls bend ${measures.bendsPerEdge.toFixed(2)} times each`);
   console.log(`PASS flow graph layout: a staircase is ${Math.round(band.w)} px wide, straight ${Math.round(rigid.w)}, ${measures.bendsPerEdge.toFixed(2)} bends per call`);
+}
+
+{
+  // Coordinate descent after Brandes and Köpf only shortens calls sideways,
+  // and moves cards over their neighbours rather than off their calls.
+  const graph = callGraph(5000, 12, 5);
+  const before = (await run('5000 cards, unrefined', graph, {refine: 0})).measures, after = (await run('5000 cards, refined', graph)).measures;
+  assert(after.sideways < before.sideways, `refinement shortens calls sideways: ${Math.round(after.sideways)} against ${Math.round(before.sideways)} px`);
+  assert(after.bendsPerEdge <= before.bendsPerEdge, `refinement adds no bends: ${after.bendsPerEdge.toFixed(2)} against ${before.bendsPerEdge.toFixed(2)}`);
+  console.log(`PASS flow graph layout: refinement shortens calls sideways ${(100 * (1 - after.sideways / before.sideways)).toFixed(1)}% and bends ${before.bendsPerEdge.toFixed(2)} -> ${after.bendsPerEdge.toFixed(2)} per call`);
 }
 
 {

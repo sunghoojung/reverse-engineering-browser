@@ -3102,8 +3102,11 @@ same engine report either way, on card sizes measured from their text.
   that put it there (jog insertion, as in VLSI layout compaction); a deep
   band stops after a fixed amount of work per node (`jogWork`) and keeps the
   rest of its width, rather than bending every call. Brandes and Köpf's four
-  alignments are then compacted under the bound and balanced, and each call
-  is joined into as few straight runs as its neighbours leave room for.
+  alignments are then compacted under the bound and balanced. One round of
+  coordinate descent on the calls' weighted sideways length (Gansner,
+  Koutsofios, North and Vo's objective, each layer solved exactly) moves a
+  card over its callers and callees where its layer has room. Each call is
+  then joined into as few straight runs as its neighbours leave room for.
 - Bands are packed into columns in band order, toward a drawing 1.6 times as
   wide as it is tall (`aspect`), each band centred in its column at its own
   width.

@@ -24,8 +24,10 @@
  *   the rigid drawing's critical chains of separations pass the bound (jog
  *   insertion, as in VLSI layout compaction), within a fixed amount of work
  *   per node. Brandes and Köpf's four alignments are compacted under the
- *   bound and balanced, and each call is then joined into as few straight
- *   runs as its neighbours leave room for.
+ *   bound and balanced, a round of coordinate descent shortens the calls
+ *   sideways (Gansner, Koutsofios, North and Vo's objective, each layer
+ *   solved exactly), and each call is then joined into as few straight runs
+ *   as its neighbours leave room for.
  * - Routes. Every call is orthogonal: down from a port on its caller's
  *   bottom, across the gap under the caller's row, down its segment, across
  *   the gap over its callee's row, and down into the callee's top. A port
@@ -47,7 +49,7 @@
 const flowGraphLayout = (() => {
   const METRICS = {nodeW: 220, nodeH: 34, gapX: 30, gapY: 64, segGap: 14, trackGap: 8, trackPad: 20, runGap: 24, laneGap: 56,
     lanePadX: 22, lanePadTop: 52, lanePadBottom: 26, margin: 40, top: 0, wrap: 5, bandAspect: 1, aspect: 1.6, portGap: 18, portInset: 14,
-    gutter: 18, loop: 20, sweeps: 12, transpose: true, slack: 1, straighten: 3, jogWork: 16};
+    gutter: 18, loop: 20, sweeps: 12, transpose: true, slack: 1, refine: 1, straighten: 3, jogWork: 16};
   /* Route point types: the segment that arrives at the point. A corner is
    * rounded toward the next point. */
   const MOVE = 0, CURVE = 1, LINE = 2, CORNER = 3;
@@ -640,9 +642,10 @@ const flowGraphLayout = (() => {
    * rest of the layer.
    *
    * Joints are found first (cutJoints), then Brandes and Köpf's four
-   * alignments are compacted under the bound (alignPass) and balanced, and
-   * each call is joined into as few straight runs as its neighbours leave
-   * room for (straighten). Returns the band's width.
+   * alignments are compacted under the bound (alignPass) and balanced, the
+   * calls are shortened sideways (refine), and each call is joined into as
+   * few straight runs as its neighbours leave room for (straighten).
+   * Returns the band's width.
    */
   function placeBand(I, band, m) {
     if (!band.items.length) return 0;
@@ -658,7 +661,9 @@ const flowGraphLayout = (() => {
       coords.push(coord);
     }
     band.rounds = cut.rounds; band.stopped = cut.stopped;
-    return straighten(I, band, P, balance(P, coords), m);
+    const x = balance(P, coords);
+    refine(I, band, P, x, m);
+    return straighten(I, band, P, x, m);
   }
 
   /**
@@ -950,6 +955,135 @@ const flowGraphLayout = (() => {
       x[v] = (Math.max(Math.min(a, b), Math.min(c, d)) + Math.min(Math.max(a, b), Math.max(c, d))) / 2;
     }
     return x;
+  }
+
+  /**
+   * Calls shortened sideways: `refine` rounds of coordinate descent, each
+   * layer down and then up, on the weighted horizontal length of the calls,
+   * the objective of Gansner, Koutsofios, North and Vo's placement, with
+   * their weights: 1 between cards, 2 from a card to a segment, 8 along a
+   * segment, so segments stay straight. With the other layers held, a
+   * layer's best positions keep its order and separations and the band's
+   * extent; in q = x - (the separations to the layer's left end) that is
+   * isotonic regression under absolute cost, solved exactly. Each step only
+   * shortens the calls, and under absolute cost a node lands exactly over a
+   * neighbour, so a call it straightens stays straight; BK's balance leaves
+   * a card with callees on both sides between its alignments, and this
+   * moves it over them where its layer has room. Moves x in place.
+   */
+  function refine(I, band, P, x, m) {
+    const {upStart, upList, upper, downStart, downList, lower, isCard, localOf} = I, {items, L} = band;
+    const {spanAt, total, owner, layerStart, layerList, sepLeft, lw, rw} = P, rounds = m.refine;
+    if (!(rounds > 0) || !total) return;
+    // Each node's neighbours in the layers above and below, and their weights.
+    const start = new Int32Array(total + 1);
+    for (let v = 0; v < total; v += 1) {
+      const it = items[owner[v]];
+      start[v + 1] = start[v] + (isCard[it] ? upStart[it + 1] - upStart[it] + downStart[it + 1] - downStart[it] : 2);
+    }
+    const near = new Int32Array(start[total]), weight = new Uint8Array(start[total]);
+    for (let v = 0, o = 0; v < total; v += 1) {
+      const i = owner[v], it = items[i];
+      if (isCard[it]) {
+        for (let k = upStart[it]; k < upStart[it + 1]; k += 1) {
+          const far = upper[upList[k]], f = localOf[far];
+          near[o] = isCard[far] ? spanAt[f] : spanAt[f + 1] - 1; weight[o++] = isCard[far] ? 1 : 2;
+        }
+        for (let k = downStart[it]; k < downStart[it + 1]; k += 1) {
+          const far = lower[downList[k]];
+          near[o] = spanAt[localOf[far]]; weight[o++] = isCard[far] ? 1 : 2;
+        }
+      } else {
+        const caller = spanAt[localOf[upper[upList[upStart[it]]]]], callee = spanAt[localOf[lower[downList[downStart[it]]]]];
+        near[o] = v > spanAt[i] ? v - 1 : caller; weight[o++] = v > spanAt[i] ? 8 : 2;
+        near[o] = v < spanAt[i + 1] - 1 ? v + 1 : callee; weight[o++] = v < spanAt[i + 1] - 1 ? 8 : 2;
+      }
+    }
+    let minL = Infinity, maxR = -Infinity, widest = 0, entries = 0;
+    for (let v = 0; v < total; v += 1) { if (x[v] - lw[v] < minL) minL = x[v] - lw[v]; if (x[v] + rw[v] > maxR) maxR = x[v] + rw[v]; }
+    for (let l = 0; l < L; l += 1) {
+      const a = layerStart[l], b = layerStart[l + 1];
+      let size = b - a;
+      for (let j = a; j < b; j += 1) size += start[layerList[j] + 1] - start[layerList[j]];
+      widest = Math.max(widest, b - a); entries = Math.max(entries, size);
+    }
+    const off = new Float64Array(widest), best = new Float64Array(widest), heapX = new Float64Array(entries), heapW = new Float64Array(entries);
+    const stackX = new Float64Array(entries), stackW = new Float64Array(entries);
+    let size = 0, depth = 0;
+    // The breakpoints of the layer's cost so far, each with the slope it
+    // adds: those that came in rising sit on a stack, the rest in a
+    // max-heap, so the usual case, a node right of the one before, costs no
+    // heap work.
+    const add = (value, w) => {
+      if (depth ? value >= stackX[depth - 1] : !size || value >= heapX[0]) { stackX[depth] = value; stackW[depth++] = w; }
+      else push(value, w);
+    };
+    const push = (value, w) => {
+      let i = size++;
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (heapX[p] >= value) break;
+        heapX[i] = heapX[p]; heapW[i] = heapW[p]; i = p;
+      }
+      heapX[i] = value; heapW[i] = w;
+    };
+    const popTop = () => {
+      const value = heapX[--size], w = heapW[size];
+      let i = 0;
+      for (;;) {
+        let c = 2 * i + 1;
+        if (c >= size) break;
+        if (c + 1 < size && heapX[c + 1] > heapX[c]) c += 1;
+        if (heapX[c] <= value) break;
+        heapX[i] = heapX[c]; heapW[i] = heapW[c]; i = c;
+      }
+      if (size) { heapX[i] = value; heapW[i] = w; }
+    };
+    // One layer, the others held: the slope trick for isotonic regression
+    // under absolute cost. Each node adds |q - t| per neighbour (and a
+    // little toward where it is, so a tie keeps its place); the prefix
+    // minimum drops the slope past the largest breakpoints, and the best q
+    // runs back from the right end.
+    const place = l => {
+      const a = layerStart[l], b = layerStart[l + 1];
+      size = 0; depth = 0;
+      for (let j = 0; j < b - a; j += 1) {
+        const v = layerList[a + j];
+        off[j] = j ? off[j - 1] + sepLeft[v] : 0;
+        // Targets at one place (a straight segment's node and both its
+        // neighbours) go in as one breakpoint.
+        let drop = 1e-3, at = x[v], w = 1e-3;
+        for (let k = start[v]; k < start[v + 1]; k += 1) {
+          const t = x[near[k]];
+          drop += weight[k];
+          if (t === at) { w += weight[k]; continue; }
+          add(at - off[j], 2 * w);
+          at = t; w = weight[k];
+        }
+        add(at - off[j], 2 * w);
+        // Drop `drop` of slope off the largest breakpoints.
+        while (drop > 0) {
+          if (depth && (!size || stackX[depth - 1] >= heapX[0])) {
+            if (stackW[depth - 1] > drop) { stackW[depth - 1] -= drop; break; }
+            drop -= stackW[--depth];
+          } else {
+            if (heapW[0] > drop) { heapW[0] -= drop; break; }
+            drop -= heapW[0]; popTop();
+          }
+        }
+        best[j] = depth && (!size || stackX[depth - 1] >= heapX[0]) ? stackX[depth - 1] : heapX[0];
+      }
+      const lo = minL + lw[layerList[a]], hi = maxR - rw[layerList[b - 1]] - off[b - a - 1];
+      let q = Infinity;
+      for (let j = b - a - 1; j >= 0; j -= 1) {
+        q = Math.min(q, best[j]);
+        x[layerList[a + j]] = Math.min(hi, Math.max(lo, q)) + off[j];
+      }
+    };
+    for (let round = 0; round < rounds; round += 1) {
+      for (let l = 0; l < L; l += 1) if (layerStart[l + 1] > layerStart[l]) place(l);
+      for (let l = L - 1; l >= 0; l -= 1) if (layerStart[l + 1] > layerStart[l]) place(l);
+    }
   }
 
   /**

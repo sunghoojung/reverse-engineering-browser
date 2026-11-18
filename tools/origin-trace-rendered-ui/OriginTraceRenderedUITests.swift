@@ -2456,6 +2456,30 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await reportPhases()
     let lag = try await ui.json("({max: Math.round(window.__rebFlowLag.max), seconds: Math.round(performance.now() - window.__rebFlowLag.started) / 1000})")
     print("RENDERED_UI_FLOW large session: longest task gap \(lag["max"] ?? "?") ms over \(lag["seconds"] ?? "?") s")
+    // Triskel in the background: Cancel stops a run in progress and offers
+    // the realms it left; asked, Triskel counts its seconds beside Cancel
+    // over the layered drawing, and Cancel stops it and offers it again.
+    let triskel = "document.querySelector('#flow-graph-host .flow-graph-triskel')"
+    let elapsed = "document.querySelector('#flow-graph-host .flow-graph-engine-run')"
+    let engine = "document.querySelector('#flow-graph-host .flow-graph-engine')"
+    try await ui.waitUntil("!\(triskel).hidden || (\(elapsed).hidden && !/waiting/.test(\(engine).textContent))", timeout: 600, "large: Triskel's state was not shown")
+    if try await ui.value("!\(triskel).hidden && \(triskel).textContent === 'Cancel'") as? Bool == true {
+      try await ui.click("#flow-graph-host .flow-graph-triskel")
+      try await ui.waitUntil("\(elapsed).hidden && !/waiting/.test(\(engine).textContent)", timeout: 60, "large: Cancel did not stop the unasked realms")
+    }
+    if try await ui.value("!\(triskel).hidden && \(triskel).textContent === 'Lay out with Triskel'") as? Bool == true {
+      try await ui.click("#flow-graph-host .flow-graph-triskel")
+      try await ui.waitUntil("\(triskel).textContent === 'Cancel' && /^Laying out with Triskel · \\d+ s$/.test(\(elapsed).textContent) && document.querySelector('#flow-graph-host .flow-graph-state').hidden",
+        timeout: 60, "large: Lay out with Triskel did not run Triskel over the drawing")
+      try await assertLayout(ui, "#flow-graph-host .flow-graph-status", "large Graph status while Triskel runs")
+      try await ui.screenshot("flow-graph-triskel-large")
+      try await ui.click("#flow-graph-host .flow-graph-triskel")
+      try await ui.waitUntil("!\(triskel).hidden && \(triskel).textContent === 'Lay out with Triskel' && \(elapsed).hidden && /Triskel was stopped/.test(\(engine).title)",
+        timeout: 60, "large: Cancel did not stop Triskel")
+      print("RENDERED_UI_FLOW large: Lay out with Triskel ran over the drawing and Cancel stopped it")
+    } else {
+      print("RENDERED_UI_FLOW large: Triskel laid out every realm unasked")
+    }
     try await ui.load(harnessPage)
   }
 

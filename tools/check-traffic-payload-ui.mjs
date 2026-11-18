@@ -304,7 +304,9 @@ for (const [body, pattern] of [
   [record({kind: 'chunked_data_pipe', state: 'not_captured_read_incomplete', lengthPartial: true, read: true, sha256: null, capturedLength: '0', artifactId: '0'}), /a file, blob or stream part was not read whole/],
   [record({state: 'not_captured_artifact_unavailable', capturedLength: '0', artifactId: '0'}), /artifact channel was unavailable/],
   [record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'}),
-    /Not captured: this session had used its request content budget\. Raise Request content budget in New Live Session… for the next session\./],
+    /Not captured: the request content budget was used, a limit of the browser that recorded this session\. Current capture keeps every body and target whole\./],
+  [record({kind: 'bytes', state: 'not_captured_disk_reserve', read: true, sha256: null, capturedLength: '0', artifactId: '0'}),
+    /Not captured: storing it would have left less free disk than the artifact receiver's reserve\. Free disk space to keep later bodies\./],
   [record({state: 'not_captured_credential_form', sha256: null, capturedLength: '0', artifactId: '0'}), /password form submission\. Bytes and digest are withheld/],
 ]) {
   render(body === undefined ? {...request(null), origin: 'sample'} : request(body), null);
@@ -312,14 +314,11 @@ for (const [body, pattern] of [
   assert.equal(panel.querySelector('.traffic-payload-view'), null, 'no payload view without retained bytes');
   assert.equal(panel.querySelector('.traffic-payload-tools'), null, 'no find or copy without content');
 }
-// The session context names a content session's budget (state.sessionContentLimits,
-// app.js), so the refusal says which.
-context.state = {sessionContentLimits: {request_content_budget_mib: 1024, response_body_budget_mib: 512, response_media: false}};
+// An older session's budget names no control to raise: current capture has none.
 render(request(record({state: 'not_captured_session_budget', capturedLength: '0', artifactId: '0'})), null);
-assert.match(text('[data-section="payload"]'),
-  /Not captured: this session had used its 1,024 MiB request content budget\. Raise Request content budget in New Live Session… for the next session\./);
-assert.doesNotMatch(text('[data-section="payload"]'), /REB_/);
-delete context.state;
+assert.doesNotMatch(text('[data-section="payload"]'), /Raise|New Live Session|REB_/);
+render(request(record({kind: 'bytes', state: 'not_captured_disk_reserve', read: true, sha256: null, capturedLength: '0', artifactId: '0'})), null);
+assert.match(panel.querySelector('details.traffic-payload-details').textContent, /Not computed: the receiver refused the body to keep its disk reserve free/);
 render(jsonRequest, ready(json));
 const details = panel.querySelector('details.traffic-payload-details');
 assert.equal(details.hasAttribute('open'), false, 'Capture details starts collapsed');
@@ -331,7 +330,7 @@ assert.match(panel.querySelector('details.traffic-payload-details').textContent,
 // Over its 4 MiB bound the record has no digest, and the manifest's SHA-256 stands in.
 const overDigest = request(record({sha256: null, digestSizeLimit: true, bodyLength: '5242880', capturedLength: '5242880'}));
 render(overDigest, null);
-assert.match(panel.querySelector('details.traffic-payload-details').textContent, /Not computed: the body exceeds the 4 MiB digest bound/);
+assert.match(panel.querySelector('details.traffic-payload-details').textContent, /Not computed: the body exceeds the 4 MiB digest bound of the browser that recorded this session/);
 render(overDigest, ready('{}', {artifact: {sha256: 'cd'.repeat(32), byte_size: 5242880}}));
 assert.match(panel.querySelector('details.traffic-payload-details').textContent,
   /SHA-256(cd){32}Digest sourceArtifact manifest, over the 5,242,880 bytes retained; the request record carries no digest/);

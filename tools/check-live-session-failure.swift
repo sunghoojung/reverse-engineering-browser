@@ -3,16 +3,15 @@ import Foundation
 // Compile with the production coordinator, so these exercise its actual parser.
 @main
 enum LiveSessionFailureChecks {
-  // Starts as the app does: resolve the content switches once from the mode,
-  // the panel's limits and the environment, then build the launcher's
-  // environment from them.
+  // Starts as the app does: resolve the content switches once from the mode
+  // and the environment, then build the launcher's environment from them.
   static func launch(
-    _ environment: [String: String], content: Bool, sites: URL? = nil, limits: ContentLimits? = nil, chosen: Bool = false
+    _ environment: [String: String], content: Bool, sites: URL? = nil, chosen: Bool = false
   ) -> [String: String] {
     LiveSessionCoordinator.captureDefaults(
       environment: environment,
       content: LiveCaptureContent.resolve(
-        environment: environment, mode: content ? .content : .metadata, limits: limits, modeChosen: chosen),
+        environment: environment, mode: content ? .content : .metadata, modeChosen: chosen),
       savedInvocationSites: sites)
   }
 
@@ -150,130 +149,41 @@ enum LiveSessionFailureChecks {
     }
     print("PASS native live document-start permission: on by default for app captures, an explicit 0 survives")
 
-    // The start panel's content limits: the launcher's bounds and grammar,
-    // the agent path's rules for a start message, and the environment they
-    // reach the launcher through only in a session that retains content.
-    let defaultLimits = ContentLimits.defaults
-    precondition(defaultLimits == ContentLimits(requestContentBudgetMiB: 256, responseBodyBudgetMiB: 512, responseMedia: false), "default limits")
-    let configuredCases: [([String: String], ContentLimits)] = [
-      ([:], defaultLimits),
-      (["REB_REQUEST_CONTENT_BUDGET_MIB": "1024", "REB_RESPONSE_BODY_BUDGET_MIB": "16384", "REB_CAPTURE_RESPONSE_MEDIA": "1"],
-        ContentLimits(requestContentBudgetMiB: 1024, responseBodyBudgetMiB: 16384, responseMedia: true)),
-      (["REB_REQUEST_CONTENT_BUDGET_MIB": "1", "REB_RESPONSE_BODY_BUDGET_MIB": "1"],
-        ContentLimits(requestContentBudgetMiB: 1, responseBodyBudgetMiB: 1, responseMedia: false)),
-      (["REB_REQUEST_CONTENT_BUDGET_MIB": "4097", "REB_RESPONSE_BODY_BUDGET_MIB": "16385"], defaultLimits),
-      (["REB_REQUEST_CONTENT_BUDGET_MIB": "0", "REB_RESPONSE_BODY_BUDGET_MIB": "0512"], defaultLimits),
-      (["REB_REQUEST_CONTENT_BUDGET_MIB": "+64", "REB_RESPONSE_BODY_BUDGET_MIB": " 64"], defaultLimits),
-      (["REB_REQUEST_CONTENT_BUDGET_MIB": "\u{FF16}\u{FF14}", "REB_RESPONSE_BODY_BUDGET_MIB": "64k"], defaultLimits),
-      (["REB_CAPTURE_RESPONSE_MEDIA": "yes"], defaultLimits),
-    ]
-    for (environment, expected) in configuredCases {
-      precondition(ContentLimits.configured(environment) == expected, "configured limits \(environment)")
-    }
-    let start = { (request: Any?, response: Any?, media: Any?) -> Result<ContentLimits, ContentLimits.Refusal> in
-      var body: [String: Any] = ["op": "start", "mode": "content"]
-      if let request { body["request_content_budget_mib"] = request }
-      if let response { body["response_body_budget_mib"] = response }
-      if let media { body["response_media"] = media }
-      return ContentLimits.validated(body)
-    }
-    let yes = NSNumber(value: true), no = NSNumber(value: false)
-    precondition(start(NSNumber(value: 256), NSNumber(value: 512), no) == .success(defaultLimits), "default start")
-    precondition(start(NSNumber(value: 4096), NSNumber(value: 16384), yes)
-      == .success(ContentLimits(requestContentBudgetMiB: 4096, responseBodyBudgetMiB: 16384, responseMedia: true)), "raised start")
-    precondition(start(NSNumber(value: 1), NSNumber(value: 1.0), no)
-      == .success(ContentLimits(requestContentBudgetMiB: 1, responseBodyBudgetMiB: 1, responseMedia: false)), "smallest start")
-    let requestRule = ContentLimits.Refusal(message: ContentLimits.requestContentBudgetRule)
-    let responseRule = ContentLimits.Refusal(message: ContentLimits.responseBodyBudgetRule)
-    let mediaRule = ContentLimits.Refusal(message: "Capture media and fonts must be on or off.")
-    let refusals: [(String, Any?, Any?, Any?, ContentLimits.Refusal)] = [
-      ("request over", NSNumber(value: 4097), NSNumber(value: 512), no, requestRule),
-      ("request zero", NSNumber(value: 0), NSNumber(value: 512), no, requestRule),
-      ("request negative", NSNumber(value: -1), NSNumber(value: 512), no, requestRule),
-      ("request fraction", NSNumber(value: 12.5), NSNumber(value: 512), no, requestRule),
-      ("request text", "256", NSNumber(value: 512), no, requestRule),
-      ("request boolean", yes, NSNumber(value: 512), no, requestRule),
-      ("request infinite", NSNumber(value: Double.infinity), NSNumber(value: 512), no, requestRule),
-      ("response over", NSNumber(value: 256), NSNumber(value: 16385), no, responseRule),
-      ("response huge", NSNumber(value: 256), NSNumber(value: 1e300), no, responseRule),
-      ("response boolean", NSNumber(value: 256), no, no, responseRule),
-      ("media number", NSNumber(value: 256), NSNumber(value: 512), NSNumber(value: 1), mediaRule),
-      ("media text", NSNumber(value: 256), NSNumber(value: 512), "true", mediaRule),
-    ]
-    for (name, request, response, media, expected) in refusals {
-      precondition(start(request, response, media) == .failure(expected), "refused limits: \(name)")
-    }
-    for missing in 0..<3 {
-      let values: [Any?] = [NSNumber(value: 256), NSNumber(value: 512), no].enumerated().map { $0.offset == missing ? nil : $0.element }
-      guard case .failure(let refusal) = start(values[0], values[1], values[2]) else { preconditionFailure("missing limit \(missing)") }
-      precondition(refusal.message.contains("needs a request content budget"), "missing limit \(missing): \(refusal.message)")
-    }
-    let raised = ContentLimits(requestContentBudgetMiB: 1024, responseBodyBudgetMiB: 2048, responseMedia: true)
-    let limitNames = ["REB_REQUEST_CONTENT_BUDGET_MIB", "REB_RESPONSE_BODY_BUDGET_MIB", "REB_CAPTURE_RESPONSE_MEDIA"]
-    let inherited = ["REB_REQUEST_CONTENT_BUDGET_MIB": "999", "REB_RESPONSE_BODY_BUDGET_MIB": "99", "REB_CAPTURE_RESPONSE_MEDIA": "0"]
-    let limitCases: [(String, [String: String], Bool, ContentLimits?, [String?])] = [
-      ("content default", [:], true, defaultLimits, ["256", "512", "0"]),
-      ("content raised", [:], true, raised, ["1024", "2048", "1"]),
-      ("chosen limits replace inherited ones", inherited, true, raised, ["1024", "2048", "1"]),
-      ("no panel choice passes the environment", inherited, true, nil, ["999", "99", "0"]),
-      ("no panel choice, no environment", [:], true, nil, [nil, nil, nil]),
-      ("metadata passes nothing", [:], false, raised, [nil, nil, nil]),
-      ("a mask without content passes nothing", ["REB_CAPTURE_CATEGORY_MASK": "0x300"], true, raised, [nil, nil, nil]),
-      ("content off by the environment passes nothing", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, raised, [nil, nil, nil]),
-    ]
-    for (name, given, content, limits, expected) in limitCases {
-      let environment = launch(given, content: content, limits: limits)
-      precondition(limitNames.map { environment[$0] } == expected, "content limits: \(name) \(limitNames.map { environment[$0] })")
-    }
-    // The start panel message SessionPanel.swift accepts only through LivePanelStart.parse.
+    // The start panel message SessionPanel.swift accepts only through
+    // LivePanelStart.parse: the mode and nothing else. A Content session keeps
+    // every body whole, so the removed budget and media keys are refused as
+    // any other key is.
     let parse = { (body: [String: Any]) in LivePanelStart.parse(["op": "start"].merging(body) { _, given in given }) }
-    precondition(parse(["mode": "metadata"]) == .success(LivePanelStart(mode: .metadata, limits: nil)), "metadata start")
-    precondition(parse(["mode": "content", "request_content_budget_mib": NSNumber(value: 1024), "response_body_budget_mib": NSNumber(value: 512),
-      "response_media": yes]) == .success(LivePanelStart(mode: .content, limits: ContentLimits(requestContentBudgetMiB: 1024,
-        responseBodyBudgetMiB: 512, responseMedia: true))), "content start")
+    let yes = NSNumber(value: true)
+    precondition(parse(["mode": "metadata"]) == .success(LivePanelStart(mode: .metadata)), "metadata start")
+    precondition(parse(["mode": "content"]) == .success(LivePanelStart(mode: .content)), "content start")
+    let onlyMode = "The start panel offers only the capture mode."
     let startRefusals: [(String, [String: Any], String)] = [
-      ("limits on metadata", ["mode": "metadata", "response_media": yes], "Budgets and media capture apply only to a Content session."),
-      ("a budget on metadata", ["mode": "metadata", "request_content_budget_mib": NSNumber(value: 64)],
-        "Budgets and media capture apply only to a Content session."),
-      ("content without limits", ["mode": "content"], "A Content session needs a request content budget, a response body budget and the media choice."),
-      ("content out of bounds", ["mode": "content", "request_content_budget_mib": NSNumber(value: 5000), "response_body_budget_mib": NSNumber(value: 512),
-        "response_media": no], ContentLimits.requestContentBudgetRule),
-      ("a Keychain switch", ["mode": "metadata", "keychain": yes], "The start panel offers only the capture mode and a Content session's limits."),
+      ("a removed request content budget", ["mode": "content", "request_content_budget_mib": NSNumber(value: 256)], onlyMode),
+      ("a removed response body budget", ["mode": "content", "response_body_budget_mib": NSNumber(value: 512)], onlyMode),
+      ("the removed media switch", ["mode": "content", "response_media": yes], onlyMode),
+      ("a Keychain switch", ["mode": "metadata", "keychain": yes], onlyMode),
       ("an unknown mode", ["mode": "everything"], "Choose Content or Metadata only."),
+      ("no mode", [:], "Choose Content or Metadata only."),
     ]
     for (name, body, message) in startRefusals {
-      precondition(parse(body) == .failure(ContentLimits.Refusal(message: message)), "refused start: \(name)")
+      precondition(parse(body) == .failure(LivePanelStart.Refusal(message: message)), "refused start: \(name)")
     }
-    // A session that keeps no request content is given none of the content-only
-    // switches, inherited or chosen; the panel's mode decides request content.
-    let media = ["REB_CAPTURE_RESPONSE_MEDIA": "1", "REB_REQUEST_CONTENT_BUDGET_MIB": "999", "REB_RESPONSE_BODY_BUDGET_MIB": "99"]
-    let modeCases: [(String, [String: String], Bool, Bool, ContentLimits?, String, [String?])] = [
-      ("a metadata start drops inherited content switches", media, false, true, nil, "0", [nil, nil, nil]),
-      ("an automatic metadata launch drops them too", media, false, false, nil, "0", [nil, nil, nil]),
-      ("a chosen Content mode wins over an inherited 0", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, true, raised, "1", ["1024", "2048", "1"]),
-      ("a chosen Metadata mode wins over an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, false, true, nil, "0",
-        [nil, nil, nil]),
-      ("an automatic Metadata launch drops an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, false, false,
-        nil, "0", [nil, nil, nil]),
-      ("an automatic Content launch keeps an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"].merging(media) { a, _ in a }, true, false,
-        nil, "1", ["999", "99", "1"]),
-      ("an automatic launch keeps an inherited 0 and drops the rest", ["REB_CAPTURE_REQUEST_CONTENT": "0"].merging(media) { a, _ in a }, true, false,
-        raised, "0", [nil, nil, nil]),
+    // The panel's mode decides request content; an automatic launch keeps an
+    // inherited value in Content mode and never in Metadata.
+    let modeCases: [(String, [String: String], Bool, Bool, String)] = [
+      ("a metadata start", [:], false, true, "0"),
+      ("a chosen Content mode wins over an inherited 0", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, true, "1"),
+      ("a chosen Metadata mode wins over an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"], false, true, "0"),
+      ("an automatic Metadata launch drops an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"], false, false, "0"),
+      ("an automatic Content launch keeps an inherited 1", ["REB_CAPTURE_REQUEST_CONTENT": "1"], true, false, "1"),
+      ("an automatic launch keeps an inherited 0", ["REB_CAPTURE_REQUEST_CONTENT": "0"], true, false, "0"),
+      ("a mask without Network and Artifact keeps hosts only", ["REB_CAPTURE_CATEGORY_MASK": "0x300"], true, true, "0"),
     ]
-    for (name, given, content, chosen, limits, expectedContent, expected) in modeCases {
-      let environment = launch(given, content: content, limits: limits, chosen: chosen)
-      precondition(environment["REB_CAPTURE_REQUEST_CONTENT"] == expectedContent, "request content: \(name)")
-      precondition(limitNames.map { environment[$0] } == expected, "content switches: \(name) \(limitNames.map { environment[$0] })")
+    for (name, given, content, chosen, expected) in modeCases {
+      precondition(launch(given, content: content, chosen: chosen)["REB_CAPTURE_REQUEST_CONTENT"] == expected, "request content: \(name)")
     }
-    let panelContent = { (given: [String: String]) in
-      LiveCaptureContent.resolve(environment: given, mode: .content, limits: raised, modeChosen: true)
-    }
-    precondition(panelContent([:]).retainsRequestContent && panelContent([:]).limits == raised, "content retains")
-    let hostsOnly = panelContent(["REB_CAPTURE_CATEGORY_MASK": "0x300"])
-    precondition(!hostsOnly.retainsRequestContent && hostsOnly.limits == nil,
-      "a mask without Network and Artifact retains nothing, so the panel names no limits")
-    precondition(panelContent(["REB_CAPTURE_REQUEST_CONTENT": "0"]).retainsRequestContent,
-      "a chosen Content mode retains content over an inherited 0")
+    precondition(LiveCaptureContent.resolve(environment: [:], mode: .content, modeChosen: true).retainsRequestContent, "content retains")
     // An inherited REB_CAPTURE_REQUEST_CONTENT=0 still protects someone who
     // just presses Start: the panel preselects Metadata and says why, and only
     // choosing Content there captures content.
@@ -286,16 +196,13 @@ enum LiveSessionFailureChecks {
     precondition(LiveCaptureMode.optOutNote.contains("Metadata is preselected"), "the panel says why")
     let preselected = LiveCaptureMode.configured(optedOut)
     guard case .success(let untouched) = parse(["mode": preselected.rawValue]) else { preconditionFailure("preselected start") }
-    let pressed = launch(optedOut.merging(media) { a, _ in a }, content: untouched.mode.capturesNetworkContent,
-      limits: untouched.limits, chosen: true)
-    precondition(untouched.mode == .metadata && pressed["REB_CAPTURE_REQUEST_CONTENT"] == "0"
-      && limitNames.allSatisfy({ pressed[$0] == nil }), "Start pressed without touching the mode is a Metadata start")
-    guard case .success(let chosen) = parse(["mode": "content", "request_content_budget_mib": NSNumber(value: 256),
-      "response_body_budget_mib": NSNumber(value: 512), "response_media": no]) else { preconditionFailure("chosen content") }
-    let content = launch(optedOut, content: chosen.mode.capturesNetworkContent, limits: chosen.limits, chosen: true)
-    precondition(content["REB_CAPTURE_REQUEST_CONTENT"] == "1" && content["REB_REQUEST_CONTENT_BUDGET_MIB"] == "256",
-      "choosing Content there is a Content start")
-    print("PASS native content limits: the launcher's bounds and grammar for the panel's first values, start messages checked as the agent path checks them, launcher switches only for a session that retains content, inherited content-only switches dropped otherwise, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
+    let pressed = launch(optedOut, content: untouched.mode.capturesNetworkContent, chosen: true)
+    precondition(untouched.mode == .metadata && pressed["REB_CAPTURE_REQUEST_CONTENT"] == "0",
+      "Start pressed without touching the mode is a Metadata start")
+    guard case .success(let chosen) = parse(["mode": "content"]) else { preconditionFailure("chosen content") }
+    let content = launch(optedOut, content: chosen.mode.capturesNetworkContent, chosen: true)
+    precondition(content["REB_CAPTURE_REQUEST_CONTENT"] == "1", "choosing Content there is a Content start")
+    print("PASS native start panel: a start names only its mode, removed budget and media keys refused, the panel's mode deciding request content, and an inherited opt-out preselecting Metadata")
 
     // Saved invocation sites arm app-started captures. Digests follow the
     // mode, the launcher drops sites a Brave cannot arm, and explicit values win.
@@ -327,7 +234,7 @@ enum LiveSessionFailureChecks {
     // with saved, explicit or no invocation sites. Each leak is listed.
     let metadataOff = ["REB_CAPTURE_REQUEST_CONTENT": "0", "REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]
     let everyContentSwitch = ["REB_CAPTURE_REQUEST_CONTENT": "1", "REB_CAPTURE_CANVAS_IMAGES": "1",
-      "REB_NATIVE_JS_INVOCATION_DIGESTS": "1"].merging(media) { a, _ in a }
+      "REB_NATIVE_JS_INVOCATION_DIGESTS": "1"]
     let inheritedCases: [(String, [String: String])] = [
       ("nothing", [:]),
       ("request content", ["REB_CAPTURE_REQUEST_CONTENT": "1"]),
@@ -351,25 +258,25 @@ enum LiveSessionFailureChecks {
       }
     }
     precondition(leaks.isEmpty, "Metadata starts were given content-derived switches:\n" + leaks.joined(separator: "\n"))
-    print("PASS native Metadata start: no request content, Canvas images, invocation digests, budgets or media, from the panel or the automatic launch, whatever the environment holds")
+    print("PASS native Metadata start: no request content, Canvas images or invocation digests, from the panel or the automatic launch, whatever the environment holds")
 
     // Retry gives the launcher the failed start's content switches, never a
-    // new reading of the environment, so the mode and limits the panel names
-    // are always what the launcher got. The failed starts include the case
+    // new reading of the environment, so the mode the panel names is always
+    // what the launcher got. The failed starts include the case
     // that leaked: an automatic Metadata launch with an inherited
     // REB_CAPTURE_REQUEST_CONTENT=1.
     let automaticMetadata = ["REB_AUTOMATIC_CAPTURE_MODE": "metadata", "REB_CAPTURE_REQUEST_CONTENT": "1"]
-    let automaticContent = ["REB_REQUEST_CONTENT_BUDGET_MIB": "64", "REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]
+    let automaticContent = ["REB_CAPTURE_CANVAS_IMAGES": "0", "REB_NATIVE_JS_INVOCATION_DIGESTS": "0"]
     let failedStarts: [(String, [String: String], LiveCaptureContent)] = [
       ("automatic Metadata with an inherited 1", automaticMetadata, LiveCaptureContent.resolve(
-        environment: automaticMetadata, mode: LiveCaptureMode.configured(automaticMetadata), limits: nil, modeChosen: false)),
+        environment: automaticMetadata, mode: LiveCaptureMode.configured(automaticMetadata), modeChosen: false)),
       ("panel Metadata over every content switch", everyContentSwitch, LiveCaptureContent.resolve(
-        environment: everyContentSwitch, mode: .metadata, limits: nil, modeChosen: true)),
-      ("panel Content with raised limits", media, LiveCaptureContent.resolve(environment: media, mode: .content, limits: raised, modeChosen: true)),
-      ("automatic Content with the environment's limits", automaticContent, LiveCaptureContent.resolve(
-        environment: automaticContent, mode: LiveCaptureMode.configured(automaticContent), limits: nil, modeChosen: false)),
+        environment: everyContentSwitch, mode: .metadata, modeChosen: true)),
+      ("panel Content", [:], LiveCaptureContent.resolve(environment: [:], mode: .content, modeChosen: true)),
+      ("automatic Content with the environment's switches", automaticContent, LiveCaptureContent.resolve(
+        environment: automaticContent, mode: LiveCaptureMode.configured(automaticContent), modeChosen: false)),
       ("panel Content with a mask without Network", ["REB_CAPTURE_CATEGORY_MASK": "0x600"], LiveCaptureContent.resolve(
-        environment: ["REB_CAPTURE_CATEGORY_MASK": "0x600"], mode: .content, limits: raised, modeChosen: true)),
+        environment: ["REB_CAPTURE_CATEGORY_MASK": "0x600"], mode: .content, modeChosen: true)),
     ]
     let retryEnvironments: [(String, [String: String])] = [
       ("nothing", [:]), ("every content switch on", everyContentSwitch),
@@ -380,15 +287,12 @@ enum LiveSessionFailureChecks {
       let mask = given["REB_CAPTURE_CATEGORY_MASK"].map { ["REB_CAPTURE_CATEGORY_MASK": $0] } ?? [:]
       let first = LiveSessionCoordinator.captureDefaults(environment: given, content: failed, savedInvocationSites: saved)
       let firstSwitches = LiveCaptureContent.names.map { first[$0] }
-      // The panel's label: Metadata keeps nothing, and named limits are the ones given.
+      // The panel's label: Metadata keeps nothing.
       if failed.mode == .metadata, LiveCaptureContent.names.contains(where: { first[$0] != metadataOff[$0] }) {
         mismatches.append("\(name): labeled \(failed.mode.title) but given \(firstSwitches)")
       }
       if failed.retainsRequestContent != (first["REB_CAPTURE_REQUEST_CONTENT"] == "1") {
         mismatches.append("\(name): request content \(failed.retainsRequestContent) but given \(first["REB_CAPTURE_REQUEST_CONTENT"] ?? "unset")")
-      }
-      if let limits = failed.limits, limits.launcherEnvironment.contains(where: { first[$0.key] != $0.value }) {
-        mismatches.append("\(name): names limits \(limits) but given \(firstSwitches)")
       }
       for (retryName, environment) in retryEnvironments {
         let retried = LiveSessionCoordinator.captureDefaults(
@@ -399,7 +303,7 @@ enum LiveSessionFailureChecks {
       }
     }
     precondition(mismatches.isEmpty, "Retry or its label differed from the failed start:\n" + mismatches.joined(separator: "\n"))
-    print("PASS native live Retry: the failed start's content switches whatever the environment holds, Metadata labels that keep nothing and named limits that were given")
+    print("PASS native live Retry: the failed start's content switches whatever the environment holds, and Metadata labels that keep nothing")
 
     // The Swift store reads and writes exactly what the backend and browser do.
     let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

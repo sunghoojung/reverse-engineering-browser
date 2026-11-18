@@ -30,7 +30,7 @@ enum class ResponseBodyState : std::uint8_t {
   kEmpty = 6,
   kNotModified = 7,
   kRedirected = 8,
-  // Versions 1 and 2 only: media or a font, with Capture media and fonts off.
+  // Versions 1 and 2 only: media or a font the session did not ask for.
   kNotCapturedType = 9,
   kNotCapturedArtifactUnavailable = 10,
   kNotCapturedTransferRefused = 11,

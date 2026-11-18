@@ -374,7 +374,7 @@ enum AgentCoreChecks {
       ("start_live_session", false, .auto, [:], false, refuse),
       ("start_live_session", false, .full, ["url": "http://127.0.0.1:8/"], false, .run),
       ("start_live_session", false, .full, ["request_content": true, "confirm_sensitive_capture": true], false, refuse),
-      ("start_live_session", false, .full, ["response_media": true], false, refuse),
+      ("start_live_session", false, .full, ["canvas_images": true], false, refuse),
       ("start_live_session", false, .full, ["request_content": true, "confirm_sensitive_capture": true], true, .run),
       ("session_action", false, .auto, [:], false, refuse),
       ("run_wasm_function", false, .ask, [:], false, refuse),

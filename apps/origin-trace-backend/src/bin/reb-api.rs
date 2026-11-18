@@ -113,7 +113,7 @@ enum Action {
         )]
         permission: Option<String>,
         /// With --permission full, let start_live_session name sensitive
-        /// capture options (canvas_images, request_content, response_media,
+        /// capture options (canvas_images, request_content,
         /// js_invocation_digests). Not authorization.
         #[arg(long, requires = "permission")]
         allow_sensitive_capture: bool,
@@ -182,20 +182,12 @@ enum SessionCommand {
         /// Store Canvas images, which can contain sensitive page content.
         #[arg(long, requires = "confirm_sensitive_capture")]
         canvas_images: bool,
-        /// Retain request paths, queries and bounded bodies, request and response
-        /// headers including Cookie, Set-Cookie and Authorization, each request's
-        /// cookies, and response bodies (sensitive).
+        /// Retain request paths, queries and bodies, request and response headers
+        /// including Cookie, Set-Cookie and Authorization, each request's
+        /// cookies, and every response body, media and fonts included, whole
+        /// (sensitive).
         #[arg(long, requires = "confirm_sensitive_capture")]
         request_content: bool,
-        /// MiB of unique request bodies and targets to retain, 1..4096 (default 256).
-        #[arg(long, requires = "request_content")]
-        request_content_budget_mib: Option<u32>,
-        /// MiB of unique response bodies to retain, 1..16384 (default 512).
-        #[arg(long, requires = "request_content")]
-        response_body_budget_mib: Option<u32>,
-        /// Also retain images, audio, video and fonts that page elements load.
-        #[arg(long, requires = "request_content")]
-        response_media: bool,
         /// Record the JavaScript and Wasm stack that started each renderer request.
         #[arg(long)]
         request_stacks: bool,
@@ -1295,9 +1287,6 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         localhost_only,
         canvas_images,
         request_content,
-        request_content_budget_mib,
-        response_body_budget_mib,
-        response_media,
         request_stacks,
         document_start,
         js_invocation_sites,
@@ -1327,9 +1316,6 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         localhost_only,
         canvas_images,
         request_content,
-        request_content_budget_mib,
-        response_body_budget_mib,
-        response_media,
         request_stacks,
         document_start,
         js_invocation_sites,

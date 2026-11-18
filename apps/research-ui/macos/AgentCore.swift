@@ -203,11 +203,11 @@ let agentPermissionPromptAuto = """
   """
 
 let agentPermissionPromptFull = """
-  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly or request and response bodies, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Sensitive capture options (canvas_images, request_content, response_media, js_invocation_digests) are not allowed in this conversation. The researcher sees every call and its result and can stop you at any time.
+  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly or request and response bodies, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Sensitive capture options (canvas_images, request_content, js_invocation_digests) are not allowed in this conversation. The researcher sees every call and its result and can stop you at any time.
   """
 
 let agentPermissionPromptFullSensitive = """
-  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly or request and response bodies, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. The researcher also allowed sensitive capture options (canvas_images, request_content, response_media, js_invocation_digests) in this conversation: name them, with confirm_sensitive_capture, only when the content they keep is what the question needs. The researcher sees every call and its result and can stop you at any time.
+  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly or request and response bodies, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. The researcher also allowed sensitive capture options (canvas_images, request_content, js_invocation_digests) in this conversation: name them, with confirm_sensitive_capture, only when the content they keep is what the question needs. The researcher sees every call and its result and can stop you at any time.
   """
 
 func agentSystemPrompt(_ level: AgentPermission, sensitive: Bool = false) -> String {
@@ -249,7 +249,7 @@ enum AgentToolGate {
   static let fullOnly: Set<String> = [
     "get_artifact_text", "search_artifact_text", "run_wasm_function", "get_wasm_runs", "start_live_session", "session_action",
   ]
-  static let sensitiveStartOptions = ["canvas_images", "request_content", "response_media", "js_invocation_digests", "confirm_sensitive_capture"]
+  static let sensitiveStartOptions = ["canvas_images", "request_content", "js_invocation_digests", "confirm_sensitive_capture"]
 
   // Whether a tool the server listed is offered to the model at this level.
   static func lists(_ name: String, readOnly: Bool, level: AgentPermission) -> Bool {

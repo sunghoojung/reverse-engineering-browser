@@ -9,6 +9,8 @@ const TRAFFIC_RESPONSE_RETRY_MS = 2000;
 const TRAFFIC_RESPONSE_FIND_LIMIT = 1000;
 // Hex shows one window of this many bytes at a time, paged to the end of the body.
 const TRAFFIC_RESPONSE_HEX_BYTES = 256 * 1024;
+// Response body records before version 3 kept at most this prefix; current
+// capture keeps every body whole.
 const TRAFFIC_RESPONSE_CAPTURE_BYTES = 16n * 1024n * 1024n;
 // Bytes of a cut, partial or stopped body can end inside a character.
 const TRAFFIC_RESPONSE_OPEN_ENDED = new Set(['captured_truncated', 'partial', 'aborted', 'cancelled']);
@@ -23,7 +25,7 @@ function trafficResponseBytes(value) {
 
 const TRAFFIC_RESPONSE_STATES = new Set(['captured', 'captured_truncated', 'partial', 'aborted', 'cancelled', 'empty',
   'not_modified', 'redirected', 'not_captured_type', 'not_captured_artifact_unavailable', 'not_captured_transfer_refused',
-  'not_captured_session_budget']);
+  'not_captured_session_budget', 'not_captured_disk_reserve']);
 
 // The request index read the whole session, so it decides when the loaded
 // records lack the final response or its body record: a live row's
@@ -136,10 +138,13 @@ function trafficResponseUnseen(request, contentSession, kind = responseBodyCase(
   }[kind] ?? 'The browser network proxy recorded no response for this request.';
 }
 
-// A partial record whose kept prefix is the whole capture limit is sealed:
-// those bytes are final, whether or not more had arrived when it was recorded.
+// A partial record before version 3 whose kept prefix is the whole capture
+// limit is sealed: those bytes are final, whether or not more had arrived when
+// it was recorded. A version 3 snapshot holds every byte that had arrived. The
+// index answer names no version, so it is sealed only with bytes past the limit.
 function trafficResponseSealed(record) {
-  return record?.state === 'partial' && BigInt(record.capturedLength) === TRAFFIC_RESPONSE_CAPTURE_BYTES;
+  if (record?.state !== 'partial' || BigInt(record.capturedLength) !== TRAFFIC_RESPONSE_CAPTURE_BYTES) return false;
+  return record.version === undefined ? BigInt(record.bodyLength) > TRAFFIC_RESPONSE_CAPTURE_BYTES : record.version < 3;
 }
 
 // What the record says happened to the body, or why there is no record.
@@ -152,9 +157,9 @@ function trafficResponseCapture(request, contentSession) {
   const sealed = trafficResponseSealed(record);
   return {
     captured: record.shared ? 'Retained in full. Identical bytes were already retained, so this names that artifact.' : 'Retained in full.',
-    captured_truncated: `Retained prefix: ${kept}, truncated at the 16 MiB capture limit.`,
+    captured_truncated: `Retained prefix: ${kept}, truncated at 16 MiB, a limit of the browser that recorded this session; current capture keeps every body whole.`,
     partial: `Still arriving: ${trafficResponseBytes(record.bodyLength)} had arrived${after ? ` ${after} after the response started` : ''}, at snapshot ${record.partialIndex}. ${sealed
-      ? `The first ${trafficResponseBytes(record.capturedLength)} reached the 16 MiB capture limit and are retained as they will stay; later bytes are only counted, and the body may still be arriving.`
+      ? `The first ${trafficResponseBytes(record.capturedLength)} reached the 16 MiB limit of the browser that recorded this session and are retained as they will stay; later bytes are only counted, and the body may still be arriving.`
       : 'All of them are retained in this snapshot.'} The record of the ended body replaces it.`,
     aborted: record.capturedLength === '0' ? 'Aborted: the network failed before any byte was retained.'
       : `Aborted: the network failed mid-body. The ${trafficResponseBytes(record.capturedLength)} that arrived are retained.`,
@@ -163,17 +168,18 @@ function trafficResponseCapture(request, contentSession) {
     empty: 'Empty body (0 bytes).',
     not_modified: 'Not modified (304): the server sent no body.',
     redirected: 'Redirect: Chromium discards redirect bodies.',
-    not_captured_type: 'Not retained: images, audio, video and fonts that page elements load are kept only when Capture media and fonts is on in New Live Session…, for the next session.',
+    not_captured_type: 'Not retained: the browser that recorded this session skipped images, audio, video and fonts that page elements load. Current content sessions keep them.',
     not_captured_artifact_unavailable: 'Not retained: the artifact channel was unavailable.',
     not_captured_transfer_refused: 'Not retained: the bounded in-flight memory or artifact transfer queue refused it.',
-    not_captured_session_budget: 'Not retained: this session had used its response body budget. Raise Response body budget in New Live Session… for the next session.'
+    not_captured_session_budget: 'Not retained: it arrived after the response body budget was used, a limit of the browser that recorded this session. Current capture keeps every body whole.',
+    not_captured_disk_reserve: 'Not retained: storing it would have left less free disk than the artifact receiver\'s reserve. Free disk space to keep later bodies.'
   }[record.state] ?? 'Unknown capture state.';
 }
 
 function trafficResponseRows(record) {
   if (!record || record.malformed) return [];
   // Version 2 bit 7 (protocol/native-network-v3.md "Partial bodies"), which the index carries too.
-  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshot allowance, the session\'s snapshot share or the response body budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
+  const withheld = record.snapshotsWithheld ? [['Snapshots', 'A snapshot the schedule allowed was withheld: this body\'s snapshots had copied four times what it kept plus 64 MiB, or in an older session a snapshot share or budget was used, so the newest snapshot is older than the schedule would make it.', 'prose']] : [];
   // The index answer carries lengths and the digest, not the record's type or codings.
   if (record.fromIndex) {
     return [['Body length', `${trafficResponseBytes(record.bodyLength)} decoded`, 'value'],
@@ -330,12 +336,13 @@ function trafficServiceWorkerFetches(request, rows) {
 // One line for each body case, as the session summary words it.
 function trafficResponseCaseMeaning(kind) {
   return {
-    captured: 'retained in full', captured_truncated: 'retained up to the 16 MiB capture limit',
+    captured: 'retained in full', captured_truncated: 'retained up to the 16 MiB limit of the browser that recorded it',
     partial: 'still arriving; its newest snapshot is retained', aborted: 'the network failed mid-body; what arrived is retained',
     cancelled: 'stopped mid-body; what arrived is retained', empty: 'an empty body', not_modified: 'HTTP 304, no body',
-    redirected: 'redirected, then ended with no other response', not_captured_type: 'media or a font, not asked for',
+    redirected: 'redirected, then ended with no other response', not_captured_type: 'media or a font the recording browser skipped',
     not_captured_artifact_unavailable: 'the artifact channel was unavailable', not_captured_transfer_refused: 'refused by the bounded transfer',
-    not_captured_session_budget: 'past the response body budget', malformed: 'a malformed record',
+    not_captured_session_budget: 'past the recording browser\'s response body budget',
+    not_captured_disk_reserve: 'refused to keep the disk reserve free', malformed: 'a malformed record',
     source_artifact: 'retained as a source artifact', no_record: 'no body record', memory_cache: 'itself reused from the memory cache',
     service_worker: 'itself served by a service worker', failed_before_response: 'failed before any response',
     cancelled_before_response: 'cancelled before any response', interrupted: 'observation ended first', end_lost: 'its end was lost',

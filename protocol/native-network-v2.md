@@ -24,7 +24,7 @@ request body, and retains the bytes only where the session allows it.
 | --- | --- | --- | --- |
 | Network category off, or no session | none | none | none |
 | Network on (metadata) | always: kind, state, length, normalized content type, SHA-256 | none | none |
-| Network on with request content | always, as above | start and every redirect, with the full target as a `request_target` artifact past 116 bytes | at most 16 MiB per request, as a `request_body` artifact |
+| Network on with request content | always, as above | start and every redirect, with the full target as a `request_target` artifact past 116 bytes | the whole body, as a `request_body` artifact (at most 16 MiB in payload version 1) |
 
 Request content is the session's sensitive content gate for requests:
 
@@ -68,7 +68,7 @@ do not emit another one.
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `1` |
+| 0 | 2 | payload version, `1` ([`2`](native-network-v3.md#record) in current captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | body kind |
 | 5 | 1 | capture state |
@@ -100,13 +100,13 @@ recorded. Other bits are zero.
 | 2 `empty` | In-memory bytes totalling zero; digest of the empty string |
 | 3 `metadata_only` | Content capture off for this session |
 | 4 `captured` | The whole body was queued as the named artifact |
-| 5 `captured_truncated` | The first 16 MiB were queued; the length and digest describe the whole body |
+| 5 `captured_truncated` | Version 1 only: the first 16 MiB were queued; the length and digest describe the whole body |
 | 6 `not_captured_body_kind` | An unknown part, or a file, blob or stream part not read; nothing was read |
 | 7 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
 | 8 `not_captured_transfer_refused` | The artifact queue or the background copy refused it |
 | 9 `not_captured_url` | Not HTTP(S). Captures before payload version 2 targets also used it for URLs over 8 KiB |
-| 10 `not_captured_session_budget` | The session's request-content byte budget was used |
-| 11 `not_captured_credential_form` | Chromium marked a password form post; no bytes and no digest |
+| 10 `not_captured_session_budget` | Version 1 only: the session's request-content byte budget was used |
+| 11 `not_captured_credential_form` | Chromium marked a password form post; no bytes and no digest. Version 2 uses it only in Metadata only sessions |
 
 Validation rules, shared by the C++ core, the Python evidence validator and the
 Origin Trace decoder:
@@ -130,6 +130,9 @@ Origin Trace decoder:
   need a nonzero in-memory body.
 - [v3](native-network-v3.md#request-body-reads) adds bit 6 and state 12 for
   bodies the browser read, and states 7 to 10 for file, blob and stream bodies.
+  Its payload version 2 retires bit 2 and states 5 and 10, reads and hashes
+  every body whole, and adds bit 7 and state 13; the rules above are version
+  1's.
 
 ### `request_target` (type 23)
 
@@ -161,7 +164,7 @@ Retention says where the bytes past the prefix went:
 | 1 `retained` | The whole target is the `request_target` artifact the envelope's `artifact_id` names |
 | 2 `not_retained_artifact_unavailable` | Artifact category off, receiver disconnected, session inactive, or a renderer record ([v3](native-network-v3.md#requests-answered-in-the-renderer)) |
 | 3 `not_retained_transfer_refused` | The in-flight pool or the background copy refused it |
-| 4 `not_retained_session_budget` | The session's request-content byte budget was used |
+| 4 `not_retained_session_budget` | Older sessions only: the session's request-content byte budget was used |
 | 5 `not_retained_url` | No HTTP(S) or WebSocket origin, or longer than Chromium's 2 MiB URL limit |
 
 Value 0 if and only if the length is at most 116; value 1 if and only if
@@ -194,47 +197,29 @@ neither kind; Traffic shows them with their request.
 
 - Disabled: one atomic load, as in v1. Nothing is classified, hashed or copied.
 - Every admitted request: one more 320-byte record, a walk over the body
-  element list, a non-allocating `Content-Type` lookup and at most 4 MiB of
-  SHA-256 on the browser UI sequence. Bodies above 4 MiB are marked, not hashed.
-- Issue #436 asks that request bodies be copied and hashed on a background
-  sequence while a reference keeps the body alive. The copy into the artifact
-  and the artifact's digest are (next item). The record's own digest stays on
-  the UI sequence on purpose, and this version keeps it there:
-  - It is metadata of every Network session, and the record is emitted as the
-    start's immediate child. Hashing elsewhere would defer the record past the
-    start for every request with a body, and add to metadata sessions the
-    capture-end and expiry losses that deferred reads have
-    ([v3](native-network-v3.md#request-body-reads)).
-  - A metadata session holds no reference to the body after the start
-    returns, so there is nothing to hash later without keeping every body
-    alive in a session that retains none.
-  - The 4 MiB bound caps the work. SHA-256 runs at about 3 GB/s with the ARMv8
-    and x86 SHA extensions that BoringSSL uses (3.0 GB/s for 4 MiB blocks with
-    OpenSSL 3.6 on the Apple silicon machine this was measured on), so the
-    worst case is about 1.4 ms once per such request, and only while capture
-    is active. Most bodies are a few kilobytes and hash in microseconds.
+  element list and a non-allocating `Content-Type` lookup on the browser UI
+  sequence. A Metadata only session hashes an in-memory body whole on a worker
+  while a reference keeps the immutable body alive, and emits the record, still
+  the start's child, with the digest when the hash ends (issue #436). SHA-256
+  runs at about 3 GB/s with the ARMv8 and x86 SHA extensions BoringSSL uses, so
+  the UI sequence never waits on a large body. Version 1 hashed on the UI
+  sequence and marked bodies over 4 MiB instead.
 - Request content: one more record per start or redirect. A body, and a target
-  past 116 bytes, is charged to the session's byte budget, then copied and
-  hashed on a background sequence while a reference keeps the immutable body
-  alive, and streamed to the receiver in data frames of at most 64 KiB. Each
-  frame holds its share of the 32 MiB in-flight pool it shares with response
-  tees until the writer sends it, so the pool bounds bytes in flight rather
-  than requests. The UI sequence copies only the target string. A pool that
-  refuses a frame is `artifact_capture_failed` with `active_memory_limit`.
-- The budget counts unique bytes: identical content already queued in the
-  session configuration is refunded, because the receiver stores one blob per
-  SHA-256. It defaults to 256 MiB and is set per session with
-  `--reb-request-content-budget-bytes` (1 MiB to 4 GiB), which the launcher
-  takes from `REB_REQUEST_CONTENT_BUDGET_MIB`, set by the app start panel's
-  **Request content budget** or the start option `request_content_budget_mib`.
-  The session summary's budget checks carry the budget in force and the unique
-  request content retained, and `get_session_context` reports the limit as
-  `capture_options.content_limits`. There is no body count. For a content
-  session the launcher sizes the receiver's store at 256 MiB plus the request
-  content budget plus the response body budget, allows one artifact per 4 KiB
-  of that store (262,144 at the default budgets), and gives the manifest
-  1 KiB per artifact, at least 256 MiB. Each refusal is a named state, never
-  silence.
+  past 116 bytes, is copied and hashed on a background sequence while a
+  reference keeps the immutable body alive, and streamed to the receiver in
+  data frames of at most 64 KiB. Each frame holds its share of the 32 MiB
+  in-flight pool it shares with response tees until the writer sends it, so
+  the pool bounds bytes in flight rather than requests or their sizes; a read
+  that finds the pool full waits for the writer to drain it. A pool that
+  refuses a target is `artifact_capture_failed` with `active_memory_limit`.
+- No size, count or budget bound applies to request content. Identical content
+  is stored once, because the receiver stores one blob per SHA-256. The
+  receiver's free-disk reserve, 4 GiB unless `REB_ARTIFACT_DISK_RESERVE_MIB`
+  sets another, is the only bound on what a session stores, and a body it
+  refuses is the visible state 13
+  ([disk reserve](../services/artifact-receiver/README.md#disk-reserve)).
+  Version 1 records come from browsers that charged a per-session budget
+  (state 10) and kept at most 16 MiB per body (state 5).
 - The request is never delayed, consumed or altered. Content sessions read
   file, blob and stream parts as described in
   [v3](native-network-v3.md#request-body-reads).
@@ -272,10 +257,10 @@ neither kind; Traffic shows them with their request.
 ## Validation
 
 `make native-network-capture-check` drives the actual sink: disabled, expiry,
-metadata-only, content, truncation, the digest bound, each body kind, password
-forms, unavailable, refused, budget and unsupported-URL outcomes for bodies and
-full targets, and redirect targets, checking every produced record with the
-core validator.
+metadata-only, content, whole bodies past 4 and 16 MiB, each body kind,
+password forms, unavailable, refused and unsupported-URL outcomes for bodies
+and full targets, and redirect targets, checking every produced record with
+the core validator.
 `tests/network_request_test.cpp` (in `make native-tests`) checks overlay/core
 layout parity, content-type normalization, every state and many malformed
 records, and the receiver's sensitive policy and manifest round trip.
@@ -283,8 +268,9 @@ records, and the receiver's sensitive policy and manifest round trip.
 validator and the shipped decoders. `make native-artifact-capture-check` runs
 request bodies and an 8 KB full target through the real sinks, the production
 receiver with and without `--allow-sensitive`, and the broker; it drives 5,000
-bodies to the byte budget, digest dedupe, the shared in-flight pool, the
-background copy and every target retention state. `make rendered-ui-check` shows a retained
+bodies and 272 MiB with no session budget, digest dedupe, a body larger than
+the shared in-flight pool kept whole through its backpressure, the background
+copy and every target retention state. `make rendered-ui-check` shows a retained
 body containing markup and a metadata-only body in the packaged app.
 
 ## Acceptance
@@ -297,8 +283,9 @@ Still required before declaring this browser-ready:
    full `ResourceRequest`.
 2. With an authorized fixture, compare server receipts with native records for
    JSON, form, multipart, `Blob`, `ReadableStream` and file uploads, a password
-   form, a 307 redirect of a POST, a 5 MiB body, a body above 16 MiB, an 8 KB
-   GraphQL GET and a session that exhausts a small byte budget.
+   form, a 307 redirect of a POST, a 5 MiB body, a body above 64 MiB kept
+   whole, an 8 KB GraphQL GET, more than 256 MiB of bodies in one session, and
+   a forced disk reserve refusal.
 3. On the authorized hCaptcha demo, confirm that each `api.hcaptcha.com` POST
    shows its endpoint path, and that `checksiteconfig`, `getcaptcha` and
    `checkcaptcha` bodies are retained and their digests match.

@@ -59,6 +59,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
 | `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
 | `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
+| `response_body` payload version 3 | every body whole, media and fonts kept, state 13 `not_captured_disk_reserve` | Response bodies |
+| `request_body` payload version 2 | every body read and hashed whole, flag bit 7 `credential_form`, state 13 `not_captured_disk_reserve` | Request body reads |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
 | Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
 | `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
@@ -980,12 +982,10 @@ capture path. `NativeArtifactCaptureSink::MaybeCaptureResponse` keeps scripts
 and Wasm as before, in every artifact session, and hands every other response
 to `browser/native_response_body_capture.cc`:
 
-- Kept by default: documents, JSON, text, XML, fetch and XHR responses, and any
-  other subresource.
-- Skipped unless `--reb-capture-response-media` (`REB_CAPTURE_RESPONSE_MEDIA=1`):
-  fonts and media (resource types 5 and 8, `font/*`, `audio/*`, `video/*`, font
-  application types), and images that page elements load (resource types 4 and
-  12, `image/*` except `image/svg+xml`). A fetch or XHR image is kept.
+- Every response is kept: documents, JSON, text, XML, fetch and XHR
+  responses, images, fonts, audio, video and any other subresource. Before
+  payload version 3, fonts and media and the images page elements load were
+  skipped unless the session asked for them (state 9).
 - The tee forwards decoded bytes, so the artifact holds the decoded body. The
   record keeps the `Content-Encoding` codings as sent and flags bodies Chromium
   left encoded for client-side decoding.
@@ -1088,7 +1088,7 @@ time is when the body ended or was snapshotted. Little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `2` (`1` in older captures) |
+| 0 | 2 | payload version, `3` (`1` and `2` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | state |
 | 5 | 1 | flags |
@@ -1105,25 +1105,27 @@ time is when the body ended or was snapshotted. Little endian:
 | State | Meaning |
 | ---: | --- |
 | 1 `captured` | The whole body is the named artifact |
-| 2 `captured_truncated` | The first 16 MiB are the named artifact |
+| 2 `captured_truncated` | Before version 3 only: the first 16 MiB are the named artifact |
 | 3 `partial` | The body is still open; the artifact is what arrived so far |
 | 4 `aborted` | The network failed before the end; any bytes that arrived are the artifact |
 | 5 `cancelled` | The page or browser stopped the request; any bytes that arrived are the artifact |
 | 6 `empty` | The body ended with zero bytes, or the loader sent no body |
 | 7 `not_modified` | HTTP 304; no body |
 | 8 `redirected` | A redirect hop; Chromium discards its body |
-| 9 `not_captured_type` | Media or a font, not asked for |
+| 9 `not_captured_type` | Before version 3 only: media or a font, not asked for |
 | 10 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
-| 11 `not_captured_transfer_refused` | The in-flight pool, the tee or the artifact queue refused it |
-| 12 `not_captured_session_budget` | The session's response body budget was used |
+| 11 `not_captured_transfer_refused` | The in-flight pool refused the stream's opening metadata, or the tee or the artifact queue refused it |
+| 12 `not_captured_session_budget` | Before version 3 only: the session's response body budget was used |
+| 13 `not_captured_disk_reserve` | Version 3 only: the receiver refused it to keep its free-disk reserve ([disk reserve](../services/artifact-receiver/README.md#disk-reserve)) |
 
 Flags: bit 0 `shared`, identical bytes were already retained in this
 configuration and `artifact_id` names that earlier artifact; bit 1 served from
 the HTTP cache; bit 2 served by a service worker; bit 3 bytes still encoded
 (client-side decoding); bit 4 more than four codings, the rest not recorded;
-bit 5 completion not observed; bit 6 content type present; bit 7, in version 2
-only, a snapshot the schedule's spacing allowed was withheld by a byte bound
-([partial bodies](#partial-bodies)). Version 1 records stay valid without it.
+bit 5 completion not observed; bit 6 content type present; bit 7, from
+version 2, a snapshot the schedule's spacing allowed was withheld by a byte
+bound ([partial bodies](#partial-bodies)). Version 1 records stay valid without
+it.
 
 Codings: 1 `gzip` (and `x-gzip`), 2 `deflate`, 3 `br`, 4 `zstd`, 5 `dcb`,
 6 `dcz`, 7 `compress`, 15 any other token. `identity` is not a coding.
@@ -1133,11 +1135,13 @@ Trace decoder (`make network-request-wire-check`):
 
 - `artifact_id` is nonzero, the digest nonzero and the captured length nonzero
   all together, or none of them. `shared` needs an artifact.
-- Captured length is at most body length. With L = min(body length, 16 MiB):
-  state 1 has captured equal to a nonzero body length; state 2 has a body over
-  16 MiB and captured 16 MiB; state 3 has a nonzero body and captured L;
-  states 4 and 5 have captured 0 or L; states 6 to 9 have body length 0;
-  states 10 to 12 have no artifact.
+- Captured length is at most body length. With L the body length in version
+  3, or min(body length, 16 MiB) before it: state 1 has captured equal to a
+  nonzero body length; state 2, before version 3 only, has a body over 16 MiB
+  and captured 16 MiB; state 3 has a nonzero body and captured L; states 4 and
+  5 have captured 0 or L; states 6 to 8, and state 9 before version 3, have
+  body length 0; states 10 and 11, state 12 before version 3 and state 13 in
+  version 3 have no artifact.
 - Partial index is nonzero exactly for state 3. Bit 5 only with states 1, 2
   and 6. Bit 4 only with four codings. Coding bytes follow the coding count.
 - Content type: bit 6 if and only if the length is nonzero, normalized as in
@@ -1164,29 +1168,23 @@ launcher passes for content sessions.
   one relaxed load per response start, completion and untyped body.
 - Each open body holds at most one pending 64 KiB data frame, plus frames the
   writer has not yet sent, in the 32 MiB in-flight pool it shares with scripts
-  and request content; a declared length reserves nothing. A full pool or a
-  refused frame is state 11, never a stall.
-- At most 16 MiB per body. Past it the tee keeps the prefix and counts every
-  byte.
+  and request content; a declared length reserves nothing. A body that finds
+  the pool full stops taking bytes from the network and waits until the writer
+  drains below the pool's wake mark, so a fast body slows to the receiver's
+  pace instead of losing bytes. Browser memory stays within the pool however
+  large or many the bodies are.
+- No size or count bound: every body is kept whole, and the tee counts every
+  byte. Before version 3 a body kept at most its first 16 MiB.
 - SHA-256 grows by at most one 64 KiB tee read per task, so the record carries
   the digest when the body ends; the receiver verifies it.
-- Unique bytes per session are budgeted: 512 MiB by default, 1 MiB to 16 GiB
-  with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`, the
-  app start panel's **Response body budget**, or the start option
-  `response_body_budget_mib`). Media and fonts are asked for with
-  `REB_CAPTURE_RESPONSE_MEDIA=1`, **Capture media and fonts** or
-  `response_media`.
-  A body is charged when it ends, once its digest is known: identical bytes
-  are stored once by SHA-256 and charge nothing (the repeat stream is aborted),
-  each snapshot is charged within its [shares](#partial-bodies), and a receiver
-  refusal refunds them. The launcher grows a content session's receiver store
-  by both budgets.
-- Every refusal is a named state. The session summary counts states 2 and 9 to
-  12 under `request_content_not_retained`, category `response_body`; state 12
-  also carries the budget in force (`budget_mib`) and the unique
-  `response_body` bytes retained (`retained_bytes`), and
-  `get_session_context` reports the session's limits as
-  `capture_options.content_limits`.
+- No session budget. Identical bytes are stored once by SHA-256 (the repeat
+  stream is aborted). The receiver's free-disk reserve is the only bound on
+  what a session stores: a body it refuses is state 13, and the refusal is
+  visible in the record, Traffic and the session summary.
+- Every refusal is a named state. The session summary counts states 2 and 9
+  to 13 under `request_content_not_retained`, category `response_body`, and
+  names states 2, 9 and 12 as limits of the browser that recorded the
+  session.
 
 ### Bodies the proxy never sees
 
@@ -1240,7 +1238,7 @@ them instead of nothing:
   with `reason` `host_differs` or `started_after`, and `not_recorded` when no
   such row exists. A found source's `response_body` is shown in Response and
   Preview, labelled as the reused request's, with a control that opens it, and
-  with its state: complete, cut at 16 MiB, a snapshot with how much had
+  with its state: complete, cut at 16 MiB in an older session, a snapshot with how much had
   arrived and when relative to the reuse, stopped mid-body, or not retained.
   For a `multipart/x-mixed-replace` source Blink holds the last part while the
   retained body has every part, which the view says.
@@ -1315,8 +1313,8 @@ binary is refused and oversized JSON returns a structural summary.
   syntax-colored text with pretty print, wrap, find, copy and hex (always hex
   for binary), hex in 256 KiB windows paged to the end of the retained body,
   reading the next 2 MiB range when a window passes the bytes loaded. A
-  partial record says how many bytes had arrived and when, and whether the
-  body was sealed at the 16 MiB limit. Preview shows a bounded
+  partial record says how many bytes had arrived and when, and, in an older
+  session, whether the body was sealed at its 16 MiB limit. Preview shows a bounded
   JSON tree, a raster image whose signature matches its bytes, plain text, or
   markup as source. HTML and SVG are never rendered. Reads are ranged 2 MiB at a
   time and rechecked by size and SHA-256. Both tabs name the body case and its
@@ -1327,11 +1325,12 @@ binary is refused and oversized JSON returns a structural summary.
 `make native-artifact-capture-check` drives the real network sink, artifact
 sink, response capture and production receiver and broker: JSON, gzip HTML,
 brotli and service-worker JSON, a fetched PNG, a chunked stream partial then
-captured, an aborted prefix, 304, a redirect, a cancelled body, a skipped font,
-digest dedupe, budget exhaustion, receiver refusal refund, 50 parallel bodies,
-the full pool, 16 MiB truncation, a missing completion, coding order, the
-capture-end partial, media opt-in, metadata-only sessions and tee refusal, and
-the [partial body schedule](#partial-bodies).
+captured, an aborted prefix, 304, a redirect, a cancelled body, a captured
+font, digest dedupe, 528 MiB with no session budget, receiver and disk reserve
+refusals, 50 parallel bodies, a wait for the full pool, a body past 16 MiB
+kept whole, a missing completion, coding order, the capture-end partial, media
+by default, metadata-only sessions and tee refusal, and the
+[partial body schedule](#partial-bodies).
 `make native-network-capture-check` covers the redirect and unavailable records.
 `tests/network_request_test.cpp` checks layout parity and every valid and
 malformed record. `tools/check-traffic-response-ui.mjs` and
@@ -1347,14 +1346,16 @@ Still required before declaring this browser-ready:
 2. With an authorized fixture, compare server bytes with retained artifacts for
    JSON, HTML, an image, gzip and brotli, a chunked response, server-sent
    events, an aborted download, a 304, a redirect and a service-worker-served
-   response; load 50 responses in parallel; exhaust a small budget; and watch
-   browser memory stay within the pool.
+   response and a body over 64 MiB; load 50 responses in parallel; force the
+   disk reserve; and watch browser memory stay within the pool.
 
 ## Request body reads
 
-Defined by #436 and #428. In content sessions a `request_body` (type 22) whose
-parts include a file, blob or stream is read instead of only described, and is
-retained as a `request_body` artifact with exact bytes and digest.
+Defined by #436 and #428. In content sessions every `request_body` (type 22)
+is read instead of only described, and is retained as a `request_body`
+artifact with exact bytes and digest. Before payload version 2 only bodies
+with a file, blob or stream part were read. A Metadata only session hashes an
+in-memory body on a worker and keeps no bytes.
 
 ### Read
 
@@ -1368,15 +1369,17 @@ retained as a `request_body` artifact with exact bytes and digest.
 - A stream part (`fetch` with a `ReadableStream` body) can be consumed only
   once, so its getter is replaced by one that forwards the size and every byte
   unchanged to the network through a tee. That getter is the only change to the
-  request, and the upload is never delayed: a full pool ends the read, not the
-  upload. The page answers the size once its stream ends, so the read is
+  request. A full pool makes the upload wait for the writer, as a response body
+  does, so the upload is never cut short and no byte is lost. The page answers
+  the size once its stream ends, so the read is
   complete when that answer is OK and the tee saw exactly that many bytes,
   whether the page's pipe closing or the network dropping the getter comes
   next; the network drops it as soon as the size completes a read that already
   has every byte. The request's completion status says whether the network
   then sent them.
-- Bytes stream to the receiver as they are read. Past 16 MiB a part is sized,
-  not read.
+- Bytes stream to the receiver as they are read, whole at any length, and
+  are hashed as they pass. Before payload version 2 a part past 16 MiB was
+  sized, not read.
 - The record is emitted when the read ends, still the child of
   `request_started`; its end frame names it as the artifact's creator. A body
   never handed to the reader (no hook) is recorded as `not_captured_body_kind`
@@ -1384,42 +1387,59 @@ retained as a `request_body` artifact with exact bytes and digest.
 
 ### Record
 
-Payload version 1. Bit 6 `read` marks a body the browser read; it needs bit 0
-and kind 2 to 5 (a stream has one element). With bit 6:
+Payload version 2. Bit 6 `read` marks a body the browser read and hashed
+whole: every body a content session kept or tried to keep, and an in-memory
+body a Metadata only session hashed. Bit 7 `credential_form` marks a body
+Chromium flags as a password form post, which a content session keeps like
+any other and a Metadata only session keeps neither bytes nor a digest of
+(state 11). Version
+2 has no state 5 `captured_truncated`, no state 10 `not_captured_session_budget`
+and no bit 2 `digest_size_limit`. With bit 6:
 
 | State | Rule |
 | ---: | --- |
-| 2 `empty` | Length 0, digest of nothing, bit 3 clear |
-| 4 `captured` | Exact length up to 16 MiB, captured equal, digest present, bit 3 clear, artifact |
-| 5 `captured_truncated` | Exact length over 16 MiB, captured 16 MiB, bit 2, bit 3 clear, artifact |
-| 8 `not_captured_transfer_refused` | The pool or queue refused it while reading; bit 3 set |
-| 10 `not_captured_session_budget` | The read passed its budget allowance; bit 3 set |
-| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, capture ended, the body started within the last 250 ms before expiry so it was not read, or the requesting renderer may not read a named file (`ChildProcessSecurityPolicy::CanReadFile`, the check the network service's upload path makes); bit 3 set |
+| 2 `empty` | Length 0, digest of nothing |
+| 3 `metadata_only` | Metadata only: an in-memory body hashed, no bytes kept |
+| 4 `captured` | Exact length, captured equal, digest present, artifact |
+| 8 `not_captured_transfer_refused` | The artifact queue refused it or the socket closed while reading |
+| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, capture ended, the body started within the last 250 ms before expiry so it was not read, or the requesting renderer may not read a named file (`ChildProcessSecurityPolicy::CanReadFile`, the check the network service's upload path makes) |
+| 13 `not_captured_disk_reserve` | The receiver refused it to keep its free-disk reserve ([disk reserve](../services/artifact-receiver/README.md#disk-reserve)) |
 
-For states 8, 10 and 12 the length counts what was read; no digest and no
-artifact. Without bit 6, kinds 2 to 5 may also carry states 7 to 10 when the
-read was refused before it started, and state 12 is invalid. Every other v2 rule
-is unchanged.
+For states 8, 12 and 13 the length counts what was read; no digest and no
+artifact; bit 3 is set for parts other than in-memory bytes. Without bit 6 a
+body was refused before any read: states 1, 2, 3, 6, 7, 8, 9 and 11, with a
+digest only for an empty in-memory body.
+
+Payload version 1, from older browsers, keeps its rules: bit 6 needed kind 2
+to 5, a read part past 16 MiB kept its prefix (state 5, bit 2), a read past
+the session's budget allowance was state 10, and a content session's password
+form post was state 11.
 
 ### Bounds
 
-- Disabled and metadata-only: unchanged; nothing is read.
-- A read charges `min(16 MiB, remaining budget)` of the request-content budget
-  when it starts and settles to its unique bytes when it ends, so parallel reads
-  cannot pass the budget together.
-- Each read holds at most one pending 64 KiB data frame in the in-flight pool.
-  A file or blob read waits for pool space, about 5 s at most, then is state 8.
+- Disabled: unchanged; nothing is read.
+- Metadata only: an in-memory body is hashed whole on a worker while a
+  reference keeps the immutable body alive, and its record follows with the
+  digest. A file, blob or stream part is not read.
+- No size, count or budget bound: every body a content session admits is read
+  whole.
+- Each read holds at most one pending 64 KiB data frame in the in-flight pool
+  and waits for space when it is full; a file or blob read resumes when the
+  writer drains, as a stream upload does.
+- The receiver's free-disk reserve is the only bound on what is stored; a
+  refused body is state 13.
 
 ### Consumers and validation
 
 The C++ core, the Python validator and the Traffic decoder share the rules
-(`make network-request-wire-check`); Traffic names state 12 and read lengths;
-the session summary counts state 12 under `request_content_not_retained`.
+(`make network-request-wire-check`); Traffic names states 12 and 13 and read
+lengths; the session summary counts states 12 and 13 under
+`request_content_not_retained`.
 `make native-network-capture-check` covers the deferred record, the hook and
 refusals. `make native-artifact-capture-check` retains a multipart upload with a
 file and a stream-body `fetch` with exact bytes and digest through the
-production receiver and broker, and covers the 16 MiB prefix, the budget
-allowance, a stuck pool, incomplete and empty reads, capture end and a missing
+production receiver and broker, and covers a body read whole past 16 MiB, a
+full pool that waits, incomplete and empty reads, capture end and a missing
 hook. The reader's Mojo and file glue compiles only in a Brave build.
 
 ### Acceptance
@@ -1613,7 +1633,7 @@ transfer sizes and resource type zero, the parent's identity, and
 | 4 `not_captured_block_limit` | Longer than 320 KiB; count and length only |
 | 5 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
 | 6 `not_captured_transfer_refused` | The bounded artifact queue refused it |
-| 7 `not_captured_session_budget` | This configuration already holds 64 MiB of header blocks; a block the receiver refused, or a second accepted copy, returns its bytes |
+| 7 `not_captured_session_budget` | Older browsers only: the configuration already held 64 MiB of header blocks. Current capture has no header budget and never emits it |
 | 8 `not_captured_url` | Not HTTP(S), the URL is longer than 8 KiB, or the request is untracked so its hop URL is unknown |
 
 Rules, shared by the C++ core, the Python evidence validator, the Origin Trace
@@ -1699,7 +1719,7 @@ and 2; reserved bytes are zero.
 Kind 12 `cookie_list`, capture origin 10 `network_request`, MIME type
 `application/x-reb-cookie-list`, always sensitive, with the hop's URL like a
 header block. Identical lists are shared by direction, length and SHA-256, in
-the header table and the header 64 MiB budget. Little endian, never truncated
+the header table. Little endian, never truncated
 or rewritten:
 
 | Offset | Size | Field |
@@ -1856,7 +1876,7 @@ string while content capture is on.
 - Disabled or metadata-only: no cookie list is serialized, and a script cookie
   call costs one atomic load.
 - A sent and a received list per hop, at most 2 MiB each, sharing the header
-  table and budget.
+  table.
 - Script cookie records: one per write, at most 2 + log2(reads) per read key,
   one per read past the table, and one read record per read with unrecorded
   names; each is one 320-byte record, one SHA-256 of
@@ -1924,8 +1944,9 @@ provenance. Values are inserted as text after a size and SHA-256 check.
   (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`) plus the
   byte `: ` normalization can add to a line of at least 4 bytes. Request blocks
   use the same bound.
-- 64 MiB of retained blocks per session configuration; shared blocks cost
-  nothing. Exhaustion is the visible state 7, never silence.
+- No byte budget: every block within the 320 KiB bound is retained. Older
+  browsers kept at most 64 MiB of blocks per configuration and named the rest
+  state 7.
 - Identical blocks are retained once by kind, length and SHA-256, through a
   4,096-entry table per configuration. When it is full, later blocks are
   retained individually.
@@ -2025,7 +2046,7 @@ footer stays one item however many reasons there are.
 sessions, provisional, network and response blocks over two redirect hops, a
 raw response with `Set-Cookie` and its status, out-of-order raw notifications,
 early hints, pseudo-headers, sharing, a 200 KiB block retained whole, the block
-limit and the session budget.
+limit, and 70 MiB of blocks with no session budget.
 It also drives sent and received cookie lists with blocked cookies, an
 unparsed `Set-Cookie`, sharing and late lists. `make native-probe-admission-check`
 drives the renderer cookie sink: disabled, metadata-only, writes, read

@@ -137,21 +137,23 @@ it.
   capture retains raw source URLs locally; metadata is not necessarily secret-free.
 - With Network capture on, every native request records its body's length,
   normalized content type and SHA-256. A digest of a short or predictable body
-  can be confirmed by guessing; password form posts keep no digest. Request
-  paths, queries and body bytes are sensitive capture: they are retained only
-  with `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
-  mode sets, at most 16 MiB per body and 256 MiB of unique body and full-URL
-  bytes per session unless `REB_REQUEST_CONTENT_BUDGET_MIB` or the start panel's
-  **Request content budget** sets another, from 1 MiB to 4 GiB. Those bytes
-  include uploaded files, blobs and stream bodies, which the
-  browser reads for that purpose. See [Native network v2](protocol/native-network-v2.md). The same
-  sessions retain response bodies, at most 16 MiB each and 512 MiB of unique
-  bytes unless `REB_RESPONSE_BODY_BUDGET_MIB` sets another budget, including
-  partial copies of bodies still arriving, which use at most a quarter of it; images,
-  audio, video and fonts that page elements load need
-  `REB_CAPTURE_RESPONSE_MEDIA=1` or the start panel's **Capture media and
-  fonts**, and the panel's **Response body budget** sets that budget, from
-  1 MiB to 16 GiB. See [Native network v3](protocol/native-network-v3.md).
+  can be confirmed by guessing, so a Metadata only session keeps neither a
+  digest nor bytes of a password form post. Request paths, queries and body
+  bytes are sensitive capture: they are retained only with
+  `REB_CAPTURE_REQUEST_CONTENT=1`, which the packaged app's default content
+  mode sets, whole at any length. Those sessions keep password form posts like
+  any other body, marked as credential forms, so their evidence holds the
+  credentials typed into the page. Those bytes include uploaded files, blobs and
+  stream bodies, which the browser reads for that purpose. The same sessions
+  retain every response body whole, images, audio, video and fonts included,
+  and partial copies of bodies still arriving, which together copy at most four
+  times what the body kept plus 64 MiB. No size or count limits a session's
+  content: the artifact receiver refuses an item, and the evidence names it as
+  not kept, only when storing it would leave less free disk than its reserve,
+  4 GiB unless `REB_ARTIFACT_DISK_RESERVE_MIB` sets another
+  ([disk reserve](services/artifact-receiver/README.md#disk-reserve)). A
+  session an older browser recorded names that browser's budgets and 16 MiB
+  limit as its own. See [Native network v3](protocol/native-network-v3.md).
   The backend's request index keeps a private derived copy of those paths
   beside the event store; capture clear removes it
   ([request index v1](protocol/request-index-v1.md)).
@@ -187,7 +189,7 @@ it.
 - Sensitive capture requires an enabled, visibly labeled session. Content mode
   is the default for captures the packaged app starts: for its bounded session
   it turns on retention of request paths, queries and bodies and of response
-  bodies, up to 16 MiB each, of request and response headers, including `Cookie`, `Set-Cookie` and
+  bodies, whole, of request and response headers, including `Cookie`, `Set-Cookie` and
   `Authorization`, of the cookies each request sent and received and the
   cookie names and value digests page script used, and of Canvas images, and
   the titlebar labels that session "Content capture". **Metadata
@@ -415,8 +417,8 @@ it.
   such as `Location` or `Referer`, are returned as captured and can still hold
   a secret, and script the agent evaluates in a connected document at Full
   access returns whatever that page can read, such as `document.cookie`. The
-  agent's own sessions can name request content, response media, canvas images
-  or invocation value digests only when the researcher also ticks a separate
+  agent's own sessions can name request content, canvas images or invocation
+  value digests only when the researcher also ticks a separate
   sensitive-capture box, off by default and never remembered. Consent in the
   agent dock turns a level on: it shows what leaves the machine for that
   level, with the warning for Auto-approve actions and Full access, beside a

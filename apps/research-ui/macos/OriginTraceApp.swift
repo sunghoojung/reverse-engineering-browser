@@ -2686,10 +2686,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   // environment and follows the start panel, so a later panel or reopen never
   // replaces Metadata with the default.
   private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
-  // The content limits last chosen in the panel, held for the run as the mode
-  // is. Nil until the panel starts a Content session: until then a session
-  // takes them from the environment, and the panel offers those.
-  private var selectedContentLimits: ContentLimits?
   // The panel chose this run's mode, so it decides request content over an
   // inherited REB_CAPTURE_REQUEST_CONTENT, in reopens as well.
   private var panelChoseMode = false
@@ -2820,7 +2816,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     if smokeTest && ProcessInfo.processInfo.environment["REB_APP_SMOKE_LIVE_FAILURE"] == "1" {
       // Exercise the real startup failure path without a browser or modal dialog.
       let content = LiveCaptureContent.resolve(
-        environment: ProcessInfo.processInfo.environment, mode: .metadata, limits: nil, modeChosen: false)
+        environment: ProcessInfo.processInfo.environment, mode: .metadata, modeChosen: false)
       liveSessionCoordinator.start(
         braveExecutableURL: resourcesURL.appendingPathComponent("__missing_smoke_browser__"),
         content: content,
@@ -2951,8 +2947,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     // Keychain for these automatic sessions; the panel never offers it.
     startAutomaticLiveSession(
       LiveCaptureContent.resolve(
-        environment: ProcessInfo.processInfo.environment, mode: selectedCaptureMode,
-        limits: selectedCaptureMode.capturesNetworkContent ? selectedContentLimits : nil, modeChosen: panelChoseMode),
+        environment: ProcessInfo.processInfo.environment, mode: selectedCaptureMode, modeChosen: panelChoseMode),
       useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
@@ -2967,9 +2962,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     // preselects Metadata (LiveCaptureMode.configured), and the panel says so.
     let environment = ProcessInfo.processInfo.environment
     sessionPanel.modeNote = !panelChoseMode && LiveCaptureMode.requestContentOptedOut(environment) ? LiveCaptureMode.optOutNote : nil
-    sessionPanel.content = .choose(
-      mode: selectedCaptureMode,
-      limits: selectedContentLimits ?? ContentLimits.configured(environment))
+    sessionPanel.content = .choose(mode: selectedCaptureMode)
   }
 
   // The panel already accepted this choice for the decision on screen; it is
@@ -2979,16 +2972,12 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     switch (choice, sessionPanel.content) {
     // A session the panel starts or retries uses the isolated, prompt-free
     // research profile; the page cannot ask for the macOS Keychain.
-    case (.start(let mode, let limits), .choose):
+    case (.start(let mode), .choose):
       automaticSessionSuppressed = false
       selectedCaptureMode = mode
       panelChoseMode = true
-      // A Metadata start keeps the last Content limits for a later Content one.
-      if let limits { selectedContentLimits = limits }
-      // The panel names limits only for a session they apply to: a category
-      // mask without Network and Artifact keeps no request content.
       let content = LiveCaptureContent.resolve(
-        environment: ProcessInfo.processInfo.environment, mode: mode, limits: limits, modeChosen: true)
+        environment: ProcessInfo.processInfo.environment, mode: mode, modeChosen: true)
       // Not a decision, so the start below is not refused as one behind it.
       sessionPanel.content = .starting(content)
       startAutomaticLiveSession(content, useSystemKeychain: false)

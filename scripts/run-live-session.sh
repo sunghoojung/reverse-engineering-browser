@@ -68,12 +68,10 @@ readonly capture_request_content="${REB_CAPTURE_REQUEST_CONTENT:-0}"
 # and counted unless this is 1 (native-network-v3.md).
 readonly capture_browser_internal="${REB_CAPTURE_BROWSER_INTERNAL:-0}"
 readonly capture_extension_traffic="${REB_CAPTURE_EXTENSION_TRAFFIC:-0}"
-# Unique body and full-target bytes one content session retains.
-readonly request_content_budget_mib="${REB_REQUEST_CONTENT_BUDGET_MIB:-256}"
-# Content sessions also retain response bodies (native-network-v3.md): unique
-# bytes per session, and whether element images, audio, video and fonts count.
-readonly response_body_budget_mib="${REB_RESPONSE_BODY_BUDGET_MIB:-512}"
-readonly capture_response_media="${REB_CAPTURE_RESPONSE_MEDIA:-0}"
+# Content sessions keep every body whole (native-network-v3.md). What bounds
+# the store is free disk: the receiver refuses what would leave less than this
+# free, 4 GiB unless set (services/artifact-receiver/README.md#disk-reserve).
+readonly artifact_disk_reserve_mib="${REB_ARTIFACT_DISK_RESERVE_MIB:-}"
 readonly use_system_keychain="${REB_USE_SYSTEM_KEYCHAIN:-1}"
 readonly localhost_only="${REB_LOCALHOST_ONLY:-0}"
 readonly embedded_session="${REB_EMBEDDED_SESSION:-0}"
@@ -258,17 +256,9 @@ fi
 if [[ "${capture_extension_traffic}" != 0 && "${capture_extension_traffic}" != 1 ]]; then
   fail_live_session 2 "REB_CAPTURE_EXTENSION_TRAFFIC must be 0 or 1."
 fi
-if ! [[ "${request_content_budget_mib}" =~ ^[1-9][0-9]{0,3}$ ]] || ((request_content_budget_mib > 4096)); then
-  fail_live_session 2 "REB_REQUEST_CONTENT_BUDGET_MIB must be an integer from 1 to 4096."
-fi
-if ! [[ "${response_body_budget_mib}" =~ ^[1-9][0-9]{0,4}$ ]] || ((response_body_budget_mib > 16384)); then
-  fail_live_session 2 "REB_RESPONSE_BODY_BUDGET_MIB must be an integer from 1 to 16384."
-fi
-if [[ "${capture_response_media}" != 0 && "${capture_response_media}" != 1 ]]; then
-  fail_live_session 2 "REB_CAPTURE_RESPONSE_MEDIA must be 0 or 1."
-fi
-if [[ "${capture_response_media}" == 1 && "${capture_request_content}" != 1 ]]; then
-  fail_live_session 2 "REB_CAPTURE_RESPONSE_MEDIA requires REB_CAPTURE_REQUEST_CONTENT=1."
+# MiB, so the byte count stays far inside a 64-bit integer.
+if [[ -n "${artifact_disk_reserve_mib}" ]] && ! [[ "${artifact_disk_reserve_mib}" =~ ^(0|[1-9][0-9]{0,9})$ ]]; then
+  fail_live_session 2 "REB_ARTIFACT_DISK_RESERVE_MIB must be a whole number of MiB."
 fi
 if [[ "${use_system_keychain}" != 0 && "${use_system_keychain}" != 1 ]]; then
   fail_live_session 2 "REB_USE_SYSTEM_KEYCHAIN must be 0 or 1."
@@ -706,25 +696,9 @@ if ((category_mask & (512 | 1024))); then
   if [[ "${capture_canvas_images}" == 1 || "${capture_request_content}" == 1 ]]; then
     artifact_receiver_arguments+=(--allow-sensitive)
   fi
-  # The store is bounded by bytes and the item count follows from them at
-  # 4 KiB an artifact, so a capture of small headers, cookie lists and stacks
-  # reaches the byte budget, not the count. Content capture grows the budget.
-  artifact_store_mib=256
-  if [[ "${capture_request_content}" == 1 ]]; then
-    artifact_store_mib=$((256 + request_content_budget_mib + response_body_budget_mib))
+  if [[ -n "${artifact_disk_reserve_mib}" ]]; then
+    artifact_receiver_arguments+=(--disk-reserve-bytes "$((artifact_disk_reserve_mib * 1048576))")
   fi
-  artifact_store_bytes=$((artifact_store_mib * 1048576))
-  artifact_item_limit=$((artifact_store_bytes / 4096))
-  # A manifest row can carry an 8 KiB URL, so small budgets keep a 256 MiB manifest.
-  artifact_manifest_bytes=$((artifact_item_limit * 1024))
-  if ((artifact_manifest_bytes < 268435456)); then
-    artifact_manifest_bytes=268435456
-  fi
-  artifact_receiver_arguments+=(
-    --max-store-bytes "${artifact_store_bytes}"
-    --max-artifacts "${artifact_item_limit}"
-    --max-manifest-bytes "${artifact_manifest_bytes}"
-  )
   "${artifact_receiver_binary}" "${artifact_receiver_arguments[@]}" \
     >"${artifact_receiver_log}" 2>&1 &
   artifact_receiver_pid=$!
@@ -807,11 +781,7 @@ ui_arguments=(
 ui_arguments+=(--native-console-live-directory "${native_console_directory}")
 # Labels for the session context; they enable nothing in the backend.
 if [[ "${capture_request_content}" == 1 ]]; then
-  # The limits this content session runs with; a metadata session has none.
-  ui_arguments+=(--session-request-content
-    --session-request-content-budget-mib "${request_content_budget_mib}"
-    --session-response-body-budget-mib "${response_body_budget_mib}"
-    --session-response-media "${capture_response_media}")
+  ui_arguments+=(--session-request-content)
 fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
   ui_arguments+=(--session-canvas-images)
@@ -927,12 +897,7 @@ if [[ "${capture_canvas_images}" == 1 ]]; then
   brave_arguments+=(--reb-capture-canvas-images)
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  brave_arguments+=(--reb-capture-request-content
-    "--reb-request-content-budget-bytes=$((request_content_budget_mib * 1048576))"
-    "--reb-response-body-budget-bytes=$((response_body_budget_mib * 1048576))")
-  if [[ "${capture_response_media}" == 1 ]]; then
-    brave_arguments+=(--reb-capture-response-media)
-  fi
+  brave_arguments+=(--reb-capture-request-content)
 fi
 if [[ "${capture_browser_internal}" == 1 ]]; then
   brave_arguments+=(--reb-capture-browser-internal)
@@ -1016,8 +981,8 @@ else
   echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
-  echo "Request content capture: enabled for this session; request paths, queries, headers, cookies and bodies are retained locally, at most ${request_content_budget_mib} MiB of unique content"
-  echo "Response body capture: enabled for this session; at most ${response_body_budget_mib} MiB of unique response bytes, element media $([[ "${capture_response_media}" == 1 ]] && echo retained || echo skipped)"
+  echo "Request content capture: enabled for this session; request paths, queries, headers, cookies and bodies are retained locally, whole"
+  echo "Response body capture: enabled for this session; every response body, media and fonts included, is retained locally, whole"
 else
   echo "Request content capture: disabled; hosts and body length, type and digest only. Set REB_CAPTURE_REQUEST_CONTENT=1 to retain paths, request bodies and response bodies"
 fi

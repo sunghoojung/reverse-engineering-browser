@@ -59,10 +59,7 @@ Every option is off unless the start names it, and none is inherited.
 | Request call stacks | `request_stacks` | F | Covered |
 | Document-start Console permission | `document_start` | F | Covered |
 | Invocation sites from a file, or the agent's saved set | `js_invocation_sites`, `js_invocation_saved_sites` | F | Covered |
-| Request content (paths, queries, bodies, headers, cookies, response bodies) | `request_content` with `confirm_sensitive_capture` | F + sensitive | Covered; under `--permission full` also needs `--allow-sensitive-capture` (the dock's sensitive box) |
-| Request content budget | `request_content_budget_mib` | F + sensitive | Covered |
-| Response body budget | `response_body_budget_mib` | F + sensitive | Added |
-| Element images, audio, video and fonts | `response_media` | F + sensitive | Added |
+| Request content (paths, queries, bodies, headers, cookies, every response body whole with media and fonts) | `request_content` with `confirm_sensitive_capture` | F + sensitive | Covered; under `--permission full` also needs `--allow-sensitive-capture` (the dock's sensitive box) |
 | Canvas images | `canvas_images` with `confirm_sensitive_capture` | F + sensitive | Covered |
 | Invocation value digests | `js_invocation_digests` with `confirm_sensitive_capture` | F + sensitive | Covered |
 | Publish the canonical endpoint, Brave binary, start timeout | `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds` | F | Covered |

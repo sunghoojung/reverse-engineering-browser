@@ -153,8 +153,7 @@ sending a request. `start_live_session` takes named capture options (`url`,
 `wasm_samples_per_indirect_site`, `wasm_function_allow`,
 `wasm_function_deny`, `wasm_module_allowlist`, `guest_adapter`, `js_dispatch_sites`,
 `quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
-`document_start`, `request_content`, `request_content_budget_mib`,
-`request_stacks`, `js_invocation_sites`,
+`document_start`, `request_content`, `request_stacks`, `js_invocation_sites`,
 `js_invocation_saved_sites`, `js_invocation_digests` and others; all off
 unless named and never inherited from the environment, with sensitive capture
 behind `confirm_sensitive_capture`), starts the same launcher as `make live`
@@ -204,7 +203,7 @@ same tools; `get_session_context` reports the level in `mcp_admission` so the
 model can say which applies. `full` sends captured source, bytecode,
 disassembly and request and response bodies to the model provider whenever
 the agent reads them. Its own live sessions cannot name `request_content`,
-`response_media`, `canvas_images` or `js_invocation_digests` unless
+`canvas_images` or `js_invocation_digests` unless
 `--allow-sensitive-capture` is also passed, which is the same choice as the
 dock's **Also allow sensitive capture options**. `full` starts without a live
 endpoint, like `--allow-session-start`. A connection that ends a session it

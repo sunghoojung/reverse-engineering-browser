@@ -315,10 +315,10 @@ session first. Sensitive Canvas images need `"canvas_images": true` with
 Canvas content for this target; `"request_content": true` (request paths,
 queries, headers, cookies and bodies; read headers with `get_request_headers`
 and cookies with `get_request_cookies` and `get_cookie_provenance`) and `"js_invocation_digests": true` take the same
-confirmation; `"request_content_budget_mib": 1024` raises the request content
-kept from the default 256 MiB, `"response_body_budget_mib": 2048` the response
-bodies kept from the default 512 MiB, and `"response_media": true` also keeps
-element images, audio, video and fonts. Under `--permission full` these
+confirmation. Request content keeps every request and response body whole,
+element images, audio, video and fonts included, with no size or count limit;
+the artifact receiver refuses a body only to keep its free-disk reserve, and
+the session summary counts each one it refused. Under `--permission full` these
 sensitive options are refused unless the connection also has
 `--allow-sensitive-capture` (in the dock, **Also allow sensitive capture
 options**). `"request_stacks": true` records the stack that
@@ -327,9 +327,8 @@ permits document-start Console scripts (recipe 19). `"js_invocation_sites": "/ab
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
 `js_invocation_site_action`, arms invocation tracking. None of these is ever
 taken from the environment; `options` in the result and
-`capture_options` in `get_session_context` show what the session runs with,
-its budgets and media choice in `capture_options.content_limits` (null without
-request content). A guest adapter
+`capture_options` in `get_session_context` show what the session runs with.
+A guest adapter
 needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
 An error names the launcher's reason, for example a Brave build that lacks a
 requested V8 flag; nothing is left running. From a shell, `reb-api session

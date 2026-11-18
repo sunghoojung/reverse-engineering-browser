@@ -1223,7 +1223,11 @@ The native stored-evidence scheme and the live HTTP backend share exactly one
 `Contents/Resources/research-ui/` directory. `index.html` resolves CSS and scripts
 relative to that directory; both Analyst adapters pass its `analyst_runner_core.js`
 to the bundled native runner. `analyst_runner_node.js` remains available for the
-backend's supported Node fallback. The runners are not public UI routes.
+backend's supported Node fallback. The runners are not public UI routes. The
+packaging script re-signs only `OriginTraceAnalystRunner` with
+[`OriginTraceAnalystRunner.entitlements`](macos/OriginTraceAnalystRunner.entitlements)
+(`com.apple.security.cs.allow-jit`), then re-seals the app: JavaScriptCore
+without it interprets every analyst script.
 `OriginTrace.icns` and `run-live-session.sh` stay at the Resources root.
 
 The `reb://` workspace answers what only Rust implements (the request index,

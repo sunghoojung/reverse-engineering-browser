@@ -861,7 +861,7 @@ const applicationResults = runInNewContext(
 const analystResult = {protocol_version: 1, run_id: 1, script_id: 1, library_generation: 1,
   ok: false, outcome: "failed", result_type: "error", result_text: "", result_truncated: false,
   logs: [], logs_truncated: false, duration_ms: 1, error: "Synthetic failure"};
-for (const [outcome, code] of [["failed", "application_failed"], ["cancelled", "cancelled"], ["timed_out", "timeout"]]) {
+for (const [outcome, code] of [["failed", "application_failed"], ["cancelled", "cancelled"]]) {
   const legacy = {...analystResult, outcome};
   const annotated = {...legacy, code, details: {phase: "worker"}};
   assert(applicationResults.isLocalAnalystResult(legacy, legacy));
@@ -870,8 +870,14 @@ for (const [outcome, code] of [["failed", "application_failed"], ["cancelled", "
     assert.equal(applicationResults.isLocalAnalystResult({...annotated, ...patch}, legacy), false);
   }
 }
+// Runs have no deadline, so nothing reports timed_out any more.
+assert.equal(applicationResults.isLocalAnalystResult({...analystResult, outcome: "timed_out"}, analystResult), false);
 const completedAnalyst = {...analystResult, ok: true, outcome: "completed", error: ""};
 assert(applicationResults.isLocalAnalystResult(completedAnalyst, completedAnalyst));
+// Results and logs are kept whole, and a run lasts as long as it needs.
+const wholeAnalyst = {...completedAnalyst, result_text: "x".repeat(4 * 1024 * 1024), duration_ms: 3_600_000,
+  logs: Array.from({length: 5000}, (_, index) => ({level: "log", text: `${index} ${"y".repeat(2048)}`}))};
+assert(applicationResults.isLocalAnalystResult(wholeAnalyst, wholeAnalyst));
 assert.equal(applicationResults.isLocalAnalystResult({...completedAnalyst, code: "application_failed", details: {phase: "worker"}}, completedAnalyst), false);
 const jwtCommon = {protocol_version: 1, ok: false, error: "Synthetic failure", duration_us: 1};
 for (const [validate, legacy] of [

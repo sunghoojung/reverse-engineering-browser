@@ -11,16 +11,18 @@ const largeId = '18446744073709551615';
 assert.equal(JSON.parse(packs.vmPackRequestText('compare', inputs, largeId, '1')).left_artifact, largeId);
 for (const id of ['', '01', '-1', '1.0', '18446744073709551616', '<script>']) assert.throws(() => packs.vmPackRequestText('compare', inputs, id, '1'));
 for (const mode of ['execute', '', null]) assert.throws(() => packs.vmPackRequestText(mode, inputs, '1', '1'));
-assert.throws(() => packs.vmPackRequestText('compare', {...inputs, pack: '{' + ' '.repeat(65536)}, '1', '1'));
 assert.throws(() => packs.vmPackRequestText('apply', {...inputs, analysis: null}));
 const unrounded = '{"artifact_id":18446744073709551615}';
 assert(packs.vmPackRequestText('apply', {...inputs, analysis: unrounded}).includes(unrounded));
-assert.throws(() => packs.vmPackRequestText('compare', {...inputs, left: '{' + ' '.repeat(8388608), right: '{' + ' '.repeat(8388608)}, '1', '1'));
+// No size refusal: two 12 MiB workspaces combine into one 24 MiB request.
+const large = '{' + ' '.repeat(12 << 20) + '}';
+const combined = packs.vmPackRequestText('compare', {...inputs, left: large, right: large}, '1', '1');
+assert(combined.length > 2 * large.length && JSON.parse(combined).right_artifact === '1');
 const spec = JSON.parse(await readFile(new URL('protocol/openapi.json', root), 'utf8'));
 for (const mode of ['apply', 'compare']) {
   const route = spec.paths[`/api/analysis/vm/packs/${mode}`].post;
   assert.equal(route.operationId, `vm_pack_${mode}`);
-  assert.equal(route['x-max-body-bytes'], 16777216);
+  assert.equal(route['x-max-body-bytes'], 1073741824);
   assert.deepEqual(route['x-reb-execution'].effects, ['analysis']);
   assert.equal(route.requestBody.content['application/json'].schema.additionalProperties, false);
 }
@@ -78,7 +80,7 @@ next = response({}); await ui.ui.run('apply'); assert.match(ui.status.textConten
 next = response({error: {unsafe: 'object'}}, 400); await ui.ui.run('apply'); assert.match(ui.status.textContent, /backend refused/); assert(!ui.status.textContent.includes('[object Object]'));
 const readHeld = deferred(); const reading = ui.load(0, '{}', () => readHeld.promise);
 ui.button('Clear').click(); readHeld.resolve(new TextEncoder().encode('{}').buffer); await reading;
-await ui.ui.run('apply'); assert.match(ui.status.textContent, /Select a bounded pack/);
+await ui.ui.run('apply'); assert.match(ui.status.textContent, /Select a pack JSON object/);
 const heldRead = new ReadableStream({start(controller) { controller.enqueue(new TextEncoder().encode('{')); }});
 await ui.load(0); await ui.load(1); next = new Response(heldRead);
 const streaming = ui.ui.run('apply'); await new Promise(resolve => setTimeout(resolve, 5)); ui.button('Clear').click(); await streaming;

@@ -5602,7 +5602,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           siblingNames.add(key);
         }
         const fileIds = new Set();
-        let totalBytes = 0;
         for (const file of workspace.files) {
           if (!analystExactKeys(file, ['id', 'folder_id', 'name', 'kind', 'language', 'content',
             'content_bytes', 'created_at_ms', 'updated_at_ms']) ||
@@ -5611,7 +5610,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             !['analyst-script', 'scratchpad'].includes(file.kind) ||
             !['javascript', 'json', 'markdown', 'text'].includes(file.language) ||
             (file.kind === 'analyst-script' && file.language !== 'javascript') ||
-            !isBoundedText(file.content, 32 * 1024) || /[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(file.content) ||
+            typeof file.content !== 'string' || /[\x00-\x08\x0b\x0c\x0e-\x1f]/u.test(file.content) ||
             file.content_bytes !== utf8ByteLength(file.content) ||
             !isSafeIntegerInRange(file.created_at_ms, 0, Number.MAX_SAFE_INTEGER) ||
             !isSafeIntegerInRange(file.updated_at_ms, file.created_at_ms, Number.MAX_SAFE_INTEGER)) return false;
@@ -5619,9 +5618,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (siblingNames.has(key)) return false;
           siblingNames.add(key);
           fileIds.add(file.id);
-          totalBytes += file.content_bytes;
         }
-        if (totalBytes > 512 * 1024) return false;
         return workspace.generation !== 0 || (workspace.updated_at_ms === 0 && workspace.files.length === 0 &&
           workspace.folders.length === 1);
       }
@@ -5636,19 +5633,19 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function isLocalAnalystResult(result, run) {
-        const code = result?.outcome === 'cancelled' ? 'cancelled' : result?.outcome === 'timed_out' ? 'timeout' : 'application_failed';
+        const code = result?.outcome === 'cancelled' ? 'cancelled' : 'application_failed';
         if (!resultHasOptionalReason(result, ['protocol_version', 'run_id', 'script_id', 'library_generation', 'ok',
           'outcome', 'result_type', 'result_text', 'result_truncated', 'logs', 'logs_truncated',
           'duration_ms', 'error'], code, 'worker') || result.protocol_version !== 1 || result.run_id !== run.run_id ||
           result.script_id !== run.script_id || result.library_generation !== run.library_generation ||
-          typeof result.ok !== 'boolean' || !['completed', 'failed', 'cancelled', 'timed_out'].includes(result.outcome) ||
+          typeof result.ok !== 'boolean' || !['completed', 'failed', 'cancelled'].includes(result.outcome) ||
           result.ok !== (result.outcome === 'completed') || !isBoundedText(result.result_type, 64) ||
-          !isBoundedText(result.result_text, 32 * 1024) || typeof result.result_truncated !== 'boolean' ||
-          !Array.isArray(result.logs) || result.logs.length > 64 || typeof result.logs_truncated !== 'boolean' ||
-          !isSafeIntegerInRange(result.duration_ms, 0, 7000) || !isBoundedText(result.error, 512) ||
+          typeof result.result_text !== 'string' || typeof result.result_truncated !== 'boolean' ||
+          !Array.isArray(result.logs) || typeof result.logs_truncated !== 'boolean' ||
+          !isSafeIntegerInRange(result.duration_ms, 0, Number.MAX_SAFE_INTEGER) || !isBoundedText(result.error, 512) ||
           (result.ok ? result.error.length !== 0 : result.error.length === 0)) return false;
         return result.logs.every(log => analystExactKeys(log, ['level', 'text']) &&
-          ['log', 'info', 'warn', 'error'].includes(log.level) && isBoundedText(log.text, 1024));
+          ['log', 'info', 'warn', 'error'].includes(log.level) && typeof log.text === 'string');
       }
 
       function analystFolder(folderId = state.analystSelectedFolderId) {
@@ -5765,22 +5762,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         event.returnValue = '';
       }
 
-      // A deadline covers both headers and bounded body reads, even if transport
-      // cancellation cannot stop a server commit. Such writes must be reconciled.
+      // No deadline or size limit: the library grows with the researcher's
+      // files, and the backend can be slow to answer while long analyses hold
+      // its readers. A write whose transport fails is reconciled against the
+      // stored generation, never retried.
       async function analystReadJSON(path, options = {}) {
-        const controller = new AbortController();
-        let timer;
-        const deadline = new Promise((_, reject) => {
-          timer = setTimeout(() => { controller.abort(); reject(new Error('timed out')); }, 15000);
-        });
-        try {
-          return await Promise.race([deadline, (async () => {
-            const response = await fetch(path, {...options, signal: controller.signal});
-            if (response.status === 304) return {response, body: null};
-            const bytes = await sourceFactsReadBytes(response, 4 * 1024 * 1024, controller.signal);
-            return {response, body: JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
-          })()]);
-        } finally { clearTimeout(timer); }
+        const response = await fetch(path, options);
+        if (response.status === 304) return {response, body: null};
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        return {response, body: JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
       }
 
       function admitAnalystWorkspace(body, confirmed = false) {
@@ -6165,9 +6155,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         colorAnalystEditor();
       }
 
+      // Any stored artifact selected in Sources, text or binary, loaded in the
+      // page or not: the runner's host reads its verified bytes from the store.
       function selectedAnalystArtifact() {
         const source = selectedSource();
-        if (source?.source_type !== 'artifact' || typeof source.content !== 'string') return null;
+        if (source?.source_type !== 'artifact' || typeof source.artifact_id !== 'string' ||
+          !/^[0-9a-f]{64}$/u.test(source.sha256 ?? '')) return null;
         return source;
       }
 
@@ -6201,56 +6194,38 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return metadata;
       }
 
+      // Everything the page holds for each chosen kind, whole. The selected
+      // artifact is named, not copied: its host reads the stored bytes.
       function buildAnalystEvidence() {
         const selected = analystElements.includeSelected.checked ? selectedAnalystArtifact() : null;
         if (analystElements.includeSelected.checked && !selected) {
-          throw new TypeError('Load one captured artifact before including its bytes.');
+          throw new TypeError('Select one stored artifact in Sources before including its bytes.');
         }
         if (selected?.sensitive && !analystElements.confirmSensitive.checked) {
           throw new TypeError('Separately confirm inclusion of sensitive selected artifact bytes.');
         }
-        const events = analystElements.includeEvents.checked ? state.events.slice(-500) : [];
-        const artifacts = analystElements.includeArtifacts.checked
-          ? state.artifacts.slice(-500).map(analystArtifactMetadata) : [];
-        const traceEdges = analystElements.includeTrace.checked ? (state.originTrace?.steps ?? []).slice(-1000) : [];
+        const events = analystElements.includeEvents.checked ? state.events : [];
+        const artifacts = analystElements.includeArtifacts.checked ? state.artifacts.map(analystArtifactMetadata) : [];
+        const traceEdges = analystElements.includeTrace.checked ? (state.originTrace?.steps ?? []) : [];
         const signalProfiles = analystElements.includeSignals.checked && state.signalProfile ? [state.signalProfile] : [];
         const vmAnalysis = analystElements.includeVm.checked ? {
           status: state.vmAnalysisStatus,
           request_id: state.vmAnalysisRequestId,
           selection: state.vmAnalysisSelection,
-          findings: state.vmFindings.slice(0, 256),
+          findings: state.vmFindings,
           malformed_findings: state.malformedVmFindings
         } : null;
-        const selectedArtifact = selected ? {...analystArtifactMetadata(selected), content: selected.content} : null;
-        const original = {events: events.length, artifacts: artifacts.length, trace_edges: traceEdges.length,
-          signal_profiles: signalProfiles.length};
-        const evidence = {
+        return {
           events, artifacts, trace_edges: traceEdges, signal_profiles: signalProfiles, vm_analysis: vmAnalysis,
-          selected_artifact: selectedArtifact,
+          selected_artifact: selected ? {artifact_id: selected.artifact_id, sha256: selected.sha256} : null,
           summary: {
             captured_at_ms: Date.now(),
             workspace_generation: state.localAnalyst.generation,
             selected_request_id: state.selectedRequestId,
-            original,
-            included: {...original},
-            dropped: {events: 0, artifacts: 0, trace_edges: 0, signal_profiles: 0}
+            included: {events: events.length, artifacts: artifacts.length, trace_edges: traceEdges.length,
+              signal_profiles: signalProfiles.length, selected_artifact_bytes: selected?.byte_size ?? 0}
           }
         };
-        const byteSize = () => utf8ByteLength(JSON.stringify(evidence));
-        const collections = [['events', evidence.events], ['artifacts', evidence.artifacts],
-          ['trace_edges', evidence.trace_edges], ['signal_profiles', evidence.signal_profiles]];
-        let guard = 0;
-        while (byteSize() > 768 * 1024 && ++guard < 128) {
-          const entry = collections.reduce((largest, candidate) => candidate[1].length > largest[1].length ? candidate : largest,
-            collections[0]);
-          if (!entry[1].length) break;
-          const remove = Math.max(1, Math.ceil(entry[1].length / 8));
-          entry[1].splice(0, remove);
-          evidence.summary.dropped[entry[0]] += remove;
-          evidence.summary.included[entry[0]] = entry[1].length;
-        }
-        if (byteSize() > 768 * 1024) throw new TypeError('The selected evidence exceeds the 768 KiB snapshot limit.');
-        return evidence;
       }
 
       function renderAnalystExecution() {
@@ -6265,15 +6240,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!selected) analystElements.includeSelected.checked = false;
         analystElements.sensitiveRow.hidden = !(selected?.sensitive && analystElements.includeSelected.checked);
         if (analystElements.sensitiveRow.hidden) analystElements.confirmSensitive.checked = false;
-        const snapshotCount = (analystElements.includeEvents.checked ? Math.min(500, state.events.length) : 0) +
-          (analystElements.includeArtifacts.checked ? Math.min(500, state.artifacts.length) : 0) +
-          (analystElements.includeTrace.checked ? Math.min(1000, state.originTrace?.steps?.length ?? 0) : 0) +
+        const snapshotCount = (analystElements.includeEvents.checked ? state.events.length : 0) +
+          (analystElements.includeArtifacts.checked ? state.artifacts.length : 0) +
+          (analystElements.includeTrace.checked ? state.originTrace?.steps?.length ?? 0 : 0) +
           (analystElements.includeSignals.checked && state.signalProfile ? 1 : 0) +
           (analystElements.includeVm.checked && state.vmAnalysisStatus === 'ready' ? state.vmFindings.length : 0);
         analystElements.snapshotBadge.textContent = `${snapshotCount} records`;
         const runnable = file?.kind === 'analyst-script' && !state.analystDraftDirty && !state.localAnalystNeedsReload &&
           !state.localAnalystPendingSave && runnerAvailable && !runnerBusy &&
-          !state.analystRunPending && state.analystTotalRuns < 256;
+          !state.analystRunPending;
         analystElements.run.disabled = !runnable;
         analystElements.cancel.disabled = !state.analystRunPending ||
           (state.analystCancelRunId !== null && state.analystCancelRunId === state.analystActiveRunId);
@@ -6294,12 +6269,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           analystElements.resultMeta.textContent = run ? `run ${run.run_id} is executing in a fresh helper process` : 'Select a completed run.';
           analystElements.resultBadge.dataset.kind = 'offline';
           analystElements.resultBadge.textContent = run ? 'Running' : 'No result';
-          analystElements.result.replaceChildren(textElement('div', 'analyst-empty', run ? 'Waiting for the bounded runner result…' : 'No run selected.'));
+          analystElements.result.replaceChildren(textElement('div', 'analyst-empty', run ? 'Waiting for the runner result…' : 'No run selected.'));
           return;
         }
-        const included = run.evidence_summary ? Object.values(run.evidence_summary.included).reduce((sum, value) => sum + value, 0) : 0;
-        const dropped = run.evidence_summary ? Object.values(run.evidence_summary.dropped).reduce((sum, value) => sum + value, 0) : 0;
-        analystElements.resultMeta.textContent = `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${run.duration_ms} ms · ${included} evidence records${dropped ? ` · ${dropped} dropped by snapshot limit` : ''}`;
+        analystElements.resultMeta.textContent = `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${run.duration_ms} ms · ${analystEvidenceText(run.evidence_summary)}`;
         analystElements.resultBadge.dataset.kind = run.ok ? '' : 'error';
         analystElements.resultBadge.textContent = run.outcome.replaceAll('_', ' ');
         const nodes = [];
@@ -6315,8 +6288,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           nodes.push(logs);
         }
         if (run.result_truncated || run.logs_truncated) nodes.push(textElement('p', 'experiment-privacy',
-          `${run.result_truncated ? 'Result' : 'Logs'} reached the visible retention limit.`));
+          `${run.result_truncated ? 'The result' : 'A log entry'} nests deeper than 256 levels or could not be serialized; those values are marked.`));
         analystElements.result.replaceChildren(...nodes);
+      }
+
+      function analystEvidenceText(summary) {
+        const included = summary?.included ?? {};
+        const records = (included.events ?? 0) + (included.artifacts ?? 0) + (included.trace_edges ?? 0) +
+          (included.signal_profiles ?? 0);
+        return `${records.toLocaleString()} records${included.selected_artifact_bytes
+          ? ` + ${formatByteSize(included.selected_artifact_bytes)} artifact` : ''}`;
       }
 
       function renderAnalystHistory() {
@@ -6336,10 +6317,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           row.tabIndex = run.run_id === state.analystSelectedRunId ? 0 : -1;
           const outcome = textElement('strong', '', run.pending ? 'running' : run.outcome.replaceAll('_', ' '));
           if (!run.pending && !run.ok) outcome.dataset.kind = 'error';
-          const included = run.evidence_summary ? Object.values(run.evidence_summary.included).reduce((sum, value) => sum + value, 0) : 0;
-          const dropped = run.evidence_summary ? Object.values(run.evidence_summary.dropped).reduce((sum, value) => sum + value, 0) : 0;
           row.append(textElement('span', '', run.file_name), outcome,
-            textElement('small', '', `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${included} records${dropped ? ` · ${dropped} dropped` : ''}${run.completed_at_ms ? ` · ${new Date(run.completed_at_ms).toLocaleTimeString()}` : ''}`));
+            textElement('small', '', `run ${run.run_id} · script ${run.script_id} · generation ${run.library_generation} · ${analystEvidenceText(run.evidence_summary)}${run.completed_at_ms ? ` · ${new Date(run.completed_at_ms).toLocaleTimeString()}` : ''}`));
           row.addEventListener('click', () => { state.analystSelectedRunId = run.run_id; renderAnalystHistory(); });
           row.addEventListener('keydown', event => {
             if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
@@ -7025,16 +7004,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         try {
           if (state.analystDraftDirty || state.localAnalystNeedsReload || state.localAnalystPendingSave) throw new TypeError('Resolve the draft and reload any uncertain save before running this script.');
           if (!analystElements.confirm.checked) throw new TypeError('Confirm access to the selected evidence snapshot before running.');
-          if (state.analystTotalRuns >= 256) throw new TypeError('The 256-run session limit was reached. Clear history to begin a fresh session.');
           const run = {
-            action: 'run_local_analyst_script', protocol_version: 1,
+            action: 'run_local_analyst_script', protocol_version: 2,
             run_id: state.analystNextRunId++, script_id: file.id,
             library_generation: state.localAnalyst.generation, source: file.content,
             variables: analystVariables(), evidence: buildAnalystEvidence(), confirmed: true,
             confirmed_sensitive: Boolean(selectedAnalystArtifact()?.sensitive && analystElements.includeSelected.checked &&
               analystElements.confirmSensitive.checked)
           };
-          state.analystTotalRuns += 1;
           state.analystRunPending = true;
           state.analystActiveRunId = run.run_id;
           const pending = {
@@ -7051,7 +7028,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.analystHistoryEvictions += 1;
           }
           state.analystSelectedRunId = run.run_id;
-          setAnalystNotice('running', `Run ${run.run_id} is executing in a fresh isolated helper process.`);
+          state.analystRunStartedAt = performance.now();
+          analystRunTick(run.run_id);
           renderLocalAnalyst();
           const response = await fetch('/api/local-analyst/actions', {
             method: 'POST', cache: 'no-store', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(run)
@@ -7073,6 +7051,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           setAnalystNotice('error', `Analyst run failed: ${error.message}`);
         } finally {
           state.analystRunPending = false;
+          state.analystRunStartedAt = null;
           state.analystActiveRunId = null;
           state.analystCancelRunId = null;
           analystElements.confirm.checked = false;
@@ -7080,6 +7059,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           await refreshLocalAnalyst();
           renderLocalAnalyst();
         }
+      }
+
+      // A run has no deadline, so the notice counts its seconds until it
+      // settles or is cancelled.
+      function analystRunTick(runId) {
+        if (state.analystActiveRunId !== runId || state.analystRunStartedAt === null) return;
+        if (state.analystCancelRunId !== runId) {
+          const seconds = Math.floor((performance.now() - state.analystRunStartedAt) / 1000);
+          setAnalystNotice('running', `Run ${runId} is running in a fresh isolated helper process · ${seconds} s. Cancel stops it.`);
+        }
+        setTimeout(() => analystRunTick(runId), 1000);
       }
 
       // A requested cancellation is state, so a render while the run is
@@ -10149,7 +10139,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.analystRunPending) return;
         state.analystRuns = [];
         state.analystSelectedRunId = null;
-        state.analystTotalRuns = 0;
         state.analystHistoryEvictions = 0;
         state.analystNextRunId = 1;
         setAnalystNotice(state.localAnalyst.files.length ? 'ready' : 'empty', 'Ephemeral analyst run history was cleared. Saved files were not changed.');

@@ -2291,7 +2291,31 @@ impl App {
                 "run_local_analyst_script" => {
                     let store = self.workspace.clone();
                     let workspace = self.blocking(move || store.load()).await?;
-                    self.analyst.run(value, &workspace).await
+                    let run = crate::analyst::Run::new(value, &workspace)?;
+                    // The script reads the stored, SHA-256 verified bytes of
+                    // the artifact the page selected, whatever their size.
+                    let selected = match run.selected() {
+                        Some(id) => {
+                            let artifact = self.find_artifact(id).await?;
+                            run.admit(&artifact)?;
+                            let root = self.options.artifacts.clone();
+                            let record = artifact.clone();
+                            let bytes = self
+                                .cancellable(move |cancelled| {
+                                    evidence::verified_range_cancellable(
+                                        &root,
+                                        &record,
+                                        0,
+                                        usize::MAX,
+                                        cancelled,
+                                    )
+                                })
+                                .await?;
+                            Some((artifact, bytes))
+                        }
+                        None => None,
+                    };
+                    self.analyst.run(run, selected).await
                 }
                 "set_wasm_function_name" => {
                     let store = self.workspace.clone();
@@ -2543,7 +2567,11 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             } else {
                 None
             };
-            let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(body, maximum))
+            // The deadline only stops a stalled client from holding admission.
+            // It grows by a second per declared 16 MiB, so a large body on a
+            // busy machine is never refused for its size.
+            let deadline = Duration::from_secs(5 + (length >> 24) as u64);
+            let bytes = tokio::time::timeout(deadline, to_bytes(body, maximum))
                 .await
                 .map_err(|_| {
                     Error::new(408, "The request body deadline was exceeded")

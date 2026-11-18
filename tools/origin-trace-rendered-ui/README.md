@@ -296,10 +296,11 @@ writes Application Support.
 
 `test21StoppedRequestIsNotAnswered` opens the bundled `reb://` workspace, saves
 a synthetic script that never returns and runs it, then reloads the page while
-the native runner still holds the request. WebKit stops that request, and the
-runner's answer at its 2 second limit must not reach it: answering a stopped
-request raises an exception that ended the app. The next run must get its own
-`timed_out` answer, not 409.
+the native runner still holds the request. WebKit stops that request, which
+must terminate the run, since a run has no deadline, and no answer may reach
+the stopped request: answering one raises an exception that ended the app. The
+next run, of a script that returns, must get its own `completed` answer, not
+409.
 
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
 through **New Live Session…** and the start panel's **Continue Offline**, because the close guard

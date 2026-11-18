@@ -17,6 +17,83 @@ pub struct Analyst {
     directory: PathBuf,
     active: Mutex<Option<(u64, watch::Sender<bool>)>>,
 }
+/// A validated run, before its host reads the stored artifact it names.
+pub struct Run {
+    request: Value,
+    selected: Option<(String, String)>,
+    confirmed_sensitive: bool,
+}
+impl Run {
+    pub fn new(value: &Value, workspace: &Value) -> Result<Self> {
+        let (request, selected) = normalize(value, workspace)?;
+        Ok(Self {
+            request,
+            selected,
+            confirmed_sensitive: value["confirmed_sensitive"] == true,
+        })
+    }
+    /// The selected artifact's ID, when the run includes one.
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_ref().map(|(id, _)| id.as_str())
+    }
+    /// Checks the stored record against the reference the page sent, and
+    /// sensitivity against the manifest rather than the page, before any of
+    /// its bytes are read.
+    pub fn admit(&self, artifact: &Value) -> Result<()> {
+        let (_, sha256) = self
+            .selected
+            .as_ref()
+            .ok_or_else(|| Error::bad("This run includes no selected artifact"))?;
+        // The kinds Sources never lists: header blocks, cookie lists, request
+        // bodies and targets, canvas images and stacks are read only with
+        // their own evidence, never by a script.
+        if NOT_SOURCES.contains(&artifact["kind"].as_str().unwrap_or("")) {
+            return Err(Error::bad(
+                "Only an artifact Sources lists can be a run's selected artifact",
+            ));
+        }
+        if artifact["sha256"] != sha256.as_str() {
+            return Err(Error::conflict(
+                "The selected artifact changed; select it again before running",
+            ));
+        }
+        if artifact["sensitive"] == true && !self.confirmed_sensitive {
+            return Err(Error::bad(
+                "Confirm inclusion of sensitive selected artifact bytes before running",
+            ));
+        }
+        Ok(())
+    }
+}
+const NOT_SOURCES: [&str; 7] = [
+    "canvas_data_url",
+    "request_body",
+    "request_target",
+    "request_headers",
+    "response_headers",
+    "cookie_list",
+    "stack",
+];
+/// The manifest fields a script sees for the selected artifact. Its bytes
+/// follow the runner's JSON header instead of being copied into it.
+const SELECTED_FIELDS: [&str; 16] = [
+    "protocol_version",
+    "artifact_id",
+    "session_id",
+    "navigation_id",
+    "frame_id",
+    "parent_artifact_id",
+    "creator_event_id",
+    "execution_context_id",
+    "capture_origin",
+    "kind",
+    "origin",
+    "url",
+    "mime_type",
+    "byte_size",
+    "sha256",
+    "sensitive",
+];
 struct Active<'a>(&'a Analyst);
 impl Drop for Active<'_> {
     fn drop(&mut self) {
@@ -97,8 +174,35 @@ impl Analyst {
             .map_err(|_| Error::bad("The selected analyst run is no longer active"))?;
         Ok(true)
     }
-    pub async fn run(&self, value: &Value, workspace: &Value) -> Result<Value> {
-        let request = normalize(value, workspace)?;
+    /// Runs until the script settles, the researcher cancels it, or its
+    /// request goes away; there is no deadline. `selected` is the stored
+    /// record and verified bytes of the artifact `run` names.
+    pub async fn run(&self, run: Run, selected: Option<(Value, Vec<u8>)>) -> Result<Value> {
+        if let Some((artifact, _)) = &selected {
+            run.admit(artifact)?;
+        }
+        let Run {
+            mut request,
+            selected: reference,
+            ..
+        } = run;
+        let bytes = match selected {
+            Some((artifact, bytes)) => {
+                let mut metadata = serde_json::Map::new();
+                for field in SELECTED_FIELDS {
+                    if !artifact[field].is_null() {
+                        metadata.insert(field.into(), artifact[field].clone());
+                    }
+                }
+                metadata.insert("byte_size".into(), json!(bytes.len()));
+                request["evidence"]["selected_artifact"] = Value::Object(metadata);
+                bytes
+            }
+            None if reference.is_some() => {
+                return Err(Error::bad("The selected artifact was not read"));
+            }
+            None => Vec::new(),
+        };
         let executable = self.executable.as_ref().ok_or_else(|| {
             Error::new(
                 503,
@@ -126,7 +230,6 @@ impl Analyst {
                 .args([
                     "--permission",
                     &format!("--allow-fs-read={}", self.directory.display()),
-                    "--max-old-space-size=64",
                     "--disable-proto=throw",
                     "--no-addons",
                 ])
@@ -144,9 +247,10 @@ impl Analyst {
             command.process_group(0);
             unsafe {
                 command.pre_exec(|| {
+                    // No CPU or memory limit: a run lasts until it settles
+                    // or is cancelled, and holds what its evidence needs.
                     for (resource, limit) in [
                         (libc::RLIMIT_CORE, 0),
-                        (libc::RLIMIT_CPU, 3),
                         (libc::RLIMIT_FSIZE, 0),
                         (libc::RLIMIT_NOFILE, 32),
                     ] {
@@ -163,15 +267,14 @@ impl Analyst {
             }
         }
         let started = Instant::now();
-        let encoded = serde_json::to_vec(&request)?;
-        let result = worker::run_cancel(
-            &mut command,
-            &encoded,
-            Some(128 * 1024),
-            Some(Duration::from_millis(2500)),
-            Some(&mut receiver),
-        )
-        .await;
+        // Runner input v2: one JSON line, then the selected artifact's bytes.
+        let mut encoded = serde_json::to_vec(&request)?;
+        encoded.reserve_exact(1 + bytes.len());
+        encoded.push(b'\n');
+        encoded.extend_from_slice(&bytes);
+        drop(bytes);
+        let result =
+            worker::run_cancel(&mut command, &encoded, None, None, Some(&mut receiver)).await;
         // The run is over once its worker returns; a later cancel finds no
         // active run instead of reporting a request nothing will observe.
         drop(active);
@@ -180,12 +283,6 @@ impl Analyst {
                 &request,
                 "cancelled",
                 "Analyst script cancelled",
-                started.elapsed().as_millis() as u64,
-            )),
-            Err(e) if e.reason.code == Code::Timeout => Ok(failure(
-                &request,
-                "timed_out",
-                "Analyst script exceeded the 2 second execution limit",
                 started.elapsed().as_millis() as u64,
             )),
             Err(e) => Err(e),
@@ -204,7 +301,7 @@ impl Analyst {
         }
     }
 }
-fn normalize(value: &Value, workspace: &Value) -> Result<Value> {
+fn normalize(value: &Value, workspace: &Value) -> Result<(Value, Option<(String, String)>)> {
     validation::fields(
         value,
         &[
@@ -221,8 +318,12 @@ fn normalize(value: &Value, workspace: &Value) -> Result<Value> {
         ],
         "Analyst run",
     )?;
+    if value["protocol_version"] != 2 {
+        return Err(Error::bad(
+            "Analyst runs use protocol 2, which names the selected artifact by artifact_id and sha256",
+        ));
+    }
     if value["action"] != "run_local_analyst_script"
-        || value["protocol_version"] != 1
         || value["confirmed"] != true
         || !value["confirmed_sensitive"].is_boolean()
     {
@@ -248,7 +349,7 @@ fn normalize(value: &Value, workspace: &Value) -> Result<Value> {
         0,
         validation::MAX_SAFE_INTEGER,
     )?;
-    let source = validation::text(&value["source"], "Analyst source", 32768, false, true)?;
+    let source = validation::text(&value["source"], "Analyst source", usize::MAX, false, true)?;
     if source.trim().is_empty() || source.chars().any(|c| c < ' ' && !"\t\n\r".contains(c)) {
         return Err(Error::bad("Analyst source is empty or contains controls"));
     }
@@ -267,16 +368,9 @@ fn normalize(value: &Value, workspace: &Value) -> Result<Value> {
         ],
         "Analyst evidence",
     )?;
-    for (key, max) in [
-        ("events", 500),
-        ("artifacts", 500),
-        ("trace_edges", 1000),
-        ("signal_profiles", 256),
-    ] {
-        if !evidence[key].as_array().is_some_and(|a| a.len() <= max) {
-            return Err(Error::bad(format!(
-                "Analyst {key} are invalid or oversized"
-            )));
+    for key in ["events", "artifacts", "trace_edges", "signal_profiles"] {
+        if !evidence[key].is_array() {
+            return Err(Error::bad(format!("Analyst {key} must be a list")));
         }
     }
     if !evidence["vm_analysis"].is_null() && !evidence["vm_analysis"].is_object()
@@ -285,31 +379,38 @@ fn normalize(value: &Value, workspace: &Value) -> Result<Value> {
         return Err(Error::bad("Analyst evidence snapshot is invalid"));
     }
     let selected = &evidence["selected_artifact"];
-    if !selected.is_null() {
-        if !selected.is_object() {
-            return Err(Error::bad("Analyst selected artifact snapshot is invalid"));
-        }
-        validation::text(
-            &selected["content"],
+    let reference = if selected.is_null() {
+        None
+    } else {
+        validation::fields(
+            selected,
+            &["artifact_id", "sha256"],
             "Analyst selected artifact",
-            65536,
-            true,
-            true,
         )?;
-        if selected["sensitive"] == true && value["confirmed_sensitive"] != true {
-            return Err(Error::bad(
-                "Confirm inclusion of sensitive selected artifact bytes before running",
-            ));
+        let id = validation::text(
+            &selected["artifact_id"],
+            "Selected artifact ID",
+            64,
+            false,
+            false,
+        )?;
+        let sha256 = validation::text(
+            &selected["sha256"],
+            "Selected artifact SHA-256",
+            64,
+            false,
+            false,
+        )?;
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Error::bad("Selected artifact SHA-256 is invalid"));
         }
-    }
-    bounded_json(evidence, 0, &mut 0)?;
-    if serde_json::to_vec(evidence)?.len() > 768 * 1024 {
-        return Err(Error::bad("Analyst evidence snapshot exceeds 768 KiB"));
-    }
-    let request = json!({"protocol_version":1,"run_id":run,"script_id":script,"library_generation":generation,"source":source,"variables":variables,"evidence":evidence});
-    if serde_json::to_vec(&request)?.len() > 800 * 1024 {
-        return Err(Error::bad("Analyst runner input is oversized"));
-    }
+        Some((id.to_owned(), sha256.to_owned()))
+    };
+    let request = json!({"protocol_version":2,"run_id":run,"script_id":script,"library_generation":generation,"source":source,"variables":variables,"evidence":evidence});
     if workspace["generation"] != generation {
         return Err(Error::conflict(
             "Analyst workspace changed; refresh before running the saved script",
@@ -331,32 +432,7 @@ fn normalize(value: &Value, workspace: &Value) -> Result<Value> {
             "Only the current saved JavaScript analyst script can execute",
         ));
     }
-    Ok(request)
-}
-fn bounded_json(value: &Value, depth: usize, count: &mut usize) -> Result<()> {
-    *count += 1;
-    if depth > 16 || *count > 50000 {
-        return Err(Error::bad(
-            "Analyst evidence exceeds its nesting or entry limit",
-        ));
-    }
-    match value {
-        Value::Array(a) => {
-            for v in a {
-                bounded_json(v, depth + 1, count)?;
-            }
-        }
-        Value::Object(o) => {
-            for (key, v) in o {
-                if key.len() > 256 {
-                    return Err(Error::bad("Analyst evidence contains an invalid key"));
-                }
-                bounded_json(v, depth + 1, count)?;
-            }
-        }
-        _ => (),
-    }
-    Ok(())
+    Ok((request, reference))
 }
 fn validate_result(value: &Value, request: &Value) -> Result<()> {
     validation::fields(
@@ -383,18 +459,21 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
         || ["run_id", "script_id", "library_generation"]
             .iter()
             .any(|k| value[k] != request[k])
-        || !["completed", "failed", "cancelled", "timed_out"]
-            .contains(&value["outcome"].as_str().unwrap_or(""))
+        || !["completed", "failed", "cancelled"].contains(&value["outcome"].as_str().unwrap_or(""))
         || value["ok"].as_bool() != Some(value["outcome"] == "completed")
         || !value["result_truncated"].is_boolean()
         || !value["logs_truncated"].is_boolean()
-        || !value["duration_ms"].as_u64().is_some_and(|n| n <= 7000)
+        || !value["duration_ms"].is_u64()
     {
         return Err(Error::protocol(
             "Analyst runner returned invalid result state or correlation identifiers",
         ));
     }
-    for (key, max) in [("result_type", 64), ("result_text", 32768), ("error", 512)] {
+    for (key, max) in [
+        ("result_type", 64),
+        ("result_text", usize::MAX),
+        ("error", 512),
+    ] {
         validation::text(&value[key], key, max, true, true)
             .map_err(|e| Error::protocol(e.message))?;
     }
@@ -405,8 +484,7 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
     }
     let logs = value["logs"]
         .as_array()
-        .filter(|a| a.len() <= 64)
-        .ok_or_else(|| Error::protocol("Analyst runner returned too many logs"))?;
+        .ok_or_else(|| Error::protocol("Analyst runner returned malformed logs"))?;
     for log in logs {
         validation::fields(log, &["level", "text"], "Analyst log")
             .map_err(|e| Error::protocol(e.message))?;
@@ -415,20 +493,19 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
                 "Analyst runner returned an invalid log level",
             ));
         }
-        validation::text(&log["text"], "Analyst log", 1024, true, true)
+        validation::text(&log["text"], "Analyst log", usize::MAX, true, true)
             .map_err(|e| Error::protocol(e.message))?;
     }
     Ok(())
 }
 fn failure(request: &Value, outcome: &str, message: &str, duration: u64) -> Value {
-    let mut result = json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration.min(7000),"error":validation::truncate(message,512)});
+    let mut result = json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration,"error":validation::truncate(message,512)});
     annotate_failure(&mut result);
     result
 }
 fn annotate_failure(value: &mut Value) {
     let code = match value["outcome"].as_str() {
         Some("cancelled") => Code::Cancelled,
-        Some("timed_out") => Code::Timeout,
         Some("failed") => Code::ApplicationFailed,
         _ => return,
     };

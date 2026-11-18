@@ -1332,7 +1332,7 @@ async fn openapi_action_envelopes_and_stored_failures_are_json_errors() {
             assert_contract_response(response, "post", route, 400).await;
         }
     }
-    let mut analyst = json!({"action":"run_local_analyst_script","protocol_version":1,
+    let mut analyst = json!({"action":"run_local_analyst_script","protocol_version":2,
         "run_id":1,"script_id":1,"library_generation":0,"source":"return 1;",
         "variables":{},"evidence":{"events":[],"artifacts":[],"trace_edges":[],
             "signal_profiles":[],"vm_analysis":null,"selected_artifact":null,"summary":{}},
@@ -5903,6 +5903,157 @@ async fn error_reasons_preserve_http_text_targets_limits_and_cli_contracts() {
     );
 }
 
+/// The real Node runner, as `make e2e` and the browser development UI use it.
+#[tokio::test]
+async fn analyst_runs_read_whole_selected_artifacts_and_evidence_with_no_limits() {
+    let server = Server::start().await;
+    let runner: Value = server
+        .get("/api/local-analyst/runner")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(runner["available"], true, "Node.js 22+ must be on PATH");
+    // A 20 MiB text artifact, and a sensitive binary one that is not UTF-8.
+    let mut text = vec![b'a'; 20 * 1024 * 1024];
+    text.extend_from_slice(b"end");
+    let binary: Vec<u8> = (0..3 * 1024 * 1024u32)
+        .map(|i| 0x80 | (i % 128) as u8)
+        .collect();
+    let mut records = String::new();
+    // A cookie list is never a script's input: Sources does not list it.
+    let cookies = b"session=private".to_vec();
+    for (id, bytes, kind) in [
+        ("1", &text, "javascript"),
+        ("2", &binary, "response_body"),
+        ("3", &cookies, "cookie_list"),
+    ] {
+        let hash = hex::encode(Sha256::digest(bytes));
+        records.push_str(&format!(
+            "{}\n",
+            json!({"protocol_version":1,"artifact_id":id,"session_id":"1",
+            "navigation_id":"1","frame_id":"1","parent_artifact_id":"0","creator_event_id":"0",
+            "kind":kind,"url":format!("https://example.test/{id}"),
+            "mime_type":"application/octet-stream","byte_size":bytes.len(),"sha256":hash,
+            "sensitive":kind != "javascript","content_path":format!("blobs/{hash}.bin")})
+        ));
+        if kind == "cookie_list" {
+            // One browser network record creates a request's cookie list.
+            let mut record: Value = serde_json::from_str(records.lines().last().unwrap()).unwrap();
+            record["creator_event_id"] = json!("5");
+            record["execution_context_id"] = json!("0");
+            record["capture_origin"] = json!("network_request");
+            let kept = records.lines().count() - 1;
+            records = records
+                .lines()
+                .take(kept)
+                .map(|line| format!("{line}\n"))
+                .collect();
+            records.push_str(&format!("{record}\n"));
+        }
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+    }
+    server.file("artifacts/manifest.jsonl", records.as_bytes());
+    let source = "const a = WB.Node.Evidence.selectedArtifact(); const b = WB.Node.Evidence.selectedArtifactBytes();\n\
+        for (let i = 0; i < 100; i++) console.log('line', i, 'z'.repeat(2000));\n\
+        return {events: WB.Node.Evidence.events().length, padding: 'p'.repeat(40000), artifact: a && {id: a.artifact_id,\n\
+        size: a.byte_size, text: a.content === null ? null : a.content.length, tail: a.content === null ? null : a.content.slice(-3),\n\
+        bytes: b.length, last: b[b.length - 1], sensitive: a.sensitive, path: a.content_path === undefined}};";
+    let saved = server.action("/api/local-analyst/actions", json!({"action":"replace_local_analyst_workspace",
+        "expected_generation":0,"folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],
+        "files":[{"id":1,"folder_id":1,"name":"Whole","kind":"analyst-script","language":"javascript","content":source}]})).await;
+    assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
+    let sha = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+    // 5,000 events: well past the 768 KiB snapshot the runner used to keep.
+    let events: Vec<_> = (0..5000)
+        .map(|id| json!({"event_id":id,"detail":"e".repeat(200)}))
+        .collect();
+    let run = |id: u64, selected: Value, sensitive: bool| {
+        json!({"action":"run_local_analyst_script","protocol_version":2,
+        "run_id":id,"script_id":1,"library_generation":1,"source":source,"variables":{},
+        "evidence":{"events":events,"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,
+            "selected_artifact":selected,"summary":{}},"confirmed":true,"confirmed_sensitive":sensitive})
+    };
+    let started = Instant::now();
+    let response = server
+        .action(
+            "/api/local-analyst/actions",
+            run(1, json!({"artifact_id":"1","sha256":sha(&text)}), false),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["outcome"], "completed", "{result}");
+    let value: Value = serde_json::from_str(result["result_text"].as_str().unwrap()).unwrap();
+    assert_eq!(value["events"], 5000);
+    assert_eq!(
+        value["padding"].as_str().unwrap().len(),
+        40000,
+        "results are kept whole"
+    );
+    assert_eq!(
+        value["artifact"],
+        json!({"id":"1","size":text.len(),"text":text.len(),"tail":"end",
+        "bytes":text.len(),"last":b'd',"sensitive":false,"path":true})
+    );
+    assert_eq!(
+        result["logs"].as_array().unwrap().len(),
+        100,
+        "every log is kept"
+    );
+    assert!(result["logs"][99]["text"].as_str().unwrap().len() > 2000);
+    assert_eq!(result["result_truncated"], false);
+    eprintln!("20 MiB text artifact run: {:?}", started.elapsed());
+
+    // The binary artifact: sensitivity comes from the manifest, not the request.
+    let reference = json!({"artifact_id":"2","sha256":sha(&binary)});
+    let refused = server
+        .action(
+            "/api/local-analyst/actions",
+            run(2, reference.clone(), false),
+        )
+        .await;
+    assert_contract_response(refused, "post", "/api/local-analyst/actions", 400).await;
+    let response = server
+        .action("/api/local-analyst/actions", run(3, reference, true))
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let value: Value = serde_json::from_str(result["result_text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        value["artifact"]["text"],
+        Value::Null,
+        "bytes that are not UTF-8 have no text"
+    );
+    assert_eq!(value["artifact"]["bytes"], binary.len());
+    assert_eq!(value["artifact"]["last"], *binary.last().unwrap());
+    assert_eq!(value["artifact"]["sensitive"], true);
+
+    // A kind Sources never lists, even confirmed and with its true SHA-256.
+    let cookie = server
+        .action(
+            "/api/local-analyst/actions",
+            run(6, json!({"artifact_id":"3","sha256":sha(&cookies)}), true),
+        )
+        .await;
+    let bytes = assert_contract_response(cookie, "post", "/api/local-analyst/actions", 400).await;
+    assert!(!String::from_utf8_lossy(&bytes).contains("private"));
+
+    // A reference whose stored SHA-256 differs, and protocol 1.
+    let stale = server
+        .action(
+            "/api/local-analyst/actions",
+            run(4, json!({"artifact_id":"1","sha256":sha(b"other")}), false),
+        )
+        .await;
+    assert_contract_response(stale, "post", "/api/local-analyst/actions", 409).await;
+    let mut old = run(5, Value::Null, false);
+    old["protocol_version"] = json!(1);
+    let response = server.action("/api/local-analyst/actions", old).await;
+    assert_eq!(response.status(), 400);
+    assert!(response.text().await.unwrap().contains("protocol 2"));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_status() {
@@ -5951,7 +6102,7 @@ async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_
     let saved = server.action("/api/local-analyst/actions", json!({"action":"replace_local_analyst_workspace","expected_generation":0,
         "folders":[{"id":1,"name":"Analyst Workspace","parent_id":null}],"files":[{"id":1,"folder_id":1,"name":"Fixture","kind":"analyst-script","language":"javascript","content":"return 1;"}]})).await;
     assert_eq!(saved.status(), 200, "{}", saved.text().await.unwrap());
-    let request = json!({"action":"run_local_analyst_script","protocol_version":1,"run_id":1,"script_id":1,"library_generation":1,"source":"return 1;",
+    let request = json!({"action":"run_local_analyst_script","protocol_version":2,"run_id":1,"script_id":1,"library_generation":1,"source":"return 1;",
         "variables":{},"evidence":{"events":[],"artifacts":[],"trace_edges":[],"signal_profiles":[],"vm_analysis":null,"selected_artifact":null,"summary":{}},"confirmed":true,"confirmed_sensitive":false});
     let response = server
         .action("/api/local-analyst/actions", request.clone())
@@ -5984,20 +6135,13 @@ async fn http_200_application_failures_have_reasons_and_keep_cli_transport_exit_
     assert_eq!(result["outcome"], "failed");
     assert_eq!(result["code"], "application_failed");
 
-    // The synthetic helper consumes input but neither evaluates source nor replies.
+    // The synthetic helper consumes input but neither evaluates source nor
+    // replies. A run has no deadline, so only cancellation ends it.
     std::fs::write(
         &helper,
         "#!/bin/sh\n/bin/cat >/dev/null\nexec /bin/sleep 60\n",
     )
     .unwrap();
-    let response = server
-        .action("/api/local-analyst/actions", request.clone())
-        .await;
-    let bytes = assert_contract_response(response, "post", "/api/local-analyst/actions", 200).await;
-    let result: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(result["outcome"], "timed_out");
-    assert_eq!(result["code"], "timeout");
-    assert_eq!(result["details"], json!({"phase":"worker"}));
 
     let client = server.client.clone();
     let url = format!("{}/api/local-analyst/actions", server.url);

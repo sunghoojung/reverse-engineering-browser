@@ -1301,30 +1301,31 @@ pub(crate) fn control_flow(
     let decoded = decode(body, cancelled)?;
     let graph = build(&decoded);
     let blocks = graph.leaders.len();
-    let mut lists: Vec<Vec<u32>> = vec![Vec::new(); blocks];
     let mut exits = vec![false; blocks];
+    // A br_table's cases to one label are one edge already; a block can
+    // still name the same successor twice (a br_if to the next block).
+    let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(graph.edges.len());
     for (from, to, _, _) in &graph.edges {
         match to {
-            Some(to) => {
-                if !lists[*from as usize].contains(to) {
-                    lists[*from as usize].push(*to);
-                }
-            }
+            Some(to) => pairs.push((*from, *to)),
             None => exits[*from as usize] = true,
         }
     }
+    pairs.sort_unstable();
+    pairs.dedup();
     for (block, flags) in graph.flags.iter().enumerate() {
         if flags & (EXIT | TRAP) != 0 {
             exits[block] = true;
         }
     }
-    let mut successor_start = Vec::with_capacity(blocks + 1);
-    let mut successors = Vec::new();
-    for list in &lists {
-        successor_start.push(successors.len() as u32);
-        successors.extend_from_slice(list);
+    let mut successor_start = vec![0u32; blocks + 1];
+    for (from, _) in &pairs {
+        successor_start[*from as usize + 1] += 1;
     }
-    successor_start.push(successors.len() as u32);
+    for block in 0..blocks {
+        successor_start[block + 1] += successor_start[block];
+    }
+    let successors: Vec<u32> = pairs.into_iter().map(|(_, to)| to).collect();
     Ok(ControlFlow {
         leaders: graph.leaders,
         successor_start,

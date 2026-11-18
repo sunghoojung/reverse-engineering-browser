@@ -58,15 +58,16 @@
 //! [`crate::wasm_stack`], the layer the readable lifted view also folds with;
 //! this module keeps only its payload: values, nodes, edges and the paths that
 //! merge at each frame.
-use crate::error::{Code, Error, Result};
+use crate::error::{Code, Error, Result, check_cancelled};
 use crate::wasm_stack::{self, Callee, Clause, Control, Effect, Kind, ModuleTypes, Test};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use wasmparser::{
     BlockType, ElementItems, ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef,
 };
 
 pub const NONE: u32 = u32::MAX;
+const WHAT: &str = "WASM value flow";
 /// Engines reject a function with more locals than this, so a body declaring
 /// more cannot have run.
 pub const MAX_LOCALS: u64 = 50_000;
@@ -99,11 +100,62 @@ pub fn memory_budget() -> u64 {
     crate::js_worker_alloc::machine_ceiling() / 2
 }
 
-/// Instructions simulated so far, shared with a progress reader.
+/// What a long analysis is doing, shared with a progress reader: the phase,
+/// and the units of it done out of its total (instructions, bodies or
+/// functions, as the phase names).
 #[derive(Default)]
 pub struct Progress {
+    pub phase: AtomicU8,
     pub done: AtomicU64,
     pub total: AtomicU64,
+}
+
+/// The phases [`Progress`] names, in the order a value-flow request meets them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Phase {
+    Read,
+    Simulate,
+    Control,
+    Index,
+    Summaries,
+    Slice,
+}
+
+impl Phase {
+    pub const ALL: [Phase; 6] = [
+        Self::Read,
+        Self::Simulate,
+        Self::Control,
+        Self::Index,
+        Self::Summaries,
+        Self::Slice,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Simulate => "simulate",
+            Self::Control => "control",
+            Self::Index => "index",
+            Self::Summaries => "summaries",
+            Self::Slice => "slice",
+        }
+    }
+}
+
+impl Progress {
+    /// Starts `phase` with `total` units, none done.
+    pub fn start(&self, phase: Phase, total: u64) {
+        self.phase.store(phase as u8, Ordering::Relaxed);
+        self.done.store(0, Ordering::Relaxed);
+        self.total.store(total, Ordering::Relaxed);
+    }
+    pub fn advance(&self, done: u64) {
+        self.done.store(done, Ordering::Relaxed);
+    }
+    pub fn phase(&self) -> Phase {
+        Phase::ALL[usize::from(self.phase.load(Ordering::Relaxed)).min(Phase::ALL.len() - 1)]
+    }
 }
 const MAX_IMPORT_NAME_BYTES: usize = 128;
 
@@ -361,12 +413,18 @@ pub struct Edge {
 const _: () = assert!(std::mem::size_of::<Node>() == 20);
 const _: () = assert!(std::mem::size_of::<Edge>() == 20);
 
-/// The address one memory cell stands for: `base` plus `offset`, or the
-/// constant `offset` when `base` has no node.
+/// The address one memory cell stands for: the effective address
+/// `(base + displacement) + offset`, with the constant `displacement` when
+/// `base` is [`ABSOLUTE`]. `displacement` is what adds of constants to the
+/// base sum to, wrapped in the address type as the adds wrap; `offset` is the
+/// instruction's static offset, which is added without wrapping. Two
+/// accesses with the same base and displacement wrap alike, so their offsets
+/// alone decide whether their bytes overlap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Cell {
     pub memory: u32,
     pub base: Value,
+    pub displacement: u64,
     pub offset: u64,
     pub width: u8,
 }
@@ -648,7 +706,7 @@ fn join_of(kind: Kind) -> Join {
 }
 
 /// The constant base of an absolute address key.
-const ABSOLUTE: Value = Value {
+pub const ABSOLUTE: Value = Value {
     node: NONE,
     result: NONE,
 };
@@ -663,40 +721,43 @@ struct Fact {
     at: u32,
 }
 
-/// Exact store facts of the current basic block. A store through one base
-/// may write any address another base or a constant names, so at most one
-/// base (or the constant addresses) holds facts in each memory; stores
-/// through the same base at other offsets keep each other's facts.
+/// Exact store facts of the current basic block, grouped by memory, base
+/// and displacement. A store through one group may write any address
+/// another group names (another base can hold any address, and a different
+/// displacement can wrap onto it), so at most one group per memory holds
+/// facts; stores in the same group at other offsets keep each other's.
 #[derive(Default)]
 struct Facts {
-    memories: Vec<(u32, Value, BTreeMap<u64, Fact>)>,
+    groups: Vec<(u32, Value, u64, BTreeMap<u64, Fact>)>,
 }
 
 impl Facts {
     fn clear(&mut self) {
-        self.memories.clear();
+        self.groups.clear();
     }
-    /// A store of `width` bytes at `base + offset`; a full-width one
-    /// (`class`) is kept for later loads.
-    fn store(
-        &mut self,
-        memory: u32,
-        base: Value,
-        offset: u64,
-        width: u8,
-        fact: Option<(u8, Value, u32)>,
-    ) {
-        self.memories
-            .retain(|(other, held, _)| *other != memory || *held == base);
-        let position = match self.memories.iter().position(|(other, _, _)| *other == memory) {
+    /// A store of `cell.width` bytes at `cell`; a full-width one (`fact`:
+    /// its type class, value and offset) is kept for later loads.
+    fn store(&mut self, cell: &Cell, fact: Option<(u8, Value, u32)>) {
+        self.groups.retain(|(memory, base, displacement, _)| {
+            *memory != cell.memory || (*base == cell.base && *displacement == cell.displacement)
+        });
+        let position = match self
+            .groups
+            .iter()
+            .position(|(memory, _, _, _)| *memory == cell.memory)
+        {
             Some(position) => position,
             None => {
-                self.memories.push((memory, base, BTreeMap::new()));
-                self.memories.len() - 1
+                self.groups
+                    .push((cell.memory, cell.base, cell.displacement, BTreeMap::new()));
+                self.groups.len() - 1
             }
         };
-        let facts = &mut self.memories[position].2;
+        let facts = &mut self.groups[position].3;
+        let (offset, width) = (cell.offset, cell.width);
         let end = offset.saturating_add(u64::from(width));
+        // A fact is at most 16 bytes wide, so only those starting within 15
+        // bytes before this store can reach into it.
         let overwritten: Vec<u64> = facts
             .range(offset.saturating_sub(15)..end)
             .filter(|(start, held)| start.saturating_add(u64::from(held.width)) > offset)
@@ -717,12 +778,14 @@ impl Facts {
             );
         }
     }
-    fn load(&self, memory: u32, base: Value, offset: u64, class: u8) -> Option<Fact> {
-        self.memories
+    fn load(&self, cell: &Cell, class: u8) -> Option<Fact> {
+        self.groups
             .iter()
-            .find(|(other, held, _)| *other == memory && *held == base)
-            .and_then(|(_, _, facts)| facts.get(&offset))
-            .filter(|fact| fact.class == class)
+            .find(|(memory, base, displacement, _)| {
+                *memory == cell.memory && *base == cell.base && *displacement == cell.displacement
+            })
+            .and_then(|(_, _, _, facts)| facts.get(&cell.offset))
+            .filter(|fact| fact.class == class && fact.width == cell.width)
             .copied()
     }
 }
@@ -778,8 +841,8 @@ struct Sim<'m, 'a> {
     /// Address keys resolved so far, by node.
     keys: HashMap<u32, (Value, u64)>,
     /// `i32.add` and `i64.add` nodes with a constant operand: the other
-    /// operand and the constant.
-    adds: HashMap<u32, (Value, u64)>,
+    /// operand, the constant and the add's wrap mask.
+    adds: HashMap<u32, (Value, u64, u64)>,
     accesses: Vec<Access>,
     settings: Settings,
     predicted: u64,
@@ -787,8 +850,8 @@ struct Sim<'m, 'a> {
     cancelled: &'m AtomicBool,
     progress: Option<&'m Progress>,
     /// Set once the request is cancelled inside an instruction; the main loop
-    /// stops at that instruction.
-    exhausted: Option<&'static str>,
+    /// then gives up the whole simulation.
+    interrupted: bool,
     omissions: Vec<String>,
     underflow_noted: bool,
 }
@@ -978,38 +1041,28 @@ pub fn simulate_with(
         ticks: 0,
         cancelled,
         progress,
-        exhausted: None,
+        interrupted: false,
         omissions: Vec::new(),
         underflow_noted: false,
     };
-    let (body_instructions, mut stopped_at) = sim.prescan(function, body)?;
+    let body_instructions = sim.prescan(function, body)?;
+    let mut stopped_at = None;
     if let Some(progress) = progress {
-        progress
-            .total
-            .store(u64::from(body_instructions), Ordering::Relaxed);
+        progress.start(Phase::Simulate, u64::from(body_instructions));
     }
     sim.nodes.reserve(body_instructions as usize);
     sim.instructions.reserve(body_instructions as usize);
     sim.instruction_nodes.reserve(body_instructions as usize);
     sim.instruction_live.reserve(body_instructions as usize);
     sim.input_start.reserve(body_instructions as usize);
-    if stopped_at.is_none() {
+    {
         let mut reader = body.get_operators_reader().map_err(bad)?;
         let mut ended = false;
         while !reader.eof() {
-            let position = reader.original_position() as u32;
             if sim.instructions.len() & 1023 == 0 {
-                if cancelled.load(Ordering::Relaxed) {
-                    sim.omissions.push(format!(
-                        "Simulation cancelled at byte {position}; value flow after it is not computed."
-                    ));
-                    stopped_at = Some(position);
-                    break;
-                }
+                check_cancelled(cancelled, WHAT)?;
                 if let Some(progress) = progress {
-                    progress
-                        .done
-                        .store(sim.instructions.len() as u64, Ordering::Relaxed);
+                    progress.advance(sim.instructions.len() as u64);
                 }
             }
             let (op, offset) = reader.read_with_offset().map_err(bad)?;
@@ -1028,12 +1081,8 @@ pub fn simulate_with(
             if sim.reachable {
                 sim.instruction_live[index as usize] = true;
             }
-            if let Some(reason) = sim.exhausted.take() {
-                sim.omissions.push(format!(
-                    "{reason} at byte {offset}; value flow from this instruction on is not computed."
-                ));
-                stopped_at = Some(offset as u32);
-                break;
+            if sim.interrupted {
+                return Err(Error::cancelled(WHAT));
             }
             match step {
                 Ok(done) => ended = done,
@@ -1056,9 +1105,7 @@ pub fn simulate_with(
         }
     }
     if let Some(progress) = progress {
-        progress
-            .done
-            .store(sim.instructions.len() as u64, Ordering::Relaxed);
+        progress.advance(sim.instructions.len() as u64);
     }
     let mut open_joins = HashSet::new();
     if let Some(stop) = stopped_at {
@@ -1079,8 +1126,14 @@ pub fn simulate_with(
     if settings.cells {
         cells = sim.memory_cells();
     }
-    if settings.control && !cancelled.load(Ordering::Relaxed) {
+    if settings.control {
+        if let Some(progress) = progress {
+            progress.start(Phase::Control, 0);
+        }
         sim.control_edges(body)?;
+    }
+    if sim.interrupted {
+        return Err(Error::cancelled(WHAT));
     }
     let adjacency = Adjacency::new(sim.nodes.len(), &sim.edges);
     Ok(Simulation {
@@ -1150,18 +1203,13 @@ impl Sim<'_, '_> {
     /// per write plus one per local a frame passes on: what the simulation's
     /// own entry values cost. A prediction over the budget refuses the body
     /// as soon as it is reached, so the prescan is bounded by it too.
-    /// Returns the body's instruction count and a stop, for a cancelled
-    /// request.
-    fn prescan(&mut self, function: u32, body: &FunctionBody<'_>) -> Result<(u32, Option<u32>)> {
+    /// Returns the body's instruction count.
+    fn prescan(&mut self, function: u32, body: &FunctionBody<'_>) -> Result<u32> {
         let mut reader = body.get_operators_reader().map_err(bad)?;
         let mut index = 0u32;
         while !reader.eof() {
-            if index & 4095 == 0 && self.cancelled.load(Ordering::Relaxed) {
-                let position = reader.original_position() as u32;
-                self.omissions.push(format!(
-                    "Simulation cancelled at byte {position}; value flow is not computed."
-                ));
-                return Ok((index, Some(position)));
+            if index & 4095 == 0 {
+                check_cancelled(self.cancelled, WHAT)?;
             }
             if let Operator::LocalGet { local_index } = reader.read().map_err(bad)?
                 && let Some(read) = self.last_get.get_mut(local_index as usize)
@@ -1178,12 +1226,8 @@ impl Sim<'_, '_> {
         let mut joins = 0u64;
         let mut index = 0u32;
         while !reader.eof() {
-            if index & 4095 == 0 && self.cancelled.load(Ordering::Relaxed) {
-                let position = reader.original_position() as u32;
-                self.omissions.push(format!(
-                    "Simulation cancelled at byte {position}; value flow is not computed."
-                ));
-                return Ok((count, Some(position)));
+            if index & 4095 == 0 {
+                check_cancelled(self.cancelled, WHAT)?;
             }
             let op = reader.read().map_err(bad)?;
             let effect = wasm_stack::effect(&op);
@@ -1307,7 +1351,7 @@ impl Sim<'_, '_> {
         }
         self.loops.clear();
         self.refuse_past_budget(function, count, joins)?;
-        Ok((count, None))
+        Ok(count)
     }
 
     /// The one memory guard: a body whose predicted simulation exceeds what
@@ -1328,16 +1372,18 @@ impl Sim<'_, '_> {
         .with_code(Code::ResourceLimit))
     }
 
-    /// Counts work toward the next cancellation poll. False, with the reason
-    /// kept for the main loop, once the request is cancelled.
+    /// Counts work toward the next cancellation poll, so a single instruction
+    /// that fans out (a wide `br_table`, a join of many paths) still notices a
+    /// cancelled request. False once it is cancelled; the main loop then
+    /// gives up the simulation.
     fn tick(&mut self, units: u64) -> bool {
-        if self.exhausted.is_some() {
+        if self.interrupted {
             return false;
         }
         let before = self.ticks;
         self.ticks += units;
         if before >> 12 != self.ticks >> 12 && self.cancelled.load(Ordering::Relaxed) {
-            self.exhausted = Some("Simulation cancelled");
+            self.interrupted = true;
             return false;
         }
         true
@@ -1470,13 +1516,15 @@ impl Sim<'_, '_> {
         }
     }
 
+    /// The values instruction `index` consumed, in operand order: the row the
+    /// main loop opened for it in `input_start`.
     fn record(&mut self, index: u32, values: &[Value]) {
+        debug_assert_eq!(self.instructions.len(), index as usize + 1);
         self.tick(values.len() as u64);
         for value in values {
             let value = self.materialize(*value);
             self.inputs.push(value);
         }
-        let _ = index;
     }
 
     /// One consumer node for `values`, operand kinds from `kind_of`.
@@ -1637,12 +1685,12 @@ impl Sim<'_, '_> {
             _ => {
                 let locals = self.snapshot(target);
                 let values = values.into_iter().map(|v| self.materialize(v)).collect();
-                let path = self.stored_path(Incoming {
+                let path = Incoming {
                     via,
                     via_offset: offset,
                     values,
                     locals,
-                });
+                };
                 self.control[target].state.incoming.push(path);
             }
         }
@@ -1853,7 +1901,7 @@ impl Sim<'_, '_> {
             self.close_try_body(position);
         }
         if self.control[position].kind == Kind::TryTable {
-            self.route_try_table(position, offset, index);
+            self.route_try_table(position);
         }
         if self.control[position].kind == Kind::Loop {
             let frame = self.control.pop().expect("loop frame");
@@ -1945,7 +1993,7 @@ impl Sim<'_, '_> {
         }
         self.tick(results as u64 * incomings.len() as u64);
         for slot in 0..results as usize {
-            if self.exhausted.is_some() {
+            if self.interrupted {
                 break;
             }
             let first = incomings[0].values[slot];
@@ -2047,7 +2095,7 @@ impl Sim<'_, '_> {
 
     /// A `try_table` catch clause branches to its label from anywhere in the
     /// body, so it carries exception values and the body's definitions.
-    fn route_try_table(&mut self, position: usize, offset: u32, index: u32) {
+    fn route_try_table(&mut self, position: usize) {
         if !self.control[position].state.reachable_at_entry
             || self.control[position].state.catches.is_empty()
         {
@@ -2063,7 +2111,6 @@ impl Sim<'_, '_> {
             .map(|catch| (catch.target, catch.tag, catch.values))
             .collect();
         let saved = self.control[position].state.saved.clone();
-        let _ = (offset, index);
         for (target, tag, count) in catches {
             // A try_table may name thousands of clauses with tags of up to a
             // thousand values each: every clause is charged before it is built.
@@ -2116,21 +2163,16 @@ impl Sim<'_, '_> {
                         .collect();
                     locals.sort_unstable_by_key(|(local, _)| *local);
                     self.tick(locals.len() as u64);
-                    let path = self.stored_path(Incoming {
+                    let path = Incoming {
                         via: Via::Catch,
                         via_offset: entry_offset,
                         values,
                         locals,
-                    });
+                    };
                     self.control[target].state.incoming.push(path);
                 }
             }
         }
-    }
-
-    /// Counts what an incoming path keeps until its merge.
-    fn stored_path(&mut self, path: Incoming) -> Incoming {
-        path
     }
 
     /// A block boundary, call, fence or memory operation: no store or
@@ -2268,7 +2310,7 @@ impl Sim<'_, '_> {
                 depths.dedup();
                 self.tick(depths.len() as u64);
                 for depth in depths {
-                    if self.exhausted.is_some() {
+                    if self.interrupted {
                         break;
                     }
                     self.branch(depth, Via::BrTable, offset, index);
@@ -2300,12 +2342,12 @@ impl Sim<'_, '_> {
                     let values = self.top_at(height, results);
                     let values = values.into_iter().map(|v| self.materialize(v)).collect();
                     let locals = self.snapshot(position);
-                    let path = self.stored_path(Incoming {
+                    let path = Incoming {
                         via: Via::Fallthrough,
                         via_offset: offset,
                         values,
                         locals,
-                    });
+                    };
                     self.control[position].state.incoming.push(path);
                 }
                 self.close_try_body(position);
@@ -2635,10 +2677,17 @@ impl Sim<'_, '_> {
                                     && self.nodes[value.node as usize].kind == NodeKind::Const)
                                     .then(|| self.nodes[value.node as usize].constant())
                             };
+                            // An i32 add wraps at 32 bits, so its constant
+                            // moves the displacement modulo 2^32.
+                            let mask = if matches!(other, Operator::I32Add) {
+                                u64::from(u32::MAX)
+                            } else {
+                                u64::MAX
+                            };
                             if let Some(bits) = constant(b) {
-                                self.adds.insert(node, (*a, bits));
+                                self.adds.insert(node, (*a, bits & mask, mask));
                             } else if let Some(bits) = constant(a) {
-                                self.adds.insert(node, (*b, bits));
+                                self.adds.insert(node, (*b, bits & mask, mask));
                             }
                         }
                     }
@@ -2666,6 +2715,8 @@ impl Sim<'_, '_> {
         let mut chain: Vec<(u32, u64)> = Vec::new();
         let mut current = value;
         let mut total = 0u64;
+        // The address type's wrap, from the first add met; a chain is one type.
+        let mut mask = u64::MAX;
         let key = loop {
             if current.node == NONE {
                 break (current, total);
@@ -2681,8 +2732,11 @@ impl Sim<'_, '_> {
                     current = self.inputs[self.input_start[node.instruction as usize] as usize];
                 }
                 NodeKind::Operation => match self.adds.get(&current.node).copied() {
-                    Some((other, bits)) => {
+                    Some((other, bits, wrap)) => {
                         chain.push((current.node, total));
+                        if mask == u64::MAX {
+                            mask = wrap;
+                        }
                         total = total.wrapping_add(bits);
                         current = other;
                     }
@@ -2691,8 +2745,10 @@ impl Sim<'_, '_> {
                 _ => break (current, total),
             }
         };
+        let key = (key.0, key.1 & mask);
         for (node, before) in chain {
-            self.keys.insert(node, (key.0, key.1.wrapping_sub(before)));
+            self.keys
+                .insert(node, (key.0, key.1.wrapping_sub(before) & mask));
         }
         key
     }
@@ -2707,7 +2763,7 @@ impl Sim<'_, '_> {
         offset: u32,
         args: &[Value],
     ) {
-        let Some((store, width, class, memory, displacement)) = access(op) else {
+        let Some((store, width, class, memory, static_offset)) = access(op) else {
             // A lane store or another shape no key describes may change any
             // address of its memory.
             if kind == NodeKind::Store {
@@ -2718,27 +2774,26 @@ impl Sim<'_, '_> {
         let Some(address) = args.first().copied() else {
             return;
         };
-        let (base, at) = self.address_key(address);
+        let (base, displacement) = self.address_key(address);
         let cell = Cell {
             memory,
             base,
-            offset: at.wrapping_add(displacement),
+            displacement,
+            offset: static_offset,
             width,
         };
         let atomic = atomic(op);
         let outer = self.loops.first().copied().unwrap_or(NONE);
         if store {
-            let value = args.get(1).copied().map_or(ABSOLUTE, |v| self.materialize(v));
+            let value = args
+                .get(1)
+                .copied()
+                .map_or(ABSOLUTE, |v| self.materialize(v));
             if atomic {
                 self.facts.clear();
             } else {
-                self.facts.store(
-                    memory,
-                    base,
-                    cell.offset,
-                    width,
-                    class.map(|class| (class, value, offset)),
-                );
+                self.facts
+                    .store(&cell, class.map(|class| (class, value, offset)));
             }
             if self.settings.cells {
                 self.accesses.push(Access {
@@ -2754,7 +2809,7 @@ impl Sim<'_, '_> {
         }
         if let Some(class) = class
             && !atomic
-            && let Some(fact) = self.facts.load(memory, base, cell.offset, class)
+            && let Some(fact) = self.facts.load(&cell, class)
         {
             // Proven: nothing between may have written these bytes.
             self.edge(
@@ -2878,8 +2933,8 @@ impl Sim<'_, '_> {
         };
         let mut pairs: Vec<(u32, u32)> = Vec::new();
         for position in 0..self.edges.len() {
-            if position & 4095 == 0 && self.cancelled.load(Ordering::Relaxed) {
-                return Ok(());
+            if position & 4095 == 0 {
+                check_cancelled(self.cancelled, WHAT)?;
             }
             let edge = self.edges[position];
             if edge.kind != EdgeKind::Merge || edge.via_offset == NONE {

@@ -167,7 +167,7 @@ pub(crate) fn dependences(flow: &ControlFlow, cancelled: &AtomicBool) -> Result<
     }
     // Each edge a -> b of a decision a: every block from b up the
     // post-dominator tree to a's own post-dominator depends on a.
-    let mut lists: Vec<Vec<u32>> = vec![Vec::new(); blocks];
+    let mut pairs: Vec<(u32, u32)> = Vec::new();
     for block in 0..blocks as u32 {
         let successors = flow.successors(block);
         let outs = successors.len() + usize::from(is_exit[block as usize]);
@@ -181,22 +181,20 @@ pub(crate) fn dependences(flow: &ControlFlow, cancelled: &AtomicBool) -> Result<
         for successor in successors {
             let mut runner = *successor;
             while runner != stop && runner != exit && runner != UNSET {
-                let list = &mut lists[runner as usize];
-                if list.last() != Some(&block) {
-                    list.push(block);
-                }
+                pairs.push((runner, block));
                 runner = ipdom[runner as usize];
             }
         }
     }
-    let mut start = Vec::with_capacity(blocks + 1);
-    let mut decisions = Vec::new();
-    for list in &mut lists {
-        start.push(decisions.len() as u32);
-        list.sort_unstable();
-        list.dedup();
-        decisions.extend_from_slice(list);
+    pairs.sort_unstable();
+    pairs.dedup();
+    let mut start = vec![0u32; blocks + 1];
+    for (block, _) in &pairs {
+        start[*block as usize + 1] += 1;
     }
-    start.push(decisions.len() as u32);
+    for block in 0..blocks {
+        start[block + 1] += start[block];
+    }
+    let decisions = pairs.into_iter().map(|(_, decision)| decision).collect();
     Ok(Dependences { start, decisions })
 }

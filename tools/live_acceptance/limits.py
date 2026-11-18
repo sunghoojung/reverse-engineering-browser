@@ -132,7 +132,7 @@ def body_record(run: Run, target: str, problems: list[str], label: str):
 
 
 def body_kept(run: Run, target: str, expected: bytes, problems: list[str], label: str,
-              read: bool | None = None, credential_form: bool = False) -> None:
+              credential_form: bool = False) -> None:
     record = body_record(run, target, problems, label)
     if record is None:
         return
@@ -140,8 +140,9 @@ def body_kept(run: Run, target: str, expected: bytes, problems: list[str], label
         problems.append(f"{label}: state {record.state}, {record.captured_length} of {record.body_length} bytes, "
                         f"the server got {len(expected)}")
         return
-    if read is not None and record.read != read:
-        problems.append(f"{label}: read flag {record.read}, expected {read}")
+    # Payload version 2 reads every kept body, in-memory bytes included.
+    if not record.read:
+        problems.append(f"{label}: no read flag on a kept body")
     if record.credential_form != credential_form:
         problems.append(f"{label}: credential_form flag {record.credential_form}, expected {credential_form}")
     if record.sha256 != sha256(expected):
@@ -180,8 +181,8 @@ def verify(run: Run) -> None:
     report.check(ISSUE, "8 KB GraphQL GET URL", problems, "the whole path and query is retained")
 
     problems = []
-    for path, label, read in (("/limits/json", "5 MiB JSON POST", False), ("/limits/multipart", "multipart with a file", True),
-                              ("/limits/blob", "Blob upload", True)):
+    for path, label in (("/limits/json", "5 MiB JSON POST"), ("/limits/multipart", "multipart with a file"),
+                        ("/limits/blob", "Blob upload")):
         body = received(run, path)
         if body is None:
             ok, error = run.result(label_name(path))
@@ -189,7 +190,7 @@ def verify(run: Run) -> None:
             continue
         if path == "/limits/json" and len(body) < 5 * 1024 * 1024:
             problems.append(f"{label}: only {len(body)} bytes")
-        body_kept(run, path, body, problems, label, read)
+        body_kept(run, path, body, problems, label)
     report.check(ISSUE, "5 MiB JSON, multipart and Blob bodies", problems,
                  "each kept with the exact bytes the server received")
 

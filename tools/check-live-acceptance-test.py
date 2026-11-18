@@ -753,6 +753,17 @@ class Evidence(unittest.TestCase):
         bodies.kept(self.run_, "/bodies/json?r=1", bodies.JSON_BODY, problems)
         self.assertEqual(len(problems), 1, problems)
 
+    def test_web_font_load_after_its_cache_probe(self):
+        # Blink first asks only the cache for a web font and loads it again on a miss.
+        self.build.row("/bodies/font.woff2?r=1", failed=True, error_code=bodies.CACHE_MISS,
+                       response_body={"case": "failed_before_response"})
+        self.build.kept_body(self.build.row("/bodies/font.woff2?r=1"), bodies.FONT)
+        problems = []
+        bodies.kept(self.run_, "/bodies/font.woff2?r=1", bodies.FONT, problems, cache_probe=True)
+        self.assertEqual(problems, [])
+        bodies.kept(self.run_, "/bodies/font.woff2?r=1", bodies.FONT, problems)
+        self.assertEqual(problems, ["/bodies/font.woff2?r=1: 2 rows"])
+
     def test_limits_long_target_and_password_form(self):
         target = "/limits/graphql?query=" + "f" * 8200
         self.get(target)
@@ -761,14 +772,15 @@ class Evidence(unittest.TestCase):
         form = b"user=reb&secret=not-a-real-password"
         self.get("/limits/password", method="POST", body=form)
         password = self.build.row("/limits/password", "POST")
-        # A content session keeps a password form post whole and marks it.
-        self.build.request_body(password, 4, form, flags=0x93)
+        # A content session reads a password form post whole, keeps it and marks it.
+        self.build.request_body(password, 4, form, flags=0xD3)
         limits.verify(self.run_)
         self.assertEqual(self.statuses()["8 KB GraphQL GET URL"], "PASS", self.report.lines)
         self.assertEqual(self.statuses()["password form post"], "PASS", self.report.lines)
         self.assertEqual(self.statuses()["page step limits:json"], "FAIL")
-        # An older browser's credential-form refusal, or a kept body without the mark, fails.
-        for state, flags, version in ((11, 0x11, 1), (4, 0x13, 2), (4, 0x93, 1)):
+        # An older browser's credential-form refusal, or a kept body without the
+        # mark or the read flag, fails.
+        for state, flags, version in ((11, 0x11, 1), (4, 0x53, 2), (4, 0x93, 2), (4, 0xD3, 1)):
             self.report.lines.clear()
             self.backend.events.clear()
             self.build.request_body(password, state, form, flags=flags, version=version)

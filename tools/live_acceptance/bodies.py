@@ -37,6 +37,9 @@ IMAGE = png(64, 64, "bodies")
 # Bytes no sanitizer accepts as a font: the browser still fetches them whole as
 # a font load, which is what the capture keeps.
 FONT = payload("bodies-font", 4096)
+# Blink's cache-aware font loading first asks only the HTTP cache, and on a
+# miss loads the font again from the network: a failed row, then the font's.
+CACHE_MISS = -400
 AUDIO = wav(8000, "bodies")
 GZIP_TEXT = text_body("gzip", 64 * 1024).encode()
 BROTLI_TEXT = text_body("brotli", 64 * 1024).encode()
@@ -251,10 +254,14 @@ def drive(run: Run) -> None:
 
 
 def kept(run: Run, target: str, expected: bytes, problems: list[str], label: str | None = None,
-         case: str = "captured") -> None:
-    """The row's body has this case and its artifact holds exactly these bytes."""
+         case: str = "captured", cache_probe: bool = False) -> None:
+    """The row's body has this case and its artifact holds exactly these bytes.
+
+    With `cache_probe`, a cache-only attempt that missed is not the load."""
     label = label or target
     rows = find_rows(run.rows(), target=target)
+    if cache_probe:
+        rows = [row for row in rows if not (row.get("failed") and row.get("error_code") == CACHE_MISS)]
     if len(rows) != 1:
         problems.append(f"{label}: {len(rows)} rows")
         return
@@ -284,7 +291,7 @@ def verify(run: Run) -> None:
 
     problems = []
     kept(run, "/bodies/image.png?r=element", IMAGE, problems, "image element")
-    kept(run, "/bodies/font.woff2?r=1", FONT, problems, "web font")
+    kept(run, "/bodies/font.woff2?r=1", FONT, problems, "web font", cache_probe=True)
     kept(run, "/bodies/audio.wav?r=1", AUDIO, problems, "audio element")
     report.check(ISSUE, "image element, web font and audio element", problems,
                  "each kept with the server's bytes and digest; content sessions keep media and fonts")

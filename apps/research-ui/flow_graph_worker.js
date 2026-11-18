@@ -232,6 +232,22 @@ function createFlowGraphPipeline(post) {
       from: Int32Array.from(inside, e => at[c.graph.from[e]]), to: Int32Array.from(inside, e => at[c.graph.to[e]]),
       w: Float32Array.from(nodes, v => c.graph.w[v]), h: Float32Array.from(nodes, v => c.graph.h[v])};
     const drawn = flowGraphLayout.lineage(sub);
+    // Every column comes back as tall as the widest band, a layered layout's
+    // shared band width; each is cut to its own cards and the routes in it.
+    const {lanePadBottom, margin} = flowGraphLayout.METRICS, columns = drawn.lanes.slice().sort((a, b) => a.x - b.x);
+    const bottom = new Map(columns.map(lane => [lane.key, lane.y]));
+    for (let i = 0; i < sub.count; i += 1) bottom.set(sub.lane[i], Math.max(bottom.get(sub.lane[i]), drawn.y[i] + drawn.h[i]));
+    let lowest = 0;
+    for (let k = 0; k < drawn.routes.length; k += 2) {
+      const rx = drawn.routes[k], ry = drawn.routes[k + 1];
+      lowest = Math.max(lowest, ry);
+      let lo = 0, hi = columns.length - 1;
+      while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (columns[mid].x <= rx) lo = mid; else hi = mid - 1; }
+      const lane = columns[lo];
+      if (lane && rx >= lane.x && rx <= lane.x + lane.w) bottom.set(lane.key, Math.max(bottom.get(lane.key), ry));
+    }
+    drawn.lanes = drawn.lanes.map(lane => ({...lane, h: Math.min(lane.h, bottom.get(lane.key) - lane.y + lanePadBottom)}));
+    drawn.height = drawn.lanes.reduce((most, lane) => Math.max(most, lane.y + lane.h), lowest) + margin;
     const x = new Float32Array(count).fill(NaN), y = new Float32Array(count).fill(NaN), layer = new Int32Array(count).fill(-1);
     nodes.forEach((v, i) => { x[v] = drawn.x[i]; y[v] = drawn.y[i]; layer[v] = drawn.layer[i]; });
     const edgeCount = c.graph.from.length, routeOf = new Int32Array(edgeCount).fill(-1);

@@ -791,7 +791,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       drawBands();
       drawEdges();
       // A realm's name sits under the cards at its home corner; pinned under
-      // the heading it is drawn over them, at screen size.
+      // the heading it is drawn at screen size, where no card is under it.
       if (lod === 2) drawBandLabels();
       for (let index = 0; index < display.nodes.length; index += 1) if (visibleBox(layout.x[index] - 8, layout.y[index] - 26, layout.w[index] + 16, layout.h[index] + 34)) shownCards.push(index);
       // A soft lift under each card while few are in view; a dense view skips it.
@@ -1011,7 +1011,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     });
   }
   /** A label pinned under the heading is drawn in screen space at one size,
-   * so zooming in never makes it cover more than a row. */
+   * so zooming in never makes it cover more than a row. It never covers a
+   * card: while one is under it, the band's hue alone names the realm. */
   function drawPinnedLabels() {
     if (!labelSides) chooseLabelSides();
     const inset = topInset(), mini = miniRect();
@@ -1023,7 +1024,11 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       const x0 = Math.max(0, (lane.x - view.x) * view.z), x1 = Math.min(miniLeft, (lane.x + lane.w - view.x) * view.z);
       const width = Math.min(bandLabelWidth(lane), x1 - x0 - LABEL.inset * 2);
       if (width < 40) return;
-      paintLabel(lane, labelSides.get(lane.key) === 'left' ? x0 + LABEL.inset : x1 - LABEL.inset - width, top, width);
+      const left = labelSides.get(lane.key) === 'left' ? x0 + LABEL.inset : x1 - LABEL.inset - width;
+      // The plate's box, in graph space, against the cards drawn this frame.
+      const gx0 = view.x + (left - 8) / view.z, gx1 = view.x + (left + width + 8) / view.z, gy0 = view.y + top / view.z, gy1 = view.y + (top + LABEL.height) / view.z;
+      if (shownCards.some(index => layout.x[index] < gx1 && layout.x[index] + layout.w[index] > gx0 && layout.y[index] < gy1 && layout.y[index] + layout.h[index] > gy0)) return;
+      paintLabel(lane, left, top, width);
     });
   }
   function paintLabel(lane, left, top, width) {
@@ -1644,7 +1649,26 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (id !== lineageJob || !lineageOn || fold !== shownFold || !display || next.x.length !== display.nodes.length) return;
     lineage = next; layout = lineage; labelSides = null; invalidateGeometry(); hover = noHover();
     renderEngine();
-    if (!showCards([...lineageFor.nodes]) && selected >= 0) centerOn(selected);
+    const nodes = [...lineageFor.nodes];
+    if (!showCards(nodes) && selected >= 0) { centerOn(selected); slideWithin(nodes); }
+  }
+  /** Moves the view the least that keeps it within the cards' bounds where
+   * they are wider or taller than the free area, so the selected card it was
+   * centred on stays in view while no side of the view is left empty. */
+  function slideWithin(indexes) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const index of indexes) {
+      if (!Number.isFinite(layout.x[index])) continue;
+      const box = nodeBox(index); x0 = Math.min(x0, box.x); y0 = Math.min(y0, box.y); x1 = Math.max(x1, box.x + box.w); y1 = Math.max(y1, box.y + box.h);
+    }
+    if (x0 === Infinity) return;
+    const area = freeArea(), pad = 24 / view.z;
+    const left = view.x + area.left / view.z, right = view.x + (area.right - (area.mini ? area.mini.w : 0)) / view.z;
+    const top = view.y + area.top / view.z, bottom = view.y + area.bottom / view.z;
+    const slide = (from, to, low, high) => (to - from >= high - low + 2 * pad ? 0 : from < low - pad ? low - pad - from : to > high + pad ? high + pad - to : 0);
+    view.x += slide(left, right, x0, x1);
+    view.y += slide(top, bottom, y0, y1);
+    requestDraw();
   }
   /** Lights the stacks through a card and draws their lineage. */
   async function drawLineageOf(index) {

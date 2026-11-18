@@ -2857,7 +2857,9 @@ a tall minimap.
   frame its stacks were recorded in and the process. The label takes the
   corner no edge crosses, the right one when both are clear, so it never sits
   on the spine. It stays pinned under the heading while its band is in view,
-  at the same size at every zoom, and stops short of the minimap.
+  at the same size at every zoom, and stops short of the minimap. A pinned
+  label is left out while a card is under it, so it never hides a card's
+  name; the band's tint still marks the realm.
 - **Rows of the graph:** inside a band they are call depth, callers above
   callees. A band entered from another starts at its own top row.
 - **Card header:** each card is one function. The header is tinted by the
@@ -2971,7 +2973,10 @@ generation are kept, so going back to a card reads nothing.
 
 **Lineage** (V, the toolbar's **Lineage** or **Draw its lineage** in the
 menu) draws only the cards the lit stacks walk, left to right, causes left of
-what they led to. Selecting a card inside it keeps it; choosing a request
+what they led to. Each realm is a column as tall as its own cards. The whole
+lineage is shown when it fits at a legible zoom; a wider one is shown at
+reading size around the selected card, slid to the lineage's start so no side
+of the view is empty. Selecting a card inside it keeps it; choosing a request
 draws that request's lineage; selecting a card outside it, Escape or
 **Lineage** again returns to the session with the selection in view.
 

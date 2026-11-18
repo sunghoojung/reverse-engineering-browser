@@ -2304,8 +2304,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // pane also opens that large session from its own backend.
   @MainActor
   func test45FlowGraphPane() async throws {
+    let expected = try Expectations.load()
     for size in windowSizes {
       let ui = try await prepare(size)
+      // The worker's request is in the session that holds the stacks.
+      try await show(ui, "traffic")
+      try await ui.click("#screen-traffic .request-row", containing: expected.workerStackHost)
       try await show(ui, "backtrace")
       try await flowGraphPane(ui, size.name, ready: 60)
     }
@@ -2335,12 +2339,15 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#flow-tab-graph")
     }
     let started = Date()
-    try await ui.waitUntil("document.querySelector('#flow-graph-host .flow-graph')?.dataset.state === 'ready'", timeout: ready,
-      "\(name): the Graph pane did not draw")
+    try await ui.waitUntil("['ready', 'empty', 'error', 'unavailable'].includes(document.querySelector('#flow-graph-host').dataset.state)",
+      timeout: ready, "\(name): the Graph pane did not draw")
+    let state = try await ui.json("({state: document.querySelector('#flow-graph-host').dataset.state, text: document.querySelector('#flow-graph-host .flow-graph-state').innerText})")
+    XCTAssertEqual(state["state"] as? String, "ready", "\(name): the Graph pane did not draw: \(state)")
+    guard state["state"] as? String == "ready" else { return }
     print(String(format: "RENDERED_UI_FLOW %@: drawn in %.1f s", name, Date().timeIntervalSince(started)))
     // Every part of the heading shows its whole text, whatever the tools take.
     let heading = try await ui.json("""
-      (() => { const graph = document.querySelector('#flow-graph-host .flow-graph'), parts = [...graph.querySelectorAll('.flow-graph-heading > *')];
+      (() => { const graph = document.querySelector('#flow-graph-host'), parts = [...graph.querySelectorAll('.flow-graph-heading > *')];
         const tools = graph.querySelector('.flow-graph-tools').getBoundingClientRect(), box = graph.querySelector('.flow-graph-heading').getBoundingClientRect();
         return {cut: parts.filter(part => part.textContent && part.scrollWidth > part.clientWidth + 0.5).map(part => part.textContent),
           text: parts.map(part => part.textContent).join(' '), overlap: !(tools.top >= box.bottom || tools.left >= box.right)}; })()
@@ -2356,26 +2363,37 @@ final class OriginTraceRenderedUITests: XCTestCase {
     if ["idle", "empty"].contains(dock["state"] as? String ?? ""), dock["shown"] as? String == "true" {
       XCTAssertLessThanOrEqual(dock["height"] as? Double ?? 999, 34, "\(name): an empty timeline keeps only its head: \(dock)")
     }
-    // A card from the keyboard: its stacks are read on demand, and the
-    // footer's count stays whole however long the name.
+    // The footer's count stays whole however long the line before it.
+    let footerInside: () async throws -> [String: Any] = {
+      try await ui.json("""
+        (() => { const line = document.querySelector('#flow-graph-host .flow-graph-selection').getBoundingClientRect(),
+          count = document.querySelector('#flow-graph-host .flow-graph-selection-count').getBoundingClientRect();
+          return {inside: count.left >= line.left - 0.5 && count.right <= line.right + 0.5 && count.width > 0, title: document.querySelector('#flow-graph-host .flow-graph-selection').title}; })()
+        """)
+    }
+    let count = "document.querySelector('#flow-graph-host .flow-graph-selection-count')?.textContent ?? ''"
     _ = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-canvas').focus({focusVisible: true})")
+    // A chosen request lights the stacks its record named, read on demand.
+    if try await ui.value("document.querySelector('#flow-graph-host .flow-graph-selection-what').textContent.startsWith('Selected request')") as? Bool == true {
+      try await ui.waitUntil("/^[\\d,]+ stacks? · [\\d,]+ cards?$/.test(\(count))", timeout: 60, "\(name): the selected request's stacks were not read")
+      let footer = try await footerInside()
+      XCTAssertEqual(footer["inside"] as? Bool, true, "\(name): the request's counts are cut from the footer: \(footer)")
+      try await ui.screenshot("flow-graph-request-\(name)")
+      try await ui.key(53, "\u{1B}")
+    }
+    // A card from the keyboard: its stacks are read on demand.
     try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
-    try await ui.waitUntil("/\\d+ stacks?$/.test(document.querySelector('#flow-graph-host .flow-graph-selection-count')?.textContent ?? '')", timeout: 60,
-      "\(name): the selected card's stacks were not read")
-    let footer = try await ui.json("""
-      (() => { const line = document.querySelector('#flow-graph-host .flow-graph-selection').getBoundingClientRect(),
-        count = document.querySelector('#flow-graph-host .flow-graph-selection-count').getBoundingClientRect();
-        return {inside: count.left >= line.left - 0.5 && count.right <= line.right + 0.5 && count.width > 0, title: document.querySelector('#flow-graph-host .flow-graph-selection').title}; })()
-      """)
+    try await ui.waitUntil("/^[\\d,]+ stacks?$/.test(\(count))", timeout: 60, "\(name): the selected card's stacks were not read")
+    let footer = try await footerInside()
     XCTAssertEqual(footer["inside"] as? Bool, true, "\(name): the stack count is cut from the footer: \(footer)")
     try await ui.screenshot("flow-graph-selected-\(name)")
     // V draws the lit stacks alone, left to right, and V again returns.
     try await ui.key(9, "v")
-    try await ui.waitUntil("document.querySelector('#flow-graph-host .flow-graph').hasAttribute('data-lineage') && document.querySelector('#flow-graph-host .flow-graph-engine').textContent.startsWith('Lineage')",
+    try await ui.waitUntil("document.querySelector('#flow-graph-host').hasAttribute('data-lineage') && document.querySelector('#flow-graph-host .flow-graph-engine').textContent.startsWith('Lineage')",
       timeout: 60, "\(name): V did not draw the lineage")
     try await ui.screenshot("flow-graph-lineage-\(name)")
     try await ui.key(9, "v")
-    try await ui.waitUntil("!document.querySelector('#flow-graph-host .flow-graph').hasAttribute('data-lineage')", "\(name): V again did not return to the session")
+    try await ui.waitUntil("!document.querySelector('#flow-graph-host').hasAttribute('data-lineage')", "\(name): V again did not return to the session")
     // Details lists every caller and callee; nothing is counted as more.
     try await ui.key(34, "i")
     try await ui.waitUntil("!document.querySelector('#flow-graph-host .flow-graph-inspector').hidden", "\(name): I did not open Details")
@@ -2392,7 +2410,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
     let zoom = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-zoom').textContent") as? String ?? ""
     print("RENDERED_UI_FLOW \(name): Fit at \(zoom)")
     try await ui.screenshot("flow-graph-fit-\(name)")
-    try await lightScreenshot(ui, "flow-graph-fit", name, scope: "#flow-pane-graph")
+    // The tools float over the canvas by design; the probe covers them alone.
+    try await lightScreenshot(ui, "flow-graph-fit", name, scope: "#flow-graph-host .flow-graph-tools")
     try await assertInert(ui, "\(name) flow graph")
   }
 

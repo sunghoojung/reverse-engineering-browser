@@ -646,7 +646,7 @@ class Session final {
       result = failure("Unknown document-start operation");
     }
     if (!base::JSONWriter::Write(result, &reply->payload) ||
-        reply->payload.size() > kNativeConsoleReplyLimit) {
+        reply->payload.size() > kNativeConsoleDocumentStartReplyLimit) {
       reply->payload.clear();
       reply->Fail(NativeConsoleStatus::kMalformed,
                   "Document-start result exceeded bounded transport");

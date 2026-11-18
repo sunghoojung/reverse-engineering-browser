@@ -15,7 +15,7 @@ export function createConsoleFixture() {
     // must stay usable with the experiment reported as unavailable.
     if (path.startsWith('/api/native-console/document-start')) return {status:200,body:{contract_version:3,available:true,state:fixture.session?'ready':'idle',session_id:fixture.session,
       document_start:{status:'unavailable',permitted:false,scripts:[],message:'Synthetic session does not permit document-start scripts'},
-      limits:{scripts:4,source_bytes:4096,total_source_bytes:8192,rule_bytes:256,report_bytes:512,records_per_document:64,retained_records:128,records_per_read:32,execution_millis:50}}};
+      limits:{command_bytes:67108864,rule_bytes:256,report_bytes:8192,retained_bytes:67108864,reply_bytes:67108864,listing_bytes:33554432}}};
     fixture.calls.push(structuredClone(action));if(fixture.calls.length>512)throw new Error('Synthetic action limit exceeded');
     if (action.action === 'start') {fixture.session=String(++fixture.sequence);fixture.request=0;return {status:200,body:{...state(),targets:targets(),truncated:false}};}
     if (action.action === 'stop') {fixture.session=null;return {status:200,body:state()};}

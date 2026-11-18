@@ -70,15 +70,19 @@ def fnv1a(text):
 
 
 class DocumentStart:
-    """Synthetic mirror of the browser-process registry: bounded, non-draining.
+    """Synthetic mirror of the browser-process registry: byte-bounded, non-draining.
 
     It never compiles or runs JavaScript. It exists so the owner's wire
     admission, cursor, drop counting and refusal paths are exercised by the
-    real C++ transport and the real HTTP API.
+    real C++ transport and the real HTTP API. Like the browser, it counts no
+    scripts, snippet bytes or records per document: it retains 64 MiB of
+    output and pages every record after the cursor that fits one reply.
     """
 
-    CAPACITY = 128
-    PAGE = 32
+    RETAINED_BYTES = PAYLOAD_LIMIT
+    RECORD_OVERHEAD = 96
+    REPLY_BYTES = PAYLOAD_LIMIT
+    ENVELOPE_BYTES = 64 * 1024
 
     def __init__(self, permitted):
         self.permitted = permitted
@@ -87,12 +91,16 @@ class DocumentStart:
         self.next_sequence = 1
         self.scripts = []
         self.output = []
+        self.retained_bytes = 0
         self.dropped = 0
 
     def record(self, script, kind, text):
-        if len(self.output) >= self.CAPACITY:
-            self.output.pop(0)
+        cost = self.RECORD_OVERHEAD + len(text.encode())
+        while self.output and self.retained_bytes + cost > self.RETAINED_BYTES:
+            oldest = self.output.pop(0)
+            self.retained_bytes -= self.RECORD_OVERHEAD + len(oldest["text"].encode())
             self.dropped += 1
+        self.retained_bytes += cost
         self.output.append({
             "sequence": str(self.next_sequence), "record": kind,
             "provenance": "console-document-start-script", "script_id": script["script_id"],
@@ -116,17 +124,15 @@ class DocumentStart:
         return state
 
     def arm(self, scripts):
-        if not isinstance(scripts, list) or not 1 <= len(scripts) <= 4:
-            return self.refusal("Arm 1 to 4 document-start scripts")
+        if not isinstance(scripts, list) or not scripts:
+            return self.refusal("Arm at least one document-start script")
         prepared = []
-        total = 0
         for entry in scripts:
             if not isinstance(entry, dict) or entry.get("frame") not in {"top", "child"}:
                 return self.refusal("A document-start rule matches frame top or child")
             source = entry.get("source") or ""
-            total += len(source.encode())
-            if not source or len(source.encode()) > 4096 or total > 8192:
-                return self.refusal("Document-start snippet exceeds its source limit")
+            if not source:
+                return self.refusal("A document-start snippet must be nonempty")
             rule = {"origin": entry["origin"], "frame": entry["frame"]}
             if entry.get("path_prefix"):
                 rule["path_prefix"] = entry["path_prefix"]
@@ -137,13 +143,16 @@ class DocumentStart:
         self.scripts = prepared
         self.generation += 1
         self.output = []
+        self.retained_bytes = 0
         self.dropped = 0
         # A matching new document would run each armed script exactly once.
-        for script in self.scripts:
+        for script in self.scripts[:4]:
             self.record(script, "injected", "Snippet ran before this document's own scripts")
             if "__flood__" in script["source"]:
-                for index in range(200):
-                    self.record(script, "report", f"flood-{index}")
+                # More reported text than the browser retains, so the oldest
+                # records are evicted and counted.
+                for index in range(9000):
+                    self.record(script, "report", f"flood-{index:05d}-" + "x" * 7990)
             else:
                 self.record(script, "report", "kinds=string:12 return=4 digest=0f0f")
         return self.state(0)
@@ -156,22 +165,33 @@ class DocumentStart:
         self.generation += 1
         self.scripts = []
         self.output = []
+        self.retained_bytes = 0
         self.dropped = 0
         return self.state(0)
 
     def state(self, after):
-        page = [record for record in self.output if int(record["sequence"]) > after][:self.PAGE]
+        listing = sum(256 + 2 * len(json.dumps(script["rule"])) for script in self.scripts)
+        budget = self.REPLY_BYTES - self.ENVELOPE_BYTES - listing
+        page, used = [], 0
+        for record in self.output:
+            if int(record["sequence"]) <= after:
+                continue
+            cost = 320 + 6 * len(record["text"].encode())
+            if used + cost > budget:
+                break
+            used += cost
+            page.append(record)
         return {
             "status": "ok", "contract_version": 3, "permitted": self.permitted,
             "generation": str(self.generation), "renderer_processes": 1,
-            "pending_renderer_processes": 0, "refused_renderer_processes": 0,
+            "pending_renderer_processes": 0,
             "scripts": [{key: value for key, value in script.items() if key != "source"}
                         for script in self.scripts],
             "output": {
                 "records": page, "next_sequence": str(self.next_sequence),
                 "oldest_sequence": self.output[0]["sequence"] if self.output else "0",
-                "retained": len(self.output), "dropped": self.dropped,
-                "unattributed": 0, "stale": 0,
+                "retained": len(self.output), "retained_bytes": self.retained_bytes,
+                "dropped": self.dropped, "unattributed": 0, "stale": 0,
             },
         }
 
@@ -695,7 +715,7 @@ def check(binary, browser):
             for refused in [
                 {"operation": "arm", "scripts": []},
                 {"operation": "arm", "scripts": [{"origin": "https://a.test", "frame": "any", "source": "1"}]},
-                {"operation": "arm", "scripts": [{"origin": "https://a.test", "frame": "top", "source": "a" * 4097}]},
+                {"operation": "arm", "scripts": [{"origin": "https://a.test", "frame": "top", "source": ""}]},
                 {"operation": "unknown"},
                 {"operation": "state", "after": "not-a-number"},
             ]:
@@ -704,12 +724,33 @@ def check(binary, browser):
                 assert refusal["scripts"] == armed["scripts"], refused
                 assert "output" not in refusal, "a refusal must not re-send records"
             assert document_start(operation="state", after="0")["scripts"] == armed["scripts"]
-            # A bounded ring drops the oldest records with a visible count.
+            # No script count or snippet budget: a thousand scripts and an
+            # 8 MiB snippet arm through the real relay in one command.
+            many = document_start(operation="arm", scripts=[
+                {"origin": "https://a.test", "frame": "top", "source": f"report({index});"}
+                for index in range(1000)] + [
+                {"origin": "https://b.test", "frame": "top", "source": "/*" + "a" * (8 << 20) + "*/"}])
+            assert many["status"] == "ok" and len(many["scripts"]) == 1001, many.get("text")
+            assert many["scripts"][-1]["source_bytes"] == (8 << 20) + 4
+            # Past 64 MiB of reported text the oldest records are evicted and
+            # counted. A read returns every record after its cursor that fits
+            # one reply, so paging from the oldest reads every retained record
+            # exactly once, in order.
             flooded = document_start(operation="arm", scripts=[
                 {"origin": "https://a.test", "frame": "child", "source": "report('__flood__');"}])
-            assert flooded["output"]["dropped"] > 0, flooded["output"]
-            assert flooded["output"]["retained"] <= 128
-            assert len(flooded["output"]["records"]) <= 32
+            assert flooded["output"]["dropped"] > 0, flooded["output"]["dropped"]
+            assert flooded["output"]["retained_bytes"] <= PAYLOAD_LIMIT
+            assert len(flooded["output"]["records"]) > 32, "a page is bounded by the reply, not by 32 records"
+            cursor, seen = "0", []
+            while True:
+                page = document_start(operation="state", after=cursor)["output"]["records"]
+                if not page:
+                    break
+                seen += [int(record["sequence"]) for record in page]
+                cursor = page[-1]["sequence"]
+            assert len(seen) == flooded["output"]["retained"], (len(seen), flooded["output"]["retained"])
+            assert seen == list(range(seen[0], seen[0] + len(seen))), "paging skipped or repeated a record"
+            assert seen[0] == int(flooded["output"]["oldest_sequence"])
             cleared = document_start(operation="clear")
             assert cleared["status"] == "ok" and cleared["scripts"] == []
             assert cleared["output"]["records"] == [] and cleared["output"]["dropped"] == 0
@@ -750,7 +791,7 @@ def check(binary, browser):
             process.communicate(b":unknown\n:quit\n", timeout=10)
             assert process.returncode == 2, "Invalid stdin commands must exit with a usage error"
         print("PASS native console version/usage, authentication, actual C++ pipe/socket handoff, malformed lengths, stale selection, exception responses, Stop of a running command, 8 MiB input")
-        print("PASS document-start capability advertisement, session-scoped operation 4, non-draining cursor, bounded ring drops, refusals that preserve the armed set")
+        print("PASS document-start capability advertisement, session-scoped operation 4, a thousand scripts and an 8 MiB snippet, non-draining paging of every retained record, 64 MiB retention drops, refusals that preserve the armed set")
         print("PASS real Blink/V8 execution, Stop of an endless loop and recovery, 8 MiB input, preview isolation and Unicode bounds" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
     finally:
         server.shutdown()
@@ -839,7 +880,8 @@ def check_backend(binary, backend):
             assert idle["state"] == "idle" and idle["session_id"] is None
             assert idle["document_start"]["permitted"] is False
             assert idle["document_start"]["scripts"] == []
-            assert idle["limits"]["scripts"] == 4 and idle["limits"]["execution_millis"] == 50
+            assert idle["limits"]["command_bytes"] == PAYLOAD_LIMIT and "scripts" not in idle["limits"] \
+                and "execution_millis" not in idle["limits"], idle["limits"]
             # Out-of-scope contexts are stated rather than silently skipped.
             contexts = {entry["context"] for entry in idle["unsupported"]}
             assert {"service_worker", "dedicated_worker", "isolated_world", "already_open_document"} <= contexts
@@ -998,10 +1040,9 @@ def check_backend(binary, backend):
                 {"scripts": [{"origin": "https://*.fixture.test", "frame": "top", "source": "1"}]},
                 {"scripts": [{"origin": "https://fixture.test", "frame": "any", "source": "1"}]},
                 {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": ""}]},
-                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "a" * 4097}]},
                 {"scripts": [{"origin": "https://fixture.test", "frame": "top", "path_prefix": "lab", "source": "1"}]},
                 {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "1", "extra": 1}]},
-                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "a" * 4096}] * 3},
+                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "a" * (PAYLOAD_LIMIT // 2)}] * 2},
             ]:
                 call({"action": "arm_document_start", "session_id": session,
                       "confirm_document_start": True,
@@ -1009,6 +1050,13 @@ def check_backend(binary, backend):
                       **refused}, 400)
             preserved = read_document_start()["document_start"]
             assert preserved["scripts"] == armed["document_start"]["scripts"], "A refusal changed the armed set"
+            # Through HTTP too, the set has no script count or snippet budget.
+            large = call({"action": "arm_document_start", "session_id": session, "confirm_document_start": True,
+                          "scripts": [{"origin": "https://fixture.test", "frame": "top", "source": f"report({index});"}
+                                      for index in range(500)] +
+                                     [{"origin": "https://fixture.test", "frame": "child", "source": "/*" + "a" * (4 << 20) + "*/"}]})
+            assert large["document_start"]["status"] == "ok", large["document_start"].get("text")
+            assert len(large["document_start"]["scripts"]) == 501
             cleared = call({"action": "clear_document_start", "session_id": session})
             assert cleared["document_start"]["status"] == "ok" and cleared["document_start"]["scripts"] == []
             assert read_document_start()["document_start"]["output"]["records"] == []

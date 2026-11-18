@@ -33,11 +33,14 @@ const SOURCE_LIMIT: usize = 64 * 1024 * 1024;
 const TEXT_LIMIT: usize = 8192;
 const TARGET_LIMIT: usize = 64;
 const TARGET_SIZE: usize = 920;
-// The renderer encodes one runtime or document-start reply in at most 64 KiB.
+// The renderer encodes one runtime reply in at most 64 KiB.
 const RUNTIME_LIMIT: usize = 65536;
-const DOCUMENT_START_SCRIPT_LIMIT: usize = 4;
-const DOCUMENT_START_SOURCE_LIMIT: usize = 4096;
-const DOCUMENT_START_TOTAL_SOURCE_LIMIT: usize = 8192;
+// A document-start set has no script count or source budget: its arm command
+// is one Console payload. Its reply lists the set and every retained record
+// that fits, within the same transport bound, and half of a reply may list the
+// set (common/native_console_document_start.h).
+const DOCUMENT_START_REPLY_LIMIT: usize = SOURCE_LIMIT;
+const DOCUMENT_START_LISTING_LIMIT: usize = DOCUMENT_START_REPLY_LIMIT / 2;
 const DOCUMENT_START_RULE_LIMIT: usize = 256;
 
 // Own both process groups, including Chromium descendants. kill_on_drop alone
@@ -397,10 +400,10 @@ impl ResponseHeader {
             || (parsed.kind != 10
                 && (parsed.count != 0
                     || parsed.bytes
-                        > if parsed.kind == 11 || parsed.kind == 12 {
-                            RUNTIME_LIMIT
-                        } else {
-                            TEXT_LIMIT
+                        > match parsed.kind {
+                            11 => RUNTIME_LIMIT,
+                            12 => DOCUMENT_START_REPLY_LIMIT,
+                            _ => TEXT_LIMIT,
                         }
                     || (operation == 1 && parsed.status == 0)))
         {
@@ -1148,8 +1151,11 @@ impl Inner {
                 session.document_start_armed = true;
                 serde_json::to_string(&json!({"operation":"arm","scripts":scripts}))?
             };
-            if document_start_source.len() > RUNTIME_LIMIT {
-                return Err(Error::bad("Document-start command exceeds 65536 bytes"));
+            if document_start_source.len() > SOURCE_LIMIT {
+                return Err(Error::bad(
+                    "Document-start command exceeds 64 MiB as JSON; arm fewer or smaller snippets",
+                )
+                .with_code(Code::ResourceLimit));
             }
             (4, 0, document_start_source.as_str())
         } else if action == "runtime" {
@@ -1597,17 +1603,17 @@ fn document_start_unsupported() -> Value {
     ])
 }
 
+// Transport and retention bounds only. Nothing counts scripts, snippet bytes,
+// records per document or execution time: a snippet runs until it returns, and
+// clearing or replacing the set, or ending the session, stops it.
 fn document_start_limits() -> Value {
     json!({
-        "scripts": DOCUMENT_START_SCRIPT_LIMIT,
-        "source_bytes": DOCUMENT_START_SOURCE_LIMIT,
-        "total_source_bytes": DOCUMENT_START_TOTAL_SOURCE_LIMIT,
+        "command_bytes": SOURCE_LIMIT,
         "rule_bytes": DOCUMENT_START_RULE_LIMIT,
-        "report_bytes": 512,
-        "records_per_document": 64,
-        "retained_records": 128,
-        "records_per_read": 32,
-        "execution_millis": 50,
+        "report_bytes": TEXT_LIMIT,
+        "retained_bytes": SOURCE_LIMIT,
+        "reply_bytes": DOCUMENT_START_REPLY_LIMIT,
+        "listing_bytes": DOCUMENT_START_LISTING_LIMIT,
     })
 }
 
@@ -1624,14 +1630,10 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
     let list = scripts
         .as_array()
         .ok_or_else(|| Error::bad("Document-start scripts must be an array"))?;
-    if list.is_empty() || list.len() > DOCUMENT_START_SCRIPT_LIMIT {
-        return Err(Error::bad(format!(
-            "Arm 1 to {DOCUMENT_START_SCRIPT_LIMIT} document-start scripts"
-        ))
-        .with_code(Code::ResourceLimit));
+    if list.is_empty() {
+        return Err(Error::bad("Arm at least one document-start script"));
     }
     let mut normalized = Vec::with_capacity(list.len());
-    let mut total = 0usize;
     for script in list {
         let fields: Vec<&str> = if script.get("path_prefix").is_some() {
             vec!["frame", "origin", "path_prefix", "source"]
@@ -1679,7 +1681,7 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
         let source = validation::text(
             &script["source"],
             "Document-start snippet",
-            DOCUMENT_START_SOURCE_LIMIT,
+            SOURCE_LIMIT,
             false,
             true,
         )?;
@@ -1687,13 +1689,6 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
             return Err(Error::bad(
                 "A document-start snippet must be nonempty and contain no NUL bytes",
             ));
-        }
-        total += source.len();
-        if total > DOCUMENT_START_TOTAL_SOURCE_LIMIT {
-            return Err(Error::bad(format!(
-                "Document-start snippets exceed {DOCUMENT_START_TOTAL_SOURCE_LIMIT} total source bytes"
-            ))
-            .with_code(Code::ResourceLimit));
         }
         let mut entry = json!({"origin":origin,"frame":frame,"source":source});
         if let Some(prefix) = prefix {
@@ -2252,16 +2247,16 @@ mod tests {
         ] {
             assert!(rule(refused.clone()).is_err(), "{refused}");
         }
-        // Bounds: script count, per-snippet source and the whole set's source.
+        // No script count or snippet budget: an empty set is refused, but many
+        // scripts and a large snippet are armed, and only the 64 MiB command
+        // bound applies (checked where the command is serialized).
         let script = json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
         assert!(validate_document_start(&json!([])).is_err());
-        assert!(validate_document_start(&json!([script, script, script, script, script])).is_err());
         assert!(validate_document_start(&json!(script)).is_err());
-        let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(DOCUMENT_START_SOURCE_LIMIT)});
-        assert!(validate_document_start(&json!([long])).is_ok());
-        assert!(validate_document_start(&json!([long, long, long])).is_err());
-        let oversized = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(DOCUMENT_START_SOURCE_LIMIT + 1)});
-        assert!(validate_document_start(&json!([oversized])).is_err());
+        let many: Vec<Value> = (0..1000).map(|_| script.clone()).collect();
+        assert_eq!(validate_document_start(&json!(many)).unwrap().as_array().unwrap().len(), 1000);
+        let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(8 * 1024 * 1024)});
+        assert!(validate_document_start(&json!([long, long])).is_ok());
         // The normalized command keeps exactly the declared rule.
         let armed = validate_document_start(&json!([{"origin":"http://127.0.0.1:8080","frame":"child","path_prefix":"/lab/","source":"report(1);"}])).unwrap();
         assert_eq!(
@@ -2328,15 +2323,15 @@ mod tests {
             "limits": document_start_limits(), "unsupported": document_start_unsupported(),
             "document_start": {
                 "status": "ok", "permitted": true, "generation": "2", "renderer_processes": 2,
-                "pending_renderer_processes": 1, "refused_renderer_processes": 1,
+                "pending_renderer_processes": 1,
                 "scripts": [{"script_id":"1","rule":{"origin":"https://fixture.test","frame":"top","path_prefix":"/lab/"},
                     "source_bytes": 24, "digest": "0123456789abcdef", "records": 3,
                     "injected_documents": 1, "refused": 0}],
                 "output": {"records":[{"sequence":"3","record":"report","provenance":"console-document-start-script",
                     "script_id":"1","document_id":"7","frame_id":"99","top_frame":true,"time":1.0,
                     "truncated":false,"text":"kinds=string:12"}],
-                    "next_sequence":"4","oldest_sequence":"1","retained":3,"dropped":0,
-                    "unattributed":0,"stale":0},
+                    "next_sequence":"4","oldest_sequence":"1","retained":3,"retained_bytes":1120,
+                    "dropped":0,"unattributed":0,"stale":0},
             },
         });
         crate::validation::schema("NativeConsoleDocumentStart", &armed, 500).unwrap();
@@ -2484,8 +2479,7 @@ while True:
                 scripts = []
         armed.write_text(json.dumps(scripts))
         payload, kind = json.dumps({'status':status,'contract_version':3,'permitted':True,'generation':'1',
-            'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0,
-            'refused_renderer_processes':0}).encode(), 12
+            'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0}).encode(), 12
     elif '__renderer_gone__' in source:
         # The browser's per-command reply when the selected renderer's pipe drops.
         payload, kind, wire_status = b'Renderer disconnected', 0, 6

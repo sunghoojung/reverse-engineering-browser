@@ -18,12 +18,10 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
-#include "brave/components/reverse_engineering_browser/renderer/native_console_deadline.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_console_document_start.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_console_execution.h"
 #include "content/public/renderer/render_frame.h"
-#include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
-#include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
 #include "third_party/blink/public/web/web_document.h"
 #include "third_party/blink/public/web/web_local_frame.h"
@@ -107,12 +105,6 @@ NativeConsoleType Preview(v8::Isolate* isolate,
   return NativeConsoleType::kObject;
 }
 
-// Lives on the IO thread, which stays responsive while a command runs.
-class NativeConsoleControl final : public mojom::NativeConsoleControl {
- public:
-  void Stop(std::uint64_t request_id) override { NativeConsoleDeadline::Get().Stop(request_id); }
-};
-
 }  // namespace
 
 void NativeConsoleAgent::CreateIfEnabled(content::RenderFrame* frame) {
@@ -136,13 +128,7 @@ void NativeConsoleAgent::Bind(mojo::PendingAssociatedReceiver<mojom::NativeConso
   receiver_.Bind(std::move(receiver));
 }
 void NativeConsoleAgent::BindControl(mojo::PendingReceiver<mojom::NativeConsoleControl> control) {
-  auto io = blink::Platform::Current()->GetIOTaskRunner();
-  io->PostTask(FROM_HERE, base::BindOnce(
-                              [](mojo::PendingReceiver<mojom::NativeConsoleControl> receiver) {
-                                mojo::MakeSelfOwnedReceiver(
-                                    std::make_unique<NativeConsoleControl>(), std::move(receiver));
-                              },
-                              std::move(control)));
+  BindNativeConsoleControl(std::move(control));
 }
 void NativeConsoleAgent::Describe(DescribeCallback callback) {
   const auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
@@ -213,11 +199,8 @@ void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
     return;
   }
   v8::Context::Scope entered(context);
-  auto& deadline = NativeConsoleDeadline::Get();
-  if (!deadline.Begin(isolate, request_id, 0)) {
-    reply(NativeConsoleStatus::kForbidden, "Watchdog unavailable");
-    return;
-  }
+  auto& execution = NativeConsoleExecution::Get();
+  execution.Begin(isolate, request_id);
   v8::TryCatch terminated(isolate);
   std::string result;
   {
@@ -227,7 +210,7 @@ void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
                                    v8::MicrotasksScope::kRunMicrotasks);
     result = runtime_.Run(isolate, context, frame, command);
   }
-  if (deadline.Finish() != NativeConsoleDeadline::End::kReturned) {
+  if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
     terminated.Reset();
     reply(NativeConsoleStatus::kStopped, "Stopped; changes are not rolled back");
     return;
@@ -272,11 +255,8 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
   v8::MicrotasksScope microtasks(isolate, context->GetMicrotaskQueue(),
                                  v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::TryCatch exception(isolate);
-  auto& deadline = NativeConsoleDeadline::Get();
-  if (!deadline.Begin(isolate, request_id, 0)) {
-    reply(NativeConsoleStatus::kForbidden, "Execution watchdog is unavailable");
-    return;
-  }
+  auto& execution = NativeConsoleExecution::Get();
+  execution.Begin(isolate, request_id);
   v8::Local<v8::String> code;
   v8::Local<v8::Script> script;
   v8::Local<v8::Value> value;
@@ -290,7 +270,7 @@ void NativeConsoleAgent::Evaluate(const base::UnguessableToken& document,
   NativeConsoleType type = NativeConsoleType::kUndefined;
   if (success)
     type = Preview(isolate, context, value, text, truncated);
-  if (deadline.Finish() != NativeConsoleDeadline::End::kReturned) {
+  if (execution.Finish() != NativeConsoleExecution::End::kReturned) {
     exception.Reset();
     reply(NativeConsoleStatus::kStopped, "Stopped; changes are not rolled back");
     return;

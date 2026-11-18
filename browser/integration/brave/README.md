@@ -129,13 +129,15 @@ Patch 0016 adds the separately armed document-start script experiment. It needs
 browser never advertises support, the registry refuses to bind a renderer, and
 arming fails closed. The switch alone arms nothing.
 
-The browser process owns the armed set and the bounded output ring. It pushes
+The browser process owns the armed set and its byte-bounded output. It pushes
 the set over a process-wide Mojo interface bound in
-`BindHostReceiverForRenderer`, so a renderer created after arming holds the set
-before its first document commits, and it only counts a renderer as ready once
-that renderer acknowledges the exact generation it can run. It binds at most 64
-renderers; a renderer refused beyond that is reported, never silently counted
-as ready.
+`BindHostReceiverForRenderer`, as one read-only shared memory region every
+renderer maps, so a renderer created after arming holds the set before its
+first document commits without a per-process copy. It only counts a renderer as
+ready once that renderer acknowledges the exact generation it can run, and it
+binds every live renderer. A snippet runs until it returns; Clear, a new arm or
+the end of the session sends Stop for the old generation over each renderer's
+IO-thread control pipe.
 
 The renderer injects at main-world script-context creation, which Blink performs
 before any script can run in that context. A same-origin commit from an initial
@@ -144,8 +146,8 @@ Blink clears the window object for the commit instead. Matching is the dependenc
 `common/native_console_document_start.h` decision shared with the browser and
 the offline check: one exact serialized origin, exactly one frame kind, and an
 optional literal path prefix. Workers, non-main worlds and non-HTTP(S)
-documents are never reached. Snippet output is bounded page-JavaScript
-observation, never evidence. See
+documents are never reached. Snippet output is page-JavaScript observation,
+never evidence. See
 [Native Console v3](../../../protocol/native-console-v3.md).
 
 ## Pre-initialization patches

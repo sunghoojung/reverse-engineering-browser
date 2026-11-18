@@ -22,10 +22,12 @@ inline constexpr std::uint16_t kNativeConsoleVersion = 3;
 // script; it is the transport's bound, not a source budget.
 inline constexpr std::uint32_t kNativeConsolePayloadLimit = 64 * 1024 * 1024;
 inline constexpr std::uint32_t kNativeConsoleSourceLimit = kNativeConsolePayloadLimit;
-// A runtime or document-start reply is one JSON page. Larger values are paged
-// by offset, and a poll drains at most this much, so a reply never grows with
-// the page.
+// A runtime reply is one JSON page. Larger values are paged by offset, and a
+// poll drains at most this much, so a reply never grows with the page.
 inline constexpr std::uint32_t kNativeConsoleReplyLimit = 64 * 1024;
+// A document-start reply lists the armed set and every retained record after
+// the reader's cursor that fits, so it takes the transport's bound.
+inline constexpr std::uint32_t kNativeConsoleDocumentStartReplyLimit = kNativeConsolePayloadLimit;
 // The legacy operation 2 reply copies a primitive preview only.
 inline constexpr std::uint32_t kNativeConsoleTextLimit = 8192;
 inline constexpr std::uint32_t kNativeConsoleTargetLimit = 64;
@@ -45,10 +47,6 @@ inline constexpr char kNativeConsoleLiveBindingSwitch[] = "reb-native-console-li
 // session. The switch alone arms nothing: it only lets the owner register
 // scripts later, and its absence makes an arm request fail closed.
 inline constexpr char kNativeConsoleDocumentStartSwitch[] = "reb-native-console-document-start";
-
-inline constexpr std::uint32_t kNativeConsoleDocumentStartScriptLimit = 4;
-inline constexpr std::uint32_t kNativeConsoleDocumentStartSourceLimit = 4096;
-inline constexpr std::uint32_t kNativeConsoleDocumentStartTotalSourceLimit = 8192;
 
 enum class NativeConsoleOperation : std::uint16_t {
   kTargets = 1,
@@ -172,8 +170,9 @@ struct NativeConsoleTarget final {
            response.payload_bytes == response.item_count * sizeof(NativeConsoleTarget);
   }
   return response.item_count == 0 &&
-         response.payload_bytes <= (response.type == NativeConsoleType::kRuntime ||
-                                            response.type == NativeConsoleType::kDocumentStart
+         response.payload_bytes <= (response.type == NativeConsoleType::kDocumentStart
+                                        ? kNativeConsoleDocumentStartReplyLimit
+                                    : response.type == NativeConsoleType::kRuntime
                                         ? kNativeConsoleReplyLimit
                                         : kNativeConsoleTextLimit);
 }

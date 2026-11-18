@@ -542,24 +542,23 @@
       }
       const output = view?.document_start?.output;
       const pendingProcesses = view?.document_start?.pending_renderer_processes;
-      // A refused renderer never receives a set, so it is named on its own
-      // rather than folded into a count that reads as "not ready yet".
-      const refusedProcesses = view?.document_start?.refused_renderer_processes;
       ds('counters').textContent = !output ? '' :
-        `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}${refusedProcesses ? ` · ${refusedProcesses} renderer processes over the 64-process limit never receive a set` : ''}`;
+        `${output.retained} retained · ${output.dropped} dropped · ${output.unattributed} unattributed · ${output.stale} stale · ${pendingProcesses ? `${pendingProcesses} renderer processes not ready yet` : 'every renderer holds this set'}`;
     }
     function reset() {
       view = null; cursor = '0'; failed = false; lastGeneration = null;
       ds('consent').checked = false; message(''); render();
     }
     function check(records) {
-      if (!Array.isArray(records) || records.length > 32) throw new TypeError('Malformed document-start output');
+      // A read returns every retained record after the cursor that fits one
+      // reply, so there is no count to check, only each record's shape.
+      if (!Array.isArray(records)) throw new TypeError('Malformed document-start output');
       for (const record of records) {
         if (!record || !sequence(record.sequence) || record.provenance !== 'console-document-start-script' ||
             !['injected', 'report', 'script_error', 'refused'].includes(record.record) ||
             !numberId(record.script_id) || !sequence(record.document_id) || !sequence(record.frame_id) ||
             typeof record.top_frame !== 'boolean' || typeof record.truncated !== 'boolean' ||
-            typeof record.text !== 'string' || encoder.encode(record.text).length > 2048 ||
+            typeof record.text !== 'string' || encoder.encode(record.text).length > 8192 ||
             typeof record.time !== 'number' || !Number.isFinite(record.time) || Math.abs(record.time) > 8640000000000000) {
           throw new TypeError('Malformed document-start record');
         }
@@ -596,7 +595,7 @@
         throw new TypeError('Malformed document-start state');
       }
       const next = value.document_start;
-      if (!Array.isArray(next.scripts) || next.scripts.length > 4) throw new TypeError('Malformed armed set');
+      if (!Array.isArray(next.scripts)) throw new TypeError('Malformed armed set');
       for (const script of next.scripts) {
         if (!numberId(script?.script_id) || typeof script.rule?.origin !== 'string' ||
             !['top', 'child'].includes(script.rule.frame) || !/^[0-9a-f]{16}$/.test(script.digest || '') ||
@@ -645,6 +644,12 @@
       const script = {origin: ds('origin').value.trim(), frame: ds('frame').value, source: ds('source').value};
       const prefix = ds('path').value.trim();
       if (prefix) script.path_prefix = prefix;
+      // The same bound the backend applies: one arm command is one Console
+      // payload. A snippet has no size budget of its own.
+      if (encoder.encode(JSON.stringify({operation: 'arm', scripts: [script]})).length > commandLimit) {
+        message('A document-start command can be at most 64 MiB, counting its JSON escapes. Nothing was armed.', true);
+        return;
+      }
       enqueue('arm_document_start', {scripts: [script], confirm_document_start: true}, value => {
         const armed = value?.document_start?.status === 'ok';
         // Only a replaced set discards the previous generation's records. A

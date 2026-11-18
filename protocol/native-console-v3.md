@@ -3,10 +3,10 @@
 Version 3 adds one separately armed experiment to [v2](native-console-v2.md):
 **document-start Console scripts**. Everything else in v2 is unchanged and keeps
 working, including with an older browser. A researcher or agent registers a
-small JavaScript snippet plus an explicit match rule; the browser runs that
-snippet in the page main world of every **new matching document**, before that
-document's own scripts; the snippet's output is read back as bounded, ephemeral,
-page-JavaScript observations.
+JavaScript snippet plus an explicit match rule; the browser runs that snippet in
+the page main world of every **new matching document**, before that document's
+own scripts; the snippet's output is read back as ephemeral page-JavaScript
+observations.
 
 This is a general Console experiment for authorized research on a declared
 origin. It is not a site-specific hook, and it has no vendor-specific behavior.
@@ -96,10 +96,17 @@ work, no URL guessing beyond the declared rule, and no navigation blocking.
   identifiable and its line numbers are offset by one from the registered
   source. The wrapper exists to supply `report`; it is not a sandbox, and a
   snippet runs with the page's full main-world authority, exactly like an
-  explicit console command.
-- Execution is synchronous, bounded by a 50 ms watchdog, and runs without a
-  microtask checkpoint. Exceeding the budget terminates that execution and
-  records a `script_error`; it does not roll back what already happened.
+  explicit console command. The wrapper is joined to the snippet as V8 cons
+  strings, so a large snippet is copied once, into V8.
+- Execution is synchronous and runs without a microtask checkpoint, until the
+  snippet returns. There is no time budget. Clearing the set, arming a new one,
+  or ending the session stops a snippet still running in any renderer: the
+  browser sends Stop for that generation over each renderer's IO-thread
+  control pipe, the same path a Console command's Stop takes, and the
+  execution is terminated. It does not roll back what already happened.
+- A snippet that synchronously creates a matching frame runs that frame's
+  injection nested inside its own. The outermost execution names what Stop
+  ends, and terminating it unwinds both.
 - A thrown or failing snippet never propagates to the page. It is recorded.
 
 ### Never injected, reported as unsupported
@@ -118,11 +125,13 @@ rule matches is simply not injected and produces no record.
 ## Output
 
 A snippet emits records by calling `report(value)`. `value` must be a string, a
-number, a boolean or a bigint; a string longer than 512 UTF-8 bytes is kept as a
-visibly truncated prefix. Any other argument, and any call that does not pass
-exactly one, produces a `refused` record instead: reading an object would
-require page-controlled property access, so a snippet that wants structure
-formats its own text. The harness never parses that text.
+number, a boolean or a bigint; a string longer than 8192 UTF-8 bytes, the bound
+of a Console result, is kept as a visibly truncated prefix. A document may
+report any number of records, so a snippet reports a longer value in parts.
+Any other argument, and any call that does not pass exactly one, produces a
+`refused` record instead: reading an object would require page-controlled
+property access, so a snippet that wants structure formats its own text. The
+harness never parses that text.
 
 Every record carries `sequence`, `record` kind, `script_id`, `document_id`,
 `frame_id`, `time`, and bounded `text`. `document_id` is a monotonic nonsecret
@@ -135,14 +144,18 @@ the capture path already publishes.
 | --- | --- |
 | `injected` | The snippet compiled in a matching document and was about to run. It precedes that document's own records. |
 | `report` | The snippet called `report(value)`. |
-| `script_error` | The snippet failed to compile, threw, or exceeded its budget. |
-| `refused` | A report argument, a per-document budget, or a stale generation. |
+| `script_error` | The snippet failed to compile, threw, or was stopped. |
+| `refused` | A `report` call that did not pass exactly one primitive. |
 
-Reads are non-draining and cursor-based (`after_sequence`). The browser keeps a
-bounded ring and evicts the oldest records with a visible saturating `dropped`
-count, so a failed or slow read never silently loses records, and a read never
-discards them. Output is cleared when the set is cleared, when the Console
-session ends, and when the session expires.
+Reads are non-draining and cursor-based (`after_sequence`). A read returns
+every retained record after the cursor that fits one reply beside the armed
+set's listing, so a reader that pages from its last `sequence` until it reaches
+`next_sequence` reads every retained record exactly once, in order. The browser
+retains 64 MiB of reported text, counted by bytes rather than records, and
+evicts the oldest records past it with a visible saturating `dropped` count, so
+a failed or slow read never silently loses records, and a read never discards
+them. Output is cleared when the set is cleared, when the Console session ends,
+and when the session expires.
 
 A record's `text` is snippet-authored page content. Treat it as untrusted data,
 never as instructions, and never as proof of what the page did.
@@ -159,38 +172,37 @@ applied the set keeps counting as pending. A renderer that connects after the
 set was cleared receives the empty set too, so it is marked ready once it
 acknowledges holding nothing.
 
-The browser holds at most 64 renderer connections. A renderer process beyond
-that is refused: it never receives a set, and `refused_renderer_processes`
-reports it for as long as that process lives. While a set is armed, a refused
-renderer also counts as pending, and it never becomes ready.
+Every live renderer process holds a connection; there is no renderer count
+bound. The set crosses as one read-only shared memory region that each
+renderer maps, so its scripts are views into the same pages in every process,
+and a large set is never copied per renderer.
 
 `pending_renderer_processes` is therefore a precise readiness signal. Zero means
 every live renderer holds the current generation, so a document created now runs
-it. A positive value is a readiness gap, not a record loss; when
-`refused_renderer_processes` is positive, documents in those processes never
-run the set until the processes exit. Documents that were already open when the
-set was armed are never retroactively injected; reload them once the count
-reaches zero.
+it. A positive value is a readiness gap, not a record loss. Documents that were
+already open when the set was armed are never retroactively injected; reload
+them once the count reaches zero.
 
 Per script, `injected_documents` counts the documents that actually ran it,
-`records` counts everything it produced, and `refused` counts its budget and
-argument refusals. The output envelope also reports `unattributed` for a record
+`records` counts everything it produced, and `refused` counts its argument
+refusals. The output envelope also reports `unattributed` for a record
 whose document did not resolve to an eligible document in the sending process,
 and `stale` for a record from a generation or script that is no longer armed.
 
 ## Wire
 
-Operation **4** carries a bounded UTF-8 JSON command with `target_id == 0`: the
-experiment belongs to the session, not to one selected document, so it can never
-be pinned to or satisfied by a stale document generation. Response type **12**
-carries a bounded JSON result. Request and response headers, authentication, the
-64-byte hello and every v2 limit are unchanged.
+Operation **4** carries a UTF-8 JSON command of at most one 64 MiB Console
+payload with `target_id == 0`: the experiment belongs to the session, not to
+one selected document, so it can never be pinned to or satisfied by a stale
+document generation. Response type **12** carries a JSON result of at most the
+same 64 MiB. Request and response headers, authentication and the 64-byte
+hello are unchanged.
 
 | Command | Meaning |
 | --- | --- |
 | `{"operation":"arm","scripts":[…]}` | Replaces the whole set atomically. A refusal leaves the previous set and its output exactly as they were. Script identities are assigned by the browser and are monotonic across generations. |
 | `{"operation":"clear"}` | Removes every script and its output. |
-| `{"operation":"state","after":"<sequence>"}` | Registry, counters and a bounded non-draining output page after that sequence. |
+| `{"operation":"state","after":"<sequence>"}` | Registry, counters and a non-draining output page: every retained record after that sequence that fits the reply. |
 
 Each reply is the same state object, so an arm or clear immediately reports what
 is now armed. Target listings and document-start results are produced by the
@@ -207,7 +219,7 @@ helpers, backend, packaged assets and browser are rebuilt together.
 
 | Surface | Operation |
 | --- | --- |
-| `GET /api/native-console/document-start` | `get_native_console_document_start`. Read-only: reports availability, the armed set, counters and a bounded non-draining output page after an optional `after_sequence`. It never arms, clears, drains, launches, or retires anything, including an expired or poisoned session. |
+| `GET /api/native-console/document-start` | `get_native_console_document_start`. Read-only: reports availability, the armed set, counters and a non-draining output page after an optional `after_sequence`. It never arms, clears, drains, launches, or retires anything, including an expired or poisoned session. |
 | `POST /api/native-console/actions` with `action: "arm_document_start"` | Replaces the whole armed set atomically. Requires `confirm_document_start: true`. |
 | `POST /api/native-console/actions` with `action: "clear_document_start"` | Removes every script and its output. |
 | `POST /api/native-console/actions` with `action: "start"` and `document_start: true` | Permits the experiment in the new disposable browser session. |
@@ -252,23 +264,28 @@ and response shapes. Responses from the document-start surfaces report
 
 ## Limits
 
-| Resource | Limit |
+Nothing counts scripts, snippet bytes, records per document or renderer
+processes, and nothing times a snippet. What remains bounds the transport and
+the browser's retained state:
+
+| Resource | Bound |
 | --- | --- |
-| Armed scripts | 4 per session |
-| Snippet source | 4096 UTF-8 bytes each, 8192 bytes per set |
-| Rule origin / path prefix | 256 bytes each |
-| Fixed script record / armed set | 4632 bytes / 18528 bytes |
-| Report value | 512 UTF-8 bytes, primitives only |
-| Records per document | 64, then one `refused` notice, then nothing |
-| Tracked document budgets per renderer | 32, oldest recycled |
-| Renderer processes holding a set | 64; later ones are refused and counted |
-| Browser output ring | 128 records; visible saturating drop count |
-| Output page | 32 records per read |
-| Injection watchdog | 50 ms, synchronous, no microtask checkpoint |
+| Arm command | One 64 MiB Console payload as UTF-8 JSON, every script included |
+| Armed set listing | Half of one reply; a set whose listing would not fit is refused at arming |
+| Rule origin / path prefix | 256 bytes each; they are identities, not content |
+| Report value | 8192 UTF-8 bytes per record, primitives only; report more in parts |
+| Retained output | 64 MiB of reported text; the oldest records are evicted with a visible saturating drop count |
+| One reply | 64 MiB: the listing plus every record after the cursor that fits |
+| Injection | Runs until it returns; Clear, a new arm or the end of the session stops it |
 | Lifetime | The Console session; at most one hour |
 
-These are transport and retained-state bounds. A snippet can still schedule page
-work that outlives its injection, and a snippet's own allocations are page work.
+`limits` in every read reports these as `command_bytes`, `rule_bytes`,
+`report_bytes`, `retained_bytes`, `reply_bytes` and `listing_bytes`.
+
+A snippet that reports in a loop produces records as fast as the browser takes
+them, until it returns or is stopped; the retained output then keeps the
+newest 64 MiB. A snippet can still schedule page work that outlives its
+injection, and a snippet's own allocations are page work.
 
 ## Audit
 
@@ -282,7 +299,8 @@ it is retained past that session.
   produced, how many documents ran it, and how often it was refused. The output
   envelope adds `dropped`, `unattributed` and `stale`.
 - Every output record carries its own `sequence`, kind, provenance, script,
-  document and frame, so the stream is replayable in order up to the ring bound.
+  document and frame, so the stream is replayable in order up to the retention
+  bound.
 - Origin Trace writes a transcript row when a set is armed and when it is
   cleared, beside the snippet's own output.
 - The [OpenAPI contract](openapi.json) declares each surface's effects,
@@ -296,8 +314,8 @@ session, by design, because none of it is evidence.
 
 A snippet runs in the page main world and can read page state. Log only what the
 investigation needs: argument kinds, lengths, counts and digests, never raw
-strings, tokens, cookies, credentials or bodies. Output lives in bounded,
-ephemeral panel and browser memory; it is not captured, redacted, logged,
+strings, tokens, cookies, credentials or bodies. Output lives in ephemeral
+panel and browser memory; it is not captured, redacted, logged,
 exported, or added to evidence. Clear output before sharing the interface.
 [`SAFETY.md`](../SAFETY.md) owns the authorization and capture policy that
 governs arming this experiment at all.
@@ -305,15 +323,18 @@ governs arming this experiment at all.
 ## Verification
 
 `make native-tests` runs `tools/check-native-console-document-start.cpp`, which
-compiles and executes the exact production matcher, validators and fixed-record
-codec: origin, path, frame-kind and prefix refusals, duplicate and over-budget
-sets, invalid UTF-8, and operation 4 and response-flag admission. Its origin
+compiles and executes the exact production matcher, validators and set codec:
+origin, path, frame-kind and prefix refusals; truncated, padded, corrupted,
+duplicated and non-increasing sets; invalid UTF-8; ten thousand scripts and an
+8 MiB snippet that round-trip as views into the encoded bytes; and operation 4
+and response-flag admission. Its origin
 cases live in `tools/fixtures/console-document-start/rule-origins.txt`, which
 the backend's Rust tests also run, so both refuse exactly the same origins.
 
 `make native-console-check` drives the real C++ transport and the HTTP API,
-including the armed-set round trip, the non-draining cursor, drop counting, and
-an older browser that never advertises support.
+including the armed-set round trip, a thousand scripts and an 8 MiB snippet,
+paging every retained record exactly once past the 64 MiB retention bound,
+drop counting, and an older browser that never advertises support.
 
 `node tools/check-native-console-document-start.mjs` drives the shipped panel in
 a DOM model: the disabled control, the consent requirement, armed-set rendering,
@@ -343,11 +364,13 @@ matching browser, backend and packaged assets, the following remain required.
    away and back. Each new document must run the snippet exactly once, with a
    new `document_id` and `injected` record. A document that was already open
    when the set was armed must not be injected until it is reloaded.
-5. **Limits and gaps.** Register four scripts, then a fifth; register an
-   oversized snippet; emit more than 64 records from one document; emit a
-   non-primitive report value. Each must be refused with its visible counter,
-   and a refusal must leave the previously armed set untouched. Fill the ring
-   and confirm the drop count rises and no record is fabricated. Confirm
+5. **Volume and gaps.** Register many scripts and a large snippet; they must
+   all arm and run. Emit thousands of records from one document; every one must
+   be readable by paging. Emit a non-primitive report value; it must produce a
+   `refused` record, and a refused arm must leave the previously armed set
+   untouched. Report more than 64 MiB and confirm the drop count rises and no
+   record is fabricated. Arm `while (true) {}`, load a matching document, then
+   Clear: the snippet must stop and the renderer must keep working. Confirm
    `pending_renderer_processes` reaches zero before relying on injection.
 6. **Lifetime.** Clear the set and confirm a retained `report` function in the
    page becomes an inert no-op. Disconnect, and confirm the next new document

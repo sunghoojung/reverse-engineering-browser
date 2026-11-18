@@ -15,9 +15,12 @@ use std::{
 };
 
 /// Chromium hands a second launch with the same profile to the running browser
-/// and exits. A process that is still running after this long started a new
-/// browser instead, which would not be captured.
-const RELAY_DEADLINE: Duration = Duration::from_secs(10);
+/// and exits; on a loaded machine that launch alone takes several seconds.
+/// Chromium's relay waits 20 seconds for the running browser to acknowledge,
+/// then kills it as unresponsive and starts a browser of its own, which would
+/// not be captured. Stopping the relay before then keeps a busy capture
+/// browser running.
+const RELAY_DEADLINE: Duration = Duration::from_secs(15);
 /// Time for the end response to reach the caller before the launcher stops
 /// this backend with the rest of the session.
 const END_GRACE: Duration = Duration::from_millis(300);
@@ -172,12 +175,15 @@ impl LiveBrowser {
                 )
                 .with_code(Code::DependencyUnavailable));
             }
+            // The relay may have handed the URL over before it was stopped,
+            // so the page can still open; nothing else about the session
+            // changed.
             Err(_) => {
                 let _ = relay.kill().await;
                 return Err(Error::conflict(
-                    "A browser launch did not hand the URL to the capture browser and was stopped. Start a new live session.",
+                    "The capture browser did not take the URL within 15 seconds, so the launch relaying it was stopped before Chromium could replace a busy browser. The page may still open, and the session is still running.",
                 )
-                .with_code(Code::TargetUnavailable));
+                .with_code(Code::CommandOutcomeUnknown));
             }
         }
         if Self::holder(profile) != Some(holder) {

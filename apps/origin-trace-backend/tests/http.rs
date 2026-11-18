@@ -7762,6 +7762,18 @@ async fn session_actions_drive_only_this_sessions_capture_browser() {
     let end = call(json!({"action":"end","confirm":true})).await;
     let refused = assert_contract_response(end, "post", "/api/session/actions", 409).await;
     assert_eq!(code(refused), "target_unavailable");
+    // A relay that has not returned by its deadline is stopped. It may already
+    // have handed the URL over, so the outcome is unknown, and the session is
+    // left running rather than declared lost.
+    std::fs::write(&brave, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    let late = json!({"action":"open_url","url":"https://example.test/late"});
+    let stuck =
+        assert_contract_response(call(late).await, "post", "/api/session/actions", 409).await;
+    let stuck = serde_json::from_slice::<Value>(&stuck).unwrap();
+    assert_eq!(stuck["code"], "command_outcome_unknown");
+    let text = stuck["error"].as_str().unwrap();
+    assert!(text.contains("the session is still running"), "{text}");
+    assert!(!text.contains("Start a new live session"), "{text}");
     assert_eq!(server.get("/api/health").await.status(), 200);
 }
 

@@ -478,7 +478,7 @@
             }
           },
           "409": {
-            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed.",
+            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed, except that a relay stopped at its deadline (command_outcome_unknown) may still have opened the page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -40288,7 +40288,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 10 seconds. No page JavaScript runs.",
+              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 15 seconds, before Chromium would replace a busy capture browser; that refusal is command_outcome_unknown, since the page may still open. No page JavaScript runs.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/live_browser.rs",

@@ -73,7 +73,11 @@ final class StoredEvidenceBackend {
   }
 
   private let executableURL: URL
-  private let arguments: [String]
+  // The stores the backend reads. replace(arguments:) changes them, so they
+  // are read under the lock, and `generation` tells a start begun over the old
+  // stores that it must not publish a backend for them.
+  private var arguments: [String]
+  private var generation = 0
   private let launches = DispatchQueue(label: "origin-trace.stored-evidence-backend")
   private let session: URLSession
   private let lock = NSLock()
@@ -114,6 +118,19 @@ final class StoredEvidenceBackend {
   func stop() {
     lock.lock()
     defer { lock.unlock() }
+    release()
+    retryAfter = .distantPast
+  }
+
+  // Open Session points the app at another session's stores. A request
+  // already forwarded finishes against the old backend; the next one starts a
+  // backend over the new stores.
+  func replace(arguments: [String]) {
+    lock.lock()
+    defer { lock.unlock() }
+    guard arguments != self.arguments else { return }
+    self.arguments = arguments
+    generation += 1
     release()
     retryAfter = .distantPast
   }
@@ -247,6 +264,8 @@ final class StoredEvidenceBackend {
     }
     release()
     let backingOff = Date() < retryAfter
+    let arguments = self.arguments
+    let generation = self.generation
     lock.unlock()
     guard !backingOff else {
       throw Failure(status: 503, code: "dependency_unavailable", message: "The bundled backend did not start; retry shortly")
@@ -272,6 +291,11 @@ final class StoredEvidenceBackend {
     for name in ["HOME", "TMPDIR"] { environment[name] = ProcessInfo.processInfo.environment[name] }
     child.environment = environment
     lock.lock()
+    guard generation == self.generation else {
+      lock.unlock()
+      try? FileManager.default.removeItem(at: directory)
+      throw Failure(status: 503, code: "dependency_unavailable", message: "The evidence stores changed; retry shortly")
+    }
     do {
       try child.run()
     } catch {

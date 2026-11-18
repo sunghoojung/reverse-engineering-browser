@@ -475,8 +475,8 @@
         : !session ? (requested()
             ? 'Permitted for the next disposable session. Connect, then arm a rule. Nothing runs until you arm one.'
             : livePermitted ? 'This live capture permits document-start scripts. Connect to a selected live document, then arm a rule. Nothing runs until you arm one.'
-            : listed === false ? 'This live capture does not permit document-start scripts: its browser lacks the rebuilt overlay, or it was started with REB_CONSOLE_DOCUMENT_START=0. Permit them for a disposable session above, or restart the capture with a rebuilt browser. Nothing is relaunched automatically.'
-            : 'Connect a session with this permitted, or relaunch the live capture with REB_CONSOLE_DOCUMENT_START=1.')
+            : listed === false ? 'This live capture does not permit document-start scripts: its browser lacks the rebuilt overlay, or Allow document-start Console scripts was off when it started. Permit them for a disposable session above, or start a new live session with them allowed, under Advanced options in New Live Session…. Nothing is relaunched automatically.'
+            : 'Connect a session with this permitted, or start a new live session with Allow document-start Console scripts on, under Advanced options in New Live Session….')
         : permitted() ? `Armed scripts: ${armed}. A matching new document runs them before its own scripts.`
         : (view?.document_start?.message || 'Document-start scripts are not available in this session.');
       ds('enable').disabled = !!session || !!pending || checking || live;

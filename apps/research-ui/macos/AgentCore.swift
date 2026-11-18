@@ -148,25 +148,83 @@ enum AgentPermission: String, CaseIterable, Comparable, Sendable {
   var listsActions: Bool { self >= .ask }
   // Only Full access returns captured content and starts sessions.
   var readsContent: Bool { self == .full }
-  // The level a browser may remember between launches. Higher levels are
-  // chosen again each time, through consent.
-  static let rememberedCeiling = AgentPermission.ask
 
-  // What enable accepts from the page: exactly one known level, and the
-  // sensitive capture option only as a boolean beside Full access. Anything
+  // What enable accepts from the page: exactly one known level. Anything
   // else is refused before the running agent is touched.
-  static func requested(by body: [String: Any]) throws -> (AgentPermission, Bool) {
+  static func requested(by body: [String: Any]) throws -> AgentPermission {
     guard let raw = body["permission"] as? String, let level = AgentPermission(rawValue: raw) else {
       throw AgentFailure(message: "Choose a permission level to turn the agent on. Nothing was turned on.")
     }
-    guard let value = body["sensitive"] else { return (level, false) }
-    guard let sensitive = value as? Bool, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else {
-      throw AgentFailure(message: "The sensitive capture option is malformed. Nothing was turned on.")
+    return level
+  }
+}
+
+// The dock's last choices, saved for later app runs, because the web view
+// keeps no storage between runs: the provider, the payment chosen for each
+// one, and the level last turned on or lowered to. Only enable, behind the
+// consent step, and lowerPermission save a level; the page may save a
+// provider and payment, never a level. Turning on still passes the consent
+// step, which starts from the saved level. A file that cannot be read, or a
+// value this app does not know, is ignored and the dock starts from defaults.
+struct AgentPreferences: Equatable {
+  var provider: AgentProviderKind?
+  var auth: [AgentProviderKind: AgentAuthMode] = [:]
+  var permission: AgentPermission?
+
+  static let fileName = "agent-preferences-v1.json"
+
+  // An explicit absolute REB_AGENT_PREFERENCES wins, as for the other agent stores.
+  static func storeURL(environment: [String: String], applicationSupport: URL) -> URL {
+    if let path = environment["REB_AGENT_PREFERENCES"], path.hasPrefix("/") {
+      return URL(fileURLWithPath: path).standardizedFileURL
     }
-    guard !sensitive || level == .full else {
-      throw AgentFailure(message: "Sensitive capture options belong to Full access. Nothing was turned on.")
+    return applicationSupport.appendingPathComponent("Origin Trace/\(fileName)")
+  }
+
+  static func load(_ url: URL) -> AgentPreferences {
+    guard let data = try? Data(contentsOf: url),
+      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      (object["version"] as? NSNumber)?.intValue == 1
+    else { return AgentPreferences() }
+    var preferences = AgentPreferences(
+      provider: (object["provider"] as? String).flatMap(AgentProviderKind.init(rawValue:)),
+      permission: (object["permission"] as? String).flatMap(AgentPermission.init(rawValue:)))
+    for (name, value) in object["auth"] as? [String: Any] ?? [:] {
+      guard let kind = AgentProviderKind(rawValue: name), let mode = (value as? String).flatMap(AgentAuthMode.init(rawValue:)),
+        mode == .subscription || kind.supportsKey
+      else { continue }
+      preferences.auth[kind] = mode
     }
-    return (level, sensitive)
+    return preferences
+  }
+
+  // Provider and payment names, never a key, token or model text, so the
+  // file holds nothing secret; it is still the researcher's alone.
+  var payload: [String: Any] {
+    var object: [String: Any] = ["auth": Dictionary(uniqueKeysWithValues: auth.map { ($0.key.rawValue, $0.value.rawValue) })]
+    if let provider { object["provider"] = provider.rawValue }
+    if let permission { object["permission"] = permission.rawValue }
+    return object
+  }
+
+  // A user-only temporary file renamed into place, so no other user can read
+  // the file even between its creation and a mode change.
+  func write(to url: URL) throws {
+    var object = payload
+    object["version"] = 1
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    let folder = url.deletingLastPathComponent()
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    let temporary = folder.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+    let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+    guard descriptor >= 0 else { throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: temporary.path]) }
+    let written = data.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+    let synced = fsync(descriptor) == 0
+    close(descriptor)
+    guard written == data.count, synced, rename(temporary.path, url.path) == 0 else {
+      unlink(temporary.path)
+      throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+    }
   }
 }
 
@@ -203,20 +261,16 @@ let agentPermissionPromptAuto = """
   """
 
 let agentPermissionPromptFull = """
-  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly, request and response bodies, cookie values or credential headers such as Authorization, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Sensitive capture options (canvas_images, request_content, response_media, js_invocation_digests) are not allowed in this conversation. The researcher sees every call and its result and can stop you at any time.
+  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly, request and response bodies, cookie values or credential headers such as Authorization, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Your sessions capture what the researcher's do in the app, request content and Canvas images included; set an option false when the question does not need what it keeps. The researcher sees every call and its result and can stop you at any time.
   """
 
-let agentPermissionPromptFullSensitive = """
-  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly, request and response bodies, cookie values or credential headers such as Authorization, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. The researcher also allowed sensitive capture options (canvas_images, request_content, response_media, js_invocation_digests) in this conversation: name them, with confirm_sensitive_capture, only when the content they keep is what the question needs. The researcher sees every call and its result and can stop you at any time.
-  """
-
-func agentSystemPrompt(_ level: AgentPermission, sensitive: Bool = false) -> String {
+func agentSystemPrompt(_ level: AgentPermission) -> String {
   let paragraph: String
   switch level {
   case .readOnly: paragraph = agentPermissionPromptReadOnly
   case .ask: paragraph = agentPermissionPromptAsk
   case .auto: paragraph = agentPermissionPromptAuto
-  case .full: paragraph = sensitive ? agentPermissionPromptFullSensitive : agentPermissionPromptFull
+  case .full: paragraph = agentPermissionPromptFull
   }
   return agentSystemPrompt.replacingOccurrences(of: "{permission}", with: paragraph)
 }
@@ -250,8 +304,6 @@ enum AgentToolGate {
     "get_artifact_text", "search_artifact_text", "export_requests_har", "run_wasm_function", "get_wasm_runs",
     "start_live_session", "session_action",
   ]
-  static let sensitiveStartOptions = ["canvas_images", "request_content", "response_media", "js_invocation_digests", "confirm_sensitive_capture"]
-
   // Whether a tool the server listed is offered to the model at this level.
   static func lists(_ name: String, readOnly: Bool, level: AgentPermission) -> Bool {
     if hidden.contains(name) { return false }
@@ -259,17 +311,9 @@ enum AgentToolGate {
     return readOnly || level.listsActions
   }
 
-  static func decide(
-    _ name: String, readOnly: Bool, arguments: [String: Any], level: AgentPermission, sensitive: Bool
-  ) -> AgentToolDecision {
+  static func decide(_ name: String, readOnly: Bool, level: AgentPermission) -> AgentToolDecision {
     guard lists(name, readOnly: readOnly, level: level) else {
       return .refuse("This tool is not available at \(level.label). No request was sent.")
-    }
-    if name == "start_live_session" && !sensitive {
-      let named = sensitiveStartOptions.filter { arguments[$0] as? Bool == true }
-      if !named.isEmpty {
-        return .refuse("Sensitive capture options (\(named.joined(separator: ", "))) were not allowed for this conversation. No session was started.")
-      }
     }
     if readOnly { return .run }
     return level == .ask ? .ask : .run
@@ -739,18 +783,15 @@ final class AgentSession {
     // Native state: the page asks for a level, but only enable (behind native
     // consent for Auto-approve and Full access) and lower change this.
     var permission: AgentPermission
-    // Full access only: start_live_session may name sensitive capture options.
-    var sensitiveCapture: Bool
     let transcriptDirectory: URL
     // The app's environment, read only for the few names a Full access tool
     // server needs to start a live session (mcpEnvironment).
     var appEnvironment: [String: String] = [:]
     var loop: AgentLoop { provider.loop(auth) }
     var allowEffects: Bool { permission.listsActions }
-    var sensitive: Bool { permission == .full && sensitiveCapture }
 
     init(provider: AgentProviderKind, auth: AgentAuthMode = .key, model: String, apiExecutable: URL, apiBaseURL: URL,
-      permission: AgentPermission, sensitiveCapture: Bool = false, transcriptDirectory: URL,
+      permission: AgentPermission, transcriptDirectory: URL,
       appEnvironment: [String: String] = [:])
     {
       self.provider = provider
@@ -759,7 +800,6 @@ final class AgentSession {
       self.apiExecutable = apiExecutable
       self.apiBaseURL = apiBaseURL
       self.permission = permission
-      self.sensitiveCapture = sensitiveCapture
       self.transcriptDirectory = transcriptDirectory
       self.appEnvironment = appEnvironment
     }
@@ -767,9 +807,7 @@ final class AgentSession {
     // The one tool server, for native and for a CLI alike: the same
     // `reb-api mcp --permission` level and gates.
     var mcpArguments: [String] {
-      var arguments = ["mcp", "--base-url", apiBaseURL.absoluteString, "--permission", permission.rawValue]
-      if sensitive { arguments.append("--allow-sensitive-capture") }
-      return arguments
+      ["mcp", "--base-url", apiBaseURL.absoluteString, "--permission", permission.rawValue]
     }
 
     // A tool server below Full access needs nothing from the app. A Full
@@ -824,7 +862,6 @@ final class AgentSession {
       "effects": configuration?.allowEffects ?? false,
       "permission": configuration?.permission.rawValue as Any,
       "permissionLabel": configuration?.permission.label as Any,
-      "sensitive": configuration?.sensitive ?? false,
       "tools": tools.map { ["name": $0.name, "readOnly": $0.readOnly, "needsApproval": needsApproval($0)] },
     ]
   }
@@ -833,8 +870,7 @@ final class AgentSession {
   // pause the graph; callTool enforces it either way.
   func needsApproval(_ tool: AgentToolDefinition) -> Bool {
     guard let configuration else { return true }
-    return AgentToolGate.decide(tool.name, readOnly: tool.readOnly, arguments: [:], level: configuration.permission,
-      sensitive: configuration.sensitive) == .ask
+    return AgentToolGate.decide(tool.name, readOnly: tool.readOnly, level: configuration.permission) == .ask
   }
 
   // What the graph needs to build one LangChain tool per MCP tool.
@@ -860,7 +896,6 @@ final class AgentSession {
       throw AgentFailure(message: "Raising the permission goes back through consent. Turn the agent off and on again.")
     }
     current.permission = level
-    if level != .full { current.sensitiveCapture = false }
     configuration = current
     applyLevel()
     stopChild()
@@ -994,9 +1029,7 @@ final class AgentSession {
     guard let definition = tools.first(where: { $0.name == name }) else {
       return ["text": "This tool is not available at \(configuration.permission.label). No request was sent.", "isError": true]
     }
-    switch AgentToolGate.decide(name, readOnly: definition.readOnly, arguments: arguments, level: configuration.permission,
-      sensitive: configuration.sensitive)
-    {
+    switch AgentToolGate.decide(name, readOnly: definition.readOnly, level: configuration.permission) {
     case .refuse(let reason): return ["text": reason, "isError": true]
     case .ask where !approved: return ["text": "This action needs Allow once. It did not run.", "isError": true]
     default: break

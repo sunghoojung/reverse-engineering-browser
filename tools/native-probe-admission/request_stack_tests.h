@@ -216,10 +216,17 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
     NativeRequestStackWalk::Record(1, 0);
     assert(!NativeRequestStackWalk::Enabled() &&
            NativeRequestStackWalk::RecordAsyncTask(reb::NativeAsyncTaskKind::kSetTimeout) == 0 &&
-           NativeRequestStackWalk::EnterAsyncTask(5) == 0 &&
            NativeRequestStackWalk::CurrentAsyncTask() == 0 &&
            NativeRequestStackWalk::RecordNavigation(reb::NativeNavigationKind::kLocation, 9) == 0);
-    NativeRequestStackWalk::ExitAsyncTask(0);
+    // Without a provider a task run enters nothing, and its exit restores nothing.
+    const auto not_entered = NativeRequestStackWalk::EnterAsyncTask(5);
+    assert(not_entered == NativeRequestStackWalk::kAsyncTaskNotEntered &&
+           NativeRequestStackWalk::CurrentAsyncTask() == 0);
+    NativeRequestStackWalk::ExitAsyncTask(not_entered);
+    {
+      const reb::NativeNavigationKindScope kind(reb::NativeNavigationKind::kLocation);
+      assert(reb::NativeNavigationKindScope::Current() == reb::NativeNavigationKind::kOtherScript);
+    }
     NativeRequestStackWalk::AttributeAsyncTask(3, 5);
     NativeRequestStackWalk::ScheduleFormNavigation(9);
     assert(NativeRequestStackWalk::TakeFormNavigation(9) == 0);
@@ -237,6 +244,17 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
                                         &ReleaseFixtureFrames);
     assert(allocations.load() == before && fixture_frames_made == 0 &&
            NativeRequestStackWalk::CurrentScope() == document);
+    // With the provider, a navigation scope names the kind its navigation
+    // starts with, and the scope it nests in again once it ends.
+    {
+      const reb::NativeNavigationKindScope open(reb::NativeNavigationKind::kWindowOpen);
+      {
+        const reb::NativeNavigationKindScope location(reb::NativeNavigationKind::kLocation);
+        assert(reb::NativeNavigationKindScope::Current() == reb::NativeNavigationKind::kLocation);
+      }
+      assert(reb::NativeNavigationKindScope::Current() == reb::NativeNavigationKind::kWindowOpen);
+    }
+    assert(reb::NativeNavigationKindScope::Current() == reb::NativeNavigationKind::kOtherScript);
   }
   transport.Disable();
   {

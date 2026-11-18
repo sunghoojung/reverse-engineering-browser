@@ -47,6 +47,23 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
 
   private var standIn: URL? { agentStandInBaseURL(environment) }
 
+  // The dock's saved choices (AgentPreferences), read once per app run.
+  private lazy var preferencesURL = AgentPreferences.storeURL(
+    environment: environment,
+    applicationSupport: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support"))
+  private lazy var preferences = AgentPreferences.load(preferencesURL)
+
+  // A choice that cannot be saved still applies for this run.
+  private func savePreferences(_ change: (inout AgentPreferences) -> Void) {
+    var next = preferences
+    change(&next)
+    guard next != preferences else { return }
+    preferences = next
+    do { try next.write(to: preferencesURL) }
+    catch { NSLog("Origin Trace could not save the agent choices to %@: %@", preferencesURL.path, error.localizedDescription) }
+  }
+
   init(webView: WKWebView, window: NSWindow) {
     self.webView = webView
     self.window = window
@@ -170,6 +187,11 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
       let kind = try provider(body)
       if try await confirmRemoveKey(kind) { AgentKeychain.delete(kind) }
       return status()
+    case "remember":
+      let kind = try provider(body)
+      let mode = try auth(body, kind)
+      savePreferences { $0.provider = kind; $0.auth[kind] = mode }
+      return ["ok": true]
     case "enable": return try await enable(body)
     case "lowerPermission":
       guard let raw = body["permission"] as? String, let level = AgentPermission(rawValue: raw) else {
@@ -177,6 +199,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
       }
       try engine.lower(to: level)
       cli?.lower(to: level)
+      savePreferences { $0.permission = level }
       return status()
     case "disable":
       proxy.cancelAll()
@@ -228,6 +251,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
       },
       "engine": engine.statusPayload(),
       "tools": engine.toolDefinitions(),
+      "preferences": preferences.payload,
     ]
   }
 
@@ -316,7 +340,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
     // Consent in the dock chose this level. Native checks it before anything
     // changes, then holds it: only lowerPermission changes it afterwards.
-    let (permission, sensitive) = try AgentPermission.requested(by: body)
+    let permission = try AgentPermission.requested(by: body)
     if engine.isOn { proxy.cancelAll(); stopCLI(); engine.disable() }
     let requested = (body["model"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? kind.defaultModel(mode)
     guard requested.range(of: "^[A-Za-z0-9._:\\[\\]-]{1,80}$", options: .regularExpression) != nil else {
@@ -324,7 +348,7 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
     }
     let configuration = AgentSession.Configuration(
       provider: kind, auth: mode, model: requested, apiExecutable: apiExecutable, apiBaseURL: apiBaseURL,
-      permission: permission, sensitiveCapture: sensitive, transcriptDirectory: transcriptDirectory,
+      permission: permission, transcriptDirectory: transcriptDirectory,
       appEnvironment: environment)
     let directory = executable == nil ? nil : try AgentCLILocator.workingDirectory(kind, root: cliRoot)
     sessionKey = rawKey
@@ -336,6 +360,11 @@ final class NativeAgentBridge: NSObject, WKScriptMessageHandlerWithReply {
         listedToolNames: engine.listedToolNames, environment: environment, emit: { [weak self] event in self?.deliver(event) })
       driver.onStateChange = { [weak self] in self?.engine.publishStatus() }
       cli = driver
+    }
+    savePreferences {
+      $0.provider = kind
+      $0.auth[kind] = mode
+      $0.permission = permission
     }
     return status()
   }

@@ -37,6 +37,13 @@ const environment = {
   REB_API_COLLECTION_STORE: join(temporary, "collection.json"),
   REB_LOCAL_ANALYST_STORE: join(temporary, "analyst.json"),
   REB_ACTIVE_ENDPOINT_FILE: join(temporary, "active.endpoint"),
+  // The wrapper is not a Brave build the V8 flag preflight can inspect, and
+  // the default browser is stock Brave, so the native V8 switches the
+  // launcher defaults on stay off. check-native-only-launch.mjs owns them.
+  REB_NATIVE_QUIET_MODE: "0",
+  REB_NATIVE_WASM_DISPATCH: "0",
+  REB_NATIVE_WASM_CALL_INDIRECT: "0",
+  REB_NATIVE_REQUEST_STACKS: "0",
 };
 for (const [key, name] of Object.entries({
   REB_BROKER_BINARY: "OriginTraceEventBroker",
@@ -219,7 +226,7 @@ try {
     }),
   ]);
   assert.equal(code, 1, interruptionDiagnostics);
-  assert.match(interruptionDiagnostics, /Brave stopped; the live capture connection has closed/);
+  assert.match(interruptionDiagnostics, /REB_LIVE_SESSION_FAILURE: Brave was stopped by signal KILL, so the live session ended\. See: /);
   await assert.rejects(access(handshake));
   await assert.rejects(fetch(new URL("/api/health", interruptionEndpoint), {signal: AbortSignal.timeout(1000)}));
   console.log("PASS browser exit after readiness reports failure and tears down its live session");
@@ -251,7 +258,8 @@ async function checkLiveSessionCleanup() {
   const failure = section('fail_live_session() {', '\nscript_dir=');
   const cleanup = section('broker_pid=""', '"${broker_binary}" --store');
   const analyzer = section('analyzer_log=', 'ui_arguments=(');
-  const monitor = section('if [[ "${embedded_session}" == 1 ]]; then\n  # A PID is reused', null);
+  // The owner poll, with the stop-cause helpers it reports through.
+  const monitor = section('# How a stopped child ended, in `child_ending`.', null);
   const quote = value => `'${value.replaceAll("'", "'\\''")}'`;
   const temporary = await mkdtemp(join(tmpdir(), "origin-trace-cleanup-"));
   const helper = join(temporary, "helper.cjs");
@@ -282,8 +290,10 @@ setInterval(() => {}, 1000);
     catch (error) { if (error.code === "ESRCH") return false; throw error; }
   };
   for (const scenario of [
-    {name: "responsive-browser-exit", stubborn: [], signal: "browser", code: 1},
-    {name: "shared-grace-and-analyzer-worker", stubborn: ["broker", "ui", "analyzer"], signal: "browser", code: 1},
+    // The browser fixture exits 0 on SIGTERM, as a Brave the researcher
+    // closes does: an end they chose, reported with status 0.
+    {name: "responsive-browser-exit", stubborn: [], signal: "browser", code: 0},
+    {name: "shared-grace-and-analyzer-worker", stubborn: ["broker", "ui", "analyzer"], signal: "browser", code: 0},
     {name: "coordinator-cancellation", stubborn: [], signal: "coordinator", code: 143},
     {name: "browser-exits-without-connecting", stubborn: [], signal: null, code: 1, embedded: 0, longest: 12500},
   ]) {
@@ -362,7 +372,7 @@ ${monitor}`);
       assert.match(output, /Live session cleanup complete\./);
       const markedFailures = output.split("\n").filter(line => line.startsWith("REB_LIVE_SESSION_FAILURE: "));
       if (scenario.signal === "browser") {
-        assert.deepEqual(markedFailures, [`REB_LIVE_SESSION_FAILURE: Brave stopped; the live capture connection has closed. See: ${join(directory, "brave.log")}`]);
+        assert.deepEqual(markedFailures, [`REB_LIVE_SESSION_FAILURE: Brave was closed, so the live session ended. Its evidence stays in ${directory}.`]);
         assert(output.indexOf(markedFailures[0]) < output.indexOf("Live session cleanup started:"),
           "The actionable cause must be recorded before teardown diagnostics");
       } else if (!embedded) {

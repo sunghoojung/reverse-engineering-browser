@@ -90,6 +90,11 @@ class NativeArtifactCaptureSink final {
   NativeArtifactCaptureSink(const NativeArtifactCaptureSink&) = delete;
   NativeArtifactCaptureSink& operator=(const NativeArtifactCaptureSink&) = delete;
 
+  // Whether a session armed the sink, before Get(): one atomic load with no
+  // call. IsEnabled adds the connection, category and expiry checks.
+  [[nodiscard]] static bool IsArmed() noexcept {
+    return emitter_.load(std::memory_order_acquire) != nullptr;
+  }
   [[nodiscard]] bool IsEnabled() const noexcept;
   void SetEmitter(NativeProbeEmitter emitter,
                   std::uint64_t session_id,
@@ -355,7 +360,8 @@ class NativeArtifactCaptureSink final {
   // Configuration, body completions and posted transfer ACKs run on the browser
   // sequence. A new generation retires admitted work even if session ID is reused.
   std::atomic<std::uint64_t> generation_{0};
-  std::atomic<NativeProbeEmitter> emitter_{nullptr};
+  // A static member, so IsArmed needs neither Get() nor its guard load.
+  static std::atomic<NativeProbeEmitter> emitter_;
   std::atomic<std::uint64_t> session_id_{0};
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};

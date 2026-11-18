@@ -159,13 +159,13 @@ stands for, and the server applies exactly those:
 `--permission` cannot be combined with the individual flags, and those flags
 keep their meaning without it. `get_session_context` reports the connection's
 `mcp_admission` (`permission`, `effects`, `session_start`, `content_reads`,
-`content_omitted`, `sensitive_capture`), and the initialize instructions end
-with one sentence for the level. Under `--permission full`,
-`start_live_session` refuses `canvas_images`, `request_content`,
-`response_media`, `js_invocation_digests` and `confirm_sensitive_capture`
-before anything launches, unless `--allow-sensitive-capture` is also set. The
-legacy `--allow-session-start` keeps accepting them with
-`confirm_sensitive_capture`. None of these flags is authorization.
+`content_omitted`), and the initialize instructions end with one sentence for
+the level. Allowing session start (`--permission full`, or the legacy
+`--allow-session-start`) is the researcher's one consent to what the sessions
+capture, so `start_live_session` takes the app's defaults below without
+`confirm_sensitive_capture`, which it sets itself. `--allow-sensitive-capture`
+from an older configuration is accepted and ignored. None of these flags is
+authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
 content, `get_artifact_text`, `search_artifact_text` and
@@ -525,15 +525,28 @@ returns 409 `dependency_unavailable` for these actions.
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
 `request_content_budget_mib`, `response_body_budget_mib`, `response_media`,
-`request_stacks`, `document_start`,
-`js_invocation_sites`, `js_invocation_saved_sites`,
+`request_stacks`, `document_start`, `browser_internal`, `extension_traffic`,
+`fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
 `wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
 `wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
 The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect` and
-do not raise the 16-record cap. Every
-capture switch is off unless named; an inherited capture switch, site file,
+do not raise the 16-record cap. A switch left unset takes the Origin Trace
+app's default, and `false` turns it off: `wasm_dispatch` and
+`wasm_call_indirect` (mask bits 512 and 1024), `quiet`, `request_stacks`
+(bits 256 and 1024, and only where the browser has `--reb-request-stacks`) and
+`document_start` are on; with the consent, `request_content` (bits 256 and
+1024), `canvas_images` (bits 1 and 1024) and, with named sites and request
+content, `js_invocation_digests` are on; `browser_internal`,
+`extension_traffic` and `fresh_profile` are off. A switch whose bits the mask
+lacks stays off. `duration_seconds` left unset runs the session until it is
+ended. Sessions use one persistent agent research profile,
+`~/.config/origin-trace/agent-sessions/research-profiles`, so a sign-in
+carries over; `fresh_profile` gives one session a new, empty profile in its
+session folder, and a start while another Brave holds the shared profile is
+refused with a cause that names it. Defaults come from the start request
+alone; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
 `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
@@ -543,24 +556,28 @@ browser profile or embedded-session variable is ignored, so an inherited
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
-| `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: needs `confirm_sensitive_capture` and category bits 256 and 1024. Without it, request body length, type and digest are still recorded, but no path, query or body bytes. |
+| `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: on by default with the consent (`confirm_sensitive_capture` for `reb-api session start`, session start through MCP) and category bits 256 and 1024. Off, request body length, type and digest are still recorded, but no path, query or body bytes. |
 | `request_content_budget_mib` | `REB_REQUEST_CONTENT_BUDGET_MIB` | 1..4096 MiB of unique request bodies and full targets, default 256. Needs `request_content`, so it is behind the same confirmation. |
 | `response_body_budget_mib` | `REB_RESPONSE_BODY_BUDGET_MIB` | 1..16384 MiB of unique response bodies, default 512. Needs `request_content`. |
-| `response_media` | `REB_CAPTURE_RESPONSE_MEDIA=1` | Also keeps the images, audio, video and fonts that page elements load. Needs `request_content`, so it is behind the same confirmation; under `--permission full` it also needs `--allow-sensitive-capture`. |
-| `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Strict: `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED` is removed, so a Brave without `--reb-request-stacks` refuses the start. |
+| `response_media` | `REB_CAPTURE_RESPONSE_MEDIA=1` | Also keeps the images, audio, video and fonts that page elements load. Needs `request_content`, so it is behind the same confirmation. |
+| `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Left unset, it is on with `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED=1`, so a Brave without `--reb-request-stacks` starts without it; named `true`, it is strict and such a Brave refuses the start. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
+| `browser_internal` | `REB_CAPTURE_BROWSER_INTERNAL=1` | Records requests of browser pages such as `brave://settings` and DevTools, which are otherwise counted and not recorded. |
+| `extension_traffic` | `REB_CAPTURE_EXTENSION_TRAFFIC=1` | Records requests of extension workers, which are otherwise counted and not recorded. |
+| `fresh_profile` | `REB_FRESH_PROFILE=1` | A new, empty browser profile for this session, in its session folder, instead of the shared agent research profile. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
 | `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
-| `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and `confirm_sensitive_capture`. |
-| `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: needs `confirm_sensitive_capture`. |
+| `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and the consent; on by default with both and request content. |
+| `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: on by default with the consent and category bits 1 and 1024. |
 | `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..16 retained samples of each function on each Wasm stream. Needs `wasm_dispatch` or `wasm_call_indirect`. |
 | `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..16 retained `call_indirect` samples of each caller and module offset. |
 | `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |
 | `wasm_function_deny` | `REB_NATIVE_WASM_FUNCTION_DENY` | Up to 32 function indexes to exclude. |
 | `wasm_module_allowlist` | `REB_NATIVE_WASM_MODULE_ALLOWLIST` | Up to 8 SHA-256 digests, written to a private file. Other modules do not advance either sample index. |
 
-An agent sets `confirm_sensitive_capture` only on the researcher's
-authorization for that content and target. Named invocation sites are strict:
+The researcher grants that consent only when the authorization covers that
+content and target, and an agent names a sensitive switch `false` when the
+question does not need what it keeps. Named invocation sites are strict:
 `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` is removed, so a Brave without
 invocation capture refuses the start instead of silently dropping the sites.
 The start result's `options` (and `js_invocation_sites_armed`), the first

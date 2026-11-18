@@ -64,10 +64,15 @@ step 4.
 
 Build from the merge commit of #501, or a later `main` commit that changes no
 browser input. That commit becomes `build_source`. The release refuses the pair
-if any browser input (`browser`, `include`, `src`, `protocol`, `services` and
-the six Brave scripts named in `prepare-release-brave.sh`) differs between it
-and the released commit, so merge nothing that touches them until the pin PR in
-step 8 is merged.
+if any browser input differs between it and the released commit, so merge
+nothing that touches them until the pin PR in step 8 is merged. The browser
+inputs are exactly what the Brave build reads, listed in `browser_inputs` in
+`prepare-release-brave.sh`: `browser` (pins, overlays and patches), the six
+Brave scripts, and the two patch-stack helpers they import
+(`tools/brave_patch_contract.py` and `tools/check-integrated-brave-state.py`).
+`include`, `src`, `protocol`, `services` and the app are not inputs: no overlay
+source or GN target reads them. `make check` compiles the overlay sources
+against `include` and `src` to keep the browser and its consumers compatible.
 
 ```sh
 git clone https://github.com/sunghoojung/reverse-engineering-browser.git "$REPO"
@@ -231,7 +236,7 @@ debugger observations. An agent connected with
 | Content session | JSON, HTML, image, gzip and brotli, chunked and streamed bodies kept with exact bytes and digest; an aborted download, a 304, a redirect and a service-worker answer each carry their reason; 50 parallel responses all kept; a navigation answered from `preloadResponse`; a burst then silence; the response budget shown when it runs out | #428 |
 | Content session | A 150-frame stack through wrappers matches DevTools frame for frame; 5,000-deep recursion keeps 1,024 frames and the omitted count; inline, `eval` and network script frames resolve; `fetch` from a Wasm import shows Wasm frames; an `await` chain shows async frames; one call site's stack is sent once | #429 |
 | Content session | A JS-set cookie and server `Set-Cookie` with SameSite and Secure variants: sent, received and blocked cookies match the server, and the JS write links to its script position | #430 |
-| Content session | An 8 KB GraphQL GET URL; a 5 MiB JSON POST, a multipart upload with a file and a stream-body `fetch` with exact bytes and digest; 40 parallel scripts all kept; 5,000 small POSTs kept until the request budget runs out, which is shown | #436 |
+| Content session | An 8 KB GraphQL GET URL; a 5 MiB JSON POST, a multipart upload with a file and a stream-body `fetch` with exact bytes and digest; 40 parallel scripts all kept; 5,000 small POSTs kept until the request budget runs out, which is shown, and any body the artifact queue refused before then counted in `get_session_summary` | #436 |
 | Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation | #434 phase 1 |
 | Metadata session (the same start without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images`) | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` | #427, #429, #430 |
 | Session without `--request-stacks` | No stack walk runs | #429 |
@@ -293,8 +298,8 @@ REB_BRAVE_DIRECTORY=/absolute/path/to/src/brave \
 
 The packager prints the ZIP's SHA-256. After this, the browser inputs listed in
 [`scripts/prepare-release-brave.sh`](../../scripts/prepare-release-brave.sh)
-(`browser`, `include`, `src`, `protocol`, `services` and the Brave scripts)
-must not change before the release, or CI refuses the pair.
+(`browser`, the Brave scripts and their two patch-stack helpers) must not
+change before the release, or CI refuses the pair.
 
 ## 2. Record identity and provenance
 
@@ -370,7 +375,7 @@ including `brave_name`, `build_source` and both digests, and bump only the
 application version. The browser ZIP and provenance keep the name and
 `release` of the version they were built for, because the provenance digest is
 pinned and the record cannot be rewritten. CI still refuses the pair if any
-browser input or protocol byte differs from `build_source`. Set
+browser input differs from `build_source`. Set
 `REVIEWED_BRAVE_TAG` in
 [`publish-release-pair.py`](../../tools/publish-release-pair.py) to that
 browser release; v0.5.2 paired the v0.5.1 build this way. v0.6.0 does not:

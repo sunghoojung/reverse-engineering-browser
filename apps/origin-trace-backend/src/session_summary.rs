@@ -1404,11 +1404,16 @@ pub fn build(
             "no_tab_traffic_excluded",
             "info",
             format!(
-                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}, service workers no page used {}, browser prefetches with no page {}). These are named exclusions, not gaps.",
+                "{no_tab} requests no tab caused were not recorded (extension workers {}, DevTools loads {}, service workers no page used {}, browser prefetches with no page {}). These are named exclusions, not gaps.{}",
                 count(65),
                 count(66),
                 count(68),
-                count(69)
+                count(69),
+                if count(65) > 0 {
+                    " Extension traffic in Advanced options of New Live Session… (extension_traffic for an agent session) records the extension workers' requests."
+                } else {
+                    ""
+                }
             ),
         );
         item["count"] = json!(no_tab.to_string());
@@ -1454,7 +1459,7 @@ pub fn build(
             "browser_internal_excluded",
             "info",
             format!(
-                "{}. These are named exclusions, not gaps; set REB_CAPTURE_BROWSER_INTERNAL=1 to record them.",
+                "{}. These are named exclusions, not gaps. Browser-internal traffic in Advanced options of New Live Session… (browser_internal for an agent session) records them.",
                 parts.join("; ")
             ),
         );
@@ -2598,6 +2603,12 @@ mod tests {
         assert!(no_tab["message"].as_str().unwrap().contains(
             "(extension workers 2, DevTools loads 1, service workers no page used 3, browser prefetches with no page 4)"
         ));
+        assert!(
+            no_tab["message"]
+                .as_str()
+                .unwrap()
+                .contains("Extension traffic in Advanced options")
+        );
         assert_eq!(summary["events"]["sequence_gaps"], "0");
         let checks = summary["checks"].as_array().unwrap();
         assert!(checks.iter().all(|check| check["code"] != "named_gap"));
@@ -2612,6 +2623,11 @@ mod tests {
             "11 browser-internal requests were not recorded (chrome 7, devtools 1, webui_request 3)"
         ));
         assert!(message.contains("2 WebUI renderer processes were not admitted"));
+        assert!(message.contains("Browser-internal traffic in Advanced options"));
+        assert!(
+            !message.contains("REB_"),
+            "the notice names the app control"
+        );
     }
 
     #[test]

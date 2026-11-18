@@ -1,0 +1,121 @@
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+index 5d38252..86ca759 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
+@@ -127,6 +127,7 @@
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ #include "tools/v8_context_snapshot/buildflags.h"
++#include "v8/include/v8-native-runtime-buffer.h"
+ #include "v8/include/v8-native-stack.h"
+ #include "v8/include/v8-profiler.h"
+ #include "v8/include/v8.h"
+@@ -1082,8 +1083,10 @@ void NoteWasmExecutionExited(bool tail) {
+   }
+ }
+ 
+-// Always reports, including a worker or a missing document, so the host call
+-// closes. An empty URL leaves the stashed document when the sample had one.
++// Reports for every open host call, including a worker or a missing document,
++// so the call closes. An empty URL leaves the stashed document when the
++// sample had one. Without an open call the sink would drop the report, so
++// nothing is converted.
+ void CaptureWasmExecutionTrap(v8::Local<v8::Context> context,
+                               const std::uint8_t* module_bytes,
+                               size_t module_size,
+@@ -1093,6 +1096,9 @@ void CaptureWasmExecutionTrap(v8::Local<v8::Context> context,
+                               std::uint32_t function_index,
+                               bool offset_known,
+                               std::uint32_t module_byte_offset) {
++  if (!reb::NativeProbeSink::Get().IsWasmHostCallOpen()) {
++    return;
++  }
+   if (!function_known) function_index = 0;
+   if (!offset_known) module_byte_offset = 0;
+   auto mapped_reason = reb::NativeWasmExecutionReason::kUnknown;
+@@ -2248,6 +2254,9 @@ void V8Initializer::InitializeV8Common(v8::Isolate* isolate) {
+   isolate->SetWasmDispatchScopeCallback(NoteWasmDispatchScope);
+   reb::NativeProbeSink::Get().SetNativeWasmLimitProbe(ProbeWasmDispatchLimits);
+   isolate->SetRuntimeBufferCallback(CaptureRuntimeBuffer);
++  // Process-wide; every isolate installs the same byte.
++  v8::SetRuntimeBufferCallbackGate(
++      &reb::NativeProbeSink::Get().RuntimeBufferGate());
+   isolate->SetWasmCustomDescriptorsEnabledCallback(
+       WasmCustomDescriptorsEnabledCallback);
+   isolate->SetSharedArrayBufferConstructorEnabledCallback(
+diff --git a/third_party/blink/renderer/core/loader/cookie_jar.cc b/third_party/blink/renderer/core/loader/cookie_jar.cc
+index 9cfc85b..14b2df9 100644
+--- a/third_party/blink/renderer/core/loader/cookie_jar.cc
++++ b/third_party/blink/renderer/core/loader/cookie_jar.cc
+@@ -108,7 +108,7 @@ bool CookieJar::SetCookie(const String& value) {
+       document_->GetExecutionContext()->GetStorageAccessApiStatus(),
+       is_ad_tagged, apply_devtools_overrides, value);
+   last_operation_was_set_ = true;
+-  if (::reb::NativeScriptCookieSink::Get().IsEnabled()) [[unlikely]] {
++  if (::reb::NativeScriptCookieSink::IsEnabled()) [[unlikely]] {
+     ::reb::NativeScriptCookieSink::Get().RecordDocumentCookieSet(
+         value.Utf8(), NativeScriptCookieFrameId(*document_));
+   }
+@@ -235,7 +235,7 @@ String CookieJar::Cookies() {
+   if (is_first_operation_) {
+     LogFirstCookieRequest(FirstCookieRequest::kFirstOperationWasGet);
+   }
+-  if (::reb::NativeScriptCookieSink::Get().IsEnabled()) [[unlikely]] {
++  if (::reb::NativeScriptCookieSink::IsEnabled()) [[unlikely]] {
+     // An ASCII jar is read in place; only another one is converted to UTF-8.
+     const StringUtf8Adaptor cookies(last_cookies_);
+     ::reb::NativeScriptCookieSink::Get().RecordDocumentCookieGet(
+diff --git a/third_party/blink/renderer/core/probe/core_probes.cc b/third_party/blink/renderer/core/probe/core_probes.cc
+index 487c5a6..8217890 100644
+--- a/third_party/blink/renderer/core/probe/core_probes.cc
++++ b/third_party/blink/renderer/core/probe/core_probes.cc
+@@ -71,10 +71,13 @@ AsyncTask::AsyncTask(ExecutionContext* context,
+       script_initiation_monitor_(
+           enabled ? ScriptInitiationMonitor::FromExecutionContext(context)
+                   : nullptr),
+-      reb_previous_segment_(reb::NativeRequestStackWalk::EnterAsyncTask(
++      // A task without a carried segment keeps the thread's, so it enters
++      // nothing: every other writer of that segment restores it.
++      reb_previous_segment_(
+           enabled && task_context
+-              ? task_context->reb_segment_
+-              : reb::NativeRequestStackWalk::CurrentAsyncTask())) {
++              ? reb::NativeRequestStackWalk::EnterAsyncTask(
++                    task_context->reb_segment_)
++              : reb::NativeRequestStackWalk::kAsyncTaskNotEntered) {
+   // TODO(crbug.com/1275875): Verify that `task_context` was scheduled, but
+   // not yet canceled. Currently we don't have enough confidence that such
+   // a CHECK wouldn't break blink.
+diff --git a/third_party/blink/renderer/modules/cookie_store/cookie_store.cc b/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
+index 844fd12..ec6addd 100644
+--- a/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
++++ b/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
+@@ -58,9 +58,9 @@ bool IsHttpWhitespace(UChar c) {
+ void RecordNativeCookieStore(::reb::NativeScriptCookieApi api,
+                              const String& name,
+                              const String& value = String()) {
+-  auto& sink = ::reb::NativeScriptCookieSink::Get();
+-  if (sink.IsEnabled()) [[unlikely]] {
+-    sink.RecordCookieStore(api, name.Utf8(), value.Utf8());
++  if (::reb::NativeScriptCookieSink::IsEnabled()) [[unlikely]] {
++    ::reb::NativeScriptCookieSink::Get().RecordCookieStore(api, name.Utf8(),
++                                                           value.Utf8());
+   }
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+index c65167b..cfb04e1 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/resource_request_sender.cc
+@@ -124,6 +124,11 @@ bool RedirectRequiresLoaderRestart(const GURL& original_url,
+ reb::NativeRendererRequest RecordNativeRequestStart(
+     const int request_id,
+     const network::ResourceRequest& request) {
++  // Every record below needs an armed sink, so an inactive one converts
++  // nothing.
++  if (!reb::NativeProbeSink::Get().IsCaptureArmed()) {
++    return {};
++  }
+   const reb::NativeRendererRequest start =
+       reb::NativeProbeSink::Get().RecordRequestInitiated(
+           request_id, request.method, request.url.scheme(), request.url.host());

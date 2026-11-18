@@ -7,6 +7,7 @@
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_REQUEST_STACK_H_
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -79,19 +80,6 @@ class NativeProbeSink;
 struct NativeRequestStackTables;
 class NativeRequestStackWalk;
 
-// The kind a Location setter or window.open gives the navigation it starts.
-class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeNavigationKindScope final {
- public:
-  explicit NativeNavigationKindScope(NativeNavigationKind kind) noexcept;
-  ~NativeNavigationKindScope();
-  NativeNavigationKindScope(const NativeNavigationKindScope&) = delete;
-  NativeNavigationKindScope& operator=(const NativeNavigationKindScope&) = delete;
-  [[nodiscard]] static NativeNavigationKind Current() noexcept;
-
- private:
-  const NativeNavigationKind previous_;
-};
-
 // Blink's walker. It runs on the calling thread and returns kWalked only on a
 // thread with attached tables (the document main thread or a dedicated, shared
 // or service worker), after calling FramesReady exactly once.
@@ -126,9 +114,14 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   [[nodiscard]] static NativeStackScope CurrentScope() noexcept;
   // --reb-promise-stacks: threads attached after this keep a registration ring.
   static void EnablePromiseRegistrations() noexcept;
-  // Called by the loader with RecordRequestInitiated's admitted sequence.
-  // Zero, or no provider, returns after at most one atomic load.
-  static void Record(std::int32_t request_id, std::uint64_t initiated_sequence) noexcept;
+  // Called by the loader with RecordRequestInitiated's admitted sequence,
+  // which is zero while capture is inactive: then nothing is called or loaded.
+  static void Record(const std::int32_t request_id,
+                     const std::uint64_t initiated_sequence) noexcept {
+    if (initiated_sequence != 0) [[unlikely]] {
+      RecordAdmitted(request_id, initiated_sequence);
+    }
+  }
   // The frame request_initiated names for a request this thread starts now.
   [[nodiscard]] static std::uint64_t RequestFrameId() noexcept;
   // One debugger observation, protocol/native-debugger-observation-v1.md:
@@ -144,8 +137,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
                                 std::uint64_t frame_id,
                                 std::array<std::uint8_t, 32>& digest,
                                 NativeStackFrame& innermost) noexcept;
-  // Whether the provider is installed: one atomic load.
-  [[nodiscard]] static bool Enabled() noexcept;
+  // Whether the provider is installed: one atomic load, inline. Every hook on
+  // a per-task, per-callback or per-navigation path tests it first.
+  [[nodiscard]] static bool Enabled() noexcept {
+    return provider_.load(std::memory_order_acquire) != nullptr;
+  }
   // A navigation_initiator_stack when script runs: its admitted sequence, else 0.
   [[nodiscard]] static std::uint64_t RecordNavigation(NativeNavigationKind kind,
                                                       std::uint64_t target_frame_id) noexcept;
@@ -187,10 +183,27 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   // not nest; Finished clears only its own ID.
   static void PromiseReactionStarted(std::uint32_t task_id) noexcept;
   static void PromiseReactionFinished(std::uint32_t task_id) noexcept;
+  // What EnterAsyncTask returns without a provider. No segment handle can
+  // equal it: a serial is a per-thread count, and a synthetic handle sets
+  // only bits 63 to 61 and a kind byte.
+  static constexpr std::uint64_t kAsyncTaskNotEntered = ~std::uint64_t{0};
   // The segment of the async task running on this thread, set around its run.
-  [[nodiscard]] static std::uint64_t EnterAsyncTask(std::uint64_t segment) noexcept;
-  static void ExitAsyncTask(std::uint64_t previous) noexcept;
-  [[nodiscard]] static std::uint64_t CurrentAsyncTask() noexcept;
+  // Without a provider Enter is one atomic load and returns
+  // kAsyncTaskNotEntered, and Exit of that loads and stores nothing. The
+  // provider is never removed, so an Enter that found it pairs with an Exit
+  // that restores the thread's segment.
+  [[nodiscard]] static std::uint64_t EnterAsyncTask(const std::uint64_t segment) noexcept {
+    return Enabled() ? ExchangeAsyncTask(segment) : kAsyncTaskNotEntered;
+  }
+  static void ExitAsyncTask(const std::uint64_t previous) noexcept {
+    if (previous != kAsyncTaskNotEntered) [[unlikely]] {
+      static_cast<void>(ExchangeAsyncTask(previous));
+    }
+  }
+  // One atomic load and 0 without a provider.
+  [[nodiscard]] static std::uint64_t CurrentAsyncTask() noexcept {
+    return Enabled() ? ThreadAsyncTask() : 0;
+  }
   // Promise reactions registered under this task attribution ID continue that segment.
   static void AttributeAsyncTask(std::uint32_t task_attribution, std::uint64_t segment) noexcept;
 
@@ -233,6 +246,21 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   void DescribeScript(const NativeStackScriptSource& script) noexcept;
 
  private:
+  friend class NativeNavigationKindScope;
+
+  // Set once by SetProvider, never cleared. A static member rather than a
+  // function-local static, so the inline gates above load it with no guard.
+  static std::atomic<NativeRequestStackProvider> provider_;
+
+  static void RecordAdmitted(std::int32_t request_id, std::uint64_t initiated_sequence) noexcept;
+  // The calling thread's current segment: the thread-local access behind the
+  // inline gates, made only with a provider.
+  [[nodiscard]] static std::uint64_t ExchangeAsyncTask(std::uint64_t segment) noexcept;
+  [[nodiscard]] static std::uint64_t ThreadAsyncTask() noexcept;
+  [[nodiscard]] static NativeNavigationKind ExchangeNavigationKind(
+      NativeNavigationKind kind) noexcept;
+  [[nodiscard]] static NativeNavigationKind CurrentNavigationKind() noexcept;
+
   NativeRequestStackWalk(NativeRequestStackTables* state,
                          std::uint64_t generation,
                          std::int32_t request_id,
@@ -288,6 +316,35 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeRequestStackWalk final {
   NativePromiseRegistration registration_ = NativePromiseRegistration::kThen;
   std::uint32_t task_id_ = 0;
   std::uint64_t segment_ = 0;
+};
+
+// The kind a Location setter or window.open gives the navigation it starts.
+// NavigationStack reads it only with a provider, so without one the scope is
+// one atomic load and touches no thread-local.
+class NativeNavigationKindScope final {
+ public:
+  explicit NativeNavigationKindScope(const NativeNavigationKind kind) noexcept
+      : active_(NativeRequestStackWalk::Enabled()) {
+    if (active_) [[unlikely]] {
+      previous_ = NativeRequestStackWalk::ExchangeNavigationKind(kind);
+    }
+  }
+  ~NativeNavigationKindScope() {
+    if (active_) [[unlikely]] {
+      static_cast<void>(NativeRequestStackWalk::ExchangeNavigationKind(previous_));
+    }
+  }
+  NativeNavigationKindScope(const NativeNavigationKindScope&) = delete;
+  NativeNavigationKindScope& operator=(const NativeNavigationKindScope&) = delete;
+  // The innermost scope's kind, or kOtherScript outside every scope.
+  [[nodiscard]] static NativeNavigationKind Current() noexcept {
+    return NativeRequestStackWalk::Enabled() ? NativeRequestStackWalk::CurrentNavigationKind()
+                                             : NativeNavigationKind::kOtherScript;
+  }
+
+ private:
+  NativeNavigationKind previous_ = NativeNavigationKind::kOtherScript;
+  const bool active_;
 };
 
 }  // namespace reb

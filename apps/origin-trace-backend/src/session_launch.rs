@@ -15,6 +15,9 @@ use std::{
 const READY_LINE: &str = "Origin Trace live session ";
 const FAILURE_LINE: &str = "REB_LIVE_SESSION_FAILURE: ";
 const POLL: Duration = Duration::from_millis(200);
+/// Full Wasm samples one renderer keeps per stream per second. A per-function
+/// or per-site allowance past it cannot change what is kept.
+const WASM_SAMPLE_WINDOW: u32 = 1024;
 
 /// Capture options named after the launcher's environment switches.
 #[derive(Clone, Debug, Default)]
@@ -211,15 +214,15 @@ impl StartOptions {
         }
         if self
             .wasm_samples_per_function
-            .is_some_and(|limit| !(1..=16).contains(&limit))
+            .is_some_and(|limit| !(1..=WASM_SAMPLE_WINDOW).contains(&limit))
         {
-            return Err("wasm_samples_per_function must be from 1 to 16".into());
+            return Err("wasm_samples_per_function must be from 1 to 1024".into());
         }
         if self
             .wasm_samples_per_indirect_site
-            .is_some_and(|limit| !(1..=16).contains(&limit))
+            .is_some_and(|limit| !(1..=WASM_SAMPLE_WINDOW).contains(&limit))
         {
-            return Err("wasm_samples_per_indirect_site must be from 1 to 16".into());
+            return Err("wasm_samples_per_indirect_site must be from 1 to 1024".into());
         }
         for (name, indexes) in [
             ("wasm_function_allow", &self.wasm_function_allow),
@@ -1166,7 +1169,7 @@ mod tests {
             ),
             (
                 json!({"wasm_samples_per_function":0,"wasm_dispatch":true}),
-                "from 1 to 16",
+                "from 1 to 1024",
             ),
             (
                 json!({"wasm_function_allow":[1,1],"wasm_dispatch":true}),

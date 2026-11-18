@@ -443,6 +443,23 @@ within the launcher's bounds; a value no launcher named is null, never a
 guessed default. The schema does not require `content_limits`: a backend from
 before the addition omits it, and a reader treats that as not reported.
 
+`wasm_sampling` is a second versioned addition: for a session that records
+Wasm `br_table` or `call_indirect` it is `{"version": 1, "streams",
+"window_ms", "records_per_window", "samples_per_function",
+"samples_per_indirect_site", "function_allow_count", "function_deny_count",
+"module_allowlist", "reset"}`. Each renderer keeps at most
+`records_per_window` (1024) full records per stream in each `window_ms`
+(1000) window, and the next window records again. An allowance the launcher
+did not name is null, and the browser's default then applies (64 per
+function). `reset` is `available` when `reset_wasm_sample_budgets` has a reset
+file to write. The launcher passes `--session-wasm-dispatch`,
+`--session-wasm-call-indirect`, `--session-wasm-samples-per-function`,
+`--session-wasm-samples-per-indirect-site`,
+`--session-wasm-function-allow-count`, `--session-wasm-function-deny-count`
+and `--session-wasm-module-allowlist`; they are labels only. Otherwise it is
+null, and a backend from before the addition omits it. The VM view shows it
+beside its sample-window reset control.
+
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
 `target` is null, `wasm_scripts` is empty, `generation`, `capture_epoch` and
@@ -476,8 +493,10 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   was recorded, for example because the configured browser is not a capture
   build. It never runs page JavaScript.
 - `{"action":"reset_wasm_sample_budgets"}` increments the session's Wasm
-  sample-budget reset file. The capture browser restarts both sample indexes
-  at 0 without closing the profile or replacing the capture configuration.
+  sample-budget reset file. The capture browser closes the current one-second
+  sample window of both streams at once, as if its second had passed, without
+  closing the profile or replacing the capture configuration. Sample indexes
+  keep counting.
   It needs recording capture, `--wasm-budget-reset-file`, and a live process
   holding the profile, and otherwise returns 409. The browser applies the new
   generation on its writer wake, about 250ms later. A rebuilt Brave is
@@ -531,8 +550,9 @@ returns 409 `dependency_unavailable` for these actions.
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
 `wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
 `wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
-The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect` and
-do not raise the 16-record cap. Every
+The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect`. They
+pace within the one-second window, which keeps at most 1024 full records per
+stream; without them a function keeps 64 per window. Every
 capture switch is off unless named; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
@@ -553,8 +573,8 @@ browser profile or embedded-session variable is ignored, so an inherited
 | `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and `confirm_sensitive_capture`. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: needs `confirm_sensitive_capture`. |
-| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..16 retained samples of each function on each Wasm stream. Needs `wasm_dispatch` or `wasm_call_indirect`. |
-| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..16 retained `call_indirect` samples of each caller and module offset. |
+| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..1024 retained samples of each function on each Wasm stream per one-second window (default 64). Needs `wasm_dispatch` or `wasm_call_indirect`. |
+| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..1024 retained `call_indirect` samples of each caller and module offset per window. |
 | `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |
 | `wasm_function_deny` | `REB_NATIVE_WASM_FUNCTION_DENY` | Up to 32 function indexes to exclude. |
 | `wasm_module_allowlist` | `REB_NATIVE_WASM_MODULE_ALLOWLIST` | Up to 8 SHA-256 digests, written to a private file. Other modules do not advance either sample index. |

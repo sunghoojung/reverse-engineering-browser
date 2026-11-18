@@ -130,8 +130,9 @@ payload layouts are in
 (event 17, and event 20 for `call_indirect`) and
 [native Wasm guest](../../protocol/native-wasm-guest-v1.md#capture-and-identity)
 (events 18 and 19). To restrict to one module add `"artifact_id": "5"`. Native
-`br_table` capture keeps at most 16 observations per capture configuration, so
-16 rows and a budget gap (recipe 6) is a full budget, not a broken capture.
+`br_table` capture keeps at most 1024 observations per one-second window, and
+64 of one function, so a budget gap (recipe 6) is a full window, not a broken
+capture. The next window records again.
 
 ## 5. Check guest invocation chains
 
@@ -166,8 +167,8 @@ identifiers, for example:
 
 | Reason | Meaning |
 | --- | --- |
-| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` stream budget filled. Later executions are `wasm_dispatch_overflow` identities up to the ring, then one omitted count. The stream stays enabled. |
-| `native_wasm_dispatch_function_budget_incomplete` | That function's own `br_table` maximum was reached. Other functions can still be recorded. The refused execution is a `wasm_dispatch_overflow` identity. |
+| `native_wasm_dispatch_budget_incomplete` | That second's 1024-observation `br_table` window filled. Later executions of the window are `wasm_dispatch_overflow` identities up to the ring, then one omitted count. The next window records full observations again. |
+| `native_wasm_dispatch_function_budget_incomplete` | That function's own `br_table` allowance for the window was reached (64 unless the session set one). Other functions can still be recorded, and the function records again next window. The refused execution is a `wasm_dispatch_overflow` identity. |
 | `native_wasm_indirect_function_budget_incomplete` | That function's own `call_indirect` maximum was reached. The refused call is a `wasm_indirect_overflow` identity. |
 | `native_wasm_indirect_site_budget_incomplete` | That `call_indirect` site's maximum was reached. The refused call is a `wasm_indirect_overflow` identity. |
 | `native_wasm_dispatch_filtered` | The module or function was excluded. It did not consume a sample index. The research UI labels this as a sample-policy exclusion, not a loss. The excluded execution still keeps an overflow identity. |
@@ -183,14 +184,14 @@ identifiers, for example:
 | `native_guest_parent_unresolved` | A guest record's parent invocation was not linked. |
 | `..._transport_unavailable`, `..._document_unavailable` | A capture stage was not available. |
 
-A full budget is evidence too: the capture saw more than it kept. A session
-start can keep N samples of one function, exclude functions, or admit only
-modules whose SHA-256 is listed (`wasm_samples_per_function`,
+A full window is evidence too: the capture saw more than it kept. A session
+start can keep N samples of one function per window, exclude functions, or
+admit only modules whose SHA-256 is listed (`wasm_samples_per_function`,
 `wasm_samples_per_indirect_site`, `wasm_function_allow`,
 `wasm_function_deny`, `wasm_module_allowlist`).
-`session_action` `reset_wasm_sample_budgets` restarts both sample indexes
-without a new session and starts a new overflow ring. It publishes each
-stream's pending omitted count first. The browser applies that reset on its
+`session_action` `reset_wasm_sample_budgets` opens a new window at once
+without a new session, with a new overflow ring. It publishes each stream's
+pending omitted count first. The browser applies that reset on its
 next writer wake, about 250ms later. A live browser needs a rebuild before it
 honors either control.
 For Wasm `br_table` and `call_indirect`, `get_events` with `type`

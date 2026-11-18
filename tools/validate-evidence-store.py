@@ -1127,7 +1127,7 @@ def validate_event(event: object, line_number: int) -> None:
         or int.from_bytes(payload[4:8], "little") >= 16777216
         or not 8 <= int.from_bytes(payload[8:12], "little") < 16777216
         or int.from_bytes(payload[16:20], "little") >= 16777216
-        or int.from_bytes(payload[20:24], "little") >= 16
+        or int.from_bytes(payload[20:24], "little") == 0xFFFFFFFF
         or wasm_context_invalid(payload, payload[0], 2, 24)
         or wasm_direct_caller_invalid(payload)
     ):
@@ -1152,7 +1152,7 @@ def validate_event(event: object, line_number: int) -> None:
         or int.from_bytes(payload[20:24], "little") >= 16777216
         or int.from_bytes(payload[24:28], "little") >= 5
         or (int.from_bytes(payload[24:28], "little") != 0 and any(payload[20:24]))
-        or int.from_bytes(payload[28:32], "little") >= 16
+        or int.from_bytes(payload[28:32], "little") == 0xFFFFFFFF
         or wasm_context_invalid(payload, payload[0], 2, 32)
         or any(payload[40:])
     ):
@@ -1190,7 +1190,7 @@ def validate_event(event: object, line_number: int) -> None:
             or (module_offset < 8 or module_offset >= 16777216 if known & 2 else module_offset != 0)
             or (reason != 0 or bounds != 0 if kind == 1 else reason >= 6)
             or (bounds >= 7 if reason == 3 else bounds != 0)
-            or (sample != 0xFFFFFFFF if stream == 0 else sample >= 16)
+            or ((sample == 0xFFFFFFFF) != (stream == 0))
             or any(payload[25:28])
             or wasm_context_invalid(payload, version, 1, 28)
             or any(payload[36:])

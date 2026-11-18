@@ -82,12 +82,14 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   // that renumbers one, or that cannot be read, changes nothing and is the
   // `native_js_invocation_sites_revision_refused` gap.
   void UpdateJsInvocationSites(const std::string& json) noexcept;
-  // Empty lists and zero caps are the historical 16-record stream budgets.
+  // samples_per_function is kNativeWasmDefaultSamplesPerFunction unless the
+  // session sets it. Empty lists do not filter.
   [[nodiscard]] const NativeWasmSampleBudgetPolicy& wasm_sample_budget() const noexcept {
     return wasm_sample_budget_;
   }
-  // Restarts both sample indexes in this browser session. The profile, the
-  // session id, and the capture configuration stay.
+  // Starts a new sample window in every renderer now, as each one does every
+  // kNativeWasmSampleWindowNs. The profile, the session id, the capture
+  // configuration and sample indexes stay.
   void ResetWasmSampleBudgets() noexcept;
   // The Console's kept debugger watch scope, sent to every renderer now and to
   // each one configured later; null clears it. The Console session owns it, so

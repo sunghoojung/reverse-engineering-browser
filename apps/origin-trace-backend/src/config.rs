@@ -65,6 +65,23 @@ pub struct Options {
     pub session_document_start: bool,
     #[arg(long, requires = "socket")]
     pub session_request_stacks: bool,
+    /// The Wasm sampling the launcher passed to Brave: each stream that
+    /// records, the per-function and per-site allowances it named, and how
+    /// many functions its filters list. Counts and switches only.
+    #[arg(long, requires = "socket")]
+    pub session_wasm_dispatch: bool,
+    #[arg(long, requires = "socket")]
+    pub session_wasm_call_indirect: bool,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=1024))]
+    pub session_wasm_samples_per_function: Option<u32>,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=1024))]
+    pub session_wasm_samples_per_indirect_site: Option<u32>,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=32))]
+    pub session_wasm_function_allow_count: Option<u32>,
+    #[arg(long, requires = "socket", value_parser = clap::value_parser!(u32).range(1..=32))]
+    pub session_wasm_function_deny_count: Option<u32>,
+    #[arg(long, requires = "socket")]
+    pub session_wasm_module_allowlist: bool,
     #[arg(long)]
     pub decoder: Option<PathBuf>,
     #[arg(long)]

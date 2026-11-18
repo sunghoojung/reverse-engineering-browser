@@ -1451,9 +1451,19 @@ categories in Fingerprinting. The configured sampling budgets
 sampled. That includes the per-function and per-call-site Wasm budgets. A
 function, module, call-site, or stream refusal also keeps a compact overflow
 identity up to a ring of 32, and identities past the ring are a count; those
-records are not full observations. `reset_wasm_sample_budgets` publishes that
-count and starts both rings again. See
+records are not full observations. Each one-second window has its own ring
+and count, and starts the Wasm budgets again; `reset_wasm_sample_budgets`
+closes the window at once. See
 [overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+For a live session that records a Wasm stream, VM Lab shows the session
+context's `capture_options.wasm_sampling` under its notice: the streams, the
+records each window keeps, the per-function and per-call-site allowances (an
+unnamed per-function allowance is the browser's 64), and the function and
+module filters. Its Reset sample budgets button posts
+`reset_wasm_sample_budgets` and shows the new reset generation or the
+backend's refusal, for example while capture is stopped. It is disabled when
+the session has no reset file, and a malformed label is named rather than
+shown. The strip is hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
 execution was not sampled and did not consume a sample slot. The notice and

@@ -82,7 +82,7 @@ for (const [variable, options] of [['REB_NATIVE_WASM_DISPATCH', {REB_NATIVE_WASM
   assert.match(result.stderr,new RegExp(variable));
 }
 for (const [options, pattern] of [
-  [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'99', REB_NATIVE_WASM_DISPATCH:'1'}, /must be from 1 to 16/],
+  [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'1025', REB_NATIVE_WASM_DISPATCH:'1'}, /must be from 1 to 1024/],
   [{REB_NATIVE_WASM_SAMPLES_PER_FUNCTION:'2'}, /require REB_NATIVE_WASM_DISPATCH/],
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'1,1', REB_NATIVE_WASM_DISPATCH:'1'}, /unique/],
   [{REB_NATIVE_WASM_FUNCTION_ALLOW:'16777216', REB_NATIVE_WASM_DISPATCH:'1'}, /16777216/],

@@ -8,7 +8,9 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,6 +22,7 @@
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/unsafe_shared_memory_region.h"
 #include "base/memory/weak_ptr.h"
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_transport.mojom.h"
 #include "mojo/public/cpp/base/big_buffer.h"
@@ -69,6 +72,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint8_t js_invocation_state,
                            std::uint32_t js_invocation_id,
                            const std::string& source_url,
+                           std::uint64_t module_token,
                            mojo_base::BigBuffer content) override;
   void CaptureWasmIndirect(std::uint64_t capture_epoch,
                            std::uint64_t session_id,
@@ -90,6 +94,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                            std::uint8_t js_invocation_state,
                            std::uint32_t js_invocation_id,
                            const std::string& source_url,
+                           std::uint64_t module_token,
                            mojo_base::BigBuffer content) override;
   void CaptureWasmExecution(std::uint64_t capture_epoch,
                             std::uint64_t session_id,
@@ -113,6 +118,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                             std::uint8_t js_invocation_state,
                             std::uint32_t js_invocation_id,
                             const std::string& source_url,
+                            std::uint64_t module_token,
                             mojo_base::BigBuffer content) override;
   void CaptureNativeGuest(std::uint64_t capture_epoch,
                           const std::vector<std::uint8_t>& invocation_record,
@@ -147,8 +153,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                  bool capture_canvas_images,
                  bool capture_request_content);
   void Disable();
-  // Zeros this renderer's stream counters and asks the renderer to restart
-  // sample indexes. The queue and capture epoch stay.
+  // Zeros this renderer's window counts and asks the renderer to start a new
+  // sample window. The queue, capture epoch and module bindings stay.
   void ResetWasmSampleBudgets();
   // A revision of the session's invocation site records, for a configured
   // renderer; one configured later receives it in Configure.
@@ -174,6 +180,27 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   void SendNativeGuestModuleStatus(std::uint64_t capture_epoch,
                                    std::uint64_t module_token,
                                    bool accepted);
+  // Starts this host's next window once the current one is
+  // kNativeWasmSampleWindowNs old.
+  void AdvanceWasmWindow(std::uint64_t now);
+  // A record's module: a private copy of the bytes it carried, the module an
+  // earlier record of the same document bound to module_token, or unknown
+  // for an empty record without a token. Nullopt refuses the record.
+  [[nodiscard]] std::optional<NativeWasmModuleTransfer> ResolveWasmModule(
+      std::uint64_t module_token,
+      mojo_base::BigBuffer& content,
+      std::uint64_t frame_id,
+      std::uint64_t execution_context_id,
+      std::uint64_t document_token_high,
+      std::uint64_t document_token_low) const;
+  // Lets this renderer's later records name the bytes this accepted record
+  // carried by its sequence number.
+  void BindWasmModule(std::uint64_t token,
+                      const NativeWasmModuleTransfer& module,
+                      std::uint64_t frame_id,
+                      std::uint64_t execution_context_id,
+                      std::uint64_t document_token_high,
+                      std::uint64_t document_token_low);
 
   const raw_ref<NativeProbeSession> session_;
   const int renderer_process_id_;
@@ -194,13 +221,31 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   bool browser_internal_ = false;
   bool disabling_ = false;
   std::uint64_t wasm_capture_epoch_ = 0;
+  // Records of each Wasm stream this renderer delivered in the host's current
+  // window. The renderer paces itself; this bound only stops one that does
+  // not. Host windows are not the renderer's, so one overlaps at most two of
+  // them, and the limit is twice the renderer's budget.
+  static constexpr std::uint32_t kWasmBrowserWindowLimit = 2 * kNativeWasmDispatchSampleBudget;
+  static_assert(kNativeWasmIndirectSampleBudget == kNativeWasmDispatchSampleBudget &&
+                kNativeWasmExecutionBudget == kNativeWasmDispatchSampleBudget);
+  std::uint64_t wasm_window_started_ns_ = 0;
   std::uint32_t wasm_capture_count_ = 0;
   std::uint32_t wasm_indirect_capture_count_ = 0;
-  std::uint64_t wasm_budget_epoch_ = 2;
-  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_dispatch_function_keys_{};
-  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_function_keys_{};
-  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_site_keys_{};
   std::uint32_t wasm_execution_capture_count_ = 0;
+  // The modules this renderer's accepted records carried, by token, so a later
+  // record of the same document can name one. The newest
+  // kWasmModuleBindingLimit stay; a renderer thread sends each module again
+  // every window.
+  struct WasmModuleBinding final {
+    std::uint64_t frame_id = 0;
+    std::uint64_t execution_context_id = 0;
+    std::uint64_t document_token_high = 0;
+    std::uint64_t document_token_low = 0;
+    std::size_t size = 0;
+    std::array<std::uint8_t, 32> digest{};
+  };
+  static constexpr std::size_t kWasmModuleBindingLimit = 256;
+  std::map<std::uint64_t, WasmModuleBinding> wasm_modules_;
   std::uint32_t guest_capture_count_ = 0;
   // One marker for host records naming another identity, whose sequence
   // slots are not this renderer's to fill. Every other refusal fills its own.

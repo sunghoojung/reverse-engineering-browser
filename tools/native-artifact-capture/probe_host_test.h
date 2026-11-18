@@ -237,7 +237,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto indirect = [&](std::uint64_t capture_epoch, std::uint64_t sequence,
                             std::uint32_t resolution, std::uint32_t callee) {
     host.CaptureWasmIndirect(capture_epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12,
-                             1, 8, 0, 4, callee, resolution, 0, 0, 0, "fixture://host-indirect",
+                             1, 8, 0, 4, callee, resolution, 0, 0, 0, "fixture://host-indirect", 0,
                              mojo_base::BigBuffer(indirect_module));
   };
   const auto before_indirect = events.size();
@@ -263,35 +263,39 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                              e.header.sequence_number == 604 && e.header.tab_id == 1;
                     }),
         "The host keeps the observation's own sequence and tab");
-  // Function 9 has not been claimed. A missing document and a module that is
-  // not a call_indirect must not take its one sample.
-  session.wasm_budget = {};
-  session.wasm_budget.samples_per_function = 1;
+  // The renderer paces each function; the host only filters. A missing
+  // document, a module that is not a call_indirect, and a denied function
+  // are each refused in their own slot.
   const auto capture_indirect = [&](std::uint64_t sequence,
                                     const std::vector<std::uint8_t>& bytes) {
     host.CaptureWasmIndirect(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 9, 8, 0,
-                             4, 2, 0, 0, 0, 0, "fixture://host-indirect",
+                             4, 2, 0, 0, 0, 0, "fixture://host-indirect", 0,
                              mojo_base::BigBuffer(bytes));
   };
   frame.document = {11, 99};
   capture_indirect(605, indirect_module);
   Check(gap_for(605, "native_wasm_indirect_document_unavailable") && transfers.empty(),
-        "A missing document is refused before the per-function budget");
+        "A missing document is refused");
   frame.document = {11, 12};
   capture_indirect(606, std::vector<std::uint8_t>{1, 2, 3, 4});
   Check(gap_for(606, "native_wasm_indirect_module_invalid") && transfers.empty(),
-        "An invalid module is refused before the per-function budget");
+        "An invalid module is refused");
+  session.wasm_budget = {};
+  session.wasm_budget.function_deny_count = 1;
+  session.wasm_budget.function_deny[0] = 9;
   capture_indirect(607, indirect_module);
+  Check(gap_for(607, "native_wasm_indirect_browser_filtered") && transfers.empty(),
+        "A denied function is filtered by the host whatever the renderer sent");
+  session.wasm_budget = {};
+  capture_indirect(608, indirect_module);
   Check(std::any_of(events.begin(), events.end(),
                     [](const auto& e) {
                       return e.header.type == NativeProbeType::kWasmIndirectObservation &&
-                             e.header.sequence_number == 607;
-                    }) &&
-            !gap_for(607, "native_wasm_indirect_browser_function_budget_incomplete"),
-        "Refusals did not consume function 9's host sample");
-  session.wasm_budget = {};
+                             e.header.sequence_number == 608;
+                    }),
+        "Refusals spend nothing a later valid record needs");
   host.CaptureWasmExecution(epoch, kSession, 610, 100, 123, 7, frame_id, 10, 11, 12, 4, 9, 8, 0, 0,
-                            1, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            1, 0, 3, 2, 0, 0, "fixture://host-indirect", 0,
                             mojo_base::BigBuffer(indirect_module));
   const auto trap = std::find_if(events.begin(), events.end(), [](const auto& event) {
     return event.header.type == reb::NativeProbeType::kWasmExecutionOutcome &&
@@ -305,7 +309,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
             trap_payload.function_index == 9,
         "The host publishes a signature-mismatch trap for a resolved entry");
   host.CaptureWasmExecution(epoch, kSession, 611, 100, 123, 7, frame_id, 10, 11, 12, 5, 1, 8, 0, 1,
-                            0, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            0, 0, 3, 2, 0, 0, "fixture://host-indirect", 0,
                             mojo_base::BigBuffer(std::span<const std::uint8_t>{}));
   const auto still = std::find_if(events.begin(), events.end(), [](const auto& event) {
     return event.header.sequence_number == 611;
@@ -325,7 +329,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto wasm_dispatch = [&](std::uint64_t sequence, bool observed, std::uint8_t kind,
                                  std::uint32_t caller_index) {
     host.CaptureWasmDispatch(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 1, 8, 0,
-                             1, observed, kind, caller_index, 0, 0, 0, "fixture://host-dispatch",
+                             1, observed, kind, caller_index, 0, 0, 0, "fixture://host-dispatch", 0,
                              mojo_base::BigBuffer(dispatch_module));
   };
   const auto published = [&](std::uint64_t sequence) {
@@ -361,6 +365,53 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   Check(transfers.empty() && gap_for(702, "native_wasm_dispatch_limit_or_invalid") &&
             events.size() == before_unwalked_index + 1,
         "A function index on an unwalked record is a gap, not a dropped caller");
+
+  // A record that names an earlier record's module carries no bytes. The
+  // host resolves the token against the module that record sent in the same
+  // document, and the sink joins that artifact without a second transfer.
+  const auto module_artifact = published(700)->header.artifact_id;
+  const auto bound_dispatch = [&](std::uint64_t sequence, std::uint64_t context,
+                                  std::uint64_t token, const std::vector<std::uint8_t>& bytes) {
+    host.CaptureWasmDispatch(epoch, kSession, sequence, 100, 123, 7, frame_id, context, 11, 12, 1,
+                             8, 0, 1, false, 0, 0, 0, 0, 0, "fixture://host-dispatch", token,
+                             mojo_base::BigBuffer(bytes));
+  };
+  bound_dispatch(703, 10, 700, {});
+  Check(transfers.empty() && published(703) != events.end() &&
+            published(703)->header.artifact_id == module_artifact,
+        "A module token resolves to the bytes its record carried");
+  bound_dispatch(704, 10, 999, {});
+  bound_dispatch(705, 10, 700, dispatch_module);
+  bound_dispatch(706, 14, 700, {});
+  Check(transfers.empty() && gap_for(704, "native_wasm_dispatch_module_unbound") &&
+            gap_for(705, "native_wasm_dispatch_module_unbound") &&
+            gap_for(706, "native_wasm_dispatch_module_unbound"),
+        "An unknown token, a token with bytes, and another context's token are explicit gaps");
+
+  // The host counts each stream per second on its own clock, as a ceiling a
+  // renderer that ignores its own pacing cannot pass. A new window reopens it.
+  const auto saved_expires = session.expires;
+  constexpr std::int64_t kWindow = 1'000'000'000;
+  base::test_now_ns += kWindow;
+  const auto far_expiry = static_cast<std::uint64_t>(base::test_now_ns) + 10 * kWindow;
+  session.expires = far_expiry;
+  NativeArtifactCaptureSink::Get().SetEmitter(Emit, kSession, mask, far_expiry);
+  bound_dispatch(9'999, 10, 0, dispatch_module);
+  Receive(receiver, transfers.begin()->first);
+  const auto before_window = events.size();
+  for (std::uint64_t index = 1; index < 2048; ++index)
+    bound_dispatch(10'000 + index, 10, 9'999, {});
+  Check(published(9'999) != events.end() && events.size() == before_window + 2047 &&
+            published(12'047) != events.end(),
+        "A window admits twice the renderer's dispatch budget");
+  bound_dispatch(12'048, 10, 9'999, {});
+  Check(gap_for(12'048, "native_wasm_dispatch_browser_budget_incomplete"),
+        "A record past the browser window ceiling fills its own slot");
+  base::test_now_ns += kWindow;
+  bound_dispatch(12'049, 10, 9'999, {});
+  Check(published(12'049) != events.end(), "The next window admits records again");
+  session.expires = saved_expires;
+  Configure(kSession, mask);
   host.Disable();
   session.active = false;
   session.emitted = {};

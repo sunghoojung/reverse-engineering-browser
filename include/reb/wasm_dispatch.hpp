@@ -22,6 +22,10 @@ namespace reb {
 inline constexpr std::uint8_t kWasmDirectCallerUnknown = 0;
 inline constexpr std::uint8_t kWasmDirectCallerSameInstance = 1;
 #endif
+// A sample index is its configuration's ordinal for that stream: 0 for the
+// first retained sample, then one more for each later one. 0xffffffff stays
+// free as the execution outcome's no-sample value.
+inline constexpr std::uint32_t kWasmLastSampleIndex = 0xfffffffeu;
 // Physical Wasm br_table execution, not an interpreter guest program counter.
 // Version 2 records the JavaScript invocation context the instruction ran in
 // (protocol/native-js-invocation-v1.md); version 1 reserved those bytes and
@@ -123,7 +127,8 @@ static_assert(offsetof(WasmDispatchObservationPayload, reserved) == 40);
           value.protocol_version == 3) &&
          value.payload_size == 128 && value.function_index < 16U * 1024U * 1024U &&
          value.table_count < 16U * 1024U * 1024U && value.module_byte_offset >= 8 &&
-         value.module_byte_offset < 16U * 1024U * 1024U && value.sample_index < 16 &&
+         value.module_byte_offset < 16U * 1024U * 1024U &&
+         value.sample_index <= kWasmLastSampleIndex &&
          // Version 1 reserved the context bytes, so it can only be not_observed.
          (value.protocol_version >= 2 ||
           (value.js_invocation_state == 0 && value.js_invocation_id == 0)) &&
@@ -288,7 +293,7 @@ static_assert(offsetof(WasmIndirectObservationPayload, reserved) == 40);
          value.module_byte_offset < kLimit && value.resolution < kWasmIndirectResolutionCount &&
          (value.resolution == static_cast<std::uint32_t>(WasmIndirectResolution::kResolved) ||
           value.callee_function_index == 0) &&
-         value.sample_index < 16 &&
+         value.sample_index <= kWasmLastSampleIndex &&
          std::all_of(value.reserved.begin(), value.reserved.end(),
                      [](std::byte b) { return b == std::byte{0}; });
 }
@@ -320,6 +325,7 @@ inline constexpr std::uint8_t kWasmExecutionFunctionKnown = 1U;
 inline constexpr std::uint8_t kWasmExecutionOffsetKnown = 2U;
 enum class WasmExecutionStream : std::uint8_t { kNone = 0, kBrTable = 1, kCallIndirect = 2 };
 inline constexpr std::uint32_t kWasmExecutionNoSample = 0xffffffffu;
+static_assert(kWasmLastSampleIndex < kWasmExecutionNoSample);
 // Version 1 already carries the JavaScript invocation context. A clear known
 // bit stores integer 0; that 0 is not a function index or a module offset.
 struct WasmExecutionOutcomePayload final {
@@ -447,7 +453,7 @@ static_assert(std::is_trivially_copyable_v<WasmExecutionOutcomePayload>);
   }
   if (value.related_stream == static_cast<std::uint8_t>(WasmExecutionStream::kNone))
     return value.related_sample_index == kWasmExecutionNoSample;
-  return value.related_sample_index < 16;
+  return value.related_sample_index <= kWasmLastSampleIndex;
 }
 // Compact identity for a br_table execution a budget refused: the module or
 // function filter, the per-function maximum, or the 16-record stream cap.

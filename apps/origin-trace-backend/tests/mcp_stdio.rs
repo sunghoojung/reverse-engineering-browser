@@ -2178,7 +2178,8 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
         context["capture_options"],
         json!({"source":"launcher","request_content":false,"content_limits":null,"canvas_images":false,
             "request_stacks":false,"document_start":"not_permitted",
-            "js_invocation":{"state":"not_armed","live":false,"count":0,"digests":false}})
+            "js_invocation":{"state":"not_armed","live":false,"count":0,"digests":false},
+            "wasm_sampling":null})
     );
     let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
     assert_eq!(summary["result"]["isError"], false);
@@ -2404,7 +2405,8 @@ fn agent_session_options_are_named_never_inherited() {
             "content_limits":{"version":1,"request_content_budget_mib":64,
                 "response_body_budget_mib":1024,"response_media":true},
             "canvas_images":false,"request_stacks":true,"document_start":"permitted",
-            "js_invocation":{"state":"armed","live":false,"count":1,"digests":false}})
+            "js_invocation":{"state":"armed","live":false,"count":1,"digests":false},
+            "wasm_sampling":null})
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("live")).unwrap(),

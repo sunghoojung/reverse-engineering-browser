@@ -57,6 +57,9 @@ bool ReadNativeWasmSampleBudget(const base::CommandLine& command_line,
                                 const std::uint64_t category_mask,
                                 NativeWasmSampleBudgetPolicy& policy) {
   policy = {};
+  // Paced by default: one hot function keeps at most this many full samples
+  // per window, so the rest of the page still gets the window's budget.
+  policy.samples_per_function = kNativeWasmDefaultSamplesPerFunction;
   const bool present = command_line.HasSwitch("reb-wasm-samples-per-function") ||
                        command_line.HasSwitch("reb-wasm-samples-per-indirect-site") ||
                        command_line.HasSwitch("reb-wasm-function-allow") ||
@@ -323,7 +326,6 @@ void NativeProbeSession::UpdateJsInvocationSites(const std::string& json) noexce
 void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
   if (!IsActive())
     return;
-  NativeArtifactCaptureSink::Get().ResetWasmSampleBudgets();
   for (NativeProbeHost* const host : hosts_)
     host->ResetWasmSampleBudgets();
 }

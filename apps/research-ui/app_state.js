@@ -194,6 +194,12 @@
         vmHostLinksStatus: 'loading',
         vmHostLinksGeneration: 0,
         vmStealthSession: false,
+        // capture_options.wasm_sampling from the session context (app.js):
+        // null until that read answers, and for a session without Wasm streams.
+        vmWasmSampling: null,
+        vmWasmSamplingRead: null,
+        // The last reset_wasm_sample_budgets answer: pending, done or failed.
+        vmWasmSamplingReset: null,
         deobfuscationCache: new Map(),
         deobfuscationRequests: new Map(),
         deobfuscationAssumeIntrinsics: false,
@@ -445,6 +451,10 @@
         quickOpenResults: document.querySelector('#quick-open-results'),
         vmNotice: document.querySelector('#vm-notice'),
         vmSessionStatus: document.querySelector('#vm-session-status'),
+        vmWasmSampling: document.querySelector('#vm-wasm-sampling'),
+        vmWasmSamplingPolicy: document.querySelector('#vm-wasm-sampling-policy'),
+        vmWasmSamplingStatus: document.querySelector('#vm-wasm-sampling-status'),
+        vmWasmSamplingReset: document.querySelector('#vm-wasm-sampling-reset'),
         vmCount: document.querySelector('#vm-count'),
         vmList: document.querySelector('#vm-list'),
         vmDetail: document.querySelector('#vm-detail'),

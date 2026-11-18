@@ -738,6 +738,7 @@ class NativeProbeHost {
                                    std::uint8_t,
                                    std::uint32_t,
                                    const std::string&,
+                                   std::uint64_t,
                                    mojo_base::BigBuffer) = 0;
   virtual void CaptureWasmIndirect(std::uint64_t,
                                    std::uint64_t,
@@ -759,6 +760,7 @@ class NativeProbeHost {
                                    std::uint8_t,
                                    std::uint32_t,
                                    const std::string&,
+                                   std::uint64_t,
                                    mojo_base::BigBuffer) = 0;
   virtual void CaptureWasmExecution(std::uint64_t,
                                     std::uint64_t,
@@ -782,6 +784,7 @@ class NativeProbeHost {
                                     std::uint8_t,
                                     std::uint32_t,
                                     const std::string&,
+                                    std::uint64_t,
                                     mojo_base::BigBuffer) = 0;
   virtual void CaptureNativeGuest(std::uint64_t,
                                   const std::vector<std::uint8_t>&,

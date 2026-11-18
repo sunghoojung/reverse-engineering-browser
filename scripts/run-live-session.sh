@@ -147,8 +147,10 @@ validate_wasm_count() {
   if [[ -z "${text}" ]]; then
     return 0
   fi
-  if [[ ! "${text}" =~ ^[0-9]+$ ]] || (( ${#text} > 2 || 10#${text} < 1 || 10#${text} > 16 )); then
-    fail_live_session 2 "${name} must be from 1 to 16."
+  # One window holds 1024 full samples per stream, so a per-function or
+  # per-site allowance past that cannot change what is kept.
+  if [[ ! "${text}" =~ ^[0-9]+$ ]] || (( ${#text} > 4 || 10#${text} < 1 || 10#${text} > 1024 )); then
+    fail_live_session 2 "${name} must be from 1 to 1024."
   fi
 }
 validate_wasm_function_list() {
@@ -876,6 +878,34 @@ if [[ "${console_document_start}" == 1 ]]; then
 fi
 if [[ "${request_stacks_state}" == on ]]; then
   ui_arguments+=(--session-request-stacks)
+fi
+# The Wasm sampling policy, as the VM view shows it beside its reset control.
+if [[ "${native_wasm_dispatch}" == 1 ]]; then
+  ui_arguments+=(--session-wasm-dispatch)
+fi
+if [[ "${native_wasm_call_indirect}" == 1 ]]; then
+  ui_arguments+=(--session-wasm-call-indirect)
+fi
+if [[ "${native_wasm_dispatch}" == 1 || "${native_wasm_call_indirect}" == 1 ]]; then
+  if [[ -n "${native_wasm_samples_per_function}" ]]; then
+    ui_arguments+=(--session-wasm-samples-per-function "$((10#${native_wasm_samples_per_function}))")
+  fi
+  if [[ -n "${native_wasm_samples_per_indirect_site}" ]]; then
+    ui_arguments+=(--session-wasm-samples-per-indirect-site
+      "$((10#${native_wasm_samples_per_indirect_site}))")
+  fi
+  # The lists were validated above as unique comma-separated indexes.
+  if [[ -n "${native_wasm_function_allow}" ]]; then
+    IFS=',' read -r -a wasm_allow_indexes <<<"${native_wasm_function_allow}"
+    ui_arguments+=(--session-wasm-function-allow-count "${#wasm_allow_indexes[@]}")
+  fi
+  if [[ -n "${native_wasm_function_deny}" ]]; then
+    IFS=',' read -r -a wasm_deny_indexes <<<"${native_wasm_function_deny}"
+    ui_arguments+=(--session-wasm-function-deny-count "${#wasm_deny_indexes[@]}")
+  fi
+  if [[ -n "${native_wasm_module_allowlist}" ]]; then
+    ui_arguments+=(--session-wasm-module-allowlist)
+  fi
 fi
 # The session header says which functions this capture tracks, or why not.
 if [[ -n "${js_invocation_session_state}" ]]; then

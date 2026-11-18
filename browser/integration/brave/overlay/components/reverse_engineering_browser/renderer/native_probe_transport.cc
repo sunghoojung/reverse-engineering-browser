@@ -240,7 +240,8 @@ bool NativeProbeTransport::EmitWasmDispatch(const NativeWasmDispatchObservation&
       observation.selector, observation.table_count, observation.caller_observed,
       observation.caller_kind, observation.caller_function_index, observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
-      std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
+      std::string(observation.source_url), observation.module_token,
+      mojo_base::BigBuffer(observation.module_bytes));
   return true;
 }
 
@@ -264,7 +265,8 @@ bool NativeProbeTransport::EmitWasmIndirect(const NativeWasmIndirectObservation&
       observation.table_index, observation.slot, observation.callee_function_index,
       static_cast<std::uint32_t>(observation.resolution), observation.sample_index,
       observation.js_invocation_state, observation.js_invocation_id,
-      std::string(observation.source_url), mojo_base::BigBuffer(observation.module_bytes));
+      std::string(observation.source_url), observation.module_token,
+      mojo_base::BigBuffer(observation.module_bytes));
   return true;
 }
 
@@ -289,7 +291,7 @@ bool NativeProbeTransport::EmitWasmExecution(const NativeWasmExecutionObservatio
       static_cast<std::uint8_t>(observation.kind), static_cast<std::uint8_t>(observation.reason),
       static_cast<std::uint8_t>(observation.bounds), observation.known,
       static_cast<std::uint8_t>(observation.related_stream), observation.js_invocation_state,
-      observation.js_invocation_id, std::string(observation.source_url),
+      observation.js_invocation_id, std::string(observation.source_url), observation.module_token,
       mojo_base::BigBuffer(observation.module_bytes));
   return true;
 }

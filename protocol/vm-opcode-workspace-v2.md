@@ -384,6 +384,12 @@ configuration, and its `sample_index` is null. A version 1 row keeps its 8
 slots, its per-site index below 64 and its per-configuration index below 256.
 The arming export lists at most 256 sites.
 
+Producer 2.19.0 reads a native Wasm `sample_index` as its capture
+configuration's ordinal for that stream, from 0 to 4294967294, because the
+browser now paces each stream per one-second window instead of keeping its
+first 16 samples. Documents from earlier producers keep indexes below 16 and
+stay valid.
+
 A JavaScript dispatch sample names its interpreter artifact, not a dispatch
 site. Its claims attach only when the artifact has an interpreter-candidate
 site. They name that site only when the complete classification (no omission

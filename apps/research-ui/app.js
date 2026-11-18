@@ -27,6 +27,7 @@ const sourceFactsPanel = createSourceFactsPanel({
 });
 const capturedExportPanel = installCapturedExportDialog({
   getRun: () => null, contextKey: () => null, getRunCapture: () => null,
+  getTrafficExport: id => trafficExportSnapshot(id),
   notice: message => investigationNotice(message)
 });
 const invocationSitesPanel = createInvocationSitesPanel({
@@ -3704,8 +3705,72 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           : request.hostOnly ? `${request.path} (host only metadata)`
             : fullUrl ?? (request.urlTruncated ? `${request.path}… (truncated)` : request.path);
         elements.selectedUrl.title = elements.selectedUrl.textContent;
-        // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
-        elements.requestCopyUrl.disabled = request.hostOnly || (Boolean(request.urlTruncated) && !fullUrl) || request.targetKind === 'path';
+        // The menu says which of its copies this row allows.
+        elements.requestCopyUrl.disabled = false;
+      }
+
+      // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
+      function trafficCopyUrl(request) {
+        const fullUrl = request?.urlTruncated ? requestFullUrl(request) : null;
+        if (!request || request.hostOnly || (request.urlTruncated && !fullUrl) || request.targetKind === 'path') return null;
+        return request.origin === 'sample' ? `https://checkout.acme.test${request.path}` : fullUrl ?? request.path;
+      }
+
+      // What Export offers for Traffic: one exact row and the list as the index
+      // last answered it, pinned to that answer's position. Null without an index.
+      function trafficExportSnapshot(id = null) {
+        if (!trafficIndexActive() || state.sessionMode === 'preview') return null;
+        const origin = state.sessionMode === 'demo' ? 'demo' : 'live';
+        const query = trafficIndexQuery(origin);
+        const answer = state.trafficIndex.answer();
+        const listed = answer?.query === query && answer.origin === origin ? answer.document : null;
+        const chosen = id ?? state.selectedRequestId;
+        const request = chosen === null ? null : state.requests.find(candidate => candidate.id === chosen) ?? state.trafficIndex.row(chosen);
+        const target = request ? trafficCopyUrl(request) ?? request.path ?? '' : '';
+        const label = request ? `${request.method} ${target.length > 140 ? `${target.slice(0, 139)}…` : target}` : '';
+        const selected = request && request.origin !== 'sample' ? {id: request.id, label} : null;
+        const list = listed ? {query, through: listed.through ?? null, matching: Number(listed.matching),
+          filtered: [...new URLSearchParams(query).keys()].some(key => key !== 'sort' && key !== 'order')} : null;
+        return selected || list ? {selected, list} : null;
+      }
+
+      // The row menu's actions. cURL and fetch read the row's HAR entry, so they
+      // need the request index; a sample row has none.
+      function trafficRowActions(id) {
+        const request = state.requests.find(candidate => candidate.id === id) ?? state.trafficIndex?.row(id) ?? null;
+        if (!request) return [];
+        const url = trafficCopyUrl(request);
+        const indexed = trafficIndexActive() && request.origin !== 'sample';
+        const unindexed = 'This row has no request index entry to read its headers and body from.';
+        const copy = (label, build) => async () => {
+          const button = elements.requestCopyUrl;
+          let gaps = [];
+          try {
+            await trafficClipboardWrite((async () => {
+              const result = await build();
+              gaps = result.gaps ?? [];
+              return result.text;
+            })());
+            button.textContent = 'Copied';
+            if (gaps.length) investigationNotice(`Copied the ${label}, but ${gaps.join(' and ')}.`);
+          } catch (error) {
+            button.textContent = 'Copy failed';
+            investigationNotice(`The ${label} was not copied: ${error?.message ?? error}.`, 'ambiguous');
+          }
+          clearTimeout(state.trafficCopyTimer);
+          state.trafficCopyTimer = setTimeout(() => { button.textContent = 'Copy'; }, 1800);
+        };
+        const fromHar = render => async () => {
+          const entry = await trafficHarEntry(id);
+          return {text: render(entry), gaps: trafficCopyGaps(entry)};
+        };
+        return [
+          {label: 'Copy URL', disabled: !url, title: url ? '' : 'This row has no complete URL to copy.', run: copy('URL', async () => ({text: url}))},
+          {label: 'Copy as cURL', disabled: !indexed, title: indexed ? '' : unindexed, run: copy('cURL command', fromHar(trafficCurl))},
+          {label: 'Copy as fetch', disabled: !indexed, title: indexed ? '' : unindexed, run: copy('fetch call', fromHar(trafficFetch))},
+          {label: 'Export HAR…', separated: true, disabled: !indexed, title: indexed ? '' : unindexed,
+            run: () => capturedExportPanel.openTraffic(state.trafficRowMenuOpener, id)}
+        ];
       }
 
       function selectRequest(id, expectedIdentity = null) {
@@ -9554,18 +9619,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }, {passive: true});
       // A list that gains height, or is shown, mounts the rows that come into view.
       if (typeof ResizeObserver === 'function') new ResizeObserver(() => remountTrafficRows(elements.requestRows)).observe(elements.requestRows);
-      elements.requestCopyUrl.addEventListener('click', async () => {
-        const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        const fullUrl = selected?.urlTruncated ? requestFullUrl(selected) : null;
-        if (!selected || selected.hostOnly || (selected.urlTruncated && !fullUrl) || selected.targetKind === 'path') return;
-        try {
-          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : fullUrl ?? selected.path;
-          await navigator.clipboard.writeText(url);
-          elements.requestCopyUrl.textContent = 'Copied';
-        } catch {
-          elements.requestCopyUrl.textContent = 'Copy unavailable';
-        }
-        setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
+      // Right-click, the context-menu key or Shift+F10 on a row selects it and opens the menu the strip's Copy opens.
+      state.trafficRowMenu = createTrafficRowMenu({rows: elements.requestRows, button: elements.requestCopyUrl,
+        select(id, opener) { state.trafficRowMenuOpener = opener; if (id !== state.selectedRequestId) selectTrafficRow(id); },
+        actions: trafficRowActions});
+      elements.requestCopyUrl.addEventListener('click', () => {
+        if (state.trafficRowMenu.isOpen()) { state.trafficRowMenu.close(); return; }
+        const id = state.selectedRequestId;
+        if (id === null) return;
+        const box = elements.requestCopyUrl.getBoundingClientRect();
+        state.trafficRowMenu.open(id, elements.requestCopyUrl, box.left, box.bottom + 4);
       });
       {
         const gaps = document.querySelector('#request-header-gaps');

@@ -150,6 +150,10 @@
         trafficReloaded: null,
         trafficScrollFrame: 0,
         trafficDetailOpen: false,
+        // The row menu (traffic_copy.js), the control that opened it, and the Copy label's reset.
+        trafficRowMenu: null,
+        trafficRowMenuOpener: null,
+        trafficCopyTimer: 0,
         // Written only by setEventConnection(); broker and eventFailureKind
         // are its projections for existing readers.
         connection: 'connecting',

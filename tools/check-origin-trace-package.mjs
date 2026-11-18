@@ -150,7 +150,7 @@ export function assertFloat32Smoke(name, value) {
 export async function validateClientProjectScreenshots(manifest, directory) {
   assert(Array.isArray(manifest),'XCTest attachment manifest must be an array');
   const attachments=manifest.flatMap(test=>Array.isArray(test.attachments)?test.attachments:[]);
-  const phases=['save','writeFailure','replacementSave'],used=new Set(),result=[];
+  const phases=['save','writeFailure','replacementSave','harSave'],used=new Set(),result=[];
   for(const phase of phases){
     const expected=phase+'-native-save-panel';
     const suffix=new RegExp('^'+expected+'_[0-9]+_[0-9a-fA-F-]{36}\\.png$');
@@ -170,11 +170,11 @@ export async function validateClientProjectScreenshots(manifest, directory) {
 async function checkClientProjectScreenshotContract(){
   const directory=await mkdtemp(join(tmpdir(),'reb-attachment-contract-'));
   const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=','base64');
-  const phases=['save','writeFailure','replacementSave'];
+  const phases=['save','writeFailure','replacementSave','harSave'];
   const attachments=phases.map((phase,index)=>({suggestedHumanReadableName:phase+'-native-save-panel_0_00000000-0000-0000-0000-00000000000'+index+'.png',exportedFileName:phase+'.png'}));
   try{
     for(const phase of phases)await writeFile(join(directory,phase+'.png'),png);
-    assert.equal((await validateClientProjectScreenshots([{attachments}],directory)).length,3);
+    assert.equal((await validateClientProjectScreenshots([{attachments}],directory)).length,4);
     const automatic=Array.from({length:4},(_,index)=>({suggestedHumanReadableName:'Automatic screenshot '+index,exportedFileName:'save.png'}));
     await assert.rejects(validateClientProjectScreenshots([{attachments:[...attachments.slice(0,2),...automatic]}],directory),/named XCTest screenshot/);
     await assert.rejects(validateClientProjectScreenshots([{attachments:[...attachments,attachments[0]]}],directory),/named XCTest screenshot/);
@@ -238,6 +238,13 @@ async function checkNativeDiagnosticsContract(){
 async function runClientProjectSmoke(app, directory) {
   const stores=join(directory,'client-project'),output=join(directory,'client-project-panels');
   await mkdir(stores);await mkdir(output);
+  // One completed GET for the HAR phase, which saves the bundled backend's archive of this store.
+  const event=(sequence,type,status,payload)=>JSON.stringify({protocol_version:3,session_id:'1',sequence_number:String(sequence),
+    monotonic_time_ns:String(sequence*1000),navigation_id:'0',frame_id:'9',artifact_id:'0',parent_event_id:'0',request_id:'1',process_id:7,
+    thread_id:1,tab_id:1,category:'network',type,flags:0,status_code:status,error_code:0,encoded_data_length:'0',decoded_body_length:'0',
+    resource_type:11,initiator_process_id:0,initiator_request_id:0,payload_encoding:'hex',payload:Buffer.from(payload).toString('hex'),
+    payload_size:Buffer.byteLength(payload),payload_truncated:false});
+  await writeFile(join(stores,'events.jsonl'),event(1,'request_started',0,'GET fixture.test')+'\n'+event(2,'request_completed',200,'completed')+'\n');
   const child=spawn('xcodebuild',['test','-project',join(root,'tools/client-project-ui/ClientProjectUITests.xcodeproj'),
     // One architecture: this Mac's. A Debug build otherwise compiles x86_64 too.
     '-scheme','ClientProjectUITests','-destination',`platform=macOS,arch=${execFileSync('uname',['-m'],{encoding:'utf8'}).trim()}`,
@@ -271,13 +278,13 @@ async function runClientProjectSmoke(app, directory) {
   try{receipt=JSON.parse(await readFile(join(output,'result.json'),'utf8'));}
   catch(error){throw new Error('Native Save-panel receipt is missing or malformed'+nativeClientProjectDiagnostics(output),{cause:error});}
   assert.deepEqual(receipt,{savedExactBytes:true,cancelNoWrite:true,busyRefused:true,
-    navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,panelCount:5});
+    navigationNoWrite:true,writeFailureRefused:true,replacementSaved:true,harSaved:true,panelCount:6});
   const attachmentDirectory=join(output,'attachments');
   const manifest=JSON.parse(await readFile(join(attachmentDirectory,'manifest.json'),'utf8'));
   const screenshots=await validateClientProjectScreenshots(manifest,attachmentDirectory);
   for(const item of screenshots)await cp(join(attachmentDirectory,item.exported_file),join(output,item.phase+'-panel.png'));
   await writeFile(join(output,'phase-attachments.json'),JSON.stringify(screenshots,null,2)+'\n');
-  console.log('PASS Xcode UI-tested real native Save panels, exact ZIP bytes, Cancel/no-write, pending refusal, navigation cancellation/retry and atomic-write failure; overwrite not exercised');
+  console.log('PASS Xcode UI-tested real native Save panels, exact ZIP bytes, Cancel/no-write, pending refusal, navigation cancellation/retry, atomic-write failure and a Traffic HAR streamed from the bundled backend; overwrite not exercised');
 }
 
 async function main() {

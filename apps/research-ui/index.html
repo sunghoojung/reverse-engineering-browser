@@ -136,7 +136,7 @@
                   <span id="selected-status" class="status-pill">201</span>
                   <span class="selection-target"><span id="selected-name" class="researcher-name selection-name" hidden></span><span id="selected-url" class="selection-url">https://checkout.acme.test/cart</span></span>
                   <button id="request-rename" class="icon-button selection-rename" type="button" aria-label="Rename request" aria-keyshortcuts="F2" title="Select a request to name it." disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3.5l2 2M3 13l.6-2.6L11 3l2 2-7.4 7.4z"/></svg></button>
-                  <button id="request-copy-url" class="secondary-button" type="button" title="Copy selected request URL">Copy URL</button>
+                  <button id="request-copy-url" class="secondary-button" type="button" aria-haspopup="menu" aria-expanded="false" title="Copy the selected request as a URL, cURL or fetch, or export it as HAR">Copy</button>
                   <button id="request-evidence-toggle" class="secondary-button" type="button" aria-expanded="false">Evidence</button>
                   <button id="request-collection-pivot" class="secondary-button" type="button">Save to Collection</button>
                 </div>
@@ -886,11 +886,12 @@
         <div class="captured-export-body">
           <p id="captured-export-context" class="captured-export-context"></p>
           <div class="captured-export-fields">
-            <label data-export-format-field>Format<select data-export-format><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
+            <label data-export-format-field>Format<select data-export-format><option value="traffic_har">HAR · Traffic requests</option><option value="json">Capture JSON</option><option value="client">Client project · ZIP</option><option value="har">HAR · network archive</option><option value="sdl">GraphQL schema · SDL</option></select></label>
             <label data-export-provider-field hidden>Client runtime<select data-export-provider><option value="standard">Go + JavaScript</option><option value="requests">Python · requests</option><option value="httpx">Python · httpx</option></select></label>
             <label data-export-source-field hidden>Schema source<select data-export-source><option value="capture">Selected response</option><option value="file">Local introspection JSON</option></select></label>
             <label data-export-file-field hidden>Introspection file<input type="file" accept=".json,application/json" data-export-file><span>Up to 1 MiB · complete __schema or data.__schema</span></label>
-            <label data-export-policy-field>Data policy<select data-export-policy><option value="redacted_copy">Redacted copy</option><option value="raw">Raw · includes private values</option></select></label>
+            <label data-export-scope-field hidden>Requests<select data-export-scope><option value="selected">Selected request</option><option value="list">Filtered list</option></select></label>
+            <label data-export-policy-field>Data policy<select data-export-policy><option value="raw">Raw · includes private values</option><option value="credentials_withheld">Credential values withheld</option><option value="redacted_copy">Redacted copy</option></select></label>
             <label>Destination<select data-export-destination><option value="save">Save file</option><option value="copy">Copy to clipboard</option></select></label>
           </div>
           <p class="captured-export-note" data-export-note></p>
@@ -944,6 +945,7 @@
     <script src="traffic_filter.js"></script>
     <script src="traffic_columns.js"></script>
     <script src="traffic_overview.js"></script>
+    <script src="traffic_copy.js"></script>
     <script src="captured_client.js"></script>
     <script src="captured_export_formats.js"></script>
     <script src="vm_debugger.js"></script>

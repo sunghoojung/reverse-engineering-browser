@@ -1,6 +1,10 @@
 # Offline HAR export v1
 
-Traffic **Export… → Format → HAR** exposes raw and redacted policies (redacted by default) using this same offline generator and strict timing validator. Browser development downloads the file; the native **Clipboard** destination writes text to the local clipboard only when explicitly selected.
+This page is the offline exporter for one saved `get_network_request` response.
+Traffic's own **Export…** saves the request index's HAR instead
+(`export_requests_har`, [Request HAR export](../../protocol/http-api.md#request-har-export)):
+every hop of the selected request or of the filtered list, Raw by default, as
+described in [Traffic exports and copies](../../apps/research-ui/README.md#traffic-exports-and-copies).
 
 Export one reviewed, saved `get_network_request` response without contacting its
 URL or executing anything in it:

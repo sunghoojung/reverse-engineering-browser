@@ -1036,16 +1036,34 @@ function capturedClientProject(source, mode) {
   return {files,provenance,bytes:capturedClientZip(files)};
 }
 
+// The backend's HAR of Traffic rows (export_requests_har): one exact row, or
+// the list's query pinned to the index position the list was read at.
+function capturedTrafficHarQuery(traffic, scope, mode) {
+  if (!['raw','credentials_withheld'].includes(mode)) throw new TypeError('Choose raw or credential values withheld.');
+  let parameters;
+  if (scope === 'selected') {
+    if (!traffic?.selected?.id) throw new TypeError('Select a request to export it.');
+    parameters = new URLSearchParams({rows: traffic.selected.id});
+  } else if (scope === 'list') {
+    if (!traffic?.list) throw new TypeError('The request index has not answered for this list yet.');
+    parameters = new URLSearchParams(traffic.list.query);
+    if (traffic.list.through !== null) parameters.set('through', traffic.list.through);
+  } else throw new TypeError('Choose the selected request or the list.');
+  if (mode === 'raw') parameters.set('credential_values','1');
+  return parameters.toString();
+}
+
 // A single deliberate local export. The dialog never sends a target request.
 function installCapturedExportDialog(options) {
   const dialog = document.querySelector('#captured-export-dialog');
-  if (!dialog) return {sync() {},close() {}};
+  if (!dialog) return {sync() {},close() {},openTraffic() {}};
   const query = name => dialog.querySelector('[data-export-'+name+']');
-  const fields = Object.fromEntries(['format','provider','source','file','policy','destination','submit','close','cancel','note','status'].map(name=>[name,query(name)]));
+  const fields = Object.fromEntries(['format','provider','source','file','scope','policy','destination','submit','close','cancel','note','status'].map(name=>[name,query(name)]));
   const native = document.documentElement.classList.contains('native-shell');
   const bridge = globalThis.webkit?.messageHandlers?.rebClientProjectExport;
+  const harBridge = globalThis.webkit?.messageHandlers?.rebRequestExport;
   const triggers = [...document.querySelectorAll('[data-export-open]')];
-  let kind = 'capture', snapshot = null, opener = null, revision = 0, busy = false, outputStarted = false, fileRevision = 0, preparedFile = null;
+  let kind = 'capture', snapshot = null, traffic = null, opener = null, revision = 0, busy = false, outputStarted = false, fileRevision = 0, preparedFile = null;
   const fileMode = () => fields.format.value === 'sdl' && fields.source.value === 'file';
   const source = () => {
     if (kind === 'run') {
@@ -1056,7 +1074,8 @@ function installCapturedExportDialog(options) {
     return {request,identity:capturedRequestIdentity(request),evidence:capturedClientTrafficDocument(request,'raw')};
   };
   const fingerprint = value => JSON.stringify(kind === 'run' ? value : [value.identity,value.evidence]);
-  const current = () => { try { return snapshot !== null && fingerprint(source()) === snapshot; } catch { return false; } };
+  // Traffic rows are named by ID and index position at open, so they cannot go stale.
+  const current = () => { if (fields.format.value === 'traffic_har') return traffic !== null; try { return snapshot !== null && fingerprint(source()) === snapshot; } catch { return false; } };
   const status = (message,failed=false) => { fields.status.textContent = message; fields.status.hidden = !message; fields.status.dataset.kind = failed ? 'error' : 'result'; };
   function sync() {
     for (const trigger of triggers) {
@@ -1065,67 +1084,88 @@ function installCapturedExportDialog(options) {
       trigger.disabled = busy || !available;
     }
     if (!dialog.open) return;
-    const project = fields.format.value === 'client', sdl = fields.format.value === 'sdl';
+    const project = fields.format.value === 'client', sdl = fields.format.value === 'sdl', trafficHar = fields.format.value === 'traffic_har';
     // Unavailable modes are removed from the choice, not offered disabled.
-    for (const option of fields.format.options) option.hidden = option.disabled = kind === 'run' ? option.value !== 'client' : snapshot === null && option.value !== 'sdl';
+    for (const option of fields.format.options) option.hidden = option.disabled = kind === 'run' ? option.value !== 'client'
+      : option.value === 'traffic_har' ? traffic === null : snapshot === null && option.value !== 'sdl';
     const fromCapture = fields.source.querySelector('[value="capture"]');
     fromCapture.hidden = fromCapture.disabled = snapshot === null;
-    // Without a saved capture only local-file SDL works: show no choice at all.
-    const fileOnly = kind === 'capture' && snapshot === null;
+    // Without a saved capture or request index only local-file SDL works: show no choice at all.
+    const fileOnly = kind === 'capture' && snapshot === null && traffic === null;
     query('format-field').hidden = fileOnly;
     query('provider-field').hidden = !project;
+    query('scope-field').hidden = !trafficHar;
     query('policy-field').hidden = sdl;
     query('source-field').hidden = !sdl || fileOnly;
     query('file-field').hidden = !fileMode();
+    // The backend withholds credential values but cannot redact; captured copies can.
+    for (const option of fields.policy.options) option.hidden = option.disabled = option.value === 'credentials_withheld' ? !trafficHar : option.value === 'redacted_copy' && trafficHar;
+    if (fields.policy.querySelector('[value="'+fields.policy.value+'"]')?.disabled) fields.policy.value = 'raw';
+    const one = fields.scope.querySelector('[value="selected"]'), all = fields.scope.querySelector('[value="list"]');
+    one.hidden = one.disabled = !traffic?.selected;
+    all.hidden = all.disabled = !traffic?.list;
+    if (trafficHar && fields.scope.querySelector('[value="'+fields.scope.value+'"]')?.disabled) fields.scope.value = one.disabled ? 'list' : 'selected';
     const save = fields.destination.querySelector('[value="save"]'), copy = fields.destination.querySelector('[value="copy"]');
-    save.disabled = native && !project; copy.disabled = project;
+    // A list's HAR streams to a file: it is not held whole to put on the clipboard.
+    save.disabled = native && !project && !trafficHar; copy.disabled = project || trafficHar && fields.scope.value !== 'selected';
     save.textContent = native ? 'macOS Save dialog' : 'Download file';
-    if (native && !project) fields.destination.value = 'copy';
-    if (project) fields.destination.value = 'save';
-    for (const name of ['format','provider','source','file','policy','destination']) fields[name].disabled = busy;
+    if (save.disabled) fields.destination.value = 'copy';
+    if (copy.disabled) fields.destination.value = 'save';
+    for (const name of ['format','provider','source','file','scope','policy','destination']) fields[name].disabled = busy;
     fields.close.disabled = fields.cancel.disabled = outputStarted;
-    const unavailable = project && native && !bridge;
+    const unavailable = native && fields.destination.value === 'save' && (project && !bridge || trafficHar && !harBridge);
     const validFile = preparedFile && fields.file.files?.length === 1 && preparedFile.file === fields.file.files[0];
     fields.submit.disabled = busy || unavailable || (fileMode() ? !validFile : !current());
     const privacy = sdl ? 'Schema descriptions and identifiers may be private. SDL is exported as raw text.'
+      : trafficHar ? (fields.policy.value === 'raw' ? 'Raw output includes captured credential values, cookies, URLs and bodies. Review before sharing.'
+        : 'Credential header and cookie values are withheld. URLs, other headers and bodies stay as captured.')
       : fields.policy.value === 'raw' ? 'Raw output includes retained private values. Review before sharing.'
       : 'Header values, bodies and URL credentials/query are removed. Paths and metadata can still be private.';
     const limit = project ? (fields.provider.value === 'standard' ? 'Dry-run clients; sending requires separate explicit configuration.' : 'Python uses per-operation timeouts, not an overall deadline.')
+      : trafficHar ? 'Each hop is one entry, redirects and failures included.'+(fields.scope.value === 'list' ? ' The list is the one shown at open; requests indexed after it are not added.' : '')
       : fields.format.value === 'har' ? 'Requires complete source timing; unsupported captures are refused.'
       : sdl ? 'Uses retained or local JSON only; no introspection query is sent.' : 'One retained request; original evidence stays unchanged.';
     fields.note.textContent = privacy+' '+limit;
-    if (unavailable) status('Update the native app to enable project saving.',true);
+    if (unavailable) status(trafficHar ? 'Update the native app to enable HAR saving.' : 'Update the native app to enable project saving.',true);
     else if (!busy && !fileMode() && !current()) status('The selected evidence changed or expired. Close and open Export again.',true);
 
   }
   function close() {
     if (outputStarted) { status('Finish the active save or clipboard operation first.'); return; }
-    revision++; fileRevision++; preparedFile = null; busy = false; snapshot = null; fields.file.value = '';
+    revision++; fileRevision++; preparedFile = null; busy = false; snapshot = null; traffic = null; fields.file.value = '';
     if (dialog.open) dialog.close();
     opener?.focus({preventScroll:true}); sync();
   }
-  for (const trigger of triggers) trigger.addEventListener('click',() => {
-    if (trigger.disabled || busy || dialog.open) return;
+  // Raw is the default: an export matches the evidence the researcher sees.
+  function open(from, exportKind, scope = 'list', id = null) {
+    if (busy || dialog.open) return;
     try {
-      kind = trigger.dataset.exportOpen;
+      kind = exportKind;
       if (!['capture','run'].includes(kind)) throw new TypeError('Unknown export source.');
-      snapshot = null;
+      snapshot = null; traffic = null;
       try { snapshot = fingerprint(source()); } catch (error) { if (kind === 'run') throw error; }
-      opener = trigger; revision++; fileRevision++; preparedFile = null;
-      fields.format.value = kind === 'run' ? 'client' : snapshot === null ? 'sdl' : 'json'; fields.provider.value = 'standard';
-      fields.source.value = snapshot === null ? 'file' : 'capture'; fields.policy.value = 'redacted_copy'; fields.destination.value = native && kind === 'capture' ? 'copy' : 'save';
+      if (kind === 'capture') traffic = options.getTrafficExport?.(id) ?? null;
+      opener = from; revision++; fileRevision++; preparedFile = null;
+      fields.format.value = kind === 'run' ? 'client' : traffic !== null ? 'traffic_har' : snapshot === null ? 'sdl' : 'json'; fields.provider.value = 'standard';
+      fields.source.value = snapshot === null ? 'file' : 'capture'; fields.policy.value = 'raw';
+      fields.scope.value = traffic?.selected && (scope === 'selected' || !traffic.list) ? 'selected' : 'list';
+      fields.destination.value = native && kind === 'capture' && traffic === null ? 'copy' : 'save';
+      if (traffic?.list) fields.scope.querySelector('[value="list"]').textContent = `${traffic.list.filtered ? 'Filtered list' : 'All requests'} · ${traffic.list.matching.toLocaleString('en-US')} ${traffic.list.matching === 1 ? 'request' : 'requests'}`;
       fields.file.value = ''; status('');
-      document.querySelector('#captured-export-title').textContent = kind === 'run' ? 'Export retained run' : snapshot === null ? 'Export GraphQL schema' : 'Export capture';
-      // Native Traffic rows carry no captureRecord: their headers and bodies are
-      // not captured, so only conversion of a local introspection file can work.
+      document.querySelector('#captured-export-title').textContent = kind === 'run' ? 'Export retained run' : traffic !== null ? 'Export Traffic'
+        : snapshot === null ? 'Export GraphQL schema' : 'Export capture';
       document.querySelector('#captured-export-context').textContent = kind === 'run' ? 'One retained Repeater run'
-        : snapshot === null ? 'Native Traffic rows retain no request or response headers or bodies, so capture JSON, client project and HAR exports are unavailable here. Convert a local GraphQL introspection JSON file to SDL.'
-          : 'One selected Traffic request';
-      // Return focus to the exact toolbar action when dismissed.
+        : traffic !== null ? (traffic.selected ? 'Selected: '+traffic.selected.label : 'No request is selected. The list exports every request it matches.')
+          : snapshot === null ? 'This Traffic list has no request index to export from. Convert a local GraphQL introspection JSON file to SDL.'
+            : 'One selected Traffic request';
+      // Return focus to the exact action that opened it when dismissed.
       dialog.showModal(); sync(); fields.format.focus({preventScroll:true});
     } catch (error) { options.notice(error.message); }
+  }
+  for (const trigger of triggers) trigger.addEventListener('click',() => {
+    if (!trigger.disabled) open(trigger, trigger.dataset.exportOpen);
   });
-  for (const name of ['format','provider','source','policy','destination']) fields[name].addEventListener('change',() => { status(''); sync(); });
+  for (const name of ['format','provider','source','scope','policy','destination']) fields[name].addEventListener('change',() => { status(''); sync(); });
   fields.file.addEventListener('change',async () => {
     const owner = ++fileRevision, file = fields.file.files?.length === 1 ? fields.file.files[0] : null;
     preparedFile = null; status(''); sync();
@@ -1147,19 +1187,57 @@ function installCapturedExportDialog(options) {
   dialog.addEventListener('close',() => {
     // close() queues this event; a new opening may already own the dialog.
     if (dialog.open) return;
-    revision++; fileRevision++; preparedFile = null; snapshot = null; busy = false; fields.file.value = '';
+    revision++; fileRevision++; preparedFile = null; snapshot = null; traffic = null; busy = false; fields.file.value = '';
   });
   document.addEventListener('keydown',event => {
     if (!dialog.open) return;
     if (event.key === 'F8' || event.altKey && ['ArrowLeft','ArrowRight'].includes(event.key) ||
         (event.ctrlKey || event.metaKey) && ['p','j'].includes(event.key.toLowerCase())) { event.preventDefault(); event.stopImmediatePropagation(); }
   },true);
+  // The archive streams from the backend: to a download, to the native panel's
+  // file without passing through the page, or, for one row, to the clipboard.
+  async function exportTraffic(owner,mode,destination,scope) {
+    if (!traffic || kind !== 'capture') throw new TypeError('The Traffic list is unavailable. Reopen Export.');
+    if (!['save','copy'].includes(destination) || destination === 'copy' && scope !== 'selected') throw new TypeError('This destination is unavailable for the selected requests.');
+    const parameters = capturedTrafficHarQuery(traffic,scope,mode);
+    const filename = (scope === 'selected' ? 'request' : 'requests')+'.'+(mode === 'raw' ? 'raw' : 'credentials-withheld')+'.har';
+    if (destination === 'copy') {
+      if (!navigator.clipboard) throw new TypeError('Clipboard access is unavailable.');
+      outputStarted = true; sync();
+      // The clipboard write starts now, inside the click, and takes the text when it arrives.
+      await trafficClipboardWrite((async () => {
+        const response = await fetch('/api/requests/har?'+parameters,{cache:'no-store'});
+        const text = await response.text();
+        let archive = null; try { archive = JSON.parse(text); } catch { /* Reported below. */ }
+        if (!response.ok) throw new TypeError(archive?.error ?? 'the backend returned HTTP '+response.status);
+        if (archive?.log?._reb?.complete !== true) throw new TypeError(archive?.log?._reb?.error ?? 'the archive is incomplete');
+        return text;
+      })());
+      status('Copied locally. Review before sharing.');
+    } else if (native) {
+      if (!harBridge) throw new TypeError('Native HAR saving is unavailable.');
+      if (owner !== revision || !dialog.open) return;
+      outputStarted = true; sync();
+      const result = await harBridge.postMessage({format:'reb-request-har-save-v1',query:parameters,filename});
+      if (!result || !['saved','canceled'].includes(result.status)) throw new TypeError('The native save result could not be confirmed.');
+      if (result.status === 'canceled') status('Save canceled. No archive was written.');
+      else if (result.complete === true) status('Saved '+Number(result.entries).toLocaleString('en-US')+' HAR '+(result.entries === 1 ? 'entry' : 'entries')+' locally. Review before sharing.');
+      else status('The saved archive is incomplete: '+(result.error ?? 'the export stopped early')+'. Its log._reb.complete is false.',true);
+    } else {
+      if (owner !== revision || !dialog.open) return;
+      outputStarted = true; sync();
+      const link = document.createElement('a'); link.href = '/api/requests/har?'+parameters; link.download = filename; link.hidden = true; document.body.append(link);
+      try { link.click(); } finally { link.remove(); }
+      status('Download requested. The archive says whether it is complete in log._reb.complete.');
+    }
+  }
   fields.submit.addEventListener('click',async () => {
     sync(); if (fields.submit.disabled || busy) return;
     const owner = ++revision, format = fields.format.value, mode = format === 'sdl' ? 'raw' : fields.policy.value;
     const destination = fields.destination.value, provider = fields.provider.value, localFile = fileMode() ? fields.file.files[0] : null;
     busy = true; sync(); status('Preparing local export…');
     try {
+      if (format === 'traffic_har') { await exportTraffic(owner,mode,destination,fields.scope.value); return; }
       if (!['json','client','har','sdl'].includes(format) || kind === 'run' && format !== 'client' || !['raw','redacted_copy'].includes(mode)) throw new TypeError('Choose a supported export format and policy.');
       if (!['save','copy'].includes(destination) || format === 'client' && destination !== 'save' || native && format !== 'client' && destination !== 'copy') throw new TypeError('This destination is unavailable for the selected format.');
       let bytes, text, filename, type;
@@ -1204,7 +1282,10 @@ function installCapturedExportDialog(options) {
     } catch (error) { if (owner === revision && dialog.open) status('Export failed: '+error.message,true); }
     finally { if (owner === revision) { busy = false; outputStarted = false; sync(); } }
   });
-  sync(); return {sync,close};
+  sync();
+  return {sync,close,
+    // The Traffic row menu's Export HAR…, scoped to the selected request.
+    openTraffic(from,id) { open(from,'capture','selected',id); }};
 }
 
 // CommonJS entry point for the offline exporter; browser script behavior is unchanged.

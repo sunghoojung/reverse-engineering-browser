@@ -116,6 +116,30 @@ enum StoredEvidenceBackendChecks {
     let layout = call(request("/api/source-format?session_id=1&artifact_id=1"))
     precondition(layout.status == 200 && layout.json["schema"] as? String == "source-format-v1"
       && layout.json["status"] as? String == "formatted", "\(layout)")
+    // The HAR save streams the backend's answer to a file; an error answer writes nothing.
+    guard let firstRow = (index.json["requests"] as? [[String: Any]])?.first?["id"] as? String else {
+      preconditionFailure("the index lists a row: \(index.json)")
+    }
+    precondition(call(request("/api/requests/har?rows=\(firstRow)")).status == 200, "the page's one-row HAR read is forwarded")
+    let har = root.appendingPathComponent("saved.har")
+    func save(_ query: String) -> StoredEvidenceBackend.Failure? {
+      let done = DispatchSemaphore(value: 0)
+      var failure: StoredEvidenceBackend.Failure?
+      backend.download(path: "/api/requests/har", query: query, to: har) { failure = $0; done.signal() }
+      precondition(done.wait(timeout: .now() + 60) == .success, "no answer for the HAR save")
+      return failure
+    }
+    for query in ["sort=capture&order=asc", "rows=\(firstRow)&credential_values=1"] {
+      precondition(save(query) == nil, query)
+      let archive = (try JSONSerialization.jsonObject(with: Data(contentsOf: har)) as? [String: Any])?["log"] as? [String: Any]
+      let summary = archive?["_reb"] as? [String: Any]
+      precondition(summary?["complete"] as? Bool == true && (archive?["entries"] as? [Any])?.isEmpty == false, "\(query): \(String(describing: archive))")
+    }
+    let before = try Data(contentsOf: har)
+    let missingRow = save("rows=missing-row")
+    precondition(missingRow?.status == 404 && missingRow?.message.contains("missing-row") == true, "\(String(describing: missingRow))")
+    let after = try Data(contentsOf: har)
+    precondition(after == before, "an error answer leaves the saved file as it was")
     let debugger = call(request("/api/native-debugger"))
     precondition(debugger.status == 200 && debugger.json["availability"] as? String == "unsupported", "\(debugger)")
     let action = call(request("/api/native-debugger/actions", method: "POST",
@@ -131,6 +155,6 @@ enum StoredEvidenceBackendChecks {
     let missing = StoredEvidenceBackend(executableURL: root.appendingPathComponent("missing"), arguments: stores)
     let refused = call(request("/api/requests"), on: missing)
     precondition(refused.status == 503 && refused.json["code"] as? String == "dependency_unavailable", "\(refused)")
-    print("PASS stored-evidence reb:// reads of the request index, the event poll with the app's broker state, filtered events, headers, cookies, stacks, source format and debugger state come from the bundled backend, which stops and restarts on demand")
+    print("PASS stored-evidence reb:// reads of the request index, the event poll with the app's broker state, filtered events, headers, cookies, HAR exports and saves, stacks, source format and debugger state come from the bundled backend, which stops and restarts on demand")
   }
 }

@@ -7,7 +7,10 @@ import WebKit
 // UI and drive real NSSavePanel actions. Every destination is created here under
 // a new temporary directory; no JS message can supply a path or test control.
 final class ClientProjectExportSmoke: NSObject {
-  private enum Phase: String { case cancel, save, writeFailure, navigation, replacementSave }
+  private enum Phase: String { case cancel, save, writeFailure, navigation, replacementSave, harSave }
+  // The HAR phase saves the bundled backend's archive of the fixture store's one request.
+  private static let harPayload = ["format": RequestHarSave.format, "query": "sort=capture&order=asc&credential_values=1",
+    "filename": "requests.raw.har"]
   private let webView: WKWebView
   private let window: NSWindow
   private let exporter: NativeClientProjectExport
@@ -105,15 +108,16 @@ final class ClientProjectExportSmoke: NSObject {
     phaseDirectory = directory.appendingPathComponent(next.rawValue, isDirectory: true)
     do { try manager.createDirectory(at: phaseDirectory, withIntermediateDirectories: false) }
     catch { fail("cannot create phase directory") }
+    let bridge = next == .harSave ? "rebRequestExport.postMessage(payload)" : "rebClientProjectExport.postMessage(window.__nativeProjectSmokePayload)"
     webView.callAsyncJavaScript("""
       try {
-        return {fulfilled:true,value:await window.webkit.messageHandlers.rebClientProjectExport.postMessage(window.__nativeProjectSmokePayload)};
+        return {fulfilled:true,value:await window.webkit.messageHandlers.\(bridge)};
       } catch (error) {
         // Preserve the actual rejected bridge message. WebKit wraps a rejected
         // async result in an NSError whose localizedDescription is generic.
         return {fulfilled:false,message:String(error)};
       }
-      """, arguments: [:], in: nil, in: .page) { result in
+      """, arguments: ["payload": Self.harPayload], in: nil, in: .page) { result in
       self.trace("script-reply \(next.rawValue)")
       // Reload destroys the old JavaScript promise. The native cancellation
       // receipt and replacement navigation are verified independently below.
@@ -125,6 +129,10 @@ final class ClientProjectExportSmoke: NSObject {
         if next == .writeFailure {
           self.require(!fulfilled && (outcome["message"] as? String)?.contains("could not be saved") == true,
                        "filesystem failure did not return the expected rejection")
+        } else if next == .harSave {
+          let value = outcome["value"] as? [String: Any]
+          self.require(fulfilled && value?["status"] as? String == "saved" && value?["complete"] as? Bool == true
+            && value?["entries"] as? Int == 1, "wrong HAR save result: \(outcome)")
         } else {
           let status = (outcome["value"] as? [String: Any])?["status"] as? String
           self.require(fulfilled && status == (next == .cancel ? "canceled" : "saved"), "wrong save result")
@@ -139,15 +147,18 @@ final class ClientProjectExportSmoke: NSObject {
     }
   }
 
+  private var filename: String { phase == .harSave ? Self.harPayload["filename"]! : ClientProjectArchive.Mode.raw.filename }
+
   private var destination: URL {
-    phaseDirectory.appendingPathComponent(ClientProjectArchive.Mode.raw.filename)
+    phaseDirectory.appendingPathComponent(filename)
   }
 
   private func presented(_ panel: NSSavePanel) {
     panelCount += 1
     stage("configure-panel")
-    require(panel.nameFieldStringValue == ClientProjectArchive.Mode.raw.filename, "suggested filename changed")
-    require(!panel.allowsOtherFileTypes && panel.allowedContentTypes == [.zip], "save type changed")
+    require(panel.nameFieldStringValue == filename, "suggested filename changed")
+    require(!panel.allowsOtherFileTypes && panel.allowedContentTypes
+      == [phase == .harSave ? UTType(filenameExtension: "har", conformingTo: .json) ?? .json : .zip], "save type changed")
     panel.directoryURL = phaseDirectory
     stage("wait-panel-ready")
     wait(until: { panel.sheetParent === self.window && panel.isVisible && panel.isKeyWindow }, label: "real key Save panel") {
@@ -231,6 +242,13 @@ final class ClientProjectExportSmoke: NSObject {
         let actual = try Data(contentsOf: destination)
         require(reply == "saved" && actual == expected, "saved ZIP differs from authored bytes")
         require(children == [ClientProjectArchive.Mode.raw.filename], "atomic save left an unexpected file")
+      case .harSave:
+        let archive = (try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as? [String: Any])?["log"] as? [String: Any]
+        let entries = archive?["entries"] as? [[String: Any]]
+        require(reply == "saved" && (archive?["_reb"] as? [String: Any])?["complete"] as? Bool == true
+          && entries?.count == 1 && (entries?.first?["request"] as? [String: Any])?["method"] as? String == "GET",
+          "the saved HAR is not the store's one request")
+        require(children == [filename], "the HAR save left a staged or unexpected file")
       case .writeFailure:
         require(reply == "failed", "write failure did not reject the request")
         require(try manager.contentsOfDirectory(atPath: destination.path).isEmpty,
@@ -248,15 +266,16 @@ final class ClientProjectExportSmoke: NSObject {
       schedule("prepare-replacement") {
         self.prepareFixture { self.schedule("start-replacement-save") { self.run(.replacementSave) } }
       }
-    case .replacementSave:
-      require(panelCount == 5 && busyRefused, "unexpected panel count or missing busy refusal")
+    case .replacementSave: schedule("start-har-save") { self.run(.harSave) }
+    case .harSave:
+      require(panelCount == 6 && busyRefused, "unexpected panel count or missing busy refusal")
       do { try manager.removeItem(at: directory) }
       catch { fail("cannot clean up owned temporary directory") }
-      print("NATIVE_CLIENT_PROJECT_OK {\"savedExactBytes\":true,\"cancelNoWrite\":true,\"busyRefused\":true,\"navigationNoWrite\":true,\"writeFailureRefused\":true,\"replacementSaved\":true,\"panelCount\":5}")
+      print("NATIVE_CLIENT_PROJECT_OK {\"savedExactBytes\":true,\"cancelNoWrite\":true,\"busyRefused\":true,\"navigationNoWrite\":true,\"writeFailureRefused\":true,\"replacementSaved\":true,\"harSaved\":true,\"panelCount\":6}")
       if let output = ProcessInfo.processInfo.environment["REB_APP_SMOKE_CLIENT_PROJECT_OUTPUT"] {
         let result: [String: Any] = ["savedExactBytes": true, "cancelNoWrite": true,
           "busyRefused": true, "navigationNoWrite": true, "writeFailureRefused": true,
-          "replacementSaved": true, "panelCount": 5]
+          "replacementSaved": true, "harSaved": true, "panelCount": 6]
         do {
           let bytes = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
           try bytes.write(to: URL(fileURLWithPath: output).appendingPathComponent("result.json"))

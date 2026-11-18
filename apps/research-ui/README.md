@@ -402,15 +402,37 @@ so Origin Trace has no in-app report. See
 [Passive security report v1](../../docs/product/passive-security-report-v1.md)
 for the schema, rules, bounds and commands.
 
-## Captured request exports
+## Traffic exports and copies
 
-Live native Traffic has no CDP exchange to replay, so Traffic has no capture
-actions. **Export…** in the Traffic toolbar converts a local
-introspection JSON file (`__schema` or `data.__schema`, up to 1 MiB) to GraphQL
-SDL; duplicate keys, invalid UTF-8, partial/error schemas and unsafe SDL
-literals are refused. Export never queries an introspection endpoint or sends a
-request. SDL is a raw schema export: descriptions and identifiers can be
-sensitive.
+**Export…** in the Traffic toolbar saves the request index's HAR
+(`export_requests_har`, see
+[Request HAR export](../../protocol/http-api.md#request-har-export)): the
+selected request, or the list as shown, with its filters, sort and the index
+position it was read at, so rows indexed later are not added. Every hop is an
+entry, redirects and failures included. **Raw** is the default and asks for
+credential header and cookie values; **Credential values withheld** leaves
+them out. A redacted copy is not offered: the backend withholds credentials but
+does not rewrite URLs or bodies. The browser development UI downloads the
+archive; the native app streams it from the backend to the file chosen in a
+macOS Save panel without passing it through the page, and reports how many
+entries it holds and whether `log._reb.complete` is true. One request can also
+be copied to the clipboard.
+
+The selection strip's **Copy**, a right-click on a row, or the context-menu key
+or Shift+F10 on a focused row, opens the row menu: **Copy URL**, **Copy as
+cURL**, **Copy as fetch** and **Export HAR…**. cURL and fetch are built from
+the first hop of the row's HAR entry, with the headers and body the capture
+kept, credentials included; pseudo-headers, Host, Content-Length, Connection
+and Transfer-Encoding are left to the client. A binary body is decoded from
+base64 by the shell for cURL and by `atob` for fetch. When the capture did not
+keep the body whole, or the URL is not the whole captured target, the copy says
+so. Copying sends nothing.
+
+The same dialog converts a local introspection JSON file (`__schema` or
+`data.__schema`, up to 1 MiB) to GraphQL SDL; duplicate keys, invalid UTF-8,
+partial/error schemas and unsafe SDL literals are refused. Export never queries
+an introspection endpoint or sends a request. SDL is a raw schema export:
+descriptions and identifiers can be sensitive.
 
 Saved `reb-network-request-v1` documents remain usable through offline
 commands: `tools/export-captured-client.mjs` (client projects, see
@@ -418,7 +440,9 @@ commands: `tools/export-captured-client.mjs` (client projects, see
 `tools/export-captured-har.mjs` and `tools/export-graphql-sdl.mjs`. They read
 local files only and never send captured requests.
 `node tools/check-captured-export-ui.mjs` exercises the dialog handlers with an
-in-memory DOM; native Save-panel testing remains a macOS gate.
+in-memory DOM, and `node tools/check-traffic-copy.mjs` runs each generated cURL
+command and fetch call against a loopback server. The packaged native Save-panel
+test saves a Traffic HAR from the bundled backend.
 
 ## Saved investigation notebook
 
@@ -1192,7 +1216,7 @@ that times out or gets an error status keeps the last read copy and its reason
 and is read again on the next refresh; a size or SHA-256 mismatch, whether the
 bytes differ, the store reports `artifact_integrity`, or the request record's digest
 differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
-its retained full target for General's Request URL and Copy URL, or General
+its retained full target for General's Request URL and the row menu's Copy URL, or General
 says why it was not retained. Sources never lists or opens request bodies or
 full targets.
 
@@ -1466,7 +1490,7 @@ Arrow keys select adjacent request rows; inspector tabs use Left/Right and
 Home/End. Escape closes the inspector and returns focus to the ledger. The close
 button has the same behavior. A dismissed inspector stays closed across
 refreshes; selecting a request reopens it. Full URLs remain available in General
-and Copy URL, and host-only metadata never implies a captured path or query.
+and the row menu's Copy URL, and host-only metadata never implies a captured path or query.
 
 Collection uses a saved-request library and a template editor; it never sends
 a request. Headers, Body, and Variables are keyboard-accessible request
@@ -1697,6 +1721,7 @@ capture, fetch anything or change a row.
 | `traffic_filter.js` | The filter grammar, Invert, Hide internal, 3rd-party, Failed and the time range over the newest window, mirroring the request index |
 | `traffic_columns.js` | Column widths, hidden columns, the header menu, saved layout and fitting columns to the table width |
 | `traffic_overview.js` | The timing strip and its pointer and keyboard time-range selection |
+| `traffic_copy.js` | The row menu (right-click, Shift+F10 and the strip's Copy): Copy URL, Copy as cURL and Copy as fetch from the row's HAR entry, and Export HAR… |
 | `evidence_names.js` | Researcher names: exact identities, the closed names document, its Analyst-library store, the inline rename editor and the command palette provider |
 | `wasm_function_names.js` | Wasm function names in Inspect, the Graph and its function list, Flow cards, Initiator frames and cross-references: inert name spans, the F2 and Rename entry points, and in-place refresh after a rename |
 | `captured_client.js`, `captured_export_formats.js` | Saved-capture identity, local export dialog, and the client-project/HAR/SDL generators shared with offline commands |

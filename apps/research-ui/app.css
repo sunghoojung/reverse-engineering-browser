@@ -2422,6 +2422,12 @@ var(--panel);
       .column-menu button:hover, .column-menu button:focus-visible { background: var(--panel-3); outline: 1px solid var(--accent); outline-offset: -1px; }
       .column-menu button:disabled { color: var(--faint); }
       .column-menu [role="menuitem"] { margin-top: 3px; border-top: 1px solid var(--line-soft); border-radius: 0 0 4px 4px; }
+      /* The Traffic row menu holds actions only: no check column, and one rule, above Export HAR. */
+      .traffic-row-menu { min-width: 160px; }
+      .traffic-row-menu button::before { display: none; }
+      .traffic-row-menu [role="menuitem"] { margin-top: 0; border-top: 0; border-radius: 4px; }
+      .traffic-row-menu [role="menuitem"][data-separated] { margin-top: 3px; border-top: 1px solid var(--line-soft); border-radius: 0 0 4px 4px; }
+      #request-copy-url::after { content: ""; width: 0; height: 0; margin-left: 5px; border: 3px solid transparent; border-top: 4px solid currentColor; border-bottom: 0; display: inline-block; vertical-align: 1px; opacity: .7; }
       /* Keep the phone footer to a full-width count row and one action row.
          Mixing shrinking counts with buttons steals height from the ledger. */
       @media (max-width: 480px) { .request-window > span { flex-basis: 100%; } }
@@ -3258,10 +3264,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .captured-export-header h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .captured-export-header > button { font-size: 18px; min-width: 30px; }
 .captured-export-body { padding: 16px 20px; min-height: 0; overflow: auto; font-size: 12px; }
-.captured-export-context { color: var(--muted); margin: 0 0 16px; }
+.captured-export-context { color: var(--muted); margin: 0 0 16px; overflow-wrap: anywhere; }
 .captured-export-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
 .captured-export-fields label { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; }
-.captured-export-fields label:first-child, .captured-export-fields [data-export-file-field] { grid-column: 1 / -1; }
+.captured-export-fields label:first-child, .captured-export-fields [data-export-file-field], .captured-export-fields [data-export-scope-field] { grid-column: 1 / -1; }
 .captured-export-fields [hidden] { display: none; }
 .captured-export-fields select, .captured-export-fields input { width: 100%; min-width: 0; max-width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--panel-2); font-size: 12px; }
 .captured-export-fields input { font-size: 11px; }

@@ -185,7 +185,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(String(requestURL.path.dropFirst()))),
           "text/css; charset=utf-8", 200, [:]
         )
-      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
+      case "/block_graph.js", "/wasm_readable.js", "/block_graph_layout.js", "/wasm_diff_view.js", "/graph_layout_client.js", "/flow_graph.js", "/flow_graph_layout.js", "/flow_timeline.js", "/flow_workspace.js", "/pane_layout.js", "/app.js", "/agent_panel.js", "/session_panel.js", "/command_palette.js", "/app_state.js", "/evidence_models.js", "/evidence_package.js", "/float32_inspector.js", "/evidence_comparison.js", "/source_syntax.js", "/source_format.js", "/code_view.js", "/source_facts.js", "/source_search.js", "/source_tree.js", "/investigation_navigation.js", "/investigation_notebook.js", "/evidence_names.js", "/wasm_function_names.js", "/invocation_sites.js", "/entropy_map.js", "/wasm_identification.js", "/request_stack.js", "/traffic_view.js", "/traffic_payload.js", "/traffic_index.js", "/traffic_filter.js", "/traffic_columns.js", "/traffic_overview.js", "/traffic_copy.js", "/network_scope.js", "/request_tabs.js", "/traffic_response.js", "/traffic_headers.js", "/traffic_cookies.js", "/captured_client.js", "/captured_export_formats.js", "/vm_semantics.js", "/vm_static.js", "/vm_static_view.js", "/vm_analysis_packs.js", "/vm_opcode_ledger.js", "/vm_opcode_ledger_view.js", "/vm_contextual.js", "/vm_contextual_evidence.js", "/vm_contextual_view.js", "/vm_debugger.js", "/vm_program_workspace.js", "/xrefs_view.js", "/value_flow_view.js", "/wasm_runner.js", "/native_console_completion.js", "/native_console.js", "/debugger_sidebar.js", "/debugger_pause.js":
         response = (
           try Data(contentsOf: indexURL.deletingLastPathComponent().appendingPathComponent(requestURL.lastPathComponent)),
           "text/javascript; charset=utf-8", 200, [:]
@@ -2668,6 +2668,28 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     configuration.userContentController.addScriptMessageHandler(
       clientProjectExport, contentWorld: .page, name: NativeClientProjectExport.handlerName
     )
+    configuration.userContentController.addScriptMessageHandler(
+      clientProjectExport, contentWorld: .page, name: NativeClientProjectExport.requestHandlerName
+    )
+    // The stored-evidence document reads the bundled backend; a live workspace
+    // document is served by its own loopback backend, which answers it directly.
+    let liveDownloads = StoredEvidenceBackend.loopbackSession()
+    clientProjectExport.download = { document, path, query, destination, done in
+      let reply: (StoredEvidenceBackend.Failure?) -> Void = { done($0?.message) }
+      guard document.scheme == "http" else {
+        storedBackend.download(path: path, query: query, to: destination, done: reply)
+        return
+      }
+      guard var target = URLComponents(url: document, resolvingAgainstBaseURL: false) else {
+        done("Invalid application URL")
+        return
+      }
+      target.percentEncodedPath = path
+      target.percentEncodedQuery = query
+      target.fragment = nil
+      guard let url = target.url else { done("Invalid application URL"); return }
+      StoredEvidenceBackend.download(url, to: destination, session: liveDownloads, done: reply)
+    }
     self.clientProjectExport = clientProjectExport
     let agentBridge = NativeAgentBridge(webView: webView, window: window)
     configuration.userContentController.addScriptMessageHandler(
@@ -2739,7 +2761,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       closeGuard?.navigationWillStart()
       clientProjectExport?.navigationWillStart()
       agentBridge?.navigationWillStart()
-    agentBridge?.navigationWillStart()
       sessionPanel?.navigationWillStart()
     }
     decisionHandler(.allow)

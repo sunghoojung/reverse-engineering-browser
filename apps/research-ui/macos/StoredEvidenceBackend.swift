@@ -4,7 +4,7 @@ import Foundation
 // Rust-only stored-evidence reads, answered by the bundled backend run idle over the same stores for this app alone.
 final class StoredEvidenceBackend {
   static let getRoutes: Set<String> = [
-    "/api/requests", "/api/request-headers", "/api/request-cookies", "/api/cookie-provenance",
+    "/api/requests", "/api/requests/har", "/api/request-headers", "/api/request-cookies", "/api/cookie-provenance",
     "/api/request-stack", "/api/native-debugger", "/api/source-format", "/api/origin-trace",
   ]
   static let postRoutes: Set<String> = ["/api/native-debugger/actions"]
@@ -85,6 +85,11 @@ final class StoredEvidenceBackend {
   init(executableURL: URL, arguments: [String]) {
     self.executableURL = executableURL
     self.arguments = arguments
+    session = Self.loopbackSession()
+  }
+
+  // Loopback only: no proxy, cache or cookies.
+  static func loopbackSession() -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.connectionProxyDictionary = [:]
     configuration.urlCache = nil
@@ -92,7 +97,7 @@ final class StoredEvidenceBackend {
     configuration.httpShouldSetCookies = false
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
     configuration.timeoutIntervalForRequest = 180
-    session = URLSession(configuration: configuration)
+    return URLSession(configuration: configuration)
   }
 
   deinit {
@@ -146,6 +151,68 @@ final class StoredEvidenceBackend {
         reply(body, response.statusCode, response.value(forHTTPHeaderField: "Content-Type") ?? json, headers)
       }.resume()
     }
+  }
+
+  // A GET of this backend written to `destination` as it arrives.
+  func download(path: String, query: String, to destination: URL, done: @escaping (Failure?) -> Void) {
+    launches.async {
+      let origin: URL
+      do {
+        origin = try self.start()
+      } catch let failure as Failure {
+        done(failure)
+        return
+      } catch {
+        done(Failure(status: 503, code: "dependency_unavailable", message: "The bundled backend is unavailable"))
+        return
+      }
+      guard var target = URLComponents(url: origin, resolvingAgainstBaseURL: false) else {
+        done(Failure(status: 400, code: "invalid_request", message: "Invalid application URL"))
+        return
+      }
+      target.percentEncodedPath = path
+      target.percentEncodedQuery = query
+      guard let url = target.url else {
+        done(Failure(status: 400, code: "invalid_request", message: "Invalid application URL"))
+        return
+      }
+      Self.download(url, to: destination, session: self.session, done: done)
+    }
+  }
+
+  // URLSession streams the answer to a temporary file, so an export of any
+  // size never sits in memory. Only a whole 200 answer replaces `destination`:
+  // a transfer that ends early, or an error answer, leaves it as it was.
+  static func download(_ url: URL, to destination: URL, session: URLSession, done: @escaping (Failure?) -> Void) {
+    session.downloadTask(with: URLRequest(url: url)) { location, response, error in
+      guard error == nil, let location, let response = response as? HTTPURLResponse else {
+        done(Failure(status: 502, code: "dependency_unavailable", message: "The backend stopped before the answer ended"))
+        return
+      }
+      guard response.statusCode == 200 else {
+        let failure = (try? Data(contentsOf: location)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        done(Failure(status: response.statusCode, code: failure?["code"] as? String ?? "dependency_unavailable",
+          message: failure?["error"] as? String ?? "The backend returned HTTP \(response.statusCode)"))
+        return
+      }
+      // The system's temporary file can be on another volume: move it beside
+      // the destination first, so the replacement itself is one rename.
+      let files = FileManager.default
+      let staged = destination.deletingLastPathComponent()
+        .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).partial")
+      do {
+        try files.moveItem(at: location, to: staged)
+        if files.fileExists(atPath: destination.path) {
+          _ = try files.replaceItemAt(destination, withItemAt: staged)
+        } else {
+          try files.moveItem(at: staged, to: destination)
+        }
+        done(nil)
+      } catch {
+        try? files.removeItem(at: staged)
+        done(Failure(status: 500, code: "io_error", message: "The file could not be written. Choose a writable destination and try again."))
+      }
+    }.resume()
   }
 
   private func backendRequest(for request: URLRequest, origin: URL, overlay: Overlay?) throws -> URLRequest {

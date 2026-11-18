@@ -328,7 +328,9 @@ impl App {
         app.native_console.arm_live_bridge().await;
         // Keeps the disk indexes up with their stores, so a lookup in a long
         // session reads an index instead of building one, and opening stored
-        // evidence indexes it once in the background.
+        // evidence indexes it once in the background. The gap tally is kept
+        // up the same way: its first scan reads the whole store, so a Headers,
+        // Cookies or provenance read finds it done.
         let weak = Arc::downgrade(&app);
         tokio::spawn(async move {
             let mut ticks = tokio::time::interval(INDEX_INTERVAL);
@@ -338,14 +340,16 @@ impl App {
                     break;
                 };
                 let (root, indexes) = (app.options.artifacts.clone(), app.indexes.clone());
+                let (store, gaps) = (app.options.store.clone(), app.gaps.clone());
                 drop(app);
                 let _ = tokio::task::spawn_blocking(move || {
                     let deadline = std::time::Instant::now() + INDEX_INTERVAL;
                     let _ = crate::artifact_lookup::catch_up(&root, deadline);
-                    indexes
+                    let _ = indexes
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .catch_up(deadline)
+                        .catch_up(deadline);
+                    let _ = gaps.drops(&store, "");
                 })
                 .await;
             }
@@ -1519,15 +1523,13 @@ impl App {
                         (ranges, scripts_caught_up && lists_caught_up, index.extent())
                     };
                     ranges.sort_by_key(|range| range.first);
-                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                    let lookup = |id: &str| match crate::artifact_lookup::find(
-                        &options.artifacts,
-                        id,
-                        deadline,
-                    ) {
-                        Ok(artifact) => Ok(Some(artifact)),
-                        Err(error) if error.status == 404 => Ok(None),
-                        Err(_) => Err(()),
+                    let lookup = |ids: &[&str]| {
+                        crate::artifact_lookup::find_many(
+                            &options.artifacts,
+                            ids,
+                            std::time::Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE,
+                        )
+                        .map_err(|_| ())
                     };
                     let mut fold = request_cookies::Provenance::new(
                         &options.artifacts,

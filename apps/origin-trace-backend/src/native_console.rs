@@ -2515,7 +2515,11 @@ while True:
             "scripts":[{"origin":"https://same.test","frame":"child","source":"report(1);"}]});
         let missing = console.action(&arm).await.unwrap_err();
         assert_eq!(missing.status, 503);
-        assert!(missing.message.contains("Allow document-start Console scripts"));
+        assert!(
+            missing
+                .message
+                .contains("Allow document-start Console scripts")
+        );
         assert!(missing.message.contains("disposable Console session"));
         let mut console = console;
         Arc::get_mut(&mut console.inner)

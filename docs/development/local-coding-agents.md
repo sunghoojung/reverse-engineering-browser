@@ -154,10 +154,11 @@ sending a request. `start_live_session` takes named capture options (`url`,
 `wasm_function_deny`, `wasm_module_allowlist`, `guest_adapter`, `js_dispatch_sites`,
 `quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
 `document_start`, `request_content`, `request_content_budget_mib`,
-`request_stacks`, `js_invocation_sites`,
-`js_invocation_saved_sites`, `js_invocation_digests` and others; all off
-unless named and never inherited from the environment, with sensitive capture
-behind `confirm_sensitive_capture`), starts the same launcher as `make live`
+`request_stacks`, `browser_internal`, `extension_traffic`, `fresh_profile`,
+`js_invocation_sites`, `js_invocation_saved_sites`, `js_invocation_digests`
+and others; an option left unset takes the Origin Trace app's default, request
+content and Canvas images included, `false` turns one off, and none is
+inherited from the environment), starts the same launcher as `make live`
 with an Origin Trace window, and moves this connection to that exact session.
 `get_session_context` then reports the session's `capture_options`, and
 `get_native_console` lists its documents and frames for the Console
@@ -173,7 +174,12 @@ session: Origin Trace for app sessions, or the terminal or T3 Code app when an
 agent starts the session through `reb-api`. Grant it once in System Settings >
 Privacy & Security > Accessibility. Input moves the real pointer. Agent sessions publish their endpoint privately unless
 `publish_canonical_endpoint` is set, so concurrent agents do not replace each
-other's sessions, and they use the mock Keychain. The flags are not
+other's sessions, and they use the mock Keychain. A session runs until it is
+ended, unless `duration_seconds` sets a limit. Agent sessions share one
+persistent research profile under `~/.config/origin-trace/agent-sessions/`, so
+a sign-in carries over to the next session; `fresh_profile` starts one signed
+out, and a second session started while another holds the shared profile is
+refused with a cause that names `fresh_profile`. The flags are not
 authorization: start sessions and open URLs only for the authorized target.
 See [SAFETY.md](../../SAFETY.md) and
 [live session control](../../protocol/http-api.md#live-session-control).
@@ -188,7 +194,6 @@ passes it through and puts it in printed configurations:
 scripts/reb-api-mcp.sh --permission read-only
 scripts/reb-api-mcp.sh --permission ask
 scripts/reb-api-mcp.sh --permission full
-scripts/reb-api-mcp.sh --permission full --allow-sensitive-capture
 scripts/reb-api-mcp.sh --print-config claude --permission auto
 ```
 
@@ -203,14 +208,14 @@ The server cannot see whether the client asks, so `ask` and `auto` list the
 same tools; `get_session_context` reports the level in `mcp_admission` so the
 model can say which applies. `full` sends captured source, bytecode,
 disassembly and request and response bodies to the model provider whenever
-the agent reads them. Its own live sessions cannot name `request_content`,
-`response_media`, `canvas_images` or `js_invocation_digests` unless
-`--allow-sensitive-capture` is also passed, which is the same choice as the
-dock's **Also allow sensitive capture options**. `full` starts without a live
+the agent reads them, and its own live sessions capture what the app's do,
+request content and Canvas images included: `full` is the one consent for
+that, as the dock's Full access is. A `--allow-sensitive-capture` left in an
+older configuration is accepted and ignored. `full` starts without a live
 endpoint, like `--allow-session-start`. A connection that ends a session it
 started returns to the endpoint it was opened on. `--permission` refuses the
 individual flags beside it; without it, those flags keep their old meaning,
-including sensitive capture through `--allow-session-start`. None of this is
+and `--allow-session-start` gives the same session defaults. None of this is
 authorization: agree on the target, the provider and the data categories
 first.
 

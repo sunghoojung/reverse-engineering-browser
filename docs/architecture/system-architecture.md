@@ -81,9 +81,10 @@ Hook Studio, automation recipes and Memory) were removed with the debugger.
 Explicit page mutation is limited to the native Console, which defaults to a
 disposable profile and is distinct from observational native capture.
 
-`REB_NATIVE_QUIET_MODE=1 make live` additionally enables the patched V8
-behavior that ignores page-authored `debugger;` statements; the packaged app
-enables it, and native Wasm `br_table`/`call_indirect` dispatch, by default. Native capture and
+Quiet mode enables the patched V8 behavior that ignores page-authored
+`debugger;` statements; the packaged app and `make live` enable it, and native
+Wasm `br_table`/`call_indirect` dispatch, by default
+(`REB_NATIVE_QUIET_MODE=0` opts out). Native capture and
 Captured Sources are unchanged; Origin Trace has no debugger transport in any
 mode.
 

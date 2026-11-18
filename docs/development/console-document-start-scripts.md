@@ -36,13 +36,13 @@ nothing is relaunched to obtain one.
      disposable session** in the Console settings before connecting;
    - live capture: a capture the packaged Origin Trace app starts has it by
      default, and the Console header reads `Doc-start: permitted` before you
-     connect; set `REB_CONSOLE_DOCUMENT_START=0` before opening the app to opt
-     out. A standalone `make live` capture needs
-     `REB_CONSOLE_DOCUMENT_START=1`. A capture already running without it
-     cannot be upgraded. An agent session started with `reb-api session start`
-     or `start_live_session` has it only when the start names
-     `document_start: true` (`--document-start` on the CLI); an inherited
-     `REB_CONSOLE_DOCUMENT_START` never grants it.
+     connect; turn off **Allow document-start Console scripts** in the start
+     panel's Advanced options to opt out. A standalone `make live` capture
+     has it too unless `REB_CONSOLE_DOCUMENT_START=0`. A capture already
+     running without it cannot be upgraded. An agent session started with
+     `reb-api session start` or `start_live_session` has it unless the start
+     names `document_start: false` (`--document-start=false` on the CLI); an
+     inherited `REB_CONSOLE_DOCUMENT_START` never changes it.
 3. An explicit confirmed arm. Clearing the set, disconnecting, ending the
    session, or session expiry removes it.
 

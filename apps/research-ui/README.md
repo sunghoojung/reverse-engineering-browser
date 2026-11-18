@@ -538,20 +538,29 @@ and reads that return local store paths (`get_health`) or the researcher's own
 drafts (Collection, Analyst workspace) are not offered. `get_artifact_content`
 is never offered: Full access reads bytes as text pages instead.
 
-- The default is Read only. The page remembers the last choice across launches
-  only up to Ask for actions.
+- The default is Read only. Native saves the level last turned on or lowered
+  to, Full access included, with the provider and the payment chosen for each
+  provider, in `~/Library/Application Support/Origin Trace/agent-preferences-v1.json`
+  (user-only; `REB_AGENT_PREFERENCES` names another absolute path), because the
+  web view keeps no storage between app runs. The next consent, in this run or
+  a later one, starts from that level; turning on still passes it. Only enable
+  and lowering save a level; the page saves a provider and payment, never a
+  level. No key, token or model text is saved there.
 - Consent is the only confirmation. It lists the levels with the chosen one's
   line of text, then one box with what leaves the Mac. For Auto-approve and
   Full access that box is the plain-language warning; for Full access it lists
-  exactly what more leaves the Mac and offers a separate **Also allow
-  sensitive capture options** box, off by default and never remembered,
-  without which the agent's own sessions cannot name `request_content`,
-  `response_media`, `canvas_images` or `js_invocation_digests`. The primary
-  button names the level (**Turn on Full access**). At the normal window size
-  the box and the button are in view together; at a short window, choosing a
-  level scrolls them in.
-- Native accepts only a known level, and the sensitive choice only with Full
-  access (`AgentPermission.requested`), before it touches the running agent.
+  exactly what more leaves the Mac and says that the agent's own sessions
+  capture what the researcher's do in the app, request content and Canvas
+  images included. Full access is the one consent for that: there is no
+  second choice. The primary button names the level (**Turn on Full access**).
+  At the normal window size the box and the button are in view together; at a
+  short window, choosing a level scrolls them in.
+- While the agent is on, the titlebar's Agent button carries a dot in the
+  level's color (green, amber for Auto-approve actions, red for Full access)
+  and names the level (**Agent, on at Full access**), so it shows with the
+  dock closed.
+- Native accepts only a known level (`AgentPermission.requested`) before it
+  touches the running agent.
 - **Lower to** applies at once and keeps the conversation: native filters the
   tools, the next tool call is decided at the lower level, the tool server
   restarts at it, and the graph's next model call gets the lower prompt. A CLI
@@ -707,7 +716,7 @@ The native app keeps what the page must not hold:
   loop and both CLI drivers.
 - **The tool server.** One `reb-api mcp --permission <level>` child (the
   packaged `OriginTraceAPI`) with `--base-url` set to this workspace's loopback
-  API, plus `--allow-sensitive-capture` only when that box was ticked. Below
+  API. Below
   Full access its environment is only `LANG` and `LC_ALL`; at Full access it
   also gets `HOME`, `USER`, `LOGNAME`, `TMPDIR`, a fixed `PATH`, and the app's
   `REB_BRAVE_BINARY`, `REB_LIVE_SESSION_ROOT` and `REB_OPEN_COMMAND` when set,
@@ -942,15 +951,37 @@ This packages `build/Origin Trace.app` and opens a complete live capture
 session without a setup dialog when the discovered browser is the release's
 paired build (see below). This research launch enables every implemented
 native capture category and Canvas image artifacts. Retained credentials are unmasked; evidence stays
-local. Use this profile only for authorized targets. Every app session uses the
-isolated research profile, which uses Chromium's mock Keychain so launch does
-not stop on a macOS password prompt; do not save credentials in that profile.
-The start panel offers no Keychain choice. The advanced route to macOS Keychain
+local. Use this profile only for authorized targets.
+
+App sessions share one persistent **research profile**, separate from any
+browser profile of your own, at
+`~/Library/Application Support/Origin Trace/research-profiles/default`
+(`REB_RESEARCH_PROFILE_ROOT` names another parent folder). Chromium keeps that
+profile's cache at the same path under `~/Library/Caches`. Cookies, sign-ins,
+site storage and settings carry over from one session to the next, so sign in
+to an authorized target once; only sign in with credentials the authorization
+covers. Evidence stays per session: each session still writes its own folder
+under `sessions/live/`, and the profile holds no evidence. **Fresh profile**
+in the start panel's **Advanced options** gives one session a new, empty
+profile in its session folder instead and leaves the research profile as it
+is. One Brave at a time can use a profile, so a second session that would open
+the research profile while another Brave holds it is refused with that cause
+and points at Fresh profile. The profile uses Chromium's mock Keychain so
+launch does not stop on a macOS password prompt. The start panel offers no
+Keychain choice. The advanced route to macOS Keychain
 encryption, when credential storage is required, is
 `REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN=1`: it applies to the automatic launch and a
-reopen's restart, never to a session the panel starts or retries. The
-standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN` instead (on
+reopen's restart, never to a session the panel starts or retries. Such a
+session uses its own persistent profile, `research-profiles/system-keychain`,
+because a profile written under one Keychain cannot be read under the other.
+The standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN` instead (on
 unless set to `0`).
+
+A session runs until you end it: closing the capture browser ends it, and
+the start panel then shows **Live session ended** with **Review Session** and
+**Start Again**. There is no time limit unless `REB_CAPTURE_DURATION_SECONDS`
+sets one; a session that reaches it says so. When a helper stops a session,
+the panel names which one and why, with its log.
 The app does not mark the session live until the launcher publishes its loopback
 handshake. A failure shows in the window's **start panel**, at the right edge
 of the workspace, with **Retry**, which starts again with the same capture mode
@@ -1022,18 +1053,43 @@ only for a session that keeps request content; the launch log's `Request content
 them as `capture_options.content_limits`, so a researcher or an agent can tell
 which budgets the session ran with.
 
-The app saves no capture choice between launches. `REB_AUTOMATIC_CAPTURE_MODE=metadata`
+The start panel saves its capture mode and Advanced options for later app runs
+in `~/Library/Application Support/Origin Trace/live-session-preferences-v1.json`
+(user-only; `REB_LIVE_SESSION_PREFERENCES` names another path), and opens with
+them; the content limits are not saved. While any choice differs from its
+default, **Advanced options** says how many (for example **2 changed**).
+`REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
 Any value other than `content` does the same, so a misspelled opt-out never
 turns content capture on. A mode chosen in the panel holds for later sessions
 in the same app run, including one a Dock reopen starts.
 
-Every app session also enables quiet mode and native Wasm `br_table` and
-`call_indirect` dispatch capture; Wasm dispatch forces Liftoff-only compilation,
-so Wasm-heavy pages run slower. Set `REB_NATIVE_QUIET_MODE=0`,
-`REB_NATIVE_WASM_DISPATCH=0` or `REB_NATIVE_WASM_CALL_INDIRECT=0` to opt out.
-It also permits [document-start Console scripts](#document-start-scripts),
-which arms nothing; `REB_CONSOLE_DOCUMENT_START=0` opts out.
+**Advanced options** holds the session switches that were otherwise only
+environment variables. Each starts from its default, or from a saved choice,
+and an environment variable set to `0` or `1` seeds it for that app run:
+
+| Option | Default | Environment seed |
+| --- | --- | --- |
+| **Fresh profile** | Off | `REB_FRESH_PROFILE` |
+| **Request stacks** | On | `REB_NATIVE_REQUEST_STACKS` |
+| **Promise stacks** (turns on request stacks) | Off | `REB_NATIVE_PROMISE_STACKS` |
+| **Wasm dispatch sampling** | On | `REB_NATIVE_WASM_DISPATCH` |
+| **Ignore debugger statements** | On | `REB_NATIVE_QUIET_MODE` |
+| **Allow document-start Console scripts** | On | `REB_CONSOLE_DOCUMENT_START` |
+| **Canvas images** (Content only) | On | `REB_CAPTURE_CANVAS_IMAGES` |
+| **Record settled-value digests** (Content, with saved sites) | On | `REB_NATIVE_JS_INVOCATION_DIGESTS` |
+| **Browser-internal traffic** | Off | `REB_CAPTURE_BROWSER_INTERNAL` |
+| **Extension traffic** | Off | `REB_CAPTURE_EXTENSION_TRAFFIC` |
+
+A switch whose capture categories the session's mask lacks stays off, as the
+defaults always have, instead of failing the launch.
+
+By default every app session also enables quiet mode and native Wasm
+`br_table` and `call_indirect` dispatch capture; Wasm dispatch forces
+Liftoff-only compilation, so Wasm-heavy pages run slower. Turn either off in
+**Advanced options**. It also permits
+[document-start Console scripts](#document-start-scripts), which arms nothing;
+**Allow document-start Console scripts** turns that off.
 Guest-state and JavaScript dispatch-site capture still need an adapter or site
 file and stay off until one is supplied. JavaScript invocation capture arms the
 functions saved with [Track calls](#track-calls-to-a-function); an explicit
@@ -1047,12 +1103,18 @@ Wasm record ran in; see the
 [invocation contract](../../protocol/native-js-invocation-v1.md). The launcher log's `Native switches:`
 line records the effective state.
 
-The app creates a private evidence directory and isolated browser
-profile, starts its bundled broker, artifact receiver,
+The app creates a private evidence directory, opens the research profile,
+starts its bundled broker, artifact receiver,
 analysis helpers, and loopback UI, then launches Brave Browser Development with
 all native capture categories enabled. Closing Origin Trace stops the session
 processes. Evidence remains under `~/Library/Application Support/Origin
-Trace/sessions/live/`.
+Trace/sessions/live/`, one folder per session.
+
+**Open Session…** in the application menu opens a session folder, and **Open
+Recent Session** lists the ten newest sessions no broker is still writing, by
+start time and length. Either opens that session's evidence in the offline
+workspace in place, labeled as ended, without moving or copying it; so does
+**Review Session** in the ended-session panel.
 
 Origin Trace looks beside its app bundle, in the reused browser output recorded
 at packaging time, in the local `browser/worktree/`
@@ -1147,20 +1209,22 @@ broker failures, malformed evidence, sequence gaps, queue drops, network-categor
 capture limits, scanned-tail and window caps, evictions and failed requests.
 
 The live launcher disables Brave background networking, component updates, and
-sync for its isolated research profile. Browser diagnostics are retained in the
+sync for its research profile. Browser diagnostics are retained in the
 session's private `brave.log`, separate from coordinator failures. The native
 app pre-creates the matching macOS cache sandbox path before launch.
 
 All eight fingerprint metadata families are enabled by the standard live
-launcher. To retain the exact data URL returned by Canvas readback for one
-authorized session, run:
+launcher. `make live` takes the app's defaults: like a Content session, it
+retains the exact data URL returned by Canvas readback and request paths,
+queries and bounded request bodies whenever the category mask holds them, and
+runs with quiet mode, Wasm dispatch, request stacks and document-start
+permission. Each switch set to `0` opts out for one run, for example:
 
 ```sh
-REB_CAPTURE_CANVAS_IMAGES=1 make live
+REB_CAPTURE_CANVAS_IMAGES=0 REB_CAPTURE_REQUEST_CONTENT=0 make live
 ```
 
-To retain request paths, queries and bounded request bodies with `make live`,
-run `REB_CAPTURE_REQUEST_CONTENT=1 make live`. Traffic then shows each request's
+With request content, Traffic shows each request's
 captured path and query, and its Payload tab shows them parsed:
 
 - **Query String Parameters** from the captured target, decoded or as sent.
@@ -1196,17 +1260,18 @@ its retained full target for General's Request URL and Copy URL, or General
 says why it was not retained. Sources never lists or opens request bodies or
 full targets.
 
-Canvas image capture is disabled by default because rendered output can contain
-page content. Enabled output stays in the local session artifact store, is
+Canvas image capture is on in Content sessions and `make live`, and off in
+Metadata sessions, because rendered output can contain page content. Retained
+output stays in the local session artifact store, is
 limited to 2 MiB per image, and is joined to its exact `toDataURL` event. The UI
 continues to show operation names when image capture is off or an image exceeds
 the limit.
 
-The packaged app ignores page `debugger;` statements by default. To do the same
-for a development live capture:
+The packaged app and `make live` ignore page `debugger;` statements by
+default. To let pages pause a development live capture:
 
 ```sh
-REB_NATIVE_QUIET_MODE=1 make live
+REB_NATIVE_QUIET_MODE=0 make live
 ```
 
 Quiet mode keeps native evidence capture and Captured Sources available. It does not guarantee that the custom browser is undetectable.
@@ -2171,8 +2236,8 @@ request linked to several tabs (`request_tabs.js`, from `tab_set` and
 `request_tab_link`) appears in each with a marker such as "Service worker · 2
 tabs", or "Service worker · installed from 1 tab" for a version that has had
 no client yet; All tabs counts it once. The footer also names counted
-service-worker requests no page caused and browser prefetches with no page. Extension traffic recorded with
-`REB_CAPTURE_EXTENSION_TRAFFIC=1` (`request_extension_link`) has one
+service-worker requests no page caused and browser prefetches with no page. Extension traffic, recorded when
+**Extension traffic** is on in **Advanced options** (`request_extension_link`), has one
 "Extension <id>" chip per extension. The request index joins the same links, so
 chips, the tab filter and the footer count cover the whole session. There is no
 Unattributed group: a row without an owner is a capture error, counted in the

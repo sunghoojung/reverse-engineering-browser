@@ -419,7 +419,10 @@ assert.match(nativeAppSource,/\$0\.scheme == "reb" \? \$0 : nativeUIURL\(\$0\.ab
 assert.match(nativeAppSource,/self\.localApplicationURL = localApplicationURL/);
 assert.match(nativeAppSource,/URL\(string: "reb:\/\/app\/index\.html\?native=1"\)/);
 assert.equal((nativeAppSource.match(/webView\??\.load\(URLRequest\(url:/g)??[]).length,2,'Review every new native entry path');
-assert.equal((nativeAppSource.match(/\bload\((?:url|localApplicationURL|requestedUIURL \?\? localApplicationURL)\)/g)??[]).length,5,'Review every new native entry path');
+// Open Session and Review Session reload only the bundled workspace, after
+// pointing its stores at the recorded session folder.
+assert.match(nativeAppSource,/contentHandler\.open\(stores, backendArguments: self\.storedBackendArguments\(stores\)\)\s+self\.load\(localApplicationURL\)/);
+assert.equal((nativeAppSource.match(/\bload\((?:url|localApplicationURL|requestedUIURL \?\? localApplicationURL)\)/g)??[]).length,6,'Review every new native entry path');
 assert.match(nativeAppSource,/components\.percentEncodedQuery = \(retained \+ \["native=1"\]\)\.joined/);
 assert.match(nativeAppSource,/name\.removingPercentEncoding != "native"/);
 assert.match(nativeAppSource,/contains\("--check-native-ui-url"\) \{\s+checkNativeUIURLs\(\)\s+return/);

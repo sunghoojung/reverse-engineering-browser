@@ -200,8 +200,8 @@ answer(trace({
 await settle();
 shown = texts();
 assert.equal(loadRow.getAttribute('aria-expanded') === 'true' || listRows()[3].getAttribute('aria-expanded') === 'true', true);
-assert.match(shown[4], /^join · via br_table @0x9c · through local 3 0x70 step loop join · local 3 join of local 3 2 incoming: entry @0x70 ← 0x60, br_table @0x9c ← 0x7e$/, `the first step: ${shown[4]}`);
-assert.match(shown[5], /^argument · 0 · through local 3 0xd0 seed env\.send · import call call 0$/, `the path ends at the seed: ${shown[5]}`);
+assert.match(shown[4], /^0x70 step join · via br_table @0x9c · through local 3 loop join · local 3 join of local 3 2 incoming: entry @0x70 ← 0x60, br_table @0x9c ← 0x7e$/, `the first step: ${shown[4]}`);
+assert.match(shown[5], /^0xd0 seed argument · 0 · through local 3 env\.send · import call call 0$/, `the path ends at the seed: ${shown[5]}`);
 const steps = listRows().filter(row => row.classList.contains('is-step'));
 assert.equal(steps.length, 2);
 assert.equal(steps[0].style.getPropertyValue('--depth'), '3');

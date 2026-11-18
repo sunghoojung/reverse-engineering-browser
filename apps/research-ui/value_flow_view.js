@@ -437,12 +437,20 @@
     return true;
   }
 
-  function link(item, role, classLabel, text, functionIndex) {
+  // A node's link: offset, role and class, then the detail column with the
+  // connector of a path step (how the value reached the row above), the kind
+  // and the instruction text, so offsets line up down the tree.
+  function link(item, role, classLabel, text, functionIndex, edgeText = '') {
     const button = node('button', 'value-flow-link');
     button.type = 'button';
     const kind = describe(item, functionIndex);
-    button.title = `${kind} · ${text}\nShow the Inspect row at ${hex(item.byte_offset)}`;
+    button.title = `${edgeText ? `${edgeText}\n` : ''}${kind} · ${text}\nShow the Inspect row at ${hex(item.byte_offset)}`;
     const detail = node('span', 'value-flow-detail');
+    if (edgeText) {
+      const edge = node('span', 'value-flow-edge', edgeText);
+      edge.title = edgeText;
+      detail.append(edge);
+    }
     detail.append(node('span', 'value-flow-kind', kind), node('span', 'value-flow-text', text));
     const roleText = [ROLE_LABELS[role] ?? role, classLabel].filter(Boolean).join(' · ');
     button.append(node('span', 'value-flow-offset', hex(item.byte_offset)), node('span', 'value-flow-role', roleText), detail);
@@ -512,20 +520,19 @@
       case 'step': {
         const {step} = row;
         entry.classList.add('is-step');
-        const edge = node('span', 'value-flow-edge', connector(step.edge));
-        edge.title = edge.textContent;
         const join = trace.joins.get(step.node.id);
         const text = clip(step.node.expression || step.node.text);
         const stepRole = step.node.seed ? 'seed' : step.node.role;
-        entry.append(edge, link(step.node, stepRole, CLASS_LABELS[step.node.class], text, functionIndex));
+        const button = link(step.node, stepRole, CLASS_LABELS[step.node.class], text, functionIndex, connector(step.edge));
         if (join) {
           const listed = join.incoming.map(incoming => `${incoming.via ?? 'in'}${incoming.via_offset !== null && incoming.via_offset !== undefined ? ` @${hex(incoming.via_offset)}` : ''} ← ${hex(incoming.from_offset)}`).join(', ');
           const more = join.incoming_count > join.incoming.length ? `, and ${join.incoming_count - join.incoming.length} more` : '';
           const open = join.incomplete ? ' · incomplete: its loop was still open where simulation stopped' : '';
           const summary = node('span', 'value-flow-join', `${join.incoming_count} incoming: ${listed}${more}${open}`);
           summary.title = summary.textContent;
-          entry.append(summary);
+          button.querySelector('.value-flow-detail').append(summary);
         }
+        entry.append(button);
         break;
       }
       case 'callers': {

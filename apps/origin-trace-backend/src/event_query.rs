@@ -126,6 +126,21 @@ pub struct Coverage {
     unterminated_tail_bytes: u64,
 }
 impl Coverage {
+    /// A read of every record the request index located, which is the whole
+    /// store once the index has folded it to `store_end`.
+    pub fn located(indexed_to: u64, store_end: u64, caught_up: bool, malformed: u64) -> Self {
+        Self {
+            scope: if caught_up { "store" } else { "bounded_range" },
+            complete: caught_up && malformed == 0,
+            scan_start: 0,
+            scan_end: indexed_to,
+            store_end,
+            limited: false,
+            budget_exhausted: false,
+            malformed_lines: malformed,
+            unterminated_tail_bytes: 0,
+        }
+    }
     /// Absence in the answer is a fact: the read covered its whole scope, or
     /// stopped because it found the one newest record it was asked for.
     pub fn complete(&self) -> bool {
@@ -134,10 +149,6 @@ impl Coverage {
     /// The record boundary the read stopped at: a forward read resumes here.
     pub fn scan_end(&self) -> u64 {
         self.scan_end
-    }
-    /// The first byte the read covered; older records are outside it.
-    pub fn scan_start(&self) -> u64 {
-        self.scan_start
     }
     pub fn to_json(self) -> Value {
         json!({
@@ -246,20 +257,21 @@ pub fn read_request_range(
     read_detail(store, Some(range), usize::MAX, filter, u64::MAX, false)
 }
 
-/// The records at byte ranges the request index located, each one whole
-/// line, that `keep` selects, read with one open file instead of a scan; and
-/// how many ranges no longer held a valid record.
-pub fn read_records_at(
+/// Each record at the byte ranges the request index located, each one whole
+/// line, handed to `each` in range order with one open file instead of a
+/// scan, so a whole session's records stream through; and how many ranges no
+/// longer held a valid record.
+pub fn visit_records_at(
     store: &Path,
     ranges: &[RecordRange],
-    mut keep: impl FnMut(&Value) -> bool,
-) -> Result<(Vec<Value>, u64)> {
+    mut each: impl FnMut(Value),
+) -> Result<u64> {
     if ranges.is_empty() {
-        return Ok((Vec::new(), 0));
+        return Ok(0);
     }
     let mut file = evidence::regular_file(store)?;
     let length = file.metadata()?.len();
-    let (mut records, mut malformed, mut line) = (Vec::new(), 0, Vec::new());
+    let (mut malformed, mut line) = (0, Vec::new());
     for range in ranges {
         let size = range.end.saturating_sub(range.first);
         if size == 0 || size > EVENT_RECORD_BYTES as u64 + 1 || range.end > length {
@@ -270,12 +282,11 @@ pub fn read_records_at(
         file.seek(SeekFrom::Start(range.first))?;
         file.read_exact(&mut line)?;
         match stored_event(line.strip_suffix(b"\n").unwrap_or(&line)) {
-            Some(event) if keep(&event) => records.push(event),
-            Some(_) => {}
+            Some(event) => each(event),
             None => malformed += 1,
         }
     }
-    Ok((records, malformed))
+    Ok(malformed)
 }
 
 /// The newest matching record, from the request's range when the index names

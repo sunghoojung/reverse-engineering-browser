@@ -17,6 +17,7 @@ use hex::FromHex;
 use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -99,6 +100,14 @@ pub fn find(root: &Path, id: &str, deadline: Instant) -> Result<Value> {
     let index = index(root);
     let mut index = lock(&index);
     index.find(id, deadline)
+}
+
+/// The validated manifest records of `ids` the manifest has, keyed by ID,
+/// after one catch-up for all of them.
+pub fn find_many(root: &Path, ids: &[&str], deadline: Instant) -> Result<HashMap<String, Value>> {
+    let index = index(root);
+    let mut index = lock(&index);
+    index.find_many(ids, deadline)
 }
 
 /// Brings the index of `root` up to its manifest within `deadline`, for the
@@ -252,37 +261,48 @@ impl ArtifactIndex {
     }
 
     fn find(&mut self, id: &str, deadline: Instant) -> Result<Value> {
+        self.find_many(&[id], deadline)?
+            .remove(id)
+            .ok_or_else(not_found)
+    }
+
+    fn find_many(&mut self, ids: &[&str], deadline: Instant) -> Result<HashMap<String, Value>> {
+        let mut found = HashMap::new();
         let Some(mut ready) = self.ready(deadline)? else {
-            return Err(not_found());
+            return Ok(found);
         };
-        let Some(key) = id.parse::<u64>().ok().filter(|key| key.to_string() == id) else {
-            return Err(not_found());
-        };
-        if let Some(value) = ready
-            .unterminated
-            .take()
-            .filter(|value| artifact_key(value) == key)
-        {
-            return Ok(value);
+        for &id in ids {
+            let Some(key) = id.parse::<u64>().ok().filter(|key| key.to_string() == id) else {
+                continue;
+            };
+            if let Some(value) = ready
+                .unterminated
+                .as_ref()
+                .filter(|value| artifact_key(value) == key)
+            {
+                found.insert(id.to_owned(), value.clone());
+                continue;
+            }
+            let range: Option<(i64, i64)> = self
+                .index
+                .sidecar()
+                .connection()
+                .prepare_cached("SELECT start, end FROM artifacts WHERE id = ?1")
+                .sql()?
+                .query_row([index_db::key(key)], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()
+                .sql()?;
+            let Some((start, end)) = range else {
+                continue;
+            };
+            let value = self.row(&mut ready.file, start, end)?;
+            // The anchors cover only the prefix ends; the row itself must still say so.
+            if value["artifact_id"] != id {
+                return Err(Error::new(500, "Artifact manifest changed during lookup"));
+            }
+            found.insert(id.to_owned(), value);
         }
-        let range: Option<(i64, i64)> = self
-            .index
-            .sidecar()
-            .connection()
-            .query_row(
-                "SELECT start, end FROM artifacts WHERE id = ?1",
-                [index_db::key(key)],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .sql()?;
-        let (start, end) = range.ok_or_else(not_found)?;
-        let value = self.row(&mut ready.file, start, end)?;
-        // The anchors cover only the prefix ends; the row itself must still say so.
-        if value["artifact_id"] != id {
-            return Err(Error::new(500, "Artifact manifest changed during lookup"));
-        }
-        Ok(value)
+        Ok(found)
     }
 
     fn children(&mut self, parent: u64, deadline: Instant) -> Result<Vec<Value>> {

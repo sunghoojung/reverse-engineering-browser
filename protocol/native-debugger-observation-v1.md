@@ -89,11 +89,15 @@ operation: `type` (one of the six below), a thread scope of `session_id`,
 `process_id` and `frame_id` together, `before` (a byte cursor from
 `observations_query.next_before`) and `limit` (1 to 256). The scope matches the
 record envelope exactly. Console documents carry no native frame ID, so the
-scope names a `threads.observed` frame: the session, renderer and frame of the
-observation records among the newest 2,048 records that are observations or
-gaps of any kind, within the newest 64 MiB of the store, at most 64.
-`observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
-(above, earlier builds only) in that scan, at most 16.
+scope names a `threads.observed` frame: the session, renderer and frame of
+every valid observation record of the store, newest first. The event index
+(`events.jsonl.events-v1`, layout 5) keeps them as it folds the store, beside
+`threads.workers` (every worker that started a request) and
+`observation_budget_gaps` (every `debugger_observation_budget` gap, above,
+which only earlier builds record), so
+a frame observed early in a long session is still listed. `threads.coverage`
+says what they cover: scope `store` once the index has caught up, else its
+indexed prefix, which the backend's indexer extends every second.
 
 A filtered or cursor `get_events` read and every `wait_for_events` put
 `debugger_observation` beside the hex payload of each record of types 40 to
@@ -143,12 +147,14 @@ second look:
 | `source_limit` (deferred) | The page's sites name more than 4 scripts not yet resolved | Read the same cursor again: kept sites cost nothing, so the next 4 scripts are read, and the page's tag never matches a later read while it holds one. A smaller `limit` names fewer scripts. |
 | `site_read_failed` (deferred) | The script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read | Read again |
 | `source_artifact_missing` | The script's source is retained but its artifact has not landed, or never will (a lost artifact channel, a rejected frame) | Read again after the artifact lands; nothing is re-read until the manifest grows |
-| `script_identity_outside_scan` | The request index has not folded the script's identity yet: it is still catching up with the store | Read again once the index moves (the backend's indexer folds new records in the background); `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
+| `script_identity_outside_scan` | The request index has not folded the script's identity yet: it is still catching up with the store | Read again once the index moves (the backend's indexer folds new records in the background); while it is behind, `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
 
 `stack_read` is exactly the arguments of the `get_request_stack` read named by
-`stack_read_operation`, passed as it is. That read covers the newest 64 MiB of
-the store, so for an older record it answers `outside_scan`; the site on the
-event page does not depend on it.
+`stack_read_operation`, passed as it is. That read finds the record by its
+`(session, process, sequence)` identity anywhere in the store through the event
+index (`events.jsonl.events-v1`); it answers `outside_scan` with `index_behind`
+only while that index is still catching up. The site on the event page does
+not depend on it.
 
 These fields are returned at every MCP permission level, `read-only`
 included, where the hex payload is withheld: none is captured content. A

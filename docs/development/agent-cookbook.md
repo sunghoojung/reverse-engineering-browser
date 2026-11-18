@@ -584,8 +584,8 @@ or cursor adds it; the unfiltered `get_events` window does not:
   armed set, `request_id` is the request, and `site` is null. Read the stack
   that started it with `get_request_stack`, passing `stack_read` as it is
   (`stack_read_operation` names that tool): `frames`, innermost first, with
-  `resolution.url`, `line`, `column` and `function_name`. That read covers
-  the newest 64 MiB of the store; an older record answers `outside_scan`.
+  `resolution.url`, `line`, `column` and `function_name`. That read finds
+  the record anywhere in the store.
 - `listener_dispatch`: `detail.event_type`,
   `detail.target`, and `site.resolution` is the listener's file, line and
   column. A click listener usually runs with no script on the stack, so

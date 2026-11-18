@@ -85,7 +85,7 @@ pub use app::App;
 pub use config::Options;
 pub use endpoint::{PublishedEndpoint, has_live_publisher};
 
-pub use durable::write_private_noclobber;
+pub use durable::{NoclobberFile, write_private_noclobber};
 
 mod js_worker_alloc;
 mod live_browser;

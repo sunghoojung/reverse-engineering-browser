@@ -52,22 +52,50 @@ pub fn write_private_from(path: &Path, source: &mut dyn Read) -> Result<()> {
 }
 
 /// Publish complete private CLI bytes without replacing any existing entry.
-/// The temporary is created in the destination directory for atomic publication.
 pub fn write_private_noclobber(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    #[cfg(unix)]
-    temporary
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(path)
-        .map_err(|e| Error::from(e.error))?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    let mut output = NoclobberFile::new(path)?;
+    output.file().write_all(bytes)?;
+    output.persist()
+}
+
+/// A private file written in the destination directory and published at
+/// `path` only if no entry exists there, so a CLI output of any size is
+/// streamed in place and never replaces anything.
+pub struct NoclobberFile {
+    temporary: tempfile::NamedTempFile,
+    path: std::path::PathBuf,
+}
+impl NoclobberFile {
+    pub fn new(path: &Path) -> Result<Self> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let temporary = tempfile::NamedTempFile::new_in(parent)?;
+        #[cfg(unix)]
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(Self {
+            temporary,
+            path: path.to_owned(),
+        })
+    }
+    pub fn file(&mut self) -> &mut File {
+        self.temporary.as_file_mut()
+    }
+    pub fn persist(self) -> Result<()> {
+        self.temporary.as_file().sync_all()?;
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_owned();
+        self.temporary
+            .persist_noclobber(&self.path)
+            .map_err(|e| Error::from(e.error))?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
+    }
 }

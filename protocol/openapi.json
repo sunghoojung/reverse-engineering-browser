@@ -1628,7 +1628,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from the newest 5000 cookie list, request start, redirect, script call and script identity records within the last 64 MiB of events and at most 256 distinct retained cookie lists, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false when older records were not read, so an absent response or request is unknown. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
+        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from every cookie list of the session's indexed requests, also located by the index and each distinct list read once, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false while the index is still catching up with the store, so an absent response or request is then unknown. Each distinct script position resolves to source once. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
         "tags": [
           "request-cookies"
         ],
@@ -2267,7 +2267,7 @@
       "get": {
         "operationId": "get_request_stack",
         "summary": "Read the JavaScript and Wasm call stack that started one renderer request or script navigation",
-        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer, with every recorded frame innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md. Wasm frames carry module_sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
+        "description": "Newest request_initiator_stack record (34) inside the bytes the request index names for one renderer request (or the newest 64 MiB of events when it names none), named by the renderer's process_id and request_id as its request_initiated record carries them, or with navigation_sequence the navigation_initiator_stack record (46) a browser navigation_initiator_link (47) names, or with observation_sequence one debugger observation record (40 to 45) of that renderer; a navigation or observation record is found by its identity anywhere in the store through the event index. Every recorded frame is listed innermost first. JavaScript frames resolve through their script_identity record (35) and its SHA-256 to a retained JavaScript artifact of any capture origin (network, stack_script, compiled_script or dynamic_javascript), then to one-based line and UTF-16 column, artifact_line and artifact_column for Sources, and the function name the source gives at the function start. Wasm frames name their function index, module byte offset and a name-section name when the module is retained. A frame that does not resolve keeps its raw identity and a reason; nothing is guessed. A stack deeper than 1,024 frames keeps the innermost and outermost 512 with omitted frames after omitted_after_index. Await frames follow the synchronous ones. A version 2 record adds task_segments, nearest first: each async task (timer, animation frame, idle callback, window.postMessage, XMLHttpRequest.send, scheduler.postTask, queued event or observer) with the stack that scheduled it, resolved from its async_task_stack (48) artifact, and microtask hops linked through task attribution. A version 3 record adds scope, the isolate the stack was walked in (the document main thread or a dedicated, shared or service worker), message segments (MessagePort, BroadcastChannel and worker postMessage) whose frames resolve in the posting thread's or renderer's isolate, a microtask segment's promise registration (then, catch, finally or await) when promise stacks were recorded, a no_script segment that ends the chain where a task was scheduled with no script running, and an origin_rejected segment that ends it where a received message's task origin did not validate. task_chain_cut says an earlier caller was not recorded; async_callers_not_shown lists the callers this record version cannot show. status is not_recorded when the read covered the request's indexed bytes or the whole store and found no stack record, and outside_scan when it did not reach all of them; coverage says what was read. A frame keeps reason script_identity_outside_scan when its identity was not found and not every identity was read. An observation adds observation: its type, decoded detail and its own frame (the listener, timer callback or throw site) resolved alone as site, or null when it names none; its stack is the one recorded when it fired, and the site can resolve when the stack holds no script. See protocol/native-network-v3.md and protocol/native-debugger-observation-v1.md. Wasm frames carry module_sha256 and, when the researcher named the function, analyst_name; analyst_names reports the names document status.",
         "tags": [
           "events"
         ],
@@ -11977,7 +11977,7 @@
         "properties": {
           "index_behind": {
             "type": "boolean",
-            "description": "With outside_scan: the request index had not reached the end of the store, so a later read can name this request's bytes. False means another read would scan the same range."
+            "description": "With outside_scan: the index the read goes through (the request index for request_id, the event index for navigation_sequence and observation_sequence) had not reached the end of the store, so a later read can find the record. False means another read would scan the same range."
           },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
@@ -12987,16 +12987,16 @@
               "located_outside_window",
               "unreadable"
             ],
-            "description": "How script lists every script_cookie record of the session: the request index locates each one, so a call older than coverage's window is read too. An absent call is proof only when complete is true and read_coverage.complete is true.",
+            "description": "How script lists every script_cookie record of the session: the request index locates each one. An absent call is proof only when complete is true and read_coverage.complete is true.",
             "properties": {
               "complete": {
                 "type": "boolean",
-                "description": "The index has caught up with the store, located every script_cookie record, and each one older than the window was read back."
+                "description": "The index has caught up with the store, located every script_cookie record, and each one was read back."
               },
               "located_outside_window": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Located records older than coverage.scan_start, read back by byte range; script lists those of them that concern this name."
+                "description": "Located records older than coverage.scan_start. The read starts at byte 0, so this is 0; backends that read a newest-record window counted the older calls read back here."
               },
               "unreadable": {
                 "type": "integer",
@@ -13032,17 +13032,17 @@
           "lists_read": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 256
+            "description": "Distinct retained lists read. Backends before every list was read stopped at 256."
           },
           "lists_unread": {
             "type": "integer",
             "minimum": 0,
-            "description": "Distinct retained lists past the 256 read."
+            "description": "Distinct retained lists whose manifest record could not be read in time, so their cookies are unknown; a later read asks again. Backends before every list was read counted the lists past 256 here."
           },
           "stacks_unresolved": {
             "type": "integer",
             "minimum": 0,
-            "description": "Script calls not resolved to source because 64 distinct positions already were."
+            "description": "Script calls not resolved to source because the artifact manifest could not be read in time. Backends before every position was resolved counted the calls past 64 distinct positions here."
           },
           "read_coverage": {
             "type": "object",
@@ -13084,7 +13084,7 @@
               "records_dropped": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category at or after the oldest record read (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
+                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category anywhere in the session (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
               }
             }
           },
@@ -30274,7 +30274,7 @@
                 "$ref": "#/components/schemas/DebuggerObservationDetail"
               },
               "site": {
-                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; every outcome is kept, one still waiting for its source artifact or its identity (source_artifact_missing, script_identity_outside_scan) until the artifact manifest or the request index moves, so reading the same cursor again resolves the next scripts at no cost for the ones already read. script_identity_outside_scan means the request index has not folded the identity yet or holds its 16,384 and keeps no more: read again once it moves, or read stack_read, which also scans the newest 4,096 identities.",
+                "description": "The record's own frame: the listener of a listener_dispatch, the callback of a timer_observation or the throw site of an exception_observation, resolved alone as get_request_stack resolves a frame, to the retained script's url, one-based line and UTF-16 column and the function name, or a reason with the raw script_id and position. Null for the other three types, for an object or native listener and for a rejection. A read resolves every site in up to 4 scripts per page, newest records first on a backward page; every outcome is kept, one still waiting for its source artifact or its identity (source_artifact_missing, script_identity_outside_scan) until the artifact manifest or the request index moves, so reading the same cursor again resolves the next scripts at no cost for the ones already read. script_identity_outside_scan means the request index, which keeps every identity of the session, has not folded this one yet: read again once it moves, or read stack_read, which while the index is behind also scans the newest 4,096 identities in the store's newest 64 MiB.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -30338,7 +30338,7 @@
                               "source_limit",
                               "site_read_failed"
                             ],
-                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read; read again. Neither is answered by get_request_stack for a record older than the newest 64 MiB of the store, which that read covers."
+                            "description": "source_limit: the page's sites name more than 4 scripts not yet resolved, and this one was past them; read the same cursor again (resolved sites are kept, so the next scripts are read, and a page holding a deferred site has a tag no later read matches), or with a smaller limit. site_read_failed: the script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read; read again. get_request_stack with stack_read reads the record wherever it sits in the store."
                           }
                         }
                       }
@@ -30351,7 +30351,7 @@
                 "description": "The operation stack_read is the arguments of."
               },
               "stack_read": {
-                "description": "The exact arguments of get_request_stack (stack_read_operation) that read this record's whole stack, resolved like a request's, with its site again under observation; pass it as it is. That read covers the newest 64 MiB of the store: an older record answers outside_scan.",
+                "description": "The exact arguments of get_request_stack (stack_read_operation) that read this record's whole stack, resolved like a request's, with its site again under observation; pass it as it is. That read finds the record by its identity anywhere in the store; it answers outside_scan, with index_behind, only while the event index is still catching up.",
                 "oneOf": [
                   {
                     "type": "null"
@@ -30550,6 +30550,10 @@
             ],
             "description": "Console documents (frames, including out-of-process frames), the workers whose requests the renderer recorded, and the native frames that observation records came from. Console documents carry no native frame ID, so only observed frames scope observations exactly. Not a pausable thread list.",
             "properties": {
+              "coverage": {
+                "$ref": "#/components/schemas/DetailCoverage",
+                "description": "What workers, observed and observation_budget_gaps cover: the whole store (scope store) once the event index has caught up, else its indexed prefix."
+              },
               "console": {
                 "type": "string",
                 "maxLength": 32
@@ -30597,7 +30601,6 @@
               },
               "workers": {
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -30636,16 +30639,14 @@
                     },
                     "requests": {
                       "type": "integer",
-                      "minimum": 1,
-                      "maximum": 2048
+                      "minimum": 1
                     }
                   }
                 }
               },
               "observed": {
                 "type": "array",
-                "maxItems": 64,
-                "description": "Native frames of the observation records among the newest 2,048 records that are observations or gaps of any kind, within the newest 64 MiB of the store, newest first: the exact identity a thread scope filters by.",
+                "description": "The native frame of every valid observation record of the store, from the event index, newest first: the exact identity a thread scope filters by. records counts that frame's records.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -30676,8 +30677,7 @@
                     },
                     "records": {
                       "type": "integer",
-                      "minimum": 1,
-                      "maximum": 2048
+                      "minimum": 1
                     }
                   }
                 }
@@ -30944,8 +30944,7 @@
           },
           "observation_budget_gaps": {
             "type": "array",
-            "maxItems": 16,
-            "description": "debugger_observation_budget gap records in the newest observation scan, newest first: that renderer, from an earlier build, admitted 1,024 records in one capture configuration and refused the rest. Current renderers leave none.",
+            "description": "Every debugger_observation_budget gap record of the store, from the event index, newest first: that renderer, from an earlier build, admitted 1,024 records in one capture configuration and refused the rest. Current renderers leave none.",
             "items": {
               "type": "object",
               "additionalProperties": false,

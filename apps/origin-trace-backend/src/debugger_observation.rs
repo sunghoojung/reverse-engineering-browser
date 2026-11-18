@@ -1,13 +1,18 @@
 //! Phase 1 debugger records, protocol/native-debugger-observation-v1.md.
 
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 use serde_json::{Value, json};
 
 use crate::{
     error::Result,
+    event_index::Indexes,
     event_query::{self, Cursor, EventFilter},
-    event_window,
+    index_db::SqlResult,
     request_stack::{self, u16_at, u32_at},
 };
 
@@ -22,12 +27,7 @@ pub const TYPES: [&str; 6] = [
 pub const RECENT: usize = 32;
 /// The most records one filtered read returns.
 pub const PAGE: usize = 256;
-const WORKER_SCAN: usize = 2048;
-const WORKERS: usize = 64;
-const OBSERVED_SCAN: usize = 2048;
-const OBSERVED: usize = 64;
-const BUDGET_GAPS: usize = 16;
-const BUDGET_REASON: &str = "debugger_observation_budget";
+pub(crate) const BUDGET_REASON: &str = "debugger_observation_budget";
 
 const TARGETS: [&str; 5] = ["element", "document", "window", "node", "other"];
 const EXCEPTIONS: [&str; 3] = ["uncaught", "caught", "unhandled_rejection"];
@@ -201,14 +201,6 @@ pub(crate) fn annotate(events: &mut [Value]) {
     }
 }
 
-/// The newest records and how many lines of the read were damaged.
-fn tail(store: &Path, types: &[&str], limit: usize) -> Result<(Vec<Value>, u64)> {
-    let filter = EventFilter::exact(types, Vec::new());
-    let (page, malformed) =
-        event_query::read_tolerant(store, Cursor::Tail, limit, event_query::SCAN_BYTES, &filter)?;
-    Ok((page.records, malformed))
-}
-
 /// One native frame's records, matched exactly on all three identities.
 #[derive(Clone, Copy)]
 pub struct Thread {
@@ -256,95 +248,97 @@ fn echo(page: &event_query::Page, query: &Query, returned: usize) -> Value {
     echo
 }
 
-/// The newest observation and gap records, read once per answer: the frames
-/// and budget gaps come from it, and so do the newest records whenever it
-/// already holds every one an unfiltered read would return.
-pub struct Scan {
-    page: event_query::Page,
-    damaged: u64,
+/// How long a debugger read folds appended records before it lists threads
+/// from where the event index stands; the background indexer keeps the
+/// index within a second of the store.
+const THREADS_FOLD: Duration = Duration::from_millis(100);
+
+/// The whole store's debugger threads from the event index, newest first:
+/// the native frame of every valid observation record (the identity a thread
+/// scope filters by), every worker that started a request (`request_initiated`
+/// loader kinds 17 to 19, protocol/native-network-v3.md), every observation
+/// budget gap, and what the index covered.
+pub struct Threads {
+    pub observed: Vec<Value>,
+    pub workers: Vec<Value>,
+    pub budget_gaps: Vec<Value>,
+    pub coverage: Value,
 }
 
-pub fn scan(store: &Path) -> Result<Scan> {
-    let mut types = TYPES.to_vec();
-    types.push("gap");
-    let filter = EventFilter::exact(&types, Vec::new());
-    let (page, damaged) = event_query::read_tolerant(
-        store,
-        Cursor::Tail,
-        OBSERVED_SCAN,
-        event_query::SCAN_BYTES,
-        &filter,
+pub fn threads(indexes: &Mutex<Indexes>) -> Result<Threads> {
+    let mut indexes = indexes.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(index) = indexes.summary_index(Instant::now() + THREADS_FOLD)? else {
+        return Ok(Threads {
+            observed: Vec::new(),
+            workers: Vec::new(),
+            budget_gaps: Vec::new(),
+            coverage: event_query::Coverage::located(0, 0, true, 0).to_json(),
+        });
+    };
+    let text = |key: i64| (key as u64).to_string();
+    let rows = |sql: &str, row: &dyn Fn(&rusqlite::Row<'_>) -> rusqlite::Result<Value>| {
+        index
+            .connection
+            .prepare_cached(sql)
+            .sql()?
+            .query_map([], |found| row(found))
+            .sql()?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .sql()
+    };
+    let observed = rows(
+        "SELECT session, process, frame, last_sequence, records FROM observed_frames
+         ORDER BY last_start DESC",
+        &|row| {
+            Ok(
+                json!({"session_id": text(row.get(0)?), "process_id": row.get::<_, i64>(1)?,
+                "frame_id": text(row.get(2)?), "last_sequence": text(row.get(3)?),
+                "records": row.get::<_, i64>(4)?}),
+            )
+        },
     )?;
-    Ok(Scan { page, damaged })
-}
-
-impl Scan {
-    /// The native frames whose records the scan holds, the identity a thread
-    /// scope filters by, and the renderers that ran out of their observation
-    /// budget there.
-    pub fn observed(&self) -> (Vec<Value>, Vec<Value>) {
-        let (mut frames, mut gaps): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
-        for event in self.page.records.iter().rev() {
-            if event["type"] == "gap" {
-                let named = event_window::named_gap(event);
-                if gaps.len() < BUDGET_GAPS
-                    && named.is_some_and(|named| named.0 == "runtime" && named.1 == BUDGET_REASON)
-                {
-                    gaps.push(json!({"session_id": event["session_id"], "process_id": event["process_id"],
-                        "frame_id": event["frame_id"], "sequence_number": event["sequence_number"]}));
-                }
-                continue;
-            }
-            let Some(record) = decode(event) else {
-                continue;
+    let workers = rows(
+        "SELECT kind, session, process, context, last_sequence, requests FROM workers
+         ORDER BY last_start DESC",
+        &|row| {
+            let kind = match row.get::<_, i64>(0)? {
+                17 => "dedicated_worker",
+                18 => "shared_worker",
+                _ => "service_worker",
             };
-            let same = |frame: &&mut Value| {
-                frame["session_id"] == record["session_id"]
-                    && frame["process_id"] == record["process_id"]
-                    && frame["frame_id"] == record["frame_id"]
-            };
-            if let Some(frame) = frames.iter_mut().find(same) {
-                frame["records"] = json!(frame["records"].as_u64().unwrap_or(0) + 1);
-            } else if frames.len() < OBSERVED {
-                frames.push(json!({"session_id": record["session_id"], "process_id": record["process_id"],
-                    "frame_id": record["frame_id"], "last_sequence": record["sequence_number"], "records": 1}));
-            }
-        }
-        (frames, gaps)
-    }
-
-    /// An unfiltered read's answer when the scan stopped before its own limit
-    /// and holds no more records than the read would: the same records, and
-    /// the same place to continue from.
-    fn unfiltered(&self, query: &Query) -> Option<Recent> {
-        let records: Vec<&Value> = self
-            .page
-            .records
-            .iter()
-            .filter(|e| e["type"] != "gap")
-            .collect();
-        if self.page.limited || records.len() > query.limit {
-            return None;
-        }
-        let decoded: Vec<Value> = records.iter().rev().filter_map(|e| decode(e)).collect();
-        Some(Recent {
-            malformed: records.len() - decoded.len() + self.damaged as usize,
-            records: decoded,
-            query: echo(&self.page, query, records.len()),
-        })
-    }
+            Ok(json!({"kind": kind, "session_id": text(row.get(1)?),
+                "process_id": row.get::<_, i64>(2)?, "context_id": text(row.get(3)?),
+                "last_sequence": text(row.get(4)?), "requests": row.get::<_, i64>(5)?}))
+        },
+    )?;
+    let budget_gaps = rows(
+        "SELECT session, process, frame, sequence FROM observation_budget_gaps
+         ORDER BY start DESC",
+        &|row| {
+            Ok(
+                json!({"session_id": text(row.get(0)?), "process_id": row.get::<_, i64>(1)?,
+                "frame_id": text(row.get(2)?), "sequence_number": text(row.get(3)?)}),
+            )
+        },
+    )?;
+    let caught_up = index.stopped.is_none() && index.position.caught_up();
+    let coverage = event_query::Coverage::located(
+        index.position.indexed_to,
+        index.position.file_end,
+        caught_up,
+        0,
+    );
+    Ok(Threads {
+        observed,
+        workers,
+        budget_gaps,
+        coverage: coverage.to_json(),
+    })
 }
 
 /// The newest matching records first; a record the core would refuse is
 /// counted, not shown.
-pub fn recent(store: &Path, query: &Query, scan: &Scan) -> Result<Recent> {
-    if query.kind.is_none()
-        && query.thread.is_none()
-        && query.before.is_none()
-        && let Some(recent) = scan.unfiltered(query)
-    {
-        return Ok(recent);
-    }
+pub fn recent(store: &Path, query: &Query) -> Result<Recent> {
     let types = query.kind.map_or(TYPES.to_vec(), |kind| vec![kind]);
     let ids = query.thread.map_or_else(Vec::new, |thread| {
         vec![
@@ -363,35 +357,6 @@ pub fn recent(store: &Path, query: &Query, scan: &Scan) -> Result<Recent> {
         records: decoded,
         query: echo(&page, query, page.records.len()),
     })
-}
-
-/// Workers the renderer saw start requests, from `request_initiated` loader
-/// kinds 17 to 19 (protocol/native-network-v3.md).
-pub fn workers(store: &Path) -> Result<Vec<Value>> {
-    let mut found: Vec<Value> = Vec::new();
-    for event in tail(store, &["request_initiated"], WORKER_SCAN)?
-        .0
-        .iter()
-        .rev()
-    {
-        let kind = match event["loader_kind"].as_u64() {
-            Some(17) => "dedicated_worker",
-            Some(18) => "shared_worker",
-            Some(19) => "service_worker",
-            _ => continue,
-        };
-        let same = |worker: &&mut Value| {
-            worker["process_id"] == event["process_id"] && worker["context_id"] == event["frame_id"]
-        };
-        if let Some(worker) = found.iter_mut().find(same) {
-            worker["requests"] = json!(worker["requests"].as_u64().unwrap_or(0) + 1);
-        } else if found.len() < WORKERS {
-            found.push(json!({"kind": kind, "session_id": event["session_id"],
-                "process_id": event["process_id"], "context_id": event["frame_id"],
-                "last_sequence": event["sequence_number"], "requests": 1}));
-        }
-    }
-    Ok(found)
 }
 
 #[cfg(test)]

@@ -37,8 +37,8 @@ pub const EVENTS_SUFFIX: &str = ".events-v1";
 pub const EDGES_SUFFIX: &str = ".edges-v1";
 pub const PROFILES_SUFFIX: &str = ".profiles-v1";
 /// The second layout adds the gap totals, the third the summary's counts,
-/// the fourth the flow graph's record kind.
-const EVENTS_FORMAT: &str = "reb-event-index-v1/4";
+/// the fourth the debugger threads, the fifth the flow graph's record kind.
+const EVENTS_FORMAT: &str = "reb-event-index-v1/5";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
 const PROFILES_FORMAT: &str = "reb-signal-profile-index-v1";
 /// The largest event or edge record a trace reads.
@@ -123,7 +123,21 @@ pub(crate) const EVENT_SCHEMA: &str = "
         renderer_kind INTEGER, renderer_frame INTEGER NOT NULL, browser_kind INTEGER, reason TEXT,
         UNIQUE(browser, session, process, high, low, request));
     CREATE INDEX IF NOT EXISTS summary_tabs_unresolved ON summary_tabs(ordinal)
-        WHERE reason IS NOT NULL;";
+        WHERE reason IS NOT NULL;
+    -- Debugger threads (protocol/native-debugger-observation-v1.md): the
+    -- native frame of every valid observation record, every
+    -- debugger_observation_budget gap, and the worker of every request a
+    -- worker started (loader kind 17 to 19), each with its newest record.
+    CREATE TABLE IF NOT EXISTS observed_frames(session INTEGER NOT NULL, process INTEGER NOT NULL,
+        frame INTEGER NOT NULL, records INTEGER NOT NULL, last_sequence INTEGER NOT NULL,
+        last_start INTEGER NOT NULL, PRIMARY KEY(session, process, frame)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS observation_budget_gaps(start INTEGER PRIMARY KEY,
+        session INTEGER NOT NULL, process INTEGER NOT NULL, frame INTEGER NOT NULL,
+        sequence INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS workers(process INTEGER NOT NULL, context INTEGER NOT NULL,
+        session INTEGER NOT NULL, kind INTEGER NOT NULL, requests INTEGER NOT NULL,
+        last_sequence INTEGER NOT NULL, last_start INTEGER NOT NULL,
+        PRIMARY KEY(process, context)) WITHOUT ROWID;";
 const EDGE_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS edges(start INTEGER PRIMARY KEY, end INTEGER NOT NULL,
         session INTEGER NOT NULL, process INTEGER NOT NULL, sequence INTEGER NOT NULL);
@@ -396,6 +410,74 @@ impl EventFold {
     }
 }
 
+fn identifier(value: &Value) -> i64 {
+    value.as_str().map_or(0, number)
+}
+
+/// A valid debugger observation counts for its native frame, and a request a
+/// worker started counts for that worker; each keeps its newest record.
+fn thread_record(transaction: &Transaction<'_>, event: &Value, start: u64) -> Result<()> {
+    let kind = event["type"].as_str().unwrap_or("");
+    let (session, process) = (
+        identifier(&event["session_id"]),
+        event["process_id"].as_i64().unwrap_or(0),
+    );
+    let sequence = identifier(&event["sequence_number"]);
+    if crate::debugger_observation::TYPES.contains(&kind) {
+        if crate::debugger_observation::decode(event).is_none() {
+            return Ok(());
+        }
+        transaction
+            .prepare_cached(
+                "INSERT INTO observed_frames(session, process, frame, records, last_sequence, last_start)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5)
+                 ON CONFLICT(session, process, frame) DO UPDATE SET records = records + 1,
+                     last_sequence = excluded.last_sequence, last_start = excluded.last_start",
+            )
+            .sql()?
+            .execute(params![session, process, identifier(&event["frame_id"]), sequence, start as i64])
+            .sql()?;
+    } else if kind == "request_initiated"
+        && let Some(worker @ 17..=19) = event["loader_kind"].as_i64()
+    {
+        transaction
+            .prepare_cached(
+                "INSERT INTO workers(process, context, session, kind, requests, last_sequence, last_start)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
+                 ON CONFLICT(process, context) DO UPDATE SET session = excluded.session,
+                     kind = excluded.kind, requests = requests + 1,
+                     last_sequence = excluded.last_sequence, last_start = excluded.last_start",
+            )
+            .sql()?
+            .execute(params![process, identifier(&event["frame_id"]), session, worker, sequence, start as i64])
+            .sql()?;
+    }
+    Ok(())
+}
+
+/// A renderer that ran out of its observation budget leaves one named gap.
+fn budget_gap(transaction: &Transaction<'_>, event: &Value, start: u64) -> Result<()> {
+    if event_window::named_gap(event).is_some_and(|named| {
+        named.0 == "runtime" && named.1 == crate::debugger_observation::BUDGET_REASON
+    }) {
+        transaction
+            .prepare_cached(
+                "INSERT INTO observation_budget_gaps(start, session, process, frame, sequence)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .sql()?
+            .execute(params![
+                start as i64,
+                identifier(&event["session_id"]),
+                event["process_id"].as_i64().unwrap_or(0),
+                identifier(&event["frame_id"]),
+                identifier(&event["sequence_number"])
+            ])
+            .sql()?;
+    }
+    Ok(())
+}
+
 impl index_db::Fold for EventFold {
     fn begin(&mut self) {
         *self = Self::default();
@@ -420,6 +502,7 @@ impl index_db::Fold for EventFold {
                 self.malformed += u64::from(!counted);
                 if counted {
                     self.summary.record(&event);
+                    thread_record(transaction, &event, start)?;
                 }
                 self.record(transaction, &reference, &event, start, end, counted)
             }
@@ -431,6 +514,7 @@ impl index_db::Fold for EventFold {
                 if counted(&event) {
                     self.summary.record(&event);
                     self.gap(transaction, &reference, &event)?;
+                    budget_gap(transaction, &event, start)?;
                 } else {
                     self.malformed += 1;
                 }
@@ -702,6 +786,21 @@ fn tail(file: &mut File, position: &Position) -> Result<Option<Vec<u8>>> {
     Ok(complete.then_some(bytes))
 }
 
+/// How long a record lookup folds appended records before it answers from
+/// where the index stands; the background indexer keeps it within a second
+/// of the store.
+pub const LOCATE_DEADLINE: Duration = Duration::from_secs(1);
+
+/// Where one record sits: its byte range when the indexed prefix holds it,
+/// and how far that prefix reaches. Absent from a caught-up index is absent
+/// from the store, but for an unterminated record still being written.
+pub struct Located {
+    pub range: Option<(u64, u64)>,
+    pub indexed_to: u64,
+    pub store_end: u64,
+    pub caught_up: bool,
+}
+
 /// The whole event store's gap totals, with the polling window's rules.
 #[derive(Debug, PartialEq)]
 pub struct Totals {
@@ -906,8 +1005,64 @@ impl Indexes {
         totals(self.events.index.sidecar().connection(), &position).map(Some)
     }
 
+    /// Where the record `(session, process, sequence)` sits in an event store
+    /// of any length, folding until `deadline`; None when there is no store.
+    /// With no session, each session with a stream of `process` is looked up.
+    /// A line the index cannot fold stops it there, and the answer says so.
+    pub fn locate(
+        &mut self,
+        session: Option<u64>,
+        process: u32,
+        sequence: u64,
+        deadline: Instant,
+    ) -> Result<Option<Located>> {
+        let (position, stopped) = match self.events.refresh(deadline) {
+            Ok(None) => return Ok(None),
+            Ok(Some((_, position))) => (position, false),
+            Err(_) => match self.events.index.open()? {
+                Some((_, position)) => (position, true),
+                None => return Ok(None),
+            },
+        };
+        let connection = self.events.index.sidecar().connection();
+        let sessions: Vec<i64> = match session {
+            Some(session) => vec![index_db::key(session)],
+            None => connection
+                .prepare_cached("SELECT session FROM streams WHERE process = ?1")
+                .sql()?
+                .query_map([i64::from(process)], |row| row.get(0))
+                .sql()?
+                .collect::<rusqlite::Result<_>>()
+                .sql()?,
+        };
+        let mut range = None;
+        for session in sessions {
+            range = connection
+                .prepare_cached(
+                    "SELECT start, end FROM events WHERE session = ?1 AND process = ?2 AND sequence = ?3",
+                )
+                .sql()?
+                .query_row(
+                    params![session, i64::from(process), index_db::key(sequence)],
+                    |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+                )
+                .optional()
+                .sql()?;
+            if range.is_some() {
+                break;
+            }
+        }
+        Ok(Some(Located {
+            range,
+            indexed_to: position.indexed_to,
+            store_end: position.file_end,
+            caught_up: !stopped && position.caught_up(),
+        }))
+    }
+
     /// The event index brought up to the store until `deadline`, for the
-    /// session summary, and where it stands; None when there is no store.
+    /// session summary and the debugger threads, and where it stands; None
+    /// when there is no store.
     /// Its counts and gap totals describe the same indexed prefix. A record
     /// the index cannot read stops it there, with that error beside it.
     pub fn summary_index(&mut self, deadline: Instant) -> Result<Option<SummaryIndex<'_>>> {

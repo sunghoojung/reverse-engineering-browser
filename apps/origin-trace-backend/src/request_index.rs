@@ -32,7 +32,7 @@ pub const SIDECAR_SUFFIX: &str = ".requests-v2";
 const LEGACY_SUFFIX: &str = ".requests-v1";
 const FORMAT: &str = "reb-request-index-v2";
 /// The index's row layout; an index of another layout is rebuilt from byte 0.
-const LAYOUT: &str = "reb-request-index-v2/2";
+const LAYOUT: &str = "reb-request-index-v2/3";
 const RECORD_BYTES: usize = 4096;
 /// How long a read folds new records before it answers from what is indexed.
 /// The backend's indexer folds the rest in the background, so a long store
@@ -1591,6 +1591,13 @@ CREATE TABLE IF NOT EXISTS script_cookies(
     start INTEGER NOT NULL,
     end INTEGER NOT NULL,
     PRIMARY KEY (session, start)) WITHOUT ROWID;
+-- Each session's `cookie_list` records of an indexed request by byte range,
+-- for the same reason: provenance reads every list that set or sent a name.
+CREATE TABLE IF NOT EXISTS cookie_lists(
+    session TEXT NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    PRIMARY KEY (session, start)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS counts(id INTEGER PRIMARY KEY CHECK (id = 0), malformed INTEGER NOT NULL);
 INSERT OR IGNORE INTO counts VALUES (0, 0);
 ";
@@ -2322,6 +2329,19 @@ impl Batch {
                     let id = self.identity(transaction, &event)?;
                     if let Some(ordinal) = self.ordinal(transaction, &id)? {
                         fold_child(self.row(transaction, ordinal)?, &event, kind, start, end);
+                        if kind == "cookie_list" {
+                            transaction
+                                .prepare_cached(
+                                    "INSERT OR IGNORE INTO cookie_lists(session, start, end) VALUES (?1, ?2, ?3)",
+                                )
+                                .sql()?
+                                .execute(params![
+                                    text(&event["session_id"]),
+                                    clamp(start),
+                                    clamp(end)
+                                ])
+                                .sql()?;
+                        }
                     }
                 }
                 _ => {}
@@ -3112,6 +3132,14 @@ impl RequestIndex {
 
     /// Identifies how far the index has reached while it is behind the store,
     /// so a validator on a detail answer changes as its coverage can change.
+    /// The record boundary the index has folded to and the store's length,
+    /// as of the last refresh.
+    pub fn extent(&self) -> (u64, u64) {
+        self.position
+            .as_ref()
+            .map_or((0, 0), |position| (position.indexed_to, position.file_end))
+    }
+
     pub fn progress_marker(&self) -> String {
         match &self.position {
             Some(_) if self.is_caught_up() => "caught-up".to_owned(),
@@ -3142,13 +3170,24 @@ impl RequestIndex {
     /// Byte ranges of a session's `script_cookie` records, oldest first, and
     /// whether they are every one the store holds.
     pub fn script_cookies(&mut self, session: &str) -> Result<(Vec<RecordRange>, bool)> {
+        self.session_ranges(
+            "SELECT start, end FROM script_cookies WHERE session = ?1 ORDER BY start",
+            session,
+        )
+    }
+
+    /// Byte ranges of the `cookie_list` records of a session's indexed
+    /// requests, oldest first, and whether they are every one the store holds.
+    pub fn cookie_lists(&mut self, session: &str) -> Result<(Vec<RecordRange>, bool)> {
+        self.session_ranges(
+            "SELECT start, end FROM cookie_lists WHERE session = ?1 ORDER BY start",
+            session,
+        )
+    }
+
+    fn session_ranges(&mut self, query: &str, session: &str) -> Result<(Vec<RecordRange>, bool)> {
         self.read()?;
-        let mut statement = self
-            .db()
-            .prepare_cached(
-                "SELECT start, end FROM script_cookies WHERE session = ?1 ORDER BY start",
-            )
-            .sql()?;
+        let mut statement = self.db().prepare_cached(query).sql()?;
         let ranges = collect(statement.query_map([session], |row| {
             Ok(RecordRange {
                 first: row.get::<_, i64>(0)? as u64,

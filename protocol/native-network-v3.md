@@ -1470,8 +1470,8 @@ artifact kinds.
 
 Header blocks carry credentials (`Authorization`, `Cookie`, `Set-Cookie`), so
 they use the request-content gate of v2 (`--reb-capture-request-content`,
-`REB_CAPTURE_REQUEST_CONTENT=1`, agent `request_content` with
-`confirm_sensitive_capture`). Metadata-only sessions emit no header record and
+`REB_CAPTURE_REQUEST_CONTENT=1`, agent `request_content`, on by default under
+the agent's session consent). Metadata-only sessions emit no header record and
 retain no header value. The receiver still refuses the sensitive kinds without
 `--allow-sensitive`.
 

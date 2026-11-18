@@ -6,8 +6,11 @@ import WebKit
 // that decision is open, validates the capture mode, and keeps the saved
 // invocation sites the next capture arms. As with the agent bridge, only the
 // exact main document the app loaded can ask. The page has no Keychain
-// choice: a session it starts or retries always uses the isolated profile.
-// A start names only its mode: a Content session keeps every body whole.
+// choice: a session it starts or retries always uses the mock Keychain. A
+// start names its mode, and nothing more about content: a Content session
+// keeps every body whole. Every start names its session options
+// (LiveSessionOptions): the browser profile and the native switches that were
+// otherwise only environment variables.
 //
 // Site labels and source URLs reach the page only to be drawn as text, as the
 // backend's saved-site route already serves them to the live workspace. The
@@ -28,9 +31,11 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   }
 
   enum Choice {
-    case start(LiveCaptureMode)
+    case start(LiveCaptureMode, LiveSessionOptions)
     case retry
     case offline
+    // Open an ended session's folder in the offline workspace.
+    case review(URL)
   }
 
   var content = Content.hidden {
@@ -47,6 +52,16 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   var modeNote: String? {
     didSet { if modeNote != oldValue, isChoosing(content) { publish() } }
   }
+
+  // The session options a start offers, and those of the session starting or
+  // ended: set before the content that shows them.
+  var options = LiveSessionOptions.defaults {
+    didSet { if options != oldValue, content != .hidden { publish() } }
+  }
+
+  // The persistent research profile the next session opens unless Fresh
+  // profile is chosen, shown so the researcher knows where logins live.
+  var researchProfile: URL?
 
   var decisionOpen: Bool {
     switch content {
@@ -127,6 +142,9 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   }
 
   private func handle(_ op: String, _ body: [String: Any]) throws -> (Any?, Choice?) {
+    // Review opens a recorded folder and starts nothing. The unsaved-work
+    // guard can decline it or an alert can refuse it, so it leaves the ended
+    // panel open to ask again instead of answering the decision.
     if ["start", "retry", "offline"].contains(op) {
       guard !answered else { throw SessionPanelRefusal("This choice is already being handled.") }
     }
@@ -139,9 +157,15 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       return (state(), nil)
     case "start":
       guard case .choose = content else { throw SessionPanelRefusal("This start choice is no longer open.") }
-      // The mode alone (LivePanelStart.parse).
-      switch LivePanelStart.parse(body) {
-      case .success(let start): return accept(.start(start.mode))
+      // The session options, then the mode alone (LivePanelStart.parse).
+      var start = body
+      let chosen: LiveSessionOptions
+      switch LiveSessionOptions.parse(start.removeValue(forKey: "options")) {
+      case .success(let options): chosen = options
+      case .failure(let refusal): throw SessionPanelRefusal(refusal.message)
+      }
+      switch LivePanelStart.parse(start) {
+      case .success(let start): return accept(.start(start.mode, chosen))
       case .failure(let refusal): throw SessionPanelRefusal(refusal.message)
       }
     case "retry":
@@ -150,6 +174,11 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
     case "offline":
       guard decisionOpen else { throw SessionPanelRefusal("There is no session choice open.") }
       return accept(.offline)
+    case "review":
+      guard case .failed(let failure, _) = content, failure.afterStartup, let folder = failure.sessionDirectory else {
+        throw SessionPanelRefusal("There is no ended session to review.")
+      }
+      return (["ok": true], .review(folder))
     case "removeSite", "clearSites":
       guard isChoosing(content) else { throw SessionPanelRefusal("Saved functions change only before a session starts.") }
       guard (body["generation"] as? NSNumber)?.intValue == siteGeneration else {
@@ -212,10 +241,12 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
     case .hidden:
       return ["panel": "hidden"]
     case .starting(let session):
-      return ["panel": "starting", "mode": session.mode.rawValue, "modes": modes]
+      return ["panel": "starting", "mode": session.mode.rawValue, "modes": modes, "options": options.panelState]
     case .choose(let mode):
       var value: [String: Any] = ["panel": "choose", "mode": mode.rawValue, "modes": modes, "sites": siteState()]
       if let modeNote { value["modeNote"] = modeNote }
+      value["options"] = options.panelState
+      if let researchProfile { value["researchProfile"] = (researchProfile.path as NSString).abbreviatingWithTildeInPath }
       return value
     case .failed(let failure, let session):
       return [
@@ -223,7 +254,10 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
         "failure": [
           "title": failure.afterStartup ? "Live session ended" : "Live session unavailable",
           "message": failure.message, "afterStartup": failure.afterStartup,
+          "reviewable": failure.afterStartup && failure.sessionDirectory != nil,
+          "endedNormally": failure.endedNormally,
         ],
+        "options": options.panelState,
       ]
     }
   }

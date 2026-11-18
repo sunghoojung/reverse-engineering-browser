@@ -51,15 +51,13 @@ export const PERMISSION_PROMPT_ASK = `Permission: Ask for actions. Tools read a 
 
 export const PERMISSION_PROMPT_AUTO = `Permission: Auto-approve actions. Tools read a local structural projection of that session: events, requests, artifact metadata and analysis summaries. A field such as {"omitted":"content"} or {"omitted":"string"} means the data exists locally but is not shown to you. Source, bytecode, disassembly and request bodies stay on this Mac unless the researcher pins an excerpt into a turn. If you need one, say which and ask for it to be pinned. Tools that act, such as capture controls, the Console and saved local state, run without asking. The researcher sees every call and its result and can stop you at any time, so say what an action is for before you take it and prefer the smallest action that answers the question.`;
 
-export const PERMISSION_PROMPT_FULL = `Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly or request and response bodies, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Sensitive capture options (canvas_images, request_content, js_invocation_digests) are not allowed in this conversation. The researcher sees every call and its result and can stop you at any time.`;
-
-export const PERMISSION_PROMPT_FULL_SENSITIVE = `Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly or request and response bodies, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. The researcher also allowed sensitive capture options (canvas_images, request_content, js_invocation_digests) in this conversation: name them, with confirm_sensitive_capture, only when the content they keep is what the question needs. The researcher sees every call and its result and can stop you at any time.`;
+export const PERMISSION_PROMPT_FULL = `Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly or request and response bodies, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Your sessions capture what the researcher's do in the app, request content and Canvas images included; set an option false when the question does not need what it keeps. The researcher sees every call and its result and can stop you at any time.`;
 
 export const PERMISSION_LEVELS = Object.freeze(['read-only', 'ask', 'auto', 'full']);
 
-export function systemPrompt(permission = 'read-only', sensitive = false) {
+export function systemPrompt(permission = 'read-only') {
   const paragraph = {'read-only': PERMISSION_PROMPT_READ_ONLY, ask: PERMISSION_PROMPT_ASK, auto: PERMISSION_PROMPT_AUTO,
-    full: sensitive ? PERMISSION_PROMPT_FULL_SENSITIVE : PERMISSION_PROMPT_FULL}[permission] ?? PERMISSION_PROMPT_READ_ONLY;
+    full: PERMISSION_PROMPT_FULL}[permission] ?? PERMISSION_PROMPT_READ_ONLY;
   return SYSTEM_PROMPT.replace('{permission}', paragraph);
 }
 
@@ -165,14 +163,14 @@ const formatBytes = value => value >= 1024 * 1024 ? `${(value / 1048576).toFixed
 // in the same shapes the transcript stores.
 // `createModel` is the one provider's chat model factory, so each bundle
 // carries one provider SDK.
-export function createAgentRuntime({bridge, provider, model, tools: definitions, emit, createModel, permission = 'read-only', sensitive = false}) {
+export function createAgentRuntime({bridge, provider, model, tools: definitions, emit, createModel, permission = 'read-only'}) {
   const fetch = createBridgeFetch(bridge);
   const chatModel = createModel({model, fetch});
   const decisions = new Map();
   // Native decides each call by the level it holds; this map only says which
   // calls pause the graph for Allow once (Ask for actions). A tool a lowered
   // level no longer lists does not pause: native refuses it.
-  const level = {permission, sensitive};
+  const level = {permission};
   let needsApproval = new Map();
   const setApprovals = list => { needsApproval = new Map(list.map(definition => [definition.name, definition.needsApproval ?? !definition.readOnly])); };
   setApprovals(definitions);
@@ -206,7 +204,7 @@ export function createAgentRuntime({bridge, provider, model, tools: definitions,
   const bound = chatModel.bindTools(tools);
 
   const graph = new StateGraph(MessagesAnnotation)
-    .addNode('model', async (state, config) => ({messages: [await bound.invoke([new SystemMessage(systemPrompt(level.permission, level.sensitive)), ...state.messages], config)]}))
+    .addNode('model', async (state, config) => ({messages: [await bound.invoke([new SystemMessage(systemPrompt(level.permission)), ...state.messages], config)]}))
     // A pause point only: the graph stops before this node until every action
     // in the pending model message has its own decision.
     .addNode('review', async () => ({}))
@@ -351,9 +349,8 @@ export function createAgentRuntime({bridge, provider, model, tools: definitions,
     dispose() { this.cancel(); history = []; },
     // A lowered level from the menu: the next model call has its prompt, and
     // the next tool call its approvals. Raising goes through consent instead.
-    setPermission({permission: next, sensitive: nextSensitive = false, tools: list = []}) {
+    setPermission({permission: next, tools: list = []}) {
       level.permission = next;
-      level.sensitive = Boolean(nextSensitive);
       setApprovals(list);
     },
     get permission() { return level.permission; },

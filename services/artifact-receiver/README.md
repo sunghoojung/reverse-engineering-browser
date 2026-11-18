@@ -69,8 +69,9 @@ Response bodies, request bodies, full request targets and Canvas data URLs are
 rejected by default.
 Add `--allow-sensitive` only under the sensitive-capture rules in
 [`SAFETY.md`](../../SAFETY.md), for a session whose visible authorization scope
-permits that bounded content. The live launcher adds it for
-`REB_CAPTURE_CANVAS_IMAGES=1` or `REB_CAPTURE_REQUEST_CONTENT=1`.
+permits that bounded content. The live launcher adds it whenever Canvas images
+or request content are on, as they are by default when the category mask
+holds them.
 
 The store contains immutable SHA-256-named blobs plus `manifest.jsonl`.
 Manifest records preserve execution-context and capture-origin provenance for

@@ -298,11 +298,12 @@ workspace.
 ## 14. Start a session with capture options
 
 Needs `reb-api mcp --permission full` (or `--allow-effects
---allow-session-start`) and an authorized target. Name every switch you need;
-all are off otherwise.
+--allow-session-start`) and an authorized target. The session takes the
+Origin Trace app's defaults, request content and Canvas images included, and
+runs until you end it; name a switch `false` to turn it off.
 
 ```text
-start_live_session {"url": "https://authorized.example/", "wasm_dispatch": true}
+start_live_session {"url": "https://authorized.example/"}
 ```
 
 Good: `session_id`, `endpoint`, `instance_id`, `url_opened: true` and
@@ -310,20 +311,21 @@ Good: `session_id`, `endpoint`, `instance_id`, `url_opened: true` and
 recorded, for example because the Brave build is not a capture build: end the
 session and tell the researcher. This connection now reads that session, so
 continue with recipe 2. Starting again ends this connection's previous
-session first. Sensitive Canvas images need `"canvas_images": true` with
-`"confirm_sensitive_capture": true`, only when the researcher authorized
-Canvas content for this target; `"request_content": true` (request paths,
-queries, headers, cookies and bodies; read headers with `get_request_headers`
-and cookies with `get_request_cookies` and `get_cookie_provenance`) and `"js_invocation_digests": true` take the same
-confirmation. Request content keeps every request and response body whole,
-element images, audio, video and fonts included, with no size or count limit;
-the artifact receiver refuses a body only to keep its free-disk reserve, and
-the session summary counts each one it refused. Under `--permission full` these
-sensitive options are refused unless the connection also has
-`--allow-sensitive-capture` (in the dock, **Also allow sensitive capture
-options**). `"request_stacks": true` records the stack that
-started each renderer request for `get_request_stack`. `"document_start": true`
-permits document-start Console scripts (recipe 19). `"js_invocation_sites": "/absolute/path/sites.json"`, or
+session first. Request content (request paths, queries, headers, cookies and
+bodies; read headers with `get_request_headers` and cookies with
+`get_request_cookies` and `get_cookie_provenance`), Canvas images and, with
+named sites, invocation value digests are kept by default, because the
+researcher's Full access is the consent for them; name `"request_content":
+false`, `"canvas_images": false` or `"js_invocation_digests": false` when the
+question does not need what they keep. Request content keeps every request and
+response body whole, element images, audio, video and fonts included, with no
+size or count limit; the artifact receiver refuses a body only to keep its
+free-disk reserve, and the session summary counts each one it refused. Request
+stacks (the stack that started each renderer request, for `get_request_stack`)
+and document-start Console scripts (recipe 19) are on by default;
+`"browser_internal": true` and `"extension_traffic": true` record browser-page
+and extension-worker requests, and `"fresh_profile": true` starts signed out
+instead of in the agent sessions' shared research profile. `"js_invocation_sites": "/absolute/path/sites.json"`, or
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
 `js_invocation_site_action`, arms invocation tracking. None of these is ever
 taken from the environment; `options` in the result and
@@ -332,8 +334,9 @@ A guest adapter
 needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
 An error names the launcher's reason, for example a Brave build that lacks a
 requested V8 flag; nothing is left running. From a shell, `reb-api session
-start --wasm-dispatch --url ...` does the same and prints the session
-directory.
+start --confirm-sensitive-capture --url ...` does the same and prints the
+session directory; without `--confirm-sensitive-capture` it keeps no request
+content or Canvas images, and `--wasm-dispatch=false` turns a default off.
 
 ## 15. Open a page and wait for what it loads
 

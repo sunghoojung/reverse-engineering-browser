@@ -17,8 +17,9 @@
   const ARTIFACT_NOTE = 'Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered.';
   // A Content session keeps every body whole, so the only bound on what it
   // stores is the receiver's free-disk reserve
-  // (services/artifact-receiver/README.md#disk-reserve).
-  const DISK_NOTE = 'Content stays on this Mac with the session and has no size limit. Capture keeps 4 GiB of disk free, or the REB_ARTIFACT_DISK_RESERVE_MIB reserve, and names each body it could not store.';
+  // (services/artifact-receiver/README.md#disk-reserve). The panel names no
+  // environment variable; the README names the one that sets another reserve.
+  const DISK_NOTE = 'Content stays on this Mac with the session and has no size limit. Capture keeps 4 GiB of disk free by default and names each body it could not store.';
 
   // The page's own selection while the decision is open: the capture mode.
   // It starts from what native offers and is sent with Start; native
@@ -43,6 +44,7 @@
   const ICONS = {
     start: 'M4 4h12v12H4zM8 8l5 2-5 2z',
     error: 'M10 3 2.5 16h15zM10 8v4M10 14v.5',
+    ended: 'M4 4h12v12H4zM8 8h4v4H8z',
   };
   function icon(name, className) {
     const holder = element('span', className);
@@ -72,6 +74,8 @@
   // stays on screen with the decision; native republishes what is current.
   async function choose(op, body = {}) {
     if (view.busy) return;
+    // Every start names all session options, as native requires.
+    if (op === 'start') body = {...body, options: {...session.options}};
     view.busy = true;
     view.notice = null;
     render();
@@ -103,6 +107,107 @@
     const note = element('p', `session-panel-notice${view.notice.kind === 'error' ? ' session-panel-notice-error' : ''}`, view.notice.text);
     note.setAttribute('role', view.notice.kind === 'error' ? 'alert' : 'status');
     return note;
+  }
+
+  // The session options beyond mode and limits (LiveSessionOptions in
+  // macos/LiveSessionOptions.swift): the browser profile and the native
+  // switches that were otherwise only environment variables. Native sends
+  // each value with its default; the page sends every one back with Start.
+  const FRESH_PROFILE = {key: 'fresh_profile', name: 'Fresh profile',
+    detail: 'Start signed out, with a new, empty profile that only this session uses. It stays in the session folder.'};
+  const DIGESTS = {key: 'invocation_digests', name: 'Record settled-value digests',
+    detail: 'SHA-256 digests of the string and byte results of tracked calls. They can confirm a known value, so they are sensitive capture.'};
+  // `needs` names an option this one depends on; `content` marks one only a
+  // Content session uses.
+  const ADVANCED = [
+    {key: 'request_stacks', name: 'Request stacks', detail: 'Record the JavaScript stack that started each request.'},
+    {key: 'promise_stacks', name: 'Promise stacks', needs: 'request_stacks',
+      detail: 'Also record where each promise a request awaited was created. Slower; turns on request stacks.'},
+    {key: 'wasm_dispatch', name: 'Wasm dispatch sampling',
+      detail: 'Sample br_table and call_indirect targets. Wasm then compiles with Liftoff only, so Wasm-heavy pages run slower.'},
+    {key: 'ignore_debugger_statements', name: 'Ignore debugger statements',
+      detail: 'Pages cannot pause the browser with a debugger statement.'},
+    {key: 'document_start', name: 'Allow document-start Console scripts',
+      detail: 'A live Console may arm a script that runs before page scripts, after you confirm it there.'},
+    {key: 'canvas_images', name: 'Canvas images', content: true,
+      detail: 'Keep the pixels a page reads back from a canvas.'},
+    {key: 'browser_internal', name: 'Browser-internal traffic',
+      detail: 'Record requests of browser pages such as brave://settings and DevTools. Otherwise they are counted, not recorded.'},
+    {key: 'extension_traffic', name: 'Extension traffic',
+      detail: 'Record requests of extension workers. Otherwise they are counted, not recorded.'},
+  ];
+  // The page's selection of those options while the start decision is open,
+  // and whether Advanced options is expanded.
+  const session = {options: null, advanced: false};
+
+  function optionsFrom(options) {
+    const keys = [FRESH_PROFILE.key, DIGESTS.key, ...ADVANCED.map(option => option.key)];
+    return Object.fromEntries(keys.map(key => [key, (options?.[key]?.value ?? options?.[key]?.default) === true]));
+  }
+
+  function optionDefault(key) { return view.state?.options?.[key]?.default === true; }
+
+  function optionCheck(option) {
+    const row = element('label', 'session-panel-check');
+    const box = element('input');
+    box.type = 'checkbox';
+    box.id = `session-panel-option-${option.key.replaceAll('_', '-')}`;
+    box.dataset.focusKey = `option:${option.key}`;
+    box.checked = session.options?.[option.key] === true;
+    box.addEventListener('change', () => {
+      session.options[option.key] = box.checked;
+      // A dependent option turns on what it needs, and loses it with that.
+      if (option.needs && box.checked) session.options[option.needs] = true;
+      for (const dependent of ADVANCED) {
+        if (dependent.needs === option.key && !box.checked) session.options[dependent.key] = false;
+      }
+      render();
+    });
+    const text = element('span', 'session-panel-mode-text');
+    text.append(element('span', 'session-panel-mode-name', option.name), element('span', 'session-panel-mode-detail', option.detail));
+    row.append(box, text);
+    return row;
+  }
+
+  // Native names the persistent research profile's folder; it is drawn as
+  // text.
+  function profileGroup(state) {
+    const group = element('fieldset', 'session-panel-profile');
+    group.append(element('legend', 'session-panel-label', 'Browser profile'), optionCheck(FRESH_PROFILE));
+    const folder = typeof state.researchProfile === 'string' && state.researchProfile ? state.researchProfile : null;
+    const note = element('p', 'session-panel-text session-panel-note');
+    if (session.options?.[FRESH_PROFILE.key]) {
+      note.textContent = 'The research profile is left as it is for later sessions.';
+    } else {
+      note.append('Sessions share the research profile, so sign-ins and site data carry over. Each session’s evidence still stays in its own folder.');
+      if (folder) {
+        const path = element('span', 'session-panel-path', folder);
+        path.title = folder;
+        note.append(' ', path);
+      }
+    }
+    group.append(note);
+    return group;
+  }
+
+  function advancedGroup() {
+    const group = element('section', 'session-panel-advanced');
+    const shown = ADVANCED.filter(option => !option.content || view.mode === 'content');
+    const changed = shown.filter(option => session.options?.[option.key] !== optionDefault(option.key)).length;
+    const toggle = button('session-panel-disclosure', '', () => { session.advanced = !session.advanced; render(); }, 'advanced');
+    toggle.id = 'session-panel-advanced';
+    toggle.setAttribute('aria-expanded', String(session.advanced));
+    toggle.setAttribute('aria-controls', 'session-panel-advanced-options');
+    toggle.append(element('span', 'session-panel-disclosure-mark'), element('span', 'session-panel-label', 'Advanced options'));
+    if (changed) toggle.append(element('span', 'session-panel-disclosure-count', `${changed} changed`));
+    group.append(toggle);
+    if (session.advanced) {
+      const list = element('div', 'session-panel-advanced-options');
+      list.id = 'session-panel-advanced-options';
+      list.append(...shown.map(optionCheck));
+      group.append(list);
+    }
+    return group;
   }
 
   function modeGroup() {
@@ -139,7 +244,8 @@
     return group;
   }
 
-  // Start sends the mode alone.
+  // Start sends the mode, and choose adds the session options; a Content
+  // session keeps every body whole, so there is no size to send.
   function start() {
     if (view.busy) return;
     choose('start', {mode: view.mode});
@@ -156,7 +262,7 @@
       title = `Tracking ${plural(items.length, 'function')}`;
       detail = 'This capture arms these functions in pages it loads; a page already open cannot gain tracking. '
         + (view.mode === 'content'
-          ? 'Content mode also records settled-value digests of their string and byte results (sensitive capture); set REB_NATIVE_JS_INVOCATION_DIGESTS=0 to opt out.'
+          ? 'Content mode can also record digests of their results, chosen below.'
           : 'Metadata mode records no settled-value digests.')
         + ' A Brave without invocation capture starts without them and says so.';
     } else if (sites?.state === 'unreadable') {
@@ -169,6 +275,7 @@
     const heading = element('h3', 'session-panel-label', title);
     heading.id = 'session-panel-sites-title';
     section.append(heading, element('p', 'session-panel-text', detail));
+    if (sites?.state === 'saved' && items.length && view.mode === 'content') section.append(optionCheck(DIGESTS));
     if (sites?.notice) {
       const note = element('p', 'session-panel-notice session-panel-notice-error', sites.notice);
       note.setAttribute('role', 'alert');
@@ -225,6 +332,7 @@
     body.append(element('p', 'session-panel-lede', 'Choose the evidence boundary for this session. You can start another session later from the Origin Trace menu.'),
       modeGroup(), ...(view.mode === 'content' ? [element('p', 'session-panel-text session-panel-note', DISK_NOTE)] : []),
       element('p', 'session-panel-text session-panel-note', ARTIFACT_NOTE), sitesSection(state.sites));
+    body.append(profileGroup(state), advancedGroup());
     const offline = button('session-panel-button', 'Continue Offline', () => choose('offline'), 'offline');
     offline.id = 'session-panel-offline';
     const startButton = button('session-panel-button session-panel-button-primary', 'Start Session', start, 'start');
@@ -257,6 +365,23 @@
     return [header('error', String(failure.title ?? 'Live session unavailable'), 'error'), body, actions(retry, offline)];
   }
 
+  // A session that ended after it started, with its folder known: open its
+  // evidence for review, or start again with the same choices.
+  function endedContent(state) {
+    const failure = state.failure ?? {};
+    const normal = failure.endedNormally === true;
+    const body = element('div', 'session-panel-body');
+    const message = element('p', 'session-panel-failure', String(failure.message ?? 'The live session ended.'));
+    message.id = 'session-panel-failure';
+    if (normal) message.dataset.tone = 'ended';
+    body.append(message, element('p', 'session-panel-text', 'Review Session opens its evidence in the offline workspace, in place of this ended workspace, which can no longer load or save anything. Start Again starts a new session with the same choices.'));
+    const again = button('session-panel-button', 'Start Again', () => choose('retry'), 'retry');
+    again.id = 'session-panel-retry';
+    const review = button('session-panel-button session-panel-button-primary', 'Review Session', () => choose('review'), 'review');
+    review.id = 'session-panel-review';
+    return [header(normal ? 'ended' : 'error', String(failure.title ?? 'Live session ended'), normal ? null : 'error'), body, actions(review, again)];
+  }
+
   // A decision arriving takes focus to its default control, as an alert's
   // default button would. A redraw of the same state keeps the control the
   // researcher used; while a request is in flight focus waits on the panel.
@@ -284,7 +409,8 @@
     else if (inside && active !== root && active.dataset?.focusKey) focusKey = active.dataset.focusKey;
     // A redraw of the same state keeps where the researcher scrolled to.
     const scrolled = arrived ? 0 : root.querySelector('.session-panel-body')?.scrollTop ?? 0;
-    const builders = {choose: chooseContent, starting: startingContent, failed: failedContent};
+    const builders = {choose: chooseContent, starting: startingContent,
+      failed: state => state.failure?.reviewable === true ? endedContent(state) : failedContent(state)};
     root.replaceChildren(...(builders[panel] ?? startingContent)(state));
     if (scrolled) root.querySelector('.session-panel-body').scrollTop = scrolled;
     root.dataset.state = panel;
@@ -302,7 +428,8 @@
     if (!target && focusKey?.startsWith('remove:')) {
       target = root.querySelector('[data-focus-key^="remove:"]') ?? root.querySelector('[data-focus-key="clear"]');
     }
-    (target ?? root.querySelector(`[data-focus-key="${DEFAULT_FOCUS[panel]}"]`) ?? root).focus();
+    const defaultKey = panel === 'failed' && state.failure?.reviewable === true ? 'review' : DEFAULT_FOCUS[panel];
+    (target ?? root.querySelector(`[data-focus-key="${defaultKey}"]`) ?? root).focus();
   }
 
   function receive(state, {keepNotice = false} = {}) {
@@ -311,6 +438,8 @@
     if (state.panel === 'choose' && previous !== 'choose') {
       view.mode = state.mode === 'metadata' ? 'metadata' : 'content';
       view.confirmClear = false;
+      session.options = optionsFrom(state.options);
+      session.advanced = false;
     }
     if (!keepNotice && state.panel !== previous) view.notice = null;
     view.state = state;

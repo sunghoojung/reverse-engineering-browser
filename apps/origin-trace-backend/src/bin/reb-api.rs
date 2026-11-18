@@ -105,17 +105,17 @@ enum Action {
         /// One ordered level in place of the individual flags: read-only, ask,
         /// auto or full. read-only, ask and auto omit captured content; ask and
         /// auto list effects (the client decides whether it asks); full adds
-        /// session start and the content reads. See x-reb-mcp.permission.
+        /// session start, with the app's content defaults, and the content
+        /// reads. See x-reb-mcp.permission.
         #[arg(
             long,
             value_parser = ["read-only", "ask", "auto", "full"],
             conflicts_with_all = ["allow_effects", "allow_session_start", "omit_content", "allow_content"]
         )]
         permission: Option<String>,
-        /// With --permission full, let start_live_session name sensitive
-        /// capture options (canvas_images, request_content,
-        /// js_invocation_digests). Not authorization.
-        #[arg(long, requires = "permission")]
+        /// Accepted and ignored, so an older configuration still starts:
+        /// --permission full now includes sensitive capture options.
+        #[arg(long, hide = true)]
         allow_sensitive_capture: bool,
         /// Require live capture and a running or paused debugger at startup
         /// and before every tool call. Does not authorize capture or effects.
@@ -135,17 +135,20 @@ enum SessionCommand {
     /// Start a visibly labeled live capture session with named options, the
     /// same launcher as `make live`, detached from this command. Prints JSON
     /// with the session directory and endpoint once capture is ready. Start
-    /// only for an authorized target; every switch is off unless named.
+    /// only for an authorized target. A switch left unset takes the Origin
+    /// Trace app's default; =false turns a default off. The session runs
+    /// until it is ended.
     Start {
         /// Open this HTTP or HTTPS page once capture is ready.
         #[arg(long)]
         url: Option<String>,
-        /// Sample Wasm br_table dispatch (at most 16 observations per configuration).
-        #[arg(long)]
-        wasm_dispatch: bool,
-        /// Sample Wasm call_indirect targets.
-        #[arg(long)]
-        wasm_call_indirect: bool,
+        /// Sample Wasm br_table dispatch (at most 16 observations per
+        /// configuration). Default: on when --category-mask holds 512 and 1024.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        wasm_dispatch: Option<bool>,
+        /// Sample Wasm call_indirect targets. Default: as --wasm-dispatch.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        wasm_call_indirect: Option<bool>,
         /// Keep at most this many samples of each function on each Wasm stream (1..16).
         #[arg(long)]
         wasm_samples_per_function: Option<u32>,
@@ -167,34 +170,51 @@ enum SessionCommand {
         /// Absolute path of a JavaScript dispatch-site file.
         #[arg(long, value_name = "FILE")]
         js_dispatch_sites: Option<PathBuf>,
-        /// Ignore page debugger statements.
-        #[arg(long)]
-        quiet: bool,
+        /// Ignore page debugger statements. Default: on.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        quiet: Option<bool>,
         /// Native capture category mask, 1..4095 (default 4095).
         #[arg(long)]
         category_mask: Option<u32>,
-        /// Capture lifetime in seconds, 60..3600 (default 3600).
+        /// Stop capture after this many seconds, at least 60. Unset, the
+        /// session runs until it is ended.
         #[arg(long)]
         duration_seconds: Option<u32>,
         /// Route the capture browser's traffic to loopback only.
         #[arg(long)]
         localhost_only: bool,
         /// Store Canvas images, which can contain sensitive page content.
-        #[arg(long, requires = "confirm_sensitive_capture")]
-        canvas_images: bool,
-        /// Retain request paths, queries and bodies, request and response headers
-        /// including Cookie, Set-Cookie and Authorization, each request's
+        /// Default: on with --confirm-sensitive-capture.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
+            requires_if("true", "confirm_sensitive_capture"))]
+        canvas_images: Option<bool>,
+        /// Retain request paths, queries and bodies, request and response
+        /// headers including Cookie, Set-Cookie and Authorization, each request's
         /// cookies, and every response body, media and fonts included, whole
-        /// (sensitive).
-        #[arg(long, requires = "confirm_sensitive_capture")]
-        request_content: bool,
-        /// Record the JavaScript and Wasm stack that started each renderer request.
-        #[arg(long)]
-        request_stacks: bool,
+        /// (sensitive). Default: on with --confirm-sensitive-capture.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
+            requires_if("true", "confirm_sensitive_capture"))]
+        request_content: Option<bool>,
+        /// Record the JavaScript and Wasm stack that started each renderer
+        /// request. Default: on when --category-mask holds 256 and 1024, and
+        /// dropped by a Brave without the flag; naming it is strict.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        request_stacks: Option<bool>,
         /// Permit document-start Console scripts in this capture browser.
-        /// Arming one is still a separate confirmed Console action.
+        /// Arming one is still a separate confirmed Console action. Default: on.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+        document_start: Option<bool>,
+        /// Record browser-internal pages (chrome:, devtools: and WebUI), which
+        /// are otherwise excluded and counted.
         #[arg(long)]
-        document_start: bool,
+        browser_internal: bool,
+        /// Record extension worker traffic, otherwise excluded and counted.
+        #[arg(long)]
+        extension_traffic: bool,
+        /// Start signed out, in a new, empty profile for this session only,
+        /// instead of the agent sessions' research profile.
+        #[arg(long)]
+        fresh_profile: bool,
         /// Absolute path of a JavaScript invocation site file to arm.
         #[arg(
             long,
@@ -206,10 +226,14 @@ enum SessionCommand {
         #[arg(long)]
         js_invocation_saved_sites: bool,
         /// Hash settled values of armed calls (sensitive). Needs sites.
-        #[arg(long, requires = "confirm_sensitive_capture")]
-        js_invocation_digests: bool,
-        /// Confirm the researcher authorized the sensitive capture named here:
-        /// Canvas images, request content or invocation value digests.
+        /// Default: on with sites, request content and
+        /// --confirm-sensitive-capture.
+        #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
+            requires_if("true", "confirm_sensitive_capture"))]
+        js_invocation_digests: Option<bool>,
+        /// Confirm the researcher authorized sensitive capture for this
+        /// target: Canvas images, request content and invocation value
+        /// digests, which then default on as in the app.
         #[arg(long)]
         confirm_sensitive_capture: bool,
         /// Also publish the canonical endpoint used by default MCP configs.
@@ -1059,13 +1083,13 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             omit_content,
             allow_content,
             permission,
-            allow_sensitive_capture,
+            allow_sensitive_capture: _,
             require_live,
             timeout,
         } => {
             check_timeout(timeout)?;
             let admission = match permission.as_deref() {
-                Some(level) => mcp::Admission::for_level(&spec, level, allow_sensitive_capture)?,
+                Some(level) => mcp::Admission::for_level(&spec, level)?,
                 None => mcp::Admission::flags(
                     allow_effects,
                     allow_session_start,
@@ -1289,6 +1313,9 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         request_content,
         request_stacks,
         document_start,
+        browser_internal,
+        extension_traffic,
+        fresh_profile,
         js_invocation_sites,
         js_invocation_saved_sites,
         js_invocation_digests,
@@ -1298,10 +1325,8 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         sessions_root,
         timeout_seconds,
     } = command;
-    let options = origin_trace_backend::session_launch::StartOptions {
+    let mut options = origin_trace_backend::session_launch::StartOptions {
         url,
-        wasm_dispatch,
-        wasm_call_indirect,
         wasm_samples_per_function,
         wasm_samples_per_indirect_site,
         wasm_function_allow,
@@ -1310,23 +1335,31 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         wasm_budget_malformed: false,
         guest_adapter,
         js_dispatch_sites,
-        quiet,
         category_mask,
         duration_seconds,
         localhost_only,
-        canvas_images,
-        request_content,
-        request_stacks,
-        document_start,
+        browser_internal,
+        extension_traffic,
+        fresh_profile,
         js_invocation_sites,
         js_invocation_saved_sites,
-        js_invocation_digests,
         confirm_sensitive_capture,
         publish_canonical_endpoint,
         brave_binary,
         timeout_seconds,
         sessions_root,
+        ..Default::default()
     };
+    options.resolve(origin_trace_backend::session_launch::Switches {
+        wasm_dispatch,
+        wasm_call_indirect,
+        quiet,
+        canvas_images,
+        request_content,
+        request_stacks,
+        document_start,
+        js_invocation_digests,
+    });
     match origin_trace_backend::session_launch::launch(&options).await {
         Ok(started) => {
             println!(

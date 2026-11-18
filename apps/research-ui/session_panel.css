@@ -67,9 +67,30 @@
 .session-panel-site-url { overflow: hidden; color: var(--faint); font: 11px/1.4 var(--sans); text-overflow: ellipsis; white-space: nowrap;
   direction: rtl; text-align: left; }
 
+/* ---- Session options: browser profile and Advanced options ---- */
+.session-panel-profile { min-width: 0; margin: 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line-soft); display: grid; gap: 8px; }
+.session-panel-profile > legend { float: left; width: 100%; margin-bottom: 0; }
+.session-panel-profile > legend + * { clear: both; }
+.session-panel-check { min-width: 0; display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
+.session-panel-check input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--accent); }
+.session-panel-check input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.session-panel-path { color: var(--muted); font: 11.5px/1.45 var(--mono); overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+.session-panel-advanced { min-width: 0; display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.session-panel-disclosure { justify-self: start; display: inline-flex; align-items: center; gap: 7px; height: 24px; margin: -2px 0 -2px -6px; padding: 0 6px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.session-panel-disclosure:hover:not(:disabled) { background: var(--session-hover); }
+.session-panel-disclosure:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.session-panel-disclosure-mark { flex: 0 0 auto; width: 0; height: 0; border-left: 4.5px solid var(--muted); border-top: 3.5px solid transparent; border-bottom: 3.5px solid transparent;
+  transition: transform 120ms ease-out; }
+.session-panel-disclosure[aria-expanded="true"] .session-panel-disclosure-mark { transform: rotate(90deg); }
+.session-panel-disclosure-count { color: var(--muted); font: 11.5px/1 var(--sans); }
+.session-panel-advanced-options { min-width: 0; display: grid; gap: 9px; padding-bottom: 2px; }
+
 .session-panel-failure { margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--red) 35%, var(--line-soft)); border-radius: 8px;
   background: color-mix(in srgb, var(--red) 9%, var(--panel)); color: var(--text); font: 12px/1.5 var(--sans);
   white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+/* An end the researcher chose, as closing Brave, is not a fault. */
+.session-panel-failure[data-tone="ended"] { border-color: var(--line-soft); background: var(--session-raised); }
 
 /* ---- Actions ---- */
 .session-panel-actions { flex: 0 0 auto; display: grid; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--line-soft); }

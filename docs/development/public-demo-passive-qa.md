@@ -52,7 +52,8 @@ or unavailable result; never weaken the sandbox to obtain a pass.
    [browser setup](../../browser/README.md).
 2. Start a fresh isolated session through the supported product launcher. On a
    supported development host with the pinned custom Brave build, use
-   `make live`. Keep Canvas image retention off unless separately authorized.
+   `REB_FRESH_PROFILE=1 REB_CAPTURE_CANVAS_IMAGES=0 make live`: a new, empty
+   profile, and Canvas image retention off unless separately authorized.
    Native Traffic records method, URL or host, status and lifecycle timing
    only, so request/response content assertions are not applicable.
 3. Keep the session and its loopback backend private. Confirm browser readiness

@@ -55,16 +55,17 @@ Every option is off unless the start names it, and none is inherited.
 | Guest adapter recipe | `guest_adapter` | F | Covered |
 | JavaScript dispatch sites | `js_dispatch_sites` | F | Covered |
 | Ignore page `debugger;` statements | `quiet` | F | Covered |
-| Capture category mask, duration, loopback-only fixtures | `category_mask`, `duration_seconds`, `localhost_only` | F | Covered |
+| Capture category mask, an optional time limit, loopback-only fixtures | `category_mask`, `duration_seconds`, `localhost_only` | F | Covered; unset, a session runs until it is ended |
 | Request call stacks | `request_stacks` | F | Covered |
 | Document-start Console permission | `document_start` | F | Covered |
 | Invocation sites from a file, or the agent's saved set | `js_invocation_sites`, `js_invocation_saved_sites` | F | Covered |
-| Request content (paths, queries, bodies, headers, cookies, every response body whole with media and fonts) | `request_content` with `confirm_sensitive_capture` | F + sensitive | Covered; under `--permission full` also needs `--allow-sensitive-capture` (the dock's sensitive box) |
-| Canvas images | `canvas_images` with `confirm_sensitive_capture` | F + sensitive | Covered |
-| Invocation value digests | `js_invocation_digests` with `confirm_sensitive_capture` | F + sensitive | Covered |
+| Request content (paths, queries, bodies, headers, cookies, every response body whole with media and fonts) | `request_content` | F + sensitive | Covered; on by default, as in the app, and `false` turns it off |
+| Canvas images | `canvas_images` | F + sensitive | Covered; on by default, as in the app |
+| Invocation value digests | `js_invocation_digests` | F + sensitive | Covered; on by default with named sites and request content |
 | Publish the canonical endpoint, Brave binary, start timeout | `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds` | F | Covered |
-| Browser-internal pages and extension traffic | none | none | Not exposed: SAFETY.md says agent-started sessions never set `REB_CAPTURE_BROWSER_INTERNAL` or `REB_CAPTURE_EXTENSION_TRAFFIC` |
-| Packaged-app opt-outs (`REB_NATIVE_WASM_DISPATCH=0` and similar) | none | none | Not exposed: they configure the researcher's own app session; agent sessions name each switch instead |
+| Browser-internal pages and extension traffic | `browser_internal`, `extension_traffic` | F | Added; off by default, as in the app |
+| A new, empty browser profile for one session | `fresh_profile` | F | Added; sessions otherwise share the agent research profile |
+| Packaged-app opt-outs (`REB_NATIVE_WASM_DISPATCH=0` and similar) | `false` for the matching switch | F | Covered: agent sessions take the app's defaults and name `false` to opt out |
 
 ## Traffic
 

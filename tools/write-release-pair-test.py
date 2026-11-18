@@ -324,8 +324,8 @@ class RepositoryPin(unittest.TestCase):
             "browser/integration/brave/patches/0001-example.patch",
             "scripts/bootstrap-brave.sh", "scripts/brave-toolchain.sh", "scripts/build-brave-distribution.sh",
             "scripts/build-integrated-brave.sh", "scripts/package-brave-distribution.sh",
-            "scripts/sync-browser-integration.sh", "tools/brave_patch_contract.py",
-            "tools/check-integrated-brave-state.py",
+            "scripts/sync-browser-integration.sh", "tools/brave_patch_advance.py",
+            "tools/brave_patch_contract.py", "tools/check-integrated-brave-state.py",
         ]
         others = [
             "include/reb/event.h", "src/capture/event.cpp", "protocol/native-network-v3.md",
@@ -381,6 +381,27 @@ class RepositoryPin(unittest.TestCase):
                     self.assertIn("Browser inputs changed since", result.stderr)
                     git("checkout", "-q", "--", path)
             self.assertFalse((root / "build").exists())
+
+    def test_inputs_name_every_helper_the_build_scripts_import(self):
+        """A project helper a listed script runs or a listed helper imports is itself listed."""
+        listed = re.search(r"readonly browser_inputs=\(\n(.*?)\n\)", self.script, re.DOTALL).group(1).split()
+        pending = [path for path in listed if path.endswith((".sh", ".py"))]
+        seen = set()
+        while pending:
+            path = pending.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            text = (REPOSITORY_ROOT / path).read_text()
+            helpers = {f"tools/{name}.py" for name in re.findall(r"^(?:from|import) (\w+)", text, re.MULTILINE)}
+            helpers |= set(re.findall(r"tools/[\w-]+\.py", text))
+            for helper in sorted(helper for helper in helpers if (REPOSITORY_ROOT / helper).is_file()):
+                # Checks the build runs verify its result and never change the browser bytes.
+                if helper == "tools/check-brave-services.py":
+                    continue
+                with self.subTest(script=path, helper=helper):
+                    self.assertIn(helper, listed)
+                pending.append(helper)
 
 
 if __name__ == "__main__":

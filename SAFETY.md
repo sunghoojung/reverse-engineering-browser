@@ -44,9 +44,10 @@ it.
   which applies to the automatic launch and a reopen's restart, never to a
   session the panel starts or retries, and uses a separate persistent profile.
   The standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN`.
-  A session runs until the researcher ends it or closes the capture browser;
-  `REB_CAPTURE_DURATION_SECONDS` sets an explicit limit, and a session that
-  reaches it says so. The packaged app and `make live` both enable native Wasm
+  A session runs until the researcher ends it or closes the capture browser.
+  Only `make live` (`REB_CAPTURE_DURATION_SECONDS`) and an agent's
+  `duration_seconds` set a time limit, and a session that reaches it says so;
+  an app session has none. The packaged app and `make live` both enable native Wasm
   `br_table` and `call_indirect` dispatch instrumentation and ignore page
   `debugger;` statements by default; turn them off in the start panel's
   Advanced options, or set `REB_NATIVE_WASM_DISPATCH`,

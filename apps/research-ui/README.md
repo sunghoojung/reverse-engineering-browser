@@ -964,8 +964,9 @@ covers. Evidence stays per session: each session still writes its own folder
 under `sessions/live/`, and the profile holds no evidence. **Fresh profile**
 in the start panel's **Advanced options** gives one session a new, empty
 profile in its session folder instead and leaves the research profile as it
-is. One Brave at a time can use a profile, so a second session that would open
-the research profile while another Brave holds it is refused with that cause
+is. One Brave at a time can use a profile. A session started as another ends
+waits up to 10 seconds for that Brave to close; one that would open the
+research profile while another Brave still holds it is refused with that cause
 and points at Fresh profile. The profile uses Chromium's mock Keychain so
 launch does not stop on a macOS password prompt. The start panel offers no
 Keychain choice. The advanced route to macOS Keychain
@@ -974,14 +975,15 @@ encryption, when credential storage is required, is
 reopen's restart, never to a session the panel starts or retries. Such a
 session uses its own persistent profile, `research-profiles/system-keychain`,
 because a profile written under one Keychain cannot be read under the other.
-The standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN` instead (on
-unless set to `0`).
+The standalone `make live` launcher reads `REB_USE_SYSTEM_KEYCHAIN` instead
+(the mock Keychain unless set to `1`).
 
 A session runs until you end it: closing the capture browser ends it, and
 the start panel then shows **Live session ended** with **Review Session** and
-**Start Again**. There is no time limit unless `REB_CAPTURE_DURATION_SECONDS`
-sets one; a session that reaches it says so. When a helper stops a session,
-the panel names which one and why, with its log.
+**Start Again**. An app session has no time limit; the app ignores
+`REB_CAPTURE_DURATION_SECONDS`, which only `make live` and an agent's
+`duration_seconds` use. When a helper stops a session, the panel names which
+one and why, with its log.
 The app does not mark the session live until the launcher publishes its loopback
 handshake. A failure shows in the window's **start panel**, at the right edge
 of the workspace, with **Retry**, which starts again with the same capture mode

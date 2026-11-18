@@ -489,6 +489,19 @@ enum LiveSessionFailureChecks {
       options: optionDefaults)
     precondition(chosenDefaults["REB_NATIVE_REQUEST_STACKS"] == "1" && chosenDefaults["REB_FRESH_PROFILE"] == "0"
       && chosenDefaults["REB_CAPTURE_BROWSER_INTERNAL"] == "0", "the panel's options replace inherited switches")
+    // call_indirect sites have no option of their own: an explicit 0 turns
+    // off just them, and an inherited 1 never outlasts Wasm dispatch off.
+    let callIndirect = { (inherited: String, options: LiveSessionOptions) -> [String: String] in
+      let environment = ["REB_NATIVE_WASM_CALL_INDIRECT": inherited]
+      return LiveSessionCoordinator.captureDefaults(
+        environment: environment, content: LiveCaptureContent.resolve(environment: environment, mode: .content, limits: nil, modeChosen: true),
+        options: options)
+    }
+    var wasmOff = optionDefaults
+    wasmOff.wasmDispatch = false
+    precondition(callIndirect("0", optionDefaults)["REB_NATIVE_WASM_CALL_INDIRECT"] == "0"
+      && callIndirect("0", optionDefaults)["REB_NATIVE_WASM_DISPATCH"] == "1"
+      && callIndirect("1", wasmOff)["REB_NATIVE_WASM_CALL_INDIRECT"] == "0", "call_indirect opt-out")
     // The saved mode applies unless the environment decides it.
     precondition(LiveCaptureMode.configured([:], saved: .metadata) == .metadata
       && LiveCaptureMode.configured(["REB_AUTOMATIC_CAPTURE_MODE": "content"], saved: .metadata) == .content

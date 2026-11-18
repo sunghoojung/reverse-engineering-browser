@@ -73,8 +73,8 @@ disconnects or the session expires and marks the capture as offline. Raw
 browser records stay on the Brave-to-broker socket; the UI reads the broker's
 normalized store. Live sessions enable all eight fingerprint families plus
 Network and Artifact with category mask `4095`, and run until they are ended;
-`REB_CAPTURE_CATEGORY_MASK` changes the mask and `REB_CAPTURE_DURATION_SECONDS`
-sets an explicit time limit. The mask is decimal or `0x` hexadecimal, from 1 to
+`REB_CAPTURE_CATEGORY_MASK` changes the mask and, for `make live` only,
+`REB_CAPTURE_DURATION_SECONDS` sets an explicit time limit. The mask is decimal or `0x` hexadecimal, from 1 to
 4095; the launcher refuses any other text before starting a helper, and the
 packaged app reads the same grammar when it chooses its content defaults.
 

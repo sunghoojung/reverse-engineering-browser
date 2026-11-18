@@ -144,7 +144,10 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
   }
 
   private func handle(_ op: String, _ body: [String: Any]) throws -> (Any?, Choice?) {
-    if ["start", "retry", "offline", "review"].contains(op) {
+    // Review opens a recorded folder and starts nothing. The unsaved-work
+    // guard can decline it or an alert can refuse it, so it leaves the ended
+    // panel open to ask again instead of answering the decision.
+    if ["start", "retry", "offline"].contains(op) {
       guard !answered else { throw SessionPanelRefusal("This choice is already being handled.") }
     }
     let accept = { (choice: Choice) -> (Any?, Choice?) in
@@ -178,7 +181,7 @@ final class NativeSessionPanel: NSObject, WKScriptMessageHandlerWithReply {
       guard case .failed(let failure, _) = content, failure.afterStartup, let folder = failure.sessionDirectory else {
         throw SessionPanelRefusal("There is no ended session to review.")
       }
-      return accept(.review(folder))
+      return (["ok": true], .review(folder))
     case "removeSite", "clearSites":
       guard isChoosing(content) else { throw SessionPanelRefusal("Saved functions change only before a session starts.") }
       guard (body["generation"] as? NSNumber)?.intValue == siteGeneration else {

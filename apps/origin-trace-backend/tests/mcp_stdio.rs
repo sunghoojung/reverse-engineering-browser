@@ -1941,7 +1941,7 @@ dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
-printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}}" > "$dir/stacks"
+printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}} ${{REB_NATIVE_PROMISE_STACKS-unset}}" > "$dir/stacks"
 printf '%s\n' "${{REB_REQUEST_CONTENT_BUDGET_MIB-unset}}" > "$dir/content-budget"
 printf '%s\n' "${{REB_RESEARCH_PROFILE_ROOT-unset}} ${{REB_FRESH_PROFILE-unset}} ${{REB_CAPTURE_DURATION_SECONDS-unset}} ${{REB_NATIVE_QUIET_MODE-unset}} ${{REB_CAPTURE_CANVAS_IMAGES-unset}} ${{REB_CAPTURE_BROWSER_INTERNAL-unset}} ${{REB_CAPTURE_EXTENSION_TRAFFIC-unset}}" > "$dir/session"
 labels=()
@@ -2042,6 +2042,7 @@ wait "$backend"
             .env("REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "1")
             .env("REB_NATIVE_REQUEST_STACKS", "1")
             .env("REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED", "1")
+            .env("REB_NATIVE_PROMISE_STACKS", "1")
             .env("REB_REQUEST_CONTENT_BUDGET_MIB", "999")
             .env("REB_CAPTURE_DURATION_SECONDS", "60")
             .env(
@@ -2183,7 +2184,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "1 1\n"
+        "1 1 unset\n"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("session")).unwrap(),
@@ -2433,7 +2434,7 @@ fn agent_session_options_are_named_never_inherited() {
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "1 0\n",
+        "1 0 unset\n",
         "named stacks are strict"
     );
     assert_eq!(

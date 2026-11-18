@@ -407,6 +407,12 @@ enum AgentCoreChecks {
     check(AgentPreferences.load(url) == saved, "Full access and the payments come back in the next run")
     let mode = (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue
     check(mode == 0o600, "the file is the researcher's alone: \(String(describing: mode))")
+    try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+    check((try? saved.write(to: url)) != nil, "the choices are written again")
+    let rewritten = (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue
+    check(rewritten == 0o600, "a rewrite replaces a readable file with a user-only one: \(String(describing: rewritten))")
+    check((try? FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)) == [url.lastPathComponent],
+      "no temporary file is left beside the choices")
     for (text, expected) in [
       (#"{"version":2,"provider":"claude","permission":"full"}"#, AgentPreferences()),
       (#"{"version":1,"provider":"other","permission":"everything","auth":{"grok":"key","claude":"subscription","x":"key"}}"#,

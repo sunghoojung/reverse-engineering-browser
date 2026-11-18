@@ -291,12 +291,14 @@ run_launcher --list
 assert_status 2
 assert_log_absent
 assert_stderr_has 'Both the packaged'
-# Only what this check created goes, so other checks' sessions stay.
+# Only what this check created goes, so other checks' sessions stay. A check
+# running beside this one may have written a session there since; rmdir
+# removes only an empty folder, so that session stays too.
 if [[ "$created_checkout" == 1 ]]; then
-  rmdir "$checkout"
+  rmdir "$checkout" 2>/dev/null || true
 fi
 if [[ "$created_sessions" == 1 ]]; then
-  rmdir "${repository_root}/build/sessions"
+  rmdir "${repository_root}/build/sessions" 2>/dev/null || true
 fi
 
 printf 'wrapper checks passed\n'

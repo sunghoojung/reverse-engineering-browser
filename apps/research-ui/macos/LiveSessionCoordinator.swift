@@ -809,6 +809,10 @@ final class LiveSessionCoordinator {
     environment: [String: String], content: LiveCaptureContent, options: LiveSessionOptions,
     savedInvocationSites: URL? = nil
   ) -> [String: String] {
+    // Wasm dispatch sampling covers call_indirect sites too, which have no
+    // option of their own, so an explicit REB_NATIVE_WASM_CALL_INDIRECT=0
+    // still turns off only those, as the launcher documents.
+    let callIndirectOff = environment["REB_NATIVE_WASM_CALL_INDIRECT"] == "0"
     var environment = environment
     let mask = categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
     let allows = { (required: UInt32) in mask & required == required }
@@ -826,6 +830,7 @@ final class LiveSessionCoordinator {
     }
     let sitesArmed = !(environment["REB_NATIVE_JS_INVOCATION_SITES"] ?? "").isEmpty
     environment[LiveCaptureContent.invocationDigests] = capturesContent && options.invocationDigests && sitesArmed ? "1" : "0"
+    if callIndirectOff { environment["REB_NATIVE_WASM_CALL_INDIRECT"] = "0" }
     return environment
   }
 

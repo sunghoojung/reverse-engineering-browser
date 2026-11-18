@@ -82,7 +82,8 @@ readonly browser_inputs=(
   scripts/bootstrap-brave.sh scripts/brave-toolchain.sh
   scripts/build-brave-distribution.sh scripts/build-integrated-brave.sh
   scripts/package-brave-distribution.sh scripts/sync-browser-integration.sh
-  tools/brave_patch_contract.py tools/check-integrated-brave-state.py
+  tools/brave_patch_advance.py tools/brave_patch_contract.py
+  tools/check-integrated-brave-state.py
 )
 if ! git cat-file -e "${build_source}^{commit}" 2>/dev/null; then
   echo "Browser build commit ${build_source} is not in this checkout's history." >&2

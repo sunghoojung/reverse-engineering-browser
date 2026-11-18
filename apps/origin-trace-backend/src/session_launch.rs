@@ -956,6 +956,9 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
         "REB_NATIVE_REQUEST_STACKS",
         "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
+        // Request stacks are on by default, so an inherited Promise stacks
+        // switch would now apply silently; agent options name no such switch.
+        "REB_NATIVE_PROMISE_STACKS",
         "REB_BRAVE_BINARY",
         "REB_CAPTURE_DURATION_SECONDS",
     ] {

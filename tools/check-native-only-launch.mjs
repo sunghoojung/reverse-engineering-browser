@@ -271,6 +271,43 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
   console.log('PASS native request and promise stacks opt-in, Network and Artifact gate, promise stacks dependency and js-flags merge');
 }
 
+// A session started as another ends waits for that session's Brave to close
+// instead of refusing the profile it still holds. The holder is a stand-in
+// whose command line names the profile, as a running Brave's does; the shell
+// starts it so the shell, not this check, reaps it when it exits.
+{
+  const holderCode = section('# Only one browser can hold a profile', '# The project V8 flags');
+  const quick = holderCode.replace('profile_release_wait_seconds=10', 'profile_release_wait_seconds=4');
+  assert.notEqual(quick, holderCode, 'The release wait is a named bound');
+  const profiles = await realpath(await mkdtemp(join(tmpdir(), 'reb-profile-holder-')));
+  try {
+    const run = async (kind, hold) => {
+      const profile = join(profiles, `${kind}-${hold}`);
+      await mkdir(profile);
+      const holder = hold === 'none' ? 'holder=""' :
+        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"`;
+      return spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
+trap '[[ -z "$holder" ]] || kill "$holder" 2>/dev/null || true' EXIT
+profile_kind=${kind}; profile_path="$1"; ${holder}
+${quick}echo started`, 'holder', profile], {encoding:'utf8'});
+    };
+    const closing = await run('research', 'closing');
+    assert.equal(closing.status, 0, closing.stdout + closing.stderr);
+    assert.match(closing.stdout, /^Waiting for the Brave that holds .*research-closing \(PID \d+\) to close\.\nstarted\n$/);
+    const held = await run('research', 'held');
+    assert.equal(held.status, 2, held.stdout + held.stderr);
+    assert.match(held.stdout, /^Waiting for the Brave that holds .*\nThe browser profile .*research-held is in use by a running Brave \(PID \d+\), so this session could not open it\..*Fresh profile in New Live Session…/s);
+    for (const [kind, hold] of [['research', 'none'], ['fresh', 'held']]) {
+      const result = await run(kind, hold);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(result.stdout, 'started\n', `${kind} ${hold}`);
+    }
+  } finally {
+    await rm(profiles, {recursive:true, force:true});
+  }
+  console.log('PASS held profile: a closing holder is waited out, a held one is refused, a fresh profile is never checked');
+}
+
 // V8 ignores an unknown --js-flags entry and every later one, so the real
 // launcher must refuse a Brave build whose loaded V8 lacks a requested flag
 // before any helper or browser starts. Synthetic bundles and recording helpers

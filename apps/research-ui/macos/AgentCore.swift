@@ -207,13 +207,24 @@ struct AgentPreferences: Equatable {
     return object
   }
 
+  // A user-only temporary file renamed into place, so no other user can read
+  // the file even between its creation and a mode change.
   func write(to url: URL) throws {
     var object = payload
     object["version"] = 1
+    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     let folder = url.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: url, options: .atomic)
-    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    let temporary = folder.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
+    let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+    guard descriptor >= 0 else { throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: temporary.path]) }
+    let written = data.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+    let synced = fsync(descriptor) == 0
+    close(descriptor)
+    guard written == data.count, synced, rename(temporary.path, url.path) == 0 else {
+      unlink(temporary.path)
+      throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+    }
   }
 }
 

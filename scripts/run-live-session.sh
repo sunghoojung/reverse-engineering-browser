@@ -473,8 +473,20 @@ profile_holder() {
     grep -q -F -e "--user-data-dir=${profile_path}" || return 1
   printf '%s\n' "${pid}"
 }
+# An ending session gives its Brave the 5-second cleanup grace before forcing
+# it, so a session started as another ends can find that Brave still closing.
+# Waiting out the grace, with slack for a loaded machine, starts the session
+# instead of refusing it; a Brave that holds the profile after that is in use.
+readonly profile_release_wait_seconds=10
 if [[ "${profile_kind}" != fresh ]] && profile_holder_pid="$(profile_holder)"; then
-  fail_live_session 1 "The browser profile ${profile_path} is in use by a running Brave (PID ${profile_holder_pid}), so this session could not open it. End the session that uses it or quit that Brave, or start with a fresh profile (Fresh profile in New Live Session…, or REB_FRESH_PROFILE=1)."
+  echo "Waiting for the Brave that holds ${profile_path} (PID ${profile_holder_pid}) to close."
+  profile_release_deadline=$((SECONDS + profile_release_wait_seconds))
+  while profile_holder_pid="$(profile_holder)"; do
+    if ((SECONDS >= profile_release_deadline)); then
+      fail_live_session 1 "The browser profile ${profile_path} is in use by a running Brave (PID ${profile_holder_pid}), so this session could not open it. End the session that uses it or quit that Brave, or start with a fresh profile (Fresh profile in New Live Session…, or REB_FRESH_PROFILE=1)."
+    fi
+    sleep 0.2
+  done
 fi
 
 # The project V8 flags are assembled before any helper starts, so a build that

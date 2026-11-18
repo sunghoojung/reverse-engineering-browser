@@ -360,6 +360,17 @@ impl App {
         .await
         .map_err(|e| Error::new(500, e.to_string()))?
     }
+    /// Blocking analysis with no deadline: it runs until it is done or its
+    /// request goes away, when dropping this future sets the flag `work`
+    /// polls, so an abandoned analysis gives its reader permit back.
+    async fn cancellable<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&AtomicBool) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelOnDrop(cancelled.clone());
+        self.blocking(move || work(&cancelled)).await
+    }
     async fn vm_documents(&self) -> Result<(Value, Result<Value>)> {
         let signature = format!(
             "{}:{}:{}",
@@ -480,15 +491,17 @@ impl App {
             if q.one("function")?.is_some() {
                 return Err(Error::bad("The WASM function list takes only artifact_id"));
             }
-            self.blocking(move || wasm_graph::function_index_named(&root, &id, Some(&names())))
-                .await?
+            self.cancellable(move |cancelled| {
+                wasm_graph::function_index_named(&root, &id, Some(&names()), cancelled)
+            })
+            .await?
         } else {
             let function = q
                 .required("function")?
                 .parse::<u32>()
                 .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
-            self.blocking(move || {
-                wasm_graph::function_graph_named(&root, &id, function, Some(&names()))
+            self.cancellable(move |cancelled| {
+                wasm_graph::function_graph_named(&root, &id, function, Some(&names()), cancelled)
             })
             .await?
         };
@@ -522,7 +535,7 @@ impl App {
         let root = self.options.artifacts.clone();
         let names = self.names_reader();
         let document = self
-            .blocking(move || {
+            .cancellable(move |cancelled| {
                 wasm_pseudocode::pseudocode_named(
                     &root,
                     &id,
@@ -530,6 +543,7 @@ impl App {
                     offset,
                     limit,
                     Some(&names()),
+                    cancelled,
                 )
             })
             .await?;
@@ -538,8 +552,6 @@ impl App {
     /// Two artifact IDs and an optional page. A misspelled parameter fails
     /// instead of returning an unfiltered table the caller reads as filtered.
     async fn wasm_diff_route(&self, raw_query: &str) -> Result<Response> {
-        // The deadline counts from arrival, including the wait for a reader.
-        let started = std::time::Instant::now();
         let q = Query::new(raw_query);
         if q.0.keys().any(|key| {
             ![
@@ -563,7 +575,7 @@ impl App {
         let page = wasm_diff::Page::new(offset, limit, q.one("status")?)?;
         let root = self.options.artifacts.clone();
         let document = self
-            .blocking(move || wasm_diff::diff(&root, &a, &b, &page, started))
+            .cancellable(move |cancelled| wasm_diff::diff(&root, &a, &b, &page, cancelled))
             .await?;
         Ok(axum::Json(document).into_response())
     }
@@ -615,7 +627,9 @@ impl App {
                 .ok_or_else(|| Error::bad("artifact_id is required"))?;
             let root = self.options.artifacts.clone();
             let document = self
-                .blocking(move || wasm_value_flow::value_flow(&root, &id, &request))
+                .cancellable(move |cancelled| {
+                    wasm_value_flow::value_flow(&root, &id, &request, cancelled)
+                })
                 .await?;
             return Ok(axum::Json(document).into_response());
         }
@@ -764,8 +778,10 @@ impl App {
                     return Err(Error::bad("row_limit is at most 1024"));
                 }
                 let root = self.options.artifacts.clone();
-                self.blocking(move || wasm_identification::load(&root, &id, offset, limit))
-                    .await?
+                self.cancellable(move |cancelled| {
+                    wasm_identification::load(&root, &id, offset, limit, cancelled)
+                })
+                .await?
             }
             "/api/artifact-map" => {
                 if q.0.keys().any(|key| key != "artifact_id") {
@@ -2923,9 +2939,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wasm_diff_deadline_counts_from_arrival_not_from_the_reader_permit() {
-        // A request that waits for a reader past the deadline gets a partial
-        // answer as soon as it runs: the deadline counts from arrival.
+    async fn wasm_diff_waits_for_a_reader_without_a_deadline_and_stops_when_abandoned() {
+        // A comparison has no deadline: one that waited for a reader still
+        // answers in full, and one abandoned while it waits never runs and
+        // keeps no reader.
         let root = tempfile::tempdir().unwrap();
         let artifacts = root.path().join("artifacts");
         std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
@@ -2954,23 +2971,34 @@ mod tests {
         options.api_collection = root.path().join("collection.json");
         options.local_analyst = root.path().join("analyst.json");
         let app = App::new(options, 0).await;
-        let held = app.io.clone().acquire_many_owned(4).await.unwrap();
-        let request = {
+        let permits = app.io.available_permits();
+        let held = app
+            .io
+            .clone()
+            .acquire_many_owned(permits as u32)
+            .await
+            .unwrap();
+        let spawn = || {
             let app = app.clone();
             tokio::spawn(async move {
                 app.wasm_diff_route("artifact_id=1&compare_artifact_id=2")
                     .await
             })
         };
-        tokio::time::sleep(wasm_diff::DEADLINE + Duration::from_millis(200)).await;
+        let abandoned = spawn();
+        let request = spawn();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        abandoned.abort();
+        assert!(abandoned.await.unwrap_err().is_cancelled());
         drop(held);
         let response = request.await.unwrap().unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["status"], "partial", "{}", body["omissions"]);
-        assert!(body["omissions"].to_string().contains("deadline"));
+        assert_eq!(body["status"], "complete", "{}", body["omissions"]);
+        assert!(body["limits"].get("deadline_ms").is_none());
+        assert_eq!(app.io.available_permits(), permits);
         app.stop().await;
     }
 

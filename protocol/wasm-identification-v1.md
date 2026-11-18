@@ -46,8 +46,8 @@ never changed. Three rules hold everywhere:
 
 ## Document
 
-- `status`: `complete`, or `partial` when `omissions` names a limit, a deadline
-  or a malformed advisory section.
+- `status`: `complete`, or `partial` when `omissions` names a listing limit or
+  a malformed advisory section.
 - `summary`: the labels of non-low toolchain conclusions, the labeled-function
   count, the suggestion count and the constant match counts.
 - `toolchain.conclusions`: `id`, `label`, `kind` (`language`, `compiler`,
@@ -130,29 +130,29 @@ both sides of a complete one never hides it.
 
 ## Bounds and errors
 
-- Maximum input: 64 MiB, the block graph's budget. Larger artifacts fail with
-  HTTP 400.
-- One 3.5-second deadline for the whole report, counted from the start of the
-  artifact read and hash, well inside the native helper's five-second process
-  kill, so a partial report arrives before it. Reading sections, labeling, the data scan,
-  clustering, merging, suppression and the immediate scan all poll it, and
-  `omissions` names the phase and how far it got.
-- Records are kept up to 65,536 of each kind (imports, exports, names, data
-  segments, custom sections) and counted past that; `function_names` and the
-  function counts stay exact for what was read. At most 8,192 data runs and
-  512 candidate matches are kept before merging; the rest are counted. Merging
-  and suppression are each one pass over sorted matches.
+- A module of any size is identified whole, with no deadline. Reading
+  sections, labeling, the data scan, clustering, merging, suppression and the
+  immediate scan poll the request instead; one that goes away stops the work
+  and is answered 499 `cancelled`, never with the part read before it.
+- The whole report is kept by module SHA-256 (the last four modules), so a
+  later page only cuts its suggestion rows and a module is identified once.
+- Every record (imports, exports, names, data segments, custom sections),
+  every data run and every candidate match is kept; a record borrows its text
+  from the module bytes. Merging and suppression are each one pass over sorted
+  matches. `limits` no longer reports `max_input_bytes`, `deadline_ms`,
+  `max_suggestions` or `max_stored_records`; version 1 readers ignore the
+  absent keys.
 - At most 32 conclusions of 8 evidence items (strongest first), and 16
   producers, 32 target features and 32 custom sections across the whole
   module however many sections declare them; a target_features section past
   the cap is not read, and producers are still read for conclusions. Also 4
   suggestions per function (each label once; further labels are counted in an
   omission),
-  16,384 suggestions, 64 constant matches (complete and larger first), and 4
-  references and 4 sites per match. Every cap reports a count and an omission
-  or `*_truncated` flag. Each kind of omission appears once; a repeated one
-  ends with how often it happened, as in `(65536 times)`. Custom sections are
-  read under the same deadline.
+  64 listed constant matches (complete and larger first; `summary` counts them
+  all), and 4 references and 4 sites per match. Every suggestion is paged.
+  Every cap reports a count and an omission or `*_truncated` flag. Each kind of
+  omission appears once; a repeated one ends with how often it happened, as in
+  `(70000 times)`.
 - One page pretty-printed is at most 126,000 bytes, inside the 131,072-byte
   MCP inline limit, which reb-api mcp applies to both the compact and the
   pretty-printed text. Everything but the suggestions is held to 96,000 bytes,

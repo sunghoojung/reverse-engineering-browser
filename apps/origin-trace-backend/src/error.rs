@@ -179,6 +179,20 @@ impl Error {
     pub fn protocol(message: impl Into<String>) -> Self {
         Self::new(422, message).with_code(Code::ProtocolError)
     }
+    /// The request that started this work went away. An analysis polls its
+    /// flag where a deadline once stopped it, so a large input runs for as
+    /// long as it needs and an abandoned one ends promptly.
+    pub fn cancelled(what: &str) -> Self {
+        Self::new(499, format!("{what} request was cancelled")).with_code(Code::Cancelled)
+    }
+}
+
+/// `Error::cancelled` once the request behind `flag` went away.
+pub fn check_cancelled(flag: &std::sync::atomic::AtomicBool, what: &str) -> Result<()> {
+    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(Error::cancelled(what));
+    }
+    Ok(())
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -4613,7 +4613,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4623,7 +4623,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4633,7 +4633,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4643,7 +4643,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4653,7 +4653,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4737,7 +4747,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4747,7 +4757,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4757,7 +4767,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4767,7 +4777,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4777,7 +4787,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier, missing artifact, oversized artifact or function, or integrity/decoding failure.",
+            "description": "Invalid identifier, missing artifact, oversized function, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4826,7 +4846,7 @@
       "get": {
         "operationId": "get_wasm_value_flow",
         "summary": "Value flow for one WebAssembly operand or local",
-        "description": "Declared static value flow inside one defined function of a hash-verified core WASM artifact. Seed with offset (an instruction's original byte offset) and optionally operand (text order), or with local. backward lists what feeds the seed: params, locals, globals, constants, memory loads with their address slice, call and import call results; forward lists where it goes: stores (address or value side), call and call_indirect arguments, import calls (the JS crossing), br_table, br_if, if and select selectors, globals and returns. Joins at block, loop, if and try merges list every incoming edge. A load follows a store only for the same constant address in the same block with nothing between. interprocedural=true adds one step to direct call sites. Bounded by max_nodes, max_depth and a deadline; truncated and omissions say what was cut. text and expression are content (instruction text) and are omitted below Full access; kinds, offsets, indices and edges are structure. Never executes the module.",
+        "description": "Declared static value flow inside one defined function of a hash-verified core WASM artifact. Seed with offset (an instruction's original byte offset) and optionally operand (text order), or with local. backward lists what feeds the seed: params, locals, globals, constants, memory loads with their address slice, call and import call results; forward lists where it goes: stores (address or value side), call and call_indirect arguments, import calls (the JS crossing), br_table, br_if, if and select selectors, globals and returns. Joins at block, loop, if and try merges list every incoming edge. A load follows a store only for the same constant address in the same block with nothing between. interprocedural=true adds one step to direct call sites. Bounded by max_nodes and max_depth, with no deadline: a request that goes away stops the slice and is answered 499 cancelled; truncated and omissions say what was cut. text and expression are content (instruction text) and are omitted below Full access; kinds, offsets, indices and edges are structure. Never executes the module.",
         "tags": [
           "artifacts"
         ],
@@ -4942,7 +4962,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4952,7 +4972,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4962,7 +4982,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4972,7 +4992,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4982,7 +5002,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized artifact or function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5035,7 +5065,7 @@
       "get": {
         "operationId": "get_wasm_module_diff",
         "summary": "Match the functions of two captured WebAssembly modules",
-        "description": "Static function matching between two hash-verified core WASM artifacts (A is artifact_id, B is compare_artifact_id), for example two builds of one site's module. Matching runs in a fixed order: import names, byte-identical bodies of the same signature that name nothing by a renumberable index, normalized-identical bodies (call targets, renumbered locals, globals and types, and static data addresses ignored), export names, name-section names, call-graph propagation, then structural similarity with a score. Rows report matched functions with method and score as identical (equal bytes and normalized hashes, and every call and ref.func target matched), renumbered or changed, plus added and removed functions. Tied candidates are never forced into a pair: each member of a tie is its own ambiguous row with its group. Each side names its function index, and a.sha256 and b.sha256 with that index identify a function. Structure only: no instruction text, constant value or data byte is returned. Bounded by module size, function count, comparisons and one deadline checked inside every body and loop; a stopped step leaves its functions unclassified, and partial status and omissions name it. Page with row_offset and row_limit, and narrow with status; only a complete report pages reliably, since each page of a partial one is compared again. Never executes either module.",
+        "description": "Static function matching between two hash-verified core WASM artifacts (A is artifact_id, B is compare_artifact_id), for example two builds of one site's module. Matching runs in a fixed order: import names, byte-identical bodies of the same signature that name nothing by a renumberable index, normalized-identical bodies (call targets, renumbered locals, globals and types, and static data addresses ignored), export names, name-section names, call-graph propagation, then structural similarity with a score. Rows report matched functions with method and score as identical (equal bytes and normalized hashes, and every call and ref.func target matched), renumbered or changed, plus added and removed functions. Tied candidates are never forced into a pair: each member of a tie is its own ambiguous row with its group. Each side names its function index, and a.sha256 and b.sha256 with that index identify a function. Structure only: no instruction text, constant value or data byte is returned. Modules of any size are compared whole. Bounded by a cap on similarity scores; a step it stops leaves its functions unclassified, and partial status and omissions name it. There is no deadline: cancellation is checked inside every body and loop, and a request that goes away is answered 499 cancelled. Page with row_offset and row_limit, and narrow with status; every page of a pair is cut from one kept report. Never executes either module.",
         "tags": [
           "artifacts"
         ],
@@ -5109,7 +5139,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5119,7 +5149,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5129,7 +5159,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5139,7 +5169,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5149,7 +5179,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, oversized module, or integrity/decoding failure.",
+            "description": "Invalid identifier or page, the same artifact twice, missing or non-WebAssembly artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5495,7 +5535,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5505,7 +5545,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5515,7 +5555,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5525,7 +5565,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5535,7 +5575,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or window, missing artifact, oversized artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or window, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5563,7 +5613,7 @@
             }
           ],
           "confirmations": [],
-          "notes": "Verifies captured artifact bytes, then reads sections, names and constant immediates under a five-second deadline. Static identification only; the module is never executed and nothing is written.",
+          "notes": "Verifies captured artifact bytes, then reads every section, name and constant immediate with no deadline; a request that goes away stops the work. The whole report is kept by module SHA-256, so later pages only cut rows. Static identification only; the module is never executed and nothing is written.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm_identification.rs",
@@ -5646,7 +5696,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5656,7 +5706,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5666,7 +5716,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5676,7 +5726,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
             "content": {
               "application/json": {
                 "schema": {
@@ -5686,7 +5736,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized artifact or function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "description": "Invalid identifier or window, missing artifact, imported or undefined function, oversized function, integrity/decoding failure, or a module or function that does not validate (422, named).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its analysis stopped.",
             "content": {
               "application/json": {
                 "schema": {

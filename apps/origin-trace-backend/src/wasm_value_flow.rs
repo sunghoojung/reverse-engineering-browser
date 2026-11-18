@@ -9,7 +9,7 @@
 //! captured bytes and are the only content fields. Nothing here runs the
 //! module, and raw evidence is never modified.
 use crate::{
-    error::{Code, Error, Result},
+    error::{Code, Error, Result, check_cancelled},
     wasm,
     wasm_def_use::{self, EdgeKind, Module, NONE, NodeKind, Simulation, Value as Def},
     wasm_graph,
@@ -19,7 +19,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
     path::Path,
-    time::{Duration, Instant},
+    sync::atomic::{AtomicBool, Ordering},
 };
 use wasmparser::Operator;
 
@@ -41,9 +41,6 @@ const MAX_STEPS: usize = 64;
 const MAX_CALL_SITES: usize = 256;
 /// Web engines reject a body above this size, so a longer one cannot have run.
 const MAX_BODY_BYTES: usize = 7_654_321;
-const DEADLINE: Duration = Duration::from_secs(4);
-/// The response cut's time when the slice already used the deadline.
-const CUT_ALLOWANCE: Duration = Duration::from_millis(500);
 /// Incoming edges listed per join; `incoming_count` keeps the total. A
 /// dispatcher's exit join can have thousands.
 const MAX_JOIN_ENTRIES: usize = 64;
@@ -257,7 +254,6 @@ struct Truncated {
     nodes: bool,
     edges: bool,
     depth: bool,
-    deadline: bool,
     joins: bool,
 }
 
@@ -370,7 +366,9 @@ struct Slicer<'s> {
     max_edges: usize,
     max_depth: u32,
     truncated: Truncated,
-    deadline: Instant,
+    /// The request's flag; a walk stops once it is set, and the caller then
+    /// answers that the request was cancelled.
+    cancelled: &'s AtomicBool,
 }
 
 impl Slicer<'_> {
@@ -469,8 +467,7 @@ impl Slicer<'_> {
                 break;
             };
             steps += 1;
-            if steps & 255 == 0 && Instant::now() > self.deadline {
-                self.truncated.deadline = true;
+            if steps & 255 == 0 && self.cancelled.load(Ordering::Relaxed) {
                 break;
             }
             if !expanded.insert(node) {
@@ -517,8 +514,7 @@ impl Slicer<'_> {
         let mut steps = 0u32;
         while let Some((value, depth)) = queue.pop_front() {
             steps += 1;
-            if steps & 255 == 0 && Instant::now() > self.deadline {
-                self.truncated.deadline = true;
+            if steps & 255 == 0 && self.cancelled.load(Ordering::Relaxed) {
                 break;
             }
             if !expanded.insert(value) {
@@ -805,9 +801,9 @@ struct CallSites {
     undecoded: Vec<u32>,
 }
 
-/// Every direct call site of `callee` in the module, bounded by the deadline
-/// and a site cap.
-fn call_sites(module: &Module<'_>, callee: u32, deadline: Instant) -> CallSites {
+/// Every direct call site of `callee` in the module, bounded by a site cap.
+/// A cancelled request stops the scan.
+fn call_sites(module: &Module<'_>, callee: u32, cancelled: &AtomicBool) -> CallSites {
     let mut found = CallSites {
         sites: Vec::new(),
         finished: true,
@@ -825,7 +821,7 @@ fn call_sites(module: &Module<'_>, callee: u32, deadline: Instant) -> CallSites 
         };
         while !reader.eof() {
             steps += 1;
-            if steps & 4095 == 0 && Instant::now() > deadline {
+            if steps & 4095 == 0 && cancelled.load(Ordering::Relaxed) {
                 found.finished = false;
                 break 'bodies;
             }
@@ -864,39 +860,46 @@ pub fn value_flow_query(root: &Path, id: &str, query: &str) -> Result<Value> {
             "Pass the artifact with --artifact-id, not in the query",
         ));
     }
-    value_flow(root, id, &request)
+    value_flow(root, id, &request, &AtomicBool::new(false))
 }
 
-/// The value-flow document for one request, or a provider error.
-pub fn value_flow(root: &Path, id: &str, request: &Request) -> Result<Value> {
+/// The value-flow document for one request, or a provider error. The slice
+/// has no deadline: it runs until it is done or `cancelled` is set, when the
+/// request that asked for it has gone away.
+pub fn value_flow(
+    root: &Path,
+    id: &str,
+    request: &Request,
+    cancelled: &AtomicBool,
+) -> Result<Value> {
     let artifact = wasm_graph::artifact(root, id)?;
-    value_flow_of(&artifact, request)
+    value_flow_with(
+        &artifact,
+        request,
+        wasm_def_use::Limits::default(),
+        cancelled,
+    )
 }
 
 /// The document for verified artifact bytes already in memory.
+#[cfg(test)]
 pub(crate) fn value_flow_of(artifact: &wasm_graph::Artifact, request: &Request) -> Result<Value> {
-    value_flow_with(artifact, request, wasm_def_use::Limits::default())
+    value_flow_with(
+        artifact,
+        request,
+        wasm_def_use::Limits::default(),
+        &AtomicBool::new(false),
+    )
 }
 
-/// [`value_flow_of`] with explicit simulation budgets, so tests reach each stop.
+/// [`value_flow`] with explicit simulation budgets, so tests reach each stop.
 pub(crate) fn value_flow_with(
     artifact: &wasm_graph::Artifact,
     request: &Request,
     limits: wasm_def_use::Limits,
+    cancelled: &AtomicBool,
 ) -> Result<Value> {
-    value_flow_timed(artifact, request, limits, None)
-}
-
-/// [`value_flow_with`] with the response cut's own deadline when given, so a
-/// test reaches the cut's clock stop.
-fn value_flow_timed(
-    artifact: &wasm_graph::Artifact,
-    request: &Request,
-    limits: wasm_def_use::Limits,
-    cut_by: Option<Instant>,
-) -> Result<Value> {
-    let started = Instant::now();
-    let deadline = started + DEADLINE;
+    const WHAT: &str = "WASM value flow";
     let module = Module::read(&artifact.bytes)?;
     let function = request.function;
     if function < module.imported_functions {
@@ -921,7 +924,8 @@ fn value_flow_timed(
             range.len()
         )));
     }
-    let sim = wasm_def_use::simulate_with(&module, function, body, deadline, limits)?;
+    let sim = wasm_def_use::simulate_with(&module, function, body, cancelled, limits)?;
+    check_cancelled(cancelled, WHAT)?;
     let adjacency = Adjacency::new(&sim);
     let max_nodes = request.max_nodes;
     let mut slicer = Slicer {
@@ -935,7 +939,7 @@ fn value_flow_timed(
         max_edges: max_nodes * EDGES_PER_NODE,
         max_depth: request.max_depth,
         truncated: Truncated::default(),
-        deadline,
+        cancelled,
     };
     let mut omissions = sim.omissions.clone();
     let mut seed_values: Vec<Def> = Vec::new();
@@ -1326,8 +1330,9 @@ fn value_flow_timed(
         &sim,
         &slicer,
         &mut omissions,
-        deadline,
+        cancelled,
     )?;
+    check_cancelled(cancelled, WHAT)?;
     let truncated = &slicer.truncated;
     if truncated.nodes {
         omissions.push(format!(
@@ -1346,9 +1351,6 @@ fn value_flow_timed(
             request.max_depth
         ));
     }
-    if truncated.deadline {
-        omissions.push("Slice deadline reached; the slice is the part walked before it.".into());
-    }
     if truncated.joins {
         omissions.push(format!(
             "A join lists at most {MAX_JOIN_ENTRIES} incoming edges ({} in all); incoming_count gives each join's total.",
@@ -1361,7 +1363,6 @@ fn value_flow_timed(
         omissions.push(format!("{more} more omissions are not listed."));
     }
     let limits = json!({
-        "max_input_bytes": wasm_graph::MAX_BYTES,
         "max_body_bytes": MAX_BODY_BYTES,
         "max_locals": wasm_def_use::MAX_LOCALS,
         "max_instructions": wasm_def_use::MAX_INSTRUCTIONS,
@@ -1375,7 +1376,6 @@ fn value_flow_timed(
         "max_interprocedural_steps": MAX_STEPS,
         "max_call_sites": MAX_CALL_SITES,
         "max_response_bytes": MAX_RESPONSE_BYTES,
-        "deadline_ms": DEADLINE.as_millis() as u64,
     });
     let total = nodes.len();
     // When the budget cuts nodes, the seed goes first, then the slice's
@@ -1394,9 +1394,7 @@ fn value_flow_timed(
     };
     let mut ranked: Vec<usize> = (0..total).collect();
     ranked.sort_by_key(|id| (rank(*id), *id));
-    // `cut_stopped` marks a cut that the clock ended before it found the
-    // largest prefix that fits.
-    let assemble = |keep: usize, cut_stopped: bool| -> Value {
+    let assemble = |keep: usize| -> Value {
         let cut = keep < total;
         let mut chosen = vec![false; total];
         for id in &ranked[..keep] {
@@ -1415,12 +1413,6 @@ fn value_flow_timed(
             notes.push(format!(
                 "Response budget of {MAX_RESPONSE_BYTES} bytes reached; {keep} of {total} nodes are listed: the seed, sources, sinks and joins first, then the nearest steps."
             ));
-        }
-        if cut_stopped {
-            notes.push(
-                "The response cut stopped at the deadline; more nodes may have fit than are listed."
-                    .into(),
-            );
         }
         let kept_nodes: Vec<Value> = (0..total)
             .filter(|id| chosen[*id])
@@ -1499,7 +1491,8 @@ fn value_flow_timed(
             "nodes": truncated.nodes,
             "edges": truncated.edges || edges_cut,
             "depth": truncated.depth,
-            "deadline": truncated.deadline,
+            // Required by v1; the slice has no deadline.
+            "deadline": false,
             "joins": truncated.joins,
             "simulation": sim.stopped_at.is_some(),
             "bytes": cut,
@@ -1549,32 +1542,24 @@ fn value_flow_timed(
             "notice": "Declared static value flow inside one function, from the module bytes. Memory is a source unless a same-block store to the same constant address is proven; nothing was executed.",
         })
     };
-    let whole = assemble(total, false);
+    let whole = assemble(total);
     if fits_response(&whole) {
         return Ok(whole);
     }
     // The longest ranked prefix that fits; fewer nodes never make the document
     // larger. The seed ranks first, and every node's text is capped, so one
     // node is far under the budget and the seed is always listed.
-    // The search is bounded by the clock too: past the request's deadline (or
-    // a short allowance when the slice used it all) it keeps the largest size
-    // found so far that fits, and says so.
-    let cut_deadline = cut_by.unwrap_or_else(|| deadline.max(Instant::now() + CUT_ALLOWANCE));
     let (mut low, mut high) = (1usize.min(total - 1), total - 1);
-    let mut stopped = false;
     while low < high {
-        if Instant::now() > cut_deadline {
-            stopped = true;
-            break;
-        }
+        check_cancelled(cancelled, WHAT)?;
         let middle = (low + high).div_ceil(2);
-        if fits_response(&assemble(middle, false)) {
+        if fits_response(&assemble(middle)) {
             low = middle;
         } else {
             high = middle - 1;
         }
     }
-    Ok(assemble(low, stopped))
+    Ok(assemble(low))
 }
 
 /// Whether a document fits the response budget pretty-printed both as it is
@@ -1619,7 +1604,7 @@ fn interprocedural_steps(
     sim: &Simulation,
     slicer: &Slicer<'_>,
     omissions: &mut Vec<String>,
-    deadline: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<Value> {
     if !request.interprocedural {
         return Ok(json!({"requested": false, "steps": [], "direct_callers": null}));
@@ -1664,7 +1649,7 @@ fn interprocedural_steps(
             finished,
             referenced,
             undecoded,
-        } = call_sites(module, function, deadline);
+        } = call_sites(module, function, cancelled);
         if !undecoded.is_empty() {
             let listed: Vec<String> = undecoded.iter().take(8).map(u32::to_string).collect();
             omissions.push(format!(
@@ -1693,8 +1678,7 @@ fn interprocedural_steps(
         }
         if !finished {
             omissions.push(
-                "The direct call site scan stopped at its cap or deadline; more callers may exist."
-                    .into(),
+                "The direct call site scan stopped at its cap; more callers may exist.".into(),
             );
         }
         direct = json!({
@@ -1712,6 +1696,7 @@ fn interprocedural_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     const FIXTURE_WAT: &str =
         include_str!("../../../tools/fixtures/wasm-value-flow/value-flow.wat");
@@ -2334,17 +2319,17 @@ mod tests {
         wat::parse_str(text).unwrap()
     }
 
-    fn simulate_first(bytes: &[u8], limits: wasm_def_use::Limits, deadline: Instant) -> Simulation {
+    fn simulate_first(bytes: &[u8], limits: wasm_def_use::Limits, cancelled: bool) -> Simulation {
         let module = Module::read(bytes).unwrap();
-        wasm_def_use::simulate_with(&module, 0, &module.bodies[0], deadline, limits).unwrap()
+        let flag = AtomicBool::new(cancelled);
+        wasm_def_use::simulate_with(&module, 0, &module.bodies[0], &flag, limits).unwrap()
     }
 
     #[test]
-    fn nested_loops_stay_inside_the_work_budget_and_the_deadline() {
-        let later = Instant::now() + Duration::from_secs(60);
+    fn nested_loops_stay_inside_the_work_budget_and_stop_when_cancelled() {
         // One write under 20,000 loops: the prescan is linear in the bytes.
         let deep = nested_loops(20_000, 1);
-        let sim = simulate_first(&deep, wasm_def_use::Limits::default(), later);
+        let sim = simulate_first(&deep, wasm_def_use::Limits::default(), false);
         assert_eq!(sim.stopped_at, None, "{:?}", sim.omissions);
         assert!(sim.work < 6 * 20_000, "work {}", sim.work);
         // Every loop really writes every local: a quadratic number of joins,
@@ -2354,7 +2339,7 @@ mod tests {
             max_instructions: wasm_def_use::MAX_INSTRUCTIONS,
             max_work: 50_000,
         };
-        let sim = simulate_first(&wide, limits, later);
+        let sim = simulate_first(&wide, limits, false);
         assert!(sim.stopped_at.is_some());
         assert!(sim.work <= 50_000 + 400, "work {}", sim.work);
         assert!(
@@ -2366,7 +2351,7 @@ mod tests {
             max_instructions: wasm_def_use::MAX_INSTRUCTIONS,
             max_work: 1_000,
         };
-        let sim = simulate_first(&wide, prescan, later);
+        let sim = simulate_first(&wide, prescan, false);
         assert!(
             sim.omissions
                 .iter()
@@ -2374,13 +2359,23 @@ mod tests {
             "{:?}",
             sim.omissions
         );
-        let sim = simulate_first(&wide, wasm_def_use::Limits::default(), Instant::now());
+        let sim = simulate_first(&wide, wasm_def_use::Limits::default(), true);
         assert!(sim.stopped_at.is_some());
         assert!(
-            sim.omissions.iter().any(|o| o.contains("deadline")),
+            sim.omissions.iter().any(|o| o.contains("cancelled")),
             "{:?}",
             sim.omissions
         );
+        // A cancelled request answers that it was cancelled, not with the
+        // part simulated before the flag was seen.
+        let error = value_flow_with(
+            &artifact_of(&wide),
+            &parse_query("function=0&local=1").unwrap(),
+            wasm_def_use::Limits::default(),
+            &AtomicBool::new(true),
+        )
+        .unwrap_err();
+        assert_eq!(error.status, 499, "{}", error.message);
         // The default budget stops the 2,000 by 2,000 shape quickly, with a name.
         let started = Instant::now();
         let document = flow(&nested_loops(2_000, 2_000), "function=0&local=1").unwrap();
@@ -2686,7 +2681,12 @@ mod tests {
     }
 
     fn limited(bytes: &[u8], query: &str, limits: wasm_def_use::Limits) -> Result<Value> {
-        value_flow_with(&artifact_of(bytes), &parse_query(query).unwrap(), limits)
+        value_flow_with(
+            &artifact_of(bytes),
+            &parse_query(query).unwrap(),
+            limits,
+            &AtomicBool::new(false),
+        )
     }
 
     fn source_kinds(document: &Value) -> Vec<String> {
@@ -2963,13 +2963,8 @@ mod tests {
         )
         .unwrap();
         let module = Module::read(&bytes).unwrap();
-        let sim = wasm_def_use::simulate(
-            &module,
-            0,
-            &module.bodies[0],
-            Instant::now() + Duration::from_secs(10),
-        )
-        .unwrap();
+        let sim =
+            wasm_def_use::simulate(&module, 0, &module.bodies[0], &AtomicBool::new(false)).unwrap();
         assert!(
             sim.nodes.iter().all(|n| n.kind != NodeKind::Phi),
             "a loop no path reaches has no joins"
@@ -3143,14 +3138,8 @@ mod tests {
             max_instructions: wasm_def_use::MAX_INSTRUCTIONS,
             max_work,
         };
-        wasm_def_use::simulate_with(
-            &module,
-            function,
-            body,
-            Instant::now() + Duration::from_secs(60),
-            limits,
-        )
-        .unwrap()
+        wasm_def_use::simulate_with(&module, function, body, &AtomicBool::new(false), limits)
+            .unwrap()
     }
 
     /// The stop is named and nothing retained outgrows the budget: a fan-out
@@ -3434,10 +3423,9 @@ mod tests {
     }
 
     #[test]
-    fn the_response_cut_stops_at_its_deadline() {
-        // A slice past the response budget, cut with a deadline already
-        // passed: the search stops at once, the prefix it has still fits, and
-        // the document says the cut stopped.
+    fn the_response_cut_finds_the_largest_prefix_that_fits() {
+        // A slice past the response budget: the cut runs to the end rather
+        // than to a clock, so one more node would not fit.
         let mut text =
             String::from("(module (import \"env\" \"f\" (func $f (param i32))) (func (param i32)");
         text.push_str(&" local.get 0 call $f".repeat(3000));
@@ -3445,24 +3433,20 @@ mod tests {
         let bytes = wat::parse_str(text).unwrap();
         let artifact = artifact_of(&bytes);
         let request = parse_query("function=1&local=0&direction=forward&max_nodes=4096").unwrap();
-        let open =
-            value_flow_timed(&artifact, &request, wasm_def_use::Limits::default(), None).unwrap();
-        assert_eq!(open["truncated"]["bytes"], true);
-        assert!(!format!("{}", open["omissions"]).contains("response cut stopped"));
-        let stopped = value_flow_timed(
-            &artifact,
-            &request,
-            wasm_def_use::Limits::default(),
-            Some(Instant::now()),
-        )
-        .unwrap();
-        assert_fits(&stopped);
+        let cut = value_flow_of(&artifact, &request).unwrap();
+        assert_eq!(cut["truncated"]["bytes"], true);
+        assert_eq!(cut["truncated"]["deadline"], false);
+        assert_fits(&cut);
         assert!(
-            format!("{}", stopped["omissions"]).contains("response cut stopped at the deadline"),
+            cut["limits"].get("deadline_ms").is_none(),
             "{}",
-            stopped["omissions"]
+            cut["limits"]
         );
-        assert!(stopped["node_count"].as_u64().unwrap() < open["node_count"].as_u64().unwrap());
+        assert!(
+            cut["limits"].get("max_input_bytes").is_none(),
+            "{}",
+            cut["limits"]
+        );
     }
 
     #[test]

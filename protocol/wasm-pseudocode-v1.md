@@ -222,8 +222,9 @@ partial; they are counted and `omissions` says how many there are.
   function called on a line in the window.
 - `window`: `line_offset`, `line_limit`, `lines` returned and
   `next_line_offset`, null at the end.
-- `truncation`: `instructions`, `lines` and `deadline` (a limit stopped the
-  lift), `clipped_lines` (lines whose text was cut at 2,048 bytes and marked
+- `truncation`: `instructions` and `lines` (a limit stopped the lift),
+  `deadline` (always `false`: the lift has no deadline, and the member stays so
+  version 1 readers still parse it), `clipped_lines` (lines whose text was cut at 2,048 bytes and marked
   `[text limited]`), `window_bytes` (the window stopped early to fit),
   `frames`, and `merged_ranges` (lines whose ranges were merged into a
   covering span).
@@ -243,14 +244,14 @@ ranges, and the callee table. Callee names are module names, which
 
 | Bound | Value | Why |
 | --- | --- | --- |
-| Input | 64 MiB | The block graph's limit, above the artifact receiver's default 16 MiB. |
+| Input | None | A module of any size is read whole. |
 | Function body | 7,654,321 bytes | Web engines reject a longer body, so it cannot have run. Module validation enforces it for every body, so one oversized function makes every function of its module return 422. |
 | Instructions lifted | 250,000 | Keeps one request's offsets and lines in tens of megabytes. |
 | Lines | 300,000, and 24 MiB of line text | The same, for line storage. Checked before each instruction and before each `br_table` case line, so one table with many targets cannot overshoot. |
 | Line text | 2,048 bytes | One line stays readable; `clipped_lines` counts cuts. |
 | Expression depth and text | 12 levels, 200 bytes | Deeper operands become temporaries. |
 | Window | 1 to 2,000 lines (default 400), cut until the whole document is at most 120 KiB both compact and pretty-printed | `reb-api mcp` inlines a result only when both forms are at most 131,072 bytes; the cut is measured on the serialized document, callees and frames included, and `truncation.window_bytes` says it happened. |
-| Deadline | 3 seconds | Checked every 1,024 instructions and every 65,536 pending values visited while ordering effects, so a deep operand stack cannot run far past it. |
+| Time | No deadline | Cancellation is checked every 1,024 instructions and every 65,536 pending values visited while ordering effects, so a request that goes away stops the lift soon, even on a deep operand stack, and is answered 499 `cancelled`. |
 
 A limit stops the lift at a named byte, sets the matching `truncation` field
 and `status: partial`, and names the byte in `omissions`; later instructions
@@ -263,8 +264,8 @@ duplicate export name, say), so it is cut at 512 bytes on a character
 boundary and marked `[text limited]`. The lift reads declared stack effects and assumes a body that
 type checks, so an invalid one would read as plausible junk. A malformed
 body or unterminated control structure also returns 422, a window past `line_count` or a `line_limit` outside 1 to 2,000
-400. The native route runs the packaged helper with the block graph's queue,
-output limit and five-second process deadline.
+400. The native app forwards the route to its bundled backend, which runs the
+same lift.
 
 ## What it does not establish
 

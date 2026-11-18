@@ -5,7 +5,6 @@
  * value from it is captured or derived from captured bytes, so it is inserted
  * as text only, and every chip reveals the module byte it rests on. */
 const WASM_IDENTIFICATION_CACHE = 4;
-const WASM_IDENTIFICATION_TIMEOUT_MS = 10000;
 /* Chips shown on one summary line before the rest go to Details. */
 const WASM_IDENTIFICATION_CHIPS = 3;
 /* Function rows Details lists; the agent API pages the rest. */
@@ -77,12 +76,16 @@ const wasmIdentificationListeners = new Set();
 
 /** Reads the report for `source` once (again with `retry`). Inspect and the
  * Graph's Functions menu share it; both are explicit actions, so selecting a
- * module alone never starts an analysis. */
+ * module alone never starts an analysis. A module of any size is identified
+ * whole, so there is no deadline: elapsed seconds show progress, and Cancel
+ * aborts the request, which stops the backend's work. */
 async function wasmIdentificationLoad(source, retry = false) {
   const key = wasmIdentificationKey(source);
   const requests = wasmIdentificationRequests;
   if (requests.get(key)?.status === 'loading' || (!retry && wasmIdentificationReports.has(key))) return;
-  requests.set(key, {status: 'loading'});
+  const controller = new AbortController();
+  const request = {status: 'loading', controller, started: Date.now()};
+  requests.set(key, request);
   while (requests.size > 64) {
     const retired = [...requests].find(([id, request]) => id !== key && request.status !== 'loading');
     if (!retired) break;
@@ -90,8 +93,7 @@ async function wasmIdentificationLoad(source, retry = false) {
   }
   const notify = () => { for (const listener of wasmIdentificationListeners) listener(); };
   notify();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), WASM_IDENTIFICATION_TIMEOUT_MS);
+  const ticker = setInterval(() => { if (requests.get(key) === request) notify(); }, 1000);
   try {
     const response = await fetch(`/api/wasm/identification?artifact_id=${encodeURIComponent(source.artifact_id)}`, {cache: 'no-store', signal: controller.signal});
     const report = await response.json();
@@ -109,10 +111,10 @@ async function wasmIdentificationLoad(source, retry = false) {
     requests.set(key, {status: 'ready'});
   } catch (error) {
     // A failed refresh keeps the last report for these bytes on screen.
-    requests.set(key, {status: 'error', error: error.name === 'AbortError' ? 'Identification timed out. Original bytes are preserved.'
+    requests.set(key, {status: 'error', error: error.name === 'AbortError' ? 'Identification cancelled. Its backend work was stopped; original bytes are preserved.'
       : error instanceof TypeError ? 'The evidence service is unreachable.' : error.message});
   } finally {
-    clearTimeout(timeout);
+    clearInterval(ticker);
     notify();
   }
 }
@@ -233,7 +235,14 @@ function createWasmIdentificationPanel({root, getSource, inspecting, reveal}) {
     // Ready with no report means it was evicted: read it again.
     if (!report && (!request || request.status === 'ready')) { load(source); return; }
     if (!report) {
-      if (request.status === 'loading') { root.replaceChildren(element('p', 'wasm-id-state', 'Identifying toolchain, functions and constants…')); return; }
+      if (request.status === 'loading') {
+        const seconds = Math.floor((Date.now() - request.started) / 1000);
+        const cancel = element('button', 'wasm-id-toggle', 'Cancel');
+        cancel.type = 'button';
+        cancel.addEventListener('click', () => request.controller.abort());
+        root.replaceChildren(element('p', 'wasm-id-state', `Identifying toolchain, functions and constants… ${seconds} s. The whole module is read; Cancel stops it.`), cancel);
+        return;
+      }
       const retry = element('button', 'wasm-id-toggle', 'Retry identification');
       retry.type = 'button';
       retry.addEventListener('click', () => load(source, true));

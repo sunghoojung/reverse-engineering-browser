@@ -141,9 +141,10 @@ artifact is a separate report, [WASM identification](wasm-identification-v1.md).
 defined function's index, byte range and type index, and names from the name
 section, then exports. It reads section framing and decodes no instruction.
 `GET /api/wasm/graph?artifact_id=<id>&function=<index>` returns
-`wasm-block-graph-v1` for one defined function, using the same decoder and the
-same `reb://app` helper path as inspection (`origin-trace-wasm --functions` and
-`--graph-function N`). The OpenAPI schema defines both documents. Any other query
+`wasm-block-graph-v1` for one defined function, using the same decoder as
+inspection. The native app forwards both routes to its bundled backend, and
+`origin-trace-wasm --functions` and `--graph-function N` print the same
+documents. The OpenAPI schema defines both documents. Any other query
 parameter is refused, and an imported or undefined index returns 404. A function
 is decoded only when requested; nothing retains a whole-module graph.
 
@@ -157,12 +158,15 @@ are newline-terminated `offset mnemonic operands` text, and a run of identical
 block openers is one row with a count, so `row_count` can be below
 `instruction_count`. `complete` is always false.
 
-Budgets are byte budgets chosen from real artifacts: the 64 MiB input limit
-(above the artifact receiver's default 16 MiB limit), the 7,654,321-byte body
-limit web engines enforce, 16 MiB of row text, 32 MiB of structure, a four-second
-decode deadline. Anything cut sets `status` to `partial` and is named in
-`omissions`; structure is kept before row text, and an edge leaving the retained
-prefix stays labeled.
+A module of any size is read whole, and the function index lists every
+function. Budgets are byte budgets chosen from real artifacts: the
+7,654,321-byte body limit web engines enforce, 16 MiB of row text and 32 MiB of
+structure for one function. Anything cut sets `status` to `partial` and is
+named in `omissions`; structure is kept before row text, and an edge leaving
+the retained prefix stays labeled. Decoding has no deadline: the request is
+polled every 4,096 instructions, and one that goes away stops the decode and is
+answered 499 `cancelled`. `limits` no longer reports `max_input_bytes`,
+`max_index_bytes` or `deadline_ms`; version 1 readers ignore the absent keys.
 
 `GET /api/wasm/pseudocode` lifts one function into readable lines with the
 same artifact checks; [WASM pseudocode](wasm-pseudocode-v1.md) defines it.

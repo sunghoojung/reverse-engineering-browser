@@ -2,11 +2,11 @@
 //! swapped, removed, added and renumbered functions and moved data, and the
 //! true correspondence, to count what matching gets right and wrong.
 use super::super::*;
-use super::{rows, untimed};
+use super::rows;
 use std::collections::BTreeMap as Map;
 
 fn long() -> Limits {
-    untimed()
+    Limits::DEFAULT
 }
 
 struct Rng(u64);
@@ -303,7 +303,7 @@ fn fuzz_mutated_modules() {
             json!({}),
             json!({}),
             long(),
-            Instant::now(),
+            &AtomicBool::new(false),
         )
         .unwrap();
         let again = compare_with(
@@ -312,7 +312,7 @@ fn fuzz_mutated_modules() {
             json!({}),
             json!({}),
             long(),
-            Instant::now(),
+            &AtomicBool::new(false),
         )
         .unwrap();
         if rows(&report) != rows(&again) || report.groups != again.groups {

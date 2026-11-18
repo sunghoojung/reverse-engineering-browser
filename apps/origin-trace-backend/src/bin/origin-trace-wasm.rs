@@ -1,6 +1,6 @@
 use clap::Parser;
 use serde_json::json;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::atomic::AtomicBool};
 
 #[derive(Parser)]
 #[command(about = "Inspect captured WASM without executing it")]
@@ -53,8 +53,9 @@ struct Options {
     value_flow: Option<String>,
 }
 fn main() {
-    let started = std::time::Instant::now();
     let options = Options::parse();
+    // A command runs to completion: only an HTTP request can be cancelled.
+    let running = AtomicBool::new(false);
     if options.artifact_map {
         let result =
             origin_trace_backend::artifact_map::load(&options.artifacts, &options.artifact_id)
@@ -75,7 +76,7 @@ fn main() {
                 &options.artifact_id,
                 other,
                 &page,
-                started,
+                &running,
             )
         })
         .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}));
@@ -95,6 +96,7 @@ fn main() {
                 &options.artifact_id,
                 row_offset,
                 row_limit,
+                &running,
             )
             .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}))
         };

@@ -3321,14 +3321,30 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) trace value")
       try await ui.screenshot("trace-value-\(size.name)")
       // Keyboard: the first link, arrows through the tree, Enter reveals a load row.
-      _ = try await ui.value("document.querySelector('#value-flow-list .value-flow-link').focus()")
+      // Every key the tree receives is recorded, so a walk that stalls says
+      // whether the keys arrived and where focus and the scroller were.
+      _ = try await ui.value("""
+        (() => { window.__rebTraceKeys = []; const list = document.querySelector('#value-flow-list'), scroll = document.querySelector('#value-flow-scroll');
+          const where = () => `${document.activeElement?.closest('.value-flow-row')?.dataset.index ?? '-'}/${scroll.scrollTop}/${scroll.scrollHeight}`;
+          list.addEventListener('keydown', event => window.__rebTraceKeys.push(`${event.key}@${where()}`), true);
+          list.addEventListener('focusin', () => window.__rebTraceKeys.push(`in@${where()}`), true);
+          list.addEventListener('focusout', () => window.__rebTraceKeys.push(`out@${where()}`), true);
+          scroll.addEventListener('scroll', () => window.__rebTraceKeys.push(`scroll@${where()}`));
+          list.querySelector('.value-flow-link').focus(); return document.activeElement?.className; })()
+        """)
       for _ in 0..<60 {
         let focused = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
         if focused.hasPrefix("0x7e") { break }
         try await ui.key(125, "\u{F701}", modifiers: [.function, .numericPad])
       }
       let reached = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
-      XCTAssertTrue(reached.hasPrefix("0x7e"), "\(size.name): arrow keys reach the load: \(reached)")
+      let walk = try await ui.json("""
+        (() => { const scroll = document.querySelector('#value-flow-scroll'), split = document.querySelector('#source-view-split');
+          return {keys: window.__rebTraceKeys.slice(-40).join(' '), keyCount: window.__rebTraceKeys.length, focus: __rebUiProbe.describe(document.activeElement), documentFocused: document.hasFocus(),
+            scrollTop: scroll.scrollTop, scrollClient: scroll.clientHeight, splitScrollTop: split.scrollTop, splitClient: split.clientHeight, splitScrollHeight: split.scrollHeight,
+            rows: document.querySelectorAll('#value-flow-list .value-flow-row').length}; })()
+        """)
+      XCTAssertTrue(reached.hasPrefix("0x7e"), "\(size.name): arrow keys reach the load: \(reached) \(walk)")
       try await ui.key(36, "\r")
       try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasm.row(Number(line.dataset.localLine))?.byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
       try await ui.waitUntil("document.activeElement.closest('.source-line').dataset.valueFlow === 'source'", "the revealed load is marked as a source")

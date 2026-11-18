@@ -994,9 +994,11 @@
       if (!session || disconnected || documentSource !== 'live_capture' || !selectedDocument()) return null;
       return {session_id: session, target_id: controls.target.value, label: controls.target.selectedOptions[0]?.textContent ?? ''};
     },
-    watch(rules) {
+    // keep also keeps the rules for later documents of this document's origin
+    // and frame kind (protocol/native-debugger-observation-v1.md).
+    watch(rules, keep = false) {
       if (!this.liveDocument()) return Promise.resolve({status: 'error', text: 'No live Console connection to a selected document'});
-      return runtime(rules ? {operation: 'watch', rules} : {operation: 'unwatch'});
+      return runtime(rules ? {operation: 'watch', rules, ...(keep ? {keep: true} : {})} : {operation: 'unwatch'});
     }
   });
   renderControls();

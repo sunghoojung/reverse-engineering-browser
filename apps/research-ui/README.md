@@ -282,10 +282,15 @@ Each section is a collapsible pane:
   retried. Without a live connection the section says how to get one and
   shows no form. The form and the armed set say what a rule cannot observe,
   because a wait for it would then find nothing with nothing missing: only
-  the armed document's main thread records, never its workers, other frames
-  or same-process iframes; its navigation clears the rules; and they cannot
-  be armed ahead of a page load, so what a page does while it loads is not
-  observed.
+  the main thread of the documents a rule is armed on records, never their
+  workers or other documents; and this document's navigation clears its
+  rules. **Keep for every later** *origin frame kind* **document**, which
+  names this document's origin and frame kind, also keeps the rules other
+  than DOM ones for every later such document, in any tab: each one is armed
+  from its first script, so a reload is observed
+  while it loads, but documents that are already open are not armed. The
+  armed set names the kept origin and frame kind and lists the kept rules,
+  and Clear rules forgets them, even after this document navigated.
 - **Observations**: the newest records, 128 at a time and up to 4,096 with
   **Show older records**, filtered by kind. A note says how much of the store
   the rows were read from: the whole store, or its newest bytes and why the

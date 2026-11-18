@@ -981,25 +981,34 @@ function debuggerWatchSection() {
     const switches = debuggerNode('div', 'debugger-watch-switches');
     switches.append(timers.label, csp.label, field('Exceptions', exceptions));
     const dom = debuggerNode('p', 'debugger-note');
+    // Keeping hands the rules to the browser, which arms every later document
+    // of this document's exact origin and frame kind before its own scripts.
+    const keep = debuggerNode('label', 'debugger-keep');
+    const keepBox = debuggerNode('input');
+    keepBox.type = 'checkbox';
+    const keepText = debuggerNode('span', 'debugger-keep-text');
+    keep.append(keepBox, keepText, debuggerNode('span', 'debugger-field-hint',
+      'Each one is armed before its own scripts run, in any tab, until Clear rules or a Console Stop. DOM rules stay with this document.'));
     // What a rule cannot see, said where it is armed: a wait for it would time
     // out with nothing missing (protocol/native-debugger-observation-v1.md).
     const limits = debuggerNode('p', 'debugger-note debugger-watch-limits',
-      'Observes only this document\'s main thread: not its workers, other frames or same-process iframes. Its navigation clears the rules, and they cannot be armed ahead of a page load, so what a page does while it loads is not observed.');
+      'Observes only the main thread of the documents it is armed on: never workers or other documents. This document\'s navigation clears its rules; kept rules arm each later document of its origin and frame kind from that document\'s first script, but not documents that are already open.');
     const arm = debuggerNode('button', 'secondary-button debugger-arm');
     arm.type = 'submit';
     const actions = debuggerNode('div', 'debugger-watch-actions');
     const output = debuggerNode('p', 'debugger-note debugger-watch-result');
     output.setAttribute('role', 'status');
     const own = {element, document: {session_id: live.session_id, target_id: live.target_id, label: live.label ?? ''},
-      requests, events, timers: timers.box, csp: csp.box, exceptions, dom, arm, output, sending: false, draftFor: null};
+      requests, events, timers: timers.box, csp: csp.box, exceptions, dom, keep: keepBox, keepText, arm, output, sending: false, draftFor: null};
     own.clear = debuggerButton('Clear rules', 'secondary-button', () => send(view, own, null));
     actions.append(arm, own.clear);
     element.append(field('Requests', requests, 'One per line: an optional method, then text the URL contains.'),
-      field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, limits, actions, output);
+      field('Event listeners', events, 'Event types, separated by commas.'), switches, dom, keep, limits, actions, output);
     element.addEventListener('submit', event => { event.preventDefault(); send(view, own, 'arm'); });
     return own;
   }
-  function fill(own, rules) {
+  function fill(own, rules, kept) {
+    own.keep.checked = Boolean(kept);
     own.requests.value = (rules?.requests ?? []).map(rule => rule.method ? `${rule.method} ${rule.url_contains}` : rule.url_contains).join('\n');
     own.events.value = (rules?.events ?? []).join(', ');
     own.timers.checked = Boolean(rules?.timers);
@@ -1026,15 +1035,20 @@ function debuggerWatchSection() {
       if (parsed.error) { say(parsed.error); view.repaint(); return; }
       rules = parsed.rules;
     }
+    const keep = action === 'arm' && own.keep.checked;
     own.sending = true;
     say(action === 'arm' ? `Arming on document ${live.target_id}…` : `Clearing the rules of document ${live.target_id}…`);
     view.repaint();
     try {
-      const reply = await view.hooks.watch(rules);
+      const reply = await view.hooks.watch(rules, keep);
+      // The browser names what it keeps; an older one leaves kept out.
+      const kept = !keep ? '' : reply?.kept
+        ? ` Kept for every later ${reply.kept.origin} ${reply.kept.frame === 'top' ? 'top-frame' : 'child-frame'} document.`
+        : reply && 'kept' in reply ? ' Nothing is kept: only DOM rules were armed.' : ' This browser does not keep rules for later documents; nothing is kept.';
       if (!reply) say(`No confirmed answer from document ${live.target_id}. The rules may have changed; nothing was retried.`);
       else if (reply.status !== 'ok') say(`Refused by document ${live.target_id}: ${reply.text || reply.status}. A refused set leaves nothing armed.`);
-      else if (action === 'arm') say(`Armed on document ${live.target_id}. The renderer confirmed the set below.`, 'armed', live.target_id, view.readsStarted());
-      else say(`Cleared on document ${live.target_id}.`, 'cleared', live.target_id, view.readsStarted());
+      else if (action === 'arm') say(`Armed on document ${live.target_id}. The renderer confirmed the set below.${kept}`, 'armed', live.target_id, view.readsStarted());
+      else say(`Cleared on document ${live.target_id}. Nothing is kept for later documents.`, 'cleared', live.target_id, view.readsStarted());
     } catch (error) {
       say(`Not confirmed by document ${live.target_id}: ${error?.message ?? error}. Nothing was retried.`);
     } finally {
@@ -1057,6 +1071,7 @@ function debuggerWatchSection() {
       let armedBox = body.querySelector(':scope > .debugger-watch-state');
       if (!armedBox) { drop(); armedBox = debuggerNode('div', 'debugger-watch-state'); body.replaceChildren(armedBox); }
       const watch = view.document.watch, armed = watch.state === 'armed' ? watch.armed : null;
+      const kept = watch.state === 'busy' ? null : watch.kept ?? null;
       // A read that started after the outcome and disagrees with it ends it:
       // "Armed on document 22" never stands above "No rules armed".
       if (outcome && view.readSerial > outcome.after && view.status === 'ready' && watch.state !== 'busy') {
@@ -1071,7 +1086,8 @@ function debuggerWatchSection() {
         : outcome?.kind === 'cleared' && pending ? `Cleared on document ${outcome.target}. Reading the set that is left…` : outcome?.text ?? '';
       const nodes = [];
       if (watch.state === 'busy') nodes.push(debuggerNote('A Console action holds the session, so the armed set is read again shortly.', 'warning'));
-      else if (!armed) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));
+      else if (!armed && !kept) nodes.push(debuggerNote('No rules armed. Nothing is observed until a set is armed on one live document.'));
+      else if (!armed) nodes.push(debuggerNote('No Console document holds rules of its own now.'));
       else {
         nodes.push(debuggerNote(`Armed on Console document ${armed.target_id} (Console session ${armed.session_id}). Only its main thread is observed. Navigation, a new capture, Clear rules or a Console Stop disarms them.`));
         const thread = view.thread;
@@ -1082,6 +1098,21 @@ function debuggerWatchSection() {
           for (const value of values) list.append(debuggerNode('dd', value === 'off' ? 'debugger-off' : '', value));
         }
         nodes.push(list);
+      }
+      if (kept) {
+        const frame = kept.frame === 'top' ? 'top-frame' : 'child-frame';
+        nodes.push(debuggerNote(`Kept for every later ${kept.origin} ${frame} document, armed from Console document ${kept.target_id}: each one is armed before its own scripts run. Clear rules or a Console Stop forgets it.`));
+        // The kept rules are the armed set without DOM rules; list them only
+        // when no armed set above shows them.
+        if (!armed || armed.target_id !== kept.target_id) {
+          const list = debuggerNode('dl', 'debugger-rules');
+          for (const [label, values] of debuggerRulesText(kept.rules)) {
+            if (label === 'DOM mutations') continue;
+            list.append(debuggerNode('dt', '', label));
+            for (const value of values) list.append(debuggerNode('dd', value === 'off' ? 'debugger-off' : '', value));
+          }
+          nodes.push(list);
+        }
       }
       const live = view.hooks.consoleLive?.() ?? null;
       if (!live) {
@@ -1096,10 +1127,17 @@ function debuggerWatchSection() {
       if (form && (!sameDocument(form.document, live) || !body.contains(form.element))) drop();
       if (!form) { form = build(view, live); body.append(form.element); }
       const same = sameDocument(armed, live);
-      const key = JSON.stringify(same ? armed.rules : null);
+      const keptHere = same && kept?.target_id === armed.target_id;
+      const key = JSON.stringify(same ? [armed.rules, keptHere] : null);
       // A draft being typed is never overwritten by a poll.
       const focused = document.activeElement;
-      if (form.draftFor !== key && !(focused && form.element.contains(focused))) { fill(form, same ? armed.rules : null); form.draftFor = key; }
+      if (form.draftFor !== key && !(focused && form.element.contains(focused))) { fill(form, same ? armed.rules : null, keptHere); form.draftFor = key; }
+      // The browser keeps the origin and frame kind of the document itself.
+      const listed = view.document.threads?.frames?.find(frame => String(frame.target_id) === String(live.target_id));
+      const keptOrigin = listed?.origin ? `${listed.origin} ${listed.frame === 'top' ? 'top-frame' : 'child-frame'}` : 'same-origin, same-kind';
+      const keepText = `Keep for every later ${keptOrigin} document`;
+      if (form.keepText.textContent !== keepText) form.keepText.textContent = keepText;
+      form.keep.disabled = form.sending;
       const carried = same && Array.isArray(armed.rules?.dom) ? armed.rules.dom.length : 0;
       form.dom.textContent = carried
         ? `Arming here keeps the ${carried} DOM ${carried === 1 ? 'rule' : 'rules'} armed from the Console. Arming replaces the whole set; a refused set leaves nothing armed.`
@@ -1107,7 +1145,8 @@ function debuggerWatchSection() {
       form.arm.textContent = form.sending ? 'Working…' : `Arm on document ${form.document.target_id}`;
       form.arm.title = `Arms these rules on Console document ${form.document.target_id}${form.document.label ? ` (${form.document.label})` : ''} through the live Console connection. Nothing pauses and no value is read.`;
       form.arm.disabled = form.sending;
-      form.clear.disabled = form.sending || !same;
+      // Clear also forgets the kept scope, even after its document navigated.
+      form.clear.disabled = form.sending || !(same || kept);
       if (form.output.textContent !== text) form.output.textContent = text;
       form.output.hidden = !text;
     },
@@ -1583,7 +1622,7 @@ for (const section of [debuggerThreadsSection(), debuggerWatchSection(), debugge
       return null;
     },
     consoleLive: () => globalThis.RebNativeConsole?.liveDocument?.() ?? null,
-    watch: rules => globalThis.RebNativeConsole?.watch?.(rules) ?? Promise.resolve(null),
+    watch: (rules, keep) => globalThis.RebNativeConsole?.watch?.(rules, keep) ?? Promise.resolve(null),
     sequenceGaps: () => typeof shownSequenceGaps === 'function' ? shownSequenceGaps() : null
   };
   debuggerSidebarController = createDebuggerSidebar({root, toggle, screen, hooks});

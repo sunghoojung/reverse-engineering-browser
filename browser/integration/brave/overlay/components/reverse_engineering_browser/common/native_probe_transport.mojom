@@ -8,6 +8,33 @@ module reb.mojom;
 import "mojo/public/mojom/base/shared_memory.mojom";
 import "mojo/public/mojom/base/big_buffer.mojom";
 
+// One request rule of a kept debugger watch scope.
+struct NativeWatchRequestRule {
+  string url_contains;
+  // Empty matches every method.
+  string method;
+};
+
+// The Console's armed watch rules, kept for every later document of one exact
+// origin and frame kind (protocol/native-debugger-observation-v1.md). The
+// browser takes the origin and kind from the document the rules were armed
+// on, after that renderer accepted them; each renderer rebuilds and
+// revalidates them, and refuses the whole scope rather than keep part of it.
+// DOM rules name one document's nodes, so a scope never carries them.
+struct NativeWatchScope {
+  // Assigned by the browser; never 0.
+  uint64 serial;
+  // url::Origin::Serialize of an http or https origin.
+  string origin;
+  bool top_frame;
+  array<NativeWatchRequestRule> requests;
+  array<string> events;
+  bool timers;
+  bool csp;
+  bool uncaught;
+  bool caught;
+};
+
 // One renderer process's capture configuration. The browser binds it on the
 // process's IPC channel at launch, so a configuration it sends before a
 // navigation commit is applied before that document runs any script.
@@ -40,6 +67,9 @@ interface NativeProbeClient {
   SetWasmSampleBudget(array<uint8> policy);
   // Restarts both sample indexes without Disable or a new configuration.
   ResetWasmSampleBudgets();
+  // Replaces the kept debugger watch scope, or clears it when null. Sent on
+  // this channel, so a document that commits after it starts armed.
+  SetDebuggerWatchScope(NativeWatchScope? scope);
   Disable();
   // Browser verdict on the module bytes carried by the guest capture whose
   // dispatch sequence number is module_token. The renderer keeps sending an

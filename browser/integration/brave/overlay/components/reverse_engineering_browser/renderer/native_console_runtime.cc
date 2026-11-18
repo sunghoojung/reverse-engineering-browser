@@ -24,9 +24,12 @@
 #include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+#include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_string.h"
+#include "third_party/blink/public/web/web_document.h"
 #include "third_party/blink/public/web/web_element.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+#include "url/origin.h"
 #include "v8/include/v8-debug.h"
 #include "v8/include/v8-native-console.h"
 #include "v8/include/v8-native-stack.h"
@@ -142,6 +145,24 @@ void ObserveThrow(v8::Isolate* isolate) {
   NativeDebuggerWatch::Exception(frame_id, thrown.catcher == v8::NativeThrowCatcher::kNone ? 1 : 2,
                                  site);
 }
+// The renderer's main-thread isolate, recorded before its first arm, so the
+// observer follows every change of armed kinds, including a kept scope the
+// browser replaces while no Console command runs.
+v8::Isolate* g_watch_isolate = nullptr;
+bool g_throw_observer = false;
+void SyncThrowObserver() {
+  const bool wanted = NativeDebuggerWatch::Armed(kNativeWatchUncaught | kNativeWatchCaught);
+  if (!g_watch_isolate || wanted == g_throw_observer)
+    return;
+  v8::SetNativeThrowObserver(g_watch_isolate, wanted ? &ObserveThrow : nullptr);
+  g_throw_observer = wanted;
+}
+void UseWatchIsolate(v8::Isolate* isolate) {
+  if (g_watch_isolate || !isolate)
+    return;
+  g_watch_isolate = isolate;
+  NativeDebuggerWatch::SetKindsChanged(&SyncThrowObserver);
+}
 base::DictValue Location(v8::Isolate* isolate,
                          v8::Local<v8::Value> resource,
                          int line,
@@ -158,7 +179,7 @@ base::DictValue Location(v8::Isolate* isolate,
 NativeConsoleRuntime::NativeConsoleRuntime() = default;
 
 NativeConsoleRuntime::~NativeConsoleRuntime() {
-  Unwatch();
+  DocumentEnded();
 }
 
 void NativeConsoleRuntime::Reset() {
@@ -168,20 +189,47 @@ void NativeConsoleRuntime::Reset() {
   messages_.Reset();
 }
 void NativeConsoleRuntime::Unwatch() {
-  if (watch_frame_ != 0) {
+  // The throw observer follows the armed kinds, so another document's arm
+  // keeps it.
+  if (watch_frame_ != 0)
     NativeDebuggerWatch::Disarm(watch_frame_);
-    // Another document's newer Arm keeps the observer it installed.
-    if (!NativeDebuggerWatch::Armed(kNativeWatchUncaught | kNativeWatchCaught))
-      v8::SetNativeThrowObserver(watch_isolate_, nullptr);
-  }
   watch_frame_ = 0;
-  watch_isolate_ = nullptr;
+}
+void NativeConsoleRuntime::DocumentStarted(v8::Isolate* isolate, blink::WebLocalFrame* frame) {
+  document_ = frame->GetDocument().Token().value();
+  frame_id_ = FrameId(frame);
+  if (!NativeDebuggerWatch::HasScope())
+    return;
+  // The browser serializes the scope's origin with url::Origin, so compare the
+  // document's own serialization: an opaque origin is "null" and never equals
+  // a scope.
+  const url::Origin origin = frame->GetSecurityOrigin();
+  UseWatchIsolate(isolate);
+  static_cast<void>(
+      NativeDebuggerWatch::ArmScope(frame_id_, origin.Serialize(), frame->IsOutermostMainFrame()));
+}
+void NativeConsoleRuntime::WindowCleared(v8::Isolate* isolate, blink::WebLocalFrame* frame) {
+  if (frame->GetDocument().Token().value() == document_)
+    return;
+  DocumentEnded();
+  DocumentStarted(isolate, frame);
+}
+void NativeConsoleRuntime::DocumentEnded() {
+  Unwatch();
+  // A document the kept scope armed.
+  if (frame_id_ != 0)
+    NativeDebuggerWatch::Disarm(frame_id_);
+  frame_id_ = 0;
+  document_ = base::UnguessableToken();
 }
 base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
                                             blink::WebLocalFrame* frame,
                                             const base::DictValue& command) {
-  // A refused watch leaves nothing armed, so the caller never guesses.
+  // A refused watch leaves nothing armed on this document, so the caller
+  // never guesses; a kept scope still arms later documents.
+  UseWatchIsolate(isolate);
   Unwatch();
+  NativeDebuggerWatch::Disarm(FrameId(frame));
   const auto* rules = command.FindDict("rules");
   if (!rules)
     return Failure("Watch rules must be an object");
@@ -231,9 +279,6 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
   if (!NativeDebuggerWatch::Arm(frame_id, armed))
     return Failure("No capture session is active in this renderer; nothing was armed");
   watch_frame_ = frame_id;
-  watch_isolate_ = isolate;
-  if (armed.uncaught)
-    v8::SetNativeThrowObserver(isolate, &ObserveThrow);
   std::vector<std::string> parts;
   if (armed.request_count)
     parts.push_back(base::NumberToString(armed.request_count) + " request rules");

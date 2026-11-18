@@ -2758,7 +2758,7 @@
       "get": {
         "operationId": "wait_for_events",
         "summary": "Wait for matching events",
-        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. js_invocation_start, js_invocation_settle and js_invocation_request include js_invocation with kind start, settle or request (JsInvocationDecode); status invalid has no fields. Debugger observations (types 40 to 45) include debugger_observation with its site resolved and stack_read (DebuggerObservationDecode): wait with type request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation or dom_mutation to break on one without pausing. Such a wait can time out with nothing missing from the store, because rules match only the main thread of the one document they were armed on (workers, other frames and same-process iframes never match), navigation clears them, and they cannot be armed ahead of a page load, so a new page records nothing until native_console_action watch arms it; get_native_debugger watch says what is armed. Records have no count; a renderer from an earlier build refused records past 1,024 per capture configuration and left one debugger_observation_budget gap. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
+        "description": "Waits up to timeout_ms for the first events after a cursor that match the same filters as get_events, then returns them in the filtered get_events shape plus a wait object. wasm_dispatch_observation and wasm_indirect_observation include wasm_observation. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. status invalid has no fields. A payload version other than 1 or 2 is invalid in full. The record is protocol 3, category vm, and flags 0. js_invocation_start, js_invocation_settle and js_invocation_request include js_invocation with kind start, settle or request (JsInvocationDecode); status invalid has no fields. Debugger observations (types 40 to 45) include debugger_observation with its site resolved and stack_read (DebuggerObservationDecode): wait with type request_watch_match, listener_dispatch, timer_observation, csp_violation, exception_observation or dom_mutation to break on one without pausing. Such a wait can time out with nothing missing from the store, because rules match only the main thread of the documents they are armed on (workers and documents they are not armed on never match), and navigation clears a document's own rules unless they were armed with keep: then every later document of that exact origin and frame kind is armed before its own scripts run, while documents that already existed are not; get_native_debugger watch says what is armed and kept. Records have no count; a renderer from an earlier build refused records past 1,024 per capture configuration and left one debugger_observation_budget gap. Without after, only events written after the call count, so take a cursor first (timeout_ms 1) and then act: session_action open_url or click, or a Console evaluate. On timeout it returns no events, wait.timed_out true and query.next_after for the next wait. Waiting does not change the browser or the stores. At most eight waits run at once.",
         "tags": [
           "events"
         ],
@@ -6238,7 +6238,7 @@
       "get": {
         "operationId": "get_native_debugger",
         "summary": "Read Phase 1 threads, watch rules and observations, and the pausing debugger state",
-        "description": "Phase 1 is served: threads lists Console documents, recorded workers and the native frames observation records came from (observed), watch is what the renderer confirmed armed through the Console watch command (rules match only that document's main thread and its navigation clears them), and observations are the newest decoded records; wait on them with wait_for_events, which decodes them the same way. type, the thread scope (session_id, process_id and frame_id together, an observed frame) and before select and page the observations; observations_query echoes the read and its byte scope. observation_budget_gaps names renderers from earlier builds that refused later records after 1,024 in one capture configuration; current renderers record every match. The pausing fields come from the debugger peer: a state command that never pauses, steps, resumes or renews a lease, which is why this read carries a state-dependent browser-control effect, like get_live_wasm. availability unsupported means no peer answered; its reason says which case. That is not an empty breakpoint list, and no document, frames, scopes or values are invented. See protocol/native-debugger-pause-v1.md.",
+        "description": "Phase 1 is served: threads lists Console documents, recorded workers and the native frames observation records came from (observed), watch is what the renderer confirmed armed through the Console watch command (rules match only that document's main thread and its navigation clears them) and the scope the browser keeps for later documents of one origin and frame kind, and observations are the newest decoded records; wait on them with wait_for_events, which decodes them the same way. type, the thread scope (session_id, process_id and frame_id together, an observed frame) and before select and page the observations; observations_query echoes the read and its byte scope. observation_budget_gaps names renderers from earlier builds that refused later records after 1,024 in one capture configuration; current renderers record every match. The pausing fields come from the debugger peer: a state command that never pauses, steps, resumes or renews a lease, which is why this read carries a state-dependent browser-control effect, like get_live_wasm. availability unsupported means no peer answered; its reason says which case. That is not an empty breakpoint list, and no document, frames, scopes or values are invented. See protocol/native-debugger-pause-v1.md.",
         "tags": [
           "native-debugger"
         ],
@@ -6715,7 +6715,7 @@
       "post": {
         "operationId": "native_console_action",
         "summary": "Connect the Console to one document, evaluate there, arm document-start scripts",
-        "description": "Live capture: connect_live selects one document from get_native_console, top or child, cross-site frames included, and returns a new session_id. evaluate runs up to 64 MiB of JavaScript in that document's main world and returns status, type and text (at most 8 KiB, truncated marked); runtime adds inspect, await, poll for console messages, and traffic. A command runs until it returns: while it runs, get_native_console reports it under command, and interrupt stops it, which answers the command with status stopped and keeps the changes it made. Commands run only in the selected document: another target_id, or one that navigated, returns status stale_target with the next step, and nothing runs. To switch frames, stop, then connect_live with the new id. arm_document_start replaces the armed set: at most 4 rules, each one exact origin, frame top or child, an optional path_prefix and a snippet that calls report(value). It runs only in documents created after arming, so reload or navigate, then read get_native_console_document_start. clear_document_start removes the set; stop clears it too and must be confirmed. start opens a separate disposable browser instead. Refusals: 409 with another connection open or a stale session_id or binding_id; 503 for arming where document-start is not permitted (an agent session needs start_live_session document_start true). Never retried. Output is ephemeral page data, not evidence.",
+        "description": "Live capture: connect_live selects one get_native_console document (top or child, cross-site included) and returns a new session_id. evaluate runs up to 64 MiB of JavaScript in its main world, returning status, type and text (at most 8 KiB, truncated marked); runtime adds inspect, await, poll (console messages), traffic and watch. A command runs until it returns, listed as get_native_console command; interrupt answers it with status stopped, keeping its changes. Another target_id or a navigated document returns stale_target and runs nothing; to switch frames, stop, then connect_live. watch arms non-pausing rules; keep true also arms them, less DOM rules, in every later document of that exact origin and frame kind before its scripts, until unwatch, a watch without keep, or stop. arm_document_start replaces the armed set: any number of rules, each an exact origin, frame top or child, optional path_prefix and a snippet calling report(value), run only in documents created later: reload, then read get_native_console_document_start. clear_document_start removes it; stop clears it too and must be confirmed. start opens a separate disposable browser. Refusals: 409 with another connection open or a stale session_id or binding_id; 503 when document-start is not permitted (agent sessions need start_live_session document_start true). Never retried. Output is ephemeral page data, not evidence.",
         "tags": [
           "native-console"
         ],
@@ -29342,9 +29342,10 @@
             "additionalProperties": false,
             "required": [
               "state",
-              "armed"
+              "armed",
+              "kept"
             ],
-            "description": "Rules the renderer last confirmed armed through the Console watch command. busy means a Console action holds the session; read again.",
+            "description": "Rules the renderer last confirmed armed on the Console's document through the watch command (armed), and the scope the browser keeps for every later document of one exact origin and frame kind (kept), which outlives that document's navigation. busy means a Console action holds the session; read again.",
             "properties": {
               "state": {
                 "enum": [
@@ -29377,6 +29378,49 @@
                       },
                       "rules": {
                         "type": "object"
+                      }
+                    }
+                  }
+                ]
+              },
+              "kept": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "session_id",
+                      "target_id",
+                      "origin",
+                      "frame",
+                      "rules"
+                    ],
+                    "properties": {
+                      "session_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$"
+                      },
+                      "target_id": {
+                        "type": "string",
+                        "pattern": "^(0|[1-9][0-9]{0,19})$",
+                        "description": "The Console document the scope was armed from; it may have navigated since."
+                      },
+                      "origin": {
+                        "type": "string",
+                        "x-max-utf8-bytes": 256
+                      },
+                      "frame": {
+                        "enum": [
+                          "top",
+                          "child"
+                        ]
+                      },
+                      "rules": {
+                        "type": "object",
+                        "description": "The kept rules: the confirmed set without its DOM rules."
                       }
                     }
                   }
@@ -30440,7 +30484,7 @@
           {
             "type": "object",
             "additionalProperties": false,
-            "description": "Arms non-pausing observation rules on the selected document, replacing any earlier set; protocol/native-debugger-observation-v1.md. Records arrive through get_events and wait_for_events. Nothing pauses and no value is read. Rules match only this document's main thread: workers, other frames and same-process iframes never match, and one document is armed at a time (stop disarms it before another is connected). Navigation, a new capture configuration, unwatch or stop disarms them. A rule cannot be armed ahead of a page load: arm after the page loaded, and what ran while it loaded is not observed. Without an active capture session nothing is armed.",
+            "description": "Arms non-pausing observation rules on the selected document, replacing any earlier set; protocol/native-debugger-observation-v1.md. Records arrive through get_events and wait_for_events. Nothing pauses and no value is read. Rules match only this document's main thread: workers and other documents never match, and the Console arms one document at a time (stop disarms it before another is connected). Navigation, a new capture configuration, unwatch or stop disarms them. With keep true the browser also keeps the rules, without DOM rules, for every later document of this document's exact origin and frame kind, in any tab or renderer: each is armed when its main-world context is created, before its own scripts run, so reload or navigate to observe a page from its first script. Documents that already exist are not armed by it. The reply's kept names the origin and frame kept, or is null when only DOM rules were armed. A later watch replaces the kept scope, or clears it without keep; unwatch and stop clear it even after its document navigated. Without an active capture session nothing is armed.",
             "properties": {
               "operation": {
                 "type": "string",
@@ -30454,7 +30498,7 @@
                 "properties": {
                   "requests": {
                     "type": "array",
-                    "maxItems": 8,
+                    "maxItems": 32,
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
@@ -30476,7 +30520,7 @@
                   },
                   "events": {
                     "type": "array",
-                    "maxItems": 16,
+                    "maxItems": 64,
                     "uniqueItems": true,
                     "items": {
                       "type": "string",
@@ -30499,7 +30543,7 @@
                   },
                   "dom": {
                     "type": "array",
-                    "maxItems": 4,
+                    "maxItems": 32,
                     "items": {
                       "type": "object",
                       "additionalProperties": false,
@@ -30524,6 +30568,10 @@
                     }
                   }
                 }
+              },
+              "keep": {
+                "type": "boolean",
+                "description": "Keeps the rules, without DOM rules, for every later document of this document's exact origin and frame kind."
               }
             },
             "required": [
@@ -30534,7 +30582,7 @@
           {
             "type": "object",
             "additionalProperties": false,
-            "description": "Disarms every observation rule of the selected document.",
+            "description": "Disarms every observation rule of the selected document, and forgets the kept scope even when the document it was armed from navigated.",
             "properties": {
               "operation": {
                 "type": "string",
@@ -30849,6 +30897,34 @@
                     "kind"
                   ]
                 }
+              },
+              "kept": {
+                "description": "A confirmed watch with keep: the exact origin and frame kind the browser keeps the rules for, read from the document itself, or null when only DOM rules were armed.",
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "origin",
+                      "frame"
+                    ],
+                    "properties": {
+                      "origin": {
+                        "type": "string",
+                        "x-max-utf8-bytes": 256
+                      },
+                      "frame": {
+                        "enum": [
+                          "top",
+                          "child"
+                        ]
+                      }
+                    }
+                  }
+                ]
               }
             },
             "required": [

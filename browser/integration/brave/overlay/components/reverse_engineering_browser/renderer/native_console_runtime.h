@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "base/functional/callback_helpers.h"
-#include "base/memory/raw_ptr.h"
+#include "base/unguessable_token.h"
 #include "base/values.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_messages.h"
 #include "third_party/blink/public/web/web_element.h"
@@ -44,8 +44,19 @@ class NativeConsoleRuntime final {
                   v8::Local<v8::Context> context,
                   blink::WebLocalFrame* frame,
                   const std::string& command);
-  // Disarms this document's watch rules, protocol/native-debugger-observation-v1.md.
+  // Disarms the rules the Console armed on this document,
+  // protocol/native-debugger-observation-v1.md.
   void Unwatch();
+  // The frame's main-world context exists for a new document, before any of
+  // its own scripts: arms the kept watch scope when it names this document's
+  // origin and frame kind. Without a kept scope this reads two tokens and
+  // stores them.
+  void DocumentStarted(v8::Isolate* isolate, blink::WebLocalFrame* frame);
+  // Blink cleared the window object. When the commit kept the existing context
+  // for a new document, that document starts here instead.
+  void WindowCleared(v8::Isolate* isolate, blink::WebLocalFrame* frame);
+  // The document's main-world context is going away: nothing stays armed on it.
+  void DocumentEnded();
 
  private:
   struct Retained {
@@ -75,8 +86,11 @@ class NativeConsoleRuntime final {
   base::DictValue Watch(v8::Isolate* isolate,
                         blink::WebLocalFrame* frame,
                         const base::DictValue& command);
+  // The frame the Console's own watch arm holds, or 0.
   std::uint64_t watch_frame_ = 0;
-  raw_ptr<v8::Isolate> watch_isolate_ = nullptr;
+  // The frame and document whose start was last decided.
+  std::uint64_t frame_id_ = 0;
+  base::UnguessableToken document_;
   // Keyed by handle. Handles only grow, so lookups never see a reused one.
   std::map<std::uint64_t, Retained> retained_;
   std::uint64_t next_handle_ = 1;

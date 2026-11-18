@@ -141,8 +141,14 @@ void NativeConsoleAgent::Describe(DescribeCallback callback) {
 // matching snippet observes this document before its own scripts. Nothing runs
 // here unless the separate document-start experiment is armed.
 void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, int world_id) {
-  if (world_id == 0)
-    InjectNativeConsoleDocumentStart(render_frame(), context, document_start_);
+  if (world_id != 0)
+    return;
+  InjectNativeConsoleDocumentStart(render_frame(), context, document_start_);
+  // After any document-start snippet, so a kept watch scope observes the
+  // page's own scripts rather than the researcher's.
+  auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
+  if (frame && !frame->IsProvisional())
+    runtime_.DocumentStarted(frame->GetAgentGroupScheduler()->Isolate(), frame);
 }
 
 // A same-origin commit from the initial empty document keeps that window and
@@ -152,12 +158,15 @@ void NativeConsoleAgent::DidCreateScriptContext(v8::Local<v8::Context> context, 
 // before its parser runs, which is where that document is matched instead.
 void NativeConsoleAgent::DidClearWindowObject() {
   InjectNativeConsoleDocumentStartIntoReusedWindow(render_frame(), document_start_);
+  auto* frame = render_frame() ? render_frame()->GetWebFrame() : nullptr;
+  if (document_start_.context && frame && !frame->IsProvisional())
+    runtime_.WindowCleared(frame->GetAgentGroupScheduler()->Isolate(), frame);
 }
 
 void NativeConsoleAgent::WillReleaseScriptContext(v8::Local<v8::Context> context, int world_id) {
   if (world_id == 0) {
     runtime_.Reset();
-    runtime_.Unwatch();
+    runtime_.DocumentEnded();
     document_start_.context = false;
   }
 }

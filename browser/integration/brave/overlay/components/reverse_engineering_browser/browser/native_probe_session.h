@@ -80,6 +80,13 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   // Restarts both sample indexes in this browser session. The profile, the
   // session id, and the capture configuration stay.
   void ResetWasmSampleBudgets() noexcept;
+  // The Console's kept debugger watch scope, sent to every renderer now and to
+  // each one configured later; null clears it. The Console session owns it, so
+  // a capture session ending leaves it for the next configuration.
+  void SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope);
+  [[nodiscard]] const mojom::NativeWatchScopePtr& debugger_watch_scope() const noexcept {
+    return debugger_watch_scope_;
+  }
   [[nodiscard]] bool IsActive() const noexcept;
   [[nodiscard]] std::uint64_t session_id() const noexcept;
   [[nodiscard]] std::uint64_t category_mask() const noexcept;
@@ -129,6 +136,7 @@ class NativeProbeSession final : public content::RenderProcessHostObserver {
   std::vector<std::uint8_t> js_invocation_sites_;
   bool js_invocation_digests_ = false;
   NativeWasmSampleBudgetPolicy wasm_sample_budget_{};
+  mojom::NativeWatchScopePtr debugger_watch_scope_;
   std::vector<raw_ptr<NativeProbeHost>> hosts_;
   std::atomic<NativeProbeEmitter> downstream_{nullptr};
   std::atomic<std::uint64_t> session_id_{0};

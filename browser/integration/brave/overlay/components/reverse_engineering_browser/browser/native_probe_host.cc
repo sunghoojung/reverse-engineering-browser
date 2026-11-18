@@ -847,6 +847,9 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   wasm_epoch_lifetime_ = std::make_shared<const std::uint64_t>(wasm_capture_epoch_);
   const auto encoded = EncodeNativeWasmSampleBudgetPolicy(session_->wasm_sample_budget());
   client_->SetWasmSampleBudget(std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
+  // Before the configuration, so this renderer's first armed document already
+  // has the scope (protocol/native-debugger-observation-v1.md).
+  SendDebuggerWatchScope();
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
                      session_->guest_adapter_json(), session_->js_dispatch_sites(),
@@ -891,6 +894,11 @@ void NativeProbeHost::ResetWasmSampleBudgets() {
     wasm_budget_epoch_ += 2;
   if (client_.is_bound())
     client_->ResetWasmSampleBudgets();
+}
+
+void NativeProbeHost::SendDebuggerWatchScope() {
+  if (client_.is_bound())
+    client_->SetDebuggerWatchScope(session_->debugger_watch_scope().Clone());
 }
 
 std::uint32_t NativeProbeHost::RendererOsPid() {

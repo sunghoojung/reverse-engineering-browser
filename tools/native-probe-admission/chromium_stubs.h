@@ -126,6 +126,22 @@ struct BigBuffer {
 }  // namespace mojo_base
 
 namespace reb::mojom {
+struct NativeWatchRequestRule {
+  std::string url_contains;
+  std::string method;
+};
+struct NativeWatchScope {
+  std::uint64_t serial = 0;
+  std::string origin;
+  bool top_frame = false;
+  std::vector<std::unique_ptr<NativeWatchRequestRule>> requests;
+  std::vector<std::string> events;
+  bool timers = false;
+  bool csp = false;
+  bool uncaught = false;
+  bool caught = false;
+};
+using NativeWatchScopePtr = std::unique_ptr<NativeWatchScope>;
 struct NativeProbeClient {
   virtual ~NativeProbeClient() = default;
   virtual void Configure(std::uint64_t,
@@ -142,6 +158,7 @@ struct NativeProbeClient {
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
+  virtual void SetDebuggerWatchScope(NativeWatchScopePtr) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
   virtual void NativeStackArtifactRefused(std::uint64_t) = 0;

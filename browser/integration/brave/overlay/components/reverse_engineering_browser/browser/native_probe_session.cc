@@ -423,6 +423,12 @@ void NativeProbeSession::Emit(const NativeProbeEvent& event) const noexcept {
   }
 }
 
+void NativeProbeSession::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {
+  debugger_watch_scope_ = std::move(scope);
+  for (NativeProbeHost* const host : hosts_)
+    host->SendDebuggerWatchScope();
+}
+
 void NativeProbeSession::AddHost(NativeProbeHost& host) {
   hosts_.push_back(&host);
 }

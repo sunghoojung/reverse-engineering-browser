@@ -40,6 +40,7 @@
 #include "base/values.h"
 #include "brave/components/reverse_engineering_browser/browser/native_console_document_start.h"
 #include "brave/components/reverse_engineering_browser/browser/native_local_ipc_client.h"
+#include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_console.mojom.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_io.h"
 #include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
@@ -89,6 +90,54 @@ struct Target final {
   bool metadata_truncated = false;
   bool complete = false;
 };
+
+// A Console `watch` on one document: whether to keep its rules, and the exact
+// origin and frame kind the browser itself reads from that document, so a
+// kept scope never names anything the command supplied.
+struct WatchCommand final {
+  bool keep = false;
+  std::string origin;
+  bool top_frame = false;
+  base::DictValue rules;
+};
+
+// The rules a renderer just accepted, as the scope every renderer rebuilds for
+// each later document of this origin and frame kind
+// (protocol/native-debugger-observation-v1.md). Null when only DOM rules, which
+// name this document's own nodes, or no rule at all would be kept.
+mojom::NativeWatchScopePtr KeptWatchScope(const WatchCommand& watch, std::uint64_t serial) {
+  auto scope = mojom::NativeWatchScope::New();
+  scope->serial = serial;
+  scope->origin = watch.origin;
+  scope->top_frame = watch.top_frame;
+  if (const auto* requests = watch.rules.FindList("requests")) {
+    for (const auto& item : *requests) {
+      const auto* rule = item.GetIfDict();
+      const auto* url = rule ? rule->FindString("url_contains") : nullptr;
+      if (!url)
+        return nullptr;
+      const auto* method = rule->FindString("method");
+      scope->requests.push_back(
+          mojom::NativeWatchRequestRule::New(*url, method ? *method : std::string()));
+    }
+  }
+  if (const auto* events = watch.rules.FindList("events")) {
+    for (const auto& item : *events) {
+      if (!item.is_string())
+        return nullptr;
+      scope->events.push_back(item.GetString());
+    }
+  }
+  scope->timers = watch.rules.FindBool("timers").value_or(false);
+  scope->csp = watch.rules.FindBool("csp").value_or(false);
+  const auto* exceptions = watch.rules.FindString("exceptions");
+  scope->uncaught = exceptions && (*exceptions == "uncaught" || *exceptions == "all");
+  scope->caught = exceptions && *exceptions == "all";
+  if (scope->requests.empty() && scope->events.empty() && !scope->timers && !scope->csp &&
+      !scope->uncaught)
+    return nullptr;
+  return scope;
+}
 
 // One observer per owned WebContents. All collection runs on the UI thread and
 // copies metadata only. No response content, headers, cookies, paths or queries.
@@ -280,8 +329,10 @@ class Session final {
     documents_.clear();
     observers_.clear();
     activity_.clear();
-    // Losing the owner must not leave armed scripts running in new documents.
+    // Losing the owner must not leave armed scripts running in new documents,
+    // or kept watch rules arming them.
     NativeConsoleDocumentStartRegistry::Get().Clear();
+    NativeProbeSession::Get().SetDebuggerWatchScope(nullptr);
     // The caller owns the disposable browser lifetime. Loss of the control
     // channel must not leave a mutable experiment running without its owner.
     if (retired_)
@@ -369,6 +420,14 @@ class Session final {
       DocumentStart(source, std::move(reply));
       return;
     }
+    const auto command = request.operation == NativeConsoleOperation::kRuntime
+                             ? base::JSONReader::ReadDict(source, base::JSON_PARSE_RFC)
+                             : std::nullopt;
+    const auto* operation = command ? command->FindString("operation") : nullptr;
+    // Forgets the kept scope even when the document its rules were armed on
+    // is gone, so the owner can always clear it.
+    if (operation && *operation == "unwatch")
+      NativeProbeSession::Get().SetDebuggerWatchScope(nullptr);
     Target* selected = nullptr;
     for (auto& target : targets_)
       if (target.id == request.target_id)
@@ -379,10 +438,6 @@ class Session final {
                   "Selected document navigated, closed, or is no longer active");
       return;
     }
-    const auto command = request.operation == NativeConsoleOperation::kRuntime
-                             ? base::JSONReader::ReadDict(source, base::JSON_PARSE_RFC)
-                             : std::nullopt;
-    const auto* operation = command ? command->FindString("operation") : nullptr;
     if (operation && *operation == "traffic") {
       base::ListValue events;
       for (auto iterator = activity_.begin(); iterator != activity_.end();) {
@@ -410,10 +465,20 @@ class Session final {
     if (request.operation == NativeConsoleOperation::kEvaluate ||
         (operation && *operation == "evaluate"))
       last_evaluation_ = request.request_id;
+    std::optional<WatchCommand> watch;
+    if (operation && *operation == "watch") {
+      auto* const document = selected->document.AsRenderFrameHostIfValid();
+      const auto* rules = command->FindDict("rules");
+      watch = WatchCommand{command->FindBool("keep").value_or(false),
+                           document->GetLastCommittedOrigin().Serialize(),
+                           document->GetParentOrOuterDocument() == nullptr,
+                           rules ? rules->Clone() : base::DictValue()};
+    }
     const auto weak_document = selected->document;
     auto callback = mojo::WrapCallbackWithDefaultInvokeIfNotRun(
         base::BindOnce(
-            [](content::WeakDocumentPtr document, std::shared_ptr<Reply> result,
+            [](Session* session, std::optional<WatchCommand> watch,
+               content::WeakDocumentPtr document, std::shared_ptr<Reply> result,
                std::uint16_t status, std::uint16_t type, const std::string& text, bool truncated) {
               if (!document.AsRenderFrameHostIfValid()) {
                 result->Fail(NativeConsoleStatus::kStaleTarget,
@@ -436,11 +501,15 @@ class Session final {
               result->header.status = static_cast<NativeConsoleStatus>(status);
               result->header.type = static_cast<NativeConsoleType>(type);
               result->header.flags = truncated ? kNativeConsoleTruncated : 0;
-              result->payload = text;
-              result->header.payload_bytes = static_cast<std::uint32_t>(text.size());
+              result->payload =
+                  watch && status == static_cast<std::uint16_t>(NativeConsoleStatus::kOk) &&
+                          type == static_cast<std::uint16_t>(NativeConsoleType::kRuntime)
+                      ? session->Watched(*watch, text)
+                      : text;
+              result->header.payload_bytes = static_cast<std::uint32_t>(result->payload.size());
               result->ready.Signal();
             },
-            weak_document, reply),
+            base::Unretained(this), std::move(watch), weak_document, reply),
         static_cast<std::uint16_t>(NativeConsoleStatus::kDisconnected),
         static_cast<std::uint16_t>(NativeConsoleType::kUndefined),
         std::string("Renderer disconnected"), false);
@@ -451,6 +520,48 @@ class Session final {
     else
       selected->agent->Evaluate(selected->renderer_document, request.request_id, expires, source,
                                 std::move(callback));
+  }
+
+  // A watch the renderer confirmed replaces the kept scope with its rules, or
+  // clears it, and its reply then says what is kept. A refused watch changes
+  // nothing. After Retire the scope stays clear: nothing outlives its owner.
+  std::string Watched(const WatchCommand& watch, const std::string& text) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    auto result = base::JSONReader::ReadDict(text, base::JSON_PARSE_RFC);
+    const auto* status = result ? result->FindString("status") : nullptr;
+    if (!status || *status != "ok" || !active_.load(std::memory_order_acquire))
+      return text;
+    auto scope = watch.keep ? KeptWatchScope(watch, next_scope_++) : nullptr;
+    std::string reply = text;
+    if (watch.keep) {
+      const auto* said = result->FindString("text");
+      std::string reply_text = said ? *said : std::string();
+      if (scope) {
+        result->Set("kept", base::DictValue()
+                                .Set("origin", watch.origin)
+                                .Set("frame", watch.top_frame ? "top" : "child"));
+        reply_text += " Kept for every later " + watch.origin +
+                      (watch.top_frame ? " top-frame" : " child-frame") +
+                      " document, armed before its own scripts run.";
+        const auto* dom = watch.rules.FindList("dom");
+        if (dom && !dom->empty())
+          reply_text += " DOM rules stay with this document.";
+      } else {
+        result->Set("kept", base::Value());
+        reply_text +=
+            " Nothing is kept: DOM rules name this document's own nodes, and no other rule is "
+            "armed.";
+      }
+      result->Set("text", reply_text);
+      // A reply that cannot say what is kept keeps nothing, so the owner never
+      // misses a scope the browser holds.
+      if (!base::JSONWriter::Write(*result, &reply) || reply.size() > kNativeConsoleReplyLimit) {
+        reply = text;
+        scope = nullptr;
+      }
+    }
+    NativeProbeSession::Get().SetDebuggerWatchScope(std::move(scope));
+    return reply;
   }
 
   void List(std::shared_ptr<Reply> reply) {
@@ -699,6 +810,8 @@ class Session final {
   // Exact document generations only; recycled oldest-first and never published.
   std::deque<std::pair<base::UnguessableToken, std::uint64_t>> documents_;
   std::uint64_t next_target_ = 1;
+  // Kept watch scope serials; never 0.
+  std::uint64_t next_scope_ = 1;
   std::size_t pending_ = 0;
   bool started_ = false;
   base::OnceClosure retired_;

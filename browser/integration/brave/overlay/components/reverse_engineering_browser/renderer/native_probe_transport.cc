@@ -9,6 +9,7 @@
 #include <atomic>
 #include <bit>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
@@ -18,6 +19,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
+#include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_probe_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_position.h"
@@ -149,6 +151,32 @@ void NativeProbeTransport::SetWasmSampleBudget(const std::vector<std::uint8_t>& 
 
 void NativeProbeTransport::ResetWasmSampleBudgets() {
   NativeProbeSink::Get().ResetNativeWasmSampleBudgets();
+}
+
+void NativeProbeTransport::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {
+  std::optional<NativeWatchScope> kept;
+  if (scope) {
+    NativeWatchScope rebuilt;
+    rebuilt.serial = scope->serial;
+    rebuilt.origin = scope->origin;
+    rebuilt.top_frame = scope->top_frame;
+    // A rule this renderer cannot hold exactly refuses the whole scope.
+    bool held = true;
+    for (const auto& rule : scope->requests) {
+      held = held && rule && rebuilt.rules.AddRequest(rule->url_contains, rule->method);
+    }
+    for (const auto& type : scope->events) {
+      held = held && rebuilt.rules.AddEvent(type);
+    }
+    rebuilt.rules.timers = scope->timers;
+    rebuilt.rules.csp = scope->csp;
+    rebuilt.rules.uncaught = scope->uncaught || scope->caught;
+    rebuilt.rules.caught = scope->caught;
+    if (held) {
+      kept = std::move(rebuilt);
+    }
+  }
+  NativeDebuggerWatch::SetScope(std::move(kept));
 }
 
 void NativeProbeTransport::Disable() {

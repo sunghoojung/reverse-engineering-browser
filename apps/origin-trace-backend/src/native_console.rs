@@ -129,6 +129,11 @@ struct Session {
     document_start_armed: bool,
     // The document and rules the renderer last confirmed armed through `watch`.
     watch: Option<(u64, Value)>,
+    // The scope the browser confirmed it keeps for later documents, and the
+    // document it was armed from. It outlives that document's navigation, so
+    // Stop clears it through an `unwatch` even when the document is gone
+    // (protocol/native-debugger-observation-v1.md).
+    kept: Option<(u64, Value)>,
     // The last live listing, which a state read reports while a command runs.
     listing: Value,
 }
@@ -235,7 +240,11 @@ impl Session {
     }
     async fn release_live_values(&mut self) -> Result<()> {
         // Watch rules outlive a listing's agent rebind, so Stop disarms them.
-        if let Some((target, _)) = self.watch.take() {
+        // The browser forgets a kept scope on any unwatch, even one whose
+        // document is gone, so the document it was armed from serves.
+        let armed = self.watch.take().map(|(target, _)| target);
+        let kept = self.kept.take().map(|(target, _)| target);
+        if let Some(target) = armed.or(kept) {
             let result = self
                 .exchange(3, target, r#"{"operation":"unwatch"}"#)
                 .await?;
@@ -561,15 +570,24 @@ impl NativeConsole {
                 json!({"contract_version":2,"available":false,"state":"idle","session_id":null,"message":error.message})
             })
     }
-    /// The confirmed watch rules, `Value::Null` when none, or `None` while an
-    /// action holds the session. Never exchanges with the browser.
+    /// The confirmed watch rules as `armed` and the scope the browser keeps
+    /// as `kept`, each null when there is none, or `None` while an action
+    /// holds the session. Never exchanges with the browser.
     pub fn watch(&self) -> Option<Value> {
         let guard = self.inner.session.try_lock().ok()?;
-        Some(guard.as_ref().map_or(Value::Null, |session| {
-            session.watch.as_ref().map_or(Value::Null, |(target, rules)| {
-                json!({"session_id": session.id, "target_id": target.to_string(), "rules": rules})
-            })
-        }))
+        let Some(session) = guard.as_ref() else {
+            return Some(json!({"armed": null, "kept": null}));
+        };
+        let armed = session.watch.as_ref().map(|(target, rules)| {
+            json!({"session_id": session.id, "target_id": target.to_string(), "rules": rules})
+        });
+        let kept = session.kept.as_ref().map(|(target, kept)| {
+            let mut kept = kept.clone();
+            kept["session_id"] = json!(session.id);
+            kept["target_id"] = json!(target.to_string());
+            kept
+        });
+        Some(json!({"armed": armed, "kept": kept}))
     }
     pub async fn document_start(&self, after: u64) -> Result<Value> {
         let inner = self.inner.clone();
@@ -1221,11 +1239,20 @@ impl Inner {
         let watch = request["command"]["operation"].as_str();
         if operation == 3 && matches!(watch, Some("watch" | "unwatch")) {
             // A refused watch leaves nothing armed (renderer/native_console_runtime.cc).
-            session.watch = result
+            let confirmed = result
                 .as_ref()
                 .ok()
-                .filter(|value| watch == Some("watch") && value["runtime"]["status"] == "ok")
-                .map(|_| (target, request["command"]["rules"].clone()));
+                .filter(|value| watch == Some("watch") && value["runtime"]["status"] == "ok");
+            session.watch = confirmed.map(|_| (target, request["command"]["rules"].clone()));
+            // The browser replaces or clears its kept scope on every confirmed
+            // watch and forgets it on any unwatch it receives; a refused watch
+            // leaves it as it was.
+            if watch == Some("unwatch") && result.is_ok() {
+                session.kept = None;
+            } else if let Some(value) = confirmed {
+                session.kept = kept_scope(&value["runtime"]["kept"], &request["command"]["rules"])
+                    .map(|kept| (target, kept));
+            }
         } else if session.watch.as_ref().map(|(armed, _)| *armed) == session.stale_target {
             session.watch = None;
         }
@@ -1468,6 +1495,7 @@ impl BridgeProcess {
             document_start: false,
             document_start_armed: false,
             watch: None,
+            kept: None,
             listing: Value::Null,
         }
     }
@@ -2019,6 +2047,18 @@ async fn wait_for_socket(path: &Path) -> bool {
     false
 }
 
+// What the browser said it keeps, with the rules it keeps: the confirmed set
+// without its DOM rules, which name one document's nodes.
+fn kept_scope(kept: &Value, rules: &Value) -> Option<Value> {
+    let origin = kept["origin"].as_str()?;
+    let frame = kept["frame"]
+        .as_str()
+        .filter(|frame| ["top", "child"].contains(frame))?;
+    let mut rules = rules.clone();
+    rules.as_object_mut()?.remove("dom");
+    Some(json!({"origin": origin, "frame": frame, "rules": rules}))
+}
+
 // Runtime inspection commands have exact fields. Source is only accepted by
 // explicit evaluation; completion never receives an executable expression.
 fn validate_command(command: &Value) -> Result<()> {
@@ -2030,12 +2070,16 @@ fn validate_command(command: &Value) -> Result<()> {
         "await" | "release" | "store" | "cancel" | "source" | "listeners" | "monitor"
         | "unmonitor" => &["operation", "handle"],
         "poll" | "clear" | "last" | "traffic" | "unwatch" => &["operation"],
+        "watch" if command.get("keep").is_some() => &["operation", "rules", "keep"],
         "watch" => &["operation", "rules"],
         _ => return Err(Error::bad("Invalid runtime operation")),
     };
     validation::fields(command, fields, "Runtime command")?;
     if operation == "watch" {
         crate::debugger_watch::validate(&command["rules"])?;
+        if command.get("keep").is_some_and(|keep| !keep.is_boolean()) {
+            return Err(Error::bad("keep must be true or false"));
+        }
     }
     if operation == "evaluate" {
         let source = validation::text(&command["source"], "JavaScript", SOURCE_LIMIT, false, true)?;
@@ -2254,7 +2298,14 @@ mod tests {
         assert!(validate_document_start(&json!([])).is_err());
         assert!(validate_document_start(&json!(script)).is_err());
         let many: Vec<Value> = (0..1000).map(|_| script.clone()).collect();
-        assert_eq!(validate_document_start(&json!(many)).unwrap().as_array().unwrap().len(), 1000);
+        assert_eq!(
+            validate_document_start(&json!(many))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1000
+        );
         let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(8 * 1024 * 1024)});
         assert!(validate_document_start(&json!([long, long])).is_ok());
         // The normalized command keeps exactly the declared rule.
@@ -2484,7 +2535,12 @@ while True:
         # The browser's per-command reply when the selected renderer's pipe drops.
         payload, kind, wire_status = b'Renderer disconnected', 0, 6
     else:
-        payload = json.dumps({'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}).encode()
+        reply = {'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}
+        # The browser says what a confirmed watch keeps, from the document's own origin.
+        command = json.loads(source) if operation == 3 else {}
+        if command.get('operation') == 'watch' and command.get('keep'):
+            reply['kept'] = {'origin':'https://same.test','frame':'top'}
+        payload = json.dumps(reply).encode()
     sys.stdout.buffer.write(response.pack(magic,version,wire_status,sequence,kind,flags,count,len(payload),0) + payload)
     sys.stdout.buffer.flush()
 "#;
@@ -2517,6 +2573,7 @@ while True:
             document_start: false,
             document_start_armed: false,
             watch: None,
+            kept: None,
             listing: Value::Null,
         };
         (session, directory)
@@ -2802,13 +2859,14 @@ while True:
             }
             json!({"action":"runtime","session_id":session,"target_id":"22","command":command})
         };
+        let none = json!({"armed": null, "kept": null});
         console.action(&watch(&identity, "watch")).await.unwrap();
         assert_eq!(
             console.watch().unwrap(),
-            json!({"session_id":identity,"target_id":"22","rules":rules})
+            json!({"armed":{"session_id":identity,"target_id":"22","rules":rules},"kept":null})
         );
         console.action(&watch(&identity, "unwatch")).await.unwrap();
-        assert_eq!(console.watch().unwrap(), Value::Null);
+        assert_eq!(console.watch().unwrap(), none);
         console.action(&watch(&identity, "watch")).await.unwrap();
         console
             .action(&json!({"action":"stop","session_id":identity}))
@@ -2821,17 +2879,57 @@ while True:
         let unwatch = sent.iter().rposition(|s| s == r#"{"operation":"unwatch"}"#);
         let clear = sent.iter().rposition(|s| s == r#"{"operation":"clear"}"#);
         assert!(unwatch.unwrap() < clear.unwrap(), "{sent:?}");
-        assert_eq!(console.watch().unwrap(), Value::Null);
+        assert_eq!(console.watch().unwrap(), none);
 
+        // A kept scope: the browser names the document's origin and frame
+        // kind, and the backend keeps the rules without their DOM rules.
         let second = connect_fixture(&console, "22").await;
-        console.action(&watch(&second, "watch")).await.unwrap();
+        let mut keep = watch(&second, "watch");
+        keep["command"]["keep"] = json!(true);
+        keep["command"]["rules"]["dom"] = json!([{"handle":"7","removal":true}]);
+        console.action(&keep).await.unwrap();
+        let kept = json!({"origin":"https://same.test","frame":"top","rules":rules,
+            "session_id":second,"target_id":"22"});
+        assert_eq!(console.watch().unwrap()["kept"], kept);
+        let mut refused = keep.clone();
+        refused["command"]["keep"] = json!("yes");
+        assert!(console.action(&refused).await.is_err());
+        // Navigation ends the document's own arm; the scope stays, and Stop
+        // still forgets it through that document.
         std::fs::write(
             directory.path().join("targets.json"),
             r#"[{"id":11,"url":"https://same.test/page"}]"#,
         )
         .unwrap();
         console.state().await;
-        assert_eq!(console.watch().unwrap(), Value::Null);
+        assert_eq!(console.watch().unwrap()["armed"], Value::Null);
+        assert_eq!(console.watch().unwrap()["kept"], kept);
+        let before = requests(&directory).len();
+        console
+            .action(&json!({"action":"stop","session_id":second}))
+            .await
+            .unwrap();
+        let after = requests(&directory);
+        assert!(
+            after[before..]
+                .iter()
+                .any(|request| request["source"] == r#"{"operation":"unwatch"}"#
+                    && request["target"] == 22),
+            "{after:?}"
+        );
+        assert_eq!(console.watch().unwrap(), none);
+
+        // A watch without keep on the same document clears the scope.
+        let third = connect_fixture(&console, "11").await;
+        let mut keep = watch(&third, "watch");
+        keep["target_id"] = json!("11");
+        keep["command"]["keep"] = json!(true);
+        console.action(&keep).await.unwrap();
+        assert_eq!(console.watch().unwrap()["kept"]["target_id"], "11");
+        keep["command"].as_object_mut().unwrap().remove("keep");
+        console.action(&keep).await.unwrap();
+        assert_eq!(console.watch().unwrap()["kept"], Value::Null);
+        assert_eq!(console.watch().unwrap()["armed"]["target_id"], "11");
         console.stop().await;
     }
     async fn arm_fixture(console: &NativeConsole, directory: &TempDir) -> String {

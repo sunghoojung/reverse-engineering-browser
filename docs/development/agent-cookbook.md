@@ -604,10 +604,14 @@ record's `stack_read`, which also scans the store's newest identities.
 `status: invalid` is a record the core refuses, with no fields.
 
 A timeout does not mean nothing happened. Rules match only the main thread of
-the document they were armed on, never a worker, another frame or a
-same-process iframe, and one document is armed at a time. A navigation clears
-them, and they cannot be armed ahead of a page load, so what a new page does
-before you arm it again is not recorded. `get_native_debugger` `watch` says
+the documents they are armed on, never a worker or a document they are not
+armed on. A navigation clears them, so what a new page does before you arm it
+again is not recorded, unless the watch kept them: add `"keep": true` beside
+`rules` and every later document of the armed document's origin and frame
+kind (top or child), in any tab, is armed before its own scripts run, so a
+reload is observed from its first script. Documents already open are not
+armed. The reply's `runtime.kept` names the origin and frame kept, or is null
+when only DOM rules were armed, since those name one document's nodes. `get_native_debugger` `watch` says
 what the renderer has armed now (`--permission ask` and up). Every match is
 recorded while the rules stay armed; only a renderer from an earlier build
 stopped after 1,024 records per capture configuration and left one

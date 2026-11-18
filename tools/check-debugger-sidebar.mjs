@@ -1011,7 +1011,7 @@ await check('watch rules state what they cannot observe', async () => {
   ui.open();
   await until(() => ui.sidebar.querySelector('.debugger-watch-limits'), 'the arming form');
   const limits = ui.text('.debugger-watch-limits');
-  for (const said of [/only this document's main thread/, /workers, other frames or same-process iframes/, /navigation clears the rules/i, /cannot be armed ahead of a page load/]) assert.match(limits, said);
+  for (const said of [/main thread of the documents it is armed on/, /never workers or other documents/, /navigation clears its rules/i, /not documents that are already open/]) assert.match(limits, said);
   assert.match(ui.text('.debugger-watch-state'), /Only its main thread is observed/);
   ui.close();
 });

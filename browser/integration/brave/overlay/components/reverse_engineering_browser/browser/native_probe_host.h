@@ -150,6 +150,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // Zeros this renderer's stream counters and asks the renderer to restart
   // sample indexes. The queue and capture epoch stay.
   void ResetWasmSampleBudgets();
+  // Sends the session's kept debugger watch scope, or its absence.
+  void SendDebuggerWatchScope();
 
  private:
   void Drain();

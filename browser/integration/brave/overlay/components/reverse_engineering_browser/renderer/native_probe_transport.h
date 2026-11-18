@@ -57,6 +57,7 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  bool capture_browser_internal = false) override;
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
+  void SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) override;
   void Disable() override;
   void NativeStackArtifactRefused(std::uint64_t creator_event_id) override;
   void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,

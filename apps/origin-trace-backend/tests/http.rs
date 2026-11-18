@@ -887,8 +887,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
     // reset_wasm_sample_budgets is the extra SessionAction. The four
     // LiveWasmAction variants are read_memory, write_memory, call_export,
     // and call_function. set_wasm_function_name is the narrow AnalystAction
-    // write of one researcher Wasm name.
-    assert_eq!(action_count, 41);
+    // write of one researcher Wasm name. NativeConsoleAction interrupt stops
+    // a running Console evaluation.
+    assert_eq!(action_count, 42);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -947,7 +948,8 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         (
             "NativeConsoleAction",
             include_str!("../src/native_console.rs"),
-            r#"action\s*(?:==|!=)\s*"([a-z_]+)""#,
+            // interrupt is answered before the action lock, from the request.
+            r#"(?:action|request\["action"\])\s*(?:==|!=)\s*"([a-z_]+)""#,
         ),
         (
             "CaptureAction",

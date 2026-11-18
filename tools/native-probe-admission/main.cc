@@ -2303,6 +2303,7 @@ int main() {
   Run<&NativeWasmExecutionOutcomes>();
   Run<&NativeJsDispatchWire>();
   Run<&NativeJsDispatchAdmission>();
+  Run<&NativeJsInvocationRevisions>();
   Run<&NativeJsInvocationAdmission>();
   Run<&NativeJsInvocationOpenStarts>();
   Run<&NativeJsInvocationHeldGaps>();

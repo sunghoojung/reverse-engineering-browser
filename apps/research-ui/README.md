@@ -2287,8 +2287,8 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 
 ## Track calls to a function
 
-To follow calls of a page function such as `window.hsw` in the next capture,
-open its captured script in **Sources** and either type the name in the
+To follow calls of a page function such as `window.hsw`, open its captured
+script in **Sources** and either type the name in the
 **Track function calls** pane of **Details** and press Return, or put the
 cursor in the function (click it, or use **Go to line**) and
 choose **Track calls** in **More**. The position must be in the original
@@ -2300,11 +2300,17 @@ bare-parameter or `async` arrow, a generator, a class constructor or a class
 initializer is refused with its reason, as is top-level code. Context lines
 and labels are captured text, inserted as text.
 
-Saving changes nothing in the open page or the running capture. The pane says
-tracking starts with the next capture: the start panel that **New Live
-Session…** opens shows "Tracking N functions" with each label and
-script URL, a Remove for each and Clear All (which asks once more), and the
-capture it starts arms a private copy of the set. The native app reads and
+Saving changes nothing in the open page. A capture the app started follows the
+saved set: the pane says it tracks a saved function at once, and a removed one
+stops recording new calls while a call already running still settles. A
+function the page compiled before it was saved is tracked after the page
+reloads. A function saved once the capture has used all 256 site slots waits
+for the next capture, and the pane says so. With a Brave built before site
+revisions the pane says tracking starts with the next capture. The start panel
+that **New Live Session…** opens shows "Tracking N functions" with each label
+and script URL, a Remove for each and Clear All (which asks once more), and
+the capture it starts arms a private copy of the set, which its backend
+rewrites as a slot table when the set changes. The native app reads and
 rewrites the saved file for the panel; a Remove names the list the panel
 showed, so a list that changed since is refused rather than edited. Content mode also records
 the calls' settled-value digests; Metadata mode does not. The titlebar names

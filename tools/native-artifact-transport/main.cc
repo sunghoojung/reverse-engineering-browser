@@ -28,6 +28,7 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_socket_client.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_socket_client.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_ipc.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 
@@ -570,6 +571,72 @@ void CheckRefusedSession(const std::string& root) {
                "connection\n";
 }
 
+// Replaced by rename, as the backend does, so a poll never reads half a file.
+void ReplaceFile(const std::string& path, const std::string& text) {
+  const std::string temporary = path + ".tmp";
+  {
+    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+    file << text;
+    Require(static_cast<bool>(file), "write " + temporary);
+  }
+  Require(std::rename(temporary.c_str(), path.c_str()) == 0, "rename " + path);
+}
+
+// The startup site file of a following capture and its generation, before
+// the session starts.
+void ConfigureLiveInvocationSites(const std::string& root) {
+  const std::string sites = root + "/js-invocation-sites.json";
+  const std::string generation = root + "/js-invocation-sites-generation";
+  ReplaceFile(sites, R"({"sites":[],"version":2})");
+  ReplaceFile(generation, "0\n");
+  auto& switches = base::CommandLine::ForCurrentProcess()->switches;
+  switches["reb-js-invocation-sites"] = sites;
+  switches["reb-js-invocation-sites-generation"] = generation;
+  reb::NativeProbeSession::Get().site_revisions.clear();
+}
+
+// A following capture's writer rereads the site file each time the backend
+// advances the generation, never for the startup, an unchanged or an older
+// generation, and hands a file it cannot read to the session as an empty
+// revision, which the session refuses with its gap.
+void CheckLiveInvocationSites(const std::string& root) {
+  const std::string sites = root + "/js-invocation-sites.json";
+  const std::string generation = root + "/js-invocation-sites-generation";
+  auto& session = reb::NativeProbeSession::Get();
+  const auto settle = [] {
+    base::SequencedTaskRunner::GetCurrentDefault()->RunUntil([] { return false; },
+                                                             std::chrono::milliseconds(800));
+  };
+  settle();
+  Require(session.site_revisions.empty(), "the startup generation is not a revision");
+  ReplaceFile(sites, "revision one");
+  ReplaceFile(generation, "1\n");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 1; }),
+          "an advanced generation rereads the site file");
+  Require(session.site_revisions[0] == "revision one", "the revision is the file as written");
+  ReplaceFile(sites, "not applied");
+  ReplaceFile(generation, "1\n");
+  settle();
+  ReplaceFile(generation, "0\n");
+  settle();
+  Require(session.site_revisions.size() == 1, "an unchanged or older generation rereads nothing");
+  ReplaceFile(sites, std::string(reb::kNativeJsInvocationSitesFileLimit + 1, ' '));
+  ReplaceFile(generation, "3\n");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 2; }),
+          "an over-limit site file is still a revision");
+  Require(session.site_revisions[1].empty(), "a file the writer cannot read is an empty revision");
+  ReplaceFile(sites, "revision four");
+  ReplaceFile(generation, "4\n");
+  Require(RunBrowserUntil([&] { return session.site_revisions.size() == 3; }) &&
+              session.site_revisions[2] == "revision four",
+          "the next generation reads again");
+  auto& switches = base::CommandLine::ForCurrentProcess()->switches;
+  switches.erase("reb-js-invocation-sites");
+  switches.erase("reb-js-invocation-sites-generation");
+  std::cout << "PASS broker writer: a following capture rereads the site file only for a newer "
+               "generation and hands an unreadable one to the session as an empty revision\n";
+}
+
 // Drops in the browser's mixed queue are reported as browser records, and the
 // end of artifact delivery is a named gap in the same stream.
 void CheckTransportGaps(const std::string& root) {
@@ -581,6 +648,7 @@ void CheckTransportGaps(const std::string& root) {
                           reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kCanvas) |
                               reb::NativeProbeCategoryMask(reb::NativeProbeCategory::kArtifact));
   ConfigureArtifactSwitches(artifact_path, root + "/token");
+  ConfigureLiveInvocationSites(root);
   Require(reb::NativeProbeSocketClient::Get().StartFromCommandLine(), "session start");
   const int artifact_connection = AcceptHello(artifact_listener);
   broker.Accept();
@@ -649,6 +717,7 @@ void CheckTransportGaps(const std::string& root) {
       }),
       "a lost artifact channel is a named gap in the event stream");
   std::cout << "PASS broker writer: a lost artifact channel becomes an artifact_channel_lost gap\n";
+  CheckLiveInvocationSites(root);
 
   broker.Disconnect();
   Require(RunBrowserUntil([] { return reb::NativeProbeSession::Get().stop_calls.load() == 1; }),

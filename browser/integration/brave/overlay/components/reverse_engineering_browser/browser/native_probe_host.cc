@@ -896,6 +896,11 @@ void NativeProbeHost::ResetWasmSampleBudgets() {
     client_->ResetWasmSampleBudgets();
 }
 
+void NativeProbeHost::UpdateJsInvocationSites(const std::vector<std::uint8_t>& records) {
+  if (client_.is_bound() && queue_)
+    client_->UpdateJsInvocationSites(records);
+}
+
 void NativeProbeHost::SendDebuggerWatchScope() {
   if (client_.is_bound())
     client_->SetDebuggerWatchScope(session_->debugger_watch_scope().Clone());

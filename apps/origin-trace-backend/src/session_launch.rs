@@ -632,9 +632,10 @@ fn with_option_names(cause: &str) -> String {
 }
 
 /// The agent's saved invocation sites, shared by the sessions agents start
-/// under this HOME and never the app's own set. Sites saved with
-/// `js_invocation_site_action` in one agent session arm the next one started
-/// with `js_invocation_saved_sites`.
+/// under this HOME and never the app's own set. A session started with
+/// `js_invocation_saved_sites` follows the sites `js_invocation_site_action`
+/// saves or removes while it runs, when its Brave follows site revisions,
+/// and every later such session starts with them.
 pub fn agent_site_store(home: &Path) -> PathBuf {
     home.join(".config/origin-trace/agent-sessions/js-invocation-sites-v1.json")
 }
@@ -668,14 +669,17 @@ fn wasm_module_allowlist_file(
     Ok(Some(path))
 }
 
-/// The site file this session arms, as a private copy nothing changes while
-/// it runs: the browser rereads the file it was given and refuses a session
-/// whose file changed. Returns the copy and how many sites it names.
+/// The site file this session arms, as a private copy. A named file is armed
+/// as it is for the whole session. The agent sessions' saved set, even an
+/// empty one, starts as that copy and the session's backend then follows the
+/// saved set, rewriting the copy as a slot table the browser applies while
+/// it runs. Returns the copy, how many sites it names, and whether the
+/// session follows the saved set.
 fn invocation_sites(
     options: &StartOptions,
     home: &Path,
     agent: &Path,
-) -> Result<Option<(PathBuf, usize)>, String> {
+) -> Result<Option<(PathBuf, usize, bool)>, String> {
     let sites = if options.js_invocation_saved_sites {
         let store = agent_site_store(home);
         let saved = js_invocation_sites::Store::new(store)
@@ -686,9 +690,6 @@ fn invocation_sites(
                     error.message
                 )
             })?;
-        if saved.is_empty() {
-            return Err("js_invocation_saved_sites names the agent's saved set, which is empty. In an agent session, resolve a function with resolve_js_invocation_site and save it with js_invocation_site_action add; it arms in the next session started with js_invocation_saved_sites.".into());
-        }
         saved.into_iter().map(|saved| saved.site).collect()
     } else if let Some(path) = &options.js_invocation_sites {
         let bytes = std::fs::read(path)
@@ -700,8 +701,12 @@ fn invocation_sites(
     } else {
         return Ok(None);
     };
-    let text = js_invocation_sites::sites_file(&sites)
-        .map_err(|_| "The invocation site set cannot be written as a site file")?;
+    let text = if sites.is_empty() {
+        js_invocation_sites::slot_table_file(&[])
+    } else {
+        js_invocation_sites::sites_file(&sites)
+    }
+    .map_err(|_| "The invocation site set cannot be written as a site file")?;
     let copy = agent.join("js-invocation-sites.json");
     crate::durable::write_private(&copy, text.as_bytes()).map_err(|error| {
         format!(
@@ -709,7 +714,7 @@ fn invocation_sites(
             error.message
         )
     })?;
-    Ok(Some((copy, sites.len())))
+    Ok(Some((copy, sites.len(), options.js_invocation_saved_sites)))
 }
 
 fn ready(log: &str) -> Option<String> {
@@ -828,7 +833,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // is visible beside what the launcher reports it passed to Brave.
         use std::io::Write;
         let mut named = options.effective();
-        if let Some((_, count)) = &armed_sites {
+        if let Some((_, count, _)) = &armed_sites {
             named["js_invocation_site_count"] = json!(count);
         }
         writeln!(&log, "Agent session options: {named}")
@@ -868,6 +873,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // without invocation capture refuses the start instead of dropping it.
         "REB_NATIVE_JS_INVOCATION_SITES",
         "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
+        "REB_NATIVE_JS_INVOCATION_LIVE",
         "REB_NATIVE_REQUEST_STACKS",
         "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
         "REB_BRAVE_BINARY",
@@ -881,7 +887,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     command
         .env("REB_LIVE_SESSION_ROOT", &sessions_root)
         .env("REB_ACTIVE_ENDPOINT_FILE", &active_endpoint)
-        // The app's saved invocation sites arm its next capture, so agent
+        // The app's saved invocation sites arm its captures, so agent
         // sessions keep their own saved set and never change the researcher's.
         .env("REB_JS_INVOCATION_SITE_STORE", agent_site_store(&home))
         .env("REB_NATIVE_WASM_DISPATCH", switch(options.wasm_dispatch))
@@ -974,8 +980,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     if let Some(path) = &options.js_dispatch_sites {
         command.env("REB_NATIVE_JS_DISPATCH_SITES", path);
     }
-    if let Some((path, _)) = &armed_sites {
+    if let Some((path, _, live)) = &armed_sites {
         command.env("REB_NATIVE_JS_INVOCATION_SITES", path);
+        if *live {
+            command.env("REB_NATIVE_JS_INVOCATION_LIVE", "1");
+        }
     }
     if let Some(path) = &brave {
         command.env("REB_BRAVE_BINARY", path);
@@ -1045,7 +1054,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
                         url_opened: None,
                         url_error: None,
                         capture_observed: None,
-                        js_invocation_sites_armed: armed_sites.as_ref().map(|(_, count)| *count),
+                        js_invocation_sites_armed: armed_sites.as_ref().map(|(_, count, _)| *count),
                     };
                 }
             }

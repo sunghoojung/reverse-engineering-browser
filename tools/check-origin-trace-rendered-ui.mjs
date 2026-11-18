@@ -112,13 +112,20 @@ try {
   const stores = await buildEvidence({root: join(temporary, 'evidence'), sessions: join(root, 'build/sessions'), ...goldenStores});
 
   const endpointFile = join(temporary, 'endpoint');
+  // The app's captures follow the saved set: each starts from a private copy,
+  // an empty slot table when nothing is saved, that the backend rewrites.
+  const sessionSites = join(temporary, 'js-invocation-session-sites.json');
+  const sessionGeneration = join(temporary, 'js-invocation-sites-generation');
+  await writeFile(sessionSites, '{"sites":[],"version":2}', {mode: 0o600});
+  await writeFile(sessionGeneration, '0\n', {mode: 0o600});
   backend = spawn(join(host, 'Contents/MacOS/OriginTraceBackend'), ['--host', '127.0.0.1', '--port', '0',
     '--endpoint-file', endpointFile, '--store', stores.store, '--trace-store', stores.traceStore,
     '--signal-store', stores.signalStore, '--artifacts', stores.artifacts, '--api-collection', stores.apiCollection,
     '--local-analyst', stores.localAnalyst, '--decoder', join(host, 'Contents/MacOS/OriginTraceDecoder'),
     // Sources and the app's start panel share one saved site set here, as
     // they share Application Support in a real app run.
-    '--js-invocation-site-store', stores.invocationSites],
+    '--js-invocation-site-store', stores.invocationSites,
+    '--js-invocation-session-sites', sessionSites, '--js-invocation-session-generation', sessionGeneration],
   {cwd: temporary, stdio: ['ignore', 'pipe', 'pipe']});
   let backendLog = '';
   for (const stream of [backend.stdout, backend.stderr]) stream.on('data', chunk => { backendLog = (backendLog + chunk).slice(-256 * 1024); });

@@ -5307,7 +5307,7 @@ details.decoder-card > header p { margin-top: 0; }
 #screen-vm .vm-selection-inspector .evidence-name-editor { padding: 8px 10px; }
 
 /* Saved JavaScript invocation sites. The header chip names what this capture
-   tracks; the Sources pane saves functions for the next capture. Context lines
+   tracks; the Sources pane saves the functions captures track. Context lines
    are captured text and wrap rather than widen the sidebar. */
 .session-tracking {
   min-width: 0; max-width: min(46vw, 420px); min-height: 20px; padding: 0 8px; overflow: hidden;

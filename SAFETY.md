@@ -62,15 +62,16 @@ it.
   receiver, return or exception contents. Captures the packaged app starts arm
   its saved site set (up to 256 functions, saved from Sources with **Track
   calls**), which the start panel lists and the titlebar names while the
-  session runs. Saving a site changes nothing in the open page or the running
-  capture; tracking starts with the next capture. Each saved site keeps its
+  session runs. Saving a site changes nothing in the open page; a running
+  capture that follows the saved set arms it at once, and any other capture
+  arms it next time. Each saved site keeps its
   script's raw source URL beside it, locally and user-only, like the artifact
   manifest. An explicit `REB_NATIVE_JS_INVOCATION_SITES`, even an empty one,
   replaces the saved set. Agent-started sessions arm invocation sites only when
   the start request names them (`js_invocation_sites`, a file the agent wrote,
   or `js_invocation_saved_sites`), never inherited, and keep their own saved
-  set, so an agent cannot read or change what the researcher's next capture
-  arms.
+  set, so an agent cannot read or change what the researcher's captures
+  arm.
 - Request call stacks (`REB_NATIVE_REQUEST_STACKS`, on by default in the
   packaged app when Network and Artifact are captured) record script IDs and
   positions of the stack that started each document or worker request or

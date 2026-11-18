@@ -9749,7 +9749,7 @@
       "get": {
         "operationId": "get_js_invocation_sites",
         "summary": "Get the saved JavaScript invocation sites",
-        "description": "The saved native-js-invocation-sites-v1 set this backend edits (at most 8), each with its label, source URL and whether this session retained the saved script version or another version the site will not match, plus session: what this session's launcher armed. In the Origin Trace app it is the app's set, armed by the app's next capture. In an agent session it is the agent sessions' own set, armed by the next start_live_session with js_invocation_saved_sites; the researcher's set is never read or changed. Saved sites never arm the open page.",
+        "description": "The saved native-js-invocation-sites-v1 set this backend edits (at most 256), each with its label, source URL, whether this capture arms it and whether this session retained the saved script version or another version the site will not match, plus session: what this capture arms. In the Origin Trace app it is the app's set; in an agent session it is the agent sessions' own set, used by start_live_session with js_invocation_saved_sites, and the researcher's set is never read or changed. A capture with session.live true follows the set: a saved site arms at once and a removed one disarms. Otherwise the set applies from the next capture. A function a page compiled before its site was armed is tracked only after the page reloads.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -10051,7 +10051,7 @@
       "post": {
         "operationId": "js_invocation_site_action",
         "summary": "Add, remove or clear saved JavaScript invocation sites",
-        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. At most 8 sites; a duplicate function is refused. Nothing changes in the open page. In the app, the app's next capture arms the set and in Content mode records settled-value digests. In an agent session it edits the agent sessions' own set, which arms only in a later start_live_session with js_invocation_saved_sites.",
+        "description": "add resolves a name or byte offset in one exact artifact on the server and saves the site (refusals save nothing and return the reason and candidates); remove deletes one site by source_sha256 and anchor_offset; clear deletes the set. At most 256 sites; a duplicate function is refused. A capture whose set.session.live is true applies the change at once: functions compiled after it record or stop recording calls, and a call in flight still settles. Otherwise the next capture arms the set. In the app, a Content-mode capture records settled-value digests. In an agent session it edits the agent sessions' own set, which a start_live_session with js_invocation_saved_sites follows.",
         "tags": [
           "js-invocation-sites"
         ],
@@ -31643,6 +31643,7 @@
                 "additionalProperties": false,
                 "required": [
                   "state",
+                  "live",
                   "count",
                   "digests"
                 ],
@@ -31656,10 +31657,15 @@
                       "unreadable"
                     ]
                   },
+                  "live": {
+                    "type": "boolean",
+                    "description": "This capture follows the saved set: js_invocation_site_action arms and disarms its functions while it runs."
+                  },
                   "count": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 8
+                    "maximum": 256,
+                    "description": "Sites armed now."
                   },
                   "digests": {
                     "type": "boolean"
@@ -41322,7 +41328,7 @@
             "type": "string",
             "minLength": 2,
             "maxLength": 4096,
-            "description": "Absolute path of a JavaScript dispatch-site file of 1 to 256 sites, 1 to 131072 bytes. Turns off code caching browser-wide for the session."
+            "description": "Absolute path of a JavaScript dispatch-site file of 1 to 256 sites, 1 to 131072 bytes. Scripts the sites name compile without code caches; other scripts keep theirs."
           },
           "quiet": {
             "type": "boolean",
@@ -41389,12 +41395,12 @@
             "type": "string",
             "minLength": 2,
             "maxLength": 4096,
-            "description": "Absolute path of a native-js-invocation-sites-v1 file (1 to 8 sites) to arm, from resolve_js_invocation_site entries. Armed from a private copy. Needs category bit 512 and a Brave with invocation capture; a Brave without it refuses the start. Not with js_invocation_saved_sites."
+            "description": "Absolute path of a native-js-invocation-sites-v1 file (1 to 256 sites) to arm, from resolve_js_invocation_site entries. Armed from a private copy for the whole session. Needs category bit 512 and a Brave with invocation capture; a Brave without it refuses the start. Not with js_invocation_saved_sites."
           },
           "js_invocation_saved_sites": {
             "type": "boolean",
             "default": false,
-            "description": "Arm the agent sessions' own saved invocation sites, saved earlier with js_invocation_site_action in an agent session. Never the Origin Trace app's saved set. Refused when that set is empty. Not with js_invocation_sites."
+            "description": "Arm the agent sessions' own saved invocation sites, even none, and follow that set while the session runs: js_invocation_site_action add and remove arm and disarm functions at once when the Brave follows site revisions (get_session_context capture_options.js_invocation.live). Never the Origin Trace app's saved set. Not with js_invocation_sites."
           },
           "js_invocation_digests": {
             "type": "boolean",
@@ -41769,11 +41775,16 @@
                 "label",
                 "source_url",
                 "session_id",
-                "retained"
+                "retained",
+                "armed_in_capture"
               ],
               "properties": {
                 "site": {
                   "$ref": "#/components/schemas/JsInvocationSite"
+                },
+                "armed_in_capture": {
+                  "type": "boolean",
+                  "description": "This capture arms the site now. False for a site saved after a capture that does not follow the set started, or saved once all 256 of a following capture's slots were used; the next capture arms it."
                 },
                 "label": {
                   "type": "string",
@@ -41838,15 +41849,19 @@
             }
           },
           "next_capture": {
-            "type": "string"
+            "type": "string",
+            "description": "When a saved change takes effect: at once in a capture that follows the set, otherwise with the next capture."
           },
           "session": {
             "type": "object",
             "additionalProperties": false,
             "required": [
               "state",
+              "live",
               "count",
               "digests",
+              "revision",
+              "revision_error",
               "sites"
             ],
             "properties": {
@@ -41859,10 +41874,27 @@
                 ],
                 "description": "What this session's launcher armed. browser_unsupported: this Brave does not define invocation capture, so the session started without the saved sites."
               },
+              "live": {
+                "type": "boolean",
+                "description": "This capture follows the saved set. Each change rewrites its site file as a slot table and Brave applies it to the running capture (protocol/native-js-invocation-v1.md#revisions)."
+              },
               "count": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 256
+                "maximum": 256,
+                "description": "Sites armed now."
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "How many slot tables this backend has published to the running capture; 0 is the table it started with."
+              },
+              "revision_error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why the last change could not be published. The capture keeps the table it last applied, and the next listing retries."
               },
               "digests": {
                 "type": "boolean",
@@ -41871,17 +41903,21 @@
               "sites": {
                 "type": "array",
                 "maxItems": 256,
-                "description": "The armed site file in order: entry n is site_slot n of this session's js_invocation records, and its source_sha256 and anchor_offset equal theirs. label comes from the saved set this backend started with, or Unlabeled function.",
+                "description": "The capture's slot table in order: entry n is site_slot n of this session's js_invocation records, and its source_sha256 and anchor_offset equal theirs. A slot keeps its site for the capture; armed false means the site was removed from the saved set, so its functions record no new calls. label comes from the saved set, or Unlabeled function.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
                     "source_sha256",
                     "anchor_offset",
+                    "armed",
                     "label",
                     "source_url"
                   ],
                   "properties": {
+                    "armed": {
+                      "type": "boolean"
+                    },
                     "source_sha256": {
                       "type": "string",
                       "pattern": "^[0-9a-f]{64}$"
@@ -42015,7 +42051,7 @@
                   "effects": [
                     "sensitive-capture"
                   ],
-                  "when": "The next capture the Origin Trace app starts runs in Content mode: it arms the saved sites and records settled-value digests of their calls unless REB_NATIVE_JS_INVOCATION_DIGESTS=0 is set."
+                  "when": "A capture the Origin Trace app runs in Content mode arms the saved sites, the running one at once when it follows the set, and records settled-value digests of their calls unless REB_NATIVE_JS_INVOCATION_DIGESTS=0 is set."
                 }
               ],
               "uncertainties": [],
@@ -42034,7 +42070,7 @@
                 },
                 {
                   "id": "set-capacity",
-                  "condition": "The saved set holds at most 8 sites and refuses a duplicate source_sha256 and anchor_offset."
+                  "condition": "The saved set holds at most 256 sites and refuses a duplicate source_sha256 and anchor_offset."
                 }
               ],
               "confirmations": [],
@@ -42090,7 +42126,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Removes one saved site and its label. A running capture keeps what it armed.",
+              "notes": "Removes one saved site and its label. A capture that follows the set stops tracking it, and a call in flight still settles; any other running capture keeps what it armed.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/app.rs",
@@ -42137,7 +42173,7 @@
                   "when": {}
                 }
               ],
-              "notes": "Deletes the saved site file and its label sidecar, including an unreadable one. A running capture keeps what it armed.",
+              "notes": "Deletes the saved site file and its label sidecar, including an unreadable one. A capture that follows the set stops tracking every site; any other running capture keeps what it armed.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/app.rs",

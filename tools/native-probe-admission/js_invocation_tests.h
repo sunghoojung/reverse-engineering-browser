@@ -1,7 +1,7 @@
 // Native JavaScript invocation identity: the real sink, transport and ring
-// with the same narrow boundaries as main.cc. The sink retains one site list
-// for the process lifetime, so every case uses kInvocationSites and the
-// changed-list refusal runs last.
+// with the same narrow boundaries as main.cc. The sink keeps each slot's site
+// for the process lifetime, so the revision case runs first, while its slots
+// are still empty, and every later case uses kInvocationSites.
 #pragma once
 
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
@@ -283,10 +283,22 @@ reb::NativeProbeEmitStatus CaptureInvocationEvent(const NativeProbeEvent& event,
   assert(sink.NativeJsInvocationEpoch() == 0 && sink.CurrentNativeJsInvocation().state == 0);
   base::test_now_ns = 100;
 
-  // The browser keeps the list fixed; a different list arms nothing.
+  // Slots keep their sites: a shorter list disarms the slots it omits...
   transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false,
                       {&queue, sizeof(queue)}, 0, {}, {},
                       InvocationRecords(std::span(kInvocationSites).first(1)), false);
+  const auto shorter = sink.NativeJsInvocationEpoch();
+  assert(shorter != 0 && sink.IsNativeJsInvocationEnabled(shorter, 0) &&
+         !sink.IsNativeJsInvocationEnabled(shorter, 1));
+  assert(sink.CopyNativeJsInvocationSites(shorter, copied) == copied.size() &&
+         copied[0] == kInvocationSites[0] && !copied[1].armed && copied[1].source_length == 0);
+  assert(Drain(queue) == 0);
+  // ...and a list that names another site at a kept slot, or is malformed,
+  // arms nothing.
+  auto moved = kInvocationSites;
+  std::swap(moved[0], moved[1]);
+  transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false,
+                      {&queue, sizeof(queue)}, 0, {}, {}, InvocationRecords(moved), false);
   assert(sink.NativeJsInvocationEpoch() == 0);
   assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
   transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false,
@@ -299,7 +311,84 @@ reb::NativeProbeEmitStatus CaptureInvocationEvent(const NativeProbeEvent& event,
                "expiry refusal, 256 sites armed but not called, 6000 starts of one site and "
                "6000 requests with no count refusal, per-site and request ordinals that restart "
                "per configuration, exact site match, digest opt-in, inside/none/unknown "
-               "requests, status and ID-exhaustion gaps and a fixed site list\n";
+               "requests, status and ID-exhaustion gaps, and slots that keep their sites\n";
+}
+
+// A revision of the running configuration arms, disarms and appends slots.
+// Ordinals, open starts and digests stay; a revision that renumbers a slot,
+// is malformed, or arrives without an invocation configuration changes
+// nothing.
+[[gnu::noinline]] void NativeJsInvocationRevisions() {
+  NativeProbeQueue queue;
+  transport.Disable();
+  sink.SetNativeJsInvocationContextProvider(&ReadInvocation);
+  // Tracking functions before any is armed: no epoch, so V8 stays inactive.
+  transport.Configure(42, reb::kAllNativeProbeCategoryMask, kForever, false,
+                      {&queue, sizeof(queue)}, 0, {}, {}, std::vector<std::uint8_t>{}, true);
+  assert(sink.NativeJsInvocationEpoch() == 0 && Drain(queue) == 0);
+  transport.UpdateJsInvocationSites(InvocationRecords(std::span(kInvocationSites).first(2)));
+  const auto epoch = sink.NativeJsInvocationEpoch();
+  const auto first = sink.NativeJsInvocationRevision(epoch);
+  assert(epoch != 0 && first != 0 && sink.NativeJsInvocationDigests(epoch));
+  assert(sink.IsNativeJsInvocationEnabled(epoch, 1) && !sink.IsNativeJsInvocationEnabled(epoch, 2));
+  assert(sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 1)));
+  assert(StartOrdinal(One(queue)) == 0);
+
+  // Slot 0 disarmed while its call is open, and a third slot appended.
+  auto table =
+      std::vector<NativeJsInvocationSite>(kInvocationSites.begin(), kInvocationSites.begin() + 3);
+  table[0].armed = false;
+  transport.UpdateJsInvocationSites(InvocationRecords(table));
+  const auto second = sink.NativeJsInvocationRevision(epoch);
+  assert(sink.NativeJsInvocationEpoch() == epoch && second > first);
+  assert(!sink.IsNativeJsInvocationEnabled(epoch, 0) && sink.IsNativeJsInvocationEnabled(epoch, 2));
+  InvocationSiteTable copied{};
+  assert(sink.CopyNativeJsInvocationSites(epoch, copied) == 3 && !copied[0].armed &&
+         copied[0].source_length == 0 && copied[2] == kInvocationSites[2]);
+  // A start V8 still reports for the disarmed slot is not recorded and is no
+  // input fault.
+  assert(!sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 2)));
+  assert(Drain(queue) == 0);
+  assert(sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(2, 3)));
+  assert(StartOrdinal(One(queue)) == 0);
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(3, true, 2));
+  assert(Drain(queue) == 1);
+  // The call opened before the revision is still open, and settles.
+  InvocationProvider::context = {1, 0, false};
+  sink.RecordNativeJsInvocationRequest(60);
+  assert(RequestOrdinal(One(queue)) == 0);
+  sink.RecordNativeJsInvocationSettle(epoch, 8, SettleFor(1, true, 0));
+  assert(One(queue).header.type == reb::NativeProbeType::kJsInvocationSettle);
+  sink.RecordNativeJsInvocationRequest(61);
+  assert(Drain(queue) == 0);
+
+  // Re-arming slot 0 continues its ordinals.
+  table[0].armed = true;
+  transport.UpdateJsInvocationSites(InvocationRecords(table));
+  assert(sink.RecordNativeJsInvocationStart(epoch, 8, StartFor(0, 4)));
+  assert(StartOrdinal(One(queue)) == 1);
+  // Renumbering a slot or a malformed revision changes nothing: one input
+  // gap for the configuration.
+  const auto armed = sink.NativeJsInvocationRevision(epoch);
+  std::swap(table[1], table[2]);
+  transport.UpdateJsInvocationSites(InvocationRecords(table));
+  assert(InvocationGap(One(queue)) == "native_js_invocation_input_unavailable");
+  transport.UpdateJsInvocationSites(std::vector<std::uint8_t>(43, 1));
+  assert(Drain(queue) == 0 && sink.NativeJsInvocationRevision(epoch) == armed);
+  assert(sink.IsNativeJsInvocationEnabled(epoch, 1) && sink.IsNativeJsInvocationEnabled(epoch, 2));
+  // A configuration that tracks no functions takes no revision.
+  Configure(queue);
+  transport.UpdateJsInvocationSites(InvocationRecords(std::span(kInvocationSites).first(3)));
+  assert(sink.NativeJsInvocationEpoch() == 0 && Drain(queue) == 0);
+  transport.Disable();
+  sink.SetNativeJsInvocationContextProvider(nullptr);
+  // The admission test that follows starts from an unread provider.
+  InvocationProvider::context = {};
+  InvocationProvider::reads = 0;
+  std::cout << "PASS native JS invocation revisions: an empty list tracks later sites, a "
+               "revision arms, disarms and appends slots of the running configuration, an open "
+               "call settles across it, ordinals continue, and a renumbering or malformed "
+               "revision changes nothing\n";
 }
 
 // The open count behind an unknown request follows recorded starts exactly:

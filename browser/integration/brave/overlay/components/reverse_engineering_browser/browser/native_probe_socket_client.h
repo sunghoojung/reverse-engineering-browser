@@ -46,6 +46,7 @@ class NativeProbeSocketClient final {
   [[nodiscard]] NativeProbeEvent MakeTransportGap(std::uint64_t dropped) const noexcept;
   void Run();
   void PollWasmBudgetReset();
+  void PollJsInvocationSites();
   void HandleDisconnect();
 
   NativeProbeQueue queue_;
@@ -62,6 +63,12 @@ class NativeProbeSocketClient final {
   // Empty means this launch has no reset file.
   std::string wasm_budget_reset_file_;
   std::uint64_t applied_wasm_budget_reset_ = 0;
+  // Written before the writer starts. Only the writer reads and advances
+  // them. An empty generation file means the startup sites stay for the
+  // session.
+  std::string js_invocation_sites_file_;
+  std::string js_invocation_generation_file_;
+  std::uint64_t applied_js_invocation_generation_ = 0;
   std::uint64_t session_id_ = 0;
   // Category of the most recent record this queue dropped. Every queued record
   // passed the session's category filter, so a gap that names it is admitted.

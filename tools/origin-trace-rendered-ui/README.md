@@ -94,8 +94,10 @@ refuse top-level code; `o.dup`, typed with native keys and Return, must be
 refused with both definitions listed and their markup-bearing context lines
 inert; `window.hsw` must be saved without matching the decoys in a string and
 a comment; and **More** > **Go to line** and **Track calls** must save the
-callback around `awb(`. The titlebar chip must read `2 functions saved for the
-next capture` in full, inside the titlebar and over no other label.
+callback around `awb(`. The harness backend follows the saved set as an app
+capture does, so saving says the capture tracks the function at once, the set
+reports both sites armed, and the titlebar chip must read `Tracking 2
+functions` in full, inside the titlebar and over no other label.
 `test18bMinifiedSourceOpensPrettyPrinted` opens a one-line source map over
 16 KiB (artifact 332). It must open pretty-printed with formatted gutter
 numbers and the original location in their tooltips, keep its colors after

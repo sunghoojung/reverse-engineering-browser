@@ -280,7 +280,7 @@
       detail = 'The saved invocation site file is not a valid site file, so this capture tracks nothing. Clear it to start again.';
     } else {
       title = 'Tracking no functions';
-      detail = 'Choose Track calls in Sources during a capture to save a function. The next capture you start tracks its calls.';
+      detail = 'Choose Track calls in Sources during the capture to save a function. The capture tracks its calls from then on in pages that compile it, and so does every later capture.';
     }
     const heading = element('h3', 'session-panel-label', title);
     heading.id = 'session-panel-sites-title';

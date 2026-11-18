@@ -74,18 +74,19 @@ void NativeProbeTransport::BindClient(
   receiver_.Bind(std::move(receiver));
 }
 
-void NativeProbeTransport::Configure(const std::uint64_t session_id,
-                                     const std::uint64_t category_mask,
-                                     const std::uint64_t expires_at_monotonic_ns,
-                                     const bool capture_canvas_images,
-                                     base::UnsafeSharedMemoryRegion queue_region,
-                                     const std::uint64_t wasm_capture_epoch,
-                                     const std::string& guest_adapter_json,
-                                     const std::vector<std::uint8_t>& js_dispatch_sites,
-                                     const std::vector<std::uint8_t>& js_invocation_sites,
-                                     const bool js_invocation_digests,
-                                     const bool capture_request_content,
-                                     const bool capture_browser_internal) {
+void NativeProbeTransport::Configure(
+    const std::uint64_t session_id,
+    const std::uint64_t category_mask,
+    const std::uint64_t expires_at_monotonic_ns,
+    const bool capture_canvas_images,
+    base::UnsafeSharedMemoryRegion queue_region,
+    const std::uint64_t wasm_capture_epoch,
+    const std::string& guest_adapter_json,
+    const std::vector<std::uint8_t>& js_dispatch_sites,
+    const std::optional<std::vector<std::uint8_t>>& js_invocation_sites,
+    const bool js_invocation_digests,
+    const bool capture_request_content,
+    const bool capture_browser_internal) {
   Disable();
   const std::uint64_t now =
       static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
@@ -130,13 +131,14 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
     NativeProbeSink::Get().ConfigureNativeJsDispatch(
         std::span<const NativeJsDispatchSite>(sites.data(), count ? count : 1));
   }
-  if (!js_invocation_sites.empty()) {
-    // As above: a malformed list is one input gap and arms nothing.
+  if (js_invocation_sites) {
+    // A malformed list arms nothing and is the configuration's input gap. An
+    // empty one tracks functions that later revisions arm.
     std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
-    const std::size_t count = DecodeNativeJsInvocationSites(js_invocation_sites, sites);
+    const auto count = DecodeNativeJsInvocationSites(*js_invocation_sites, sites);
     NativeProbeSink::Get().ConfigureNativeJsInvocation(
-        std::span<const NativeJsInvocationSite>(sites.data(), count ? count : 1),
-        js_invocation_digests);
+        std::span<const NativeJsInvocationSite>(sites.data(), count.value_or(0)),
+        js_invocation_digests, count.has_value());
   }
   // After emitters, so a jitless notice can be admitted.
   NativeProbeSink::Get().ProbeNativeWasmLimits();
@@ -151,6 +153,14 @@ void NativeProbeTransport::SetWasmSampleBudget(const std::vector<std::uint8_t>& 
 
 void NativeProbeTransport::ResetWasmSampleBudgets() {
   NativeProbeSink::Get().ResetNativeWasmSampleBudgets();
+}
+
+void NativeProbeTransport::UpdateJsInvocationSites(
+    const std::vector<std::uint8_t>& js_invocation_sites) {
+  std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> sites{};
+  const auto count = DecodeNativeJsInvocationSites(js_invocation_sites, sites);
+  NativeProbeSink::Get().UpdateNativeJsInvocationSites(
+      std::span<const NativeJsInvocationSite>(sites.data(), count.value_or(0)), count.has_value());
 }
 
 void NativeProbeTransport::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {

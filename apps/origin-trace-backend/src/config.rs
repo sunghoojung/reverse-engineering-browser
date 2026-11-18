@@ -28,7 +28,9 @@ pub struct Options {
     /// app-started capture arms. A label sidecar is kept beside it.
     #[arg(long, default_value = "build/sessions/js-invocation-sites-v1.json")]
     pub js_invocation_site_store: PathBuf,
-    /// The site file this session's launcher was asked to arm, read once.
+    /// The site file this session's launcher was asked to arm. With
+    /// `js_invocation_session_generation` this backend rewrites it as the
+    /// saved set changes; otherwise it is read once.
     #[arg(long)]
     pub js_invocation_session_sites: Option<PathBuf>,
     /// `armed`, or `browser_unsupported` when the launcher started without
@@ -38,6 +40,10 @@ pub struct Options {
     /// This session records settled-value digests of armed calls.
     #[arg(long, requires = "js_invocation_session_sites")]
     pub js_invocation_session_digests: bool,
+    /// The generation file Brave polls. Present only when this Brave follows
+    /// site revisions; then the capture follows the saved set.
+    #[arg(long, requires = "js_invocation_session_sites")]
+    pub js_invocation_session_generation: Option<PathBuf>,
     /// Labels for session context: what this session's launcher passed to
     /// Brave. They grant and enable nothing here.
     #[arg(long, requires = "socket")]
@@ -171,6 +177,7 @@ impl Options {
             &mut self.endpoint_file,
             &mut self.active_endpoint_file,
             &mut self.js_invocation_session_sites,
+            &mut self.js_invocation_session_generation,
             &mut self.wasm_budget_reset_file,
         ]
         .into_iter()

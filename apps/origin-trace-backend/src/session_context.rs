@@ -94,6 +94,7 @@ pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> 
         },
         "js_invocation": {
             "state": invocation["state"],
+            "live": invocation["live"],
             "count": invocation["count"],
             "digests": invocation["digests"],
         },

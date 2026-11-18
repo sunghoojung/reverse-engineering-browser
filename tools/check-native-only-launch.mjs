@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {readFile, access, mkdir, mkdtemp, realpath, writeFile, rm, symlink} from 'node:fs/promises';
+import {readFile, readdir, access, mkdir, mkdtemp, realpath, writeFile, rm, symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {execFileSync, spawn, spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -469,6 +469,50 @@ exec ${quote(systemGrep)} "$@"
   assert.equal(badSwitch.status, 2);
   assert.match(badSwitch.stderr, /REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1/);
   console.log('PASS saved invocation sites start without invocation capture on a Brave that lacks it; explicit sites and other flags stay strict');
+
+  // A following session needs a Brave whose invocation flag help says its
+  // armed sites are revisable; only then does the launcher write the
+  // generation Brave polls. An older Brave keeps the startup sites, and the
+  // app's empty slot table, which it would refuse, then arms nothing.
+  const revisionText = 'armed sites revisable while running';
+  const generations = async () => {
+    const found = [];
+    const entries = await readdir(at('sessions')).catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    for (const entry of entries) {
+      try { found.push(await readFile(join(at('sessions'), entry, 'js-invocation-sites-generation'), 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return found;
+  };
+  const following = {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'1', REB_NATIVE_JS_INVOCATION_LIVE:'1'};
+  const revisable = await braveApp({framework: [...allNames, 'reb_js_invocation_capture', revisionText]});
+  await rm(at('sessions'), {recursive:true, force:true});
+  const live = await launchWith(revisable.executable, following);
+  accepted(live, [...packaged, '--reb-js-invocation-capture', '--reb-js-invocation-capture'], revisable.framework);
+  assert(live.allScans.includes(`-a -q -F -e ${revisionText} ${revisable.framework}`), live.allScans.join('\n'));
+  assert.deepEqual(await generations(), ['0\n']);
+  await rm(at('sessions'), {recursive:true, force:true});
+  const fixedSites = await launchWith(withInvocation.executable, following);
+  accepted(fixedSites, [...packaged, '--reb-js-invocation-capture', '--reb-js-invocation-capture'], withInvocation.framework);
+  assert.deepEqual(await generations(), [], 'a Brave that cannot follow revisions gets no generation');
+  const emptyTable = at('empty-slot-table.json');
+  await writeFile(emptyTable, '{"sites":[],"version":2}');
+  accepted(await launchWith(withInvocation.executable, {...following, REB_NATIVE_JS_INVOCATION_SITES:emptyTable}),
+    [...packaged, '--reb-js-invocation-capture'], withInvocation.framework);
+  // Without the request, a revisable Brave is not asked for its revision text.
+  const notFollowing = await launchWith(revisable.executable, {...savedSites, REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:'1'});
+  accepted(notFollowing, [...packaged, '--reb-js-invocation-capture', '--reb-js-invocation-capture'], revisable.framework);
+  assert(!notFollowing.allScans.some(line => line.includes(revisionText)));
+  for (const [options, message] of [[{...following, REB_NATIVE_JS_INVOCATION_LIVE:'yes'}, /REB_NATIVE_JS_INVOCATION_LIVE must be 0 or 1/],
+    [{...switches.packaged, REB_NATIVE_JS_INVOCATION_LIVE:'1'}, /REB_NATIVE_JS_INVOCATION_LIVE=1 requires REB_NATIVE_JS_INVOCATION_SITES/]]) {
+    const result = await launchWith(revisable.executable, options);
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, message);
+  }
+  console.log('PASS a following session writes the revision generation only for a Brave that follows revisions; an empty slot table arms nothing on an older one');
 
   // The packaged app's request and promise stacks defaults: a Brave without
   // promise registration stacks starts with request stacks alone, and one

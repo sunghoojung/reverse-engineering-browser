@@ -210,7 +210,8 @@ enum SessionCommand {
             conflicts_with = "js_invocation_saved_sites"
         )]
         js_invocation_sites: Option<PathBuf>,
-        /// Arm the agent sessions' own saved invocation sites, never the app's.
+        /// Arm the agent sessions' own saved invocation sites, never the app's,
+        /// and follow that set while the session runs.
         #[arg(long)]
         js_invocation_saved_sites: bool,
         /// Hash settled values of armed calls (sensitive). Needs sites.

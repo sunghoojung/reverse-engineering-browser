@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -51,12 +52,13 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  std::uint64_t wasm_capture_epoch = 0,
                  const std::string& guest_adapter_json = {},
                  const std::vector<std::uint8_t>& js_dispatch_sites = {},
-                 const std::vector<std::uint8_t>& js_invocation_sites = {},
+                 const std::optional<std::vector<std::uint8_t>>& js_invocation_sites = {},
                  bool js_invocation_digests = false,
                  bool capture_request_content = false,
                  bool capture_browser_internal = false) override;
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
+  void UpdateJsInvocationSites(const std::vector<std::uint8_t>& js_invocation_sites) override;
   void SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) override;
   void Disable() override;
   void NativeStackArtifactRefused(std::uint64_t creator_event_id) override;

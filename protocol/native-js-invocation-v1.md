@@ -8,16 +8,19 @@ limit below exists, is
 
 ## Enablement
 
-Rebuild Brave with V8 patches `0011` and `0023`, Chromium patches `0021` and
-`0066` and the overlay.
+Rebuild Brave with V8 patches `0011`, `0023`, `0024` and `0025`, Chromium
+patches `0021`, `0066` and `0067` and the overlay.
 Launch a native live session with
 `REB_NATIVE_JS_INVOCATION_SITES=/absolute/path/sites.json`. The launcher adds
 `--js-flags=--reb-js-invocation-capture` and
 `--reb-js-invocation-sites=/absolute/path/sites.json`. The category mask must
-include VM (512); request records also need Network (256). The site file is
-read once per session, must be identical for the browser lifetime, and
-changing it needs a browser restart. The flag alone arms nothing, and the
-file alone emits nothing.
+include VM (512); request records also need Network (256). The browser reads
+the site file when the session starts. Records name sites by slot, so a slot
+keeps its site for the browser's lifetime: a file that renumbers a slot the
+browser has sent refuses the session, while armed flags and appended slots
+may change. With `REB_NATIVE_JS_INVOCATION_LIVE=1` the running capture also
+follows later versions of the file; see [Revisions](#revisions). The flag
+alone arms nothing, and the file alone emits nothing.
 
 `REB_NATIVE_JS_INVOCATION_DIGESTS=1` additionally passes
 `--reb-js-invocation-digests`, the session's sensitive opt-in for
@@ -26,25 +29,30 @@ prints a sensitive-capture label. Without it every settle record says
 `digest_state: not_requested`.
 
 Captures the packaged app starts arm its saved site set
-(`js-invocation-sites-v1.json` in Application Support, this exact format) from
-a private per-launch copy, with digests on in Content mode and off in
-Metadata mode; an explicit environment value wins. They also set
+(`js-invocation-sites-v1.json` in Application Support, version 1 of the format
+below) from a private per-launch copy, an empty version 2 slot table when
+nothing is saved, with digests on in Content mode and off in Metadata mode; an
+explicit environment value wins. They set `REB_NATIVE_JS_INVOCATION_LIVE=1`,
+so the capture follows the saved set, and
 `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED=1`: if the Brave's V8 image does not
 define `reb_js_invocation_capture`, the launcher starts the session without
 the sites and digests and prints `JavaScript invocation tracking:
 unavailable`, instead of refusing the session. Without that switch a missing
 flag still refuses the session. Agent-started sessions arm sites only from the
 named options `js_invocation_sites` or `js_invocation_saved_sites` (their own
-saved set, never the app's), from a private copy and without that switch;
-digests need `js_invocation_digests`. See
+saved set, never the app's, even when empty), from a private copy and without
+that switch; only `js_invocation_saved_sites` follows its set while the
+session runs. Digests need `js_invocation_digests`. See
 [live session control](http-api.md#live-session-control). The
 routes that resolve and save sites are in
 [the HTTP API](http-api.md#saved-javascript-invocation-sites).
 
 `--reb-js-invocation-capture` implies `--reb-js-dispatch-capture`, so the
 compile-path settings of
-[JavaScript dispatch capture](native-js-dispatch-v1.md#enablement) apply: no
-code cache, compilation cache or streaming, and eager source positions.
+[JavaScript dispatch capture](native-js-dispatch-v1.md#enablement) apply: a
+script that an armed invocation or dispatch site names compiles on the main
+thread without a code cache or the compilation cache and with eager source
+positions, and every other script compiles as usual.
 Functions that start at an armed site are never optimized. Workers, worklets
 and service workers are unsupported: their isolates never arm a site, and a
 Wasm or loader record on a worker thread reads as `not_observed`.
@@ -69,13 +77,71 @@ refuses any other character. The backend computes the same key when Origin
 Trace saves a site by name or position; both check
 `tools/fixtures/native-js-invocation/site-cases.json`.
 
+Version 2 is a slot table of 0 to 256 entries, each with an `armed` boolean,
+in the same canonical form with sorted keys:
+
+```json
+{"sites":[{"anchor_offset":120,"armed":false,"artifact_id":"12","artifact_sha256":"<64 lowercase hex>","byte_offset":118,"shape":"function-entry","source_length":456,"source_sha256":"<64 lowercase hex>"}],"version":2}
+```
+
+Entry n is slot n. A disarmed slot keeps its site so later slots are not
+renumbered; it records no new call. Version 1 is a slot table whose 1 to 256
+entries are all armed. The backend writes version 2 when it revises a
+following capture's file; the app's empty set starts as
+`{"sites":[],"version":2}`.
+
 The browser sends the renderer only fixed 44-byte records: `source_sha256`
-(32 bytes), `source_length` (u32), `anchor_offset` (u32), shape byte 3 and 3
-zero bytes. A dispatch record (shape 1 or 2) is refused here and a
-function-entry record is refused as a dispatch site.
+(32 bytes), `source_length` (u32), `anchor_offset` (u32), shape byte 3, a
+flags byte whose bit 0 means disarmed, and 2 zero bytes. Any other flag bit,
+a dispatch record (shape 1 or 2) here, or a function-entry record as a
+dispatch site is refused. A null record array means the session tracks no
+invocations; an empty one means it tracks with no slot yet.
 
 Generators, async generators, class constructors and class initializer
 functions are never armed; see the design for why.
+
+## Revisions
+
+A capture launched with `REB_NATIVE_JS_INVOCATION_LIVE=1` follows the saved
+set while it runs. The launcher first looks for the help text `armed sites
+revisable while running` of `reb_js_invocation_capture` in the Brave's V8
+image. A Brave without it keeps the startup sites and the launcher prints that
+saved functions apply from the next capture; an empty slot table, which such a
+Brave would refuse, then arms nothing. Otherwise the launcher creates
+`js-invocation-sites-generation` (decimal `0`) in the session directory and
+passes it to Brave as `--reb-js-invocation-sites-generation` and to the
+backend as `--js-invocation-session-generation`.
+
+Whenever the backend reads the saved set, it compares it with the capture's
+slot table. A removed site is disarmed in its slot, a saved one is armed
+again in its slot, and a new one takes the next slot; a site saved after all
+256 slots are used waits for the next capture and its saved entry says
+`armed_in_capture: false`. The backend replaces the site file with the new
+slot table and then the generation file with the next decimal, each by an
+atomic rename, so Brave never applies a generation without its table. A
+write that fails keeps the capture's table, reports `revision_error`, and is
+retried at the next listing.
+
+Brave's broker writer reads the generation on its wake of about 250 ms. A
+greater one makes it reread the site file on that thread, and the browser
+sequence sends the table to every renderer of the session
+(`UpdateJsInvocationSites`); a renderer that starts later is configured with
+it. A table that renumbers a slot or is invalid is refused with one
+`native_js_invocation_sites_revision_refused` gap and the capture keeps its
+previous table. The renderer applies a table within its configuration:
+retained slots keep their site, ordinals and open calls and take the new
+armed flag, an omitted slot is disarmed, new slots are appended, and a
+revision counter advances. A table that renumbers a slot or is malformed is
+refused with the configuration's `native_js_invocation_input_unavailable` gap.
+
+V8 reads the counter through `JsInvocationCallbacks::revision` at its next
+sync and copies the sites again without ending the epoch, so a call that
+started before a revision settles after it and keeps its invocation ID. A
+function compiled while its slot was armed records again when the slot is
+re-armed, without recompiling. A function compiled while its slot was
+disarmed or did not exist reports `compiled_before_arming`; it gains tracking
+when its page reloads, because a script an armed site names skips the code
+cache and the compilation cache.
 
 ## V8 embedder interface
 
@@ -86,7 +152,10 @@ functions are never armed; see the design for why.
 `kJsInvocationSiteLimit` is 256 (8 before patch `0023`), the most slots the
 records' one-byte site slot can name; `kJsInvocationArgumentLimit` is 8 and
 `kJsInvocationDigestByteLimit` is 1 MiB. V8 pulls the epoch (0 means
-inactive) and the sites when the epoch changes. `enabled(epoch, slot)` runs
+inactive) and the sites when the epoch changes, or when the optional
+`revision(epoch)` changes: then it copies the sites again and keeps the
+epoch's invocation IDs, so a call in flight settles under the new sites. A
+slot copied with `source_length` 0 is disarmed. `enabled(epoch, slot)` runs
 before anything is allocated for the call. `digests(epoch)` reports the
 session's opt-in. `start` returns whether the embedder recorded the call; V8
 wraps, carries and settles only a recorded call, so every recorded start has
@@ -135,6 +204,8 @@ write, and none allocates.
 | Function compiled before arming | one `gap`, `native_js_invocation_site_<n>_compiled_before_arming`, per configuration and slot |
 | Generator, constructor or initializer at the site | one `gap`, `native_js_invocation_site_<n>_unsupported_function`, per configuration and slot |
 | Renderer ring full | the ring's existing drop counter, and a missing site or request ordinal |
+| Browser refused a site revision that renumbers a slot or is invalid | one `gap`, `native_js_invocation_sites_revision_refused`, per refused revision; the capture keeps its table |
+| Renderer refused a site revision | one `gap`, `native_js_invocation_input_unavailable`, per configuration |
 
 Gaps are `vm` category events whose payload is the reason text. Version 1
 records came from builds with budgets: those builds also wrote

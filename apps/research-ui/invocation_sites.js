@@ -1,12 +1,14 @@
-/* Track calls to a JavaScript function in the next capture. The backend
- * resolves a name or a position in one exact retained artifact to one native
- * invocation site (protocol/native-js-invocation-v1.md) and saves it in the
- * app's site set, which the next capture Origin Trace starts arms. Nothing here
- * changes the open page or the running capture. Captured context lines and
- * labels are inserted as text only. */
+/* Track calls to a JavaScript function. The backend resolves a name or a
+ * position in one exact retained artifact to one native invocation site
+ * (protocol/native-js-invocation-v1.md) and saves it in the app's site set.
+ * A capture whose session says live follows the set: a saved function is
+ * armed at once and a removed one disarmed. Otherwise the next capture
+ * Origin Trace starts arms it. Nothing here changes the open page. Captured
+ * context lines and labels are inserted as text only. */
 // The backend's set document names its limit; this is every one-byte site slot.
 const INVOCATION_SITE_LIMIT = 256;
 const INVOCATION_SITE_NEXT_CAPTURE = 'Tracking starts with the next capture Origin Trace starts, not the open page: a function the page already compiled cannot gain tracking.';
+const INVOCATION_SITE_THIS_CAPTURE = 'This capture tracks a saved function at once and stops tracking a removed one. A page that compiled the function before it was saved records its calls after a reload.';
 
 // UTF-8 byte offset of a UTF-16 offset in the original text Sources shows:
 // the artifact decoded with its BOM kept. Null outside the retained text or
@@ -22,20 +24,33 @@ function invocationSitePlural(count, noun) {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+// Whether a saved change reaches the running capture.
+function invocationSiteFollows(set) {
+  return set?.session?.state === 'armed' && set.session.live === true;
+}
+
+// The capture's armed sites; a slot whose site was removed stays listed
+// by the backend with armed false.
+function invocationSiteArmed(session) {
+  return (session?.sites ?? []).filter(site => site.armed !== false);
+}
+
 // What the session header says about this capture and the saved set.
 function invocationSiteHeader(set) {
   if (!set) return null;
   const session = set.session ?? {}, saved = Number(set.count) || 0;
   const stale = (set.sites ?? []).filter(site => site.retained?.state === 'other_version').length;
+  const waiting = invocationSiteFollows(set) ? (set.sites ?? []).filter(site => site.armed_in_capture === false).length : 0;
   const labels = list => list.map(site => site.label).filter(Boolean).join(', ');
   let text = '', title = '', kind = 'armed';
-  if (session.state === 'armed') {
+  if (session.state === 'armed' && (session.count > 0 || !session.live)) {
     text = `Tracking ${invocationSitePlural(session.count, 'function')}`;
-    title = `This capture tracks calls to ${labels(session.sites ?? [])}.`;
+    title = `This capture tracks calls to ${labels(invocationSiteArmed(session))}.`;
     if (session.digests) {
       text += ' · value digests';
       title += ' Settled string and byte values of these calls are hashed (sensitive capture).';
     }
+    if (session.live) title += ' Functions you save or remove apply to this capture at once.';
   } else if (session.state === 'browser_unsupported') {
     kind = 'warning';
     text = `Not tracking ${invocationSitePlural(session.count, 'saved function')}`;
@@ -50,6 +65,11 @@ function invocationSiteHeader(set) {
     title = `This capture tracks no functions. ${INVOCATION_SITE_NEXT_CAPTURE}`;
   } else {
     return null;
+  }
+  if (waiting && session.count > 0) {
+    kind = 'warning';
+    text += ` · ${waiting} waiting`;
+    title += ` ${invocationSitePlural(waiting, 'saved function')} wait for the next capture: this one has used all ${INVOCATION_SITE_LIMIT} of its site slots.`;
   }
   if (stale) {
     kind = 'warning';
@@ -76,6 +96,7 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
     return element;
   };
   const note = node('p', INVOCATION_SITE_NEXT_CAPTURE, 'invocation-sites-note');
+  const applies = () => invocationSiteFollows(model.set) ? INVOCATION_SITE_THIS_CAPTURE : INVOCATION_SITE_NEXT_CAPTURE;
   const session = node('p', '', 'invocation-sites-session');
   const form = node('div', '', 'invocation-sites-name');
   form.setAttribute('role', 'search');
@@ -100,7 +121,7 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
   const result = node('div', '', 'invocation-sites-result');
   const heading = node('h3', '', 'invocation-sites-heading');
   const list = node('ul', '', 'invocation-sites-list');
-  list.setAttribute('aria-label', 'Functions saved for the next capture');
+  list.setAttribute('aria-label', 'Saved functions');
   const clear = button('Clear all', () => clearAll());
   clear.dataset.invocationAction = 'clear';
   root.replaceChildren(note, session, form, hint, status, result, heading, list, clear);
@@ -184,7 +205,7 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
     const where = describe(value.resolution), label = value.resolution?.label ?? '';
     // A function bound to no name is labeled by its position; say it once.
     const saved = label === `Function at ${where}` ? `the function at ${where}` : `${label} (${where})`;
-    model.status = value.added ? `Saved ${saved}. ${INVOCATION_SITE_NEXT_CAPTURE}` : value.resolution?.message ?? 'Nothing was saved.';
+    model.status = value.added ? `Saved ${saved}. ${applies()}` : value.resolution?.message ?? 'Nothing was saved.';
     render();
   }
 
@@ -203,7 +224,13 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
 
   function remove(site) {
     act({action: 'remove', source_sha256: site.site.source_sha256, anchor_offset: site.site.anchor_offset}, `Removing ${site.label}…`)
-      .then(value => { if (value) { model.status = `Removed ${site.label}. A running capture keeps what it armed.`; render(); } });
+      .then(value => {
+        if (!value) return;
+        model.status = invocationSiteFollows(model.set)
+          ? `Removed ${site.label}. This capture stops tracking it; a call already running still settles.`
+          : `Removed ${site.label}. A running capture keeps what it armed.`;
+        render();
+      });
   }
 
   function clearAll() {
@@ -249,9 +276,12 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
   function renderSession() {
     const state = model.set?.session;
     if (!state) { session.textContent = ''; return; }
-    const names = (state.sites ?? []).map(site => site.label).join(', ');
-    session.textContent = state.state === 'armed'
+    const names = invocationSiteArmed(state).map(site => site.label).join(', ');
+    const tracks = state.count > 0
       ? `This capture tracks ${names}${state.digests ? ', with settled-value digests (sensitive capture)' : ''}.`
+      : 'This capture tracks no functions yet.';
+    session.textContent = state.state === 'armed'
+      ? `${tracks}${state.revision_error ? ` ${state.revision_error}` : ''}`
       : state.state === 'browser_unsupported'
         ? `This capture tracks nothing: this Brave does not define invocation capture, so it started without ${invocationSitePlural(state.count, 'saved function')}.`
         : state.state === 'unreadable' ? 'The site file this capture was given could not be read.' : 'This capture tracks no functions.';
@@ -260,7 +290,8 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
   function renderList() {
     const sites = model.set?.sites ?? [];
     const limit = Number.isSafeInteger(model.set?.limit) && model.set.limit > 0 ? model.set.limit : INVOCATION_SITE_LIMIT;
-    heading.textContent = `Saved for the next capture (${sites.length} of ${limit})`;
+    const follows = invocationSiteFollows(model.set);
+    heading.textContent = `${follows ? 'Saved functions' : 'Saved for the next capture'} (${sites.length} of ${limit})`;
     list.replaceChildren(...sites.map(site => {
       const item = node('li', '', 'invocation-site');
       item.dataset.retained = site.retained?.state ?? 'not_retained';
@@ -278,6 +309,11 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
       } else if (retained.state === 'matches') {
         item.append(node('span', `This session retained the saved version (artifact ${retained.matching_artifact_id}).`, 'invocation-site-meta'));
       }
+      if (follows && site.armed_in_capture === false) {
+        const waiting = node('span', `Waits for the next capture: this one has used all ${limit} of its site slots.`, 'invocation-site-stale');
+        waiting.setAttribute('role', 'note');
+        item.append(waiting);
+      }
       item.append(button('Remove', () => remove(site), `Remove ${site.label}`));
       return item;
     }));
@@ -291,13 +327,16 @@ function createInvocationSitesPanel({root, chip, trackButton, getSource, positio
     clear.disabled = Boolean(unavailable) || model.busy || !(model.set?.count > 0);
     clear.textContent = model.confirmClear ? 'Confirm clear' : 'Clear all';
     status.textContent = unavailable || model.error || model.status;
+    note.textContent = applies();
     renderSession();
     renderCandidates(model.result);
     renderList();
     if (trackButton) {
       const reason = unavailable || sourceProblem || positionProblem?.() || '';
       trackButton.disabled = Boolean(reason) || model.busy;
-      trackButton.title = reason || 'Track calls to the function at the current position, starting with the next capture';
+      trackButton.title = reason || (invocationSiteFollows(model.set)
+        ? 'Track calls to the function at the current position in this capture'
+        : 'Track calls to the function at the current position, starting with the next capture');
     }
     if (chip) {
       const header = unavailable ? null : invocationSiteHeader(model.set);

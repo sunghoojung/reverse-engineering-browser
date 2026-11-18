@@ -16,10 +16,15 @@ include VM (512). The site file is read once per session, must be identical
 for the browser lifetime, and changing it needs a browser restart. The flag
 alone arms nothing, and the file alone emits nothing.
 
-While the V8 flag is set, V8 neither consumes nor produces code caches, the
-in-memory compilation cache, script streaming and the lazy compile dispatcher
-are off, and source positions are recorded eagerly. Functions that contain an
-armed site are never optimized. This mode is not performance-neutral.
+While the V8 flag is set, the lazy compile dispatcher and parallel compile
+tasks are off, so all JavaScript bytecode is generated on the main thread. Only
+a script whose text an armed site names (same UTF-16 length and SHA-256) takes
+the capture compile path: it bypasses the in-memory compilation cache, a code
+cache for it is rejected and none is produced, a streamed compile of it is
+redone on the main thread, and its source positions are recorded eagerly. Every
+other script keeps code caching, streaming, the compilation cache and lazy
+source positions. Functions that contain an armed site are never optimized, so
+an armed script is not performance-neutral.
 Workers, worklets and service workers are unsupported.
 
 ## Site file

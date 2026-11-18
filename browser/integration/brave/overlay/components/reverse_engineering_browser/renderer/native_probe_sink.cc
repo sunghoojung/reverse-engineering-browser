@@ -4272,24 +4272,48 @@ void NativeProbeSink::NoteNativeJsDispatchInputUnavailable(const std::uint64_t e
     NoteNativeJsDispatchOmission(epoch, frame_id, kNativeJsInputGap);
 }
 
+bool NativeProbeSink::MergeNativeJsInvocationSites(
+    const std::span<const NativeJsInvocationSite> sites) noexcept {
+  if (sites.size() > kNativeJsInvocationSiteLimit ||
+      !std::all_of(sites.begin(), sites.end(), IsValidNativeJsInvocationSite))
+    return false;
+  // Records name sites by slot, so a slot never names another site.
+  const auto retained = native_invocation_site_count_.load(std::memory_order_acquire);
+  const std::size_t kept = std::min(retained, sites.size());
+  for (std::size_t slot = 0; slot < kept; ++slot) {
+    if (!IsSameNativeJsInvocationSite(sites[slot], native_invocation_sites_[slot]))
+      return false;
+  }
+  for (std::size_t slot = 0; slot < sites.size(); ++slot) {
+    for (std::size_t previous = 0; previous < slot; ++previous) {
+      if (sites[previous].source_sha256 == sites[slot].source_sha256 &&
+          sites[previous].anchor_offset == sites[slot].anchor_offset)
+        return false;
+    }
+  }
+  for (std::size_t slot = 0; slot < retained; ++slot) {
+    native_invocation_armed_[slot].store(slot < sites.size() && sites[slot].armed,
+                                         std::memory_order_release);
+  }
+  for (std::size_t slot = retained; slot < sites.size(); ++slot) {
+    native_invocation_sites_[slot] = sites[slot];
+    native_invocation_sites_[slot].armed = true;
+    native_invocation_armed_[slot].store(sites[slot].armed, std::memory_order_release);
+  }
+  if (sites.size() > retained)
+    native_invocation_site_count_.store(sites.size(), std::memory_order_release);
+  native_invocation_revision_.fetch_add(1, std::memory_order_acq_rel);
+  return true;
+}
+
 void NativeProbeSink::ConfigureNativeJsInvocation(
     const std::span<const NativeJsInvocationSite> sites,
-    const bool digests) noexcept {
+    const bool digests,
+    const bool valid) noexcept {
   const auto generation = config_generation_.load(std::memory_order_acquire);
-  if (sites.empty() || generation == 0 || (generation & 1U) != 0)
+  if (generation == 0 || (generation & 1U) != 0)
     return;
-  if (sites.size() > kNativeJsInvocationSiteLimit ||
-      !std::all_of(sites.begin(), sites.end(), IsValidNativeJsInvocationSite)) {
-    NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
-    return;
-  }
-  const auto retained = native_invocation_site_count_.load(std::memory_order_acquire);
-  if (retained == 0) {
-    std::copy(sites.begin(), sites.end(), native_invocation_sites_.begin());
-    native_invocation_site_count_.store(sites.size(), std::memory_order_release);
-  } else if (retained != sites.size() ||
-             !std::equal(sites.begin(), sites.end(), native_invocation_sites_.begin())) {
-    // A changed list needs a browser restart; never retarget armed bytecode.
+  if (!valid || !MergeNativeJsInvocationSites(sites)) {
     NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
     return;
   }
@@ -4300,6 +4324,17 @@ void NativeProbeSink::ConfigureNativeJsInvocation(
   native_invocation_open_generation_.store(generation, std::memory_order_release);
   native_invocation_digest_generation_.store(digests ? generation : 0, std::memory_order_release);
   native_invocation_generation_.store(generation, std::memory_order_release);
+}
+
+void NativeProbeSink::UpdateNativeJsInvocationSites(
+    const std::span<const NativeJsInvocationSite> sites,
+    const bool valid) noexcept {
+  const auto generation = native_invocation_generation_.load(std::memory_order_acquire);
+  // Only a configuration that tracks functions takes a revision.
+  if (generation == 0 || config_generation_.load(std::memory_order_acquire) != generation)
+    return;
+  if (!valid || !MergeNativeJsInvocationSites(sites))
+    NoteNativeJsInvocationOmission(generation, 0, kInvocationInputGap);
 }
 
 bool NativeProbeSink::NativeJsInvocationActive(const std::uint64_t generation) const noexcept {
@@ -4324,6 +4359,13 @@ std::uint64_t NativeProbeSink::NativeJsInvocationEpoch() const noexcept {
   return NativeJsInvocationActive(generation) ? generation : 0;
 }
 
+std::uint64_t NativeProbeSink::NativeJsInvocationRevision(
+    const std::uint64_t epoch) const noexcept {
+  return NativeJsInvocationActive(epoch)
+             ? native_invocation_revision_.load(std::memory_order_acquire)
+             : 0;
+}
+
 std::size_t NativeProbeSink::CopyNativeJsInvocationSites(
     const std::uint64_t epoch,
     const std::span<NativeJsInvocationSite> out) const noexcept {
@@ -4331,13 +4373,19 @@ std::size_t NativeProbeSink::CopyNativeJsInvocationSites(
     return 0;
   const auto count =
       std::min(native_invocation_site_count_.load(std::memory_order_acquire), out.size());
-  std::copy_n(native_invocation_sites_.begin(), count, out.begin());
+  for (std::size_t slot = 0; slot < count; ++slot) {
+    out[slot] = native_invocation_sites_[slot];
+    out[slot].armed = native_invocation_armed_[slot].load(std::memory_order_acquire);
+    if (!out[slot].armed)
+      out[slot].source_length = 0;
+  }
   return count;
 }
 
 bool NativeProbeSink::IsNativeJsInvocationEnabled(const std::uint64_t epoch,
                                                   const std::uint32_t slot) const noexcept {
   return slot < native_invocation_site_count_.load(std::memory_order_acquire) &&
+         native_invocation_armed_[slot].load(std::memory_order_acquire) &&
          NativeJsInvocationActive(epoch);
 }
 
@@ -4419,6 +4467,10 @@ bool NativeProbeSink::RecordNativeJsInvocationStart(
   bool matches =
       frame_id != 0 && site_slot < native_invocation_site_count_.load(std::memory_order_acquire);
   if (matches) {
+    // V8 asks IsNativeJsInvocationEnabled first on this thread, and revisions
+    // arrive on it too, so a disarmed slot here is not an input fault.
+    if (!native_invocation_armed_[site_slot].load(std::memory_order_acquire))
+      return false;
     const auto& site = native_invocation_sites_[site_slot];
     matches = payload.source_length == site.source_length &&
               payload.anchor_offset == site.anchor_offset &&

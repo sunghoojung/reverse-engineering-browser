@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include "native_probe_event.h"
@@ -31,6 +32,8 @@ inline constexpr std::size_t kNativeJsInvocationPayloadSize = 128;
 inline constexpr std::uint32_t kNativeJsInvocationDigestByteLimit = 1U << 20U;
 // The site record's shape byte. Dispatch sites use 1 and 2.
 inline constexpr std::uint8_t kNativeJsInvocationFunctionEntryShape = 3;
+// The site record's flags byte: the slot keeps its site but arms nothing.
+inline constexpr std::uint8_t kNativeJsInvocationSiteDisarmed = 1U << 0U;
 
 enum class NativeJsInvocationValueKind : std::uint8_t {
   kInteger = 1,
@@ -110,15 +113,24 @@ struct NativeJsInvocationContext final {
 };
 using NativeJsInvocationContextProvider = NativeJsInvocationContext (*)() noexcept;
 
-// One armed function-entry site, keyed exactly like a dispatch site: SHA-256
-// over the script text as UTF-16LE code units, its UTF-16 length, and the
-// UTF-16 offset of the function's V8 start position.
+// One function-entry site, keyed exactly like a dispatch site: SHA-256 over
+// the script text as UTF-16LE code units, its UTF-16 length, and the UTF-16
+// offset of the function's V8 start position. A slot keeps its site for the
+// browser lifetime; `armed` is what a site file revision changes.
 struct NativeJsInvocationSite final {
   std::array<std::uint8_t, 32> source_sha256{};
   std::uint32_t source_length = 0;
   std::uint32_t anchor_offset = 0;
+  bool armed = true;
   friend bool operator==(const NativeJsInvocationSite&, const NativeJsInvocationSite&) = default;
 };
+
+[[nodiscard]] constexpr bool IsSameNativeJsInvocationSite(
+    const NativeJsInvocationSite& a,
+    const NativeJsInvocationSite& b) noexcept {
+  return a.source_sha256 == b.source_sha256 && a.source_length == b.source_length &&
+         a.anchor_offset == b.anchor_offset;
+}
 
 [[nodiscard]] constexpr bool IsValidNativeJsInvocationSite(
     const NativeJsInvocationSite& site) noexcept {
@@ -437,7 +449,7 @@ static_assert(offsetof(NativeJsInvocationRequestPayload, reserved) == 16);
 }
 
 // Fixed 44-byte renderer site records, the dispatch site layout with shape 3:
-// sha256, length, anchor, shape, 3 zero bytes.
+// sha256, length, anchor, shape, flags (bit 0 disarmed), 2 zero bytes.
 [[nodiscard]] inline std::array<std::uint8_t, kNativeJsInvocationSiteRecordSize>
 EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
   std::array<std::uint8_t, kNativeJsInvocationSiteRecordSize> out{};
@@ -447,17 +459,19 @@ EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
     out[36 + i] = static_cast<std::uint8_t>((site.anchor_offset >> (8U * i)) & 255U);
   }
   out[40] = kNativeJsInvocationFunctionEntryShape;
+  out[41] = site.armed ? 0 : kNativeJsInvocationSiteDisarmed;
   return out;
 }
 
-// Decodes 1 to 256 records into out and returns the count, or 0 when any record
-// is malformed or a (source_sha256, anchor_offset) key repeats.
-[[nodiscard]] inline std::size_t DecodeNativeJsInvocationSites(
+// Decodes 1 to 256 records into out and returns the count, or nullopt when any
+// record is malformed or a (source_sha256, anchor_offset) key repeats. A
+// session that tracks functions but has armed none yet sends no records.
+[[nodiscard]] inline std::optional<std::size_t> DecodeNativeJsInvocationSites(
     std::span<const std::uint8_t> bytes,
     std::span<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> out) noexcept {
-  if (bytes.empty() || bytes.size() % kNativeJsInvocationSiteRecordSize != 0 ||
+  if (bytes.size() % kNativeJsInvocationSiteRecordSize != 0 ||
       bytes.size() / kNativeJsInvocationSiteRecordSize > kNativeJsInvocationSiteLimit)
-    return 0;
+    return std::nullopt;
   const std::size_t count = bytes.size() / kNativeJsInvocationSiteRecordSize;
   for (std::size_t n = 0; n < count; ++n) {
     const auto record =
@@ -468,13 +482,15 @@ EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
       site.source_length |= static_cast<std::uint32_t>(record[32 + i]) << (8U * i);
       site.anchor_offset |= static_cast<std::uint32_t>(record[36 + i]) << (8U * i);
     }
-    if (record[40] != kNativeJsInvocationFunctionEntryShape || record[41] || record[42] ||
-        record[43] || !IsValidNativeJsInvocationSite(site))
-      return 0;
+    if (record[40] != kNativeJsInvocationFunctionEntryShape ||
+        (record[41] & ~kNativeJsInvocationSiteDisarmed) != 0 || record[42] || record[43] ||
+        !IsValidNativeJsInvocationSite(site))
+      return std::nullopt;
+    site.armed = record[41] == 0;
     for (std::size_t previous = 0; previous < n; ++previous)
       if (out[previous].source_sha256 == site.source_sha256 &&
           out[previous].anchor_offset == site.anchor_offset)
-        return 0;
+        return std::nullopt;
     out[n] = site;
   }
   return count;

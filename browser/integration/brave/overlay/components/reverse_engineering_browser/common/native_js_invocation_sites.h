@@ -5,6 +5,7 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_JS_INVOCATION_SITES_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_COMMON_NATIVE_JS_INVOCATION_SITES_H_
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -13,37 +14,49 @@
 #include "native_js_dispatch_sites.h"
 #include "native_js_invocation.h"
 namespace reb {
-// Parses native-js-invocation-sites-v1 (protocol/native-js-invocation-v1.md):
-// the native-js-dispatch-sites-v1 form with every shape "function-entry",
-// exact compact canonical JSON, 1 to 256 unique sites. Returns the fixed 44-byte
-// renderer records, or an empty vector for any refusal. Provenance fields are
-// validated for format and not used for matching.
-inline std::vector<std::uint8_t> ParseNativeJsInvocationSites(std::string_view json) {
+// Parses a native JavaScript invocation site file
+// (protocol/native-js-invocation-v1.md#site-file): exact compact canonical
+// JSON in one of two versions, each site's shape "function-entry" and each
+// (source_sha256, anchor_offset) unique. Version 1 is native-js-dispatch-sites-v1
+// with 1 to 256 sites, all armed. Version 2 is a slot table of 0 to 256 sites,
+// each with an `armed` boolean, so a revision can disarm a slot without
+// renumbering the others. Returns the sites by slot, or nullopt for any
+// refusal. Provenance fields are validated for format and not used for
+// matching.
+inline std::optional<std::vector<NativeJsInvocationSite>> ParseNativeJsInvocationSiteList(
+    std::string_view json) {
   using namespace native_js_dispatch_sites_detail;
   if (json.empty() || json.size() > kNativeJsInvocationSitesFileLimit)
-    return {};
+    return std::nullopt;
   const auto parsed = base::JSONReader::Read(json, base::JSON_PARSE_RFC);
   if (!parsed || !parsed->is_dict())
-    return {};
+    return std::nullopt;
   std::string canonical;
   if (!base::JSONWriter::Write(*parsed, &canonical) || canonical != json)
-    return {};
+    return std::nullopt;
   const auto& dict = parsed->GetDict();
-  if (!Keys(dict, {"sites", "version"}) || dict.FindInt("version") != 1)
-    return {};
+  const auto version = dict.FindInt("version");
+  if (!Keys(dict, {"sites", "version"}) || (version != 1 && version != 2))
+    return std::nullopt;
+  const bool slot_table = version == 2;
   const auto* list = dict.FindList("sites");
-  if (!list || list->empty() || list->size() > kNativeJsInvocationSiteLimit)
-    return {};
+  if (!list || (!slot_table && list->empty()) || list->size() > kNativeJsInvocationSiteLimit)
+    return std::nullopt;
   std::vector<NativeJsInvocationSite> sites;
   for (const auto& entry : *list) {
     const auto* site_dict = entry.GetIfDict();
-    if (!site_dict || !Keys(*site_dict, {"anchor_offset", "artifact_id", "artifact_sha256",
-                                         "byte_offset", "shape", "source_length", "source_sha256"}))
-      return {};
+    if (!site_dict ||
+        !(slot_table
+              ? Keys(*site_dict, {"anchor_offset", "armed", "artifact_id", "artifact_sha256",
+                                  "byte_offset", "shape", "source_length", "source_sha256"})
+              : Keys(*site_dict, {"anchor_offset", "artifact_id", "artifact_sha256", "byte_offset",
+                                  "shape", "source_length", "source_sha256"})))
+      return std::nullopt;
     NativeJsInvocationSite site;
     std::uint32_t byte_offset = 0;
     const auto* shape = site_dict->FindString("shape");
-    if (!shape || *shape != "function-entry" ||
+    const auto armed = slot_table ? site_dict->FindBool("armed") : std::optional<bool>(true);
+    if (!shape || *shape != "function-entry" || !armed ||
         !U32(*site_dict, "anchor_offset", site.anchor_offset) ||
         !U32(*site_dict, "source_length", site.source_length) ||
         !U32(*site_dict, "byte_offset", byte_offset) ||
@@ -51,13 +64,20 @@ inline std::vector<std::uint8_t> ParseNativeJsInvocationSites(std::string_view j
         !Sha256(site_dict->FindString("artifact_sha256"), nullptr) ||
         !Sha256(site_dict->FindString("source_sha256"), &site.source_sha256) ||
         !IsValidNativeJsInvocationSite(site))
-      return {};
+      return std::nullopt;
+    site.armed = *armed;
     for (const auto& previous : sites)
       if (previous.source_sha256 == site.source_sha256 &&
           previous.anchor_offset == site.anchor_offset)
-        return {};
+        return std::nullopt;
     sites.push_back(site);
   }
+  return sites;
+}
+
+// The fixed 44-byte renderer records of sites, one per slot.
+inline std::vector<std::uint8_t> EncodeNativeJsInvocationSites(
+    const std::vector<NativeJsInvocationSite>& sites) {
   std::vector<std::uint8_t> records;
   records.reserve(sites.size() * kNativeJsInvocationSiteRecordSize);
   for (const auto& site : sites) {
@@ -65,6 +85,15 @@ inline std::vector<std::uint8_t> ParseNativeJsInvocationSites(std::string_view j
     records.insert(records.end(), record.begin(), record.end());
   }
   return records;
+}
+
+// The renderer records of a site file, or nullopt for any refusal.
+inline std::optional<std::vector<std::uint8_t>> ParseNativeJsInvocationSites(
+    std::string_view json) {
+  const auto sites = ParseNativeJsInvocationSiteList(json);
+  if (!sites)
+    return std::nullopt;
+  return EncodeNativeJsInvocationSites(*sites);
 }
 }  // namespace reb
 #endif

@@ -1,7 +1,8 @@
-//! Native JavaScript invocation sites: the site key, the app's saved set, and
-//! resolving a name or a position in a retained artifact to exactly one site.
-//! The wire and file contract is protocol/native-js-invocation-v1.md; why the
-//! app saves sites for its next capture is in docs/product/native-js-invocation-v1.md.
+//! Native JavaScript invocation sites: the site key, the app's saved set, the
+//! slot table a live capture follows, and resolving a name or a position in a
+//! retained artifact to exactly one site. The wire and file contract is
+//! protocol/native-js-invocation-v1.md; why the app saves sites and how a
+//! capture follows them is in docs/product/native-js-invocation-v1.md.
 //!
 //! A site is computed exactly as tools/native-js-invocation-site.py computes
 //! it. Both read tools/fixtures/native-js-invocation/site-cases.json, so the
@@ -30,6 +31,7 @@ const LABELS_LIMIT: usize = SITE_LIMIT * (2 * URL_BYTES + 4096);
 const CONTEXT_CHARS: usize = 60;
 const CANDIDATE_LIMIT: usize = 32;
 const NEXT_CAPTURE: &str = "Tracking starts with the next capture Origin Trace starts, not the open page: a function compiled before its site is armed cannot gain tracking.";
+const THIS_CAPTURE: &str = "This capture arms a saved function at once and stops tracking a removed one. A page that compiled the function before it was saved records its calls after a reload.";
 
 /// One `native-js-invocation-sites-v1` entry with shape `function-entry`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +57,12 @@ impl Site {
             self.source_length,
             self.source_sha256
         )
+    }
+    /// The version 2 slot entry: `armed` sorts after `anchor_offset`.
+    fn canonical_slot(&self, armed: bool) -> String {
+        let canonical = self.canonical();
+        let anchor = format!(r#"{{"anchor_offset":{},"#, self.anchor_offset);
+        format!(r#"{anchor}"armed":{armed},{}"#, &canonical[anchor.len()..])
     }
     pub fn value(&self) -> Value {
         serde_json::from_str(&self.canonical()).expect("canonical site JSON")
@@ -183,6 +191,32 @@ pub fn sites_file(sites: &[Site]) -> std::result::Result<String, SiteError> {
     Ok(text)
 }
 
+/// The exact version 2 slot table for 0 to 256 distinct sites, each with
+/// whether it is armed. A slot keeps its site for the browser's lifetime, so
+/// a revision disarms a removed site instead of renumbering the others.
+pub fn slot_table_file(slots: &[(Site, bool)]) -> std::result::Result<String, SiteError> {
+    if slots.len() > SITE_LIMIT {
+        return Err(SiteError::Count);
+    }
+    for (index, (site, _)) in slots.iter().enumerate() {
+        if slots[..index]
+            .iter()
+            .any(|(prior, _)| prior.same_function(site))
+        {
+            return Err(SiteError::Duplicate);
+        }
+    }
+    let entries = slots
+        .iter()
+        .map(|(site, armed)| site.canonical_slot(*armed))
+        .collect::<Vec<_>>();
+    let text = format!(r#"{{"sites":[{}],"version":2}}"#, entries.join(","));
+    if text.len() > FILE_LIMIT {
+        return Err(SiteError::FileSize);
+    }
+    Ok(text)
+}
+
 fn keys(object: &Map<String, Value>, expected: &[&str]) -> bool {
     object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
 }
@@ -190,21 +224,33 @@ fn keys(object: &Map<String, Value>, expected: &[&str]) -> bool {
 /// Accepts exactly what the browser accepts: canonical text, 1 to 256
 /// distinct valid `function-entry` sites.
 pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
+    let (version, slots) = parse_entries(text)?;
+    (version == 1).then(|| slots.into_iter().map(|(site, _)| site).collect())
+}
+
+/// A version 1 file, every site armed, or a version 2 slot table, each in
+/// exactly the canonical form the browser accepts.
+pub fn parse_slot_table(text: &str) -> Option<Vec<(Site, bool)>> {
+    parse_entries(text).map(|(_, slots)| slots)
+}
+
+fn parse_entries(text: &str) -> Option<(u64, Vec<(Site, bool)>)> {
     if text.is_empty() || text.len() > FILE_LIMIT {
         return None;
     }
     let value: Value = serde_json::from_str(text).ok()?;
     let object = value.as_object()?;
-    if !keys(object, &["sites", "version"]) || object["version"] != 1 {
+    let version = object.get("version").and_then(Value::as_u64)?;
+    if !keys(object, &["sites", "version"]) || !(1..=2).contains(&version) {
         return None;
     }
     let u32_field = |entry: &Map<String, Value>, key: &str| {
         entry[key].as_u64().and_then(|n| u32::try_from(n).ok())
     };
-    let mut sites = Vec::new();
+    let mut slots = Vec::new();
     for entry in object["sites"].as_array()? {
         let entry = entry.as_object()?;
-        let fields = [
+        let mut fields = vec![
             "anchor_offset",
             "artifact_id",
             "artifact_sha256",
@@ -213,9 +259,17 @@ pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
             "source_length",
             "source_sha256",
         ];
+        if version == 2 {
+            fields.push("armed");
+        }
         if !keys(entry, &fields) || entry["shape"] != "function-entry" {
             return None;
         }
+        let armed = if version == 2 {
+            entry["armed"].as_bool()?
+        } else {
+            true
+        };
         let site = Site {
             anchor_offset: u32_field(entry, "anchor_offset")?,
             artifact_id: entry["artifact_id"]
@@ -236,9 +290,20 @@ pub fn parse_sites_file(text: &str) -> Option<Vec<Site>> {
         if site.source_length == 0 || site.anchor_offset >= site.source_length {
             return None;
         }
-        sites.push(site);
+        slots.push((site, armed));
     }
-    (sites_file(&sites).ok()? == text).then_some(sites)
+    let canonical = if version == 1 {
+        sites_file(
+            &slots
+                .iter()
+                .map(|(site, _)| site.clone())
+                .collect::<Vec<_>>(),
+        )
+        .ok()?
+    } else {
+        slot_table_file(&slots).ok()?
+    };
+    (canonical == text).then_some((version, slots))
 }
 
 /// A saved site and what the researcher needs to recognize it.
@@ -459,71 +524,205 @@ impl Store {
     }
 }
 
-/// What this session's launcher armed, read once when the backend starts.
+/// One slot of the session's table: the site it keeps for the browser's
+/// lifetime, its saved label, and whether it is armed now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Slot {
+    saved: Saved,
+    armed: bool,
+}
+
+/// Where a live session publishes slot tables: the site file Brave was given
+/// and the generation file Brave polls for a newer table.
+struct Live {
+    sites: PathBuf,
+    generation: PathBuf,
+}
+
+#[derive(Default)]
+struct Slots {
+    table: Vec<Slot>,
+    generation: u64,
+    error: Option<String>,
+}
+
+/// What this session's launcher armed. A live session also follows the saved
+/// set: each change it sees rewrites the site file as a slot table and
+/// advances the generation, and Brave applies it to the running capture.
 pub struct Session {
     pub state: &'static str,
-    pub sites: Vec<Saved>,
     pub digests: bool,
+    live: Option<Live>,
+    slots: Mutex<Slots>,
 }
 
 impl Session {
-    pub fn read(path: Option<&Path>, state: Option<&str>, digests: bool, store: &Store) -> Self {
-        let Some(path) = path else {
-            return Self {
-                state: "not_armed",
-                sites: Vec::new(),
-                digests: false,
-            };
+    pub fn read(
+        path: Option<&Path>,
+        state: Option<&str>,
+        digests: bool,
+        generation: Option<&Path>,
+        store: &Store,
+    ) -> Self {
+        let empty = |state| Self {
+            state,
+            digests: false,
+            live: None,
+            slots: Mutex::new(Slots::default()),
         };
-        let sites = durable::read_private(path, FILE_LIMIT)
+        let Some(path) = path else {
+            return empty("not_armed");
+        };
+        let slots = durable::read_private(path, FILE_LIMIT)
             .ok()
             .flatten()
             .and_then(|bytes| String::from_utf8(bytes).ok())
-            .and_then(|text| parse_sites_file(&text));
-        let Some(sites) = sites else {
-            return Self {
-                state: "unreadable",
-                sites: Vec::new(),
-                digests: false,
-            };
+            .and_then(|text| parse_slot_table(&text));
+        let Some(slots) = slots else {
+            return empty("unreadable");
         };
         let saved = store.load().unwrap_or_default();
         let browser_unsupported = state == Some("browser_unsupported");
-        Self {
+        let session = Self {
             state: if browser_unsupported {
                 "browser_unsupported"
             } else {
                 "armed"
             },
-            sites: sites
-                .into_iter()
-                .map(|site| {
-                    saved
-                        .iter()
-                        .find(|prior| prior.site.same_function(&site))
-                        .cloned()
-                        .unwrap_or(Saved {
-                            site,
-                            label: "Unlabeled function".into(),
-                            source_url: None,
-                            session_id: None,
-                        })
-                })
-                .collect(),
             digests: digests && !browser_unsupported,
+            live: generation
+                .filter(|_| !browser_unsupported)
+                .map(|generation| Live {
+                    sites: path.to_owned(),
+                    generation: generation.to_owned(),
+                }),
+            slots: Mutex::new(Slots {
+                table: slots
+                    .into_iter()
+                    .map(|(site, armed)| Slot {
+                        saved: saved
+                            .iter()
+                            .find(|prior| prior.site.same_function(&site))
+                            .cloned()
+                            .unwrap_or(Saved {
+                                site,
+                                label: "Unlabeled function".into(),
+                                source_url: None,
+                                session_id: None,
+                            }),
+                        armed,
+                    })
+                    .collect(),
+                ..Slots::default()
+            }),
+        };
+        session.follow(&saved);
+        session
+    }
+
+    /// Whether a saved change applies to this capture or the next one.
+    pub fn applies(&self) -> &'static str {
+        if self.live.is_some() {
+            THIS_CAPTURE
+        } else {
+            NEXT_CAPTURE
         }
     }
 
+    /// Makes a live session's slot table follow the saved set: a removed site
+    /// disarms its slot, a saved site arms its slot again, and a new one takes
+    /// the next free slot. Once all 256 slots are used, a new site waits for
+    /// the next capture. The site file is replaced before the generation
+    /// advances, so Brave never applies a generation without its table. A
+    /// failed write keeps the table Brave has and is reported in `value`.
+    pub fn follow(&self, saved: &[Saved]) {
+        let Some(live) = &self.live else {
+            return;
+        };
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let mut table = slots.table.clone();
+        for slot in &mut table {
+            let current = saved
+                .iter()
+                .find(|prior| prior.site.same_function(&slot.saved.site));
+            slot.armed = current.is_some();
+            if let Some(current) = current {
+                // The slot keeps the site Brave has; only its labels follow.
+                slot.saved = Saved {
+                    site: slot.saved.site.clone(),
+                    ..current.clone()
+                };
+            }
+        }
+        for current in saved {
+            if table.len() < SITE_LIMIT
+                && !table
+                    .iter()
+                    .any(|slot| slot.saved.site.same_function(&current.site))
+            {
+                table.push(Slot {
+                    saved: current.clone(),
+                    armed: true,
+                });
+            }
+        }
+        let browser = |table: &[Slot]| {
+            table
+                .iter()
+                .map(|slot| (slot.saved.site.clone(), slot.armed))
+                .collect::<Vec<_>>()
+        };
+        let revised = browser(&table);
+        if revised == browser(&slots.table) {
+            slots.table = table;
+            return;
+        }
+        let next = slots.generation + 1;
+        let written = slot_table_file(&revised)
+            .map_err(|_| Error::new(500, "The slot table could not be written"))
+            .and_then(|text| durable::write_private(&live.sites, text.as_bytes()))
+            .and_then(|()| {
+                durable::write_private(&live.generation, format!("{next}\n").as_bytes())
+            });
+        match written {
+            Ok(()) => {
+                slots.table = table;
+                slots.generation = next;
+                slots.error = None;
+            }
+            Err(error) => {
+                slots.error = Some(format!(
+                    "This capture could not follow the saved functions: {}",
+                    error.message
+                ));
+            }
+        }
+    }
+
+    /// Whether this capture's table arms the site now.
+    fn arms(&self, site: &Site) -> bool {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots
+            .table
+            .iter()
+            .any(|slot| slot.armed && slot.saved.site.same_function(site))
+    }
+
     pub fn value(&self) -> Value {
+        let slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         json!({
             "state": self.state,
-            "count": self.sites.len(),
+            "live": self.live.is_some(),
+            "count": slots.table.iter().filter(|slot| slot.armed).count(),
             "digests": self.digests,
-            "sites": self.sites.iter().map(|saved| json!({
-                "source_sha256": saved.site.source_sha256,
-                "anchor_offset": saved.site.anchor_offset,
-                "label": saved.label,
-                "source_url": saved.source_url,
+            "revision": slots.generation,
+            "revision_error": slots.error,
+            "sites": slots.table.iter().map(|slot| json!({
+                "source_sha256": slot.saved.site.source_sha256,
+                "anchor_offset": slot.saved.site.anchor_offset,
+                "armed": slot.armed,
+                "label": slot.saved.label,
+                "source_url": slot.saved.source_url,
             })).collect::<Vec<_>>(),
         })
     }
@@ -580,9 +779,10 @@ pub fn set_document(saved: &[Saved], retained: Vec<Value>, session: &Session) ->
         "sites": saved.iter().zip(retained).map(|(saved, retained)| {
             let mut value = saved.value();
             value["retained"] = retained;
+            value["armed_in_capture"] = json!(session.arms(&saved.site));
             value
         }).collect::<Vec<_>>(),
-        "next_capture": NEXT_CAPTURE,
+        "next_capture": session.applies(),
         "session": session.value(),
     })
 }
@@ -848,6 +1048,7 @@ pub fn resolution(
     response: &Value,
     requested_label: Option<&str>,
     saved: &[Saved],
+    applies: &str,
 ) -> Result<Value> {
     let mut document = json!({
         "format": "reb-js-invocation-site-resolution-v1",
@@ -864,7 +1065,7 @@ pub fn resolution(
         "site": Value::Null,
         "label": Value::Null,
         "saved": false,
-        "next_capture": NEXT_CAPTURE,
+        "next_capture": applies,
     });
     let refuse = |document: &mut Value, reason: &str, message: String| {
         document["reason"] = json!(reason);
@@ -974,7 +1175,7 @@ pub fn resolution(
     };
     document["status"] = json!("resolved");
     document["message"] = json!(format!(
-        "Resolved to the function at line {}, column {}. {NEXT_CAPTURE}",
+        "Resolved to the function at line {}, column {}. {applies}",
         function["line"], function["column"]
     ));
     document["saved"] = json!(saved.iter().any(|prior| prior.site.same_function(&site)));
@@ -1078,6 +1279,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_slot_table_keeps_slot_order_and_is_accepted_only_in_canonical_form() {
+        let fixture = fixture();
+        let file = fixture["files"][0]["file"].as_str().unwrap();
+        let sites = parse_sites_file(file).unwrap();
+        // Version 1 is a table whose slots are all armed.
+        assert_eq!(
+            parse_slot_table(file).unwrap(),
+            sites
+                .iter()
+                .map(|site| (site.clone(), true))
+                .collect::<Vec<_>>()
+        );
+        let slots = sites
+            .iter()
+            .enumerate()
+            .map(|(index, site)| (site.clone(), index % 2 == 1))
+            .collect::<Vec<_>>();
+        let table = slot_table_file(&slots).unwrap();
+        assert!(table.ends_with(r#"],"version":2}"#));
+        assert!(table.starts_with(r#"{"sites":[{"anchor_offset":"#));
+        assert!(table.contains(r#","armed":false,"artifact_id":"#));
+        assert_eq!(parse_slot_table(&table).unwrap(), slots);
+        // A slot table is not a version 1 file, and the empty table is valid.
+        assert!(parse_sites_file(&table).is_none());
+        assert_eq!(slot_table_file(&[]).unwrap(), r#"{"sites":[],"version":2}"#);
+        assert_eq!(
+            parse_slot_table(r#"{"sites":[],"version":2}"#),
+            Some(Vec::new())
+        );
+        assert!(parse_slot_table(r#"{"sites":[],"version":1}"#).is_none());
+        let pretty =
+            serde_json::to_string_pretty(&serde_json::from_str::<Value>(&table).unwrap()).unwrap();
+        for bad in [
+            pretty.as_str(),
+            &table.replacen("\"armed\":false", "\"armed\":0", 1),
+            &table.replacen(",\"armed\":false", "", 1),
+            &table.replace("\"version\":2", "\"version\":3"),
+            &file.replace("\"version\":1", "\"version\":2"),
+        ] {
+            assert!(parse_slot_table(bad).is_none(), "{bad}");
+        }
+        let duplicate = [slots[0].clone(), (slots[0].0.clone(), false)];
+        assert_eq!(slot_table_file(&duplicate), Err(SiteError::Duplicate));
+    }
+
     fn saved(index: u32) -> Saved {
         Saved {
             site: Site {
@@ -1171,7 +1418,8 @@ mod tests {
         let target = Target::Name("window.hsw".into());
         let response = worker(source, &target);
         validate_worker(raw, &target, &response).unwrap();
-        let document = resolution(raw, &artifact, &target, &response, None, &[]).unwrap();
+        let document =
+            resolution(raw, &artifact, &target, &response, None, &[], NEXT_CAPTURE).unwrap();
         assert_eq!(document["status"], "resolved", "{document}");
         assert_eq!(document["label"], "window.hsw");
         let anchor = source.find("(aGh").unwrap();
@@ -1202,6 +1450,7 @@ mod tests {
             &response,
             Some("hsw entry"),
             std::slice::from_ref(&saved),
+            NEXT_CAPTURE,
         )
         .unwrap();
         assert_eq!(
@@ -1213,8 +1462,16 @@ mod tests {
         let target = Target::Offset(2);
         let response = worker(arrow, &target);
         validate_worker(arrow.as_bytes(), &target, &response).unwrap();
-        let refused =
-            resolution(arrow.as_bytes(), &artifact, &target, &response, None, &[]).unwrap();
+        let refused = resolution(
+            arrow.as_bytes(),
+            &artifact,
+            &target,
+            &response,
+            None,
+            &[],
+            NEXT_CAPTURE,
+        )
+        .unwrap();
         assert_eq!(refused["status"], "refused");
         assert_eq!(refused["reason"], "unsupported_function");
         assert!(

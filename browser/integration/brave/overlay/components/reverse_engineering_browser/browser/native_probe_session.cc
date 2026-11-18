@@ -216,28 +216,24 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     }
     js_dispatch_startup_sites_json_ = std::move(json);
   }
-  js_invocation_sites_.clear();
+  js_invocation_sites_.reset();
   js_invocation_digests_ = false;
+  std::optional<std::vector<NativeJsInvocationSite>> invocation_sites;
   if (command_line->HasSwitch("reb-js-invocation-sites")) {
-    // Same lifetime rule as dispatch sites: armed entries cannot be
-    // retargeted, so a changed or invalid file refuses the session.
+    // Records name sites by slot and renderers keep their slots, so a file
+    // that renumbers a slot this browser has sent, or is invalid, refuses the
+    // session. Its armed flags and appended slots may change.
     const auto path = command_line->GetSwitchValuePath("reb-js-invocation-sites");
     std::string json;
     if (path.empty() ||
         !base::ReadFileToStringWithMaxSize(path, &json, kNativeJsInvocationSitesFileLimit) ||
-        (!js_invocation_startup_sites_json_.empty() && js_invocation_startup_sites_json_ != json) ||
-        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0) {
+        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
+        !(invocation_sites = ParseNativeJsInvocationSiteList(json)) ||
+        !KeepsJsInvocationSlots(*invocation_sites)) {
       guest_adapter_json_.clear();
       js_dispatch_sites_.clear();
       return false;
     }
-    js_invocation_sites_ = ParseNativeJsInvocationSites(json);
-    if (js_invocation_sites_.empty()) {
-      guest_adapter_json_.clear();
-      js_dispatch_sites_.clear();
-      return false;
-    }
-    js_invocation_startup_sites_json_ = std::move(json);
     // Digests are a sensitive capture path; the launcher passes this switch
     // only with a visible sensitive-capture label.
     js_invocation_digests_ = command_line->HasSwitch("reb-js-invocation-digests");
@@ -250,9 +246,12 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
       !ReadResponseBodyPolicy(*command_line, response_bodies)) {
     guest_adapter_json_.clear();
     js_dispatch_sites_.clear();
-    js_invocation_sites_.clear();
     js_invocation_digests_ = false;
     return false;
+  }
+  if (invocation_sites) {
+    AdoptJsInvocationSlots(*invocation_sites);
+    js_invocation_sites_ = EncodeNativeJsInvocationSites(*invocation_sites);
   }
   wasm_sample_budget_ = budget;
   category_mask_.store(category_mask, std::memory_order_relaxed);
@@ -291,6 +290,36 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   return true;
 }
 
+bool NativeProbeSession::KeepsJsInvocationSlots(
+    const std::vector<NativeJsInvocationSite>& sites) const noexcept {
+  const std::size_t kept = std::min(sites.size(), js_invocation_slots_.size());
+  for (std::size_t slot = 0; slot < kept; ++slot) {
+    if (!IsSameNativeJsInvocationSite(sites[slot], js_invocation_slots_[slot]))
+      return false;
+  }
+  return true;
+}
+
+void NativeProbeSession::AdoptJsInvocationSlots(
+    const std::vector<NativeJsInvocationSite>& sites) noexcept {
+  for (std::size_t slot = js_invocation_slots_.size(); slot < sites.size(); ++slot)
+    js_invocation_slots_.push_back(sites[slot]);
+}
+
+void NativeProbeSession::UpdateJsInvocationSites(const std::string& json) noexcept {
+  if (!IsActive() || !js_invocation_sites_)
+    return;
+  const auto sites = ParseNativeJsInvocationSiteList(json);
+  if (!sites || !KeepsJsInvocationSlots(*sites)) {
+    EmitNamedGap(NativeProbeCategory::kVm, "native_js_invocation_sites_revision_refused");
+    return;
+  }
+  AdoptJsInvocationSlots(*sites);
+  js_invocation_sites_ = EncodeNativeJsInvocationSites(*sites);
+  for (NativeProbeHost* const host : hosts_)
+    host->UpdateJsInvocationSites(*js_invocation_sites_);
+}
+
 void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
   if (!IsActive())
     return;
@@ -302,7 +331,7 @@ void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
 void NativeProbeSession::StopSession() noexcept {
   guest_adapter_json_.clear();
   js_dispatch_sites_.clear();
-  js_invocation_sites_.clear();
+  js_invocation_sites_.reset();
   js_invocation_digests_ = false;
   wasm_sample_budget_ = {};
   // Hosts drain records their renderers already queued, and the artifact sink

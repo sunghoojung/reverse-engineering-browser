@@ -705,8 +705,13 @@ bodies. Identifiers and origins can still be sensitive. It has its own ETag.
 
 The Origin Trace app keeps one saved set of at most 256
 [native JavaScript invocation sites](native-js-invocation-v1.md#site-file)
-and arms it in the next capture it starts. These routes name, save and list
-those sites; none of them changes the open page or a running capture.
+and arms it in every capture it starts. A capture whose `session.live` is
+true follows the set while it runs
+([revisions](native-js-invocation-v1.md#revisions)): a saved site arms at
+once and a removed one disarms. Otherwise a change applies from the next
+capture. These routes name, save and list those sites; none of them changes
+the open page, and a function the page compiled before its site was armed is
+tracked only after a reload.
 
 - `GET /api/js-invocation-sites/resolve` (`resolve_js_invocation_site`) takes
   an exact `session_id` and `artifact_id` and exactly one of `name` (a dotted
@@ -719,15 +724,18 @@ those sites; none of them changes the open page or a running capture.
 - `GET /api/js-invocation-sites` (`get_js_invocation_sites`) returns the saved
   set with each site's label, source URL and session, whether this session
   retained the saved script version (`retained.state`: `matches`,
-  `other_version` or `not_retained`), and what this session's launcher armed
-  (`session.state`: `not_armed`, `armed`, `browser_unsupported` or
-  `unreadable`, with `digests`).
+  `other_version` or `not_retained`) and whether this capture arms it now
+  (`armed_in_capture`), and what this capture arms (`session.state`:
+  `not_armed`, `armed`, `browser_unsupported` or `unreadable`, with `live`,
+  `digests`, its slot table in `sites` with each slot's `armed` flag,
+  `revision` and `revision_error`). Reading the set is also when a following
+  capture publishes a change made by another writer.
 - `POST /api/js-invocation-sites/actions` (`js_invocation_site_action`) takes
   `add` (the resolve inputs and an optional `label`), `remove`
   (`source_sha256` and `anchor_offset`) or `clear` with `confirm: true`. `add`
   resolves the artifact again on the server and never accepts a site from the
   caller. A refused resolution returns HTTP 200 with `added: false` and the
-  resolution; a duplicate `(source_sha256, anchor_offset)` or a ninth site is
+  resolution; a duplicate `(source_sha256, anchor_offset)` or a 257th site is
   a 409. Every action returns the updated set.
 
 A name matches only syntax that binds it: an assignment to that identifier or

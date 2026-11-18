@@ -452,19 +452,31 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                   NativeJsDispatchSiteStatus status) noexcept;
   void NoteNativeJsDispatchInputUnavailable(std::uint64_t epoch, std::uint64_t frame_id) noexcept;
   // Native JavaScript invocation identity, protocol/native-js-invocation-v1.md.
-  // The site list follows the dispatch rules: immutable for the browser
-  // lifetime, configured after SetEmitters, disarmed by the next one.
-  // digests is the session's sensitive value-digest opt-in.
+  // Configured after SetEmitters and disarmed by the next one. A slot keeps
+  // its site for the renderer lifetime: a list that names another site at a
+  // retained slot, or is not `valid`, arms nothing and is the configuration's
+  // input gap. A slot the list omits is disarmed. An empty valid list tracks
+  // functions a later revision arms. digests is the session's sensitive
+  // value-digest opt-in.
   void ConfigureNativeJsInvocation(std::span<const NativeJsInvocationSite> sites,
-                                   bool digests) noexcept;
+                                   bool digests,
+                                   bool valid = true) noexcept;
+  // A revision of the current configuration's sites under the same slot rule.
+  // Ordinals, open invocations and digests stay: V8 copies the sites again
+  // and calls in flight settle under their IDs.
+  void UpdateNativeJsInvocationSites(std::span<const NativeJsInvocationSite> sites,
+                                     bool valid) noexcept;
   // V8 pulls these on the isolate thread; none of them calls back into V8,
   // allocates or blocks.
   [[nodiscard]] std::uint64_t NativeJsInvocationEpoch() const noexcept;
+  // Changes with every accepted revision of the epoch's sites.
+  [[nodiscard]] std::uint64_t NativeJsInvocationRevision(std::uint64_t epoch) const noexcept;
+  // Every slot, a disarmed one with source length 0, which V8 never arms.
   [[nodiscard]] std::size_t CopyNativeJsInvocationSites(
       std::uint64_t epoch,
       std::span<NativeJsInvocationSite> out) const noexcept;
-  // True for every configured slot while the configuration is active: every
-  // call is wrapped and recorded.
+  // True for every armed slot while the configuration is active: every call
+  // is wrapped and recorded.
   [[nodiscard]] bool IsNativeJsInvocationEnabled(std::uint64_t epoch,
                                                  std::uint32_t slot) const noexcept;
   [[nodiscard]] bool NativeJsInvocationDigests(std::uint64_t epoch) const noexcept;
@@ -837,10 +849,17 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void PublishNativeJsInvocationGaps(std::uint64_t generation) noexcept;
   // One recorded start of generation settled or can no longer settle.
   void CloseNativeJsInvocation(std::uint64_t generation) noexcept;
-  // Written once before native_invocation_site_count_ is release-published
-  // and never rewritten, as for dispatch sites.
+  // Applies the slot rule; false changes nothing.
+  [[nodiscard]] bool MergeNativeJsInvocationSites(
+      std::span<const NativeJsInvocationSite> sites) noexcept;
+  // Each slot's site, written once before native_invocation_site_count_ is
+  // release-published and never rewritten, as for dispatch sites. Only the
+  // armed flags change, and each change advances the revision. Configuration
+  // and revisions arrive on the renderer main thread.
   std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> native_invocation_sites_{};
+  std::array<std::atomic<bool>, kNativeJsInvocationSiteLimit> native_invocation_armed_{};
   std::atomic<std::size_t> native_invocation_site_count_{0};
+  std::atomic<std::uint64_t> native_invocation_revision_{0};
   std::atomic<std::uint64_t> native_invocation_generation_{0};
   std::atomic<std::uint64_t> native_invocation_digest_generation_{0};
   // Each site's next start ordinal and the next request ordinal, zeroed

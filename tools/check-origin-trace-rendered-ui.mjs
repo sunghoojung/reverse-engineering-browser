@@ -177,6 +177,10 @@ fetch("/getcaptcha");
   });
   await new Promise(done => agentStandIn.listen(0, '127.0.0.1', done));
   const agentProviderURL = `http://127.0.0.1:${agentStandIn.address().port}`;
+  // Full access, above Ask for actions, as an earlier app run saves it
+  // (AgentPreferences); test0AgentPanel starts its first consent there.
+  const agentPreferences = join(temporary, 'agent-preferences-v1.json');
+  await writeFile(agentPreferences, JSON.stringify({version: 1, provider: 'claude', auth: {claude: 'key'}, permission: 'full'}), {mode: 0o600});
 
   // A separate, real backend has no cached analysis. Removing execution
   // permission from its copied binary makes self-reexecution fail at spawn.
@@ -241,6 +245,8 @@ fetch("/getcaptcha");
       REB_LIVE_SESSION_ROOT: recordedSessions,
       REB_AGENT_PROVIDER_BASE_URL: agentProviderURL,
       REB_AGENT_TRANSCRIPT_DIR: join(temporary, 'agent-transcripts'),
+      // The agent dock's saved choices, seeded as an earlier app run leaves them.
+      REB_AGENT_PREFERENCES: agentPreferences,
       // None of the researcher's CLIs runs. Claude is the stand-in CLI that
       // make app-build builds (tools/agent-cli-stand-in.swift); no Grok CLI is
       // found, so its account line reads the same on every machine.
@@ -265,7 +271,7 @@ fetch("/getcaptcha");
         workerStackPostingProcess: WORKER_STACK_PROCESSES[1], debuggerProcess: DEBUGGER_PROCESS, debuggerFrame: DEBUGGER_FRAME,
         debuggerArtifactId: DEBUGGER_ARTIFACT_ID, bodyCaseProcess: BODY_CASE_PROCESS, reusedHost: REUSED_HOST, reusedMarker: REUSED_MARKER,
         workerAnswerHost: WORKER_ANSWER_HOST, partialHost: PARTIAL_HOST, hexBodyHost: HEX_BODY_HOST, hexBodyBytes: HEX_BODY_BYTES,
-        recordedSession, sessionPreferences: join(temporary, 'live-session-preferences-v1.json')}),
+        recordedSession, sessionPreferences: join(temporary, 'live-session-preferences-v1.json'), agentPreferences}),
     },
   });
   target.TestingEnvironmentVariables = {...target.TestingEnvironmentVariables,

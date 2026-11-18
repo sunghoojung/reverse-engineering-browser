@@ -124,9 +124,11 @@ assert_status 0
 grep -q -F -- '"--allow-session-start"' "$out" || fail "config lacks session start: $(cat "$out")"
 assert_stderr_has 'authorized target'
 # --permission is forwarded as one level; full also starts without a file.
+# full is the one consent for session capture, so an older config's
+# --allow-sensitive-capture is accepted and not forwarded.
 run_launcher --permission full --allow-sensitive-capture
 assert_status 0
-grep -q -F -- "mcp --endpoint-file ${canonical} --permission full --allow-sensitive-capture --require-live" "$log" || fail "permission was not forwarded: $(cat "$log")"
+grep -q -F -- "mcp --endpoint-file ${canonical} --permission full --require-live" "$log" || fail "permission was not forwarded: $(cat "$log")"
 run_launcher --permission ask
 assert_status 2
 assert_log_absent
@@ -139,10 +141,6 @@ run_launcher --permission ask --allow-effects
 assert_status 2
 assert_log_absent
 assert_stderr_has 'replaces --allow-effects'
-run_launcher --permission auto --allow-sensitive-capture
-assert_status 2
-assert_log_absent
-assert_stderr_has 'needs --permission full'
 run_launcher --permission everything
 assert_status 2
 assert_log_absent
@@ -281,6 +279,8 @@ fi
 
 checkout="${repository_root}/build/sessions/live"
 created_checkout=0
+created_sessions=0
+[[ -d "${repository_root}/build/sessions" ]] || created_sessions=1
 if [[ ! -d "$checkout" ]]; then
   mkdir -p "$checkout"
   created_checkout=1
@@ -291,9 +291,12 @@ run_launcher --list
 assert_status 2
 assert_log_absent
 assert_stderr_has 'Both the packaged'
+# Only what this check created goes, so other checks' sessions stay.
 if [[ "$created_checkout" == 1 ]]; then
-  rmdir "$checkout" || true
-  rmdir "${repository_root}/build/sessions" || true
+  rmdir "$checkout"
+fi
+if [[ "$created_sessions" == 1 ]]; then
+  rmdir "${repository_root}/build/sessions"
 fi
 
 printf 'wrapper checks passed\n'

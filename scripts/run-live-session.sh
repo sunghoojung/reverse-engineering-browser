@@ -1112,6 +1112,16 @@ else
     --ui-url "${live_ui_url}"
 fi
 
+# How the summary says to turn a switch on: an app session's switches come
+# from the start panel, so it names the panel option; make live names the
+# environment setting.
+switch_hint() {
+  if [[ "${embedded_session}" == 1 ]]; then
+    printf 'turn on %s in New Live Session… Advanced options' "$1"
+  else
+    printf 'set %s' "$2"
+  fi
+}
 echo "Origin Trace live session ${session_id}"
 echo "Evidence store: ${store_path}"
 echo "Origin trace store: ${trace_store_path}"
@@ -1133,7 +1143,7 @@ esac
 if [[ "${capture_canvas_images}" == 1 ]]; then
   echo "Canvas image capture: enabled for this session; outputs may contain sensitive page content"
 else
-  echo "Canvas image capture: disabled; set REB_CAPTURE_CANVAS_IMAGES=1 to enable it for one session"
+  echo "Canvas image capture: disabled; $(switch_hint 'Canvas images (a Content capture option)' REB_CAPTURE_CANVAS_IMAGES=1) to enable it for one session"
 fi
 if [[ "${capture_request_content}" == 1 ]]; then
   echo "Request content capture: enabled for this session; request paths, queries, headers, cookies and bodies are retained locally, at most ${request_content_budget_mib} MiB of unique content"
@@ -1144,19 +1154,19 @@ fi
 if [[ "${capture_browser_internal}" == 1 ]]; then
   echo "Browser-internal capture: enabled; chrome:, devtools: and WebUI renderer evidence is recorded"
 else
-  echo "Browser-internal capture: excluded and counted; set REB_CAPTURE_BROWSER_INTERNAL=1 to record it"
+  echo "Browser-internal capture: excluded and counted; $(switch_hint 'Browser-internal traffic' REB_CAPTURE_BROWSER_INTERNAL=1) to record it"
 fi
 if [[ "${capture_extension_traffic}" == 1 ]]; then
   echo "Extension worker traffic: recorded under each extension id"
 else
-  echo "Extension worker traffic: excluded and counted; set REB_CAPTURE_EXTENSION_TRAFFIC=1 to record it"
+  echo "Extension worker traffic: excluded and counted; $(switch_hint 'Extension traffic' REB_CAPTURE_EXTENSION_TRAFFIC=1) to record it"
 fi
 if [[ "${console_document_start}" == 1 && "${native_console_bound}" == 1 ]]; then
   echo "Console document-start scripts: permitted for this capture browser; nothing runs until a live Console connection arms a confirmed rule"
 elif [[ "${console_document_start}" == 1 ]]; then
   echo "Console document-start scripts: requested, but the live Console binding is unavailable, so Brave did not receive the permission"
 else
-  echo "Console document-start scripts: not permitted; set REB_CONSOLE_DOCUMENT_START=1 to permit them for one session"
+  echo "Console document-start scripts: not permitted; $(switch_hint 'Allow document-start Console scripts' REB_CONSOLE_DOCUMENT_START=1) to permit them for one session"
 fi
 if [[ "${request_stacks_state}" == browser_unsupported ]]; then
   echo "Request call stacks: unavailable; this Brave does not define --reb-request-stacks"

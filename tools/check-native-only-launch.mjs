@@ -308,6 +308,22 @@ ${quick}echo started`, 'holder', profile], {encoding:'utf8'});
   console.log('PASS held profile: a closing holder is waited out, a held one is refused, a fresh profile is never checked');
 }
 
+// An app session's summary says which start panel option turns a switch on;
+// make live's names the environment setting.
+{
+  const hintCode = section('# How the summary says to turn a switch on', 'echo "Origin Trace live session');
+  const hint = embedded => spawnSync(shell, ['-c', `set -eu; embedded_session=${embedded}; ${hintCode}
+printf '%s\\n' "$(switch_hint 'Extension traffic' REB_CAPTURE_EXTENSION_TRAFFIC=1)"`], {encoding:'utf8'}).stdout;
+  assert.equal(hint(1), 'turn on Extension traffic in New Live Session… Advanced options\n');
+  assert.equal(hint(0), 'set REB_CAPTURE_EXTENSION_TRAFFIC=1\n');
+  const summary = section('echo "Origin Trace live session', 'echo "Capture transport:');
+  for (const name of ['REB_CAPTURE_CANVAS_IMAGES', 'REB_CAPTURE_BROWSER_INTERNAL', 'REB_CAPTURE_EXTENSION_TRAFFIC', 'REB_CONSOLE_DOCUMENT_START']) {
+    assert.doesNotMatch(summary, new RegExp(`set ${name}=`), `${name} is named through switch_hint`);
+    assert.match(summary, new RegExp(`\\$\\(switch_hint '[^']+' ${name}=1\\)`), name);
+  }
+  console.log('PASS session summary hints name the start panel option in an app session and the environment setting for make live');
+}
+
 // V8 ignores an unknown --js-flags entry and every later one, so the real
 // launcher must refuse a Brave build whose loaded V8 lacks a requested flag
 // before any helper or browser starts. Synthetic bundles and recording helpers

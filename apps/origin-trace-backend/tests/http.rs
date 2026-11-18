@@ -7944,6 +7944,10 @@ async fn source_format_lays_out_json_and_javascript_bodies_with_anchors() {
     assert_contract_response(server.get(&named).await, "get", route, 400).await;
 }
 
+// This stand-in and invocation_site_worker take the request with cat, never
+// the shell's read: read takes a pipe one byte per system call, which for a
+// 4 MiB source request came close to the 5 s worker deadline and passed it on
+// a loaded machine.
 #[cfg(unix)]
 fn source_facts_worker(directory: &Path, tail: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -7951,7 +7955,7 @@ fn source_facts_worker(directory: &Path, tail: &str) -> std::path::PathBuf {
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"source_facts\"'*) ;; *) exit 2;; esac\n{tail}\n"
+            "#!/bin/sh\nrequest=$(/bin/cat)\ncase \"$request\" in *'\"operation\":\"source_facts\"'*) ;; *) exit 2;; esac\n{tail}\n"
         ),
     )
     .unwrap();
@@ -10721,7 +10725,7 @@ fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"invocation_site\"'*) ;; *) exit 2;; esac\nkey=$(printf '%s' \"$request\" | /usr/bin/sed -n 's/.*\"byte_offset\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$key\" ] || key=name\nexec /bin/cat '{}/reply-'\"$key\"'.json'\n",
+            "#!/bin/sh\nrequest=$(/bin/cat)\ncase \"$request\" in *'\"operation\":\"invocation_site\"'*) ;; *) exit 2;; esac\nkey=$(printf '%s' \"$request\" | /usr/bin/sed -n 's/.*\"byte_offset\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$key\" ] || key=name\nexec /bin/cat '{}/reply-'\"$key\"'.json'\n",
             directory.display()
         ),
     )

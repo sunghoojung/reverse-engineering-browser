@@ -507,13 +507,6 @@ impl RequestQuery {
                     })?,
             ),
         };
-        let flag = |key: &str| -> Result<bool> {
-            match q.one(key)? {
-                None | Some("0") => Ok(false),
-                Some("1") => Ok(true),
-                Some(_) => Err(Error::bad(format!("{key} must be 0 or 1"))),
-            }
-        };
         let bound = |key: &str| -> Result<Option<u64>> {
             q.one(key)?
                 .map(|_| q.number(key, None, 64, false))
@@ -553,10 +546,10 @@ impl RequestQuery {
             descending,
             filter: Filter::parse(&needle),
             needle,
-            failed: flag("failed")?,
-            invert: flag("invert")?,
-            hide_internal: flag("hide_internal")?,
-            third_party: flag("third_party")?,
+            failed: q.flag("failed")?,
+            invert: q.flag("invert")?,
+            hide_internal: q.flag("hide_internal")?,
+            third_party: q.flag("third_party")?,
             from: from.unwrap_or(0),
             to: to.unwrap_or(u64::MAX),
             tab,

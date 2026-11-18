@@ -1325,12 +1325,13 @@ impl App {
                 .await?
             }
             "/api/request-headers" => {
-                q.only(&["session_id", "request_id"], &[])?;
+                q.only(&["session_id", "request_id", "credential_values"], &[])?;
                 let session = q.required("session_id")?.to_owned();
                 let request = q.required("request_id")?.to_owned();
                 for key in ["session_id", "request_id"] {
                     q.number(key, None, 64, true)?;
                 }
+                let credentials = q.credentials()?;
                 let filter = event_query::event_filter(&q)?;
                 let options = self.options.clone();
                 // Coverage also depends on how far the index has read, with no store change.
@@ -1338,8 +1339,9 @@ impl App {
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "{}:{session}:{request}:{progress}",
-                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                        "{}:{session}:{request}:{progress}:{}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), ""),
+                        credentials.name()
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -1364,6 +1366,7 @@ impl App {
                         &options.artifacts,
                         &session,
                         &request,
+                        credentials,
                     );
                     document["coverage"] = detail.coverage.to_json();
                     Ok(document)
@@ -1371,20 +1374,22 @@ impl App {
                 .await?
             }
             "/api/request-cookies" => {
-                q.only(&["session_id", "request_id"], &[])?;
+                q.only(&["session_id", "request_id", "credential_values"], &[])?;
                 let session = q.required("session_id")?.to_owned();
                 let request = q.required("request_id")?.to_owned();
                 for key in ["session_id", "request_id"] {
                     q.number(key, None, 64, true)?;
                 }
+                let credentials = q.credentials()?;
                 let filter = event_query::event_filter(&q)?;
                 let options = self.options.clone();
                 let progress = self.requests.lock().await.progress_marker();
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "cookies:{}:{session}:{request}:{progress}",
-                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                        "cookies:{}:{session}:{request}:{progress}:{}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), ""),
+                        credentials.name()
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -1409,6 +1414,7 @@ impl App {
                         &options.artifacts,
                         &session,
                         &request,
+                        credentials,
                     );
                     document["coverage"] = detail.coverage.to_json();
                     Ok(document)
@@ -1416,9 +1422,10 @@ impl App {
                 .await?
             }
             "/api/cookie-provenance" => {
-                q.only(&["session_id", "name"], &[])?;
+                q.only(&["session_id", "name", "credential_values"], &[])?;
                 let session = q.required("session_id")?.to_owned();
                 q.number("session_id", None, 64, true)?;
+                let credentials = q.credentials()?;
                 let name = q.required("name")?.to_owned();
                 if name.len() > 4096 {
                     return Err(Error::bad("name is longer than 4096 bytes"));
@@ -1434,8 +1441,9 @@ impl App {
                 etag = Some(evidence::resource_etag(
                     &options.store,
                     &format!(
-                        "provenance:{}:{session}:{name}:{progress}",
-                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), "")
+                        "provenance:{}:{session}:{name}:{progress}:{}",
+                        evidence::resource_etag(&options.artifacts.join("manifest.jsonl"), ""),
+                        credentials.name()
                     ),
                 ));
                 if matches_etag(headers, etag.as_deref()) {
@@ -1500,6 +1508,7 @@ impl App {
                         &session,
                         &name,
                         &identities,
+                        credentials,
                     );
                     document["coverage"] = detail.coverage.to_json();
                     document["script_coverage"] = script_coverage;
@@ -1683,7 +1692,7 @@ impl App {
             "/api/artifacts/search" => {
                 q.only(
                     &artifact_query::ARTIFACT_QUERY_KEYS[..8],
-                    &["q", "match_case", "offset", "limit"],
+                    &["q", "match_case", "offset", "limit", "credential_values"],
                 )?;
                 let query = artifact_text::SearchRequest::query(q.required("q")?)?;
                 let match_case = match q.one("match_case")? {
@@ -1697,14 +1706,16 @@ impl App {
                     filter: artifact_query::ArtifactFilter::parse(&q)?,
                     offset: q.number("offset", Some("0"), 32, false)? as usize,
                     limit: q.limit(50, artifact_text::SEARCH_MAX_LIMIT)?,
+                    credentials: q.credentials()?,
                 };
                 let root = self.options.artifacts.clone();
                 self.blocking(move || artifact_text::search(&root, &request))
                     .await?
             }
             _ if path.starts_with("/api/artifacts/") && path.ends_with("/text") => {
-                q.only(&["offset", "length", "encoding"], &[])?;
+                q.only(&["offset", "length", "encoding", "credential_values"], &[])?;
                 let id = &path["/api/artifacts/".len()..path.len() - "/text".len()];
+                let credentials = q.credentials()?;
                 let artifact = self.find_artifact(id).await?;
                 let encoding = artifact_text::Encoding::parse(q.one("encoding")?)?;
                 let offset = q.number("offset", Some("0"), 64, false)? as usize;
@@ -1712,7 +1723,7 @@ impl App {
                 let length = q.number("length", Some(&default), 32, true)? as usize;
                 let root = self.options.artifacts.clone();
                 self.blocking(move || {
-                    artifact_text::page(&root, &artifact, offset, length, encoding)
+                    artifact_text::page(&root, &artifact, offset, length, encoding, credentials)
                 })
                 .await?
             }
@@ -2708,6 +2719,22 @@ impl Query {
             nonzero,
             key,
         )
+    }
+    /// A 0 or 1 switch, off when absent.
+    pub(crate) fn flag(&self, key: &str) -> Result<bool> {
+        match self.one(key)? {
+            None | Some("0") => Ok(false),
+            Some("1") => Ok(true),
+            Some(_) => Err(Error::bad(format!("{key} must be 0 or 1"))),
+        }
+    }
+    /// The credential mode a header, cookie or text read asked for.
+    fn credentials(&self) -> Result<request_headers::Credentials> {
+        Ok(if self.flag("credential_values")? {
+            request_headers::Credentials::Returned
+        } else {
+            request_headers::Credentials::Withheld
+        })
     }
     /// Rejects any key outside the listed ones.
     pub(crate) fn only(&self, keys: &[&str], extra: &[&str]) -> Result<()> {

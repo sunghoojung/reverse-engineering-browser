@@ -224,7 +224,8 @@
   const STAYS_VISIBLE = 'Every call and its result stays in the transcript, and Stop or Turn off ends it at once.';
   // Exactly what Full access adds to what leaves this Mac.
   const FULL_LEAVES = Object.freeze(['JavaScript and other source text', 'Wasm bytes and disassembly', 'VM bytecode',
-    'Request and response bodies', 'Every content field of tool results']);
+    'Request and response bodies', 'Cookie values and credential headers such as Authorization',
+    'Every content field of tool results']);
   const FULL_SESSIONS = 'Actions run without asking, and it runs its own live capture sessions, with real clicks and keys.';
   const SENSITIVE_TEXT = 'Request content, response media, Canvas images and invocation digests in its sessions, only if your authorization covers them.';
 
@@ -534,7 +535,7 @@
     const provider = providerInfo();
     const vendor = provider?.vendor ?? 'the provider';
     const structural = level === 'full'
-      ? `With Full access, tool results include captured content: source, bytecode, disassembly and request and response bodies go to ${standInApplies() ? 'the stand-in' : vendor} when the agent reads them.`
+      ? `With Full access, tool results include captured content: source, bytecode, disassembly, request and response bodies, cookie values and credential headers go to ${standInApplies() ? 'the stand-in' : vendor} when the agent reads them.`
       : 'Tool results are structural: they can include URLs, hosts, identifiers and counts. Source, bytecode, disassembly and request bodies stay on this Mac unless you pin them.';
     const decisions = {'read-only': 'it can only read', ask: 'every action still needs Allow once', auto: 'actions run without asking', full: 'actions run without asking'}[level] ?? 'it can only read';
     if (standInApplies()) return `Your question, excerpts you pin and every tool result go to a local stand-in provider on this machine. ${structural}`;

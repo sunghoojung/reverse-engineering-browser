@@ -1369,14 +1369,17 @@ inside a character begins at the next one (`offset` is where it began), a
 character cut by `length` is finished from the next bytes, and invalid bytes
 become U+FFFD, counted in `replacements`. Each page re-verifies the artifact's
 SHA-256, as `get_artifact_content` does. Header blocks and cookie lists
-(`request_headers`, `response_headers`, `cookie_list`) are refused with 400 at
-every level, because they hold `Cookie`, `Set-Cookie`, `Authorization` and
-cookie values; `get_request_headers` and `get_request_cookies` read them with
-those values withheld.
+(`request_headers`, `response_headers`, `cookie_list`) are refused with 400
+unless the read passes `credential_values=1`, because they hold `Cookie`,
+`Set-Cookie`, `Authorization` and cookie values; `get_request_headers` and
+`get_request_cookies` read them with those values withheld unless they get the
+same parameter. `reb-api mcp` never lets a model pass it and passes it only
+with `--allow-content` (`x-reb-mcp.credential_values`).
 
 `GET /api/artifacts/search` (`search_artifact_text`) finds a literal `q` of 1
 to 256 bytes on one line, as Sources Search does. There is no pattern
-language, and header blocks and cookie lists are never searched. `match_case` (default false) folds ASCII letters only. `kind`,
+language, and header blocks and cookie lists are searched only with
+`credential_values=1`. `match_case` (default false) folds ASCII letters only. `kind`,
 `artifact_id`, `session_id`, `navigation_id`, `frame_id`,
 `execution_context_id`, `sha256` and `host` select artifacts as
 [`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first. Each

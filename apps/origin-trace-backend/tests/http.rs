@@ -11533,7 +11533,7 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         ("1", "javascript", script.as_bytes().to_vec()),
         ("2", "request_body", body.clone()),
         ("3", "wasm", module.clone()),
-        // Header blocks hold credential values that stay withheld at every level.
+        // Header blocks hold credential values, withheld unless asked for.
         (
             "6",
             "request_headers",
@@ -11617,6 +11617,20 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         refused.contains("get_request_headers") && !refused.contains("SECRET-COOKIE"),
         "{refused}"
     );
+    // Asked for, as reb-api mcp asks only with --allow-content, it reads as text.
+    let asked: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server
+                .get("/api/artifacts/6/text?credential_values=1")
+                .await,
+            "get",
+            "/api/artifacts/{artifact_id}/text",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(asked["text"], "cookie: sid=token-SECRET-COOKIE\r\n");
     let binary: Value = serde_json::from_slice(
         &assert_contract_response(
             server.get("/api/artifacts/2/text").await,
@@ -11668,13 +11682,17 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
     let cookies = search("q=SECRET-COOKIE").await;
     assert!(
         cookies["matches"].as_array().unwrap().is_empty(),
-        "header blocks are never searched"
+        "header blocks are searched only when credential values are asked for"
     );
     assert_eq!(cookies["coverage"]["artifacts_selected"], 3);
+    let asked = search("q=SECRET-COOKIE&credential_values=1").await;
+    assert_eq!(asked["matches"][0]["artifact_id"], "6");
+    assert_eq!(asked["coverage"]["artifacts_selected"], 4);
     for query in [
         "q=",
         "q=a%0Ab",
         "q=a&match_case=yes",
+        "q=a&credential_values=yes",
         "q=a&after=1",
         "match_case=true",
     ] {

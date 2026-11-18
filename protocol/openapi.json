@@ -100,6 +100,18 @@
       ],
       "description": "The native debugger reads values out of a page while it is paused. Those values and the page-derived names they are keyed by are omitted below --allow-content, which --permission full implies: a property name or a paused function name can carry a secret as well as its value. The gate is content admission itself, not the --omit-content flag, so the raw-flag path (--allow-effects alone, which sets neither flag) omits them too. Identifiers, counts, origins and URLs are returned at every level, as elsewhere."
     },
+    "credential_values": {
+      "flag": "--allow-content",
+      "parameter": "credential_values",
+      "operations": [
+        "get_request_headers",
+        "get_request_cookies",
+        "get_cookie_provenance",
+        "get_artifact_text",
+        "search_artifact_text"
+      ],
+      "description": "Credential header values, cookie values and received Set-Cookie lines, and the header blocks and cookie lists that hold them, are returned only when a request passes credential_values=1. The projection never lists that parameter in a tool's input schema, so a model cannot ask for it, and passes credential_values=1 on these operations with --allow-content, which --permission full implies. Below Full access they stay withheld. A header document larger than the inline limit returns a structural summary; get_artifact_text then reads each block or list it names by artifact_id in bounded pages."
+    },
     "run_values": {
       "flag": "--allow-content",
       "operations": [
@@ -1373,7 +1385,7 @@
       "get": {
         "operationId": "get_request_headers",
         "summary": "get request headers",
-        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each block gives its source (browser: a request's provisional headers, before the network stack, or a response as it reached the browser, without Set-Cookie, Set-Cookie2 and Clear-Site-Data; network: what the network stack sent or received; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie, Set-Cookie and any header whose name contains a credential root (token, secret, passw, csrf, xsrf, cookie, bearer, signature, credential, sessionid, authoriz and similar), has the whole word auth, session, jwt, otp or pwd, or has a word ending in key, except Sec-WebSocket-Key, Idempotency-Key and Public-Key-Pins are withheld as value_withheld with their byte length: like request bodies they stay in the binary artifact. Withholding goes by name, so another value, such as a Location query, is returned as captured. A hop is provisional when it has only browser request blocks.",
+        "description": "Header blocks of one native request per redirect hop (protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each block gives its source (browser: a request's provisional headers, before the network stack, or a response as it reached the browser, without Set-Cookie, Set-Cookie2 and Clear-Site-Data; network: what the network stack sent or received; early_hints: a 103), state, header count, byte length, SHA-256, and its referrer policy or status and remote endpoint. Retained blocks are read after a size and SHA-256 check and parsed into ordered headers. Values of Authorization, Proxy-Authorization, Cookie, Set-Cookie and any header whose name contains a credential root (token, secret, passw, csrf, xsrf, cookie, bearer, signature, credential, sessionid, authoriz and similar), has the whole word auth, session, jwt, otp or pwd, or has a word ending in key, except Sec-WebSocket-Key, Idempotency-Key and Public-Key-Pins are withheld as value_withheld with their byte length unless credential_values=1, which returns each as value with credential true. reb-api mcp passes it only with --allow-content (--permission full), so below Full access those values stay in the binary artifact. Withholding goes by name, so another value, such as a Location query, is returned as captured. A hop is provisional when it has only browser request blocks.",
         "tags": [
           "request-headers"
         ],
@@ -1469,6 +1481,20 @@
             }
           },
           {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 returns credential header values, cookie values and received Set-Cookie lines as captured. Default 0 withholds them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "required": false,
@@ -1507,7 +1533,7 @@
       "get": {
         "operationId": "get_request_cookies",
         "summary": "get request cookies",
-        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length: like credential headers they stay in the binary artifact.",
+        "description": "Cookie lists of one native request per redirect hop (\"Cookies\" in protocol/native-network-v3.md), from the bytes the request index names for that request, or the newest 64 MiB of events when it names none, reading at most 1024 of its records; coverage says what was read. Recorded only in sessions that retain request content. Each hop has the cookies the network service sent with the request, including excluded ones, and the Set-Cookie cookies it received, each with state, counts, byte length and SHA-256. Retained lists are read after a size and SHA-256 check: every cookie has its name, domain, path, expiry, size, HttpOnly, Secure, SameSite, effective SameSite, partition key, priority, source scheme and port, and its exclusion and warning reasons. Values are withheld as value_withheld with their byte length and SHA-256, and a received line as line_withheld with its length, unless credential_values=1, which returns them as value and line beside the same length and digest. reb-api mcp passes it only with --allow-content (--permission full), so below Full access they stay in the binary artifact.",
         "tags": [
           "request-cookies"
         ],
@@ -1603,6 +1629,20 @@
             }
           },
           {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 returns credential header values, cookie values and received Set-Cookie lines as captured. Default 0 withholds them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
+          },
+          {
             "name": "If-None-Match",
             "in": "header",
             "required": false,
@@ -1641,7 +1681,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from the newest 5000 cookie list, request start, redirect, script call and script identity records within the last 64 MiB of events and at most 256 distinct retained cookie lists, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false when older records were not read, so an absent response or request is unknown. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256. A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
+        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from the newest 5000 cookie list, request start, redirect, script call and script identity records within the last 64 MiB of events and at most 256 distinct retained cookie lists, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false when older records were not read, so an absent response or request is unknown. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
         "tags": [
           "request-cookies"
         ],
@@ -1736,6 +1776,20 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 4096
+            }
+          },
+          {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 returns credential header values, cookie values and received Set-Cookie lines as captured. Default 0 withholds them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
             }
           },
           {
@@ -3546,7 +3600,7 @@
       "get": {
         "operationId": "search_artifact_text",
         "summary": "Search retained artifacts for literal text",
-        "description": "Captured content: finds a literal of 1 to 256 bytes on one line in retained artifacts, oldest artifact first, as Sources Search does. There is no pattern language, because captured text is adversarial. Header blocks and cookie lists are never searched, so no match shows a credential or cookie value. match_case false folds ASCII letters only. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. Each match has its artifact, byte_offset, 1-based line and column (characters), and up to 48 bytes of the same line before and after it. At most 100 matches are taken from one file, files over 16 MiB are skipped, one call reads at most 64 MiB and stops after 10 seconds; coverage names each file not fully searched and complete says whether the scope was searched whole. offset skips matches and next_offset continues. The MCP projection lists this operation only with --allow-content (--permission full).",
+        "description": "Captured content: finds a literal of 1 to 256 bytes on one line in retained artifacts, oldest artifact first, as Sources Search does. There is no pattern language, because captured text is adversarial. Header blocks and cookie lists are searched only with credential_values=1, which reb-api mcp passes only with --allow-content, so no other match shows a credential or cookie value. match_case false folds ASCII letters only. kind, artifact_id, session_id, navigation_id, frame_id, execution_context_id, sha256 and host select artifacts as get_artifacts filters do. Each match has its artifact, byte_offset, 1-based line and column (characters), and up to 48 bytes of the same line before and after it. At most 100 matches are taken from one file, files over 16 MiB are skipped, one call reads at most 64 MiB and stops after 10 seconds; coverage names each file not fully searched and complete says whether the scope was searched whole. offset skips matches and next_offset continues. The MCP projection lists this operation only with --allow-content (--permission full).",
         "tags": [
           "artifacts"
         ],
@@ -3660,6 +3714,20 @@
               "type": "integer",
               "default": 50
             }
+          },
+          {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 also searches header blocks and cookie lists (request_headers, response_headers, cookie_list), which hold credential and cookie values. Default 0 leaves them out. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
+            }
           }
         ],
         "responses": {
@@ -3758,7 +3826,7 @@
       "get": {
         "operationId": "get_artifact_text",
         "summary": "Read one bounded page of an artifact's bytes as text",
-        "description": "Captured content: returns one page of a retained artifact (JavaScript source, request and response bodies, Wasm module bytes, stacks and the other kinds) as UTF-8 text, hex or base64, verified against the manifest digest. Header blocks and cookie lists (request_headers, response_headers, cookie_list) are refused with 400: read them with get_request_headers and get_request_cookies, which withhold credential and cookie values. A page covers at most 65,536 source bytes for utf-8, 32,768 for hex and 49,152 for base64, and stops earlier so its text costs at most 98,304 JSON bytes with escapes, so the whole document always fits the 128 KiB MCP inline limit. next_offset continues the read and is null at the end; complete is true when one page held the whole artifact. A utf-8 page that starts inside a character begins at the next one, and invalid bytes become U+FFFD and are counted in replacements. The MCP projection lists this operation only with --allow-content (--permission full), because its result is captured content that goes to the model provider.",
+        "description": "Captured content: returns one page of a retained artifact (JavaScript source, request and response bodies, Wasm module bytes, stacks and the other kinds) as UTF-8 text, hex or base64, verified against the manifest digest. Header blocks and cookie lists (request_headers, response_headers, cookie_list) are refused with 400 unless credential_values=1, which reb-api mcp passes only with --allow-content: below that, read them with get_request_headers and get_request_cookies, which withhold credential and cookie values. A page covers at most 65,536 source bytes for utf-8, 32,768 for hex and 49,152 for base64, and stops earlier so its text costs at most 98,304 JSON bytes with escapes, so the whole document always fits the 128 KiB MCP inline limit. next_offset continues the read and is null at the end; complete is true when one page held the whole artifact. A utf-8 page that starts inside a character begins at the next one, and invalid bytes become U+FFFD and are counted in replacements. The MCP projection lists this operation only with --allow-content (--permission full), because its result is captured content that goes to the model provider.",
         "tags": [
           "artifacts"
         ],
@@ -3807,6 +3875,20 @@
                 "base64"
               ],
               "default": "utf-8"
+            }
+          },
+          {
+            "name": "credential_values",
+            "in": "query",
+            "required": false,
+            "description": "1 also reads header blocks and cookie lists (request_headers, response_headers, cookie_list), which hold credential and cookie values. Default 0 refuses them. reb-api mcp never lists this parameter and passes 1 only with --allow-content (--permission full), so a model below Full access cannot ask for them (x-reb-mcp.credential_values).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "0",
+                "1"
+              ],
+              "default": "0"
             }
           }
         ],
@@ -11653,9 +11735,17 @@
           "hops",
           "malformed_records",
           "unattached_records",
-          "coverage"
+          "coverage",
+          "credential_values"
         ],
         "properties": {
+          "credential_values": {
+            "enum": [
+              "withheld",
+              "returned"
+            ],
+            "description": "Whether credential header values, cookie values and received lines were withheld or, with credential_values=1, returned."
+          },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
           },
@@ -11854,6 +11944,10 @@
           "value_withheld": {
             "const": true
           },
+          "credential": {
+            "const": true,
+            "description": "A credential name's value, returned only with credential_values=1."
+          },
           "value_bytes": {
             "type": "integer",
             "minimum": 0
@@ -11882,9 +11976,17 @@
           "hops",
           "malformed_records",
           "unattached_records",
-          "coverage"
+          "coverage",
+          "credential_values"
         ],
         "properties": {
+          "credential_values": {
+            "enum": [
+              "withheld",
+              "returned"
+            ],
+            "description": "Whether credential header values, cookie values and received lines were withheld or, with credential_values=1, returned."
+          },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
           },
@@ -12079,6 +12181,10 @@
           "line_withheld": {
             "const": true
           },
+          "line": {
+            "type": "string",
+            "description": "The received Set-Cookie line as captured, invalid UTF-8 replaced; only with credential_values=1."
+          },
           "line_bytes": {
             "type": "integer",
             "minimum": 0
@@ -12088,6 +12194,10 @@
           },
           "value_withheld": {
             "const": true
+          },
+          "value": {
+            "type": "string",
+            "description": "The cookie value as captured, invalid UTF-8 replaced; only with credential_values=1. value_bytes and value_sha256 describe the captured bytes."
           },
           "value_bytes": {
             "type": "integer",
@@ -12238,9 +12348,17 @@
           "read_coverage",
           "malformed_records",
           "coverage",
-          "script_coverage"
+          "script_coverage",
+          "credential_values"
         ],
         "properties": {
+          "credential_values": {
+            "enum": [
+              "withheld",
+              "returned"
+            ],
+            "description": "Whether credential header values, cookie values and received lines were withheld or, with credential_values=1, returned."
+          },
           "coverage": {
             "$ref": "#/components/schemas/DetailCoverage"
           },
@@ -12256,7 +12374,7 @@
             "properties": {
               "complete": {
                 "type": "boolean",
-                "description": "The index has caught up with the store, located every script_cookie record (at most 65536), and each one older than the window was read back."
+                "description": "The index has caught up with the store, located every script_cookie record, and each one older than the window was read back."
               },
               "located_outside_window": {
                 "type": "integer",

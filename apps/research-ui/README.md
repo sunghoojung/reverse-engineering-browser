@@ -1448,8 +1448,9 @@ footer count them separately from sampling budgets and from reported losses.
 Every other reason, including transport, input, document, module, expiry,
 compiled-before-arming, capacity and parent-link reasons and any reason this
 build does not know, reads as reported lost evidence with its raw reason as text.
-The Swift stored-evidence reader uses the same newest-general and
-newest-network windows, 64 MiB tail, and summary scope as the Rust endpoint.
+Stored-evidence native mode forwards the event poll to the bundled Rust
+backend, so its windows and whole-store counts are the same answer; the app
+adds only its own broker state and capture mode.
 A response that omits those fields is still labeled visible-window-only, and
 no whole-capture count is inferred for it. Filtering
 and sorting cover the whole session through the index. Rows and capture-tab controls are

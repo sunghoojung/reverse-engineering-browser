@@ -397,8 +397,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
           if (kind === 'empty') kind = 'gap';
-          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence; the request list covers the whole session.'
-            : 'Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
+          // The event index counts the whole store once it catches up (scope store).
+          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence until the event index catches up; the request list covers the whole session.'
+            : 'Only the newest 64 MiB of stored evidence is scanned until the event index catches up; counts and both windows exclude the older prefix.');
         }
         if (gapCount > 0n) {
           if (kind === 'empty') kind = 'gap';

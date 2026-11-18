@@ -286,6 +286,7 @@ pub struct Tally {
     queue_drops: u64,
     queue_drops_saturated: bool,
     named_gaps: Vec<NamedGap>,
+    named_positions: HashMap<(String, String), usize>,
     malformed_lines: u64,
 }
 impl Tally {
@@ -312,19 +313,18 @@ impl Tally {
             event_window::drop_weight(event),
         );
         if let Some(named) = event_window::named_gap(event) {
-            let (category, reason) = *named;
-            if let Some(gap) = self
-                .named_gaps
-                .iter_mut()
-                .find(|gap| gap.category == category && gap.reason == reason)
-            {
-                gap.count += 1;
-            } else if self.named_gaps.len() < event_window::MAX_NAMED_GAPS {
-                self.named_gaps.push(NamedGap {
-                    category,
-                    reason,
-                    count: 1,
-                });
+            match self.named_positions.get(named.as_ref()) {
+                Some(&position) => self.named_gaps[position].count += 1,
+                None => {
+                    let (category, reason) = *named;
+                    self.named_positions
+                        .insert((category.clone(), reason.clone()), self.named_gaps.len());
+                    self.named_gaps.push(NamedGap {
+                        category,
+                        reason,
+                        count: 1,
+                    });
+                }
             }
         }
         Ok(())

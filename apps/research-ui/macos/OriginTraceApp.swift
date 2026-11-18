@@ -105,7 +105,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let wasmService: NativeWasmService
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
-  private let storedEvents = StoredEventWindowCache()
   private let storedBackend: StoredEvidenceBackend
   private let demoEvidenceEnabled: Bool
   private let analystRunnerLock = NSLock()
@@ -167,7 +166,10 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       return
     }
     if StoredEvidenceBackend.serves(urlSchemeTask.request) {
-      storedBackend.forward(urlSchemeTask.request) { body, status, contentType, headers in
+      // The idle backend reads the stores; this app names the broker and mode.
+      let overlay = StoredEvidenceBackend.isEventPoll(urlSchemeTask.request)
+        ? eventPollOverlay() : nil
+      storedBackend.forward(urlSchemeTask.request, overlay: overlay) { body, status, contentType, headers in
         self.send(body, contentType: contentType, status: status, headers: headers, to: urlSchemeTask)
       }
       return
@@ -307,8 +309,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         }
         handleLocalAnalystAction(urlSchemeTask.request, to: urlSchemeTask)
         return
-      case "/api/events":
-        response = (try eventsResponse(for: requestURL), "application/json; charset=utf-8", 200, [:])
       case "/api/request-signal-profile":
         let profileResponse = try requestSignalProfileResponse(
           for: requestURL,
@@ -1744,33 +1744,11 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     }
   }
 
-  private func eventsResponse(for requestURL: URL) throws -> Data {
-    let requestedLimit = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)?
-      .queryItems?
-      .first(where: { $0.name == "limit" })?
-      .value
-      .flatMap(Int.init) ?? 500
-    let limit = min(max(requestedLimit, 1), 5000)
-
-    let window = try storedEvents.read(path: eventStoreURL.path, limit: limit)
-    return try JSONSerialization.data(
-      withJSONObject: [
-        "count": window.events.count,
-        "events": window.events,
-        "network_events": window.networkEvents,
-        "sequence_gaps": String(window.sequenceGaps),
-        "sequence_gaps_saturated": window.sequenceGapsSaturated,
-        "queue_drops": String(window.queueDrops),
-        "queue_drops_saturated": window.queueDropsSaturated,
-        "named_gaps": window.namedGaps.map {
-          ["category": $0.category, "reason": $0.reason, "count": String($0.count)]
-        },
-        "event_window": window.coverage,
-        "broker_connected": brokerConnected(),
-        "capture_mode": captureMode(),
-      ],
-      options: []
-    )
+  private func eventPollOverlay() -> StoredEvidenceBackend.Overlay {
+    let connected = brokerConnected()
+    let mode = captureMode()
+    return StoredEvidenceBackend.Overlay(
+      fields: ["broker_connected": connected, "capture_mode": mode], tag: "\(mode)-\(connected ? 1 : 0)")
   }
 
   private func artifactEntries() throws -> [[String: Any]] {

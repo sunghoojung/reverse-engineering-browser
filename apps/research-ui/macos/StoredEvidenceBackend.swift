@@ -18,14 +18,49 @@ final class StoredEvidenceBackend {
     let message: String
   }
 
-  // The bare /api/events window stays with StoredEventWindow and the bare artifact
-  // list with the scheme handler. Filtered and cursor-paged reads of both go to Rust,
-  // which pages the manifest by record boundary off the main thread.
+  // Fields the app owns in a forwarded JSON object, such as the broker state of
+  // the bare event poll: the backend runs idle and cannot know them. `tag` names
+  // their values inside the ETag, so a change in either is a new answer.
+  struct Overlay {
+    let fields: [String: Any]
+    let tag: String
+
+    func etag(_ backend: String) -> String {
+      backend.hasSuffix("\"") ? "\(backend.dropLast())-\(tag)\"" : "\(backend)-\(tag)"
+    }
+
+    // The backend's own tag, or nil when the app's fields changed since.
+    func backendTag(_ etag: String) -> String? {
+      for suffix in ["-\(tag)\"", "-\(tag)"] where etag.hasSuffix(suffix) {
+        return String(etag.dropLast(suffix.count)) + (suffix.hasSuffix("\"") ? "\"" : "")
+      }
+      return nil
+    }
+
+    func apply(_ body: Data) -> Data? {
+      guard var object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] else { return nil }
+      object.merge(fields) { _, app in app }
+      return try? JSONSerialization.data(withJSONObject: object)
+    }
+  }
+
+  // The bare event poll: GET /api/events with at most a limit.
+  static func isEventPoll(_ request: URLRequest) -> Bool {
+    guard (request.httpMethod ?? "GET") == "GET", let url = request.url, url.path == "/api/events" else { return false }
+    let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    return items.allSatisfy { $0.name == "limit" }
+  }
+
+  // Every event read goes to Rust, whose event index counts gaps and drops over
+  // the whole store. The bare artifact list stays with the scheme handler;
+  // filtered and cursor-paged reads of it go to Rust, which pages the manifest
+  // by record boundary off the main thread.
   static func serves(_ request: URLRequest) -> Bool {
     guard let url = request.url else { return false }
     switch request.httpMethod ?? "GET" {
     case "GET":
-      if url.path == "/api/events" || url.path == "/api/artifacts" {
+      if url.path == "/api/events" { return true }
+      if url.path == "/api/artifacts" {
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         return items.contains { $0.name != "limit" }
       }
@@ -78,12 +113,14 @@ final class StoredEvidenceBackend {
     retryAfter = .distantPast
   }
 
-  func forward(_ request: URLRequest, reply: @escaping (Data, Int, String, [String: String]) -> Void) {
+  func forward(
+    _ request: URLRequest, overlay: Overlay? = nil, reply: @escaping (Data, Int, String, [String: String]) -> Void
+  ) {
     let json = "application/json; charset=utf-8"
     launches.async {
       let forwarded: URLRequest
       do {
-        forwarded = try self.backendRequest(for: request, origin: try self.start())
+        forwarded = try self.backendRequest(for: request, origin: try self.start(), overlay: overlay)
       } catch let failure as Failure {
         reply(Self.body(failure), failure.status, json, [:])
         return
@@ -97,13 +134,21 @@ final class StoredEvidenceBackend {
           return
         }
         var headers: [String: String] = [:]
-        if let tag = response.value(forHTTPHeaderField: "ETag") { headers["ETag"] = tag }
-        reply(data ?? Data(), response.statusCode, response.value(forHTTPHeaderField: "Content-Type") ?? json, headers)
+        if let tag = response.value(forHTTPHeaderField: "ETag") { headers["ETag"] = overlay?.etag(tag) ?? tag }
+        var body = data ?? Data()
+        if let overlay, response.statusCode == 200 {
+          guard let applied = overlay.apply(body) else {
+            reply(Self.body(Failure(status: 502, code: "dependency_unavailable", message: "The bundled backend returned malformed JSON")), 502, json, [:])
+            return
+          }
+          body = applied
+        }
+        reply(body, response.statusCode, response.value(forHTTPHeaderField: "Content-Type") ?? json, headers)
       }.resume()
     }
   }
 
-  private func backendRequest(for request: URLRequest, origin: URL) throws -> URLRequest {
+  private func backendRequest(for request: URLRequest, origin: URL, overlay: Overlay?) throws -> URLRequest {
     let invalid = Failure(status: 400, code: "invalid_request", message: "Invalid application URL")
     guard let url = request.url, let source = URLComponents(url: url, resolvingAgainstBaseURL: false),
       var target = URLComponents(url: origin, resolvingAgainstBaseURL: false)
@@ -113,8 +158,11 @@ final class StoredEvidenceBackend {
     guard let targetURL = target.url else { throw invalid }
     var forwarded = URLRequest(url: targetURL)
     forwarded.httpMethod = request.httpMethod ?? "GET"
-    if let tag = request.value(forHTTPHeaderField: "If-None-Match") {
-      forwarded.setValue(tag, forHTTPHeaderField: "If-None-Match")
+    // A tag from before the app's fields changed matches nothing.
+    if let tag = request.value(forHTTPHeaderField: "If-None-Match"),
+      let backend = overlay == nil ? tag : overlay?.backendTag(tag)
+    {
+      forwarded.setValue(backend, forHTTPHeaderField: "If-None-Match")
     }
     if forwarded.httpMethod == "POST" {
       forwarded.httpBody = try Self.body(of: request)

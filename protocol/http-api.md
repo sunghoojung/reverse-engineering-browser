@@ -1066,19 +1066,34 @@ arrival order, not numeric sequence order. Network selection includes
 `network`. General event churn cannot displace this second window within the
 scan budget. Neither array promises a complete request lifecycle.
 
-The reader scans at most the newest 67,108,864 bytes, plus one boundary byte.
+The windows read at most the newest 67,108,864 bytes, plus one boundary byte.
 `event_window` reports `scan_start` and `scan_end` as canonical unsigned byte
-offsets (end exclusive), `scan_limit`, and separate `events_limited` and
-`network_events_limited` flags. A cut-through record prefix is omitted, not
-parsed as a new record. `scope: "store"` means the scan starts at byte zero;
-`"bounded_tail"` excludes an older prefix, even if fewer than 5,000 rows remain.
+offsets (end exclusive) of the summaries' scope, `scan_limit`, separate
+`events_limited` and `network_events_limited` flags, and `next_before`. A
+cut-through record prefix is omitted, not parsed as a new record.
+
+The summaries cover the whole store. The event index
+(`events.jsonl.events-v1`, layout `reb-event-index-v1/2`) folds every appended
+record into per-stream sequence bounds, the drop total, every named gap pair
+and the unreadable-line count, so a poll reads them without scanning the
+store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
+`"0"` and `scan_end` is where the index ends, which can be far past
+`scan_limit`; both windows then end at that same record boundary, so a record
+counted is a record the windows could show. While the index catches up, the
+summaries cover the scanned tail: `"bounded_tail"` excludes an older prefix, even
+if fewer than 5,000 rows remain. A store no larger than `scan_limit` is
+`"store"` either way. `next_before` is the start of the oldest event the answer
+holds, or of the scanned tail, when older records exist: `before=next_before`
+reads them, newest first, with the filtered-read cursor below. It is null when
+the events reach the start of the store.
+
 A stored line that is not a valid event is skipped and counted in
 `malformed_lines`, so one damaged record cannot fail every poll. A tail still
 being written is omitted and not counted.
 
 `sequence_gaps` and `queue_drops` are canonical unsigned decimal strings over
-validated records in this declared scope. They are not session totals.
-Sequence gaps count absent IDs between the minimum and maximum observed sequence
+validated records in this declared scope; with `scope: "store"` they are
+session totals. Sequence gaps count absent IDs between the minimum and maximum observed sequence
 within each session/process in the stated scope. Late ACK-delayed arrivals close
 holes; duplicates do not create gaps. Unknown prefixes and tails are not counted.
 The native broker retains bounded missing intervals independently of its event
@@ -1091,9 +1106,9 @@ The respective `_saturated` flags distinguish clamping at u64 maximum.
 Malformed or incomplete JSON in the scanned records fails the refresh; the UI
 retains its last valid data. A complete final record without a newline is valid.
 The cache verifies exact overlap/boundary bytes and file identity before reuse.
-The Rust endpoint and the Swift stored-evidence reader both support this
-contract, including the separate network window, scan coverage, and saturated
-gap and drop totals. A response that omits the fields is still accepted, and
+The Rust endpoint answers this poll in every mode; stored-evidence native mode
+forwards it to the bundled backend and sets only `broker_connected` and
+`capture_mode`, which it folds into the ETag. A response that omits the fields is still accepted, and
 the UI then resets old summaries and labels fallback counts as
 visible-window-only.
 

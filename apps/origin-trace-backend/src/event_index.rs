@@ -4,19 +4,24 @@
 //! `(session, process, sequence)` and request IDs to record byte ranges and
 //! keeps each stream's queue-drop markers; the edge index maps an edge's
 //! source event to its record. Records are read back from the stores, so the
-//! indexes hold identifiers and offsets only.
+//! indexes hold identifiers and offsets only. The event index also keeps the
+//! whole store's gap totals (sequence gaps per stream, queue drops, named
+//! capture-limit gaps and unreadable lines) with the rules of the polling
+//! window, so `/api/events` counts every record instead of its newest bytes.
 //!
 //! A trace refuses a damaged store as it always refused a damaged window: the
 //! first oversized, malformed or duplicate record is kept as the index's damage
 //! and every trace over that store returns it.
 use crate::{
     error::{Error, Result},
+    event_window::{self, NamedGap},
     index_db::{self, Indexed, Position, SqlResult},
     origin_trace::{self, Reference},
 };
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     fs::File,
     path::Path,
     time::{Duration, Instant},
@@ -24,7 +29,8 @@ use std::{
 
 pub const EVENTS_SUFFIX: &str = ".events-v1";
 pub const EDGES_SUFFIX: &str = ".edges-v1";
-const EVENTS_FORMAT: &str = "reb-event-index-v1";
+/// The second layout adds the gap totals.
+const EVENTS_FORMAT: &str = "reb-event-index-v1/2";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
 /// The largest event or edge record a trace reads.
 pub const RECORD_BYTES: usize = 4096;
@@ -46,7 +52,17 @@ const EVENT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS markers(session INTEGER NOT NULL, process INTEGER NOT NULL,
         count INTEGER NOT NULL, PRIMARY KEY(session, process)) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0),
-        status INTEGER NOT NULL, message TEXT NOT NULL);";
+        status INTEGER NOT NULL, message TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS gap_sequences(session INTEGER NOT NULL, process INTEGER NOT NULL,
+        sequence INTEGER NOT NULL, PRIMARY KEY(session, process, sequence)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS streams(session INTEGER NOT NULL, process INTEGER NOT NULL,
+        low INTEGER NOT NULL, high INTEGER NOT NULL, seen INTEGER NOT NULL,
+        PRIMARY KEY(session, process)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS named_gaps(ordinal INTEGER PRIMARY KEY, category TEXT NOT NULL,
+        reason TEXT NOT NULL, count INTEGER NOT NULL, UNIQUE(category, reason));
+    CREATE TABLE IF NOT EXISTS totals(id INTEGER PRIMARY KEY CHECK (id = 0),
+        drops INTEGER NOT NULL, drops_saturated INTEGER NOT NULL, malformed INTEGER NOT NULL);
+    INSERT OR IGNORE INTO totals(id, drops, drops_saturated, malformed) VALUES (0, 0, 0, 0);";
 const EDGE_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS edges(start INTEGER PRIMARY KEY, end INTEGER NOT NULL,
         session INTEGER NOT NULL, process INTEGER NOT NULL, sequence INTEGER NOT NULL);
@@ -57,10 +73,16 @@ const EDGE_SCHEMA: &str = "
 /// What one event record is to a trace.
 enum Event {
     Record(Reference, Value),
-    /// A queue-drop marker of this stream.
-    Marker(String, u32),
-    /// A named capture-limit gap, which no trace reads.
-    Ignored,
+    /// A gap marker, which shares the last event's identity: a queue-drop
+    /// marker of its stream when `drop` names one, else a named capture-limit
+    /// gap, which no trace reads.
+    Gap {
+        reference: Reference,
+        event: Value,
+        /// A marker the trace cannot read is damage to the trace, yet still
+        /// a gap record to the totals, as it is to the polling window.
+        drop: Result<Option<(String, u32)>>,
+    },
 }
 
 /// Reads one event line as the trace reads it. Gap markers share the last
@@ -81,9 +103,12 @@ fn event(line: &[u8]) -> Result<Event> {
     if event["type"] != "gap" {
         return Ok(Event::Record(reference, event));
     }
-    Ok(match origin_trace::drop_marker(&event)? {
-        Some((session, process, _)) => Event::Marker(session, process),
-        None => Event::Ignored,
+    let drop = origin_trace::drop_marker(&event)
+        .map(|marker| marker.map(|(session, process, _)| (session, process)));
+    Ok(Event::Gap {
+        reference,
+        event,
+        drop,
     })
 }
 
@@ -120,69 +145,285 @@ fn damage(transaction: &rusqlite::Transaction<'_>, error: &Error) -> Result<()> 
     Ok(())
 }
 
-fn fold_event(
-    transaction: &rusqlite::Transaction<'_>,
-    line: &[u8],
-    start: u64,
-    end: u64,
-) -> Result<()> {
-    if line.iter().all(u8::is_ascii_whitespace) {
-        return Ok(());
-    }
-    let (reference, event) = match event(line) {
-        Ok(Event::Record(reference, event)) => (reference, event),
-        Ok(Event::Marker(session, process)) => {
-            transaction
+/// One stream's sequence bounds and how many distinct sequences it holds.
+#[derive(Clone, Copy)]
+struct Stream {
+    low: u64,
+    high: u64,
+    seen: u64,
+}
+
+/// Folds event lines into identity rows and the gap totals. Totals change in
+/// memory during one fold and are written back in `finish`, so they commit
+/// with the position they describe; `begin` drops what a failed fold left.
+#[derive(Default)]
+struct EventFold {
+    streams: HashMap<(i64, i64), Stream>,
+    named: Vec<((String, String), u64)>,
+    drops: u64,
+    drops_saturated: bool,
+    malformed: u64,
+}
+
+impl EventFold {
+    fn stream(&mut self, transaction: &Transaction<'_>, key: (i64, i64)) -> Result<&mut Stream> {
+        if !self.streams.contains_key(&key) {
+            let stored = transaction
                 .prepare_cached(
-                    "INSERT INTO markers(session, process, count) VALUES (?1, ?2, 1)
-                     ON CONFLICT(session, process) DO UPDATE SET count = count + 1",
+                    "SELECT low, high, seen FROM streams WHERE session = ?1 AND process = ?2",
                 )
                 .sql()?
-                .execute(params![number(&session), i64::from(process)])
+                .query_row(params![key.0, key.1], |row| {
+                    Ok(Stream {
+                        low: row.get::<_, i64>(0)? as u64,
+                        high: row.get::<_, i64>(1)? as u64,
+                        seen: row.get::<_, i64>(2)? as u64,
+                    })
+                })
+                .optional()
                 .sql()?;
-            return Ok(());
+            self.streams.insert(
+                key,
+                stored.unwrap_or(Stream {
+                    low: u64::MAX,
+                    high: 0,
+                    seen: 0,
+                }),
+            );
         }
-        Ok(Event::Ignored) => return Ok(()),
-        Err(error) => return damage(transaction, &error),
-    };
-    let identity = params![
-        number(&reference.0),
-        i64::from(reference.1),
-        number(&reference.2)
-    ];
-    let duplicate = transaction
-        .prepare_cached(
-            "SELECT 1 FROM events WHERE session = ?1 AND process = ?2 AND sequence = ?3",
-        )
-        .sql()?
-        .exists(identity)
-        .sql()?;
-    if duplicate {
-        return damage(transaction, &duplicate_event());
+        Ok(self.streams.get_mut(&key).expect("loaded stream"))
     }
-    let request = event["request_id"].as_str().map_or(0, number);
-    let kind = if event["type"] == "js_invocation_settle" {
-        SETTLE
-    } else {
-        OTHER
-    };
-    transaction
-        .prepare_cached(
-            "INSERT INTO events(start, end, session, process, sequence, request, kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
-        .sql()?
-        .execute(params![
-            start as i64,
-            end as i64,
+
+    /// Counts one sequence of a stream as the window does: bounds widen, and
+    /// a sequence no earlier record of the stream held is one more seen.
+    fn sequence(
+        &mut self,
+        transaction: &Transaction<'_>,
+        reference: &Reference,
+        fresh: bool,
+    ) -> Result<()> {
+        let key = (number(&reference.0), i64::from(reference.1));
+        let sequence = number(&reference.2) as u64;
+        let stream = self.stream(transaction, key)?;
+        stream.low = stream.low.min(sequence);
+        stream.high = stream.high.max(sequence);
+        stream.seen += u64::from(fresh);
+        Ok(())
+    }
+
+    fn gap(
+        &mut self,
+        transaction: &Transaction<'_>,
+        reference: &Reference,
+        event: &Value,
+    ) -> Result<()> {
+        let identity = params![
             number(&reference.0),
             i64::from(reference.1),
-            number(&reference.2),
-            request,
-            kind
-        ])
-        .sql()?;
-    Ok(())
+            number(&reference.2)
+        ];
+        // A marker shares the last event's identity, so it is seldom a new sequence.
+        let known = transaction
+            .prepare_cached(
+                "SELECT 1 FROM events WHERE session = ?1 AND process = ?2 AND sequence = ?3",
+            )
+            .sql()?
+            .exists(identity)
+            .sql()?;
+        let fresh = !known
+            && transaction
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO gap_sequences(session, process, sequence) VALUES (?1, ?2, ?3)",
+                )
+                .sql()?
+                .execute(identity)
+                .sql()?
+                == 1;
+        self.sequence(transaction, reference, fresh)?;
+        event_window::add(
+            &mut self.drops,
+            &mut self.drops_saturated,
+            event_window::drop_weight(event),
+        );
+        if let Some(named) = event_window::named_gap(event) {
+            match self.named.iter_mut().find(|(pair, _)| *pair == *named) {
+                Some((_, count)) => *count += 1,
+                None => self.named.push((*named, 1)),
+            }
+        }
+        Ok(())
+    }
+
+    fn record(
+        &mut self,
+        transaction: &Transaction<'_>,
+        reference: &Reference,
+        event: &Value,
+        start: u64,
+        end: u64,
+        counted: bool,
+    ) -> Result<()> {
+        let identity = params![
+            number(&reference.0),
+            i64::from(reference.1),
+            number(&reference.2)
+        ];
+        let duplicate = transaction
+            .prepare_cached(
+                "SELECT 1 FROM events WHERE session = ?1 AND process = ?2 AND sequence = ?3",
+            )
+            .sql()?
+            .exists(identity)
+            .sql()?;
+        if duplicate {
+            if counted {
+                self.sequence(transaction, reference, false)?;
+            }
+            return damage(transaction, &duplicate_event());
+        }
+        if counted {
+            let after_marker = transaction
+                .prepare_cached(
+                    "SELECT 1 FROM gap_sequences WHERE session = ?1 AND process = ?2 AND sequence = ?3",
+                )
+                .sql()?
+                .exists(identity)
+                .sql()?;
+            self.sequence(transaction, reference, !after_marker)?;
+        }
+        let request = event["request_id"].as_str().map_or(0, number);
+        let kind = if event["type"] == "js_invocation_settle" {
+            SETTLE
+        } else {
+            OTHER
+        };
+        transaction
+            .prepare_cached(
+                "INSERT INTO events(start, end, session, process, sequence, request, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .sql()?
+            .execute(params![
+                start as i64,
+                end as i64,
+                number(&reference.0),
+                i64::from(reference.1),
+                number(&reference.2),
+                request,
+                kind
+            ])
+            .sql()?;
+        Ok(())
+    }
+}
+
+impl index_db::Fold for EventFold {
+    fn begin(&mut self) {
+        *self = Self::default();
+    }
+
+    fn line(
+        &mut self,
+        transaction: &Transaction<'_>,
+        line: &[u8],
+        start: u64,
+        end: u64,
+    ) -> Result<()> {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            return Ok(());
+        }
+        // The totals skip what the polling window skips: a line that is not a
+        // valid event counts as unreadable, though a trace still reads it.
+        let counted = |event: &Value| crate::app::validate_event(event).is_ok();
+        match event(line) {
+            Ok(Event::Record(reference, event)) => {
+                let counted = counted(&event);
+                self.malformed += u64::from(!counted);
+                self.record(transaction, &reference, &event, start, end, counted)
+            }
+            Ok(Event::Gap {
+                reference,
+                event,
+                drop,
+            }) => {
+                if counted(&event) {
+                    self.gap(transaction, &reference, &event)?;
+                } else {
+                    self.malformed += 1;
+                }
+                match drop {
+                    Ok(Some((session, process))) => {
+                        transaction
+                            .prepare_cached(
+                                "INSERT INTO markers(session, process, count) VALUES (?1, ?2, 1)
+                                 ON CONFLICT(session, process) DO UPDATE SET count = count + 1",
+                            )
+                            .sql()?
+                            .execute(params![number(&session), i64::from(process)])
+                            .sql()?;
+                        Ok(())
+                    }
+                    Ok(None) => Ok(()),
+                    Err(error) => damage(transaction, &error),
+                }
+            }
+            Err(error) => {
+                self.malformed += 1;
+                damage(transaction, &error)
+            }
+        }
+    }
+
+    fn finish(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        for ((session, process), stream) in self.streams.drain() {
+            transaction
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO streams(session, process, low, high, seen)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )
+                .sql()?
+                .execute(params![
+                    session,
+                    process,
+                    stream.low as i64,
+                    stream.high as i64,
+                    stream.seen as i64
+                ])
+                .sql()?;
+        }
+        // New pairs take the next ordinal, so the table keeps first-seen order.
+        for ((category, reason), count) in self.named.drain(..) {
+            transaction
+                .prepare_cached(
+                    "INSERT INTO named_gaps(category, reason, count) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(category, reason) DO UPDATE SET count = count + excluded.count",
+                )
+                .sql()?
+                .execute(params![category, reason, count as i64])
+                .sql()?;
+        }
+        let (drops, saturated, malformed): (i64, bool, i64) = transaction
+            .query_row(
+                "SELECT drops, drops_saturated, malformed FROM totals WHERE id = 0",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .sql()?;
+        let (mut drops, mut saturated) = (drops as u64, saturated);
+        event_window::add(&mut drops, &mut saturated, self.drops);
+        transaction
+            .execute(
+                "UPDATE totals SET drops = ?1, drops_saturated = ?2, malformed = ?3 WHERE id = 0",
+                params![
+                    drops as i64,
+                    saturated || self.drops_saturated,
+                    (malformed as u64).saturating_add(self.malformed) as i64
+                ],
+            )
+            .sql()?;
+        *self = Self::default();
+        Ok(())
+    }
 }
 
 fn fold_edge(
@@ -218,12 +459,10 @@ fn duplicate_event() -> Error {
     Error::bad("Origin trace input contains a duplicate event reference")
 }
 
-type FoldLine = fn(&rusqlite::Transaction<'_>, &[u8], u64, u64) -> Result<()>;
-
 /// One store and its identity index.
 struct StoreIndex {
     index: Indexed,
-    fold: FoldLine,
+    fold: Box<dyn index_db::Fold + Send>,
     oversized: &'static str,
 }
 
@@ -243,7 +482,7 @@ impl StoreIndex {
                 deadline,
                 RECORD_BYTES,
                 self.oversized,
-                &mut self.fold,
+                self.fold.as_mut(),
             )?;
             if position.indexed_to == before {
                 break;
@@ -320,6 +559,20 @@ fn tail(file: &mut File, position: &Position) -> Result<Option<Vec<u8>>> {
     Ok(complete.then_some(bytes))
 }
 
+/// The whole event store's gap totals, with the polling window's rules.
+#[derive(Debug, PartialEq)]
+pub struct Totals {
+    /// The store bytes they cover, from its start: every terminated record.
+    pub indexed_to: u64,
+    pub sequence_gaps: u64,
+    pub sequence_gaps_saturated: bool,
+    pub queue_drops: u64,
+    pub queue_drops_saturated: bool,
+    /// In first-seen order.
+    pub named_gaps: Vec<NamedGap>,
+    pub malformed_lines: u64,
+}
+
 /// The event and edge indexes of one session's stores.
 pub struct Indexes {
     events: StoreIndex,
@@ -331,12 +584,12 @@ impl Indexes {
         Self {
             events: StoreIndex {
                 index: Indexed::new(store, EVENTS_SUFFIX, EVENTS_FORMAT, EVENT_SCHEMA),
-                fold: fold_event,
+                fold: Box::<EventFold>::default(),
                 oversized: "The evidence store contains an oversized event",
             },
             edges: StoreIndex {
                 index: Indexed::new(trace_store, EDGES_SUFFIX, EDGES_FORMAT, EDGE_SCHEMA),
-                fold: fold_edge,
+                fold: Box::new(fold_edge),
                 oversized: "The evidence store contains an oversized origin trace edge",
             },
         }
@@ -347,6 +600,78 @@ impl Indexes {
         self.events.refresh(deadline)?;
         self.edges.refresh(deadline)?;
         Ok(())
+    }
+
+    /// The event store's gap totals once its index has caught up, folding
+    /// until `deadline`. None while the index is behind, so a caller reports
+    /// the window's counts rather than a part of the store as all of it, and
+    /// when there is no store.
+    pub fn event_totals(&mut self, deadline: Instant) -> Result<Option<Totals>> {
+        let Some((_, position)) = self.events.refresh(deadline)? else {
+            return Ok(None);
+        };
+        if !position.caught_up(RECORD_BYTES as u64) {
+            return Ok(None);
+        }
+        let connection = self.events.index.sidecar().connection();
+        let mut sequence_gaps = 0;
+        let mut sequence_gaps_saturated = false;
+        let streams = connection
+            .prepare_cached("SELECT low, high, seen FROM streams")
+            .sql()?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })
+            .sql()?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .sql()?;
+        for (low, high, seen) in streams {
+            // `seen` distinct sequences lie in [low, high], so this never underflows.
+            event_window::add(
+                &mut sequence_gaps,
+                &mut sequence_gaps_saturated,
+                high - low - (seen - 1),
+            );
+        }
+        let named_gaps = connection
+            .prepare_cached("SELECT category, reason, count FROM named_gaps ORDER BY ordinal")
+            .sql()?
+            .query_map([], |row| {
+                Ok(NamedGap {
+                    category: row.get(0)?,
+                    reason: row.get(1)?,
+                    count: row.get::<_, i64>(2)? as u64,
+                })
+            })
+            .sql()?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .sql()?;
+        let (queue_drops, queue_drops_saturated, malformed_lines) = connection
+            .query_row(
+                "SELECT drops, drops_saturated, malformed FROM totals WHERE id = 0",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? as u64,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, i64>(2)? as u64,
+                    ))
+                },
+            )
+            .sql()?;
+        Ok(Some(Totals {
+            indexed_to: position.indexed_to,
+            sequence_gaps,
+            sequence_gaps_saturated,
+            queue_drops,
+            queue_drops_saturated,
+            named_gaps,
+            malformed_lines,
+        }))
     }
 
     /// Removes both indexes, before a capture clear empties their stores.
@@ -398,10 +723,8 @@ impl Indexes {
                 }
                 evidence.event_tail = Some((reference, record));
             }
-            Some(Event::Marker(session, process)) => {
-                evidence.marker_tail = Some((session, process))
-            }
-            Some(Event::Ignored) | None => {}
+            Some(Event::Gap { drop, .. }) => evidence.marker_tail = drop?,
+            None => {}
         }
         evidence.edge_tail = edge_tail.flatten().map(|line| edge(&line)).transpose()?;
         Ok(evidence)
@@ -771,5 +1094,80 @@ mod tests {
             reopened.trace(root.path(), far()).err().unwrap().status,
             500
         );
+    }
+
+    /// The index's totals are the polling window's counts over the same whole
+    /// store, folded in several passes: sequence gaps per stream (a marker's
+    /// fresh sequence counts once, a duplicate never), queue drops with named
+    /// weights, every named pair in first-seen order and unreadable lines.
+    #[test]
+    fn gap_totals_match_the_window_over_the_whole_store() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("events.jsonl");
+        let event = |process: u64, sequence: u64, kind: &str, payload: &str| {
+            json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+                "monotonic_time_ns":"1","navigation_id":"1","frame_id":"1","artifact_id":"0",
+                "request_id":"1","process_id":process,"category":"vm","type":kind,
+                "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len()})
+        };
+        let mut rows = vec![
+            event(7, 1, "api_call", ""),
+            event(7, 2, "api_call", ""),
+            event(7, 2, "gap", "3"),
+            event(7, 6, "api_call", ""),
+            // A marker with a sequence of its own, and the record that repeats it.
+            event(7, 9, "gap", "native_reason_a"),
+            event(7, 9, "api_call", ""),
+            event(8, 40, "api_call", ""),
+            event(8, 40, "api_call", ""),
+            event(8, 45, "gap", "native_reason_b"),
+            event(8, 46, "gap", "native_reason_a"),
+        ];
+        rows.extend((0..300u64).map(|n| event(9, 2 * n + 1, "api_call", "")));
+        let mut text = String::new();
+        for (index, row) in rows.iter().enumerate() {
+            text.push_str(&row.to_string());
+            text.push('\n');
+            if index == 3 {
+                text.push_str("{\"not\":\"an event\"}\n");
+            }
+        }
+        std::fs::write(&store, &text).unwrap();
+        let mut indexes = Indexes::new(&store, &root.path().join("trace.jsonl"));
+        // A store the index has not folded yet has no totals.
+        assert_eq!(indexes.event_totals(Instant::now()).unwrap(), None);
+        let totals = indexes.event_totals(far()).unwrap().unwrap();
+        let window = crate::event_window::EventWindowCache::default()
+            .read(&store, 1, crate::app::validate_event, None)
+            .unwrap();
+        assert_eq!(window.coverage["scope"], "store");
+        assert_eq!(
+            (totals.sequence_gaps, totals.sequence_gaps_saturated),
+            (window.sequence_gaps, window.sequence_gaps_saturated)
+        );
+        assert_eq!(totals.sequence_gaps, 3 + 1 + 5 + 299, "{totals:?}");
+        assert_eq!(
+            (totals.queue_drops, totals.queue_drops_saturated),
+            (window.queue_drops, window.queue_drops_saturated)
+        );
+        assert_eq!(totals.queue_drops, 6);
+        assert_eq!(totals.named_gaps, window.named_gaps);
+        assert_eq!(totals.named_gaps[0].reason, "native_reason_a");
+        assert_eq!(totals.named_gaps[0].count, 2);
+        assert_eq!(totals.malformed_lines, 1);
+        assert_eq!(totals.indexed_to, text.len() as u64);
+        // Appended records fold into the same totals.
+        let mut more = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&store)
+            .unwrap();
+        use std::io::Write;
+        writeln!(more, "{}", event(7, 12, "api_call", "")).unwrap();
+        let grown = indexes.event_totals(far()).unwrap().unwrap();
+        assert_eq!(grown.sequence_gaps, totals.sequence_gaps + 2);
+        let window = crate::event_window::EventWindowCache::default()
+            .read(&store, 1, crate::app::validate_event, None)
+            .unwrap();
+        assert_eq!(grown.sequence_gaps, window.sequence_gaps);
     }
 }

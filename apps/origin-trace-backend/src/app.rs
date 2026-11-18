@@ -218,6 +218,9 @@ pub struct App {
 }
 /// How often, and for how long at a time, the background indexer folds.
 const INDEX_INTERVAL: Duration = Duration::from_secs(1);
+/// How long an event poll folds appended records into the gap totals; the
+/// background fold keeps the index within a second of the store.
+const EVENT_TOTALS_FOLD: Duration = Duration::from_millis(100);
 
 impl App {
     pub async fn stop(&self) {
@@ -362,13 +365,31 @@ impl App {
     pub fn router(self: &Arc<Self>) -> Router {
         Router::new().fallback(handle).with_state(self.clone())
     }
-    async fn read_event_window(&self, limit: usize) -> Result<event_window::EventWindow> {
+    /// The newest events up to `end`, a record boundary, or the store's end.
+    async fn read_event_window(
+        &self,
+        limit: usize,
+        end: Option<u64>,
+    ) -> Result<event_window::EventWindow> {
         // Serialize cache owners before acquiring shared reader slots. Waiting
         // event polls cannot consume all four slots needed by other readers.
         let mut cache = self.events.clone().lock_owned().await;
         let path = self.options.store.clone();
-        self.blocking(move || cache.read(&path, limit, validate_event))
+        self.blocking(move || cache.read(&path, limit, validate_event, end))
             .await
+    }
+    /// The event store's gap totals, or None while its index catches up.
+    async fn event_totals(&self) -> Option<crate::event_index::Totals> {
+        let indexes = self.indexes.clone();
+        self.blocking(move || {
+            indexes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .event_totals(std::time::Instant::now() + EVENT_TOTALS_FOLD)
+        })
+        .await
+        .ok()
+        .flatten()
     }
     async fn blocking<T: Send + 'static>(
         &self,
@@ -1066,10 +1087,18 @@ impl App {
                     return self.filtered_events(&q, limit, headers).await;
                 }
                 let capture = self.capture_view();
+                // Counts cover the whole store once its index has caught up,
+                // and the window then ends where the index does, so both
+                // describe the same bytes. Until then they are the scanned
+                // tail's, and say so.
+                let totals = self.event_totals().await;
+                let scope = totals
+                    .as_ref()
+                    .map_or("tail".to_owned(), |totals| totals.indexed_to.to_string());
                 etag = Some(event_window::etag(
                     &self.options.store,
                     &format!(
-                        "{}-{limit}-{}",
+                        "{}-{limit}-{}-{scope}",
                         capture.mode.as_str(),
                         capture.state.as_str()
                     ),
@@ -1077,7 +1106,19 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                let window = self.read_event_window(limit).await?;
+                let mut window = self
+                    .read_event_window(limit, totals.as_ref().map(|totals| totals.indexed_to))
+                    .await?;
+                if let Some(totals) = totals {
+                    window.sequence_gaps = totals.sequence_gaps;
+                    window.sequence_gaps_saturated = totals.sequence_gaps_saturated;
+                    window.queue_drops = totals.queue_drops;
+                    window.queue_drops_saturated = totals.queue_drops_saturated;
+                    window.named_gaps = totals.named_gaps;
+                    window.coverage["scope"] = json!("store");
+                    window.coverage["scan_start"] = json!("0");
+                    window.coverage["malformed_lines"] = json!(totals.malformed_lines);
+                }
                 let mut result = json!({
                     "count": window.events.len(),
                     "sequence_gaps": window.sequence_gaps.to_string(),
@@ -2871,9 +2912,9 @@ mod tests {
         let mut tasks = Vec::new();
         for _ in 0..8 {
             let app = app.clone();
-            tasks.push(tokio::spawn(
-                async move { app.read_event_window(5000).await },
-            ));
+            tasks.push(tokio::spawn(async move {
+                app.read_event_window(5000, None).await
+            }));
         }
         // All polls can wait on the cache while unrelated artifact work retains
         // all four shared blocking-reader slots.

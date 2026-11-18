@@ -212,14 +212,10 @@ async function checkStoredEvidenceContract(native, build) {
       assert(!native.includes(`case "${route}"`), `${route} has no second native answer`);
     }
   }
-  assert(build.includes('"${stored_event_window_source}" "${stored_evidence_backend_source}"'), 'The app compiles the forwarder');
+  assert(build.includes('"${swift_source}" "${stored_evidence_backend_source}"'), 'The app compiles the forwarder');
+  assert(!native.includes('case "/api/events"'), 'every event read, the bare poll included, comes from the bundled backend');
   assert(build.includes('tools/check-stored-evidence-backend.swift') && build.includes('check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"'),
     'The native build runs the forwarder against the packaged backend');
-  const types = text => [...text.matchAll(/"([a-z_]+)"/g)].map(match => match[1]).sort();
-  const swift = await readFile(join(root, 'apps/research-ui/macos/StoredEventWindow.swift'), 'utf8');
-  const rust = await readFile(join(root, 'apps/origin-trace-backend/src/event_window.rs'), 'utf8');
-  assert.deepEqual(types(swift.match(/func isNetwork[\s\S]+?\]\.contains/)[0]), types(rust.match(/fn is_network[\s\S]+?\n}/)[0]),
-    'The Swift and Rust network windows keep the same record types');
 }
 
 async function checkNativeDiagnosticsContract(){

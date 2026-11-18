@@ -682,6 +682,7 @@ pub type IndexedIdentities = (
 );
 
 /// Everything in `events` that touched cookie `name` in `session_id`.
+#[allow(clippy::too_many_arguments)]
 pub fn provenance(
     events: &[Value],
     drops: &Drops,

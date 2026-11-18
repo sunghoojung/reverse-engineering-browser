@@ -2231,7 +2231,7 @@
       "get": {
         "operationId": "get_events",
         "summary": "Read native events, optionally filtered and paged",
-        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. With any filter or cursor, debugger observations, request_watch_match (40) through dom_mutation (45), include debugger_observation beside that hex (DebuggerObservationDecode); the unfiltered polling window does not. status decoded carries the fields get_native_debugger lists, site (the listener, timer callback or throw site, resolved to the retained script's url, line, column and function name, or a reason with its raw script_id and position; every site in up to 4 scripts per page, newest records first, the rest deferred with source_limit until the same cursor is read again) and stack_read, the exact arguments of get_request_stack (stack_read_operation) for its stack; status invalid has no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
+        "description": "Without filters this is the Origin Trace UI polling window: the newest events of the last 64 MiB plus an independent network window. Its gap and drop counts cover the whole store once the event index has caught up (event_window scope store), and the windows then end where the index does; read older events with before=event_window.next_before. With any filter or cursor it scans complete records from the cursor (default: newest first), returns up to limit matches unchanged, and adds a query object with next_before and next_after cursors. Filters combine with AND. Gap fields then describe only the scanned byte range, and network_events is empty: select network records with category=network. Network requests: request_body (22) gives each body's length, type and digest, and request_target (23) the path and query only when the session retains request content; response_body (33), in those sessions only, says whether each response body was retained, partial, refused or never observed, names its response_body artifact and joins its response_started parent; select one request with request_id. request_headers (30) and response_headers (31) summarize each header block in those sessions; read them with get_request_headers. Invocation sites: js_invocation_start (24), js_invocation_settle (25) and js_invocation_request (26) give armed calls and the requests made inside them. Each also includes js_invocation beside the hex (JsInvocationDecode): status decoded with kind start, settle or request, never a value digest; status invalid has no fields. wasm_execution_outcome (27) records a trap or that an instrumented Wasm call is still executing. A sample refused by a function, module, call-site, or the 16-record stream budget is wasm_dispatch_overflow (28) or wasm_indirect_overflow (29): a compact identity, not a full observation. Payloads stay hex. wasm_dispatch_observation and wasm_indirect_observation also include wasm_observation beside that hex, decoded without an opcode workspace. status decoded names function_index, module_byte_offset, sample_index, js_invocation_state, and js_invocation_id. A dispatch object also has selector and table_count. An indirect object also has table_index, slot, callee_function_index, and resolution named resolved, null, out-of-bounds, foreign, or unresolved. callee_function_index is 0 unless resolution is resolved. status invalid carries no fields. Version 1 decodes as not observed. Any other payload version is invalid with no fields, not a version-2 prefix. The record is protocol 3, category vm, and flags 0.  wasm_dispatch_overflow and wasm_indirect_overflow include wasm_overflow beside that hex. status decoded names kind identity or omitted. An identity names ring_index, function_index, and module_byte_offset, plus selector and arm_count, or table_index, slot, and resolution. An omitted record names omitted_count and no site. status invalid carries no fields. With any filter or cursor, debugger observations, request_watch_match (40) through dom_mutation (45), include debugger_observation beside that hex (DebuggerObservationDecode); the unfiltered polling window does not. status decoded carries the fields get_native_debugger lists, site (the listener, timer callback or throw site, resolved to the retained script's url, line, column and function name, or a reason with its raw script_id and position; every site in up to 4 scripts per page, newest records first, the rest deferred with source_limit until the same cursor is read again) and stack_read, the exact arguments of get_request_stack (stack_read_operation) for its stack; status invalid has no fields. Unknown parameters are rejected. Use a small limit through MCP and page with query.next_before.",
         "tags": [
           "events"
         ],
@@ -19581,14 +19581,14 @@
           },
           "sequence_gaps": {
             "$ref": "#/components/schemas/Uint64String",
-            "description": "Count of absent sequence IDs between observed minimum and maximum per session/process within event_window scope, including gap markers. Late arrivals close holes; duplicate IDs do not create gaps. Unknown prefixes and tails are not counted."
+            "description": "Count of absent sequence IDs between observed minimum and maximum per session/process within event_window scope, including gap markers. Late arrivals close holes; duplicate IDs do not create gaps. Unknown prefixes and tails are not counted. Scope store counts the whole store."
           },
           "sequence_gaps_saturated": {
             "type": "boolean"
           },
           "queue_drops": {
             "$ref": "#/components/schemas/Uint64String",
-            "description": "Sum of validated gap-record drop counts within event_window scope. May overlap sequence gaps; a bounded tail is not a whole-capture total."
+            "description": "Sum of validated gap-record drop counts within event_window scope. May overlap sequence gaps. Scope store is the whole-capture total; a bounded tail is not."
           },
           "queue_drops_saturated": {
             "type": "boolean"
@@ -19641,7 +19641,18 @@
               "malformed_lines": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Whole lines in the scanned bytes skipped because they are not valid events. Present on the polling answer. A torn tail still being written is not counted."
+                "description": "Whole lines in the scope skipped because they are not valid events. Present on the polling answer. A torn tail still being written is not counted."
+              },
+              "next_before": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Uint64String"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Present on the polling answer. The start of the oldest event in events, or of the scanned tail, when older records exist: pass it as before to read them, newest first. Null when events reach the start of the store."
               }
             },
             "required": [
@@ -19652,7 +19663,7 @@
               "events_limited",
               "network_events_limited"
             ],
-            "description": "Half-open complete-record byte scope of both windows and summaries. A bounded tail excludes the older prefix and is not a session-total claim. bounded_range is a filtered read's scanned range, which can start or end inside the store."
+            "description": "scan_start and scan_end are the half-open complete-record byte scope of the summaries: sequence_gaps, queue_drops, named_gaps and malformed_lines. store is the whole store, counted by the event index, and can exceed scan_limit. bounded_tail is the newest scan_limit bytes while the index catches up, which excludes the older prefix and is not a session-total claim. bounded_range is a filtered read's scanned range, which can start or end inside the store. The events and network_events windows are the newest records of at most scan_limit bytes that end at scan_end; next_before reads older ones."
           },
           "named_gaps": {
             "$ref": "#/components/schemas/NamedGaps"
@@ -39323,8 +39334,7 @@
       },
       "NamedGaps": {
         "type": "array",
-        "maxItems": 64,
-        "description": "Gap markers whose payload names a producer reason, such as native_guest_sample_limit, in first-seen order. They also count in queue_drops.",
+        "description": "Every (category, reason) pair of the gap markers whose payload names a producer reason, such as native_guest_sample_limit, in first-seen order. They also count in queue_drops.",
         "items": {
           "type": "object",
           "additionalProperties": false,

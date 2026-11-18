@@ -24,7 +24,11 @@ enum StoredEvidenceBackendChecks {
     // The workspace pages the whole catalog; a read the scheme handler answered would hold only its newest record.
     precondition(StoredEvidenceBackend.serves(request("/api/artifacts?after=0&limit=1")))
     precondition(StoredEvidenceBackend.serves(request("/api/artifacts?artifact_id=1&limit=1")))
-    for path in ["/api/events", "/api/events?limit=5000", "/api/artifacts?limit=500", "/api/artifacts/1/content", "/api/health",
+    for path in ["/api/events", "/api/events?limit=5000"] {
+      precondition(StoredEvidenceBackend.serves(request(path)) && StoredEvidenceBackend.isEventPoll(request(path)), path)
+    }
+    precondition(!StoredEvidenceBackend.isEventPoll(request("/api/events?request_id=1&limit=5")))
+    for path in ["/api/artifacts?limit=500", "/api/artifacts/1/content", "/api/health",
       "/api/native-debugger/actions", "/api/session/summary"] {
       precondition(!StoredEvidenceBackend.serves(request(path)), "\(path) stays native")
     }
@@ -76,6 +80,33 @@ enum StoredEvidenceBackendChecks {
     precondition((events.json["events"] as? [[String: Any]])?.compactMap { $0["type"] as? String }
       == ["request_started", "request_completed"], "a filtered read returns only that request: \(events.json)")
     precondition(call(request("/api/events?limit=5&misspelled=1")).status == 400, "an unknown filter fails")
+    // The bare poll counts over the whole store and carries the app's broker
+    // state; the tag changes with it, so a stale broker state is never a 304.
+    func poll(_ overlay: StoredEvidenceBackend.Overlay, etag: String? = nil) -> (status: Int, tag: String?, json: [String: Any]) {
+      let done = DispatchSemaphore(value: 0)
+      var result: (Int, String?, [String: Any]) = (0, nil, [:])
+      backend.forward(request("/api/events?limit=5000", etag: etag), overlay: overlay) { body, status, _, headers in
+        result = (status, headers["ETag"], (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:])
+        done.signal()
+      }
+      precondition(done.wait(timeout: .now() + 60) == .success, "no reply for the event poll")
+      return result
+    }
+    let stored = StoredEvidenceBackend.Overlay(fields: ["broker_connected": true, "capture_mode": "live"], tag: "live-1")
+    var window = poll(stored)
+    for _ in 0..<50 where (window.json["event_window"] as? [String: Any])?["scope"] as? String != "store" {
+      Thread.sleep(forTimeInterval: 0.1)
+      window = poll(stored)
+    }
+    precondition(window.status == 200 && window.json["count"] as? Int == 4, "\(window)")
+    precondition(window.json["capture_mode"] as? String == "live" && window.json["broker_connected"] as? Bool == true, "\(window.json)")
+    precondition((window.json["event_window"] as? [String: Any])?["scope"] as? String == "store", "\(window.json)")
+    precondition(window.json["sequence_gaps"] as? String == "0", "\(window.json)")
+    guard let pollTag = window.tag, pollTag.hasSuffix("-live-1\"") else { preconditionFailure("the poll tag names the overlay: \(window)") }
+    precondition(poll(stored, etag: pollTag).status == 304, "an unchanged poll is not modified")
+    let disconnected = StoredEvidenceBackend.Overlay(fields: ["broker_connected": false, "capture_mode": "live"], tag: "live-0")
+    let changed = poll(disconnected, etag: pollTag)
+    precondition(changed.status == 200 && changed.json["broker_connected"] as? Bool == false, "\(changed)")
     let stack = call(request("/api/request-stack?process_id=7&request_id=1"))
     precondition(stack.status == 200 && stack.json["status"] as? String == "not_recorded", "\(stack)")
     for path in ["/api/request-headers?session_id=1&request_id=1", "/api/request-cookies?session_id=1&request_id=1",
@@ -100,6 +131,6 @@ enum StoredEvidenceBackendChecks {
     let missing = StoredEvidenceBackend(executableURL: root.appendingPathComponent("missing"), arguments: stores)
     let refused = call(request("/api/requests"), on: missing)
     precondition(refused.status == 503 && refused.json["code"] as? String == "dependency_unavailable", "\(refused)")
-    print("PASS stored-evidence reb:// reads of the request index, filtered events, headers, cookies, stacks, source format and debugger state come from the bundled backend, which stops and restarts on demand")
+    print("PASS stored-evidence reb:// reads of the request index, the event poll with the app's broker state, filtered events, headers, cookies, stacks, source format and debugger state come from the bundled backend, which stops and restarts on demand")
   }
 }

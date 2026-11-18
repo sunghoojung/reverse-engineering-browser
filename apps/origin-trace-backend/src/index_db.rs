@@ -394,6 +394,7 @@ impl Sidecar {
             return Ok(position.clone());
         }
         let transaction = self.connection.transaction().sql()?;
+        each.begin();
         let mut at = from;
         let mut pending = Vec::new();
         let mut read_to = from;
@@ -451,6 +452,9 @@ impl Sidecar {
 /// commits: an index that changes rows in memory writes them back there, so
 /// they commit with the position they describe.
 pub trait Fold {
+    /// Called before each fold's first line, so state a failed fold left
+    /// behind is not written with the next one.
+    fn begin(&mut self) {}
     fn line(
         &mut self,
         transaction: &Transaction<'_>,

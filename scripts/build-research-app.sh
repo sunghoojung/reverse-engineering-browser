@@ -44,7 +44,6 @@ info_plist="${repo_root}/apps/research-ui/macos/Info.plist"
 minimum_macos="$(plutil -extract LSMinimumSystemVersion raw -o - "${info_plist}")"
 swiftc=(xcrun swiftc -target "$(uname -m)-apple-macos${minimum_macos}")
 swift_source="${repo_root}/apps/research-ui/macos/OriginTraceApp.swift"
-stored_event_window_source="${repo_root}/apps/research-ui/macos/StoredEventWindow.swift"
 stored_evidence_backend_source="${repo_root}/apps/research-ui/macos/StoredEvidenceBackend.swift"
 workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
@@ -213,11 +212,6 @@ smoke "${repo_root}/build/check-client-project-export" \
   "${repo_root}/build/client-project-qa/authored-example.zip"
 
 smoke "${swiftc[@]}" -parse-as-library \
-  "${stored_event_window_source}" "${repo_root}/tools/check-stored-event-window.swift" \
-  -o "${repo_root}/build/check-stored-event-window"
-smoke "${repo_root}/build/check-stored-event-window"
-
-smoke "${swiftc[@]}" -parse-as-library \
   "${stored_evidence_backend_source}" "${repo_root}/tools/check-stored-evidence-backend.swift" \
   -o "${repo_root}/build/check-stored-evidence-backend"
 smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTraceBackend"
@@ -227,7 +221,7 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_evidence_backend_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

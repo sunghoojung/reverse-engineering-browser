@@ -25,8 +25,9 @@ namespace reb {
 // Producer half of the response_body record in protocol/native-network-v3.md.
 // include/reb/network_response_body.hpp decodes and validates the same bytes.
 // Version 2 adds flag bit 7, kNativeResponseBodySnapshotsWithheld. Version 3
-// keeps every body whole: it never emits captured_truncated or
-// not_captured_session_budget, and snapshots have their own bound below.
+// keeps every body whole and every media type: it never emits
+// captured_truncated, not_captured_type or not_captured_session_budget, and
+// snapshots have their own bound below.
 inline constexpr std::uint16_t kNativeResponseBodyPayloadVersion = 3;
 inline constexpr std::size_t kNativeResponseBodyCodingSlots = 4;
 // Partial snapshots of an open body ("Partial bodies" in native-network-v3.md).
@@ -44,19 +45,17 @@ inline constexpr std::uint64_t kNativeResponseBodySnapshotSlackBytes = 64ULL * 1
 
 enum class NativeResponseBodyState : std::uint8_t {
   kCaptured = 1,
-  // Retired: older sessions' 16 MiB capture limit. Never emitted.
-  kCapturedTruncated = 2,
+  // 2, 9 and 12 are retired: versions 1 and 2's 16 MiB capture limit, media
+  // and fonts left out by choice, and response body budget.
+  // include/reb/network_response_body.hpp still decodes them.
   kPartial = 3,
   kAborted = 4,
   kCancelled = 5,
   kEmpty = 6,
   kNotModified = 7,
   kRedirected = 8,
-  kNotCapturedType = 9,
   kNotCapturedArtifactUnavailable = 10,
   kNotCapturedTransferRefused = 11,
-  // Retired: older sessions' response body budget. Never emitted.
-  kNotCapturedSessionBudget = 12,
   // The receiver's disk reserve refused the body while it arrived.
   kNotCapturedDiskReserve = 13,
 };

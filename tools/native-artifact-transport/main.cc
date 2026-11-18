@@ -92,7 +92,8 @@ std::unique_ptr<reb::NativeArtifactTransfer> MakeTransfer(const std::uint64_t ar
                                                           const std::size_t size,
                                                           const bool canvas = false) {
   auto transfer = std::make_unique<reb::NativeArtifactTransfer>();
-  transfer->reservation = reb::NativeArtifactReservation::Acquire(g_pool, size);
+  transfer->reservation =
+      reb::NativeArtifactReservation::Acquire(g_pool, size, reb::NativeArtifactPoolUse::kWhole);
   Require(transfer->reservation.is_valid(), "transfer pool share");
   transfer->header.session_id = kSessionId;
   transfer->header.artifact_id = artifact_id;
@@ -114,8 +115,9 @@ std::unique_ptr<reb::NativeArtifactTransfer> MakeTransfer(const std::uint64_t ar
   return transfer;
 }
 
-std::unique_ptr<reb::NativeArtifactTransfer> OpenStream(const std::uint64_t artifact_id) {
-  auto transfer = MakeTransfer(artifact_id, 0);
+std::unique_ptr<reb::NativeArtifactTransfer> OpenStream(const std::uint64_t artifact_id,
+                                                        const bool sensitive = false) {
+  auto transfer = MakeTransfer(artifact_id, 0, sensitive);
   transfer->op = reb::NativeArtifactTransferOp::kOpen;
   transfer->header.protocol_version = reb::kNativeArtifactStreamProtocolVersion;
   transfer->header.content_size = 0;
@@ -133,7 +135,8 @@ std::unique_ptr<reb::NativeArtifactTransfer> StreamFrame(const reb::NativeArtifa
   transfer->frame.artifact_id = artifact_id;
   transfer->frame.content_size = content_size;
   if (size != 0) {
-    transfer->reservation = reb::NativeArtifactReservation::Acquire(g_pool, size);
+    transfer->reservation =
+        reb::NativeArtifactReservation::Acquire(g_pool, size, reb::NativeArtifactPoolUse::kStream);
     Require(transfer->reservation.is_valid(), "stream frame pool share");
     transfer->content.assign(size, 's');
     transfer->frame.data_size = static_cast<std::uint32_t>(size);
@@ -204,9 +207,7 @@ pid_t SpawnReceiver(const std::string& binary,
                                         "--token-file",
                                         token,
                                         "--session-id",
-                                        std::to_string(kSessionId),
-                                        "--max-artifact-bytes",
-                                        "65536"};
+                                        std::to_string(kSessionId)};
   arguments.insert(arguments.end(), extra.begin(), extra.end());
   std::vector<char*> argv;
   for (std::string& argument : arguments) {
@@ -333,10 +334,11 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
   Require(Enqueue(MakeTransfer(2, 32 * 1024, true)), "enqueue sensitive artifact");
   Require(StatusOf(2) == NativeArtifactReceiveStatus::kSensitiveCaptureDisabled,
           "sensitive rejection keeps its status");
-  // 256 KiB against a 64 KiB receiver limit: the body is larger than any
-  // socket buffer, so this fails as an I/O error unless the receiver reads it.
-  Require(Enqueue(MakeTransfer(3, 256 * 1024)), "enqueue oversize artifact");
-  Require(StatusOf(3) == NativeArtifactReceiveStatus::kTooLarge, "oversize keeps its status");
+  // A refused 256 KiB body is larger than any socket buffer, so this fails as
+  // an I/O error unless the receiver reads it.
+  Require(Enqueue(MakeTransfer(3, 256 * 1024, true)), "enqueue large sensitive artifact");
+  Require(StatusOf(3) == NativeArtifactReceiveStatus::kSensitiveCaptureDisabled,
+          "a refused body past the socket buffers keeps its status");
   Require(Enqueue(MakeTransfer(1, 12)), "enqueue duplicate artifact");
   Require(StatusOf(1) == NativeArtifactReceiveStatus::kConflict, "duplicate keeps its status");
   Require(Enqueue(MakeTransfer(4, 20)), "enqueue after rejections");
@@ -352,23 +354,23 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
           "only the accepted artifacts are in the manifest");
   Require(WaitFor([] { return g_pool.used() == 0; }),
           "written and rejected transfers return their pool share");
-  std::cout << "PASS artifact writer: sensitive, oversize and duplicate rejections answered on one "
-               "connection with their real status; the next artifact is accepted\n";
+  std::cout << "PASS artifact writer: sensitive, large sensitive and duplicate rejections answered "
+               "on one connection with their real status; the next artifact is accepted\n";
 
-  // Streams interleave on the same connection. A refusal mid-stream is
-  // reported once and the stream's later frames are dropped; an abort is
-  // silent; a stream still open when the receiver goes is reported lost.
+  // Streams interleave on the same connection. A refused stream is reported
+  // once and its later frames are dropped; an abort is silent; a stream still
+  // open when the receiver goes is reported lost.
   using Op = reb::NativeArtifactStreamOp;
   Require(
-      Enqueue(OpenStream(20)) && Enqueue(OpenStream(21)) && Enqueue(OpenStream(22)) &&
+      Enqueue(OpenStream(20)) && Enqueue(OpenStream(21, true)) && Enqueue(OpenStream(22)) &&
           Enqueue(StreamFrame(Op::kData, 20, 1000)) && Enqueue(StreamFrame(Op::kData, 21, 60000)) &&
           Enqueue(StreamFrame(Op::kData, 22, 10)) && Enqueue(StreamFrame(Op::kData, 20, 2000)) &&
           Enqueue(StreamFrame(Op::kData, 21, 10000)) && Enqueue(StreamFrame(Op::kData, 21, 5)) &&
           Enqueue(StreamFrame(Op::kAbort, 22)) && Enqueue(StreamFrame(Op::kEnd, 21, 0, 60005)) &&
           Enqueue(StreamFrame(Op::kEnd, 20, 0, 3000)),
       "enqueue interleaved streams");
-  Require(StatusOf(21) == NativeArtifactReceiveStatus::kTooLarge,
-          "a stream refused mid-body reports the receiver's status");
+  Require(StatusOf(21) == NativeArtifactReceiveStatus::kSensitiveCaptureDisabled,
+          "a refused stream reports the receiver's status");
   Require(StatusOf(20) == NativeArtifactReceiveStatus::kAccepted, "an ended stream is accepted");
   Require(Enqueue(OpenStream(23)) && Enqueue(StreamFrame(Op::kData, 23, 7)) &&
               Enqueue(MakeTransfer(24, 4)) &&
@@ -388,9 +390,8 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
 
   StopReceiver(pid);
   const std::string stats = ReadFile(log_path);
-  Require(CountOf(stats, "accepted=4 ") == 1 && CountOf(stats, "too_large=2 ") == 1 &&
-              CountOf(stats, "streams_abandoned=1 ") == 1 &&
-              CountOf(stats, "sensitive_rejected=1 ") == 1 && CountOf(stats, "conflicts=1 ") == 1,
+  Require(CountOf(stats, "accepted=4 ") == 1 && CountOf(stats, "streams_abandoned=1 ") == 1 &&
+              CountOf(stats, "sensitive_rejected=3 ") == 1 && CountOf(stats, "conflicts=1 ") == 1,
           "receiver counted every rejection");
   const auto lost_started = Clock::now();
   Require(Enqueue(MakeTransfer(5, 8)), "enqueue to a vanished receiver");
@@ -447,7 +448,7 @@ void CheckDiskReserve(const std::string& receiver, const std::string& root) {
   StopArtifactClient();
   StopReceiver(pid);
   Require(CountOf(ReadFile(log_path), "disk_reserve=3 ") == 1 &&
-              CountOf(ReadFile(log_path), "accepted=0 ") == 1,
+              CountOf(ReadFile(log_path), "stopped: accepted=0 ") == 1,
           "the receiver counted every disk reserve refusal");
   Require(g_channel_lost == lost_before, "a stopped client after refusals announces no loss");
   std::cout << "PASS artifact writer: disk reserve refusals reported with status 7 on one "

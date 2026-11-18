@@ -53,7 +53,9 @@ static_assert(static_cast<std::uint16_t>(reb::ArtifactCaptureOrigin::kNetworkReq
               static_cast<std::uint16_t>(reb::NativeArtifactCaptureOrigin::kNetworkRequest));
 static_assert(reb::kRequestTargetPrefixBytes == reb::kNativeRequestTargetPrefixBytes);
 static_assert(reb::kRequestContentTypeBytes == reb::kNativeRequestContentTypeBytes);
-static_assert(reb::kRequestBodyDigestBytes == reb::kNativeRequestBodyDigestBytes);
+static_assert(reb::kRequestBodyPayloadVersion == reb::kNativeRequestBodyPayloadVersion);
+static_assert(reb::kRequestBodyRead == reb::kNativeRequestBodyRead);
+static_assert(reb::kRequestBodyCredentialForm == reb::kNativeRequestBodyCredentialForm);
 static_assert(static_cast<std::uint8_t>(reb::RequestBodyState::kNotCapturedCredentialForm) ==
               static_cast<std::uint8_t>(reb::NativeRequestBodyState::kNotCapturedCredentialForm));
 static_assert(static_cast<std::uint8_t>(reb::RequestBodyKind::kUnknown) ==
@@ -94,11 +96,14 @@ static_assert(reb::kScriptCookieTableFull == reb::kNativeScriptCookieTableFull);
 static_assert(reb::kScriptCookieReadRecord == reb::kNativeScriptCookieReadRecord);
 static_assert(reb::kScriptCookiePayloadVersion == reb::kNativeScriptCookiePayloadVersion);
 
+// A version 2 record the UI thread wrote without reading the body
+// (native-network-v3.md): only an empty in-memory body has a digest there.
 reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                                       const reb::NativeRequestBodyState state,
                                       const bool content,
                                       const std::uint64_t length,
                                       const std::uint64_t captured = 0) {
+  using S = reb::NativeRequestBodyState;
   reb::NativeRequestBodySummary value;
   value.kind = kind;
   value.state = state;
@@ -108,14 +113,12 @@ reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
                         : kind == reb::NativeRequestBodyKind::kMixed ? 2
                                                                      : 1;
   value.flags = content ? reb::kNativeRequestBodyContentCapture : 0;
-  if (kind == reb::NativeRequestBodyKind::kBytes &&
-      state != reb::NativeRequestBodyState::kNotCapturedCredentialForm) {
-    if (length <= reb::kNativeRequestBodyDigestBytes) {
-      value.flags |= reb::kNativeRequestBodyDigestPresent;
-      value.sha256.fill(0xab);
-    } else {
-      value.flags |= reb::kNativeRequestBodyDigestSizeLimit;
-    }
+  if (state == S::kEmpty) {
+    value.flags |= reb::kNativeRequestBodyDigestPresent;
+    value.sha256.fill(0xab);
+  }
+  if (state == S::kNotCapturedCredentialForm) {
+    value.flags |= reb::kNativeRequestBodyCredentialForm;
   }
   if (kind != reb::NativeRequestBodyKind::kNone && kind != reb::NativeRequestBodyKind::kBytes) {
     value.flags |= reb::kNativeRequestBodyLengthPartial;
@@ -128,22 +131,52 @@ reb::NativeRequestBodySummary Summary(const reb::NativeRequestBodyKind kind,
   return value;
 }
 
-// A body whose file, blob or stream parts the browser read (native-network-v3.md).
+// A body read, or in a Metadata only session hashed, off the UI thread: its
+// lengths and digest are exact when it was read whole.
 reb::NativeRequestBodySummary Read(const reb::NativeRequestBodyKind kind,
                                    const reb::NativeRequestBodyState state,
                                    const std::uint64_t length,
-                                   const std::uint64_t captured = 0) {
+                                   const std::uint64_t captured = 0,
+                                   const bool content = true) {
   using S = reb::NativeRequestBodyState;
-  auto value = Summary(kind, state, true, length, captured);
+  auto value = Summary(kind, state, content, length, captured);
   value.flags |= reb::kNativeRequestBodyRead;
-  if (state == S::kEmpty || state == S::kCaptured || state == S::kCapturedTruncated) {
+  if (state == S::kEmpty || state == S::kCaptured || state == S::kMetadataOnly) {
+    value.flags &= static_cast<std::uint8_t>(~reb::kNativeRequestBodyLengthPartial);
+    value.flags |= reb::kNativeRequestBodyDigestPresent;
+    value.sha256.fill(0xab);
+  }
+  return value;
+}
+
+// A stored version 1 record (native-network-v2.md): in-memory bodies up to
+// 4 MiB were hashed, and a read kept at most a 16 MiB prefix.
+reb::NativeRequestBodySummary Version1(const reb::NativeRequestBodyKind kind,
+                                       const reb::RequestBodyState state,
+                                       const bool content,
+                                       const std::uint64_t length,
+                                       const std::uint64_t captured = 0,
+                                       const bool read = false) {
+  using S = reb::RequestBodyState;
+  auto value = Summary(kind, static_cast<reb::NativeRequestBodyState>(state), content, length,
+                       captured);
+  value.flags &= static_cast<std::uint8_t>(
+      ~(reb::kNativeRequestBodyDigestPresent | reb::kNativeRequestBodyCredentialForm));
+  value.sha256 = {};
+  if (read) {
+    value.flags |= reb::kNativeRequestBodyRead;
+  }
+  if (read && (state == S::kEmpty || state == S::kCaptured || state == S::kCapturedTruncated)) {
     value.flags &= static_cast<std::uint8_t>(~reb::kNativeRequestBodyLengthPartial);
   }
-  if (state == S::kEmpty || state == S::kCaptured) {
+  const bool hashed = read ? state == S::kEmpty || state == S::kCaptured
+                           : kind == reb::NativeRequestBodyKind::kBytes &&
+                                 state != S::kNotCapturedCredentialForm;
+  if (hashed && (read || length <= reb::kRequestBodyDigestBytes)) {
     value.flags |= reb::kNativeRequestBodyDigestPresent;
-    value.sha256.fill(0xcd);
-  } else if (state == S::kCapturedTruncated) {
-    value.flags |= reb::kNativeRequestBodyDigestSizeLimit;
+    value.sha256.fill(0xab);
+  } else if (hashed || (read && state == S::kCapturedTruncated)) {
+    value.flags |= reb::kRequestBodyDigestSizeLimit;
   }
   return value;
 }
@@ -165,8 +198,11 @@ reb::EventRecord Event(const reb::EventType type, const std::array<std::byte, 12
 }
 
 reb::EventRecord BodyEvent(const reb::NativeRequestBodySummary& summary,
-                           const std::uint64_t artifact_id = 0) {
+                           const std::uint64_t artifact_id = 0,
+                           const std::uint16_t version = reb::kNativeRequestBodyPayloadVersion) {
   auto event = Event(reb::EventType::kRequestBody, reb::EncodeNativeRequestBodyPayload(summary));
+  // Older records differ only in their version and the rules it selects.
+  event.inline_payload[0] = static_cast<std::byte>(version);
   event.header.artifact_id = artifact_id;
   return event;
 }
@@ -174,7 +210,7 @@ reb::EventRecord BodyEvent(const reb::NativeRequestBodySummary& summary,
 void CheckParity() {
   reb::NativeRequestBodySummary body;
   body.kind = reb::NativeRequestBodyKind::kMixed;
-  body.state = reb::NativeRequestBodyState::kNotCapturedSessionBudget;
+  body.state = reb::NativeRequestBodyState::kNotCapturedReadIncomplete;
   body.flags = 0x2a;
   body.content_type_length = 0x3f;
   body.body_length = 0x0102030405060708ULL;
@@ -189,8 +225,8 @@ void CheckParity() {
   reb::RequestBodyPayload decoded;
   Check(reb::DecodeRequestBodyPayload(reb::EncodeNativeRequestBodyPayload(body), decoded),
         "body payload decodes");
-  Check(decoded.protocol_version == 1 && decoded.payload_size == 128 && decoded.kind == 5 &&
-            decoded.state == 10 && decoded.flags == 0x2a && decoded.content_type_length == 0x3f &&
+  Check(decoded.protocol_version == 2 && decoded.payload_size == 128 && decoded.kind == 5 &&
+            decoded.state == 12 && decoded.flags == 0x2a && decoded.content_type_length == 0x3f &&
             decoded.body_length == body.body_length &&
             decoded.captured_length == body.captured_length &&
             decoded.element_count == body.element_count && decoded.reserved0 == 0 &&
@@ -256,26 +292,37 @@ void CheckContentTypes() {
 void CheckBodyStates() {
   using K = reb::NativeRequestBodyKind;
   using S = reb::NativeRequestBodyState;
+  using V1 = reb::RequestBodyState;
+  constexpr std::uint16_t kVersion1 = 1;
+  constexpr std::uint64_t kMiB = 1ULL << 20U;
   struct Valid {
     const char* name;
     reb::NativeRequestBodySummary summary;
     std::uint64_t artifact_id;
+    std::uint16_t version = reb::kNativeRequestBodyPayloadVersion;
   };
   auto no_body = Summary(K::kNone, S::kNoBody, false, 0);
   no_body.flags &= static_cast<std::uint8_t>(~reb::kNativeRequestBodyContentTypePresent);
   no_body.content_type = {};
   no_body.content_type_length = 0;
+  auto credential = Read(K::kBytes, S::kCaptured, 40, 40);
+  credential.flags |= reb::kNativeRequestBodyCredentialForm;
+  auto refused_credential = Read(K::kBytes, S::kNotCapturedDiskReserve, 40);
+  refused_credential.flags |= reb::kNativeRequestBodyCredentialForm;
   const Valid valid[] = {
       {"no body, metadata session", no_body, 0},
       {"no body, content session", Summary(K::kNone, S::kNoBody, true, 0), 0},
       {"empty bytes body", Summary(K::kBytes, S::kEmpty, false, 0), 0},
-      {"metadata-only JSON body", Summary(K::kBytes, S::kMetadataOnly, false, 816), 0},
+      {"empty bytes body, content session", Summary(K::kBytes, S::kEmpty, true, 0), 0},
+      {"metadata-only JSON body", Read(K::kBytes, S::kMetadataOnly, 816, 0, false), 0},
+      {"metadata-only body hashed past 4 MiB",
+       Read(K::kBytes, S::kMetadataOnly, 70 * kMiB, 0, false), 0},
+      {"metadata-only body not hashed", Summary(K::kBytes, S::kMetadataOnly, false, 816), 0},
       {"metadata-only file body", Summary(K::kFile, S::kMetadataOnly, false, 0), 0},
-      {"metadata-only over digest bound", Summary(K::kBytes, S::kMetadataOnly, false, 5 << 20), 0},
-      {"captured body", Summary(K::kBytes, S::kCaptured, true, 816, 816), 901},
-      {"truncated body", Summary(K::kBytes, S::kCapturedTruncated, true, 300000, 262144), 902},
-      {"truncated over digest bound",
-       Summary(K::kBytes, S::kCapturedTruncated, true, 5 << 20, 262144), 903},
+      {"captured body", Read(K::kBytes, S::kCaptured, 816, 816), 901},
+      {"captured body past 16 MiB", Read(K::kBytes, S::kCaptured, 70 * kMiB, 70 * kMiB), 902},
+      {"captured credential form", credential, 903},
+      {"credential form refused by the disk reserve", refused_credential, 0},
       {"file not captured", Summary(K::kFile, S::kNotCapturedBodyKind, true, 0), 0},
       {"blob data pipe not captured", Summary(K::kDataPipe, S::kNotCapturedBodyKind, true, 0), 0},
       {"stream not captured", Summary(K::kChunkedDataPipe, S::kNotCapturedBodyKind, true, 0), 0},
@@ -285,31 +332,46 @@ void CheckBodyStates() {
        Summary(K::kBytes, S::kNotCapturedArtifactUnavailable, true, 10), 0},
       {"transfer refused", Summary(K::kBytes, S::kNotCapturedTransferRefused, true, 10), 0},
       {"unsupported URL", Summary(K::kBytes, S::kNotCapturedUrl, true, 10), 0},
-      {"older session budget", Summary(K::kBytes, S::kNotCapturedSessionBudget, true, 10), 0},
       {"credential form, metadata", Summary(K::kBytes, S::kNotCapturedCredentialForm, false, 40),
        0},
-      {"credential form, content", Summary(K::kBytes, S::kNotCapturedCredentialForm, true, 40), 0},
       {"file body unavailable before read",
        Summary(K::kFile, S::kNotCapturedArtifactUnavailable, true, 0), 0},
-      {"stream body past an older budget before read",
-       Summary(K::kChunkedDataPipe, S::kNotCapturedSessionBudget, true, 0), 0},
       {"multipart body refused before read",
        Summary(K::kMixed, S::kNotCapturedTransferRefused, true, 120), 0},
       {"blob body on unsupported URL", Summary(K::kDataPipe, S::kNotCapturedUrl, true, 0), 0},
       {"read multipart body with a file", Read(K::kMixed, S::kCaptured, 4096, 4096), 904},
       {"read stream body", Read(K::kChunkedDataPipe, S::kCaptured, 77, 77), 905},
       {"read empty blob", Read(K::kDataPipe, S::kEmpty, 0), 0},
-      {"read file past 16 MiB",
-       Read(K::kFile, S::kCapturedTruncated, (16ULL << 20) + 9, 16ULL << 20), 906},
-      {"read stopped by an older budget", Read(K::kDataPipe, S::kNotCapturedSessionBudget, 70000),
-       0},
+      {"read file past 16 MiB", Read(K::kFile, S::kCaptured, 16 * kMiB + 9, 16 * kMiB + 9), 906},
       {"read refused by the disk reserve", Read(K::kFile, S::kNotCapturedDiskReserve, 65536), 0},
-      {"read refused by the pool", Read(K::kChunkedDataPipe, S::kNotCapturedTransferRefused, 12),
-       0},
+      {"read in-memory body refused", Read(K::kBytes, S::kNotCapturedTransferRefused, 816), 0},
+      {"read stream refused", Read(K::kChunkedDataPipe, S::kNotCapturedTransferRefused, 12), 0},
       {"read incomplete", Read(K::kFile, S::kNotCapturedReadIncomplete, 0), 0},
+      // Stored version 1 records keep their meaning.
+      {"version 1 metadata-only JSON body", Version1(K::kBytes, V1::kMetadataOnly, false, 816), 0,
+       kVersion1},
+      {"version 1 metadata-only over digest bound",
+       Version1(K::kBytes, V1::kMetadataOnly, false, 5 * kMiB), 0, kVersion1},
+      {"version 1 captured body", Version1(K::kBytes, V1::kCaptured, true, 816, 816), 901,
+       kVersion1},
+      {"version 1 truncated body",
+       Version1(K::kBytes, V1::kCapturedTruncated, true, 300000, 262144), 902, kVersion1},
+      {"version 1 truncated over digest bound",
+       Version1(K::kBytes, V1::kCapturedTruncated, true, 5 * kMiB, 262144), 903, kVersion1},
+      {"version 1 session budget", Version1(K::kBytes, V1::kNotCapturedSessionBudget, true, 10),
+       0, kVersion1},
+      {"version 1 stream body past the session budget before read",
+       Version1(K::kChunkedDataPipe, V1::kNotCapturedSessionBudget, true, 0), 0, kVersion1},
+      {"version 1 credential form, content",
+       Version1(K::kBytes, V1::kNotCapturedCredentialForm, true, 40), 0, kVersion1},
+      {"version 1 read file past 16 MiB",
+       Version1(K::kFile, V1::kCapturedTruncated, true, 16 * kMiB + 9, 16 * kMiB, true), 906,
+       kVersion1},
+      {"version 1 read stopped by the session budget",
+       Version1(K::kDataPipe, V1::kNotCapturedSessionBudget, true, 70000, 0, true), 0, kVersion1},
   };
   for (const Valid& item : valid) {
-    golden.emplace_back(item.name, BodyEvent(item.summary, item.artifact_id));
+    golden.emplace_back(item.name, BodyEvent(item.summary, item.artifact_id, item.version));
     Check(reb::IsValidEvent(golden.back().second), std::string("valid body state: ") + item.name);
   }
 
@@ -319,38 +381,54 @@ void CheckBodyStates() {
     reb::NativeRequestBodySummary base;
     std::uint64_t artifact_id;
     Mutation mutate;
+    std::uint16_t version = reb::kNativeRequestBodyPayloadVersion;
   };
-  const auto captured = Summary(K::kBytes, S::kCaptured, true, 816, 816);
-  const auto metadata = Summary(K::kBytes, S::kMetadataOnly, false, 816);
+  const auto captured = Read(K::kBytes, S::kCaptured, 816, 816);
+  const auto metadata = Read(K::kBytes, S::kMetadataOnly, 816, 0, false);
   const auto file = Summary(K::kFile, S::kNotCapturedBodyKind, true, 0);
+  const auto refused = Read(K::kFile, S::kNotCapturedTransferRefused, 40);
+  const auto state = [](const V1 value) { return static_cast<S>(value); };
   const auto payload = [](std::size_t offset, std::byte value) {
     return [offset, value](reb::NativeRequestBodySummary&, reb::EventRecord& event) {
       event.inline_payload[offset] = value;
     };
   };
+  const auto digest = [](auto& s, auto&) {
+    s.flags |= reb::kNativeRequestBodyDigestPresent;
+    s.sha256.fill(1);
+  };
+  const auto credential_flag = [](auto& s, auto&) {
+    s.flags |= reb::kNativeRequestBodyCredentialForm;
+  };
   const Invalid invalid[] = {
-      {"version", captured, 901, payload(0, std::byte{2})},
+      {"version", captured, 901, payload(0, std::byte{3})},
+      {"version 0", captured, 901, payload(0, std::byte{0})},
       {"payload size field", captured, 901, payload(2, std::byte{127})},
       {"reserved bytes", captured, 901, payload(28, std::byte{1})},
       {"unknown kind", captured, 901, payload(4, std::byte{7})},
       {"zero state", captured, 901, payload(5, std::byte{0})},
       {"unknown state", captured, 901, payload(5, std::byte{14})},
+      {"retired truncation", Read(K::kFile, state(V1::kCapturedTruncated), 40, 39), 904, {}},
+      {"retired session budget",
+       Summary(K::kBytes, state(V1::kNotCapturedSessionBudget), true, 10),
+       0,
+       {}},
+      {"retired digest size flag", Summary(K::kBytes, S::kMetadataOnly, false, 816), 0,
+       [](auto& s, auto&) { s.flags |= reb::kRequestBodyDigestSizeLimit; }},
       {"disk reserve without read flag",
        Summary(K::kFile, S::kNotCapturedDiskReserve, true, 0),
        0,
        {}},
-      {"unknown flag", captured, 901, payload(6, std::byte{0x80 | 0x13})},
-      {"read flag on in-memory bytes", captured, 901, [](auto& s, auto&) { s.flags |= 0x40; }},
-      {"read flag on an unknown element",
-       Read(K::kUnknown, S::kNotCapturedReadIncomplete, 0),
-       0,
-       {}},
-      {"read flag in a metadata session", Read(K::kFile, S::kNotCapturedReadIncomplete, 0), 0,
-       [](auto& s, auto&) { s.flags &= static_cast<std::uint8_t>(~1U); }},
       {"read incomplete without read flag",
        Summary(K::kFile, S::kNotCapturedReadIncomplete, true, 0),
        0,
        {}},
+      {"captured without a read", Summary(K::kBytes, S::kCaptured, true, 816, 816), 901, {}},
+      {"read flag on an unknown element",
+       Read(K::kUnknown, S::kNotCapturedReadIncomplete, 0),
+       0,
+       {}},
+      {"read flag on no body", Read(K::kNone, S::kNoBody, 0), 0, {}},
       {"read capture without digest", Read(K::kFile, S::kCaptured, 40, 40), 904,
        [](auto& s, auto&) {
          s.flags &= static_cast<std::uint8_t>(~2U);
@@ -358,20 +436,29 @@ void CheckBodyStates() {
        }},
       {"read capture with partial length", Read(K::kFile, S::kCaptured, 40, 40), 904,
        [](auto& s, auto&) { s.flags |= 8; }},
-      {"read capture past 16 MiB untruncated",
-       Read(K::kFile, S::kCaptured, (16ULL << 20) + 1, (16ULL << 20) + 1),
-       904,
-       {}},
-      {"read truncation with a short prefix",
-       Read(K::kFile, S::kCapturedTruncated, (16ULL << 20) + 9, 1024),
-       906,
-       {}},
+      {"read capture short of the body", Read(K::kFile, S::kCaptured, 40, 39), 904, {}},
+      {"read capture of an empty body", Read(K::kFile, S::kCaptured, 0, 0), 904, {}},
       {"read capture without artifact", Read(K::kDataPipe, S::kCaptured, 40, 40), 0, {}},
-      {"read refusal with exact length", Read(K::kFile, S::kNotCapturedTransferRefused, 40), 0,
+      {"read refusal with exact length", refused, 0,
        [](auto& s, auto&) { s.flags &= static_cast<std::uint8_t>(~8U); }},
+      {"read refusal with digest", refused, 0, digest},
+      {"read refusal keeping bytes", refused, 0, [](auto& s, auto&) { s.captured_length = 10; }},
+      {"read in-memory refusal with partial length",
+       Read(K::kBytes, S::kNotCapturedTransferRefused, 816),
+       0,
+       [](auto& s, auto&) { s.flags |= 8; }},
       {"read stream of two elements", Read(K::kChunkedDataPipe, S::kCaptured, 40, 40), 905,
        [](auto& s, auto&) { s.element_count = 2; }},
       {"read state outside the read set", Read(K::kFile, S::kNotCapturedUrl, 0), 0, {}},
+      {"read metadata state in a content session", metadata, 0,
+       [](auto& s, auto&) { s.flags |= 1; }},
+      {"metadata read of a file", Read(K::kFile, S::kMetadataOnly, 40, 0, false), 0, {}},
+      {"metadata read of an empty body", Read(K::kBytes, S::kMetadataOnly, 0, 0, false), 0, {}},
+      {"metadata read of a credential form", metadata, 0, credential_flag},
+      {"metadata read keeping bytes", Read(K::kBytes, S::kCaptured, 816, 816, false), 901, {}},
+      {"metadata read refused", Read(K::kBytes, S::kNotCapturedTransferRefused, 816, 0, false),
+       0,
+       {}},
       {"content type dirty tail", captured, 901, payload(100, std::byte{'x'})},
       {"content type upper case", captured, 901, payload(64, std::byte{'A'})},
       {"content type length past field", captured, 901, payload(7, std::byte{65})},
@@ -379,29 +466,18 @@ void CheckBodyStates() {
       {"metadata with artifact", metadata, 901, {}},
       {"captured without content flag", captured, 901,
        [](auto& s, auto&) { s.flags &= static_cast<std::uint8_t>(~1U); }},
-      {"metadata-only in content session", metadata, 0, [](auto& s, auto&) { s.flags |= 1; }},
+      {"metadata-only in content session", Summary(K::kFile, S::kMetadataOnly, true, 0), 0, {}},
       {"captured length past body", captured, 901, [](auto& s, auto&) { s.captured_length = 817; }},
       {"captured state with short prefix", captured, 901,
        [](auto& s, auto&) { s.captured_length = 800; }},
-      {"truncated without truncation",
-       Summary(K::kBytes, S::kCapturedTruncated, true, 816, 816),
-       901,
-       {}},
       {"digest bytes without flag", metadata, 0,
        [](auto& s, auto&) { s.flags &= static_cast<std::uint8_t>(~2U); }},
-      {"bytes with neither digest nor bound flag", metadata, 0,
+      {"digest flag without bytes", metadata, 0, [](auto& s, auto&) { s.sha256 = {}; }},
+      {"digest on a file body", file, 0, digest},
+      {"digest on an unread body", Summary(K::kBytes, S::kMetadataOnly, false, 816), 0, digest},
+      {"empty body without digest", Summary(K::kBytes, S::kEmpty, false, 0), 0,
        [](auto& s, auto&) {
          s.flags &= static_cast<std::uint8_t>(~2U);
-         s.sha256 = {};
-       }},
-      {"digest on a file body", file, 0,
-       [](auto& s, auto&) {
-         s.flags |= 2;
-         s.sha256.fill(1);
-       }},
-      {"digest bound below limit", metadata, 0,
-       [](auto& s, auto&) {
-         s.flags = static_cast<std::uint8_t>((s.flags & ~2U) | 4U);
          s.sha256 = {};
        }},
       {"file without partial length", file, 0,
@@ -409,20 +485,29 @@ void CheckBodyStates() {
       {"bytes with partial length", metadata, 0, [](auto& s, auto&) { s.flags |= 8; }},
       {"no body with elements", Summary(K::kNone, S::kNoBody, false, 0), 0,
        [](auto& s, auto&) { s.element_count = 1; }},
+      {"no body with a length", Summary(K::kNone, S::kNoBody, false, 0), 0,
+       [](auto& s, auto&) { s.body_length = 3; }},
+      {"no body marked a credential form", Summary(K::kNone, S::kNoBody, true, 0), 0,
+       credential_flag},
       {"body kind claiming no body", metadata, 0, [](auto& s, auto&) { s.state = S::kNoBody; }},
       {"mixed from one element", Summary(K::kMixed, S::kNotCapturedBodyKind, true, 1), 0,
        [](auto& s, auto&) { s.element_count = 1; }},
       {"empty state with bytes", Summary(K::kBytes, S::kEmpty, false, 0), 0,
        [](auto& s, auto&) { s.body_length = 3; }},
-      {"credential form with digest", Summary(K::kBytes, S::kNotCapturedCredentialForm, true, 40),
+      {"credential form left out in a content session",
+       Summary(K::kBytes, S::kNotCapturedCredentialForm, true, 40),
        0,
-       [](auto& s, auto&) {
-         s.flags |= 2;
-         s.sha256.fill(1);
-       }},
+       {}},
+      {"credential form without its flag",
+       Summary(K::kBytes, S::kNotCapturedCredentialForm, false, 40), 0,
+       [](auto& s, auto&) { s.flags &= static_cast<std::uint8_t>(~0x80U); }},
+      {"credential flag on a metadata body", Summary(K::kFile, S::kMetadataOnly, false, 0), 0,
+       credential_flag},
+      {"credential form with digest", Summary(K::kBytes, S::kNotCapturedCredentialForm, false, 40),
+       0, digest},
       {"body kind refusal on bytes", Summary(K::kBytes, S::kNotCapturedBodyKind, true, 10), 0, {}},
-      {"budget refusal in metadata session",
-       Summary(K::kBytes, S::kNotCapturedSessionBudget, false, 10),
+      {"refusal in metadata session",
+       Summary(K::kBytes, S::kNotCapturedTransferRefused, false, 10),
        0,
        {}},
       {"type present and omitted", metadata, 0, [](auto& s, auto&) { s.flags |= 0x20; }},
@@ -438,6 +523,31 @@ void CheckBodyStates() {
        [](auto&, auto& e) { e.header.resource_type = 13; }},
       {"envelope payload size", captured, 901, [](auto&, auto& e) { e.header.payload_size = 127; }},
       {"envelope navigation", captured, 901, [](auto&, auto& e) { e.header.navigation_id = 1; }},
+      // Version 1 kept its own limits and knew no credential flag.
+      {"version 1 credential flag", Version1(K::kBytes, V1::kCaptured, true, 816, 816), 901,
+       credential_flag, kVersion1},
+      {"version 1 read capture past 16 MiB untruncated",
+       Version1(K::kFile, V1::kCaptured, true, 16 * kMiB + 1, 16 * kMiB + 1, true), 904, {},
+       kVersion1},
+      {"version 1 read truncation with a short prefix",
+       Version1(K::kFile, V1::kCapturedTruncated, true, 16 * kMiB + 9, 1024, true), 906, {},
+       kVersion1},
+      {"version 1 truncated without truncation",
+       Version1(K::kBytes, V1::kCapturedTruncated, true, 816, 816), 901, {}, kVersion1},
+      {"version 1 digest bound below limit", Version1(K::kBytes, V1::kMetadataOnly, false, 816),
+       0,
+       [](auto& s, auto&) {
+         s.flags = static_cast<std::uint8_t>((s.flags & ~2U) | 4U);
+         s.sha256 = {};
+       },
+       kVersion1},
+      {"version 1 read flag on in-memory bytes",
+       Version1(K::kBytes, V1::kCaptured, true, 816, 816), 901,
+       [](auto& s, auto&) { s.flags |= reb::kNativeRequestBodyRead; }, kVersion1},
+      {"version 1 read refused by the disk reserve",
+       Version1(K::kFile, V1::kNotCapturedDiskReserve, true, 65536, 0, true), 0, {}, kVersion1},
+      {"version 1 session budget in metadata session",
+       Version1(K::kBytes, V1::kNotCapturedSessionBudget, false, 10), 0, {}, kVersion1},
   };
   for (const Invalid& item : invalid) {
     // A mutation edits the summary before encoding, or the encoded record
@@ -447,7 +557,7 @@ void CheckBodyStates() {
     if (item.mutate) {
       item.mutate(summary, unused);
     }
-    auto event = BodyEvent(summary, item.artifact_id);
+    auto event = BodyEvent(summary, item.artifact_id, item.version);
     auto ignored = summary;
     if (item.mutate) {
       item.mutate(ignored, event);
@@ -1086,10 +1196,7 @@ void CheckArtifacts() {
 
 static_assert(static_cast<std::uint16_t>(reb::EventType::kResponseBody) ==
               static_cast<std::uint16_t>(reb::NativeProbeType::kResponseBody));
-static_assert(reb::kResponseBodyCaptureBytes == reb::kNativeResponseBodyCaptureBytes);
 static_assert(reb::kResponseBodyPayloadVersion == reb::kNativeResponseBodyPayloadVersion);
-static_assert(static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedSessionBudget) ==
-              static_cast<std::uint8_t>(reb::NativeResponseBodyState::kNotCapturedSessionBudget));
 static_assert(static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedDiskReserve) ==
               static_cast<std::uint8_t>(reb::NativeResponseBodyState::kNotCapturedDiskReserve));
 static_assert(static_cast<std::uint8_t>(reb::RequestBodyState::kNotCapturedDiskReserve) ==
@@ -1100,14 +1207,7 @@ static_assert(reb::kResponseBodyContentTypePresent == reb::kNativeResponseBodyCo
 static_assert(reb::kResponseBodyCompletionUnobserved ==
               reb::kNativeResponseBodyCompletionUnobserved);
 static_assert(reb::kResponseBodyShared == reb::kNativeResponseBodyShared);
-static_assert(reb::IsNativeResponseMedia(5, "font/woff2") &&
-              reb::IsNativeResponseMedia(4, "image/png") &&
-              !reb::IsNativeResponseMedia(13, "image/png") &&
-              !reb::IsNativeResponseMedia(4, "image/svg+xml") &&
-              reb::IsNativeResponseMedia(13, "video/mp4") &&
-              reb::IsNativeResponseMedia(13, "application/vnd.ms-fontobject") &&
-              !reb::IsNativeResponseMedia(0, "text/html") &&
-              !reb::IsNativeResponseMedia(13, "application/json"));
+static_assert(reb::kResponseBodySnapshotsWithheld == reb::kNativeResponseBodySnapshotsWithheld);
 
 reb::NativeResponseBodySummary ResponseSummary(const reb::NativeResponseBodyState state,
                                                const std::uint64_t body,
@@ -1127,15 +1227,22 @@ reb::NativeResponseBodySummary ResponseSummary(const reb::NativeResponseBodyStat
 }
 
 reb::EventRecord ResponseEvent(const reb::NativeResponseBodySummary& summary,
-                               const std::uint64_t artifact_id = 0) {
+                               const std::uint64_t artifact_id = 0,
+                               const std::uint16_t version =
+                                   reb::kNativeResponseBodyPayloadVersion) {
   auto event = Event(reb::EventType::kResponseBody, reb::EncodeNativeResponseBodyPayload(summary));
+  // Older records differ only in their version and the rules it selects.
+  event.inline_payload[0] = static_cast<std::byte>(version);
   event.header.artifact_id = artifact_id;
   return event;
 }
 
 void CheckResponseBodies() {
   using S = reb::NativeResponseBodyState;
-  constexpr std::uint64_t kCap = reb::kNativeResponseBodyCaptureBytes;
+  using Older = reb::ResponseBodyState;
+  // Versions 1 and 2 kept at most this prefix of a body.
+  constexpr std::uint64_t kCap = reb::kResponseBodyCaptureBytes;
+  const auto older = [](const Older value) { return static_cast<S>(value); };
   reb::NativeResponseBodySummary full;
   full.state = S::kPartial;
   full.flags = 0x5a;
@@ -1154,7 +1261,7 @@ void CheckResponseBodies() {
   }
   reb::ResponseBodyPayload decoded;
   Check(reb::DecodeResponseBodyPayload(reb::EncodeNativeResponseBodyPayload(full), decoded) &&
-            decoded.protocol_version == 2 && decoded.payload_size == 128 && decoded.state == 3 &&
+            decoded.protocol_version == 3 && decoded.payload_size == 128 && decoded.state == 3 &&
             decoded.flags == 0x5a && decoded.content_type_length == 0x3f &&
             decoded.coding_count == 3 && decoded.body_length == full.body_length &&
             decoded.captured_length == full.captured_length &&
@@ -1188,6 +1295,7 @@ void CheckResponseBodies() {
     const char* name;
     reb::NativeResponseBodySummary summary;
     std::uint64_t artifact_id;
+    std::uint16_t version = reb::kNativeResponseBodyPayloadVersion;
   };
   auto shared = ResponseSummary(S::kCaptured, 900, 900);
   shared.flags |= reb::kNativeResponseBodyShared | reb::kNativeResponseBodyFromCache;
@@ -1196,11 +1304,13 @@ void CheckResponseBodies() {
   encoded.flags |= reb::kNativeResponseBodyStillEncoded | reb::kNativeResponseBodyServiceWorker;
   auto unobserved = ResponseSummary(S::kCaptured, 12, 12);
   unobserved.flags |= reb::kNativeResponseBodyCompletionUnobserved;
-  // Version 2 bit 7: a snapshot the spacing allowed was withheld by a byte bound.
+  // Bit 7: a snapshot the spacing allowed was withheld by the body's copy bound.
   auto withheld = ResponseSummary(S::kPartial, 300, 300);
   withheld.flags |= reb::kNativeResponseBodySnapshotsWithheld;
-  auto withheld_end = ResponseSummary(S::kNotCapturedSessionBudget, 4096);
+  auto withheld_end = ResponseSummary(S::kNotCapturedDiskReserve, 4096);
   withheld_end.flags |= reb::kNativeResponseBodySnapshotsWithheld;
+  auto withheld_budget = ResponseSummary(older(Older::kNotCapturedSessionBudget), 4096);
+  withheld_budget.flags |= reb::kNativeResponseBodySnapshotsWithheld;
   auto untyped = ResponseSummary(S::kNotModified, 0);
   untyped.flags = 0;
   untyped.content_type = {};
@@ -1210,34 +1320,44 @@ void CheckResponseBodies() {
       {"response captured shared", shared, 911},
       {"response captured still encoded", encoded, 912},
       {"response captured unobserved completion", unobserved, 913},
-      {"response truncated", ResponseSummary(S::kCapturedTruncated, kCap + 5, kCap), 914},
+      {"response captured past 16 MiB", ResponseSummary(S::kCaptured, kCap * 5, kCap * 5), 914},
       {"response partial", ResponseSummary(S::kPartial, 300, 300), 915},
-      {"response partial past cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 916},
+      {"response partial past 16 MiB", ResponseSummary(S::kPartial, kCap + 1, kCap + 1), 916},
       {"response aborted prefix", ResponseSummary(S::kAborted, 2048, 2048), 917},
+      {"response aborted past 16 MiB", ResponseSummary(S::kAborted, kCap * 3, kCap * 3), 917},
       {"response aborted nothing kept", ResponseSummary(S::kAborted, 0), 0},
       {"response cancelled prefix", ResponseSummary(S::kCancelled, 10, 10), 918},
       {"response cancelled before bytes", ResponseSummary(S::kCancelled, 0), 0},
       {"response empty", ResponseSummary(S::kEmpty, 0), 0},
       {"response not modified", untyped, 0},
       {"response redirected", ResponseSummary(S::kRedirected, 0), 0},
-      {"response type skipped", ResponseSummary(S::kNotCapturedType, 0), 0},
       {"response artifact unavailable", ResponseSummary(S::kNotCapturedArtifactUnavailable, 77), 0},
       {"response transfer refused", ResponseSummary(S::kNotCapturedTransferRefused, 0), 0},
-      {"response older session budget", ResponseSummary(S::kNotCapturedSessionBudget, 4096), 0},
       {"response disk reserve", ResponseSummary(S::kNotCapturedDiskReserve, 4096), 0},
       {"response partial with snapshots withheld", withheld, 919},
       {"response refused with snapshots withheld", withheld_end, 0},
+      // Stored version 1 and 2 records keep their 16 MiB prefix, media choice
+      // and session budget.
+      {"response version 1", ResponseSummary(S::kCaptured, 900, 900), 911, 1},
+      {"response version 2 truncated",
+       ResponseSummary(older(Older::kCapturedTruncated), kCap + 5, kCap), 914, 2},
+      {"response version 2 partial past cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 916,
+       2},
+      {"response version 2 aborted past cap", ResponseSummary(S::kAborted, kCap * 3, kCap), 917,
+       2},
+      {"response version 2 type skipped", ResponseSummary(older(Older::kNotCapturedType), 0), 0,
+       2},
+      {"response version 2 session budget",
+       ResponseSummary(older(Older::kNotCapturedSessionBudget), 4096), 0, 2},
+      {"response version 2 budget with snapshots withheld", withheld_budget, 0, 2},
+      {"response version 1 session budget",
+       ResponseSummary(older(Older::kNotCapturedSessionBudget), 4096), 0, 1},
   };
   for (const Valid& item : valid) {
-    golden.emplace_back(item.name, ResponseEvent(item.summary, item.artifact_id));
+    golden.emplace_back(item.name, ResponseEvent(item.summary, item.artifact_id, item.version));
     Check(reb::IsValidEvent(golden.back().second),
           std::string("valid response body state: ") + item.name);
   }
-  // Version 1 records, from before bit 7, stay valid.
-  auto version_one = ResponseEvent(ResponseSummary(S::kCaptured, 900, 900), 911);
-  version_one.inline_payload[0] = std::byte{1};
-  golden.emplace_back("response version 1", version_one);
-  Check(reb::IsValidEvent(version_one), "valid response body state: version 1");
 
   using Mutation = std::function<void(reb::NativeResponseBodySummary&, reb::EventRecord&)>;
   struct Invalid {
@@ -1245,9 +1365,10 @@ void CheckResponseBodies() {
     reb::NativeResponseBodySummary base;
     std::uint64_t artifact_id;
     Mutation mutate;
+    std::uint16_t version = reb::kNativeResponseBodyPayloadVersion;
   };
   const auto captured = ResponseSummary(S::kCaptured, 900, 900);
-  const auto refused = ResponseSummary(S::kNotCapturedSessionBudget, 900);
+  const auto refused = ResponseSummary(S::kNotCapturedTransferRefused, 900);
   const auto summary = [](auto change) {
     return [change](reb::NativeResponseBodySummary& value, reb::EventRecord&) { change(value); };
   };
@@ -1257,16 +1378,31 @@ void CheckResponseBodies() {
     };
   };
   const Invalid invalid[] = {
-      {"response version 3", captured, 911, byte(0, std::byte{3})},
+      {"response version 4", captured, 911, byte(0, std::byte{4})},
       {"response version 0", captured, 911, byte(0, std::byte{0})},
       {"response version 1 with bit 7", captured, 911,
-       [](reb::NativeResponseBodySummary&, reb::EventRecord& event) {
-         event.inline_payload[0] = std::byte{1};
-         event.inline_payload[5] |= std::byte{0x80};
-       }},
+       summary([](auto& value) { value.flags |= reb::kNativeResponseBodySnapshotsWithheld; }), 1},
       {"response reserved", captured, 911, byte(30, std::byte{1})},
       {"response state 0", captured, 911, byte(4, std::byte{0})},
       {"response state 14", refused, 0, byte(4, std::byte{14})},
+      {"response truncated in version 3",
+       ResponseSummary(older(Older::kCapturedTruncated), kCap + 5, kCap),
+       914,
+       {}},
+      {"response type skipped in version 3", ResponseSummary(older(Older::kNotCapturedType), 0), 0,
+       {}},
+      {"response session budget in version 3",
+       ResponseSummary(older(Older::kNotCapturedSessionBudget), 4096),
+       0,
+       {}},
+      {"response partial cut at 16 MiB in version 3",
+       ResponseSummary(S::kPartial, kCap + 1, kCap),
+       916,
+       {}},
+      {"response aborted cut at 16 MiB in version 3",
+       ResponseSummary(S::kAborted, kCap * 3, kCap),
+       917,
+       {}},
       {"response captured without artifact", captured, 0, {}},
       {"response artifact without bytes", refused, 911, {}},
       {"response digest without bytes", refused, 0,
@@ -1283,11 +1419,17 @@ void CheckResponseBodies() {
        summary([](auto& value) { value.partial_index = 1; })},
       {"response partial without index", ResponseSummary(S::kPartial, 30, 30), 911,
        summary([](auto& value) { value.partial_index = 0; })},
-      {"response partial short of cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 911,
-       summary([](auto& value) { value.captured_length = kCap - 1; })},
+      {"response partial short", ResponseSummary(S::kPartial, 30, 29), 911, {}},
+      {"response version 2 partial short of cap", ResponseSummary(S::kPartial, kCap + 1, kCap), 911,
+       summary([](auto& value) { value.captured_length = kCap - 1; }), 2},
       {"response unobserved on aborted", ResponseSummary(S::kAborted, 0), 0,
        summary([](auto& value) { value.flags |= reb::kNativeResponseBodyCompletionUnobserved; })},
-      {"response truncated under cap", ResponseSummary(S::kCapturedTruncated, kCap, kCap), 911, {}},
+      {"response version 2 truncated under cap",
+       ResponseSummary(older(Older::kCapturedTruncated), kCap, kCap), 911, {}, 2},
+      {"response version 2 disk reserve", ResponseSummary(S::kNotCapturedDiskReserve, 4096), 0, {},
+       2},
+      {"response version 2 type skipped with length",
+       ResponseSummary(older(Older::kNotCapturedType), 3), 0, {}, 2},
       {"response empty with bytes", ResponseSummary(S::kEmpty, 0), 0,
        summary([](auto& value) { value.body_length = 3; })},
       {"response redirect with length", ResponseSummary(S::kRedirected, 0), 0,
@@ -1320,12 +1462,13 @@ void CheckResponseBodies() {
   };
   for (const Invalid& item : invalid) {
     auto value = item.base;
-    reb::EventRecord event = ResponseEvent(value, item.artifact_id);
+    reb::EventRecord event = ResponseEvent(value, item.artifact_id, item.version);
     if (item.mutate) {
       item.mutate(value, event);
       // Summary mutations re-encode; payload and envelope mutations stand.
-      const auto mutated = ResponseEvent(value, item.artifact_id);
-      if (mutated.inline_payload != ResponseEvent(item.base, item.artifact_id).inline_payload) {
+      const auto mutated = ResponseEvent(value, item.artifact_id, item.version);
+      if (mutated.inline_payload !=
+          ResponseEvent(item.base, item.artifact_id, item.version).inline_payload) {
         event.inline_payload = mutated.inline_payload;
       }
     }

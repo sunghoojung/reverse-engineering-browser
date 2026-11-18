@@ -53,7 +53,7 @@ enum class RequestBodyState : std::uint8_t {
   // used it too.
   kNotCapturedCredentialForm = 11,
   kNotCapturedReadIncomplete = 12,
-  // native-network-v3.md: the receiver's disk reserve refused a read body.
+  // Version 2: the receiver's disk reserve refused a read body.
   kNotCapturedDiskReserve = 13,
 };
 
@@ -268,7 +268,6 @@ namespace request_detail {
       case kNotCapturedTransferRefused:
       case kNotCapturedSessionBudget:
       case kNotCapturedReadIncomplete:
-      case kNotCapturedDiskReserve:
         return !digest && !size_limit;
       default:
         return false;

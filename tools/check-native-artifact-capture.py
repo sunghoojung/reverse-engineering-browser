@@ -237,6 +237,7 @@ ARTIFACT_MAGIC = 0x41424552
 ACK_MAGIC = 0x4B414252
 HELLO_MAGIC = 0x52454249
 KIND_JAVASCRIPT = 1
+KIND_RESPONSE_BODY = 4
 STATUS_ACCEPTED = 0
 STATUS_INVALID = 2
 STATUS_SENSITIVE_DISABLED = 4
@@ -246,7 +247,8 @@ TEST_TOKEN = bytes([0xAA]) * 32
 
 
 def artifact_frame(
-    artifact_id: int, content: bytes, *, session_id: int = 7, flags: int = 0
+    artifact_id: int, content: bytes, *, session_id: int = 7, flags: int = 0,
+    kind: int = KIND_JAVASCRIPT,
 ) -> bytes:
     url = f"https://fixture.test/{artifact_id}.js".encode()
     mime = b"text/javascript"
@@ -255,7 +257,7 @@ def artifact_frame(
     # the content size; metadata sizes, digest, context, origin, reserved.
     header = struct.pack(
         "<IHHHHI7QII32sQHHI",
-        *(ARTIFACT_MAGIC, 1, 128, KIND_JAVASCRIPT, flags, 0),
+        *(ARTIFACT_MAGIC, 1, 128, kind, flags, 0),
         *(session_id, 0, 0, artifact_id, 0, 0, size),
         *(len(url), len(mime), bytes(32), 0, 0, 0, 0),
     )
@@ -353,7 +355,11 @@ def check_receiver_socket(receiver: str) -> None:
                 assert read_ack(connection) == (STATUS_ACCEPTED, 1)
                 # A refused frame: the receiver reads the body, answers, and
                 # keeps the connection.
-                connection.sendall(artifact_frame(2, b"x" * (256 * 1024), flags=FLAG_SENSITIVE))
+                connection.sendall(
+                    artifact_frame(
+                        2, b"x" * (256 * 1024), flags=FLAG_SENSITIVE, kind=KIND_RESPONSE_BODY
+                    )
+                )
                 assert read_ack(connection) == (STATUS_SENSITIVE_DISABLED, 2)
                 connection.sendall(artifact_frame(3, b"three();"))
                 assert read_ack(connection) == (STATUS_ACCEPTED, 3)
@@ -641,19 +647,17 @@ def check_request_bodies(output: Path, artifacts: list[dict], events: list[dict]
         assert item["url"] == body["url"] and item["mime_type"] == body["mime_type"]
         assert item["creator_event_id"] == body["body_sequence"]
         data = (output / "artifacts" / item["content_path"]).read_bytes()
-        assert len(data) == body["captured_length"] == item["byte_size"]
-        truncated = body["captured_length"] < body["body_length"]
-        assert body["state"] == (5 if truncated else 4)
-        if not truncated:
-            assert hashlib.sha256(data).hexdigest() == body["sha256"]
+        # Every body is kept whole, and its record carries the digest.
+        assert len(data) == body["captured_length"] == body["body_length"] == item["byte_size"]
+        assert body["state"] == 4
+        assert hashlib.sha256(data).hexdigest() == body["sha256"]
         record = by_sequence[body["body_sequence"]]
         assert record["type"] == "request_body" and record["category"] == "network"
         assert record["artifact_id"] == body["artifact_id"]
         assert record["parent_event_id"] == body["start_sequence"]
         payload = bytes.fromhex(record["payload"])
-        # Past 4 MiB the record carries no digest; the artifact's is checked above.
-        hashed = body["body_length"] <= 4 * 1024 * 1024
-        assert payload[32:64].hex() == (body["sha256"] if hashed else "00" * 32)
+        assert int.from_bytes(payload[0:2], "little") == 2
+        assert payload[32:64].hex() == body["sha256"]
         assert int.from_bytes(payload[8:16], "little") == body["body_length"]
         target = next(
             e

@@ -14,7 +14,8 @@ namespace reb {
 // overlay's common/native_network_response_body.h is the producer half.
 // Version 2 adds flag bit 7; version 1 records stay valid without it.
 // Version 3 keeps every body whole: no captured_truncated, no session budget,
-// and a partial or stopped body keeps every byte that arrived.
+// no media left out by choice, and a partial or stopped body keeps every byte
+// that arrived.
 inline constexpr std::uint16_t kResponseBodyPayloadVersion = 3;
 // Versions 1 and 2 only: a body kept at most this prefix.
 inline constexpr std::uint64_t kResponseBodyCaptureBytes = 16ULL * 1024ULL * 1024ULL;
@@ -29,12 +30,13 @@ enum class ResponseBodyState : std::uint8_t {
   kEmpty = 6,
   kNotModified = 7,
   kRedirected = 8,
+  // Versions 1 and 2 only: media or a font, with Capture media and fonts off.
   kNotCapturedType = 9,
   kNotCapturedArtifactUnavailable = 10,
   kNotCapturedTransferRefused = 11,
   // Versions 1 and 2 only: the per-session response body budget was used.
   kNotCapturedSessionBudget = 12,
-  // The receiver's disk reserve refused the body while it arrived.
+  // Version 3: the receiver's disk reserve refused the body while it arrived.
   kNotCapturedDiskReserve = 13,
 };
 
@@ -166,14 +168,16 @@ static_assert(offsetof(ResponseBodyPayload, content_type) == 64);
     case kEmpty:
     case kNotModified:
     case kRedirected:
-    case kNotCapturedType:
       return value.body_length == 0;
+    case kNotCapturedType:
+      return limited && value.body_length == 0;
     case kNotCapturedSessionBudget:
       return limited && !retained;
     case kNotCapturedArtifactUnavailable:
     case kNotCapturedTransferRefused:
-    case kNotCapturedDiskReserve:
       return !retained;
+    case kNotCapturedDiskReserve:
+      return !limited && !retained;
   }
   return false;
 }

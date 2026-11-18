@@ -68,14 +68,14 @@ enum class NativeRequestBodyState : std::uint8_t {
   kEmpty = 2,
   kMetadataOnly = 3,
   kCaptured = 4,
-  // Retired: older sessions' 16 MiB capture limit. Never emitted.
-  kCapturedTruncated = 5,
+  // 5 and 10 are retired: version 1's 16 MiB capture limit and request content
+  // budget. include/reb/network_request.hpp still decodes them.
   kNotCapturedBodyKind = 6,
   kNotCapturedArtifactUnavailable = 7,
   kNotCapturedTransferRefused = 8,
   kNotCapturedUrl = 9,
-  // Retired: older sessions' request content budget. Never emitted.
-  kNotCapturedSessionBudget = 10,
+  // A Metadata only session's password form post; content sessions capture
+  // it and set kNativeRequestBodyCredentialForm.
   kNotCapturedCredentialForm = 11,
   // native-network-v3.md: a file, blob or stream part could not be read whole.
   kNotCapturedReadIncomplete = 12,
@@ -85,8 +85,7 @@ enum class NativeRequestBodyState : std::uint8_t {
 
 inline constexpr std::uint8_t kNativeRequestBodyContentCapture = 1U << 0U;
 inline constexpr std::uint8_t kNativeRequestBodyDigestPresent = 1U << 1U;
-// Retired: older sessions' 4 MiB digest limit. Never set.
-inline constexpr std::uint8_t kNativeRequestBodyDigestSizeLimit = 1U << 2U;
+// Bit 2 is retired: version 1's 4 MiB digest limit.
 inline constexpr std::uint8_t kNativeRequestBodyLengthPartial = 1U << 3U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypePresent = 1U << 4U;
 inline constexpr std::uint8_t kNativeRequestBodyContentTypeOmitted = 1U << 5U;

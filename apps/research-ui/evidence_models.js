@@ -1174,6 +1174,7 @@
           (body.capture_mode === undefined || ['live', 'demo', 'idle'].includes(body.capture_mode)) &&
           (body.broker_connected === undefined || typeof body.broker_connected === 'boolean') &&
           (body.capture_stopped === undefined || typeof body.capture_stopped === 'boolean') &&
+          (body.session_ended === undefined || typeof body.session_ended === 'boolean') &&
           (body.capture_controls_available === undefined || typeof body.capture_controls_available === 'boolean') &&
           (body.stealth_session === undefined || typeof body.stealth_session === 'boolean') &&
           (body.native_stealth === undefined || typeof body.native_stealth === 'boolean') &&

@@ -389,6 +389,8 @@ struct Expectations: Decodable {
   let partialHost: String
   let hexBodyHost: String
   let hexBodyBytes: Int
+  let recordedSession: String
+  let sessionPreferences: String
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -2424,7 +2426,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
       var text = try await panelText(ui)
       XCTAssertTrue(text.contains("Tracking 2 functions"), "the panel counts the saved functions: \(text)")
       XCTAssertTrue(text.contains("window.hsw"), "the panel names each saved function")
-      XCTAssertTrue(text.contains("Content mode also records settled-value digests"), "Content mode names its digests")
+      XCTAssertTrue(text.contains("Content mode can also record digests of their results"), "Content mode names its digests")
+      let digests = try await ui.value("document.querySelector('#session-panel-option-invocation-digests')?.checked ?? null") as? Bool
+      XCTAssertEqual(digests, true, "the digests are a checkbox in the panel, on by default, not an environment variable")
+      XCTAssertFalse(text.contains("REB_"), "the panel names no environment variable: \(text)")
       XCTAssertTrue(text.contains("https://hcaptcha.test/glue.js"), "each site names its script")
       try await assertLayout(ui, "#session-panel", "start panel with saved functions")
       try await assertInert(ui, "start panel with saved functions")
@@ -2433,6 +2438,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
       text = try await panelText(ui)
       XCTAssertTrue(text.contains("Metadata mode records no settled-value digests"), "Metadata mode records no digests: \(text)")
+      let metadataDigests = try await ui.value("document.querySelector('#session-panel-option-invocation-digests') === null") as? Bool
+      XCTAssertEqual(metadataDigests, true, "Metadata offers no digests")
       try await ui.click("#session-panel button[aria-label=\"Remove window.hsw\"]")
       try await ui.waitUntil("document.querySelector('#session-panel').innerText.includes('Tracking 1 function')", "Remove updates the count")
       text = try await panelText(ui)
@@ -3825,6 +3832,209 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // The start panel's session options at both window sizes and in both
+  // themes: the browser profile with the research profile's folder, Advanced
+  // options by keyboard with a visible ring on each, a dependent option, the
+  // count of changed options, and the choices Start saves for the next app run
+  // and holds for this one. The named Brave does not exist, so nothing
+  // launches. The defaults are chosen again at the end, so later tests see
+  // the panel as a first run does.
+  @MainActor
+  func test43StartPanelSessionOptions() async throws {
+    let ui = try await prepare(windowSizes[0])
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let expected = try Expectations.load()
+    try await clearSavedSites(ui)
+    let focus = { try await ui.json("__rebUiProbe.focusState()") }
+    let checked = "Object.fromEntries([...document.querySelectorAll('#session-panel input[id^=\"session-panel-option-\"]')].map(box => [box.id.replace('session-panel-option-', ''), box.checked]))"
+    let advancedKeys = ["request-stacks", "promise-stacks", "wasm-dispatch", "ignore-debugger-statements", "document-start",
+                        "canvas-images", "browser-internal", "extension-traffic"]
+    let startFails = { (name: String) in
+      try await ui.click("#session-panel-start")
+      try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
+      try await ui.click("#session-panel-offline")
+      try await ui.waitUntil("document.querySelector('#session-panel').hidden", "\(name): Continue Offline did not close the panel")
+    }
+    do {
+      for size in windowSizes {
+        let name = size.name
+        try await ui.resize(width: size.width, height: size.height)
+        try await openStartPanel(ui)
+        try await ui.activate()
+        if try await ui.value("document.querySelector('#session-panel-mode-content').checked") as? Bool != true {
+          try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+        }
+        // The profile: shared by default, with its folder, never the Keychain.
+        let profile = try await ui.value("document.querySelector('#session-panel .session-panel-profile').innerText") as? String ?? ""
+        XCTAssertTrue(profile.contains("Fresh profile") && profile.contains("Sessions share the research profile")
+          && profile.contains("Library/Application Support/Origin Trace/research-profiles/default"), "\(name): \(profile)")
+        let collapsed = try await ui.json("({expanded: document.querySelector('#session-panel-advanced').getAttribute('aria-expanded'), options: \(checked)})")
+        XCTAssertEqual(collapsed["expanded"] as? String, "false", "\(name): Advanced options starts collapsed: \(collapsed)")
+        XCTAssertEqual((collapsed["options"] as? [String: Bool])?.keys.sorted(), ["fresh-profile"], "\(name): \(collapsed)")
+        try await assertStartPanelFits(ui, "\(name) start panel profile")
+
+        // Keyboard: the toggle opens the list, and every option is a stop
+        // with a visible ring, in the order shown.
+        _ = try await ui.value("(document.querySelector('#session-panel-advanced').focus(), true)")
+        try await ui.key(49, " ")
+        try await ui.waitUntil("document.querySelector('#session-panel-advanced').getAttribute('aria-expanded') === 'true'", "\(name): Space did not open Advanced options")
+        let opened = try await focus()
+        XCTAssertEqual(opened["id"] as? String, "session-panel-advanced", "\(name): focus stays on the toggle: \(opened)")
+        for key in advancedKeys {
+          try await ui.tab()
+          let stop = try await focus()
+          XCTAssertEqual(stop["id"] as? String, "session-panel-option-\(key)", "\(name): \(stop)")
+          XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
+          XCTAssertEqual(stop["inViewport"] as? Bool, true, "\(name): the panel scrolls each option into view: \(stop)")
+          let ring = try await ui.value("""
+            (() => { const shown = getComputedStyle(document.activeElement);
+              return shown.outlineStyle !== 'none' && parseFloat(shown.outlineWidth) > 0; })()
+            """) as? Bool
+          XCTAssertEqual(ring, true, "\(name): a focus ring shows around \(key)")
+        }
+        try await ui.tab()
+        let after = try await focus()
+        XCTAssertEqual(after["id"] as? String, "session-panel-offline", "\(name): the actions follow the options: \(after)")
+        let defaults = try await ui.json(checked)
+        XCTAssertEqual(defaults as? [String: Bool], ["fresh-profile": false, "request-stacks": true, "promise-stacks": false, "wasm-dispatch": true,
+          "ignore-debugger-statements": true, "document-start": true, "canvas-images": true, "browser-internal": false, "extension-traffic": false],
+          "\(name): app sessions start with the defaults: \(defaults)")
+        let text = try await panelText(ui)
+        XCTAssertFalse(text.contains("REB_"), "\(name): the panel names no environment variable: \(text)")
+        _ = try await ui.reveal("#session-panel .session-panel-advanced", block: "start")
+        try await assertStartPanelFits(ui, "\(name) start panel advanced")
+        try await ui.screenshot("start-panel-advanced-\(name)")
+        try await lightScreenshot(ui, "start-panel-advanced", name, scope: "#session-panel")
+
+        // Metadata keeps no Canvas images, so it does not offer them.
+        try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
+        let metadata = try await ui.json(checked)
+        XCTAssertNil(metadata["canvas-images"], "\(name): Metadata offers no Canvas images: \(metadata)")
+        try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+        try await ui.click("#session-panel-advanced")
+        try await startFails(name)
+      }
+
+      // Choose: Promise stacks brings request stacks with it, and loses them
+      // with them; Wasm off, browser-internal traffic on, and Fresh profile.
+      try await openStartPanel(ui)
+      try await ui.click("#session-panel-advanced")
+      try await ui.click("#session-panel-option-request-stacks")
+      try await ui.click("#session-panel-option-promise-stacks")
+      var chosen = try await ui.json(checked)
+      XCTAssertEqual(chosen["request-stacks"] as? Bool, true, "Promise stacks turns request stacks on: \(chosen)")
+      try await ui.click("#session-panel-option-request-stacks")
+      chosen = try await ui.json(checked)
+      XCTAssertEqual(chosen["promise-stacks"] as? Bool, false, "request stacks off takes Promise stacks with them: \(chosen)")
+      for key in ["request-stacks", "promise-stacks", "wasm-dispatch", "browser-internal", "fresh-profile"] {
+        try await ui.click("#session-panel-option-\(key)")
+      }
+      let count = try await ui.value("document.querySelector('#session-panel-advanced').innerText") as? String ?? ""
+      XCTAssertTrue(count.contains("3 changed"), "the toggle counts the changed options: \(count)")
+      let fresh = try await panelText(ui)
+      XCTAssertTrue(fresh.contains("The research profile is left as it is"), "Fresh profile says what it leaves: \(fresh)")
+      try await assertStartPanelFits(ui, "start panel chosen options")
+      try await ui.screenshot("start-panel-options-chosen")
+      try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
+      try await startFails("chosen")
+
+      // Saved for the next app run, exactly as chosen.
+      let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: expected.sessionPreferences))) as? [String: Any]
+      XCTAssertEqual(saved?["version"] as? Int, 1, "\(String(describing: saved))")
+      XCTAssertEqual(saved?["mode"] as? String, "metadata", "\(String(describing: saved))")
+      XCTAssertEqual(saved?["options"] as? [String: Bool], ["fresh_profile": true, "request_stacks": true, "promise_stacks": true,
+        "wasm_dispatch": false, "ignore_debugger_statements": true, "canvas_images": true, "invocation_digests": true,
+        "document_start": true, "browser_internal": true, "extension_traffic": false], "the saved options: \(String(describing: saved))")
+      let mode = (try FileManager.default.attributesOfItem(atPath: expected.sessionPreferences)[.posixPermissions] as? NSNumber)?.intValue
+      XCTAssertEqual(mode, 0o600, "the saved choices are the researcher's alone")
+
+      // Held for this run: the panel opens with them.
+      try await openStartPanel(ui)
+      let held = try await ui.json("({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, options: \(checked), toggle: document.querySelector('#session-panel-advanced').innerText})")
+      XCTAssertEqual(held["mode"] as? String, "metadata", "\(held)")
+      XCTAssertEqual((held["options"] as? [String: Bool])?["fresh-profile"], true, "\(held)")
+      XCTAssertTrue((held["toggle"] as? String ?? "").contains("changed"), "\(held)")
+
+      // The defaults again, saved, for the tests that follow.
+      try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+      try await ui.click("#session-panel-advanced")
+      for key in ["promise-stacks", "wasm-dispatch", "browser-internal", "fresh-profile"] {
+        try await ui.click("#session-panel-option-\(key)")
+      }
+      try await startFails("defaults")
+      let restored = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: expected.sessionPreferences))) as? [String: Any]
+      XCTAssertEqual(restored?["mode"] as? String, "content", "\(String(describing: restored))")
+      XCTAssertEqual((restored?["options"] as? [String: Bool])?.filter { $0.value }.keys.sorted(),
+        ["canvas_images", "document_start", "ignore_debugger_statements", "invocation_digests", "request_stacks", "wasm_dispatch"],
+        "\(String(describing: restored))")
+    } catch {
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+  }
+
+  // Open Recent Session lists the ended sessions under the session root and
+  // opens one in the bundled workspace, which labels it as ended rather than
+  // capturing and shows its evidence. New Live Session leaves it.
+  @MainActor
+  func test44OpenRecentSession() async throws {
+    let ui = try await prepare(windowSizes[0])
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let expected = try Expectations.load()
+    let applicationMenu = try XCTUnwrap(NSApp.mainMenu?.items.first?.submenu)
+    let open = try XCTUnwrap(applicationMenu.items.first { $0.title == "Open Session…" })
+    XCTAssertEqual(open.keyEquivalent, "o", "Open Session… is Command-O")
+    let recentItem = try XCTUnwrap(applicationMenu.items.first { $0.title == "Open Recent Session" })
+    let recent = try XCTUnwrap(recentItem.submenu)
+    recent.delegate?.menuNeedsUpdate?(recent)
+    let sessions = recent.items.filter { $0.representedObject is URL }
+    XCTAssertEqual(sessions.count, 1, "the one ended session is listed: \(recent.items.map(\.title))")
+    let session = try XCTUnwrap(sessions.first)
+    XCTAssertEqual((session.representedObject as? URL)?.standardizedFileURL.path,
+      URL(fileURLWithPath: expected.recordedSession).standardizedFileURL.path)
+    XCTAssertTrue(session.title.hasSuffix(")"), "the item names when it started and for how long: \(session.title)")
+    XCTAssertTrue(recent.items.contains { $0.title == "Show Session Folders in Finder" }, "\(recent.items.map(\.title))")
+    do {
+      for size in windowSizes {
+        try await ui.resize(width: size.width, height: size.height)
+        _ = try? await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+        let index = recent.index(of: session)
+        RunLoop.main.add(Timer(timeInterval: 0, repeats: false) { _ in recent.performActionForItem(at: index) }, forMode: .default)
+        let ready = "window.__rebOutgoingDocument === undefined && location.protocol === 'reb:' && document.readyState === 'complete' "
+          + "&& typeof state === 'object' && state.sessionEnded === true && state.requests.length > 0"
+        let deadline = Date().addingTimeInterval(30)
+        while (try? await ui.value(ready)) as? Bool != true {
+          // The harness page cannot answer the close guard; leave it.
+          if let sheet = ui.window.attachedSheet, let leave = button(sheet, "Open Session"), leave.isEnabled { leave.performClick(nil) }
+          guard Date() < deadline else { throw HarnessError("\(size.name): the ended session did not open") }
+          try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try await ui.settle()
+        let shell = try await ui.json("({mode: document.querySelector('#session-mode').textContent, kind: document.querySelector('#session-mode').dataset.kind, capture: document.querySelector('.capture-state').innerText, panel: document.querySelector('#session-panel').hidden})")
+        XCTAssertEqual(shell["mode"] as? String, "Ended session", "\(size.name): \(shell)")
+        XCTAssertEqual(shell["kind"] as? String, "ended", "\(size.name): \(shell)")
+        XCTAssertTrue((shell["capture"] as? String ?? "").contains("Ended"), "\(size.name): not Capturing: \(shell)")
+        XCTAssertEqual(shell["panel"] as? Bool, true, "\(size.name): no start panel over the review: \(shell)")
+        try await show(ui, "traffic")
+        let rows = try await ui.value("document.querySelectorAll('#screen-traffic .request-row').length") as? Int ?? 0
+        XCTAssertGreaterThan(rows, 0, "\(size.name): the session's requests are shown")
+        try await assertLayout(ui, ".titlebar", "\(size.name) ended session titlebar")
+        try await ui.screenshot("ended-session-review-\(size.name)")
+      }
+      // New Live Session leaves the review for the configured workspace.
+      try await openStartPanel(ui)
+      let left = try await ui.value("state.sessionEnded") as? Bool
+      XCTAssertEqual(left, false, "New Live Session leaves the ended session")
+      try await ui.click("#session-panel-offline")
+      try await ui.waitUntil("document.querySelector('#session-panel').hidden", "Continue Offline did not close the panel")
+    } catch {
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+  }
+
   // The start panel through a whole decision at both window sizes. The harness
   // names a REB_BRAVE_BINARY that does not exist, so Start fails at once and
   // nothing launches. The panel must fit, reach every control by keyboard with
@@ -3850,7 +4060,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await openStartPanel(ui)
         try await ui.activate()
         let opened = try await ui.json(
-          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not(#session-panel-media)').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
+          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not(#session-panel-media):not([id^=\"session-panel-option-\"])').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
         XCTAssertEqual(opened["mode"] as? String, plan.from, "\(name): the panel opens with this run's last mode: \(opened)")
         XCTAssertEqual(opened["checkboxes"] as? Int, 0, "\(name): the panel has no Keychain checkbox: \(opened)")
         XCTAssertEqual(opened["keychain"] as? Bool, false, "\(name): the panel says nothing about the Keychain: \(opened)")
@@ -3861,7 +4071,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
         // Shift+Tab walks back through every control to the chosen mode.
         var stops: [String] = []
-        for _ in 0..<8 {
+        for _ in 0..<10 {
           try await ui.tab(shift: true)
           let stop = try await focus()
           stops.append(stop["id"] as? String ?? "\(stop["element"] ?? "?")")
@@ -3877,9 +4087,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if stops.last?.hasPrefix("session-panel-mode-") == true { break }
         }
         print("RENDERED_UI_START_PANEL_FOCUS \(name) \(stops)")
-        // Content's limits sit between the mode and the actions; Metadata has none.
+        // Content's limits sit between the mode and the session options;
+        // Metadata has none. Advanced options stays collapsed.
         let limits = ["session-panel-media", "session-panel-response-budget", "session-panel-request-budget"]
-        XCTAssertEqual(stops, ["session-panel-offline"] + (plan.from == "content" ? limits : []) + ["session-panel-mode-\(plan.from)"],
+        let options = ["session-panel-advanced", "session-panel-option-fresh-profile"]
+        XCTAssertEqual(stops, ["session-panel-offline"] + options + (plan.from == "content" ? limits : []) + ["session-panel-mode-\(plan.from)"],
           "\(name): the panel's controls in reverse order")
         try await ui.screenshot("start-panel-focus-\(name)")
         // Arrow keys choose within the mode group.
@@ -3887,7 +4099,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let moved = try await ui.json(
           "({focus: document.activeElement?.id, text: document.querySelector('#session-panel').innerText})")
         XCTAssertEqual(moved["focus"] as? String, "session-panel-mode-\(plan.to)", "\(name): the arrow moved the choice: \(moved)")
-        for _ in 0..<(plan.to == "content" ? 5 : 2) { try await ui.tab() }
+        for _ in 0..<(plan.to == "content" ? 7 : 4) { try await ui.tab() }
         let start = try await focus()
         XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): Tab returns to Start Session: \(start)")
         try await ui.screenshot("start-panel-chosen-\(name)")
@@ -3998,7 +4210,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
         // Keyboard: each limit is a stop with a visible ring.
         _ = try await ui.value("(document.querySelector('#session-panel-start').focus(), true)")
-        for expectedStop in ["session-panel-offline", "session-panel-media", "session-panel-response-budget", "session-panel-request-budget"] {
+        for expectedStop in ["session-panel-offline", "session-panel-advanced", "session-panel-option-fresh-profile",
+                             "session-panel-media", "session-panel-response-budget", "session-panel-request-budget"] {
           try await ui.tab(shift: true)
           let stop = try await focus()
           XCTAssertEqual(stop["id"] as? String, expectedStop, "\(name): \(stop)")

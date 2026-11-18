@@ -17,16 +17,16 @@ enum LiveCaptureMode: String {
     }
   }
 
-  // The app saves no choice between launches, so REB_AUTOMATIC_CAPTURE_MODE is
-  // the only durable one. Unset or empty means the default. Any other value but
-  // "content" selects Metadata, so a misspelled opt-out never turns on content.
-  // An inherited REB_CAPTURE_REQUEST_CONTENT=0 also selects Metadata: it opted
-  // out of request content, and a start panel that preselected Content would
-  // capture it on a single Return.
-  static func configured(_ environment: [String: String]) -> LiveCaptureMode {
+  // An explicit REB_AUTOMATIC_CAPTURE_MODE wins over the mode the start panel
+  // last saved (LiveSessionPreferences); with neither, Content. Any other value
+  // but "content" selects Metadata, so a misspelled opt-out never turns on
+  // content. An inherited REB_CAPTURE_REQUEST_CONTENT=0 also selects Metadata:
+  // it opted out of request content, and a start panel that preselected
+  // Content would capture it on a single Return.
+  static func configured(_ environment: [String: String], saved: LiveCaptureMode? = nil) -> LiveCaptureMode {
     if requestContentOptedOut(environment) { return .metadata }
     guard let value = environment["REB_AUTOMATIC_CAPTURE_MODE"], !value.isEmpty else {
-      return .content
+      return saved ?? .content
     }
     return LiveCaptureMode(rawValue: value) ?? .metadata
   }
@@ -163,20 +163,19 @@ struct LivePanelStart: Equatable {
 }
 
 // The content-derived launcher switches of one app-started capture: request
-// content with the three switches only it reads, Canvas images, and the
-// settled-value digests of armed invocation sites. Each start resolves them
-// once from its mode, the panel's limits and the app environment, and
+// content with the three switches only it reads. Each start resolves them once
+// from its mode, the panel's limits and the app environment, and
 // LiveSessionCoordinator.captureDefaults gives the launcher exactly these in
 // place of any inherited value. Metadata turns every one off, whatever the
 // environment holds, as the agent path does (session_launch.rs). The start
 // panel holds a failed start's value and Retry starts from it, never from a
 // new reading of the environment, so the mode and limits the panel names are
-// always what the launcher got.
+// always what the launcher got. Canvas images and the settled-value digests of
+// armed invocation sites are content too; they are session options
+// (LiveSessionOptions), which captureDefaults applies in Content mode only.
 //
-// Other inherited switches are not content and stay as the environment sets
-// them: browser-internal and extension traffic keep the same content gates,
-// request and promise stacks record positions only, and dispatch-site and
-// guest-state capture need a researcher-supplied file.
+// Dispatch-site and guest-state capture need a researcher-supplied file and
+// stay as the environment sets them.
 struct LiveCaptureContent: Equatable {
   static let requestContent = "REB_CAPTURE_REQUEST_CONTENT"
   static let canvasImages = "REB_CAPTURE_CANVAS_IMAGES"
@@ -188,8 +187,7 @@ struct LiveCaptureContent: Equatable {
   // request content; nil otherwise and for limits taken from the environment.
   let limits: ContentLimits?
   // The value of each name the launcher is given; a name absent here is
-  // removed. Without a digest value, the saved sites a start arms take the
-  // Content default (captureDefaults).
+  // removed, and captureDefaults sets Canvas images and digests.
   let switches: [String: String]
 
   var retainsRequestContent: Bool { switches[Self.requestContent] == "1" }
@@ -204,19 +202,15 @@ struct LiveCaptureContent: Equatable {
     environment: [String: String], mode: LiveCaptureMode, limits: ContentLimits?, modeChosen: Bool
   ) -> LiveCaptureContent {
     guard mode.capturesNetworkContent else {
-      return LiveCaptureContent(
-        mode: mode, limits: nil, switches: [requestContent: "0", canvasImages: "0", invocationDigests: "0"])
+      return LiveCaptureContent(mode: mode, limits: nil, switches: [requestContent: "0"])
     }
     let mask = LiveSessionCoordinator.categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
     let allows = { (required: UInt32) in mask & required == required }
     var switches: [String: String] = [:]
-    // Canvas images need Canvas (1) and Artifact (1024).
-    switches[canvasImages] = environment[canvasImages] ?? (allows(1025) ? "1" : "0")
     // Request paths, queries and bounded bodies need both Network (256) and
     // Artifact (1024); a narrower mask keeps hosts only.
     let requestDefault = allows(1280) ? "1" : "0"
     switches[requestContent] = modeChosen ? requestDefault : environment[requestContent] ?? requestDefault
-    switches[invocationDigests] = environment[invocationDigests]
     // A session that keeps no request content is given none of the three
     // content-only switches, inherited or chosen. Until the panel chooses
     // limits, the environment's pass as they are and the launcher checks them.
@@ -421,13 +415,19 @@ final class LiveSessionCoordinator {
     // The session had published its workspace, so it ended rather than
     // failed to start.
     let afterStartup: Bool
+    // The ended session's folder, named in its launch log, so the start panel
+    // can open its evidence for review.
+    var sessionDirectory: URL? = nil
+    // The session ended the way it was meant to, as when Brave was closed:
+    // the launcher exited with status 0 after naming the cause.
+    var endedNormally = false
   }
 
   // What a launch reports. Exit and timeout carry the launcher log, read off
   // the main thread, so the cause is named for the phase the launch was in.
   enum Report {
     case published(URL)
-    case exited(log: Data?)
+    case exited(log: Data?, status: Int32)
     case timedOut(log: Data?)
     case stopped
   }
@@ -459,6 +459,7 @@ final class LiveSessionCoordinator {
   func start(
     braveExecutableURL: URL,
     content: LiveCaptureContent,
+    options: LiveSessionOptions,
     useSystemKeychain: Bool,
     ready: @escaping (URL) -> Void,
     failed: @escaping (Failure) -> Void
@@ -470,6 +471,7 @@ final class LiveSessionCoordinator {
       let configuration = try makeConfiguration(
         braveExecutableURL: braveExecutableURL,
         content: content,
+        options: options,
         useSystemKeychain: useSystemKeychain
       )
       let child = Process()
@@ -482,7 +484,9 @@ final class LiveSessionCoordinator {
       let report = { [weak self] (report: Report) in
         DispatchQueue.main.async { self?.apply(report, to: id) }
       }
-      child.terminationHandler = { _ in report(.exited(log: try? Data(contentsOf: configuration.logURL))) }
+      child.terminationHandler = { process in
+        report(.exited(log: try? Data(contentsOf: configuration.logURL), status: process.terminationStatus))
+      }
       launch = Launch(
         id: id, process: child, logHandle: configuration.logHandle, logURL: configuration.logURL,
         invocationSitesCopy: configuration.invocationSitesURL, ready: ready, failed: failed)
@@ -517,14 +521,16 @@ final class LiveSessionCoordinator {
     switch (phase, report) {
     case (.starting, .published(let url)):
       return .ready(url)
-    case (.starting, .exited(let log)):
+    case (.starting, .exited(let log, _)):
       return .failed(Failure(message: message(log, startupFallback), afterStartup: false))
     case (.starting, .timedOut(let log)):
       return .failed(Failure(
         message: "Live capture did not become ready within 60 seconds. " + message(log, startupFallback),
         afterStartup: false))
-    case (.ready, .exited(let log)):
-      return .failed(Failure(message: message(log, sessionFallback), afterStartup: true))
+    case (.ready, .exited(let log, let status)):
+      return .failed(Failure(
+        message: message(log, sessionFallback), afterStartup: true, sessionDirectory: sessionDirectory(in: log),
+        endedNormally: status == 0 && !failureCause(in: log, fallback: "").isEmpty))
     case (.starting, .stopped), (.ready, .stopped):
       return .ended
     default:
@@ -571,6 +577,7 @@ final class LiveSessionCoordinator {
   private func makeConfiguration(
     braveExecutableURL: URL,
     content: LiveCaptureContent,
+    options: LiveSessionOptions,
     useSystemKeychain: Bool
   ) throws -> Configuration {
     guard let resourcesURL = Bundle.main.resourceURL else {
@@ -607,7 +614,7 @@ final class LiveSessionCoordinator {
       "Origin Trace",
       isDirectory: true
     )
-    let sessionRootURL = originTraceURL.appendingPathComponent("sessions/live", isDirectory: true)
+    let sessionRootURL = RecordedSession.root(environment: ProcessInfo.processInfo.environment, originTrace: originTraceURL)
     let logsURL = originTraceURL.appendingPathComponent("logs", isDirectory: true)
     let cachesURL =
       FileManager.default.urls(
@@ -653,6 +660,13 @@ final class LiveSessionCoordinator {
     environment["REB_SESSION_OWNER_PID"] = String(ProcessInfo.processInfo.processIdentifier)
     environment["REB_LIVE_SESSION_ROOT"] = sessionRootURL.path
     environment["REB_BRAVE_CACHE_ROOT"] = browserCacheRootURL.path
+    // A session the app starts runs until the researcher ends it, and its
+    // browser profile is the one the start panel chose: the persistent research
+    // profile for its Keychain mode, or a fresh one (REB_FRESH_PROFILE).
+    environment.removeValue(forKey: "REB_CAPTURE_DURATION_SECONDS")
+    environment.removeValue(forKey: "REB_BRAVE_PROFILE")
+    environment["REB_RESEARCH_PROFILE_ROOT"] = LiveSessionOptions.researchProfileRoot(
+      environment: environment, originTrace: originTraceURL).path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
     // Sources can save sites while this capture runs; the browser keeps
     // reading the copy it was given, which nothing changes.
@@ -668,7 +682,7 @@ final class LiveSessionCoordinator {
       invocationSitesURL = copy
     }
     environment = Self.captureDefaults(
-      environment: environment, content: content, savedInvocationSites: invocationSitesURL)
+      environment: environment, content: content, options: options, savedInvocationSites: invocationSitesURL)
     // A mask without VM leaves the copy unused.
     if let copy = invocationSitesURL, environment["REB_NATIVE_JS_INVOCATION_SITES"] != copy.path {
       try? FileManager.default.removeItem(at: copy)
@@ -777,56 +791,54 @@ final class LiveSessionCoordinator {
     return UInt32(mask)
   }
 
-  // Defaults the packaged app adds for a live session. The content-derived
-  // switches are exactly `content`, this start's resolved value, whatever the
-  // environment holds. For every other switch an explicit environment value
-  // wins. Each default capture also needs its categories in the mask, read
-  // with the launcher's grammar, so a narrower mask leaves it off rather than
-  // failing the launch, and an unreadable mask turns nothing on.
+  // The switches the packaged app gives a live session. The content-derived
+  // switches are exactly `content`, this start's resolved value, and every
+  // other switch the start panel offers is exactly `options`, whatever the
+  // environment holds (LiveSessionOptions.launcherEnvironment). Each also needs
+  // its categories in the mask, read with the launcher's grammar, so a narrower
+  // mask leaves it off rather than failing the launch, and an unreadable mask
+  // turns nothing on.
   //
   // `savedInvocationSites` is this launch's private copy of the app's saved
   // site set, or nil when the set is empty. The sites need the VM category
   // (512). The launcher arms them only if this Brave defines invocation
-  // capture, and otherwise starts without them and says so. Their settled-value
-  // digests are sensitive capture: on in Content mode unless set to 0, never in
-  // Metadata mode.
+  // capture, and otherwise starts without them and says so. Canvas images and
+  // the settled-value digests of armed sites are sensitive capture: they follow
+  // `options` in Content mode and are never recorded in Metadata mode.
   static func captureDefaults(
-    environment: [String: String], content: LiveCaptureContent, savedInvocationSites: URL? = nil
+    environment: [String: String], content: LiveCaptureContent, options: LiveSessionOptions,
+    savedInvocationSites: URL? = nil
   ) -> [String: String] {
     var environment = environment
     let mask = categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
     let allows = { (required: UInt32) in mask & required == required }
     for name in LiveCaptureContent.names { environment.removeValue(forKey: name) }
     environment.merge(content.switches) { _, resolved in resolved }
-    // The packaged app turns on every native switch that needs no per-target input
-    // file. Guest-state and JavaScript dispatch-site capture stay off because they
-    // need a researcher-supplied adapter or site file. An explicit "0" still opts
-    // out: Wasm dispatch forces Liftoff-only compilation. Both Wasm switches need
-    // the VM (512) and Artifact (1024) categories, so a narrower mask leaves them off.
-    environment["REB_NATIVE_QUIET_MODE"] = environment["REB_NATIVE_QUIET_MODE"] ?? "1"
-    for name in ["REB_NATIVE_WASM_DISPATCH", "REB_NATIVE_WASM_CALL_INDIRECT"] {
-      environment[name] = environment[name] ?? (allows(1536) ? "1" : "0")
-    }
-    // Request call stacks need Network (256) and Artifact (1024). The default
-    // is dropped, with a launch log line, by a Brave that predates the flag.
-    if environment["REB_NATIVE_REQUEST_STACKS"] == nil {
-      environment["REB_NATIVE_REQUEST_STACKS"] = allows(1280) ? "1" : "0"
-      environment["REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED"] = "1"
-    }
-    // Permission only: the capture browser may later arm a document-start
-    // Console script, which still needs a live Console connection to a selected
-    // document and a separate confirmed arm. Nothing runs until then. A browser
-    // without the v3 overlay ignores the switch and the Console reports it
-    // unavailable. An explicit "0" opts out.
-    environment["REB_CONSOLE_DOCUMENT_START"] = environment["REB_CONSOLE_DOCUMENT_START"] ?? "1"
-    // An explicit REB_NATIVE_JS_INVOCATION_SITES, even an empty one, wins, and
-    // then the resolved switch alone decides digests, as for make live.
+    environment.merge(options.launcherEnvironment(mask: mask)) { _, chosen in chosen }
+    let capturesContent = content.mode.capturesNetworkContent
+    // Canvas images need Canvas (1) and Artifact (1024).
+    environment[LiveCaptureContent.canvasImages] = capturesContent && options.canvasImages && allows(1025) ? "1" : "0"
+    // An explicit REB_NATIVE_JS_INVOCATION_SITES, even an empty one, wins over
+    // the saved set. Digests mean nothing without armed sites.
     if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil, let saved = savedInvocationSites, allows(512) {
       environment["REB_NATIVE_JS_INVOCATION_SITES"] = saved.path
       environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] = environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] ?? "1"
-      environment[LiveCaptureContent.invocationDigests] = environment[LiveCaptureContent.invocationDigests] ?? "1"
     }
+    let sitesArmed = !(environment["REB_NATIVE_JS_INVOCATION_SITES"] ?? "").isEmpty
+    environment[LiveCaptureContent.invocationDigests] = capturesContent && options.invocationDigests && sitesArmed ? "1" : "0"
     return environment
+  }
+
+  // The session folder from the launcher's "Evidence store: <folder>/events.jsonl"
+  // line, which it prints before the session can end.
+  static func sessionDirectory(in data: Data?) -> URL? {
+    guard let data else { return nil }
+    let prefix = "Evidence store: ", suffix = "/events.jsonl"
+    guard let line = String(decoding: data, as: UTF8.self).split(separator: "\n").first(where: {
+      $0.hasPrefix(prefix) && $0.hasSuffix(suffix)
+    }) else { return nil }
+    let path = String(line.dropFirst(prefix.count).dropLast(suffix.count))
+    return path.hasPrefix("/") ? URL(fileURLWithPath: path, isDirectory: true) : nil
   }
 
   static func failureCause(in data: Data?, fallback: String = startupFallback) -> String {

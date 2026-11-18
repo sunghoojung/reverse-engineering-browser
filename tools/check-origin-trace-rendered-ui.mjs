@@ -110,6 +110,15 @@ try {
   await cp(app, host, {recursive: true});
   execFileSync('codesign', ['--verify', '--deep', '--strict', host], {stdio: 'pipe'});
   const stores = await buildEvidence({root: join(temporary, 'evidence'), sessions: join(root, 'build/sessions'), ...goldenStores});
+  // One ended session for Open Recent Session: a copy of the harness evidence
+  // in a session folder laid out as the launcher writes one.
+  const recordedSessions = join(temporary, 'sessions', 'live');
+  const recordedSession = join(recordedSessions, '4242');
+  await mkdir(recordedSession, {recursive: true, mode: 0o700});
+  for (const [from, to] of [[stores.store, 'events.jsonl'], [stores.traceStore, 'origin-trace.jsonl'],
+    [stores.signalStore, 'request-signals.jsonl'], [stores.artifacts, 'artifacts']]) {
+    await cp(from, join(recordedSession, to), {recursive: true});
+  }
 
   const endpointFile = join(temporary, 'endpoint');
   backend = spawn(join(host, 'Contents/MacOS/OriginTraceBackend'), ['--host', '127.0.0.1', '--port', '0',
@@ -226,6 +235,10 @@ fetch("/getcaptcha");
       // at once and nothing launches, whatever Brave this machine has.
       REB_BRAVE_BINARY: missingBrave,
       REB_JS_INVOCATION_SITE_STORE: stores.invocationSites,
+      // The start panel's saved choices and the sessions Open Recent Session
+      // lists, kept apart from the researcher's.
+      REB_LIVE_SESSION_PREFERENCES: join(temporary, 'live-session-preferences-v1.json'),
+      REB_LIVE_SESSION_ROOT: recordedSessions,
       REB_AGENT_PROVIDER_BASE_URL: agentProviderURL,
       REB_AGENT_TRANSCRIPT_DIR: join(temporary, 'agent-transcripts'),
       // None of the researcher's CLIs runs. Claude is the stand-in CLI that
@@ -251,7 +264,8 @@ fetch("/getcaptcha");
         invocationSiteStore: stores.invocationSites, workerStackHost: WORKER_STACK_HOST, registrantHost: REGISTRANT_HOST,
         workerStackPostingProcess: WORKER_STACK_PROCESSES[1], debuggerProcess: DEBUGGER_PROCESS, debuggerFrame: DEBUGGER_FRAME,
         debuggerArtifactId: DEBUGGER_ARTIFACT_ID, bodyCaseProcess: BODY_CASE_PROCESS, reusedHost: REUSED_HOST, reusedMarker: REUSED_MARKER,
-        workerAnswerHost: WORKER_ANSWER_HOST, partialHost: PARTIAL_HOST, hexBodyHost: HEX_BODY_HOST, hexBodyBytes: HEX_BODY_BYTES}),
+        workerAnswerHost: WORKER_ANSWER_HOST, partialHost: PARTIAL_HOST, hexBodyHost: HEX_BODY_HOST, hexBodyBytes: HEX_BODY_BYTES,
+        recordedSession, sessionPreferences: join(temporary, 'live-session-preferences-v1.json')}),
     },
   });
   target.TestingEnvironmentVariables = {...target.TestingEnvironmentVariables,
@@ -280,7 +294,8 @@ fetch("/getcaptcha");
     REB_DISABLE_AUTOMATIC_LIVE_SESSION: '0', REB_RENDERED_UI_LAUNCH: '1',
     REB_EVENT_STORE: join(launchStores, 'events.jsonl'), REB_ORIGIN_TRACE_STORE: join(launchStores, 'origin-trace.jsonl'),
     REB_REQUEST_SIGNAL_STORE: join(launchStores, 'request-signals.jsonl'), REB_ARTIFACT_STORE: join(launchStores, 'artifacts'),
-    REB_JS_INVOCATION_SITE_STORE: join(launchStores, 'js-invocation-sites-v1.json')};
+    REB_JS_INVOCATION_SITE_STORE: join(launchStores, 'js-invocation-sites-v1.json'),
+    REB_LIVE_SESSION_PREFERENCES: join(launchStores, 'live-session-preferences-v1.json')};
   launchTarget.OnlyTestIdentifiers = [`OriginTraceRenderedUITests/${launchTest}`];
   const hostedLaunch = join(products, 'hosted-origin-trace-launch.xctestrun');
   await writeFile(hostedLaunch, '');

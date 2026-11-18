@@ -286,6 +286,9 @@
         signalKnownKeys: null,
         signalNewKeys: new Set(),
         captureStopped: false,
+        // An ended live session opened for review: its evidence stays, and it
+        // captures nothing more.
+        sessionEnded: false,
         captureControlsAvailable: false,
         // 'stop' or 'clear' while its POST runs. The generation changes when an
         // action starts and ends, so an overlapping event poll is discarded.

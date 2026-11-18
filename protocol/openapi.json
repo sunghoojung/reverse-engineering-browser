@@ -362,7 +362,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (budget, block limit, pool, channel, URL or kind) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed, not_reported or record_dropped), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the newest 64 MiB of events. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (budget, block limit, pool, channel, URL or kind) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed, not_reported or record_dropped), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the whole session; while the backend first indexes a long store it covers what is indexed, and a summary_indexing check says how far. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -40602,7 +40602,8 @@
         ],
         "properties": {
           "protocol_version": {
-            "const": 1,
+            "const": 2,
+            "description": "2: every count covers the whole session from the backend's disk indexes, not the newest 64 MiB.",
             "type": "integer"
           },
           "instance_id": {
@@ -40658,8 +40659,7 @@
               "scope",
               "scan_start",
               "scan_end",
-              "scan_limit",
-              "budget_exhausted",
+              "store_end",
               "total",
               "first_time_ns",
               "last_time_ns",
@@ -40668,7 +40668,7 @@
               "sessions_omitted",
               "frames",
               "frames_omitted",
-              "untracked_frame_events",
+              "malformed_lines",
               "sequence_gaps",
               "sequence_gaps_saturated",
               "queue_drops",
@@ -40680,8 +40680,10 @@
                 "type": "string",
                 "enum": [
                   "store",
-                  "bounded_range"
-                ]
+                  "indexing",
+                  "stopped"
+                ],
+                "description": "store: every complete record of the event store is counted. indexing: the backend is still indexing a long store, so the counts cover [scan_start, scan_end) of store_end bytes, and a summary_indexing check says so. stopped: the index cannot read the record at scan_end, which an events_unreadable check names, so nothing after it is counted."
               },
               "scan_start": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -40689,14 +40691,9 @@
               "scan_end": {
                 "$ref": "#/components/schemas/Uint64String"
               },
-              "scan_limit": {
-                "type": "integer",
-                "enum": [
-                  67108864
-                ]
-              },
-              "budget_exhausted": {
-                "type": "boolean"
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "The event store's length when the summary was read."
               },
               "total": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -40840,8 +40837,9 @@
                 "type": "integer",
                 "minimum": 0
               },
-              "untracked_frame_events": {
-                "$ref": "#/components/schemas/Uint64String"
+              "malformed_lines": {
+                "$ref": "#/components/schemas/Uint64String",
+                "description": "Stored lines that are not valid events, which no count includes."
               },
               "sequence_gaps": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -40863,15 +40861,14 @@
           "request_tabs": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Whether each request row of the scanned events has a browser tab (protocol/native-network-v3.md). Rows join records as Traffic does; a row is linked when a record has a tab or a request_tab_link or request_extension_link names it. An unlinked row is a capture error, reported by the network_tab_unresolved check. Read one with get_events process_id and request_id.",
+            "description": "Whether each request row of the whole event store has a browser tab (protocol/native-network-v3.md). Rows join records as Traffic does; a row is linked when a record has a tab or a request_tab_link or request_extension_link names it. An unlinked row is a capture error, reported by the network_tab_unresolved check. Read one with get_events process_id and request_id.",
             "required": [
               "rows",
               "extension_rows",
               "unresolved",
               "unresolved_reasons",
               "unresolved_requests",
-              "unresolved_omitted",
-              "untracked_records"
+              "unresolved_omitted"
             ],
             "properties": {
               "rows": {
@@ -40897,6 +40894,7 @@
               "unresolved_requests": {
                 "type": "array",
                 "maxItems": 16,
+                "description": "The unresolved rows first seen most recently; unresolved_omitted counts the rest.",
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -40921,9 +40919,6 @@
                 }
               },
               "unresolved_omitted": {
-                "$ref": "#/components/schemas/Uint64String"
-              },
-              "untracked_records": {
                 "$ref": "#/components/schemas/Uint64String"
               }
             }
@@ -40977,7 +40972,8 @@
             "additionalProperties": false,
             "required": [
               "scope",
-              "budget_exhausted",
+              "scan_end",
+              "store_end",
               "total",
               "by_kind",
               "items",
@@ -40988,11 +40984,16 @@
                 "type": "string",
                 "enum": [
                   "store",
-                  "bounded_range"
-                ]
+                  "indexing",
+                  "stopped"
+                ],
+                "description": "store: every complete record of the artifact manifest is counted. indexing: the counts cover its first scan_end of store_end bytes. stopped: the index cannot read the record at scan_end, which an artifact_manifest_unreadable check names."
               },
-              "budget_exhausted": {
-                "type": "boolean"
+              "scan_end": {
+                "$ref": "#/components/schemas/Uint64String"
+              },
+              "store_end": {
+                "$ref": "#/components/schemas/Uint64String"
               },
               "total": {
                 "$ref": "#/components/schemas/Uint64String"
@@ -41185,7 +41186,6 @@
                     "request_content_not_retained",
                     "network_headers_unattributed",
                     "final_headers_missing",
-                    "final_headers_untracked",
                     "queue_drops",
                     "sequence_gaps",
                     "named_gap",
@@ -41196,7 +41196,11 @@
                     "response_snapshots_withheld",
                     "network_tab_unresolved",
                     "network_tab_no_document",
-                    "bounded_scope"
+                    "malformed_lines",
+                    "events_unreadable",
+                    "artifact_manifest_unreadable",
+                    "artifact_manifest_damaged",
+                    "summary_indexing"
                   ]
                 },
                 "severity": {
@@ -41237,11 +41241,11 @@
                 },
                 "retained_bytes": {
                   "$ref": "#/components/schemas/Uint64String",
-                  "description": "On a session budget check: the unique bytes of that budget's artifacts (request_body and request_target, or response_body) in the scanned manifest, identical content counted once as the browser charges it."
+                  "description": "On a session budget check: the unique bytes of that budget's artifacts (request_body and request_target, or response_body) in the indexed manifest, identical content counted once as the browser charges it."
                 },
                 "retained_complete": {
                   "type": "boolean",
-                  "description": "False when the manifest scan stopped at its bound, so retained_bytes is a lower bound."
+                  "description": "False while the backend is still indexing the manifest, so retained_bytes is a lower bound."
                 }
               }
             }

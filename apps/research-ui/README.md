@@ -1762,7 +1762,7 @@ session budget, queue, channel or URL), network blocks that arrived after
 their request ended ("late header records on no row"), and requests that
 ended with only provisional headers, by reason (HTTP cache, service worker,
 download, failed, not reported); `get_session_summary` has the same counts
-over the newest 64 MiB. Sources reads retained artifact bytes only. A failed
+over the whole session. Sources reads retained artifact bytes only. A failed
 refresh preserves the last valid catalog, and a detached pending load is
 cancelled and cannot restore obsolete source text. Artifact loads have a
 10-second deadline, including body reads; a timed-out load can be retried

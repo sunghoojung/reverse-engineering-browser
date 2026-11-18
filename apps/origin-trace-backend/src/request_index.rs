@@ -1556,6 +1556,9 @@ CREATE TABLE IF NOT EXISTS states(ordinal INTEGER PRIMARY KEY, data BLOB NOT NUL
 -- Third-party rows compare their site with their tab's latest document.
 CREATE INDEX IF NOT EXISTS rows_documents ON rows(tab, first_ns, ordinal)
     WHERE main_frame = 1 AND tab != 0;
+-- The session summary counts every row's body case from this compact index,
+-- without reading the rows or sorting them.
+CREATE INDEX IF NOT EXISTS rows_body_cases ON rows(body_case, body_withheld, body_earlier);
 -- The rows each (session, process, request) member belongs to.
 CREATE TABLE IF NOT EXISTS members(
     request TEXT NOT NULL,

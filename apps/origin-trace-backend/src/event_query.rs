@@ -344,9 +344,11 @@ impl Tally {
     pub fn malformed_lines(&self) -> u64 {
         self.malformed_lines
     }
+    #[cfg(test)]
     pub fn named_gaps(&self) -> &[NamedGap] {
         &self.named_gaps
     }
+    #[cfg(test)]
     pub fn queue_drops(&self) -> (u64, bool) {
         (self.queue_drops, self.queue_drops_saturated)
     }

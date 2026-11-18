@@ -1996,7 +1996,7 @@ Cookies or provenance read costs its own records, not a 64 MiB scan.
 Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
 and the Cookies tab lists each such hop with it.
 
-`get_session_summary` counts, over the newest 64 MiB of events:
+`get_session_summary` counts, over every record of the session:
 
 - every header block and cookie list in states 4 to 8, as
   `request_content_not_retained` with category `request_headers`,
@@ -2006,11 +2006,11 @@ and the Cookies tab lists each such hop with it.
 - the requests whose final hop ended without a `network` block, one
   `final_headers_missing` check per reason: `info` for `download`,
   `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`
-  and `record_dropped` (a drop of any category while the request ran).
-  It follows at most 131,072 browser requests; header records of later ones
-  are counted as `final_headers_untracked`. A request with no header record
-  (any request of a metadata-only session) has no final block to miss and is
-  never counted there.
+  and `record_dropped` (a drop of any category while the request ran, or
+  reported within a second of its end, wherever in the store the drop's
+  record lies). Every browser request is followed. A request with no header
+  record (any request of a metadata-only session) has no final block to miss
+  and is never counted there.
 
 The Traffic footer shows the same counts for the loaded rows as one item,
 "N header gaps", whose breakdown lists each count with its reason, so the

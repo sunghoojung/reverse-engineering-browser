@@ -2020,15 +2020,13 @@ async fn session_summary_counts_frames_and_explains_gaps() {
     assert_contract_response(bad, "get", "/api/session/summary", 400).await;
 }
 
-// The summary's ETag names the request index's progress its body case counts
-// were read at, and an answer without them has no ETag (lock scope is not
-// observable here).
+// The summary counts the whole store from its indexes, says how far they
+// have read while they catch up, and is tagged by its own bytes, so an answer
+// read mid-store never revalidates as the complete one.
 #[tokio::test]
-async fn session_summary_tags_name_the_request_index_progress() {
+async fn session_summary_counts_a_long_store_whole_and_is_tagged_by_its_bytes() {
     let server = Server::start().await;
     let summary = |tag: Option<String>| {
-        // Each answer digests the whole store for its tag; a debug build
-        // under load can take longer than the client's default deadline.
         let request = server
             .client
             .get(format!("{}/api/session/summary", server.url))
@@ -2052,7 +2050,7 @@ async fn session_summary_tags_name_the_request_index_progress() {
             (status, tag, body)
         }
     };
-    // Both readers skip blank lines without parsing them, so blank lines
+    // Every reader skips blank lines without parsing them, so blank lines
     // under the 4 KiB record limit stand in for a large store cheaply.
     const MIB: usize = 1024 * 1024;
     let blank = |mebibytes: usize, store: &mut Vec<u8>| {
@@ -2062,58 +2060,81 @@ async fn session_summary_tags_name_the_request_index_progress() {
             store.extend_from_slice(&line);
         }
     };
-    let event = jsonl(&[window_event(1, "wasm", "module_compiled", "")]);
-    // A store the index reads in two 64 MiB steps: an answer counted mid-store
-    // never revalidates as the complete one. The index's maintenance read can
-    // run first, so a store already read whole is replaced by a fresh one.
-    let mut first = None;
-    for attempt in 0..3 {
-        let mut store = Vec::with_capacity(66 * MIB);
-        blank(65 + attempt, &mut store);
-        store.extend_from_slice(&event);
-        server.file("events.jsonl", &store);
-        drop(store);
+    // The first record lies more than 64 MiB before the store's end, where
+    // a summary of the newest bytes never looked.
+    let mut store = Vec::with_capacity(66 * MIB);
+    store.extend_from_slice(&jsonl(&[window_event(1, "wasm", "module_compiled", "")]));
+    blank(65, &mut store);
+    store.extend_from_slice(&jsonl(&[window_event(2, "canvas", "api_call", "")]));
+    server.file("events.jsonl", &store);
+    drop(store);
+    // The indexes read a long store in steps; each answer says how far.
+    let mut answers = Vec::new();
+    let complete = loop {
         let (status, tag, body) = summary(None).await;
         assert_eq!(status, 200);
-        if body.unwrap()["response_bodies"]["complete"] == false {
-            first = Some(tag.expect("a counted answer is tagged"));
-            break;
+        let (tag, body) = (tag.expect("every answer is tagged"), body.unwrap());
+        let done =
+            body["events"]["scope"] == "store" && body["response_bodies"]["complete"] == true;
+        answers.push((tag.clone(), body.clone()));
+        if done {
+            break (tag, body);
+        }
+        assert!(
+            answers.len() < 240,
+            "the summary never covered the whole store"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    let (complete, body) = complete;
+    assert_eq!(body["events"]["total"], "2");
+    assert_eq!(body["events"]["scan_end"], body["events"]["store_end"]);
+    assert!(
+        body["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["code"] == "wasm_without_artifacts"),
+        "{body}"
+    );
+    // An answer read mid-store never revalidates as the complete one.
+    for (tag, partial) in &answers {
+        if partial != &body {
+            assert_ne!(tag, &complete);
+            let (status, again, _) = summary(Some(tag.clone())).await;
+            assert_eq!((status, again.as_ref()), (200, Some(&complete)));
         }
     }
-    let first = first.expect("an answer counted mid-store");
-    let (status, complete, body) = summary(None).await;
-    assert_eq!(status, 200);
-    assert_eq!(body.unwrap()["response_bodies"]["complete"], true);
-    let complete = complete.expect("a counted answer is tagged");
-    assert_ne!(first, complete);
-    let (status, tag, body) = summary(Some(first)).await;
-    assert_eq!(
-        status, 200,
-        "a mid-store answer's tag is not the complete one"
-    );
-    assert_eq!(body.unwrap()["response_bodies"]["complete"], true);
-    assert_eq!(tag.as_ref(), Some(&complete));
     let (status, tag, _) = summary(Some(complete.clone())).await;
     assert_eq!((status, tag), (304, Some(complete)));
-    // A first line longer than the index's 64 MiB read, then more than the
-    // summary's 64 MiB window: the index finds no record end and cannot read
-    // on, while the summary reads only the newest lines.
+    // A first line longer than any record stops both indexes there: the
+    // summary says what it cannot read rather than failing.
     let mut store = Vec::with_capacity(132 * MIB);
     store.resize(65 * MIB, b'x');
     store.push(b'\n');
     blank(65, &mut store);
-    store.extend_from_slice(&event);
+    store.extend_from_slice(&jsonl(&[window_event(1, "wasm", "module_compiled", "")]));
     server.file("events.jsonl", &store);
     drop(store);
     let (status, tag, body) = summary(None).await;
-    let bodies = &body.unwrap()["response_bodies"];
+    let body = body.unwrap();
     assert_eq!(status, 200);
+    assert!(tag.is_some());
+    assert_eq!(body["events"]["scope"], "stopped");
+    assert_eq!(body["events"]["total"], "0");
+    let unreadable = body["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["code"] == "events_unreadable")
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(unreadable["severity"], "error");
+    let bodies = &body["response_bodies"];
     assert_eq!(bodies["available"], false);
     assert!(
         bodies["reason"].as_str().unwrap().contains("oversized"),
         "{bodies}"
     );
-    assert_eq!(tag, None, "an unavailable answer is not tagged");
 }
 
 #[tokio::test]

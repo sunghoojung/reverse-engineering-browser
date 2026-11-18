@@ -7,7 +7,9 @@
 //! indexes hold identifiers and offsets only. The event index also keeps the
 //! whole store's gap totals (sequence gaps per stream, queue drops, named
 //! capture-limit gaps and unreadable lines) with the rules of the polling
-//! window, so `/api/events` counts every record instead of its newest bytes.
+//! window, so `/api/events` counts every record instead of its newest bytes,
+//! and the session summary's counts (`session_summary::Fold`), so a summary
+//! covers the whole store by reading a few rows.
 //!
 //! A trace refuses a damaged store as it always refused a damaged window: the
 //! first oversized, malformed or duplicate record is kept as the index's damage
@@ -17,8 +19,9 @@ use crate::{
     event_window::{self, NamedGap},
     index_db::{self, Indexed, Position, SqlResult},
     origin_trace::{self, Reference},
+    session_summary,
 };
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::Value;
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -29,8 +32,8 @@ use std::{
 
 pub const EVENTS_SUFFIX: &str = ".events-v1";
 pub const EDGES_SUFFIX: &str = ".edges-v1";
-/// The second layout adds the gap totals.
-const EVENTS_FORMAT: &str = "reb-event-index-v1/2";
+/// The second layout adds the gap totals, the third the summary's counts.
+const EVENTS_FORMAT: &str = "reb-event-index-v1/3";
 const EDGES_FORMAT: &str = "reb-edge-index-v1";
 /// The largest event or edge record a trace reads.
 pub const RECORD_BYTES: usize = 4096;
@@ -42,7 +45,7 @@ pub const TRACE_DEADLINE: Duration = Duration::from_secs(5);
 /// which value flow reads by renderer stream.
 const OTHER: i64 = 0;
 const SETTLE: i64 = 1;
-const EVENT_SCHEMA: &str = "
+pub(crate) const EVENT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS events(start INTEGER PRIMARY KEY, end INTEGER NOT NULL,
         session INTEGER NOT NULL, process INTEGER NOT NULL, sequence INTEGER NOT NULL,
         request INTEGER NOT NULL, kind INTEGER NOT NULL);
@@ -61,8 +64,54 @@ const EVENT_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS named_gaps(ordinal INTEGER PRIMARY KEY, category TEXT NOT NULL,
         reason TEXT NOT NULL, count INTEGER NOT NULL, UNIQUE(category, reason));
     CREATE TABLE IF NOT EXISTS totals(id INTEGER PRIMARY KEY CHECK (id = 0),
-        drops INTEGER NOT NULL, drops_saturated INTEGER NOT NULL, malformed INTEGER NOT NULL);
-    INSERT OR IGNORE INTO totals(id, drops, drops_saturated, malformed) VALUES (0, 0, 0, 0);";
+        drops INTEGER NOT NULL, drops_saturated INTEGER NOT NULL, malformed INTEGER NOT NULL,
+        events INTEGER NOT NULL DEFAULT 0, first_ns INTEGER, last_ns INTEGER);
+    INSERT OR IGNORE INTO totals(id, drops, drops_saturated, malformed) VALUES (0, 0, 0, 0);
+    -- The session summary's counts (session_summary::Fold). Identifiers keep
+    -- their bits (`index_db::key`); times are below 2^63.
+    CREATE TABLE IF NOT EXISTS summary_types(category TEXT NOT NULL, type TEXT NOT NULL,
+        count INTEGER NOT NULL, PRIMARY KEY(category, type)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS summary_sessions(session INTEGER PRIMARY KEY, count INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS summary_frames(id INTEGER PRIMARY KEY, session INTEGER NOT NULL,
+        tab INTEGER NOT NULL, navigation INTEGER NOT NULL, frame INTEGER NOT NULL,
+        count INTEGER NOT NULL, first_ns INTEGER NOT NULL, last_ns INTEGER NOT NULL,
+        UNIQUE(session, tab, navigation, frame));
+    CREATE INDEX IF NOT EXISTS summary_frames_busiest ON summary_frames(count);
+    CREATE TABLE IF NOT EXISTS summary_frame_types(frame INTEGER NOT NULL, type TEXT NOT NULL,
+        count INTEGER NOT NULL, PRIMARY KEY(frame, type)) WITHOUT ROWID;
+    -- Cumulative counts a producer repeats in each record, the newest kept:
+    -- kind 0 is a capture exclusion of `class`, 1 unattributed header blocks
+    -- and 2 unattributed cookie lists.
+    CREATE TABLE IF NOT EXISTS summary_newest(kind INTEGER NOT NULL, session INTEGER NOT NULL,
+        process INTEGER NOT NULL, class INTEGER NOT NULL, count INTEGER NOT NULL,
+        PRIMARY KEY(kind, session, process, class)) WITHOUT ROWID;
+    -- Content refusals by category and reason; category `artifact` holds the
+    -- artifact_capture_failed reasons.
+    CREATE TABLE IF NOT EXISTS summary_refusals(category TEXT NOT NULL, reason TEXT NOT NULL,
+        count INTEGER NOT NULL, PRIMARY KEY(category, reason)) WITHOUT ROWID;
+    -- Counts kept as rows change: `tab_rows`, `tab_extension_rows`,
+    -- `unresolved:<reason>` and `missing:<reason>`.
+    CREATE TABLE IF NOT EXISTS summary_counts(name TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS summary_drops(session INTEGER NOT NULL, time INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS summary_drops_time ON summary_drops(session, time);
+    -- Each browser request's header hops and lifecycle, and why its final
+    -- block is missing, or null.
+    CREATE TABLE IF NOT EXISTS summary_headers(session INTEGER NOT NULL, process INTEGER NOT NULL,
+        request INTEGER NOT NULL, provisional INTEGER NOT NULL, network INTEGER NOT NULL,
+        lifecycle INTEGER NOT NULL, first_ns INTEGER NOT NULL, last_ns INTEGER NOT NULL, reason TEXT,
+        PRIMARY KEY(session, process, request)) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS summary_headers_unsure ON summary_headers(session, last_ns)
+        WHERE reason = 'not_reported';
+    -- Each request row's tab facts (request_tabs), in first-seen order, and
+    -- why it has no tab, or null.
+    CREATE TABLE IF NOT EXISTS summary_tabs(ordinal INTEGER PRIMARY KEY, browser INTEGER NOT NULL,
+        session INTEGER NOT NULL, process INTEGER NOT NULL, high INTEGER NOT NULL,
+        low INTEGER NOT NULL, request INTEGER NOT NULL, linked INTEGER NOT NULL,
+        extension INTEGER NOT NULL, process_id INTEGER NOT NULL, request_id INTEGER NOT NULL,
+        renderer_kind INTEGER, renderer_frame INTEGER NOT NULL, browser_kind INTEGER, reason TEXT,
+        UNIQUE(browser, session, process, high, low, request));
+    CREATE INDEX IF NOT EXISTS summary_tabs_unresolved ON summary_tabs(ordinal)
+        WHERE reason IS NOT NULL;";
 const EDGE_SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS edges(start INTEGER PRIMARY KEY, end INTEGER NOT NULL,
         session INTEGER NOT NULL, process INTEGER NOT NULL, sequence INTEGER NOT NULL);
@@ -153,9 +202,10 @@ struct Stream {
     seen: u64,
 }
 
-/// Folds event lines into identity rows and the gap totals. Totals change in
-/// memory during one fold and are written back in `finish`, so they commit
-/// with the position they describe; `begin` drops what a failed fold left.
+/// Folds event lines into identity rows, the gap totals and the summary's
+/// counts. Totals change in memory during one fold and are written back in
+/// `finish`, so they commit with the position they describe; `begin` drops
+/// what a failed fold left.
 #[derive(Default)]
 struct EventFold {
     streams: HashMap<(i64, i64), Stream>,
@@ -163,6 +213,7 @@ struct EventFold {
     drops: u64,
     drops_saturated: bool,
     malformed: u64,
+    summary: session_summary::Fold,
 }
 
 impl EventFold {
@@ -338,6 +389,9 @@ impl index_db::Fold for EventFold {
             Ok(Event::Record(reference, event)) => {
                 let counted = counted(&event);
                 self.malformed += u64::from(!counted);
+                if counted {
+                    self.summary.record(&event);
+                }
                 self.record(transaction, &reference, &event, start, end, counted)
             }
             Ok(Event::Gap {
@@ -346,6 +400,7 @@ impl index_db::Fold for EventFold {
                 drop,
             }) => {
                 if counted(&event) {
+                    self.summary.record(&event);
                     self.gap(transaction, &reference, &event)?;
                 } else {
                     self.malformed += 1;
@@ -420,6 +475,7 @@ impl index_db::Fold for EventFold {
                 ],
             )
             .sql()?;
+        self.summary.write(transaction)?;
         *self = Self::default();
         Ok(())
     }
@@ -572,6 +628,76 @@ pub struct Totals {
     pub malformed_lines: u64,
 }
 
+/// The gap totals of the indexed prefix `position` names.
+pub fn totals(connection: &Connection, position: &Position) -> Result<Totals> {
+    let mut sequence_gaps = 0;
+    let mut sequence_gaps_saturated = false;
+    let streams = connection
+        .prepare_cached("SELECT low, high, seen FROM streams")
+        .sql()?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)? as u64,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, i64>(2)? as u64,
+            ))
+        })
+        .sql()?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .sql()?;
+    for (low, high, seen) in streams {
+        // `seen` distinct sequences lie in [low, high], so this never underflows.
+        event_window::add(
+            &mut sequence_gaps,
+            &mut sequence_gaps_saturated,
+            high - low - (seen - 1),
+        );
+    }
+    let named_gaps = connection
+        .prepare_cached("SELECT category, reason, count FROM named_gaps ORDER BY ordinal")
+        .sql()?
+        .query_map([], |row| {
+            Ok(NamedGap {
+                category: row.get(0)?,
+                reason: row.get(1)?,
+                count: row.get::<_, i64>(2)? as u64,
+            })
+        })
+        .sql()?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .sql()?;
+    let (queue_drops, queue_drops_saturated, malformed_lines) = connection
+        .query_row(
+            "SELECT drops, drops_saturated, malformed FROM totals WHERE id = 0",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            },
+        )
+        .sql()?;
+    Ok(Totals {
+        indexed_to: position.indexed_to,
+        sequence_gaps,
+        sequence_gaps_saturated,
+        queue_drops,
+        queue_drops_saturated,
+        named_gaps,
+        malformed_lines,
+    })
+}
+
+/// The event index as the session summary reads it.
+pub struct SummaryIndex<'a> {
+    pub position: Position,
+    /// Why the index cannot read past `position`, when it cannot.
+    pub stopped: Option<Error>,
+    pub connection: &'a Connection,
+}
+
 /// The event and edge indexes of one session's stores.
 pub struct Indexes {
     events: StoreIndex,
@@ -612,64 +738,26 @@ impl Indexes {
         if !position.caught_up(RECORD_BYTES as u64) {
             return Ok(None);
         }
-        let connection = self.events.index.sidecar().connection();
-        let mut sequence_gaps = 0;
-        let mut sequence_gaps_saturated = false;
-        let streams = connection
-            .prepare_cached("SELECT low, high, seen FROM streams")
-            .sql()?
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)? as u64,
-                    row.get::<_, i64>(1)? as u64,
-                    row.get::<_, i64>(2)? as u64,
-                ))
-            })
-            .sql()?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .sql()?;
-        for (low, high, seen) in streams {
-            // `seen` distinct sequences lie in [low, high], so this never underflows.
-            event_window::add(
-                &mut sequence_gaps,
-                &mut sequence_gaps_saturated,
-                high - low - (seen - 1),
-            );
-        }
-        let named_gaps = connection
-            .prepare_cached("SELECT category, reason, count FROM named_gaps ORDER BY ordinal")
-            .sql()?
-            .query_map([], |row| {
-                Ok(NamedGap {
-                    category: row.get(0)?,
-                    reason: row.get(1)?,
-                    count: row.get::<_, i64>(2)? as u64,
-                })
-            })
-            .sql()?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .sql()?;
-        let (queue_drops, queue_drops_saturated, malformed_lines) = connection
-            .query_row(
-                "SELECT drops, drops_saturated, malformed FROM totals WHERE id = 0",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)? as u64,
-                        row.get::<_, bool>(1)?,
-                        row.get::<_, i64>(2)? as u64,
-                    ))
-                },
-            )
-            .sql()?;
-        Ok(Some(Totals {
-            indexed_to: position.indexed_to,
-            sequence_gaps,
-            sequence_gaps_saturated,
-            queue_drops,
-            queue_drops_saturated,
-            named_gaps,
-            malformed_lines,
+        totals(self.events.index.sidecar().connection(), &position).map(Some)
+    }
+
+    /// The event index brought up to the store until `deadline`, for the
+    /// session summary, and where it stands; None when there is no store.
+    /// Its counts and gap totals describe the same indexed prefix. A record
+    /// the index cannot read stops it there, with that error beside it.
+    pub fn summary_index(&mut self, deadline: Instant) -> Result<Option<SummaryIndex<'_>>> {
+        let (position, stopped) = match self.events.refresh(deadline) {
+            Ok(None) => return Ok(None),
+            Ok(Some((_, position))) => (position, None),
+            Err(error) => match self.events.index.open()? {
+                Some((_, position)) => (position, Some(error)),
+                None => return Ok(None),
+            },
+        };
+        Ok(Some(SummaryIndex {
+            position,
+            stopped,
+            connection: self.events.index.sidecar().connection(),
         }))
     }
 

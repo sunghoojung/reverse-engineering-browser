@@ -731,7 +731,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
 
   // A session that used no budget reads the summary once and shows nothing.
   {
-    const quiet = footer({summary: {checks: []}});
+    const quiet = footer({summary: {events: {scope: 'store'}, checks: []}});
     quiet.api.renderTrafficBudget(); await settle();
     assert.deepEqual(quiet.reads, ['/api/session/summary'], 'every session reads the summary once');
     assert.equal(quiet.notice.hidden, true, 'no refusal, no notice');
@@ -741,7 +741,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   // A stored capture whose refusals are all outside the loaded rows still shows
   // them: nothing arrives in a stored window, so the figure is exact.
   {
-    const stored = footer({summary: {checks: [check('response_body', 'not_captured_session_budget', 5)]}});
+    const stored = footer({summary: {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_session_budget', 5)]}});
     stored.api.renderTrafficBudget(); await settle();
     assert.equal(stored.notice.hidden, false);
     assert.equal(stored.line.textContent, 'Response body budget used, 0 KiB kept: 5 response bodies not kept · Raise it in New Live Session… for the next session.');
@@ -749,7 +749,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
 
   // A live content session.
   const f = footer({live: true,
-    summary: {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+    summary: {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
       check('request_body', 'not_captured_session_budget', 30, {retained_bytes: '1048576', retained_complete: false}),
       check('request_target', 'not_retained_session_budget', 12, {retained_bytes: '1048576', retained_complete: false}),
       check('response_body', 'not_captured_type', 7)]},
@@ -788,7 +788,7 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   assert.match(line.textContent, /: at least 42 request bodies or URLs not kept · /);
   // The next read is exact again while nothing arrives.
   clock.now += 30_000;
-  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2450, {retained_bytes: String(511 * 1048576)})]};
+  f.answers.summary = {events: {scope: 'store'}, checks: [check('response_body', 'not_captured_session_budget', 2450, {retained_bytes: String(511 * 1048576)})]};
   api.renderTrafficBudget(); await settle();
   assert.equal(reads.length, 3);
   assert.match(line.textContent, /Response body budget \(512 MiB\) used, 511\.0 MiB kept: 2,450 response bodies not kept · Raise /);
@@ -803,8 +803,8 @@ console.log('PASS Traffic selection reuses rendered search/sort/window; only row
   // bounded summary scan is a lower bound too.
   clock.now += 30_000;
   for (const index of [3, 4, 5, 8, 9, 10]) { t.state.requests[index].responseBody = null; t.state.requests[index].body = null; }
-  f.answers.summary = {checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
-    {code: 'bounded_scope', severity: 'info', message: 'bounded'}]};
+  f.answers.summary = {events: {scope: 'indexing'}, checks: [check('response_body', 'not_captured_session_budget', 2400, {retained_bytes: String(511 * 1048576)}),
+    {code: 'summary_indexing', severity: 'info', message: 'indexing'}]};
   api.renderTrafficBudget(); await settle();
   assert.equal(reads.length, 5);
   assert.equal(line.textContent, 'Response body budget (512 MiB) used, 511.0 MiB kept: at least 2,400 response bodies not kept · '

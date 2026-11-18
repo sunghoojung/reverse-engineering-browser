@@ -3277,9 +3277,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // The summary's budget checks: their counts, the unique bytes kept and
-      // the budget each names, whether its event scan stopped at its bound,
-      // and the event poll's tag when it was read (`marker`), so a later store
-      // change is known. Read at most every 30 s while Traffic shows; a refused
+      // the budget each names, whether its counts cover less than the whole
+      // store (still indexing, or stopped at a record it cannot read), and the
+      // event poll's tag when it was read (`marker`), so a later store change
+      // is known. Read at most every 30 s while Traffic shows; a refused
       // or malformed read keeps the last answer, marked stale.
       function refreshTrafficBudgetUse() {
         const use = state.trafficBudgetUse;
@@ -3293,7 +3294,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           .then(summary => {
             if (!Array.isArray(summary?.checks)) throw new Error('No session summary');
             const next = {counts: {}, retained: {}, budgets: {}, marker, stale: false,
-              bounded: summary.checks.some(check => check?.code === 'bounded_scope')};
+              bounded: summary.events?.scope !== 'store'};
             for (const budget of TRAFFIC_BUDGETS) {
               for (const check of summary.checks) {
                 if (check?.code !== 'request_content_not_retained' ||

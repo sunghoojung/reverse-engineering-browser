@@ -639,8 +639,12 @@ frame's exact origin with `frame: child`; see
 work?" in one read. It reports capture state, event counts by category and
 type, first and last event time, up to 16 sessions, the 32 busiest frames with
 their top event types, gap counts with named gap reasons, artifact counts by
-kind with the 32 newest artifact identities and digests, and `checks`. Each
-check has a `code`, a `severity` of `info` or `warning`, and a plain message:
+kind with the 32 newest artifact identities and digests, and `checks`, over
+the whole session (`protocol_version` 2; version 1 summarized the newest
+64 MiB). Each list says how many it leaves out (`sessions_omitted`,
+`frames_omitted`, `types_omitted`, `items_omitted`, `unresolved_omitted`).
+Each check has a `code`, a `severity` of `info`, `warning` or `error`, and a
+plain message:
 
 | Code | Meaning |
 | --- | --- |
@@ -651,12 +655,11 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `no_events` | The store is empty. |
 | `wasm_without_artifacts` | Wasm compiled, but no Wasm module was stored. |
 | `artifact_capture_failed` | Some artifact bodies were not stored. |
-| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the scanned manifest, and `retained_complete`, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
+| `request_content_not_retained` | A content session kept less than the whole of some request bodies, full targets, response bodies, header blocks or cookie lists; `category` names which (`request_headers`, `response_headers` and `cookie_list` among them), `reason` the state and `count` how many. A request content or response body budget reason (`not_captured_session_budget` for `request_body` or `response_body`, `not_retained_session_budget` for `request_target`) adds `budget_mib`, the budget in force or null when this backend does not know it, `retained_bytes`, the unique bytes of that budget's artifacts in the indexed manifest, and `retained_complete`, false while the manifest is still being indexed, and its message names the remedy for the next session: the start panel's **Request content budget** or **Response body budget**, or the start option. Header blocks and cookie lists have their own fixed budget. `not_captured_type` names **Capture media and fonts** or `response_media`. |
 | `network_headers_unattributed` | Severity `warning`: `blocks` network header blocks and `lists` cookie lists arrived for requests the capture no longer tracked, so no row shows them. |
 | `final_headers_missing` | `count` requests of a content session ended with provisional headers and no cookie lists, one check per `reason`: `download`, `service_worker`, `from_cache` or `failed` (`info`, no request reached the network or it failed first), `not_reported` (`warning`, no observer or an untracked block) and `record_dropped` (`warning`, a full queue dropped records while it ran, so the block may have been lost). See [missing final blocks](native-network-v3.md#missing-final-blocks). |
-| `final_headers_untracked` | Header records of requests past the 131,072 the summary follows; their final blocks are not counted. Never raised for a metadata-only session, which records no header. |
 | `queue_drops` | Records lost to a full queue, beyond named gap markers. |
-| `sequence_gaps` | Sequence numbers missing inside the scanned events. |
+| `sequence_gaps` | Sequence numbers missing inside the stored events. |
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
@@ -665,7 +668,11 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: their snapshot allowance, the session's snapshot quarter of the response body budget, or the budget was used, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
 | `network_tab_no_document` | Severity `warning`: `count` request rows come from a context with no parent document (a shared storage worklet), which the capture does not link; their reason is `no_document`. |
-| `bounded_scope` | Only the newest 64 MiB of events were summarized. |
+| `malformed_lines` | Severity `warning`: `count` stored lines are not valid events, so no count includes them. |
+| `events_unreadable` | Severity `error`: the event index cannot read a record (one longer than any record can be), so the counts cover the store before it and `events.scope` is `stopped`. |
+| `artifact_manifest_unreadable` | Severity `error`: the same for the artifact manifest; `artifacts.scope` is `stopped`. |
+| `artifact_manifest_damaged` | Severity `warning`: a malformed or duplicate manifest record, which no count includes and which makes artifact reads by ID fail until the manifest is replaced. |
+| `summary_indexing` | The backend is still indexing a long session, so the counts cover the bytes `events.scan_end` and `artifacts.scan_end` name of `store_end`; read again shortly. |
 
 `response_bodies` counts every request's response body case from the request
 index's rows ([request index v2](request-index-v2.md)): `cases` lists each case
@@ -676,12 +683,9 @@ with its `count` and `meaning`, such as `captured`, `partial`, `not_modified`,
 A refused or malformed body can still name an earlier snapshot of the same
 response that the receiver holds; each case's `earlier_snapshots`, and the
 total beside `cases`, count those rows, which Traffic opens.
-`complete` is false while the index is still reading the store. The route's
-ETag names the store as it was before the index read and the index's progress
-after it, the point the counts were read at, so an answer counted mid-store
-never revalidates as the complete one. When the index cannot answer,
-`available` is false with a `reason`, the rest of the summary stands, and the
-answer has no ETag, so the next request reads the index again.
+`complete` is false while the index is still reading the store. When the
+index cannot answer, `available` is false with a `reason` and the rest of the
+summary stands.
 
 `exclusions` lists those counts by class and unit; see
 [native network v3](native-network-v3.md#browser-internal-exclusion).
@@ -691,10 +695,18 @@ answer has no ETag, so the next request reads the index again.
 `browser_factory`, `no_loader_kind` or `no_start`); see
 [request owners and tabs](native-network-v3.md#request-owners-and-tabs) and
 [unresolved requests](native-network-v3.md#unresolved-requests).
-The summary scans the same newest 64 MiB as the polling window and the newest
-64 MiB of the manifest. It contains counts, identifiers and origin or
-`wasm://wasm/<hex>` labels only: no payloads, URL paths or queries, source or
-bodies. Identifiers and origins can still be sensitive. It has its own ETag.
+The counts are folded as records arrive into the event index beside the store
+(`events.jsonl.events-v1`, which also keeps the gap totals) and the artifact
+lookup index beside the manifest (`manifest.jsonl.lookup-v1`), so a summary of
+a session of any length reads a few rows. A read folds what was appended for
+up to a second and answers from what is indexed; the background indexer folds
+the rest. `events.scope` and `artifacts.scope` are `store` when every complete
+record is counted, `indexing` while the index catches up (a `summary_indexing`
+check says how far) and `stopped` at a record it cannot read. The summary
+contains counts, identifiers and origin or `wasm://wasm/<hex>` labels only: no
+payloads, URL paths or queries, source or bodies. Identifiers and origins can
+still be sensitive. Its ETag is the digest of the answer's bytes, so an answer
+read mid-store never revalidates as the complete one.
 
 ## Saved JavaScript invocation sites
 

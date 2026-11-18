@@ -72,13 +72,6 @@ impl Identity {
     }
 }
 
-// Identity and change time are not enough. A same-size rewrite can restore
-// mtime without advancing ctime, and that must not produce a false 304.
-pub fn etag(path: &Path, signature: &str) -> String {
-    let identity = evidence::observed_identity(path, true);
-    evidence::resource_etag(path, &format!("{signature}:event-window-v6:{identity}"))
-}
-
 struct Record {
     start: u64,
     end: u64,
@@ -650,7 +643,6 @@ mod tests {
         assert_eq!(cache.parsed_records, 4);
         write(&path, &events);
         let _ = poll(&mut cache, &path, 10);
-        let previous_etag = etag(&path, "test");
         let old_time = fs::metadata(&path).unwrap().modified().unwrap();
         let mut rewritten = events.clone();
         rewritten[6]["sequence_number"] = json!("99");
@@ -661,7 +653,6 @@ mod tests {
             .unwrap()
             .set_times(fs::FileTimes::new().set_modified(old_time))
             .unwrap();
-        assert_ne!(etag(&path, "test"), previous_etag);
         assert_eq!(
             ids(&poll(&mut cache, &path, 10).events),
             vec![15, 99, 17, 18, 19]

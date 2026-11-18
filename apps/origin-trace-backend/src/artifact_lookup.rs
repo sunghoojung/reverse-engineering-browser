@@ -3,7 +3,9 @@
 //! row is validated once as it is indexed; a malformed, oversized or
 //! duplicate row fails every lookup until the manifest is rewritten, as a
 //! complete scan of it would. Content integrity is never cached: a caller
-//! verifies the bytes a record names when it reads them.
+//! verifies the bytes a record names when it reads them. The index also
+//! counts the manifest for the session summary: records by kind, and the
+//! unique bytes each content budget's artifacts hold.
 use crate::{
     error::{Error, Result},
     evidence,
@@ -20,11 +22,20 @@ use std::{
 };
 
 pub const SUFFIX: &str = ".lookup-v1";
-const FORMAT: &str = "reb-artifact-lookup-v1";
+/// The second layout adds the summary's counts and manifest order.
+const FORMAT: &str = "reb-artifact-lookup-v1/2";
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, parent INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS artifacts_parent ON artifacts(parent) WHERE parent != 0;
-    CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0), message TEXT NOT NULL);";
+    CREATE INDEX IF NOT EXISTS artifacts_order ON artifacts(start);
+    CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0), message TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS kinds(kind TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID;
+    -- A content budget's artifacts by digest, as its start option names it.
+    -- The browser charges unique bytes, so identical content counts once; a
+    -- digest is kept as its first 64 bits.
+    CREATE TABLE IF NOT EXISTS budget_digests(budget TEXT NOT NULL, digest INTEGER NOT NULL,
+        PRIMARY KEY(budget, digest)) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS budget_bytes(budget TEXT PRIMARY KEY, bytes INTEGER NOT NULL) WITHOUT ROWID;";
 /// A manifest line, its newline included, as the receiver writes it.
 pub const RECORD_BYTES: usize = 8192;
 /// Bytes folded per call, so a lookup never holds the index for long.
@@ -150,7 +161,7 @@ impl ArtifactIndex {
                 if inserted == 0 {
                     return damage(tx, "The artifact manifest contains a duplicate artifact ID");
                 }
-                Ok(())
+                count(tx, &value)
             })?;
             if position.indexed_to == before || Instant::now() >= deadline {
                 break;
@@ -287,6 +298,132 @@ struct Ready {
 /// A validated record's canonical decimal artifact ID.
 fn artifact_key(value: &Value) -> u64 {
     value["artifact_id"].as_str().unwrap().parse().unwrap()
+}
+
+/// Counts one indexed record for the summary.
+fn count(transaction: &rusqlite::Transaction<'_>, value: &Value) -> Result<()> {
+    let kind = value["kind"].as_str().unwrap_or("");
+    transaction
+        .prepare_cached(
+            "INSERT INTO kinds(kind, count) VALUES (?1, 1)
+             ON CONFLICT(kind) DO UPDATE SET count = count + 1",
+        )
+        .sql()?
+        .execute([kind])
+        .sql()?;
+    let (Some(budget), Some(digest), Some(size)) = (
+        crate::session_summary::budget_of_kind(kind),
+        value["sha256"]
+            .as_str()
+            .and_then(|text| text.get(..16))
+            .and_then(|prefix| u64::from_str_radix(prefix, 16).ok()),
+        value["byte_size"].as_u64(),
+    ) else {
+        return Ok(());
+    };
+    let fresh = transaction
+        .prepare_cached("INSERT OR IGNORE INTO budget_digests(budget, digest) VALUES (?1, ?2)")
+        .sql()?
+        .execute(params![budget, index_db::key(digest)])
+        .sql()?;
+    if fresh == 1 {
+        transaction
+            .prepare_cached(
+                "INSERT INTO budget_bytes(budget, bytes) VALUES (?1, ?2)
+                 ON CONFLICT(budget) DO UPDATE SET bytes = bytes + excluded.bytes",
+            )
+            .sql()?
+            .execute(params![budget, i64::try_from(size).unwrap_or(i64::MAX)])
+            .sql()?;
+    }
+    Ok(())
+}
+
+/// What the session summary reports of the manifest, as far as it is indexed.
+#[derive(Default)]
+pub struct Summary {
+    /// Every complete record is indexed.
+    pub complete: bool,
+    pub indexed_to: u64,
+    pub file_end: u64,
+    pub total: u64,
+    pub by_kind: Vec<(String, u64)>,
+    /// Unique bytes by the start option of the budget they are charged to.
+    pub retained: Vec<(String, u64)>,
+    /// The newest records, newest first, with public fields only.
+    pub newest: Vec<Value>,
+    /// The first malformed or duplicate record, which no count includes.
+    pub damage: Option<String>,
+    /// Why the index cannot read past `indexed_to`, when it cannot.
+    pub stopped: Option<String>,
+}
+
+/// The manifest's counts and its `items` newest records, from the index
+/// brought up to the manifest until `deadline`. A bad row is left out of the
+/// counts and named, where a lookup fails on it; a record the index cannot
+/// read stops the counts there.
+pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> {
+    let index = index(root);
+    let mut index = lock(&index);
+    let Some((mut file, position)) = index.open()? else {
+        return Ok(Summary {
+            complete: true,
+            ..Summary::default()
+        });
+    };
+    let (position, stopped) = match index.fold(&mut file, position.clone(), deadline) {
+        Ok(position) => (position, None),
+        Err(error) => match index.open()? {
+            Some((_, position)) => (position, Some(error.message)),
+            None => (position, Some(error.message)),
+        },
+    };
+    let connection = index.index.sidecar().connection();
+    let damage = connection
+        .query_row("SELECT message FROM damage WHERE id = 0", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()
+        .sql()?;
+    let pairs = |sql: &str| -> Result<Vec<(String, u64)>> {
+        connection
+            .prepare_cached(sql)
+            .sql()?
+            .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))
+            .sql()?
+            .map(|row| row.sql())
+            .collect()
+    };
+    let by_kind = pairs("SELECT kind, count FROM kinds ORDER BY kind")?;
+    let ranges: Vec<(i64, i64)> = connection
+        .prepare_cached("SELECT start, end FROM artifacts ORDER BY start DESC LIMIT ?1")
+        .sql()?
+        .query_map([i64::try_from(items).unwrap_or(i64::MAX)], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .sql()?
+        .collect::<rusqlite::Result<_>>()
+        .sql()?;
+    let newest = ranges
+        .into_iter()
+        .map(|(start, end)| {
+            parse(&index_db::record(&mut file, start, end)?)
+                .map(|value| evidence::public_artifact(&value))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Summary {
+        complete: stopped.is_none() && position.caught_up(RECORD_BYTES as u64),
+        damage,
+        stopped,
+        indexed_to: position.indexed_to,
+        file_end: position.file_end,
+        total: by_kind
+            .iter()
+            .fold(0u64, |sum, (_, count)| sum.saturating_add(*count)),
+        by_kind,
+        retained: pairs("SELECT budget, bytes FROM budget_bytes")?,
+        newest,
+    })
 }
 
 /// Records why the manifest cannot answer; the first reason stands.

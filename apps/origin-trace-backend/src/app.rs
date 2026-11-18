@@ -1254,45 +1254,27 @@ impl App {
                     self.receiver_connected().await,
                     capture.state.as_str(),
                 );
-                // The store's tag is taken before the request index reads it.
-                let before = event_window::etag(
-                    &self.options.store,
-                    &session_summary::etag_key(
-                        &format!("{state:?}"),
-                        &evidence::resource_etag(
-                            &self.options.artifacts.join("manifest.jsonl"),
-                            "",
-                        ),
-                    ),
-                );
                 // Per request, so they come from the request index's rows. The
                 // index is held only for its counts, and a failure leaves the
                 // rest of the summary standing.
                 let index = self.requests.clone().lock_owned().await;
-                let (counts, progress) = self
+                let counts = self
                     .blocking(move || {
                         let mut index = index;
-                        let counts = index.response_bodies().map_err(|error| error.message);
-                        Ok((counts, index.progress_marker()))
+                        Ok(index.response_bodies().map_err(|error| error.message))
                     })
                     .await?;
-                // The counts can be mid-store on an unchanged file, so the tag
-                // names the progress they were read at. An answer without them
-                // is not tagged, so a revalidation reads the index again.
-                etag = counts
-                    .is_ok()
-                    .then(|| session_summary::etag(&before, &progress));
-                if matches_etag(headers, etag.as_deref()) {
-                    return Ok(not_modified(etag.as_deref().unwrap()));
-                }
-                let store = self.options.store.clone();
+                let indexes = self.indexes.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
                 let content_limits = session_context::content_limits(&self.options);
                 let mut summary = self
                     .blocking(move || {
+                        let mut indexes = indexes
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let mut summary = session_summary::build(
-                            &store,
+                            &mut indexes,
                             &artifacts,
                             &session_summary::CaptureState {
                                 instance_id: &instance,
@@ -1303,13 +1285,17 @@ impl App {
                                 artifact_receiver_connected: state.4,
                                 content_limits,
                             },
+                            std::time::Instant::now() + session_summary::FOLD,
                         )?;
                         session_summary::add_response_bodies(&mut summary, counts);
                         Ok(summary)
                     })
                     .await?;
                 summary["capture_state"] = json!(state.5);
-                summary
+                // Read from the indexes in a few rows, so it is tagged by its
+                // bytes: an answer counted mid-store never revalidates as
+                // the complete one.
+                return Ok(tagged_json(&summary, headers, ""));
             }
             "/api/origin-trace" => {
                 let request = q.required("request_id")?.to_owned();

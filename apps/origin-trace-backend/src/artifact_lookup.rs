@@ -7,7 +7,8 @@
 //! counts the manifest for the session summary: records by kind, and the
 //! unique bytes each content budget's artifacts hold. JavaScript artifacts are
 //! also kept by content digest and URL, so a saved invocation site finds the
-//! retained versions of its script in a manifest of any length.
+//! retained versions of its script in a manifest of any length, and Wasm
+//! modules by ID, so the session context lists the newest of them.
 use crate::{
     error::{Error, Result},
     evidence,
@@ -27,9 +28,9 @@ use std::{
 
 pub const SUFFIX: &str = ".lookup-v1";
 /// The second layout adds the summary's counts and manifest order, the
-/// third JavaScript artifacts by digest and URL, the fourth the flow graph's
-/// content by SHA-256.
-const FORMAT: &str = "reb-artifact-lookup-v1/4";
+/// third JavaScript artifacts by digest and URL, the fourth Wasm modules,
+/// the fifth the flow graph's content by SHA-256.
+const FORMAT: &str = "reb-artifact-lookup-v1/5";
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS artifacts(id INTEGER PRIMARY KEY, start INTEGER NOT NULL, end INTEGER NOT NULL, parent INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS artifacts_parent ON artifacts(parent) WHERE parent != 0;
@@ -45,6 +46,7 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL, url TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS scripts_sha256 ON scripts(sha256);
     CREATE INDEX IF NOT EXISTS scripts_url ON scripts(url);
+    CREATE TABLE IF NOT EXISTS wasm(id INTEGER PRIMARY KEY);
     -- The newest record of each SHA-256 per session and content (1 stack
     -- artifacts, 2 scripts and modules), as the flow graph reads them.
     CREATE TABLE IF NOT EXISTS digests(session INTEGER NOT NULL, content INTEGER NOT NULL,
@@ -499,10 +501,17 @@ pub fn by_digest(
     })
 }
 
-/// Counts one indexed record for the summary, and keeps a script by its
-/// digest and URL.
+/// Counts one indexed record for the summary, keeps a script by its digest
+/// and URL, and a Wasm module by its ID.
 fn count(transaction: &rusqlite::Transaction<'_>, value: &Value) -> Result<()> {
     let kind = value["kind"].as_str().unwrap_or("");
+    if kind == "wasm" {
+        transaction
+            .prepare_cached("INSERT INTO wasm(id) VALUES (?1)")
+            .sql()?
+            .execute([index_db::key(artifact_key(value))])
+            .sql()?;
+    }
     if kind == "javascript" {
         transaction
             .prepare_cached("INSERT INTO scripts(id, sha256, url) VALUES (?1, ?2, ?3)")
@@ -570,10 +579,66 @@ pub struct Summary {
 }
 
 /// The manifest's counts and its `items` newest records, from the index
-/// brought up to the manifest until `deadline`. A bad row is left out of the
-/// counts and named, where a lookup fails on it; a record the index cannot
-/// read stops the counts there.
+/// brought up to the manifest until `deadline`.
 pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> {
+    counted(root, deadline, |connection, file, summary| {
+        let pairs = |sql: &str| -> Result<Vec<(String, u64)>> {
+            connection
+                .prepare_cached(sql)
+                .sql()?
+                .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))
+                .sql()?
+                .map(|row| row.sql())
+                .collect()
+        };
+        summary.by_kind = pairs("SELECT kind, count FROM kinds ORDER BY kind")?;
+        summary.total = summary
+            .by_kind
+            .iter()
+            .fold(0u64, |sum, (_, count)| sum.saturating_add(*count));
+        summary.retained = pairs("SELECT budget, bytes FROM budget_bytes")?;
+        summary.newest = newest(
+            connection,
+            file,
+            "SELECT start, end FROM artifacts ORDER BY start DESC LIMIT ?1",
+            items,
+        )?;
+        Ok(())
+    })
+}
+
+/// The manifest's Wasm modules as far as it is indexed: their count as
+/// `total` and `by_kind`, and the `items` newest as `newest`, in the
+/// summary's form.
+pub fn wasm(root: &Path, items: usize, deadline: Instant) -> Result<Summary> {
+    counted(root, deadline, |connection, file, summary| {
+        summary.total = connection
+            .query_row("SELECT count FROM kinds WHERE kind = 'wasm'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()
+            .sql()?
+            .map_or(0, |count| count as u64);
+        summary.by_kind = vec![("wasm".to_owned(), summary.total)];
+        summary.newest = newest(
+            connection,
+            file,
+            "SELECT a.start, a.end FROM wasm w JOIN artifacts a ON a.id = w.id
+             ORDER BY a.start DESC LIMIT ?1",
+            items,
+        )?;
+        Ok(())
+    })
+}
+
+/// Brings the index up to the manifest until `deadline`, then lets `fill`
+/// read its counts. A bad row is left out of the counts and named, where a
+/// lookup fails on it; a record the index cannot read stops the counts there.
+fn counted(
+    root: &Path,
+    deadline: Instant,
+    fill: impl FnOnce(&rusqlite::Connection, &mut File, &mut Summary) -> Result<()>,
+) -> Result<Summary> {
     let index = index(root);
     let mut index = lock(&index);
     let Some((mut file, position)) = index.open()? else {
@@ -590,24 +655,32 @@ pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> 
         },
     };
     let connection = index.index.sidecar().connection();
-    let damage = connection
-        .query_row("SELECT message FROM damage WHERE id = 0", [], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()
-        .sql()?;
-    let pairs = |sql: &str| -> Result<Vec<(String, u64)>> {
-        connection
-            .prepare_cached(sql)
-            .sql()?
-            .query_map([], |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)))
-            .sql()?
-            .map(|row| row.sql())
-            .collect()
+    let mut summary = Summary {
+        complete: stopped.is_none() && position.caught_up(),
+        damage: connection
+            .query_row("SELECT message FROM damage WHERE id = 0", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .sql()?,
+        stopped,
+        indexed_to: position.indexed_to,
+        file_end: position.file_end,
+        ..Summary::default()
     };
-    let by_kind = pairs("SELECT kind, count FROM kinds ORDER BY kind")?;
+    fill(connection, &mut file, &mut summary)?;
+    Ok(summary)
+}
+
+/// The records `sql` ranges, newest first, with public fields only.
+fn newest(
+    connection: &rusqlite::Connection,
+    file: &mut File,
+    sql: &str,
+    items: usize,
+) -> Result<Vec<Value>> {
     let ranges: Vec<(i64, i64)> = connection
-        .prepare_cached("SELECT start, end FROM artifacts ORDER BY start DESC LIMIT ?1")
+        .prepare_cached(sql)
         .sql()?
         .query_map([i64::try_from(items).unwrap_or(i64::MAX)], |row| {
             Ok((row.get(0)?, row.get(1)?))
@@ -615,26 +688,13 @@ pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> 
         .sql()?
         .collect::<rusqlite::Result<_>>()
         .sql()?;
-    let newest = ranges
+    ranges
         .into_iter()
         .map(|(start, end)| {
-            parse(&index_db::record(&mut file, start, end)?)
+            parse(&index_db::record(file, start, end)?)
                 .map(|value| evidence::public_artifact(&value))
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Summary {
-        complete: stopped.is_none() && position.caught_up(),
-        damage,
-        stopped,
-        indexed_to: position.indexed_to,
-        file_end: position.file_end,
-        total: by_kind
-            .iter()
-            .fold(0u64, |sum, (_, count)| sum.saturating_add(*count)),
-        by_kind,
-        retained: pairs("SELECT budget, bytes FROM budget_bytes")?,
-        newest,
-    })
+        .collect()
 }
 
 /// Records why the manifest cannot answer; the first reason stands.

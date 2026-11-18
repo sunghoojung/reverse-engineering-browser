@@ -51,7 +51,7 @@ A record of the session that its decoder refuses counts in
 `get_cookie_provenance` applies. A store line the event index refused (not a
 record, or a duplicate) is never read by any fold; the first such line is
 `coverage.index_damage`. Stack, script and module artifacts are found by
-SHA-256 in the artifact lookup's digest table (`reb-artifact-lookup-v1/4`),
+SHA-256 in the artifact lookup's digest table (`reb-artifact-lookup-v1/5`),
 then read in parallel and verified against their digest.
 
 ## Folding

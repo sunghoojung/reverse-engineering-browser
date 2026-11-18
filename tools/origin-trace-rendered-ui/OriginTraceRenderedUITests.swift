@@ -92,7 +92,9 @@ final class Harness {
   func waitForInitialLoad() async throws {
     let deadline = Date().addingTimeInterval(30)
     while webView.isLoading || webView.url?.scheme != "http" {
-      guard Date() < deadline else { throw HarnessError("The packaged app did not load its loopback UI") }
+      guard Date() < deadline else {
+        throw HarnessError("The packaged app did not load its loopback UI (at \(webView.url?.absoluteString ?? "no page"), loading=\(webView.isLoading))")
+      }
       try await Task.sleep(nanoseconds: 100_000_000)
     }
   }

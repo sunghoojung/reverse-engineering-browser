@@ -212,12 +212,14 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 /* Callers, callees and sites list every entry, one line each with the whole
  * text in its tooltip; a long list builds only the rows scrolled into view. */
 .flow-inspector-scroll { position: relative; min-width: 0; }
-.flow-inspector-scroll[data-virtual] { overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line-soft); border-radius: 6px; }
+/* Content-box, so the border never takes from the twelve rows in view. */
+.flow-inspector-scroll[data-virtual] { box-sizing: content-box; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--line-soft); border-radius: 6px; }
 .flow-inspector-scroll[data-virtual] > .flow-inspector-rows { position: relative; display: block; }
 .flow-inspector-rows > li { height: 24px; flex-wrap: nowrap; align-items: center; overflow: hidden; white-space: nowrap; }
 .flow-inspector-scroll[data-virtual] > .flow-inspector-rows > li { position: absolute; left: 0; right: 0; padding: 0 6px; }
 .flow-inspector-rows > li > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
-.flow-inspector-rows > li > .flow-inspector-meta { flex: 0 0 auto; max-width: 45%; }
+.flow-inspector-rows > li > :first-child { flex: 0 1 auto; max-width: 72%; }
+.flow-inspector-rows > li > .flow-inspector-meta { flex: 1 1 0; }
 .flow-inspector-link { min-width: 0; padding: 2px 4px; border: 0; border-radius: 3px; background: transparent; color: var(--accent); font: 11px var(--mono); text-align: left; overflow-wrap: anywhere; }
 .flow-inspector-link:hover { background: var(--panel-3); }
 .flow-inspector-link:focus-visible, .flow-graph-inspector .secondary-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -282,23 +284,23 @@ ol.flow-inspector-list { padding-left: 18px; list-style: decimal; color: var(--t
 .flow-graph-key-sample { display: inline-block; width: 24px; height: 12px; border: 1.5px dashed var(--flow-mark); border-radius: 4px; }
 .flow-graph-key-band { display: inline-block; width: 24px; height: 14px; border: 1px solid var(--flow-realm-1); border-radius: 4px; background: var(--flow-box); }
 
-/* The stats give way before the tools move; only a narrow canvas drops the
- * tools under the heading, then everything tightens. */
-@container flow-stage (max-width: 860px) {
-  .flow-graph-heading { max-width: calc(100% - 36px); }
-  .flow-graph-stage::before { height: 96px; }
-  .flow-graph-tools { top: 44px; left: 12px; right: auto; justify-content: flex-start; }
-  .flow-graph-banner { top: 84px; }
-}
+/* When the heading's whole text and the tools do not fit side by side
+ * (data-tools-below, measured from both), the tools drop under the heading;
+ * a narrow canvas then tightens everything. */
+.flow-graph[data-tools-below] .flow-graph-heading { max-width: calc(100% - 36px); }
+.flow-graph[data-tools-below] .flow-graph-stage::before { height: 96px; }
+.flow-graph[data-tools-below] .flow-graph-tools { top: 44px; left: 12px; right: auto; justify-content: flex-start; }
+.flow-graph[data-tools-below] .flow-graph-banner { top: 84px; }
 @container flow-stage (max-width: 760px) {
   .flow-graph-heading { top: 10px; left: 12px; gap: 8px; }
   .flow-graph-title { font-size: 16px; }
   .flow-graph-stats { font-size: 11.5px; }
-  .flow-graph-stage::before { height: 84px; }
-  .flow-graph-tools { top: 38px; gap: 4px; }
+  .flow-graph[data-tools-below] .flow-graph-stage::before { height: 84px; }
+  .flow-graph[data-tools-below] .flow-graph-tools { top: 38px; }
+  .flow-graph-tools { gap: 4px; }
   .flow-graph-filter input { width: 160px; }
   .flow-graph-tools > .flow-graph-tool { min-height: 28px; padding: 0 10px; }
-  .flow-graph-banner { top: 76px; }
+  .flow-graph[data-tools-below] .flow-graph-banner { top: 76px; }
 }
 @container flow-stage (max-width: 520px) {
   .flow-graph-evidence { display: none; }

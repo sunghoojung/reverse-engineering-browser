@@ -354,8 +354,17 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   const ROUTE = flowGraphLayout.ROUTE;
 
   const requestDraw = () => { if (visible && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); }); };
-  /** The heading gives way to the tools by their measured width. */
-  const syncToolsWidth = () => host.style.setProperty('--flow-tools-w', `${Math.ceil(tools.offsetWidth || 0)}px`);
+  /** The heading and the tools share the top of the stage. When the
+   * heading's whole text and the tools do not fit side by side, as when Find
+   * widens, the tools move under the heading rather than cut it. */
+  function syncToolsWidth() {
+    const toolsW = Math.ceil(tools.offsetWidth || 0);
+    host.style.setProperty('--flow-tools-w', `${toolsW}px`);
+    let want = 0;
+    for (const part of heading.children) if (part.textContent) want += part.scrollWidth + (want ? 12 : 0);
+    // The heading's left inset, the tools' right one and the gap between.
+    host.toggleAttribute('data-tools-below', 18 + want + 48 + toolsW + 12 > stage.clientWidth);
+  }
   function resize() {
     if (!visible) return;
     const shown = selected >= 0 && onScreen(selected);
@@ -613,6 +622,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     stats.title = parts.join(' · ');
     evidence.textContent = 'observed';
     evidence.title = 'Every record and artifact of the session was folded.';
+    syncToolsWidth();
     const {frame, language, dynamic} = flowGraphCrossings(display);
     const crossings = [[frame, 'frame'], [language, 'JS ↔ Wasm'], [dynamic, 'into eval']].filter(([count]) => count).map(([count, label]) => `${count.toLocaleString()} ${label}`);
     summary.textContent = `${(doc.stacks?.occurrences ?? 0).toLocaleString()} stack records · ${crossings.length ? `crossings: ${crossings.join(', ')}` : 'no crossings'}`;
@@ -843,14 +853,14 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     return (overview = {layout, lanes: counts.map(count => ({cards: count.cards, requests: count.requests.size})), bundles, straight, right, left,
       max: bundles.reduce((most, bundle) => Math.max(most, bundle.count), 1)});
   }
-  /** Screen pixels between two gutter tracks: ten, closer when there are
-   * many, so every track fits in 120. */
-  const trackGap = tracks => Math.min(10, 120 / Math.max(1, tracks));
+  /** Screen pixels from the bands to a gutter's first track, and between
+   * two tracks: six, closer when there are many, so every track fits in 96. */
+  const GUTTER = 16, trackGap = tracks => Math.min(6, 96 / Math.max(1, tracks));
   /** Screen room the overview's gutters take on each side of the bands. */
   function overviewGutters() {
     if (!layout || !display || sideways()) return {left: 0, right: 0};
     const data = bandOverview();
-    return {left: data.left ? 24 + data.left * trackGap(data.left) : 0, right: data.right ? 24 + data.right * trackGap(data.right) : 0};
+    return {left: data.left ? GUTTER + data.left * trackGap(data.left) : 0, right: data.right ? GUTTER + data.right * trackGap(data.right) : 0};
   }
   /** Below the box zoom the session is one block per realm, with its name
    * and counts, and the calls between realms bundled. */
@@ -884,30 +894,52 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
         tip = {x, y: b.y, dx: 0, dy: 1};
       } else {
         const down = bundle.to > bundle.from, track = down ? rightTrack++ : leftTrack++, gap = trackGap(down ? data.right : data.left);
-        const gx = down ? right + (24 + track * gap) * hair : left - (24 + track * gap) * hair, y0 = a.y + a.h * (down ? 0.6 : 0.4), y1 = b.y + b.h * (down ? 0.4 : 0.6), side = down ? a.x + a.w : a.x, into = down ? b.x + b.w : b.x;
+        const gx = down ? right + (GUTTER + track * gap) * hair : left - (GUTTER + track * gap) * hair, y0 = a.y + a.h * (down ? 0.6 : 0.4), y1 = b.y + b.h * (down ? 0.4 : 0.6), side = down ? a.x + a.w : a.x, into = down ? b.x + b.w : b.x;
         ctx.moveTo(side, y0); ctx.lineTo(gx, y0); ctx.lineTo(gx, y1); ctx.lineTo(into, y1);
         tip = {x: into, y: y1, dx: down ? -1 : 1, dy: 0};
       }
-      ctx.globalAlpha = 0.85; ctx.lineWidth = width; ctx.stroke();
+      ctx.globalAlpha = 0.7; ctx.lineWidth = width; ctx.stroke();
       const size = (7 + width * view.z) * hair, half = size * 0.5;
       ctx.beginPath(); ctx.moveTo(tip.x, tip.y); ctx.lineTo(tip.x - tip.dx * size - tip.dy * half, tip.y - tip.dy * size + tip.dx * half); ctx.lineTo(tip.x - tip.dx * size + tip.dy * half, tip.y - tip.dy * size - tip.dx * half); ctx.closePath(); ctx.fill();
     }
     ctx.globalAlpha = 1;
-    // Names and counts at screen size, kept under the heading.
+    // Names and counts at screen size, kept under the heading: inside a block
+    // wide enough to hold them, else beside the bands past the gutters, top
+    // to bottom, each within its block's height. A label that has no room
+    // left there is the band's hover.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.textBaseline = 'alphabetic';
-    const inset = topInset();
+    const inset = topInset(), gutters = overviewGutters();
+    const outRight = (right - view.x) * view.z + gutters.right + 14, outLeft = (left - view.x) * view.z - gutters.left - 14;
+    const outside = !across && cssW - outRight >= 160 ? 'right' : !across && outLeft >= 160 ? 'left' : null;
+    let below = inset;
     lanes.forEach((lane, index) => {
       const x = (lane.x - view.x) * view.z, y = (lane.y - view.y) * view.z, w = lane.w * view.z, h = lane.h * view.z;
-      if (x > cssW || x + w < 0 || y > cssH || y + h < 0 || w < 48 || h < 16) return;
-      const counts = data.lanes[index], start = Math.max(x + 10, 8), room = Math.min(x + w, cssW) - start - 10;
-      const top = Math.min(Math.max(y + 6, inset), y + h - 16), two = h >= 38 && y + h - top >= 36;
+      if (y > cssH || y + h < inset) return;
+      const counts = data.lanes[index], within = w >= 140 && h >= 16;
+      // Realms of one origin are told apart by their realm, the detail's first part.
+      const label = model.contexts[lane.key]?.label;
+      const line = [label?.detail?.split(' · ')[0], `${counts.cards.toLocaleString()} ${counts.cards === 1 ? 'card' : 'cards'}`, `${counts.requests.toLocaleString()} ${counts.requests === 1 ? 'request' : 'requests'}`].filter(Boolean).join(' · ');
+      let start, room, top, two;
+      if (within) {
+        if (x > cssW || x + w < 0) return;
+        start = Math.max(x + 10, 8); room = Math.min(x + w, cssW) - start - 10;
+        top = Math.min(Math.max(y + 6, inset), y + h - 16); two = h >= 38 && y + h - top >= 36;
+      } else {
+        if (!outside) return;
+        two = true;
+        top = Math.max(y + h / 2 - 16, below, inset);
+        if (top > y + h || top + 34 > cssH) return;
+        room = outside === 'right' ? cssW - outRight - 12 : outLeft - 12;
+        start = outside === 'right' ? outRight : outLeft - room;
+        below = top + 36;
+      }
       ctx.font = `600 12px ${tokens.sans}`;
-      const name = fitText(model.contexts[lane.key]?.label.title ?? 'Realm', room - 14);
+      const name = fitText(label?.title ?? 'Realm', room - 14);
       ctx.fillStyle = realmHue(lane.key); ctx.beginPath(); ctx.arc(start + 4, top + 8, 3.5, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = tokens.text; ctx.fillText(name, start + 14, top + 12);
       if (!two) return;
       ctx.font = `11px ${tokens.sans}`; ctx.fillStyle = tokens.muted;
-      ctx.fillText(fitText(`${counts.cards.toLocaleString()} ${counts.cards === 1 ? 'card' : 'cards'} · ${counts.requests.toLocaleString()} ${counts.requests === 1 ? 'request' : 'requests'}`, room - 14), start + 14, top + 28);
+      ctx.fillText(fitText(line, room - 14), start + 14, top + 28);
     });
   }
 

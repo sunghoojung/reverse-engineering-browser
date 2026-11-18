@@ -5,12 +5,12 @@ for one captured core WebAssembly module. The identifier is a canonical nonzero
 unsigned 64-bit string. The optional `sections` filter is described below. The
 loopback route rejects any other query parameter, so a misspelled filter fails
 instead of returning a whole-module document the caller will read as scoped. The
-native `reb://app/api/wasm` route and `origin-trace-wasm --artifacts DIR
---artifact-id ID [--sections NAMES]` use the same Rust provider. The CLI prints
-either the inspection document or `{error, status}`; a printed provider error is
-not a successful inspection even though the process exited normally. The native
-route does not implement `sections` and answers for the whole module, which
-`coverage.requested_sections` reports as `null`.
+native `reb://app/api/wasm` route forwards to this loopback route on the backend
+the stored-evidence window runs, so it takes the same parameters.
+`origin-trace-wasm --artifacts DIR --artifact-id ID [--sections NAMES]` uses the
+same Rust provider. The CLI prints either the inspection document or
+`{error, status}`; a printed provider error is not a successful inspection even
+though the process exited normally.
 
 The provider verifies the complete file size and SHA-256 against the manifest
 before decoding. It does not execute the module, invoke imports, fetch resources,

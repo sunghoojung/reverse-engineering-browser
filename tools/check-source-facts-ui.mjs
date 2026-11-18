@@ -307,7 +307,8 @@ async function checkSummary(ui) {
     coverage:{status:'complete',frontiers:[],diagnostics:[],analyzed_range:{start:0,end:bytes.length}}});
   assert.equal(ui.sourceFactsUnavailable(artifact, 'http:'), '');
   assert.equal(ui.sourceFactsUnavailable({...artifact, byte_size:24 * 1024 * 1024 + 1}, 'http:'), '', 'A whole artifact of any size is analyzed');
-  assert.match(ui.sourceFactsUnavailable(artifact, 'reb:'), /stored-evidence native mode/);
+  assert.equal(ui.sourceFactsUnavailable(artifact, 'reb:'), '', 'The stored-evidence window forwards Facts to its backend');
+  assert.match(ui.sourceFactsUnavailable(artifact, 'file:'), /browser development UI/);
   assert.match(ui.sourceFactsUnavailable({...artifact, source_type:'script'}, 'http:'), /captured JavaScript/);
   for (const source of [{...artifact, artifact_id:'07'}, {...artifact, session_id:'18446744073709551616'}, {...artifact, byte_size:-1}]) assert(ui.sourceFactsUnavailable(source, 'http:'));
   const report = server.summary(artifact);

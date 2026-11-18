@@ -56,8 +56,6 @@ client_project_smoke_source="${repo_root}/apps/research-ui/macos/ClientProjectEx
 live_session_source="${repo_root}/apps/research-ui/macos/LiveSessionCoordinator.swift"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
-deobfuscation_service_source="${repo_root}/apps/research-ui/macos/DeobfuscationService.swift"
-wasm_service_source="${repo_root}/apps/research-ui/macos/WasmService.swift"
 agent_core_source="${repo_root}/apps/research-ui/macos/AgentCore.swift"
 agent_bridge_source="${repo_root}/apps/research-ui/macos/AgentBridge.swift"
 session_panel_source="${repo_root}/apps/research-ui/macos/SessionPanel.swift"
@@ -139,8 +137,9 @@ triskel_revision="196ba112eba992c1460af3097c038defcf7a7e45"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"
 cp "${repo_root}/apps/origin-trace-backend/target/release/reb-api" "${macos_path}/OriginTraceAPI"
-cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-wasm" "${macos_path}/OriginTraceWasmInspector"
-chmod 755 "${macos_path}/OriginTraceWasmInspector"
+# Stored-evidence Wasm analyses are forwarded to OriginTraceBackend, which
+# hosts the same provider; never retain the retired helper in a rebuilt bundle.
+rm -f "${macos_path}/OriginTraceWasmInspector"
 chmod 755 "${macos_path}/OriginTraceBackend" "${macos_path}/OriginTraceVMAnalyzer" "${macos_path}/OriginTraceAPI"
 cp "${repo_root}/scripts/run-live-session.sh" "${resources_path}/run-live-session.sh"
 chmod 755 "${resources_path}/run-live-session.sh"
@@ -235,7 +234,7 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url

@@ -35,9 +35,10 @@ is outside a function. The retired CDP debugger was its only caller; no current
 Origin Trace view issues this query, and it remains part of the worker contract.
 
 The worker is a separate process bundled as `OriginTraceDeobfuscator` in the
-native macOS app. `DeobfuscationService.swift` invokes it with a five-second
-wall-clock deadline and projects its original UTF-8 byte ranges into the shared
-UI response. It reads only the selected captured JavaScript artifact.
+native macOS app. Only the Rust backend runs it, in live and stored-evidence
+workspaces alike (the stored-evidence window forwards its analyses to the
+bundled backend), with no deadline: a request that goes away stops it. It reads
+only the selected captured JavaScript artifact.
 
 The browser development server uses this worker when available, with an explicitly
 labelled Python lexical fallback when it is not built. Rust does not classify

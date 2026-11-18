@@ -2,10 +2,14 @@ import Darwin
 import Foundation
 
 // Rust-only stored-evidence reads, answered by the bundled backend run idle over the same stores for this app alone.
+// Analyses of an artifact are among them, so stored and live workspaces run the same code with the same
+// absence of size limits and deadlines.
 final class StoredEvidenceBackend {
   static let getRoutes: Set<String> = [
     "/api/requests", "/api/request-headers", "/api/request-cookies", "/api/cookie-provenance",
-    "/api/request-stack", "/api/native-debugger", "/api/source-format",
+    "/api/request-stack", "/api/native-debugger", "/api/source-format", "/api/source-facts",
+    "/api/source-facts/rows", "/api/deobfuscation", "/api/artifact-map", "/api/wasm", "/api/wasm/functions",
+    "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow", "/api/wasm/diff",
   ]
   static let postRoutes: Set<String> = ["/api/native-debugger/actions"]
   static let maximumBodyBytes = 64 * 1024
@@ -56,7 +60,11 @@ final class StoredEvidenceBackend {
     configuration.httpCookieStorage = nil
     configuration.httpShouldSetCookies = false
     configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-    configuration.timeoutIntervalForRequest = 180
+    // An analysis of a large artifact can compute for minutes before its first
+    // byte. The page ends a read it no longer wants, which cancels this one, so
+    // the transport never cuts one off: both intervals are the resource default.
+    configuration.timeoutIntervalForRequest = 7 * 24 * 60 * 60
+    configuration.timeoutIntervalForResource = 7 * 24 * 60 * 60
     session = URLSession(configuration: configuration)
   }
 
@@ -78,9 +86,48 @@ final class StoredEvidenceBackend {
     retryAfter = .distantPast
   }
 
-  func forward(_ request: URLRequest, reply: @escaping (Data, Int, String, [String: String]) -> Void) {
+  /// One forwarded read. Cancelling it closes its backend connection, and the
+  /// backend then drops the request and stops any worker it started for it.
+  final class Forwarding {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var task: URLSessionDataTask?
+
+    func cancel() {
+      lock.lock()
+      cancelled = true
+      let task = self.task
+      lock.unlock()
+      task?.cancel()
+    }
+
+    fileprivate var isCancelled: Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return cancelled
+    }
+
+    fileprivate func run(_ task: URLSessionDataTask) {
+      lock.lock()
+      self.task = task
+      let cancelled = self.cancelled
+      lock.unlock()
+      if cancelled { task.cancel() } else { task.resume() }
+    }
+  }
+
+  /// Replies exactly once, also after `cancel`; the caller drops a reply its
+  /// request no longer wants.
+  @discardableResult
+  func forward(_ request: URLRequest, reply: @escaping (Data, Int, String, [String: String]) -> Void) -> Forwarding {
     let json = "application/json; charset=utf-8"
+    let forwarding = Forwarding()
     launches.async {
+      let cancelled = Failure(status: 499, code: "cancelled", message: "The request was cancelled")
+      guard !forwarding.isCancelled else {
+        reply(Self.body(cancelled), cancelled.status, json, [:])
+        return
+      }
       let forwarded: URLRequest
       do {
         forwarded = try self.backendRequest(for: request, origin: try self.start())
@@ -91,16 +138,19 @@ final class StoredEvidenceBackend {
         reply(Self.body(Failure(status: 503, code: "dependency_unavailable", message: "The bundled backend is unavailable")), 503, json, [:])
         return
       }
-      self.session.dataTask(with: forwarded) { data, response, _ in
+      forwarding.run(self.session.dataTask(with: forwarded) { data, response, _ in
         guard let response = response as? HTTPURLResponse else {
-          reply(Self.body(Failure(status: 502, code: "dependency_unavailable", message: "The bundled backend did not answer")), 502, json, [:])
+          let failure = forwarding.isCancelled ? cancelled
+            : Failure(status: 502, code: "dependency_unavailable", message: "The bundled backend did not answer")
+          reply(Self.body(failure), failure.status, json, [:])
           return
         }
         var headers: [String: String] = [:]
         if let tag = response.value(forHTTPHeaderField: "ETag") { headers["ETag"] = tag }
         reply(data ?? Data(), response.statusCode, response.value(forHTTPHeaderField: "Content-Type") ?? json, headers)
-      }.resume()
+      })
     }
+    return forwarding
   }
 
   private func backendRequest(for request: URLRequest, origin: URL) throws -> URLRequest {

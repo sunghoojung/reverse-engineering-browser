@@ -101,8 +101,9 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let analystRunnerURL: URL
   private let analystRunnerCoreURL: URL
   private var tasks = SchemeTaskRegistry()
-  private let deobfuscationService: NativeDeobfuscationService
-  private let wasmService: NativeWasmService
+  // Forwarded reads still in flight, by request. Each entry's reply holds its
+  // request, so the identifier is not reused while the entry exists. Main thread only.
+  private var forwarded: [ObjectIdentifier: StoredEvidenceBackend.Forwarding] = [:]
   private let decoderService: NativeDecoderService
   private let brokerSocketURL: URL?
   private let storedEvents = StoredEventWindowCache()
@@ -138,8 +139,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     self.analystRunnerURL = analystRunnerURL
     self.analystRunnerCoreURL = analystRunnerCoreURL
     decoderService = NativeDecoderService(executableURL: decoderExecutableURL)
-    deobfuscationService = NativeDeobfuscationService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceDeobfuscator"))
-    wasmService = NativeWasmService(executableURL: decoderExecutableURL.deletingLastPathComponent().appendingPathComponent("OriginTraceWasmInspector"))
     self.brokerSocketURL = brokerSocketURL
     self.storedBackend = storedBackend
     self.demoEvidenceEnabled = demoEvidenceEnabled
@@ -167,7 +166,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       return
     }
     if StoredEvidenceBackend.serves(urlSchemeTask.request) {
-      storedBackend.forward(urlSchemeTask.request) { body, status, contentType, headers in
+      forwarded[ObjectIdentifier(urlSchemeTask)] = storedBackend.forward(urlSchemeTask.request) { body, status, contentType, headers in
         self.send(body, contentType: contentType, status: status, headers: headers, to: urlSchemeTask)
       }
       return
@@ -215,40 +214,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
           "error": "Offline Wasm runs need a live workspace. Nothing ran.",
           "code": "dependency_unavailable", "details": [:]
         ]), "application/json; charset=utf-8", 503, [:])
-      case "/api/source-facts":
-        // The stored-evidence scheme has no reviewed source-facts adapter.
-        // Live workspaces use the bundled Rust HTTP backend instead.
-        response = (try JSONSerialization.data(withJSONObject: [
-          "error": "JavaScript facts are unavailable in stored-evidence native mode. Open a live workspace or the browser development UI.",
-          "code": "dependency_unavailable", "details": [:]
-        ]), "application/json; charset=utf-8", 503, [:])
-      case "/api/deobfuscation":
-        handleDeobfuscation(requestURL, to: urlSchemeTask)
-        return
-      case "/api/wasm":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "WASM inspection requires GET")
-        }
-        handleWasm(requestURL, to: urlSchemeTask)
-        return
-      case "/api/artifact-map":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "The artifact map requires GET")
-        }
-        handleArtifactMap(requestURL, to: urlSchemeTask)
-        return
-      case "/api/wasm/functions", "/api/wasm/graph", "/api/wasm/identification", "/api/wasm/pseudocode", "/api/wasm/value-flow":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "WASM graph routes require GET")
-        }
-        handleWasmGraph(requestURL, to: urlSchemeTask)
-        return
-      case "/api/wasm/diff":
-        guard urlSchemeTask.request.httpMethod == "GET" else {
-          throw LocalHTTPError(status: 405, message: "The WASM module diff requires GET")
-        }
-        handleWasmDiff(requestURL, to: urlSchemeTask)
-        return
       case "/api/decoder":
         response = (try decoderService.state(), "application/json; charset=utf-8", 200, [:])
       case "/api/decoder/actions":
@@ -351,6 +316,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
     tasks.stop(urlSchemeTask)
+    // A page that aborts a forwarded analysis stops its backend work too.
+    forwarded.removeValue(forKey: ObjectIdentifier(urlSchemeTask))?.cancel()
   }
 
   private func healthResponse() throws -> Data {
@@ -1911,232 +1878,6 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     )
   }
 
-  private func completeDeobfuscation(_ body: Data, status: Int, to task: WKURLSchemeTask) {
-    send(body, contentType: "application/json; charset=utf-8", status: status, headers: [:], to: task)
-  }
-
-  private func handleArtifactMap(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let ids = items.filter { $0.name == "artifact_id" }
-        guard items.count == 1, ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
-          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
-          throw NativeDecoderError(status: 400, message: "One canonical nonzero artifact ID is required")
-        }
-        let body = try self.wasmService.artifactMap(root: self.artifactStoreURL, artifactID: id)
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "The artifact map is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  private func handleWasmGraph(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let valueFlow = ["function", "offset", "operand", "local", "direction", "max_nodes", "max_depth", "interprocedural"]
-        let allowed = url.path == "/api/wasm/pseudocode" ? ["artifact_id", "function", "line_offset", "line_limit"]
-          : url.path == "/api/wasm/graph" ? ["artifact_id", "function"]
-          : url.path == "/api/wasm/identification" ? ["artifact_id", "row_offset", "row_limit"]
-          : url.path == "/api/wasm/value-flow" ? ["artifact_id"] + valueFlow : ["artifact_id"]
-        let ids = items.filter { $0.name == "artifact_id" }
-        guard items.allSatisfy({ allowed.contains($0.name) }), ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
-          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
-          throw NativeDecoderError(status: 400, message: "WASM graph routes take one canonical artifact_id and, for the graph route, function")
-        }
-        let arguments: [String]
-        let schema: String
-        if url.path == "/api/wasm/pseudocode" {
-          let functions = items.filter { $0.name == "function" }
-          guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
-            throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")
-          }
-          // The helper refuses a window past the line count or the line limit.
-          var window: [String] = []
-          for name in ["line_offset", "line_limit"] {
-            let values = items.filter { $0.name == name }
-            guard values.count <= 1 else { throw NativeDecoderError(status: 400, message: "Specify \(name) only once") }
-            if let value = values.first?.value {
-              guard let number = UInt32(value), name == "line_offset" || number > 0 else {
-                throw NativeDecoderError(status: 400, message: "\(name) is an unsigned 32-bit integer")
-              }
-              window += ["--\(name.replacingOccurrences(of: "_", with: "-"))", String(number)]
-            }
-          }
-          arguments = ["--pseudocode-function", function] + window
-          schema = "wasm-pseudocode-v1"
-        } else if url.path == "/api/wasm/value-flow" {
-          // The Rust provider validates every parameter; values are ASCII
-          // digits or words, so the query passes through as it came.
-          let names = items.map(\.name)
-          guard Set(names).count == names.count, items.allSatisfy({ ($0.value ?? "").range(of: #"^[a-z0-9]{1,20}$"#, options: .regularExpression) != nil }) else {
-            throw NativeDecoderError(status: 400, message: "WASM value flow takes each parameter once, as a number or a word")
-          }
-          let query = items.filter { $0.name != "artifact_id" }.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&")
-          arguments = ["--value-flow", query]
-          schema = "wasm-value-flow-v1"
-        } else if url.path == "/api/wasm/graph" {
-          let functions = items.filter { $0.name == "function" }
-          guard functions.count == 1, let function = functions.first?.value, UInt32(function) != nil else {
-            throw NativeDecoderError(status: 400, message: "A WASM function index is an unsigned 32-bit integer")
-          }
-          arguments = ["--graph-function", function]
-          schema = "wasm-block-graph-v1"
-        } else if url.path == "/api/wasm/identification" {
-          // The same suggestion window as the loopback route: one value each,
-          // canonical, with the backend's 1024-row page as the ceiling.
-          var window: [String] = []
-          for (name, flag, minimum) in [("row_offset", "--row-offset", 0), ("row_limit", "--row-limit", 1)] {
-            let values = items.filter { $0.name == name }
-            guard values.count <= 1 else {
-              throw NativeDecoderError(status: 400, message: "WASM identification takes one \(name)")
-            }
-            if let raw = values.first?.value {
-              guard let value = Int(raw), value >= minimum, String(value) == raw, name != "row_limit" || value <= 1024 else {
-                throw NativeDecoderError(status: 400, message: name == "row_limit" ? "row_limit is 1 to 1024" : "row_offset is an unsigned integer")
-              }
-              window += [flag, raw]
-            }
-          }
-          arguments = ["--identification"] + window
-          schema = "wasm-identification-v1"
-        } else {
-          arguments = ["--functions"]
-          schema = "wasm-function-index-v1"
-        }
-        let body = try self.wasmService.graphDocument(root: self.artifactStoreURL, artifactID: id, extraArguments: arguments, schema: schema)
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "WASM graph decoding is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  /// The helper validates the page and statuses again; this only refuses a
-  /// parameter it would not pass on, so nothing unchecked reaches its argv.
-  private func handleWasmDiff(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let allowed = ["artifact_id", "compare_artifact_id", "status", "row_offset", "row_limit"]
-        func one(_ name: String, pattern: String, required: Bool) throws -> String? {
-          let values = items.filter { $0.name == name }
-          if values.isEmpty, !required { return nil }
-          guard values.count == 1, let value = values[0].value, value.count <= 128,
-            value.range(of: pattern, options: .regularExpression) != nil else {
-            throw NativeDecoderError(status: 400, message: "The WASM module diff takes one canonical artifact_id and compare_artifact_id with optional status, row_offset and row_limit")
-          }
-          return value
-        }
-        guard items.allSatisfy({ allowed.contains($0.name) }) else {
-          throw NativeDecoderError(status: 400, message: "The WASM module diff takes artifact_id and compare_artifact_id with optional status, row_offset and row_limit")
-        }
-        let canonical = #"^[1-9][0-9]{0,19}$"#
-        guard let id = try one("artifact_id", pattern: canonical, required: true), UInt64(id) != nil,
-          let other = try one("compare_artifact_id", pattern: canonical, required: true), UInt64(other) != nil else {
-          throw NativeDecoderError(status: 400, message: "Artifact IDs are canonical nonzero unsigned 64-bit integers")
-        }
-        var arguments = ["--diff-with", other]
-        if let status = try one("status", pattern: #"^[a-z]+(,[a-z]+)*$"#, required: false) { arguments += ["--status", status] }
-        if let offset = try one("row_offset", pattern: #"^[0-9]{1,10}$"#, required: false) { arguments += ["--row-offset", offset] }
-        if let limit = try one("row_limit", pattern: #"^[0-9]{1,4}$"#, required: false) { arguments += ["--row-limit", limit] }
-        let body = try self.wasmService.graphDocument(root: self.artifactStoreURL, artifactID: id, extraArguments: arguments, schema: "wasm-module-diff-v1")
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "The WASM module diff is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  private func handleWasm(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let ids = items.filter { $0.name == "artifact_id" }
-        guard ids.count == 1, let id = ids.first?.value, UInt64(id) != nil,
-          id.range(of: #"^[1-9][0-9]*$"#, options: .regularExpression) != nil else {
-          throw NativeDecoderError(status: 400, message: "One canonical nonzero artifact ID is required")
-        }
-        let body = try self.wasmService.inspect(root: self.artifactStoreURL, artifactID: id)
-        self.completeDeobfuscation(body, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "WASM inspection is unavailable"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
-  private func handleDeobfuscation(_ url: URL, to task: WKURLSchemeTask) {
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
-        let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        let artifactID = query.first(where: { $0.name == "artifact_id" })?.value
-        let scriptID = query.first(where: { $0.name == "script_id" })?.value
-        let mode = query.first(where: { $0.name == "mode" })?.value ?? "analysis"
-        guard mode == "analysis" || mode == "derived" else {
-          throw NativeDecoderError(status: 400, message: "Deobfuscation mode is invalid")
-        }
-        guard artifactID != nil || scriptID != nil else {
-          throw NativeDecoderError(status: 400, message: "Script ID or artifact ID is required")
-        }
-        guard artifactID == nil || scriptID == nil else {
-          throw NativeDecoderError(status: 400, message: "Specify only one source identifier")
-        }
-        guard scriptID == nil else {
-          throw NativeDecoderError(status: 409, message: "Live debugging is not enabled")
-        }
-        guard let id = artifactID, UInt64(id) != nil,
-          let artifact = try self.artifactEntries().first(where: { ($0["artifact_id"] as? String) == id }),
-          let relativePath = artifact["content_path"] as? String
-        else { throw NativeDecoderError(status: 404, message: "Artifact not found") }
-        guard artifact["kind"] as? String == "javascript" else {
-          throw NativeDecoderError(status: 400, message: "Artifact is not JavaScript")
-        }
-        let root = self.artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL
-        let path = root.appendingPathComponent(relativePath).resolvingSymlinksInPath().standardizedFileURL
-        guard path.path.hasPrefix(root.path + "/") else {
-          throw NativeDecoderError(status: 400, message: "Artifact path escapes the store")
-        }
-        let file = try FileHandle(forReadingFrom: path)
-        defer { try? file.close() }
-        let source = try file.read(upToCount: NativeDeobfuscationService.maximumSourceBytes + 1) ?? Data()
-        guard source.count == artifact["byte_size"] as? Int else {
-          throw NativeDecoderError(status: 400, message: "Artifact is oversized or does not match its manifest")
-        }
-        let assumptionItems = query.filter { $0.name == "assume_intrinsics" }
-        let assumption = assumptionItems.first?.value ?? "0"
-        guard assumptionItems.count <= 1, assumption == "0" || assumption == "1" else {
-          throw NativeDecoderError(status: 400, message: "Intrinsic assumption must be 0 or 1")
-        }
-        let response = try self.deobfuscationService.analyze(source: source, artifactID: id, mode: mode, assumeIntrinsics: assumption == "1")
-        self.completeDeobfuscation(response, status: 200, to: task)
-      } catch let error as NativeDecoderError {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": error.message])) ?? Data()
-        self.completeDeobfuscation(body, status: error.status, to: task)
-      } catch {
-        let body = (try? JSONSerialization.data(withJSONObject: ["error": "Artifact analysis is unavailable: \(error.localizedDescription)"])) ?? Data()
-        self.completeDeobfuscation(body, status: 500, to: task)
-      }
-    }
-  }
-
   private func artifactContentResponse(for requestURL: URL) throws -> (Data, [String: String]) {
     let components = requestURL.path.split(separator: "/")
     guard components.count == 4,
@@ -2643,6 +2384,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       return
     }
     guard tasks.finish(task) else { return }
+    forwarded.removeValue(forKey: ObjectIdentifier(task))
     guard let requestURL = task.request.url,
       let response = HTTPURLResponse(
         url: requestURL,

@@ -2253,9 +2253,9 @@ The report's changed-span inspector shows one validated replacement at a time,
 with Previous/Next, exact half-open UTF-8 ranges, and original/derived snippets
 limited to 2,048 UTF-16 units each. Snippets scroll independently; truncation is
 visible and never splits a surrogate pair. In the HTTP live workspace or browser
-development UI, **Reveal original range** verifies captured original bytes
-through the existing Facts path. Stored-evidence native mode displays an explicit
-unavailable reason for that navigation. Neither path executes source. Pretty printing remains a separate display layer.
+development UI, and in the stored-evidence window, **Reveal original range**
+verifies captured original bytes through the existing Facts path. It never
+executes source. Pretty printing remains a separate display layer.
 
 Transformation families, heuristic classification signals, recovered table
 summaries, and assumptions have explicit counts and four-row paging.
@@ -2363,10 +2363,9 @@ report summary, one page and one verified original source are retained by this
 view.
 
 The native app's live workspace loads the bundled Rust HTTP backend and shares
-this feature with browser development. The separate `reb://` stored-evidence
-native interface does not have the reviewed adapter: Facts is disabled with a
-visible explanation in Details, and direct requests return structured HTTP 503
-`dependency_unavailable`. No Swift parser or duplicate validator is substituted.
+this feature with browser development. The `reb://` stored-evidence window
+forwards both Facts routes to the backend it runs over the same stores, so it
+has the same feature; no Swift parser or duplicate validator is substituted.
 See [JavaScript source facts v2](../../protocol/javascript-source-facts-v2.md).
 
 ## Programmatic HTTP access
@@ -3074,8 +3073,9 @@ Function indexes include imports. **Find** searches retained Hex text or
 offset-bearing inspection rows with an explicit inspection label. Inspection
 headings and omission messages are excluded; partial coverage stays visible. Failures
 provide **Retry inspection**. Partial coverage and display limits are explicit.
-The native shell ships `WasmService.swift` and `OriginTraceWasmInspector`, using
-the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
+The stored-evidence window forwards inspection, graphs, identification,
+pseudocode, value flow, module diff and the artifact map to its bundled backend,
+so it runs the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
 
 **More > Run offline…** on a captured Wasm module opens a dialog that runs one
 function in the backend's local sandbox: the `wasmi` interpreter, offline, with

@@ -19,10 +19,9 @@ function sourceFactsIdentity(source) {
 }
 
 function sourceFactsUnavailable(source, protocol) {
-  if (!['http:', 'https:'].includes(protocol)) {
-    return protocol === 'reb:'
-      ? 'Unavailable in stored-evidence native mode. Open the evidence through the local HTTP workspace or the browser development UI to inspect JavaScript facts.'
-      : 'Open the local browser development UI to inspect JavaScript facts.';
+  // The stored-evidence window (reb:) forwards Facts to its bundled backend.
+  if (!['http:', 'https:', 'reb:'].includes(protocol)) {
+    return 'Open the local browser development UI to inspect JavaScript facts.';
   }
   if (source?.source_type !== 'artifact' || source.kind !== 'javascript') {
     return 'Select one captured JavaScript artifact. Derived text cannot be analyzed here.';

@@ -31,26 +31,31 @@ Sources admits only known Rust/Oxc and legacy Python engines, ordered maps and
 complete contiguous derived coverage. Replacement original spans must be
 nonempty; synthetic spans must be zero-width. Rust maps must additionally cover
 the complete original contiguously and use UTF-8 bytes, and supplied aggregate
-transformation counts must sum to the number of mapped replacements (at most
-4,096). Original and derived byte sizes, scalar boundaries, and verbatim slices
+transformation counts must sum to the number of mapped replacements, however
+many there are. Original and derived byte sizes, scalar boundaries, and verbatim slices
 are checked before a changed span is exposed. Legacy code-point maps may omit
 original formatting whitespace and are ineligible for exact-byte change
 inspection. Missing optional summaries remain
 unknown. Aggregate rule families do not identify individual replacement rules.
 
-Sources are capped at 4 MiB. Worker analysis has a five-second adapter deadline, at most
-4,096 rewrites, and 64 diagnostics. `truncated` means a derivation or rewrite
-budget was reached; unchanged remainder is preserved. Native temporary input/output files
-are private and removed when analysis finishes or fails.
+A source of any size is analyzed whole, with no deadline and no rewrite cap;
+at most 64 syntax diagnostics of a rejected source are returned. `truncated`
+means some expression ran out of its own evaluation allowance; that expression
+is preserved unchanged and the rest is still folded. Analyses queue behind one
+worker in arrival order, and a request that goes away leaves the queue or stops
+its worker. The HTTP backend keeps up to four analyses by source SHA-256 and
+assumption, so the same bytes are analyzed once. `analysis.limits` is no longer
+reported. Native temporary input/output files are private and removed when
+analysis finishes or fails.
 
 Invalid identifiers/modes or malformed source return 400, missing artifacts 404,
-unavailable live debugging or a busy worker 409, native parse failures 422,
-an abnormal worker exit 502, and a worker timeout 408. Derived-output validation
-failure also returns 422 with a qualified message that the original is preserved;
-it is not reported as an original-source parse error. A failed UI request is not automatically retried.
-The previous successful representation survives an explicit retry failure.
+native parse failures 422 and an abnormal worker exit 502. Derived-output
+validation failure also returns 422 with a qualified message that the original
+is preserved; it is not reported as an original-source parse error. A failed UI
+request is not automatically retried. The previous successful representation
+survives an explicit retry failure.
 
-After rewriting, the worker bounds and reparses the complete candidate using
+After rewriting, the worker reparses the complete candidate using
 the original parse goal. A rejected candidate has `ok: false`,
 `error_kind: "derived-validation"`, `parsed: true` (the original parsed), original
 text in `derived_source`, and an empty `transformations` list. Its diagnostic
@@ -60,13 +65,12 @@ The candidate check proves syntax acceptance only and never executes the source.
 
 Every worker response with `ok: false` names its `error_kind`:
 `invalid-request` (malformed JSON, an unknown field or operation, or a function
-lookup carrying `assume_intrinsics`), `source-limit` (the source or request
-record exceeds its byte limit), `preflight-limit` (the Tree-sitter preflight's
-depth, node, heap or time budget), `syntax` (either parser rejected the source;
-`parsed: true` means Tree-sitter admitted it and Oxc rejected it) or
-`derived-validation`. The backend maps `syntax`, `preflight-limit` and
-`derived-validation` to 422 with distinct messages, `source-limit` to 400, and
-`invalid-request`, a missing kind or an unknown kind to 502. Requests are no
+lookup carrying `assume_intrinsics`), `syntax` (the parser rejected the source;
+`parsed: true` means a parse ran) or `derived-validation`. No source is refused
+for its size or nesting, so v1's `source-limit` and `preflight-limit` kinds are
+no longer produced. The backend maps `syntax` and `derived-validation` to 422
+with distinct messages, and `invalid-request`, a missing kind or an unknown kind
+to 502. Requests are no
 longer read leniently: a misspelled `operation` or field is refused instead of
 falling through to deobfuscation.
 

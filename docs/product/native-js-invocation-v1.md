@@ -142,8 +142,8 @@ without saving. The rules ([HTTP API](../../protocol/http-api.md#saved-javascrip
   are refused with at most 32 candidates, each with its line, column, binding
   and a context line, so the researcher picks one by position. Zero matches
   list definitions whose name ends in the same segment.
-- **Syntax, not text.** The analysis worker walks its bounded tree-sitter
-  preflight tree, so a name in a string, template or comment never matches. A
+- **Syntax, not text.** The analysis worker walks its Tree-sitter syntax
+  tree, so a name in a string, template or comment never matches. A
   name matches an assignment to that identifier or member chain, a
   `var`/`let`/`const` initializer, a function declaration and an
   object-literal property or method, including chained assignments and

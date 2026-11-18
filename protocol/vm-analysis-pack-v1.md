@@ -122,11 +122,12 @@ cover the entire pack. The analysis/workspace input digest is recomputed using
 that same existing canonical convention. Integer JSON only is accepted;
 duplicate keys, including escaped spellings of the same key, are refused.
 
-Inputs are regular non-symlink files, capped at 16 MiB, depth 32, 500,000
-structural/string tokens and 8,192 UTF-8 bytes per JSON string/key. Packs are
-additionally capped at 64 KiB of canonical JSON. Reports are capped at 32 MiB;
-limits reject the whole operation rather than producing a silently partial
-report. Output is a private (0600 on Unix), atomic, no-clobber file in an existing
+Inputs are regular non-symlink files of any size, with strings and keys of any
+length. The only structural bound is serde_json's 128-level nesting limit,
+which keeps parsing and validation off the end of the stack; no versioned VM
+document nests near it. The pack schema bounds a pack's shape. Reports have no
+size cap; a refusal rejects the whole operation rather than producing a
+silently partial report. Output is a private (0600 on Unix), atomic, no-clobber file in an existing
 directory. The command uses no network or browser connection. It prints only
 the output digest and `network_requests: 0` after successful publication.
 Reports can retain sensitive local evidence. Review any report before sharing;
@@ -153,10 +154,11 @@ POST `/api/analysis/vm/packs/compare` accepts exactly
 objects; artifact IDs are canonical positive u64 strings. The implementation
 calls the exact offline `apply`/`compare` functions, preserving schema, digest,
 source-family and conservative comparison semantics. Unknown request fields,
-duplicate keys, noninteger numbers and malformed UTF-8 are refused. The combined
-HTTP body is bounded at 16 MiB/depth 32 and receives the existing local-origin,
-content-length, JSON-media-type and body-deadline checks. At most two package/pack
+duplicate keys, noninteger numbers, nesting past 128 levels and malformed UTF-8
+are refused. The HTTP body admits up to 1 GiB, the API's per-request buffer,
+and receives the existing local-origin, content-length, JSON-media-type and
+body-deadline checks (5 s plus 1 s per 16 MiB declared). At most two package/pack
 requests are admitted before body ingestion; capacity errors require explicit
 retry. Pack analysis writes no files, launches no process and sends no outgoing
-network requests. The existing 32 MiB report cap applies. Use the offline CLI
-when separate inputs fit its individual file limits but not the HTTP total.
+network requests. Reports of any size are returned whole. The offline CLI
+reads files of any size.

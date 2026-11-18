@@ -1,22 +1,31 @@
-//! Paged text reads and literal search of retained artifacts, for clients
-//! allowed to read captured content: `reb-api call`, the UI, and an MCP
-//! connection admitted with `--allow-content` (`--permission full`).
+//! Paged text reads and search of retained artifacts, for clients allowed to
+//! read captured content: `reb-api call`, the UI, and an MCP connection
+//! admitted with `--allow-content` (`--permission full`).
 //!
 //! A page is bounded so its whole JSON document stays under the MCP inline
 //! limit (128 KiB): the text costs at most `TEXT_BUDGET` bytes once JSON
-//! escapes are counted, and `next_offset` continues the read. Every page and
-//! every searched file is verified against its manifest digest, as
-//! `get_artifact_content` is. Nothing here interprets the bytes.
+//! escapes are counted, and `next_offset` continues the read. A search reads
+//! every selected artifact whole, whatever its size, and pages its matches
+//! the same way. Every page and every searched file is verified against its
+//! manifest digest, as `get_artifact_content` is. Nothing here interprets the
+//! bytes.
 use crate::{
     artifact_query::ArtifactFilter,
-    error::{Error, Result},
+    error::{Code, Error, Result, check_cancelled},
     evidence,
+    result_cache::{Cache, kept},
 };
 use base64::Engine;
+use regex::bytes::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 use std::{
     path::Path,
-    time::{Duration, Instant},
+    sync::{
+        Condvar, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
 };
 
 /// Header blocks and cookie lists hold `Cookie`, `Set-Cookie`, `Authorization`
@@ -211,72 +220,131 @@ pub fn page(
     }))
 }
 
-/// Bounds of one search: files above `FILE_BYTES` are skipped and named, the
-/// call reads at most `TOTAL_BYTES`, and stops at its deadline.
-pub const SEARCH_FILE_BYTES: usize = 16 * 1024 * 1024;
-pub const SEARCH_TOTAL_BYTES: usize = 64 * 1024 * 1024;
-pub const SEARCH_QUERY_BYTES: usize = 256;
-pub const SEARCH_FILE_MATCHES: usize = 100;
+/// Matches one page may return. A page is a paging unit, not a cap on what
+/// is searched: every match is counted and `next_offset` reaches each one.
 pub const SEARCH_MAX_LIMIT: usize = 200;
-const SEARCH_DEADLINE: Duration = Duration::from_secs(10);
+/// Bytes of the same line kept on each side of a match.
 const SNIPPET_BYTES: usize = 48;
-const SKIPPED_LISTED: usize = 32;
+/// Bytes of a long regular-expression match shown in `match`. `byte_length`
+/// and `utf16_length` always give the whole match.
+const MATCH_TEXT_BYTES: usize = 256;
+/// Artifacts named in each coverage list; the counts beside them are exact.
+const LISTED: usize = 32;
+/// Counted results kept, so the next page of a search counts nothing again.
+const CACHED_SEARCHES: usize = 8;
+/// Artifact bytes the counting workers hold at once. A larger file is read
+/// alone, so every file is searched; this only stops several large files
+/// from being held at the same time.
+const IN_FLIGHT_BYTES: u64 = 256 * 1024 * 1024;
+/// Matches between polls of the request, so an abandoned search stops.
+const POLL_MATCHES: u64 = 65_536;
+const WHAT: &str = "Artifact search";
 
 pub struct SearchRequest {
-    pub query: Vec<u8>,
+    /// `q` as given: literal text, or a regular expression when `regex` is set.
+    pub text: String,
+    pub regex: bool,
     pub match_case: bool,
     pub filter: ArtifactFilter,
-    pub offset: usize,
+    pub offset: u64,
     pub limit: usize,
 }
 
 impl SearchRequest {
-    /// The literal: 1 to 256 UTF-8 bytes on one line. Captured text is
-    /// adversarial, so there is no pattern language to backtrack on.
-    pub fn query(raw: &str) -> Result<Vec<u8>> {
-        if raw.is_empty() || raw.len() > SEARCH_QUERY_BYTES || raw.contains(['\n', '\r']) {
-            return Err(Error::bad(
-                "q must be 1 to 256 bytes of literal text on one line",
-            ));
+    /// One line of text. Captured text is adversarial, so a regular
+    /// expression runs on the `regex` crate, whose matching time is linear in
+    /// the text whatever the pattern: nothing can backtrack.
+    pub fn query(raw: &str) -> Result<String> {
+        if raw.is_empty() || raw.contains(['\n', '\r', '\u{2028}', '\u{2029}']) {
+            return Err(Error::bad("q must be text on one line"));
         }
-        Ok(raw.as_bytes().to_vec())
+        Ok(raw.to_owned())
+    }
+
+    /// Literal text matches itself only. Without `match_case`, letters fold
+    /// by Unicode simple case folding, as Find in Sources folds them.
+    fn pattern(&self) -> Result<Regex> {
+        let source = if self.regex {
+            self.text.clone()
+        } else {
+            regex::escape(&self.text)
+        };
+        RegexBuilder::new(&source)
+            .case_insensitive(!self.match_case)
+            .multi_line(true)
+            .build()
+            .map_err(|error| Error::bad(format!("q is not a valid regular expression: {error}")))
     }
 }
 
-fn find_all(haystack: &[u8], needle: &[u8], fold: bool, cap: usize) -> (Vec<usize>, bool) {
-    let mut found = Vec::new();
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return (found, false);
-    }
-    let first = needle[0];
-    let mut at = 0usize;
-    let last = haystack.len() - needle.len();
-    while at <= last {
-        let byte = haystack[at];
-        let lead = if fold {
-            byte.eq_ignore_ascii_case(&first)
-        } else {
-            byte == first
-        };
-        if lead {
-            let candidate = &haystack[at..at + needle.len()];
-            let equal = if fold {
-                candidate.eq_ignore_ascii_case(needle)
-            } else {
-                candidate == needle
-            };
-            if equal {
-                if found.len() == cap {
-                    return (found, true);
-                }
-                found.push(at);
-                at += needle.len();
-                continue;
+/// Every nonempty match of `pattern` in `bytes`, left to right. An empty match
+/// (a pattern such as `a*` between two letters) is not a match here, so no
+/// pattern can report one match per byte. Polls the request between matches.
+fn matches<'a>(
+    pattern: &'a Regex,
+    bytes: &'a [u8],
+    cancelled: &'a AtomicBool,
+) -> impl Iterator<Item = Result<regex::bytes::Match<'a>>> + 'a {
+    let mut seen = 0u64;
+    pattern
+        .find_iter(bytes)
+        .filter(|found| !found.is_empty())
+        .map(move |found| {
+            seen += 1;
+            if seen.is_multiple_of(POLL_MATCHES) {
+                check_cancelled(cancelled, WHAT)?;
             }
+            Ok(found)
+        })
+}
+
+/// What `bytes` decode to as the UI decodes them (each maximal invalid
+/// sequence is one U+FFFD): characters and UTF-16 code units.
+fn measure(bytes: &[u8]) -> (u64, u64) {
+    let (mut chars, mut units) = (0u64, 0u64);
+    for chunk in bytes.utf8_chunks() {
+        for ch in chunk.valid().chars() {
+            chars += 1;
+            units += ch.len_utf16() as u64;
         }
-        at += 1;
+        if !chunk.invalid().is_empty() {
+            chars += 1;
+            units += 1;
+        }
     }
-    (found, false)
+    (chars, units)
+}
+
+/// The line and columns of successive match starts in one file. Each call
+/// continues from the previous position, so a page of matches on one long
+/// minified line walks that line once.
+#[derive(Default)]
+struct Position {
+    byte: usize,
+    /// Lines before `byte`, 0-based.
+    line: u64,
+    line_start: usize,
+    /// Characters and UTF-16 units from `line_start` to `byte`.
+    chars: u64,
+    units: u64,
+}
+
+impl Position {
+    fn advance(&mut self, bytes: &[u8], to: usize) {
+        let step = &bytes[self.byte..to];
+        let breaks = step.iter().filter(|byte| **byte == b'\n').count() as u64;
+        if breaks > 0 {
+            self.line += breaks;
+            self.line_start =
+                self.byte + step.iter().rposition(|byte| *byte == b'\n').unwrap_or(0) + 1;
+            (self.chars, self.units) = measure(&bytes[self.line_start..to]);
+        } else {
+            let (chars, units) = measure(step);
+            self.chars += chars;
+            self.units += units;
+        }
+        self.byte = to;
+    }
 }
 
 /// Lossy text of `bytes`. A character cut at either end is dropped rather
@@ -306,130 +374,292 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[start..end]).into_owned()
 }
 
-/// Literal matches across selected artifacts, oldest artifact first.
-pub fn search(root: &Path, request: &SearchRequest) -> Result<Value> {
-    let started = Instant::now();
-    let fold = !request.match_case;
+/// Matches in each selected artifact, from one count of every file.
+struct Tally {
+    /// Matches before each selected artifact.
+    starts: Vec<u64>,
+    total: u64,
+    files_with_matches: usize,
+    /// Indexes of artifacts that could not be read or verified.
+    unreadable: Vec<usize>,
+    /// Indexes of artifacts whose bytes are not valid UTF-8.
+    not_utf8: Vec<usize>,
+    bytes: u64,
+}
+
+/// Holds artifact bytes in flight to `IN_FLIGHT_BYTES`, waiting while it is
+/// spent; one file always proceeds, whatever its size.
+struct Budget {
+    held: Mutex<u64>,
+    freed: Condvar,
+}
+
+struct Held<'a>(&'a Budget, u64);
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut held) = self.0.held.lock() {
+            *held -= self.1;
+        }
+        self.0.freed.notify_all();
+    }
+}
+
+impl Budget {
+    fn take(&self, size: u64, cancelled: &AtomicBool) -> Result<Held<'_>> {
+        let poisoned = || Error::new(500, "Artifact search worker failed");
+        let mut held = self.held.lock().map_err(|_| poisoned())?;
+        while *held > 0 && *held + size > IN_FLIGHT_BYTES {
+            held = self
+                .freed
+                .wait_timeout(held, Duration::from_millis(50))
+                .map_err(|_| poisoned())?
+                .0;
+            check_cancelled(cancelled, WHAT)?;
+        }
+        *held += size;
+        Ok(Held(self, size))
+    }
+}
+
+/// One file's verified bytes, or None when it cannot be read or verified.
+fn verified(root: &Path, artifact: &Value, cancelled: &AtomicBool) -> Result<Option<Vec<u8>>> {
+    match evidence::verified_range_cancellable(root, artifact, 0, usize::MAX, cancelled) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.status == 499 => Err(error),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Counts every match in every selected artifact on every core. Each worker
+/// takes the next file; the first error, a cancelled request among them,
+/// stops every worker.
+fn tally(
+    root: &Path,
+    selected: &[Value],
+    pattern: &Regex,
+    cancelled: &AtomicBool,
+) -> Result<Tally> {
+    // (matches, readable, valid UTF-8, bytes) per selected artifact.
+    let counts = Mutex::new(vec![(0u64, false, true, 0u64); selected.len()]);
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let budget = Budget {
+        held: Mutex::new(0),
+        freed: Condvar::new(),
+    };
+    let count_files = || -> Result<()> {
+        loop {
+            let index = next.fetch_add(1, Ordering::Relaxed);
+            if index >= selected.len() || failed.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let work = || -> Result<(u64, bool, bool, u64)> {
+                let size = selected[index]["byte_size"].as_u64().unwrap_or(0);
+                let _held = budget.take(size, cancelled)?;
+                let Some(bytes) = verified(root, &selected[index], cancelled)? else {
+                    return Ok((0, false, true, 0));
+                };
+                let mut found = 0u64;
+                for item in matches(pattern, &bytes, cancelled) {
+                    item?;
+                    found += 1;
+                }
+                Ok((
+                    found,
+                    true,
+                    std::str::from_utf8(&bytes).is_ok(),
+                    bytes.len() as u64,
+                ))
+            };
+            match work() {
+                Ok(count) => {
+                    if let Ok(mut counts) = counts.lock() {
+                        counts[index] = count;
+                    }
+                }
+                Err(error) => {
+                    failed.store(true, Ordering::Relaxed);
+                    return Err(error);
+                }
+            }
+        }
+    };
+    let workers = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, selected.len().max(1));
+    thread::scope(|scope| {
+        let others: Vec<_> = (1..workers).map(|_| scope.spawn(count_files)).collect();
+        let mut results = vec![count_files()];
+        results.extend(others.into_iter().map(|worker| {
+            worker
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        }));
+        results.into_iter().collect::<Result<Vec<()>>>()
+    })?;
+    let counts = counts
+        .into_inner()
+        .map_err(|_| Error::new(500, "Artifact search worker failed"))?;
+    let mut tally = Tally {
+        starts: Vec::with_capacity(counts.len()),
+        total: 0,
+        files_with_matches: 0,
+        unreadable: Vec::new(),
+        not_utf8: Vec::new(),
+        bytes: 0,
+    };
+    for (index, (found, readable, utf8, bytes)) in counts.into_iter().enumerate() {
+        tally.starts.push(tally.total);
+        tally.total += found;
+        tally.files_with_matches += usize::from(found > 0);
+        tally.bytes += bytes;
+        if !readable {
+            tally.unreadable.push(index);
+        } else if !utf8 {
+            tally.not_utf8.push(index);
+        }
+    }
+    Ok(tally)
+}
+
+/// One match as a result row: its byte range, its line and its columns in
+/// characters and in UTF-16 units, and context from the same line.
+fn match_row(artifact: &Value, bytes: &[u8], at: &Position, start: usize, end: usize) -> Value {
+    let before_start = start.saturating_sub(SNIPPET_BYTES).max(at.line_start);
+    let window = &bytes[end..bytes.len().min(end + SNIPPET_BYTES)];
+    let after_end = window
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(end + window.len(), |line_end| end + line_end);
+    let shown = end.min(start + MATCH_TEXT_BYTES);
+    json!({
+        "artifact_id": artifact["artifact_id"],
+        "session_id": artifact["session_id"],
+        "kind": artifact["kind"],
+        "byte_offset": start,
+        "byte_length": end - start,
+        "line": at.line + 1,
+        "column": at.chars + 1,
+        "utf16_column": at.units + 1,
+        "utf16_length": measure(&bytes[start..end]).1,
+        "before": lossy(&bytes[before_start..start]).trim_start(),
+        "match": if shown < end { lossy(&bytes[start..shown]) } else { String::from_utf8_lossy(&bytes[start..end]).into_owned() },
+        "match_complete": shown == end,
+        "after": lossy(&bytes[end..after_end]).trim_end(),
+        "clipped_before": before_start > at.line_start,
+        "clipped_after": after_end == end + SNIPPET_BYTES && after_end < bytes.len(),
+    })
+}
+
+/// Every match in the selected artifacts, oldest artifact first, counted
+/// exactly and returned a page at a time. Each artifact is searched whole,
+/// whatever its size, and verified against its manifest digest. The count is
+/// kept for the query and artifact set, so a later page reads only the files
+/// whose matches it lists.
+pub fn search(root: &Path, request: &SearchRequest, cancelled: &AtomicBool) -> Result<Value> {
+    type Key = (String, bool, bool, Vec<(String, String)>);
+    static SEARCHES: Cache<Key, Tally> = Mutex::new(Vec::new());
+    let pattern = request.pattern()?;
     // Header blocks and cookie lists are never searched, so a match can
     // never show a credential or cookie value.
     let selected = evidence::select_artifacts(root, |artifact| {
         !withheld(artifact) && request.filter.matches(&evidence::public_artifact(artifact))
     })?;
-    let wanted = request.offset.saturating_add(request.limit);
-    let mut matches = Vec::new();
-    let mut seen = 0usize;
-    let mut more = false;
-    let mut bytes_searched = 0usize;
-    let mut searched = 0usize;
-    let mut skipped = Vec::new();
-    let mut skipped_count = 0usize;
-    let mut skip = |id: &Value, reason: &str, skipped: &mut Vec<Value>| {
-        skipped_count += 1;
-        if skipped.len() < SKIPPED_LISTED {
-            skipped.push(json!({"artifact_id": id, "reason": reason}));
-        }
-    };
-    let mut stopped = None;
-    for artifact in &selected {
-        if seen > wanted {
-            more = true;
+    let set = selected
+        .iter()
+        .map(|artifact| {
+            (
+                artifact["artifact_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                artifact["sha256"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    let key = (request.text.clone(), request.regex, request.match_case, set);
+    let tally = kept(&SEARCHES, key, CACHED_SEARCHES, || {
+        tally(root, &selected, &pattern, cancelled)
+    })?;
+    let mut rows = Vec::new();
+    let mut files = Vec::new();
+    let first = tally
+        .starts
+        .partition_point(|start| *start <= request.offset)
+        .saturating_sub(1);
+    for (index, (artifact, start)) in selected.iter().zip(&tally.starts).enumerate().skip(first) {
+        let start = *start;
+        let end = tally.starts.get(index + 1).copied().unwrap_or(tally.total);
+        if rows.len() >= request.limit || start >= tally.total {
             break;
         }
-        if started.elapsed() >= SEARCH_DEADLINE {
-            stopped = Some("deadline");
-            break;
-        }
-        let size = artifact["byte_size"].as_u64().unwrap_or(u64::MAX) as usize;
-        if size > SEARCH_FILE_BYTES {
-            skip(&artifact["artifact_id"], "larger_than_16_mib", &mut skipped);
+        // A file without a match on this page is never read again.
+        if end == start || end <= request.offset {
             continue;
         }
-        if bytes_searched + size > SEARCH_TOTAL_BYTES {
-            stopped = Some("total_bytes");
-            break;
-        }
-        let content = match evidence::content(root, artifact, SEARCH_FILE_BYTES) {
-            Ok(content) => content,
-            Err(_) => {
-                skip(
-                    &artifact["artifact_id"],
-                    "unreadable_or_integrity",
-                    &mut skipped,
-                );
+        let bytes = verified(root, artifact, cancelled)?.ok_or_else(|| {
+            Error::new(500, "Artifact changed during the search; search again")
+                .with_code(Code::ArtifactIntegrity)
+        })?;
+        files.push(json!({
+            "artifact_id": artifact["artifact_id"],
+            "matches": end - start,
+            "first_match": start,
+            "valid_utf8": tally.not_utf8.binary_search(&index).is_err(),
+        }));
+        let mut rank = start;
+        let mut at = Position::default();
+        for found in matches(&pattern, &bytes, cancelled) {
+            let found = found?;
+            rank += 1;
+            if rank <= request.offset {
                 continue;
             }
-        };
-        bytes_searched += content.len();
-        searched += 1;
-        let (positions, capped) = find_all(&content, &request.query, fold, SEARCH_FILE_MATCHES);
-        if capped {
-            skip(&artifact["artifact_id"], "file_match_limit", &mut skipped);
-        }
-        let mut line = 1usize;
-        let mut line_start = 0usize;
-        let mut cursor = 0usize;
-        for position in positions {
-            for (index, byte) in content[cursor..position].iter().enumerate() {
-                if *byte == b'\n' {
-                    line += 1;
-                    line_start = cursor + index + 1;
-                }
-            }
-            cursor = position;
-            seen += 1;
-            if seen <= request.offset {
-                continue;
-            }
-            if seen > wanted {
-                more = true;
+            at.advance(&bytes, found.start());
+            rows.push(match_row(artifact, &bytes, &at, found.start(), found.end()));
+            if rows.len() >= request.limit {
                 break;
             }
-            let end = position + request.query.len();
-            let column = content[line_start..position]
-                .iter()
-                .filter(|byte| **byte & 0xC0 != 0x80)
-                .count()
-                + 1;
-            let before_start = position.saturating_sub(SNIPPET_BYTES).max(line_start);
-            let line_end = content[end..]
-                .iter()
-                .position(|byte| *byte == b'\n')
-                .map_or(content.len(), |at| end + at);
-            let after_end = (end + SNIPPET_BYTES).min(line_end);
-            matches.push(json!({
-                "artifact_id": artifact["artifact_id"],
-                "session_id": artifact["session_id"],
-                "kind": artifact["kind"],
-                "byte_offset": position,
-                "line": line,
-                "column": column,
-                "before": lossy(&content[before_start..position]).trim_start().to_owned(),
-                "match": String::from_utf8_lossy(&content[position..end]),
-                "after": lossy(&content[end..after_end]).trim_end().to_owned(),
-            }));
         }
     }
-    let complete = stopped.is_none() && !more && skipped_count == 0;
-    let returned = matches.len();
+    let next = request.offset + rows.len() as u64;
+    let listed = |indexes: &[usize], reason: Option<&str>| {
+        indexes
+            .iter()
+            .take(LISTED)
+            .map(|index| match reason {
+                Some(reason) => {
+                    json!({"artifact_id": selected[*index]["artifact_id"], "reason": reason})
+                }
+                None => selected[*index]["artifact_id"].clone(),
+            })
+            .collect::<Vec<_>>()
+    };
     Ok(json!({
-        "format": "reb-artifact-search-v1",
+        "format": "reb-artifact-search-v2",
         "query": {
-            "q_bytes": request.query.len(),
+            "q_bytes": request.text.len(),
+            "regex": request.regex,
             "match_case": request.match_case,
             "filters": request.filter.echo(),
             "offset": request.offset,
             "limit": request.limit,
         },
-        "matches": matches,
-        "next_offset": if more { json!(request.offset + returned) } else { Value::Null },
+        "total_matches": tally.total,
+        "files_with_matches": tally.files_with_matches,
+        "matches": rows,
+        "files": files,
+        "next_offset": if next < tally.total { json!(next) } else { Value::Null },
         "coverage": {
             "artifacts_selected": selected.len(),
-            "artifacts_searched": searched,
-            "bytes_searched": bytes_searched,
-            "stopped": stopped,
-            "not_fully_searched": skipped,
-            "not_fully_searched_count": skipped_count,
-            "complete": complete,
+            "artifacts_searched": selected.len() - tally.unreadable.len(),
+            "bytes_searched": tally.bytes,
+            "not_searched": listed(&tally.unreadable, Some("unreadable_or_integrity")),
+            "not_searched_count": tally.unreadable.len(),
+            "not_valid_utf8": listed(&tally.not_utf8, None),
+            "not_valid_utf8_count": tally.not_utf8.len(),
+            "complete": tally.unreadable.is_empty(),
         },
     }))
 }
@@ -455,17 +685,165 @@ mod tests {
         assert_eq!((text.as_str(), replaced), ("a\u{FFFD}b", 1));
     }
 
+    fn request(text: &str, regex: bool, match_case: bool) -> SearchRequest {
+        SearchRequest {
+            text: text.to_owned(),
+            regex,
+            match_case,
+            filter: ArtifactFilter::default(),
+            offset: 0,
+            limit: SEARCH_MAX_LIMIT,
+        }
+    }
+
+    fn starts(request: &SearchRequest, bytes: &[u8]) -> Vec<usize> {
+        let pattern = request.pattern().unwrap();
+        matches(&pattern, bytes, &AtomicBool::new(false))
+            .map(|found| found.unwrap().start())
+            .collect()
+    }
+
     #[test]
-    fn literal_search_folds_ascii_only_when_asked() {
-        let (found, capped) = find_all(b"Token token TOKEN", b"token", true, 10);
-        assert_eq!((found, capped), (vec![0, 6, 12], false));
+    fn literals_fold_unicode_case_and_regular_expressions_skip_empty_matches() {
+        let text = "Token token TOKEN a.b axb".as_bytes();
+        assert_eq!(starts(&request("token", false, false), text), [0, 6, 12]);
+        assert_eq!(starts(&request("token", false, true), text), [6]);
         assert_eq!(
-            find_all(b"Token token TOKEN", b"token", false, 10).0,
-            vec![6]
+            starts(&request("a.b", false, false), text),
+            [18],
+            "pattern syntax in a literal is text"
         );
-        assert!(find_all(b"aaaa", b"a", false, 2).1);
-        assert_eq!(lossy("éa".as_bytes()), "éa");
-        assert_eq!(lossy(&"éa".as_bytes()[1..]), "a");
-        assert_eq!(lossy(&"aé".as_bytes()[..2]), "a");
+        assert_eq!(starts(&request("a.b", true, false), text), [18, 22]);
+        // Unicode simple case folding, as a JavaScript `giu` Find folds: the
+        // Kelvin sign is a K, and Σ folds to σ and ς.
+        assert_eq!(
+            starts(&request("kelvin", false, false), "\u{212A}elvin".as_bytes()),
+            [0]
+        );
+        assert_eq!(
+            starts(&request("σ", false, false), "ΣΑΣ ς".as_bytes()),
+            [0, 4, 7]
+        );
+        // `a*` matches the empty string everywhere; only its nonempty matches count.
+        assert_eq!(starts(&request("a*", true, false), b"xaaxa"), [1, 4]);
+        // `^` and `$` are line anchors.
+        assert_eq!(starts(&request("^b", true, false), b"ab\nbc\nb"), [3, 6]);
+        // Invalid UTF-8 never stops a search.
+        assert_eq!(
+            starts(&request("ok", false, false), b"\xff\xfeok\x80ok"),
+            [2, 5]
+        );
+        for refused in ["", "a\nb", "a\rb", "a\u{2028}b"] {
+            assert!(SearchRequest::query(refused).is_err(), "{refused:?}");
+        }
+        assert!(
+            SearchRequest::query(&"x".repeat(100_000)).is_ok(),
+            "a literal of any length"
+        );
+        assert!(request("(", true, false).pattern().is_err());
+        assert!(request("(", false, false).pattern().is_ok());
+    }
+
+    #[test]
+    fn positions_continue_along_one_line_and_count_utf16_like_the_editor() {
+        let mut bytes = "a😀b\nxé\u{FEFF}c".as_bytes().to_vec();
+        bytes.extend_from_slice(b"\xff\xffd\ne");
+        let mut at = Position::default();
+        at.advance(&bytes, 5); // "b" after the astral character
+        assert_eq!((at.line, at.chars, at.units), (0, 2, 3));
+        let c = bytes.iter().position(|byte| *byte == b'c').unwrap();
+        at.advance(&bytes, c);
+        assert_eq!(
+            (at.line, at.chars, at.units),
+            (1, 3, 3),
+            "a kept BOM is one unit"
+        );
+        let d = bytes.iter().position(|byte| *byte == b'd').unwrap();
+        at.advance(&bytes, d);
+        assert_eq!(
+            (at.line, at.chars, at.units),
+            (1, 6, 6),
+            "each invalid byte is one U+FFFD"
+        );
+        at.advance(&bytes, bytes.len() - 1);
+        assert_eq!((at.line, at.line_start, at.chars), (2, bytes.len() - 1, 0));
+        assert_eq!(measure("😀".as_bytes()), (1, 2));
+    }
+
+    #[test]
+    fn rows_clip_context_on_one_long_line_and_show_the_start_of_a_long_match() {
+        let line = format!("{}needle{}", "x".repeat(400), "y".repeat(400));
+        let artifact = json!({"artifact_id":"1","session_id":"1","kind":"javascript"});
+        let start = 400;
+        let mut at = Position::default();
+        at.advance(line.as_bytes(), start);
+        let row = match_row(&artifact, line.as_bytes(), &at, start, start + 6);
+        assert_eq!(row["before"], "x".repeat(SNIPPET_BYTES));
+        assert_eq!(row["after"], "y".repeat(SNIPPET_BYTES));
+        assert_eq!(
+            (
+                row["clipped_before"].as_bool(),
+                row["clipped_after"].as_bool()
+            ),
+            (Some(true), Some(true))
+        );
+        assert_eq!(
+            (
+                row["line"].as_u64(),
+                row["column"].as_u64(),
+                row["utf16_column"].as_u64()
+            ),
+            (Some(1), Some(401), Some(401))
+        );
+        let row = match_row(&artifact, line.as_bytes(), &at, start, line.len());
+        assert_eq!(row["match"].as_str().unwrap().len(), MATCH_TEXT_BYTES);
+        assert_eq!(
+            (
+                row["match_complete"].as_bool(),
+                row["byte_length"].as_u64(),
+                row["utf16_length"].as_u64()
+            ),
+            (Some(false), Some(406), Some(406))
+        );
+        let short = "  const a = fetch(b);\nnext";
+        let mut at = Position::default();
+        at.advance(short.as_bytes(), 12);
+        let row = match_row(&artifact, short.as_bytes(), &at, 12, 17);
+        assert_eq!(
+            (row["before"].as_str(), row["after"].as_str()),
+            (Some("const a = "), Some("(b);"))
+        );
+        assert_eq!(
+            (
+                row["clipped_before"].as_bool(),
+                row["clipped_after"].as_bool()
+            ),
+            (Some(false), Some(false))
+        );
+    }
+
+    #[test]
+    fn the_in_flight_budget_lets_one_file_of_any_size_through() {
+        let budget = Budget {
+            held: Mutex::new(0),
+            freed: Condvar::new(),
+        };
+        let cancelled = AtomicBool::new(false);
+        let huge = budget.take(IN_FLIGHT_BYTES * 4, &cancelled).unwrap();
+        drop(huge);
+        let first = budget.take(IN_FLIGHT_BYTES - 1, &cancelled).unwrap();
+        thread::scope(|scope| {
+            let waiting = scope.spawn(|| budget.take(2, &cancelled).map(|held| held.1));
+            thread::sleep(Duration::from_millis(100));
+            assert!(
+                !waiting.is_finished(),
+                "a second file waits while the budget is spent"
+            );
+            drop(first);
+            assert_eq!(waiting.join().unwrap().unwrap(), 2);
+        });
+        let _held = budget.take(IN_FLIGHT_BYTES, &cancelled).unwrap();
+        cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(budget.take(1, &cancelled).err().unwrap().status, 499);
     }
 }

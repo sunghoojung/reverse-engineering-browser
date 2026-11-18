@@ -29,7 +29,15 @@ const report = (index, {suggestions = [], matches = [], conclusions = []} = {}) 
 
 let answer = () => new Promise(() => {});
 const reads = [];
-window.fetch = async url => { reads.push(String(url)); return answer(String(url)); };
+// The fake honors abort as fetch does, so Cancel settles a read that would
+// otherwise never answer.
+window.fetch = (url, init) => {
+  reads.push(String(url));
+  return new Promise((resolve, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(new window.DOMException('The read was aborted', 'AbortError')));
+    Promise.resolve(answer(String(url))).then(resolve, reject);
+  });
+};
 const json = (status, body) => new window.Response(JSON.stringify(body), {status, headers: {'content-type': 'application/json'}});
 
 let selected = source(1);
@@ -40,14 +48,19 @@ const panel = get('createWasmIdentificationPanel')({root, getSource: () => selec
   reveal: (_, offset) => reveals.push(offset)});
 const text = () => root.textContent.replace(/\s+/g, ' ');
 
-// Loading: the read starts once and the state says what is happening.
+// Loading: the read starts once, has no deadline, says how long it has run,
+// and Cancel stops it with a named state and Retry.
 panel.sync();
 await settle();
 assert.equal(reads.length, 1);
 assert.match(reads[0], /^\/api\/wasm\/identification\?artifact_id=1$/);
-assert.match(text(), /Identifying toolchain, functions and constants/);
+assert.match(text(), /Identifying toolchain, functions and constants… 0 s\. The whole module is read; Cancel stops it\./);
 panel.sync();
 assert.equal(reads.length, 1, 'a read in flight is not started again');
+[...root.querySelectorAll('button')].find(button => button.textContent === 'Cancel').click();
+await settle();
+assert.match(text(), /Identification cancelled\. Its backend work was stopped; original bytes are preserved\./);
+assert.ok([...root.querySelectorAll('button')].some(button => button.textContent === 'Retry identification'));
 
 // Error: the backend's reason, an alert and Retry; Retry reads again.
 selected = source(2);

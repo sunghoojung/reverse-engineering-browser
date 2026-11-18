@@ -51,6 +51,22 @@ function graphZoomAt(view, factor, cx, cy) {
   return {x: gx - cx / z, y: gy - cy / z, z};
 }
 
+/** Writes `Laying out with Triskel · N s` as seconds pass. They count on
+ * animation frames, which stop while the page is hidden, so a hidden view
+ * runs nothing. Returns the function that stops it. */
+function graphTriskelElapsed(write) {
+  const started = performance.now();
+  let second = -1, frame = 0, running = true;
+  const tick = () => {
+    if (!running) return;
+    const now = Math.floor((performance.now() - started) / 1000);
+    if (now !== second) { second = now; write(`Laying out with Triskel \u00b7 ${now} s`); }
+    frame = requestAnimationFrame(tick);
+  };
+  tick();
+  return () => { running = false; cancelAnimationFrame(frame); };
+}
+
 /* Reads Sources and the Flow workspace's CFG pane share. Each throws an Error
  * whose message can be shown; an aborted read throws an AbortError. */
 
@@ -83,7 +99,7 @@ async function loadWasmFunctionGraph({artifactId, functionIndex, view, runner, s
   const buffer = await response.arrayBuffer();
   signal?.throwIfAborted();
   view.setState('loading', 'Laying out the graph…');
-  const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer]);
+  const result = await runner.run({type: 'wasm', buffer, metrics: view.measurements(), engine: blockGraphEngine()}, [buffer], {onProgress: view.progress});
   signal?.throwIfAborted();
   result.graph.functionIndex = functionIndex;
   return result;
@@ -94,8 +110,8 @@ async function loadWasmFunctionGraph({artifactId, functionIndex, view, runner, s
 function blockGraphLayoutReason(reason) {
   switch (reason?.code) {
     case 'one_block': return 'one block';
-    case 'too_large': return 'over Triskel\u2019s size limit';
-    case 'request_budget': return 'past what one layout request holds';
+    case 'large': return `over ${blockGraphAutomatic()}, where Triskel runs only when asked`;
+    case 'cancelled': return 'Triskel was stopped';
     case 'wider': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 wider`;
     case 'taller': return `Triskel would draw it ${reason.ratio.toFixed(1)}\u00d7 taller`;
     case 'mismatch': return 'the Triskel answer did not match the function';
@@ -112,8 +128,16 @@ function blockGraphEngineNote(engine) {
   if (engine?.name === 'triskel') return 'Triskel layout';
   const code = engine?.reason?.code;
   if (code === 'wider' || code === 'taller') return `region layout: Triskel ${engine.reason.ratio.toFixed(1)}\u00d7 ${code}`;
-  if (code === 'too_large') return 'region layout: over Triskel\u2019s limit';
+  if (code === 'large') return 'region layout';
+  if (code === 'cancelled') return 'region layout: Triskel stopped';
+  if (code === 'failed') return `region layout: Triskel ${engine.reason.status}`;
   return '';
+}
+
+/** The size up to which Triskel lays out a graph unasked, in words. */
+function blockGraphAutomatic() {
+  const {graphNodes, graphEdges} = typeof graphLayoutClient === 'object' ? graphLayoutClient.AUTOMATIC : {graphNodes: 2000, graphEdges: 8000};
+  return `${graphNodes.toLocaleString()} blocks or ${graphEdges.toLocaleString()} edges`;
 }
 
 /** Basic blocks for a `reb-vm-static-analysis-v1` report, as declared edges. */
@@ -221,13 +245,19 @@ function createBlockGraphView(root, options = {}) {
   const tool = (label, action, aria) => { const element = node('button', 'source-tool block-graph-tool', label); element.type = 'button'; element.setAttribute('aria-label', aria ?? label); element.addEventListener('click', action); return element; };
   const zoomOut = tool('−', () => zoomAt(0.8), 'Zoom out'), zoomLabel = node('span', 'block-graph-zoom', '100%'), zoomIn = tool('+', () => zoomAt(1.25), 'Zoom in'), fitButton = tool('Fit', fit, 'Fit graph to view');
   const zoomBar = node('div', 'block-graph-zoom-bar'); zoomBar.append(zoomOut, zoomLabel, zoomIn, fitButton);
-  tools.append(zoomBar);
+  // Offered where Triskel did not run unasked or was stopped; Cancel while it runs.
+  const triskelButton = tool('Lay out with Triskel', () => { if (explicit) options.runner?.skip(); else layOutWithTriskel(); });
+  triskelButton.classList.add('block-graph-triskel'); triskelButton.hidden = true;
+  tools.append(triskelButton, zoomBar);
+  const engineRun = node('span', 'block-graph-engine-run', ''); engineRun.setAttribute('role', 'status'); engineRun.setAttribute('aria-live', 'polite'); engineRun.hidden = true;
   const stage = node('div', 'block-graph-stage');
   const canvas = node('canvas', 'block-graph-canvas');
   canvas.tabIndex = 0; canvas.setAttribute('role', 'application'); canvas.setAttribute('aria-label', 'Basic-block graph. Arrow keys move between blocks, plus and minus zoom, 0 fits, Shift plus arrows pan, Enter shows the selected block in the disassembly and hex.');
   const miniWrap = node('div', 'block-graph-minimap'); const minimap = node('canvas', 'block-graph-minimap-canvas'); minimap.width = 300; minimap.height = 220; minimap.setAttribute('aria-hidden', 'true'); miniWrap.append(minimap);
   const stateBox = node('div', 'block-graph-state'); stateBox.setAttribute('role', 'status'); stateBox.setAttribute('aria-live', 'polite'); stateBox.hidden = true;
-  const stateText = node('p', '', ''); const retry = node('button', 'secondary-button', 'Retry'); retry.type = 'button'; retry.hidden = true; stateBox.append(stateText, retry);
+  const stateText = node('p', '', ''); const retry = node('button', 'secondary-button', 'Retry'); retry.type = 'button'; retry.hidden = true;
+  const skip = node('button', 'secondary-button', 'Use the region layout'); skip.type = 'button'; skip.hidden = true;
+  stateBox.append(stateText, retry, skip);
   const hud = node('div', 'block-graph-hud');
   const selection = node('span', 'block-graph-selection', ''); selection.setAttribute('role', 'status'); selection.setAttribute('aria-live', 'polite');
   const lodCue = node('span', 'block-graph-lod', 'Overview: zoom in to read instructions'); lodCue.hidden = true;
@@ -245,7 +275,7 @@ function createBlockGraphView(root, options = {}) {
   foot.addEventListener('focusout', event => { if (!foot.contains(event.relatedTarget)) setKey(false); });
   foot.append(limits, keyToggle, legend);
   const evidence = node('span', 'block-graph-evidence', '');
-  head.append(title, analyst, stats, evidence, tools);
+  head.append(title, analyst, stats, engineRun, evidence, tools);
   root.append(head, stage, foot);
   const legendItems = [['fallthrough', 'fall'], ['taken', 'true'], ['not-taken', 'false'], ['table', 'table'], ['exception', 'catch'], ['unresolved', 'unresolved']];
   for (const [kind, label] of legendItems) {
@@ -446,14 +476,70 @@ function createBlockGraphView(root, options = {}) {
   }
   let miniImage = null;
   function setState(kind, message = '', canRetry = false) {
+    if (!explicit) stopWait();
     stateBox.hidden = kind === 'ready';
     stateBox.dataset.kind = kind;
     stateBox.dataset.overlay = kind === 'error' && layout ? 'banner' : 'center';
     stateText.textContent = message; retry.hidden = !canRetry; onError = canRetry ? options.retry : null;
+    skip.hidden = true;
     miniWrap.hidden = !layout;
+    renderTriskel();
   }
   retry.addEventListener('click', () => onError?.());
-  function setResult(result) {
+  skip.addEventListener('click', () => { options.runner?.skip(); canvas.focus({preventScroll: true}); });
+
+  // Triskel has no deadline: while it runs, elapsed seconds and a way to stop it.
+  let waiting = null, explicit = null;
+  function stopWait() { waiting?.(); waiting = null; }
+  function waitFor(write) { stopWait(); waiting = graphTriskelElapsed(write); }
+  /** A layout job's progress: once Triskel is asked for a graph not drawn
+   * yet, Use the region layout stops it and draws that layout instead. */
+  function progress(stage) {
+    if (stage?.stage !== 'triskel' || explicit) return;
+    setState('loading', '');
+    skip.hidden = !options.runner;
+    waitFor(text => { stateText.textContent = text; });
+  }
+  function renderTriskel() {
+    const code = layout?.engine?.reason?.code;
+    // Only over a drawn graph: a state or a load in progress hides it.
+    const offered = Boolean(options.runner) && blockGraphEngine() === 'triskel' && stateBox.hidden && (code === 'large' || code === 'cancelled');
+    const focused = document.activeElement === triskelButton;
+    triskelButton.hidden = !offered && !explicit;
+    triskelButton.textContent = explicit ? 'Cancel' : 'Lay out with Triskel';
+    triskelButton.setAttribute('aria-label', explicit ? 'Stop Triskel and keep the region layout' : 'Lay out this graph with Triskel');
+    triskelButton.title = explicit ? 'Stop Triskel and keep the region layout.'
+      : `Triskel runs unasked on graphs of up to ${blockGraphAutomatic()}. Larger graphs take it longer, a minute at about 16,000 blocks, and it has no size limit.`;
+    if (focused && triskelButton.hidden) canvas.focus({preventScroll: true});
+  }
+  /** Lays out the drawn graph with Triskel, past the size it runs on unasked.
+   * The region layout stays drawn until Triskel answers or is stopped. */
+  async function layOutWithTriskel() {
+    if (!graph || explicit || !options.runner) return;
+    const shown = graph, run = explicit = {};
+    renderTriskel();
+    engineRun.hidden = false;
+    waitFor(text => { engineRun.textContent = text; });
+    const finish = () => {
+      if (explicit !== run) return false;
+      explicit = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true; renderTriskel();
+      return true;
+    };
+    try {
+      const result = await options.runner.run({type: 'graph', graph: shown, metrics: {...m}, engine: 'triskel', all: true});
+      if (!finish() || graph !== shown) return;
+      result.graph = shown;
+      setResult(result, {keep: true});
+      options.onLayout?.(result);
+    } catch (error) {
+      if (finish() && graph === shown && error.name !== 'AbortError') setState('error', error.message);
+    }
+  }
+  /** Draws `result`. `keep` redraws the same graph in a new layout: the
+   * selection stays, and so does the view when the engine did not change. */
+  function setResult(result, {keep = false} = {}) {
+    const before = keep ? {block: selectedBlock, row: selectedRow, view: {...view}, engine: layout?.engine?.name} : null;
+    if (!keep) { explicit = null; engineRun.textContent = ''; engineRun.hidden = true; }
     graph = result.graph; starts = result.starts; layout = result.layout;
     selectedBlock = -1; selectedRow = -1; view.z = 1; miniDirty = true;
     title.textContent = options.titleOf?.(graph) ?? graph.title;
@@ -470,6 +556,11 @@ function createBlockGraphView(root, options = {}) {
     if (graph.omissions?.length) limits.title += ` ${graph.omissions.join(' ')}`;
     selection.textContent = graph.omissions?.length ? graph.omissions[0] : '';
     setState('ready');
+    if (before) {
+      if (before.engine === layout.engine?.name) view = before.view;
+      if (before.block >= 0) { select(before.block, before.row, {silent: true}); if (before.engine !== layout.engine?.name) centerOn(before.block); return; }
+      if (before.engine === layout.engine?.name) { requestDraw(); return; }
+    }
     needsFit = cssW <= 1;
     start();
   }
@@ -595,14 +686,15 @@ function createBlockGraphView(root, options = {}) {
       active = false; root.hidden = true;
       if (frame) { cancelAnimationFrame(frame); frame = 0; }
       observer?.disconnect(); observer = null; themeObserver?.disconnect();
-      graph = starts = layout = null; miniImage = null; selectedBlock = -1;
+      graph = starts = layout = null; miniImage = null; selectedBlock = -1; explicit = null; stopWait(); engineRun.textContent = ''; engineRun.hidden = true;
       canvas.width = 0; canvas.height = 0; minimap.width = 300; minimap.height = 220;
       setState('empty', '');
     },
-    measurements: () => ({...m}), setResult, setState,
+    measurements: () => ({...m}), setResult, setState, progress,
     /** The host's selection: it never reports back through onSelect. */
     select: (block, row = -1) => select(block, row, {silent: true}),
-    focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { title.textContent = text; stats.textContent = ''; },
+    // A new title is another graph: a Triskel run for the drawn one stops.
+    focus: () => canvas.focus(), hasGraph: () => Boolean(layout), tools, setTitle(text) { if (explicit) options.runner?.cancel(); title.textContent = text; stats.textContent = ''; },
     setAnalystName(name) { analyst.textContent = name ?? ''; analyst.hidden = !name; analyst.title = name ? `${name} (researcher name)` : ''; }
   };
 }
@@ -612,10 +704,13 @@ const blockGraphEngine = () => /^https?:$/.test(globalThis.location?.protocol ??
 
 /**
  * Runs layout jobs one at a time in a worker that answers {id, ok, result}
- * or {id, ok: false, error}. A new job cancels the one running; the worker
- * stays between jobs and is terminated only to cancel one. `script` is the
- * worker; `local`, when given, runs a job on this thread where no worker
- * starts. The flow graph uses it with its own worker and fallback.
+ * or {id, ok: false, error}, and may first send {id, progress}. A new job
+ * cancels the one running; the worker stays between jobs and is terminated
+ * only to cancel one. `skip` stops Triskel for the running job, which then
+ * answers with its own layout. `script` is the worker; `local`, when given,
+ * runs a job on this thread where no worker starts, as local(message,
+ * {signal, progress}). The flow graph uses it with its own worker and
+ * fallback.
  */
 function createBlockGraphRunner({script = 'block_graph_layout.js', local = null} = {}) {
   let worker = null, serial = 0, job = null;
@@ -625,10 +720,19 @@ function createBlockGraphRunner({script = 'block_graph_layout.js', local = null}
     job = null;
     if (ok) resolve(value); else reject(value);
   }
-  const runLocal = (id, message) => local(message).then(result => finish(id, true, result), error => finish(id, false, error));
+  function runLocal(id, message) {
+    const controller = new AbortController();
+    if (job?.id === id) job.controller = controller;
+    const progress = stage => { if (job?.id === id) job.onProgress?.(stage); };
+    local(message, {signal: controller.signal, progress}).then(result => finish(id, true, result), error => finish(id, false, error));
+  }
   function start() {
     try { worker = new Worker(script); } catch { worker = null; return false; }
-    worker.onmessage = event => finish(event.data.id, event.data.ok, event.data.ok ? event.data.result : Error(event.data.error));
+    worker.onmessage = event => {
+      const {id, progress} = event.data;
+      if (progress) { if (job?.id === id) job.onProgress?.(progress); return; }
+      finish(id, event.data.ok, event.data.ok ? event.data.result : Error(event.data.error));
+    };
     worker.onerror = event => {
       event.preventDefault?.();
       worker?.terminate();
@@ -644,18 +748,23 @@ function createBlockGraphRunner({script = 'block_graph_layout.js', local = null}
     worker = null;
     const cancelled = job;
     job = null;
+    cancelled?.controller?.abort();
     cancelled?.reject(new DOMException('Cancelled', 'AbortError'));
   }
   return {
-    run(message, transfer = []) {
+    run(message, transfer = [], {onProgress = null} = {}) {
       if (job) cancel();
       const id = ++serial;
       return new Promise((resolve, reject) => {
-        job = {id, message: local ? message : null, resolve, reject};
+        job = {id, message: local ? message : null, resolve, reject, onProgress, controller: null};
         if (worker || start()) worker.postMessage({...message, id}, transfer);
         else if (local) runLocal(id, message);
         else finish(id, false, Error('The layout worker could not start.'));
       });
+    },
+    skip() {
+      if (job?.controller) job.controller.abort();
+      else if (job && worker) worker.postMessage({cancel: job.id});
     },
     cancel
   };
@@ -663,7 +772,11 @@ function createBlockGraphRunner({script = 'block_graph_layout.js', local = null}
 
 /* Sources view mode for one captured WASM artifact. */
 function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
+  const runner = createBlockGraphRunner();
   const view = createBlockGraphView(host, {
+    runner,
+    // A Triskel layout asked for replaces the cached region layout.
+    onLayout: result => { if (functionIndex !== null) remember(`${key()}:${functionIndex}`, result); },
     // Showing a block's offset in the linear listing focuses that row; a
     // reveal started from the Graph (a click or Enter on a block) keeps focus
     // on the Graph, so F2 and the arrow keys still act on the function drawn.
@@ -677,7 +790,6 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     titleOf: graph => names.get(graph.functionIndex) ?? `func ${graph.functionIndex}`,
     statsPrefix: graph => names.has(graph.functionIndex) ? `func ${graph.functionIndex}` : ''
   });
-  const runner = createBlockGraphRunner();
   host.hidden = true;
   let source = null, isOpen = false, functions = null, names = new Map(), functionIndex = null, generation = 0, abort = null, indexStatus = 'idle', screenVisible = true;
   /* A function another view asked for, drawn once the index lists it. */
@@ -689,6 +801,8 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
     return graph.offsets.byteLength * 6 + graph.from.byteLength * 3 + graph.rows.length + starts.byteLength + layout.x.byteLength * 4 + layout.points.byteLength + layout.pointStart.byteLength + layout.box.byteLength;
   };
   const remember = (cacheKey, result) => {
+    const old = cache.get(cacheKey);
+    if (old) { cacheBytes -= old.bytes; cache.delete(cacheKey); }
     const bytes = entryBytes(result);
     if (bytes > BLOCK_GRAPH_CACHE_BYTES) return;
     cache.set(cacheKey, {result, bytes}); cacheBytes += bytes;
@@ -899,9 +1013,9 @@ function createSourceGraphPanel({host, editor, button, closeOn, revealOffset}) {
 /* Static bytecode view mode. Declared and Observed are separate drawings that
  * share a renderer and never a node set, so they cannot merge into one CFG. */
 function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}) {
-  const view = createBlockGraphView(host, {onReveal: offset => onReveal?.(offset), onSelect: offset => onReveal?.(offset), retry: () => render(), titleOf: graph => graph.title,
-    blockLabel: (graph, block) => graph.evidence === 'observed' ? `step ${graph.offsets[block]}` : `loc_${graph.offsets[block].toString(16)}`});
   const runner = createBlockGraphRunner();
+  const view = createBlockGraphView(host, {runner, onReveal: offset => onReveal?.(offset), onSelect: offset => onReveal?.(offset), retry: () => render(), titleOf: graph => graph.title,
+    blockLabel: (graph, block) => graph.evidence === 'observed' ? `step ${graph.offsets[block]}` : `loc_${graph.offsets[block].toString(16)}`});
   host.hidden = true;
   let isOpen = false, layer = 'declared', generation = 0;
   const switcher = document.createElement('div'); switcher.className = 'block-graph-layers'; switcher.setAttribute('role', 'group'); switcher.setAttribute('aria-label', 'Graph layer');
@@ -928,7 +1042,7 @@ function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}
   async function lay(graph, owner) {
     view.setState('loading', 'Laying out the graph…');
     try {
-      const result = await runner.run({type: 'graph', graph, metrics: view.measurements(), engine: blockGraphEngine()});
+      const result = await runner.run({type: 'graph', graph, metrics: view.measurements(), engine: blockGraphEngine()}, [], {onProgress: view.progress});
       if (owner === generation) view.setResult(result);
     } catch (error) { if (owner === generation && error.name !== 'AbortError') view.setState('error', error.message, true); }
   }

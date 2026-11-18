@@ -31,8 +31,8 @@
 //! execution. A malformed stack shape becomes an `unknown` value and a named
 //! omission, never a panic. Operators whose stack effect this module does not
 //! model (stack switching) stop the simulation with a named omission, and the
-//! prefix before them stays valid. Work is bounded by an instruction cap, a
-//! work counter and the caller's deadline.
+//! prefix before them stays valid. Work is bounded by an instruction cap and a
+//! work counter, and stops when the caller's request is cancelled.
 //!
 //! Each operator's stack effect and the open control frames come from
 //! [`crate::wasm_stack`], the layer the readable lifted view also folds with;
@@ -41,7 +41,7 @@
 use crate::error::{Error, Result};
 use crate::wasm_stack::{self, Callee, Clause, Control, Effect, Kind, ModuleTypes, Test};
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
 use wasmparser::{
     BlockType, ElementItems, ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef,
 };
@@ -550,7 +550,7 @@ struct Sim<'m, 'a> {
     limits: Limits,
     stored: u64,
     stack_peak: usize,
-    deadline: Instant,
+    cancelled: &'m AtomicBool,
     /// Set once a budget runs out inside an instruction; the main loop stops
     /// at that instruction.
     exhausted: Option<&'static str>,
@@ -620,14 +620,15 @@ fn const_bits(op: &Operator<'_>) -> u64 {
 }
 
 /// Simulates one body. `function` is its index in the module's function index
-/// space, `deadline` is shared with the caller.
+/// space; `cancelled` is the caller's request, which stops the simulation
+/// once it goes away.
 pub fn simulate(
     module: &Module<'_>,
     function: u32,
     body: &FunctionBody<'_>,
-    deadline: Instant,
+    cancelled: &AtomicBool,
 ) -> Result<Simulation> {
-    simulate_with(module, function, body, deadline, Limits::default())
+    simulate_with(module, function, body, cancelled, Limits::default())
 }
 
 /// [`simulate`] with explicit budgets.
@@ -635,7 +636,7 @@ pub fn simulate_with(
     module: &Module<'_>,
     function: u32,
     body: &FunctionBody<'_>,
-    deadline: Instant,
+    cancelled: &AtomicBool,
     limits: Limits,
 ) -> Result<Simulation> {
     let type_index = module
@@ -696,12 +697,12 @@ pub fn simulate_with(
         limits,
         stored: 0,
         stack_peak: 0,
-        deadline,
+        cancelled,
         exhausted: None,
         omissions: Vec::new(),
         underflow_noted: false,
     };
-    let mut stopped_at = sim.prescan(body, deadline)?;
+    let mut stopped_at = sim.prescan(body)?;
     if stopped_at.is_none() {
         let mut reader = body.get_operators_reader().map_err(bad)?;
         let mut ended = false;
@@ -724,9 +725,9 @@ pub fn simulate_with(
                 stopped_at = Some(position);
                 break;
             }
-            if sim.instructions.len() & 1023 == 0 && Instant::now() > deadline {
+            if sim.instructions.len() & 1023 == 0 && cancelled.load(Ordering::Relaxed) {
                 sim.omissions.push(format!(
-                    "Simulation deadline reached at byte {position}; value flow after it is not computed."
+                    "Simulation cancelled at byte {position}; value flow after it is not computed."
                 ));
                 stopped_at = Some(position);
                 break;
@@ -817,7 +818,7 @@ impl Sim<'_, '_> {
     /// the back edges that feed them are read. A write lands in the innermost
     /// open loop only; a loop's set joins its enclosing loop's set at `end`, so
     /// the pass costs one unit per write plus one per local a loop passes on.
-    fn prescan(&mut self, body: &FunctionBody<'_>, deadline: Instant) -> Result<Option<u32>> {
+    fn prescan(&mut self, body: &FunctionBody<'_>) -> Result<Option<u32>> {
         let mut reader = body.get_operators_reader().map_err(bad)?;
         // Every open frame; a loop carries its instruction index and its set.
         let mut open: Vec<Option<(u32, HashSet<u32>)>> = Vec::new();
@@ -829,9 +830,9 @@ impl Sim<'_, '_> {
             // open at the cap then still has its header joins, marked
             // incomplete, instead of none.
             let position = reader.original_position() as u32;
-            if index & 255 == 0 && Instant::now() > deadline {
+            if index & 255 == 0 && self.cancelled.load(Ordering::Relaxed) {
                 self.omissions.push(format!(
-                    "Simulation deadline reached at byte {position}; value flow is not computed."
+                    "Simulation cancelled at byte {position}; value flow is not computed."
                 ));
                 return Ok(Some(position));
             }
@@ -894,7 +895,7 @@ impl Sim<'_, '_> {
     }
 
     /// Charges `units` of work. False, with the reason kept for the main loop,
-    /// once the work budget or the deadline is exhausted.
+    /// once the work budget is exhausted or the request is cancelled.
     fn spend(&mut self, units: u64) -> bool {
         if self.exhausted.is_some() {
             return false;
@@ -905,8 +906,8 @@ impl Sim<'_, '_> {
             self.exhausted = Some("Simulation work budget reached");
             return false;
         }
-        if before >> 12 != self.work >> 12 && Instant::now() > self.deadline {
-            self.exhausted = Some("Simulation deadline reached");
+        if before >> 12 != self.work >> 12 && self.cancelled.load(Ordering::Relaxed) {
+            self.exhausted = Some("Simulation cancelled");
             return false;
         }
         true

@@ -1,13 +1,11 @@
 /* Data-only analysis through the same local Rust library as origin-trace-vm-pack.
  * Keep imported JSON as text: parsing/re-encoding would round u64 evidence IDs. */
 function vmPackRequestText(mode, inputs, leftArtifact, rightArtifact) {
-  const limit = 16777216;
   if (!['apply', 'compare'].includes(mode)) throw new TypeError('Unknown pack operation.');
   const keys = mode === 'apply' ? ['pack', 'analysis'] : ['pack', 'left', 'right'];
   for (const key of keys) {
-    if (typeof inputs[key] !== 'string' || !inputs[key].trim().startsWith('{') ||
-        new TextEncoder().encode(inputs[key]).length > (key === 'pack' ? 65536 : limit)) {
-      throw new TypeError(`Select a bounded ${key} JSON object.`);
+    if (typeof inputs[key] !== 'string' || !inputs[key].trim().startsWith('{')) {
+      throw new TypeError(`Select a ${key} JSON object.`);
     }
   }
   // The backend's strict parser rejects duplicate keys, nonintegers, trailing
@@ -20,7 +18,6 @@ function vmPackRequestText(mode, inputs, leftArtifact, rightArtifact) {
     }
     body += `,"left":${inputs.left},"left_artifact":${JSON.stringify(leftArtifact)},"right":${inputs.right},"right_artifact":${JSON.stringify(rightArtifact)}}`;
   }
-  if (new TextEncoder().encode(body).length > limit) throw new TypeError('Combined request exceeds 16 MiB. Use the offline CLI for separate larger inputs.');
   return body;
 }
 
@@ -33,7 +30,7 @@ function mountVmAnalysisPacks(root) {
   root.className = 'vm-tool-shell';
   const heading = node('h2', 'Analysis packs', 'vm-tool-title');
   const help = node('p', 'Apply a ranking overlay or compare instruction sets across two builds.', 'vm-tool-subtitle');
-  const limits = node('p', 'Pack: 64 KiB. Combined request: 16 MiB. Both workspace digests and exact interpreter IDs are verified. A family binding is your declaration, not proof of behavioral equivalence.');
+  const limits = node('p', 'Documents of any size. Both workspace digests and exact interpreter IDs are verified. A family binding is your declaration, not proof of behavioral equivalence.');
   const status = node('p', 'Select a pack and analysis, or two opcode workspace documents.', 'vm-tool-status vm-pack-status');
   status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
   const fields = node('div', '', 'vm-tool-imports vm-pack-inputs'), actions = node('div', '', 'vm-tool-toolbar');
@@ -184,7 +181,6 @@ function mountVmAnalysisPacks(root) {
       status.textContent = file ? 'Reading input. Previous report cleared.' : 'Input selection cleared. Previous report cleared.';
       if (!file) return;
       try {
-        if (file.size > (key === 'pack' ? 65536 : 16777216)) throw new Error('File exceeds the input limit.');
         const text = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(await file.arrayBuffer());
         if (epoch !== epochs[key]) return;
         inputs[key] = text; selected.textContent = `${file.name} · ${file.size} bytes`;

@@ -129,12 +129,13 @@ async fn vm_pack_http_cli_parity_and_rejections() {
             .status(),
         400
     );
-    // Send only oversized headers: rejection precedes body ingestion, so a
-    // client uploading a giant body could otherwise observe a broken pipe.
+    // Send only headers declaring more than the API's 1 GiB per-request
+    // buffer: rejection precedes body ingestion, so a client uploading a
+    // giant body could otherwise observe a broken pipe.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let address = url.strip_prefix("http://").unwrap();
     let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-    socket.write_all(format!("POST /api/analysis/vm/packs/compare HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", vm_pack::MAX_INPUT_BYTES + 1).as_bytes()).await.unwrap();
+    socket.write_all(format!("POST /api/analysis/vm/packs/compare HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", (1usize << 30) + 1).as_bytes()).await.unwrap();
     let mut refusal = String::new();
     tokio::time::timeout(Duration::from_secs(3), socket.read_to_string(&mut refusal))
         .await

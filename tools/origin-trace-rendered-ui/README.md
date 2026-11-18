@@ -268,6 +268,16 @@ editor for `func 2`, the function the Graph draws, which Escape closes. Layout a
 and the Graph is photographed in both themes
 ([Wasm function names v1](../../protocol/wasm-function-names-v1.md)).
 
+`test43LargeSourcesOpenWhole` measures real-size sources and skips unless
+`REB_RENDERED_UI_LARGE_SOURCES` names a directory holding `bundle.js` and
+`module.wasm`, which the fixture stores as artifacts 950 and 951 (they are read
+at test time and never committed). It opens the bundle whole and verified, finds
+every `function` in it to an exact count, opens the module as hex and then its
+first Inspect window, photographs each, and prints each step's time with the web
+content and backend resident sizes as `RENDERED_UI_LARGE_SOURCES` lines. Run it
+alone with `node tools/check-origin-trace-rendered-ui.mjs --only
+test43LargeSourcesOpenWhole` after `make app-build`.
+
 `test42RunOfflineInSources` opens fixture artifact 450, a hand-built module
 whose second export (`stamp<b>`) reads the import `env.now`, and chooses
 **More > Run offline…**. At both sizes the dialog must name the local sandbox
@@ -298,10 +308,11 @@ writes Application Support.
 
 `test21StoppedRequestIsNotAnswered` opens the bundled `reb://` workspace, saves
 a synthetic script that never returns and runs it, then reloads the page while
-the native runner still holds the request. WebKit stops that request, and the
-runner's answer at its 2 second limit must not reach it: answering a stopped
-request raises an exception that ended the app. The next run must get its own
-`timed_out` answer, not 409.
+the native runner still holds the request. WebKit stops that request, which
+must terminate the run, since a run has no deadline, and no answer may reach
+the stopped request: answering one raises an exception that ended the app. The
+next run, of a script that returns, must get its own `completed` answer, not
+409.
 
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
 through **New Live Session…** and the start panel's **Continue Offline**, because the close guard

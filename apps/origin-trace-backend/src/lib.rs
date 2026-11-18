@@ -38,6 +38,7 @@ mod request_headers;
 mod request_index;
 mod request_stack;
 mod request_tabs;
+mod result_cache;
 mod session_context;
 #[cfg(unix)]
 pub mod session_launch;

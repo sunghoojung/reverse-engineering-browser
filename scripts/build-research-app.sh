@@ -49,6 +49,7 @@ stored_evidence_backend_source="${repo_root}/apps/research-ui/macos/StoredEviden
 trace_document_source="${repo_root}/apps/research-ui/macos/OriginTraceDocument.swift"
 workspace_lease_source="${repo_root}/apps/research-ui/macos/NativeWorkspaceLease.swift"
 analyst_runner_source="${repo_root}/apps/research-ui/macos/AnalystRunner.swift"
+analyst_runner_entitlements="${repo_root}/apps/research-ui/macos/OriginTraceAnalystRunner.entitlements"
 close_smoke_source="${repo_root}/apps/research-ui/macos/NativeCloseGuardSmoke.swift"
 close_guard_source="${repo_root}/apps/research-ui/macos/NativeCloseGuard.swift"
 client_project_export_source="${repo_root}/apps/research-ui/macos/ClientProjectExport.swift"
@@ -58,8 +59,6 @@ live_session_options_source="${repo_root}/apps/research-ui/macos/LiveSessionOpti
 recorded_session_source="${repo_root}/apps/research-ui/macos/RecordedSession.swift"
 decoder_service_source="${repo_root}/apps/research-ui/macos/DecoderService.swift"
 decoder_binary="${repo_root}/build/reb-decoder"
-deobfuscation_service_source="${repo_root}/apps/research-ui/macos/DeobfuscationService.swift"
-wasm_service_source="${repo_root}/apps/research-ui/macos/WasmService.swift"
 agent_core_source="${repo_root}/apps/research-ui/macos/AgentCore.swift"
 agent_bridge_source="${repo_root}/apps/research-ui/macos/AgentBridge.swift"
 session_panel_source="${repo_root}/apps/research-ui/macos/SessionPanel.swift"
@@ -104,7 +103,7 @@ if application.is_dir():
 PY
 mkdir -p "${research_ui_resources}"
 # One explicit packaged copy serves both the native scheme and live HTTP UI.
-for asset in index.html app.css block_graph.css block_graph.js wasm_diff_view.css wasm_diff_view.js wasm_readable.css wasm_readable.js block_graph_layout.js graph_layout_client.js flow_graph.css flow_graph.js flow_graph_layout.js flow_timeline.js flow_workspace.css flow_workspace.js entropy_map.css entropy_map.js wasm_identification.css wasm_identification.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js wasm_function_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css session_panel.js session_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css value_flow_view.js value_flow_view.css wasm_runner.js wasm_runner.css debugger_sidebar.js debugger_sidebar.css debugger_pause.js debugger_pause.css analyst_runner_core.js analyst_runner_node.js; do
+for asset in index.html app.css block_graph.css block_graph.js wasm_diff_view.css wasm_diff_view.js wasm_readable.css wasm_readable.js block_graph_layout.js graph_layout_client.js flow_graph.css flow_graph.js flow_graph_layout.js flow_timeline.js flow_workspace.css flow_workspace.js entropy_map.css entropy_map.js wasm_identification.css wasm_identification.js wasm_inspection.js command_palette.js app_state.js evidence_models.js evidence_package.js float32_inspector.js evidence_comparison.js source_syntax.js source_format.js code_view.js source_facts.js source_search.js source_tree.js traffic_view.js traffic_payload.js traffic_index.js traffic_filter.js traffic_columns.js traffic_overview.js network_scope.js request_tabs.js traffic_response.js traffic_headers.js traffic_cookies.js captured_client.js captured_export_formats.js vm_debugger.js vm_static.js vm_static_view.js vm_contextual.js vm_contextual_evidence.js vm_contextual_view.js vm_analysis_packs.js vm_opcode_ledger.js vm_opcode_ledger_view.js vm_semantics.js pane_layout.js native_console_completion.js native_console.js investigation_navigation.js investigation_notebook.js evidence_names.js wasm_function_names.js invocation_sites.js request_stack.js app.js agent_panel.js agent_panel.css session_panel.js session_panel.css vm_program_workspace.js xrefs_view.js xrefs_view.css value_flow_view.js value_flow_view.css wasm_runner.js wasm_runner.css debugger_sidebar.js debugger_sidebar.css debugger_pause.js debugger_pause.css analyst_runner_core.js analyst_runner_node.js; do
   cp "${repo_root}/apps/research-ui/${asset}" "${research_ui_resources}/${asset}"
 done
 # The agent dock's LangGraph loop: one browser bundle per provider, built from
@@ -141,8 +140,9 @@ triskel_revision="196ba112eba992c1460af3097c038defcf7a7e45"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-backend" "${macos_path}/OriginTraceBackend"
 cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-vm" "${macos_path}/OriginTraceVMAnalyzer"
 cp "${repo_root}/apps/origin-trace-backend/target/release/reb-api" "${macos_path}/OriginTraceAPI"
-cp "${repo_root}/apps/origin-trace-backend/target/release/origin-trace-wasm" "${macos_path}/OriginTraceWasmInspector"
-chmod 755 "${macos_path}/OriginTraceWasmInspector"
+# Stored-evidence Wasm analyses are forwarded to OriginTraceBackend, which
+# hosts the same provider; never retain the retired helper in a rebuilt bundle.
+rm -f "${macos_path}/OriginTraceWasmInspector"
 chmod 755 "${macos_path}/OriginTraceBackend" "${macos_path}/OriginTraceVMAnalyzer" "${macos_path}/OriginTraceAPI"
 cp "${repo_root}/scripts/run-live-session.sh" "${resources_path}/run-live-session.sh"
 chmod 755 "${resources_path}/run-live-session.sh"
@@ -237,7 +237,7 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -framework Cocoa \
   -framework WebKit \
   -framework Security \
-  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${deobfuscation_service_source}" "${wasm_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
+  "${swift_source}" "${stored_event_window_source}" "${stored_evidence_backend_source}" "${trace_document_source}" "${workspace_lease_source}" "${decoder_service_source}" "${agent_core_source}" "${agent_cli_source}" "${agent_chatgpt_source}" "${agent_bridge_source}" "${session_panel_source}" "${live_session_source}" "${live_session_options_source}" "${recorded_session_source}" "${close_guard_source}" "${close_smoke_source}" "${client_project_export_source}" "${client_project_smoke_source}" \
   -o "${macos_path}/OriginTrace"
 
 "${macos_path}/OriginTrace" --check-native-ui-url
@@ -249,6 +249,12 @@ smoke "${repo_root}/build/check-stored-evidence-backend" "${macos_path}/OriginTr
   -o "${macos_path}/OriginTraceAnalystRunner"
 
 codesign --force --deep --sign - "${app_path}" >/dev/null
+# Without allow-jit, JavaScriptCore interprets every analyst script: summing a
+# 57 MB artifact's bytes takes 4.4 s instead of 0.09 s. Only the runner gets
+# it, and the app is sealed again over the re-signed runner.
+codesign --force --sign - --entitlements "${analyst_runner_entitlements}" \
+  "${macos_path}/OriginTraceAnalystRunner" >/dev/null
+codesign --force --sign - "${app_path}" >/dev/null
 # macOS opens the app on any release LSMinimumSystemVersion admits, but will
 # not start a helper built for a newer one. Never replace the bundle with one
 # that has such a helper.

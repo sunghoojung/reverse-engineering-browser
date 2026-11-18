@@ -124,6 +124,48 @@ fn contain_network() -> std::io::Result<()> {
     ))
 }
 
+/// The heap one contained worker may hold: this machine's physical memory
+/// less a reserve for the rest of the system, an eighth of it but at least
+/// 2 GiB and at most half. It protects the machine from swapping itself to a
+/// halt, so a refusal says the machine cannot hold the analysis, never that
+/// the input was judged too large. Unknown physical memory sets no ceiling.
+pub(crate) fn machine_ceiling() -> u64 {
+    let Some(physical) = physical_memory() else {
+        return u64::MAX;
+    };
+    physical - (physical / 8).max(2 << 30).min(physical / 2)
+}
+
+#[cfg(target_os = "macos")]
+fn physical_memory() -> Option<u64> {
+    let mut bytes = 0u64;
+    let mut size = std::mem::size_of::<u64>();
+    // SAFETY: the name is NUL terminated and both out pointers are writable
+    // for the sizes given.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&raw mut bytes).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0 && bytes > 0).then_some(bytes)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn physical_memory() -> Option<u64> {
+    // SAFETY: sysconf reads process-independent configuration values.
+    let (pages, page) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
+    (pages > 0 && page > 0).then(|| pages as u64 * page as u64)
+}
+
 pub(crate) fn start(limit: u64) {
     PEAK.store(LIVE.load(Relaxed), Relaxed);
     LIMIT.store(limit, Relaxed);

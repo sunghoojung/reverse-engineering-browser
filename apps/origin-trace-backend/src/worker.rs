@@ -30,8 +30,16 @@ pub struct Output {
     pub exit_code: Option<i32>,
     pub duration_us: u64,
 }
-async fn bounded_read(reader: impl AsyncRead + Unpin, maximum: usize) -> Result<Vec<u8>> {
+/// Reads a worker stream to its end. An analysis worker's output grows with
+/// its input, so `maximum` is `None` there; it bounds only the streams of a
+/// worker whose output has a fixed shape, such as diagnostics.
+async fn bounded_read(reader: impl AsyncRead + Unpin, maximum: Option<usize>) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
+    let Some(maximum) = maximum else {
+        let mut reader = reader;
+        reader.read_to_end(&mut bytes).await?;
+        return Ok(bytes);
+    };
     reader
         .take(maximum as u64 + 1)
         .read_to_end(&mut bytes)
@@ -43,19 +51,23 @@ async fn bounded_read(reader: impl AsyncRead + Unpin, maximum: usize) -> Result<
     }
     Ok(bytes)
 }
+/// Runs one worker to completion. Analysis of captured input passes `None`
+/// for both bounds: it runs as long as its input needs and is stopped only by
+/// cancellation, which here is the caller dropping this future (the request
+/// it serves went away), killing the worker's whole process group.
 pub async fn run(
     command: &mut Command,
     input: &[u8],
-    output_limit: usize,
-    deadline: Duration,
+    output_limit: Option<usize>,
+    deadline: Option<Duration>,
 ) -> Result<Output> {
     run_cancel(command, input, output_limit, deadline, None).await
 }
 pub async fn run_cancel(
     command: &mut Command,
     input: &[u8],
-    output_limit: usize,
-    deadline: Duration,
+    output_limit: Option<usize>,
+    deadline: Option<Duration>,
     mut cancel: Option<&mut watch::Receiver<bool>>,
 ) -> Result<Output> {
     let started = Instant::now();
@@ -90,9 +102,15 @@ pub async fn run_cancel(
     let result = tokio::select! {
         biased;
         _=async {if let Some(receiver)=cancel.as_mut() {if !*receiver.borrow() {let _=receiver.changed().await;}} else {std::future::pending::<()>().await}}=> {let _=child.kill().await;let _=child.wait().await;return Err(Error::new(499,"Worker cancelled").with_reason(Reason::at(Code::Cancelled, Phase::Worker)));},
-        result=tokio::time::timeout(deadline, async {
-        tokio::try_join!(async { stdin.write_all(input).await?; drop(stdin); Ok::<_,Error>(()) }, bounded_read(stdout,output_limit),bounded_read(stderr,64*1024),async { child.wait().await.map_err(Error::from) })
-    })=>result,
+        result=async {
+            let work = async {
+                tokio::try_join!(async { stdin.write_all(input).await?; drop(stdin); Ok::<_,Error>(()) }, bounded_read(stdout,output_limit),bounded_read(stderr,Some(64*1024)),async { child.wait().await.map_err(Error::from) })
+            };
+            match deadline {
+                Some(deadline) => tokio::time::timeout(deadline, work).await,
+                None => Ok(work.await),
+            }
+        }=>result,
     };
     match result {
         Ok(Ok(((), bytes, stderr, status))) => Ok(Output {
@@ -153,8 +171,8 @@ mod tests {
             run_cancel(
                 &mut command,
                 b"",
-                1024,
-                Duration::from_secs(5),
+                Some(1024),
+                Some(Duration::from_secs(5)),
                 Some(&mut receiver),
             )
             .await
@@ -185,11 +203,50 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+    /// An unbounded analysis has no deadline; the request that dropped its
+    /// future is its cancellation, and that must stop the whole group.
+    #[tokio::test]
+    async fn dropping_an_unbounded_run_stops_worker_descendants() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("descendant.pid");
+        let child_path = path.clone();
+        let task = tokio::spawn(async move {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args([
+                    "-c",
+                    "sleep 60 & printf '%s' \"$!\" > \"$1\"; wait",
+                    "origin-trace-worker-test",
+                ])
+                .arg(child_path);
+            run(&mut command, b"", None, None).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(pid) = text.parse::<i32>()
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "Worker descendant never started");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        task.abort();
+        assert!(task.await.is_err_and(|error| error.is_cancelled()));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "Worker descendant survived a dropped run"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     #[tokio::test]
     async fn timeout_and_output_limits_terminate_workers() {
         let mut slow = Command::new("/bin/sh");
         slow.args(["-c", "sleep 60"]);
-        let error = run(&mut slow, b"", 1024, Duration::from_millis(100))
+        let error = run(&mut slow, b"", Some(1024), Some(Duration::from_millis(100)))
             .await
             .err()
             .unwrap();
@@ -197,7 +254,7 @@ mod tests {
         assert_eq!(error.reason.code, Code::Timeout);
         let mut noisy = Command::new("/bin/sh");
         noisy.args(["-c", "while true; do printf 0123456789; done"]);
-        let error = run(&mut noisy, b"", 16, Duration::from_secs(2))
+        let error = run(&mut noisy, b"", Some(16), Some(Duration::from_secs(2)))
             .await
             .err()
             .unwrap();

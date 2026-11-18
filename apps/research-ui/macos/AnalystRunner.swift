@@ -2,10 +2,6 @@ import Darwin
 import Foundation
 import JavaScriptCore
 
-private let maximumInputBytes = 800 * 1_024
-private let maximumSourceBytes = 32 * 1_024
-private let maximumOutputBytes = 128 * 1_024
-
 private func setLimit(_ resource: Int32, _ value: rlim_t) {
   var limit = rlimit(rlim_cur: value, rlim_max: value)
   _ = setrlimit(resource, &limit)
@@ -50,13 +46,6 @@ private func failure(
 private func writeDocument(_ value: [String: Any]) {
   do {
     let data = try JSONSerialization.data(withJSONObject: value, options: [])
-    guard data.count <= maximumOutputBytes else {
-      throw NSError(
-        domain: "REBAnalystRunner",
-        code: 1,
-        userInfo: [NSLocalizedDescriptionKey: "Analyst runner response exceeds 128 KiB"]
-      )
-    }
     FileHandle.standardOutput.write(data)
   } catch {
     let fallback = failure(input: value, message: error.localizedDescription)
@@ -69,11 +58,11 @@ private func writeDocument(_ value: [String: Any]) {
 @main
 private struct AnalystRunner {
   static func main() {
+    // No CPU or memory limit: a run lasts until it settles or its host
+    // cancels it, and holds what its evidence needs.
     setLimit(RLIMIT_CORE, 0)
-    setLimit(RLIMIT_CPU, 3)
     setLimit(RLIMIT_FSIZE, 0)
     setLimit(RLIMIT_NOFILE, 32)
-    setLimit(RLIMIT_DATA, 192 * 1_024 * 1_024)
 
     var input: [String: Any]?
     do {
@@ -84,20 +73,34 @@ private struct AnalystRunner {
           userInfo: [NSLocalizedDescriptionKey: "Analyst runner core path is required"]
         )
       }
+      // Runner input v2: one JSON line, then the selected artifact's bytes.
       let data = FileHandle.standardInput.readDataToEndOfFile()
-      guard data.count <= maximumInputBytes,
-        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      guard let end = data.firstIndex(of: 0x0a),
+        let parsed = try JSONSerialization.jsonObject(with: data[data.startIndex..<end])
+          as? [String: Any],
+        parsed["protocol_version"] as? Int == 2,
         let source = parsed["source"] as? String,
-        !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-        source.utf8.count <= maximumSourceBytes
+        !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       else {
         throw NSError(
           domain: "REBAnalystRunner",
           code: 3,
-          userInfo: [NSLocalizedDescriptionKey: "Analyst runner input is malformed or oversized"]
+          userInfo: [NSLocalizedDescriptionKey: "Analyst runner input is malformed"]
         )
       }
       input = parsed
+      let bytes = data[data.index(after: end)...]
+      let selected = (parsed["evidence"] as? [String: Any])?["selected_artifact"] as? [String: Any]
+      guard selected.map({ $0["byte_size"] as? Int == bytes.count }) ?? bytes.isEmpty else {
+        throw NSError(
+          domain: "REBAnalystRunner",
+          code: 3,
+          userInfo: [
+            NSLocalizedDescriptionKey:
+              "Analyst runner input does not match the selected artifact's byte size"
+          ]
+        )
+      }
       var configuration = parsed
       configuration.removeValue(forKey: "source")
       let configurationData = try JSONSerialization.data(
@@ -142,7 +145,7 @@ private struct AnalystRunner {
             });
           }
         })();
-        REBExecuteAnalyst(\(configurationText), async function(WB, Utils, console) {
+        REBExecuteAnalyst(...REBTakeInput(), async function(WB, Utils, console) {
         "use strict";
         \(source)
         });
@@ -158,6 +161,34 @@ private struct AnalystRunner {
       var contextException: String?
       context.exceptionHandler = { _, exception in
         contextException = exception?.toString() ?? "Unknown JavaScript exception"
+      }
+      // The core takes these globals and removes them before the script runs.
+      context.setObject(configurationText, forKeyedSubscript: "REBInput" as NSString)
+      if selected != nil {
+        context.setObject(
+          String(data: bytes, encoding: .utf8) ?? NSNull(),
+          forKeyedSubscript: "REBSelectedText" as NSString
+        )
+        let storage = UnsafeMutableRawPointer.allocate(byteCount: max(bytes.count, 1), alignment: 1)
+        bytes.copyBytes(to: storage.assumingMemoryBound(to: UInt8.self), count: bytes.count)
+        var exception: JSValueRef?
+        guard
+          let array = JSObjectMakeTypedArrayWithBytesNoCopy(
+            context.jsGlobalContextRef, kJSTypedArrayTypeUint8Array, storage, bytes.count,
+            { storage, _ in storage?.deallocate() }, nil, &exception
+          )
+        else {
+          storage.deallocate()
+          throw NSError(
+            domain: "REBAnalystRunner",
+            code: 5,
+            userInfo: [NSLocalizedDescriptionKey: "Could not hand the selected artifact to the script"]
+          )
+        }
+        context.setObject(
+          JSValue(jsValueRef: array, in: context),
+          forKeyedSubscript: "REBSelectedBytes" as NSString
+        )
       }
       guard let promise = context.evaluateScript(
         program,
@@ -179,11 +210,10 @@ private struct AnalystRunner {
       let onRejected: @convention(block) (JSValue) -> Void = { value in
         rejected = value
       }
+      // JavaScriptCore drains its job queue as each call returns, and the
+      // script's realm has no timers or I/O, so a promise still pending here
+      // can never settle.
       promise.invokeMethod("then", withArguments: [onResolved, onRejected])
-      let deadline = Date().addingTimeInterval(2.2)
-      while resolved == nil && rejected == nil && Date() < deadline {
-        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
-      }
       if let rejected {
         throw NSError(
           domain: "REBAnalystRunner",
@@ -197,24 +227,14 @@ private struct AnalystRunner {
           code: 8,
           userInfo: [
             NSLocalizedDescriptionKey: resolved == nil
-              ? "Analyst script exceeded the 2 second execution limit"
+              ? "The analyst script awaited a promise that nothing can settle"
               : "Analyst runner returned a malformed result"
           ]
         )
       }
       writeDocument(result)
     } catch {
-      let message = error.localizedDescription
-      let timedOut = message.localizedCaseInsensitiveContains("execution limit")
-      writeDocument(
-        failure(
-          input: input,
-          outcome: timedOut ? "timed_out" : "failed",
-          message: timedOut
-            ? "Analyst script exceeded the 2 second execution limit"
-            : message
-        )
-      )
+      writeDocument(failure(input: input, message: error.localizedDescription))
     }
   }
 }

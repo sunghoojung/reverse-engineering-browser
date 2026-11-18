@@ -19,8 +19,9 @@ export async function sourcesHistoryFixture(base) {
     return source;
   };
   const wasm=await addWasm('101');
-  const report=source=>({schema:'wasm-inspection-v1',artifact_id:source.artifact_id,sha256:source.sha256,byte_size:source.byte_size,
-    status:'decoded',sections:0,defined_functions:0,imported_functions:0,instructions:0,notice:'Static inspection of an authored empty module. Never executed.',omissions:[],rows:[]});
+  const report=source=>({schema:'wasm-inspection-v2',artifact_id:source.artifact_id,sha256:source.sha256,byte_size:source.byte_size,
+    status:'decoded',sections:0,defined_functions:0,imported_functions:0,instructions:0,notice:'Static inspection of an authored empty module. Never executed.',omissions:[],rows:[],
+    row_window:{offset:0,rows:0,total_rows:0,next_offset:null}});
   const fixture={...base,target,wasm,longText,moduleBytes,report,addWasm,reads:[],gates:new Map(),catalogReads:0,nextId:200};
   fixture.hold=key=>{
     assert(!fixture.gates.has(key),'A route already has a pending hold');

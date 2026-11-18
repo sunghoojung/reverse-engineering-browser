@@ -5,8 +5,6 @@ const TRAFFIC_PAYLOAD_BLOCK_ROWS = 200;
 const TRAFFIC_PAYLOAD_GROUP = 100;
 const TRAFFIC_PAYLOAD_LEAF_UNITS = 1000;
 const TRAFFIC_PAYLOAD_FIELD_BYTES = 64 * 1024;
-const TRAFFIC_PAYLOAD_HEX_BYTES = 1024 * 1024;
-const TRAFFIC_PAYLOAD_FIND_LIMIT = 1000;
 const TRAFFIC_PAYLOAD_BINARY_TYPES = /^(?:image\/(?!svg\+xml$)|audio\/|video\/|font\/)|^application\/(?:octet-stream|wasm|zip|gzip|pdf|cbor|msgpack|x-msgpack|protobuf|x-protobuf|vnd\.google\.protobuf|grpc(?:-web)?(?:\+proto)?)$/;
 
 // Toggles carry across requests, as in DevTools; the rest belongs to the shown body.
@@ -143,11 +141,10 @@ function trafficPayloadModel(body, view) {
   const text = view.text ?? new TextDecoder().decode(bytes);
   const type = body.contentType ?? '';
   const model = {bytes, text, type, binary: trafficPayloadBinary(bytes, type, view.lossy), keys: new WeakMap(),
-    artifact: view.complete === false || view.lossy ? null : view.artifact ?? null};
+    artifact: view.lossy ? null : view.artifact ?? null};
   if (type.startsWith('multipart/')) {
     model.parts = trafficPayloadMultipart(bytes);
     if (!model.parts) model.parsedNote = 'The multipart boundary could not be read from the first line.';
-    else if (view.complete === false) for (const part of model.parts.parts) if (part.cut) part.cut = 'read';
   } else if (model.binary) {
     return model;
   } else if (type === 'application/x-www-form-urlencoded') {
@@ -156,8 +153,7 @@ function trafficPayloadModel(body, view) {
     try {
       model.json = {value: JSON.parse(text)};
     } catch {
-      // A partly read prefix is not judged; its read note says more follows.
-      if (/json$/.test(type) && view.complete !== false) {
+      if (/json$/.test(type)) {
         model.parsedNote = body.state === 'captured_truncated' ? 'The retained prefix ends before the JSON does, so it is shown as sent.'
           : 'This body is not valid JSON, so it is shown as sent.';
       }
@@ -167,12 +163,15 @@ function trafficPayloadModel(body, view) {
   return model;
 }
 
-function trafficPayloadSourceRows(model) {
+// Source rows of the body: its text, its layout, or one hex window (`hexOffset`) of every byte.
+function trafficPayloadSourceRows(model, hexOffset = 0) {
   if (model.binary) {
-    if (model.sourceRows) return model.sourceRows;
-    const hex = formatWasmHex(model.bytes.subarray(0, TRAFFIC_PAYLOAD_HEX_BYTES));
-    return model.sourceRows = {text: hex, rows: codeViewRows(hex), syntax: {kind: 'bytecode_buffer'}, hex: true, layout: null,
-      note: model.bytes.length > TRAFFIC_PAYLOAD_HEX_BYTES ? `Hex shows the first 1 MiB of ${trafficByteCount(model.bytes.length)}.` : ''};
+    if (model.sourceRows?.hexOffset === hexOffset) return model.sourceRows;
+    const hex = codeViewHexWindow(model.bytes, hexOffset);
+    const range = `bytes ${hex.start.toLocaleString('en-US')} to ${(hex.end - 1).toLocaleString('en-US')} of ${trafficByteCount(hex.total)}`;
+    const paged = hex.total > CODE_VIEW_HEX_BYTES;
+    return model.sourceRows = {text: hex.text, rows: codeViewRows(hex.text), syntax: {kind: 'bytecode_buffer'}, hex, hexOffset, layout: null,
+      note: paged ? `Hex shows ${range}.` : '', what: paged ? `the hex of ${range}` : 'the payload hex'};
   }
   const layout = model.json ? trafficPayloadLayout().layout(model.artifact, model.text, model.syntax, 'json') : null;
   if (model.sourceRows && model.sourceRows.layout === layout && model.sourceRows.status === layout?.status) return model.sourceRows;
@@ -249,25 +248,22 @@ function trafficPayloadExpand(model, expanded, steps) {
   }
 }
 
-// Ids and expansion steps are built only for matches, so a miss costs one walk.
+// Whether a tree node is a Find match: its own key or, for a leaf, its value.
+function trafficPayloadNodeMatches(key, value, needle) {
+  return (typeof key === 'string' && key.toLowerCase().includes(needle)) ||
+    (!trafficPayloadContainer(value) && String(value).toLowerCase().includes(needle));
+}
+
+// Every match in walk order, as its walk frame. The id and expansion steps
+// of a match are built when it is shown, so a search costs one walk and a
+// frame per match.
 function trafficPayloadTreeSearch(model, needle) {
   const matches = [];
   const stack = [{key: null, value: model.json.value, up: null}];
-  while (stack.length && matches.length < TRAFFIC_PAYLOAD_FIND_LIMIT) {
-    const frame = stack.pop(), value = frame.value, container = trafficPayloadContainer(value);
-    if ((typeof frame.key === 'string' && frame.key.toLowerCase().includes(needle)) ||
-        (!container && String(value).toLowerCase().includes(needle))) {
-      const path = [];
-      for (let at = frame; at.up; at = at.up) path.unshift(at);
-      let id = '$';
-      const steps = path.map(at => {
-        const step = {container: id, index: at.index, count: at.count};
-        id = `${id}/${JSON.stringify(at.key)}`;
-        return step;
-      });
-      matches.push({section: 'payload', id, steps});
-    }
-    if (!container) continue;
+  while (stack.length) {
+    const frame = stack.pop(), value = frame.value;
+    if (trafficPayloadNodeMatches(frame.key, value, needle)) matches.push(frame);
+    if (!trafficPayloadContainer(value)) continue;
     const keys = trafficPayloadKeys(model, value), count = keys ? keys.length : value.length;
     for (let index = count - 1; index >= 0; index -= 1) {
       const key = keys ? keys[index] : index;
@@ -275,6 +271,60 @@ function trafficPayloadTreeSearch(model, needle) {
     }
   }
   return matches;
+}
+
+function trafficPayloadTreeMatch(frame) {
+  if (frame.match) return frame.match;
+  const path = [];
+  for (let at = frame; at.up; at = at.up) path.unshift(at);
+  let id = '$';
+  const steps = path.map(at => {
+    const step = {container: id, index: at.index, count: at.count};
+    id = `${id}/${JSON.stringify(at.key)}`;
+    return step;
+  });
+  return frame.match = {id, steps};
+}
+
+// Find over every section of the tab, with an exact count. Each section adds
+// parts: a list of tree frames or row indices, or a count of the source text
+// or hex kept in the background over the whole document (source_syntax.js),
+// whose memory follows the document, not its matches. Only the body, the last
+// section, can hold a running count, so earlier ranks never move.
+function trafficPayloadNoFind() {
+  return {query: '', needle: '', parts: [], rank: 0, reveal: false, memo: null};
+}
+
+function trafficPayloadStopFind(find) {
+  for (const part of find.parts) cancelSourceFind(part.search);
+}
+
+function trafficPayloadFindTotal(find) {
+  return find.parts.reduce((sum, part) => sum + (part.search ? part.search.total : part.list.length), 0);
+}
+
+function trafficPayloadFindRunning(find) {
+  return find.parts.find(part => part.search?.status === 'running')?.search ?? null;
+}
+
+// The current match: its section and part with the row, tree id and steps,
+// or document offset that shows it; null without one.
+function trafficPayloadFindCurrent(find) {
+  const total = trafficPayloadFindTotal(find);
+  if (find.memo?.rank === find.rank && find.memo.parts === find.parts && find.memo.total === total) return find.memo.current;
+  let rank = find.rank, current = null;
+  for (const part of find.parts) {
+    const count = part.search ? part.search.total : part.list.length;
+    if (rank >= count) {
+      rank -= count;
+      continue;
+    }
+    current = part.search ? {section: part.section, part, offset: sourceFindMatch(part.search, rank)?.offset ?? -1}
+      : part.tree ? {section: part.section, part, ...trafficPayloadTreeMatch(part.list[rank])} : {section: part.section, part, row: part.list[rank]};
+    break;
+  }
+  find.memo = {rank: find.rank, parts: find.parts, total, current};
+  return current;
 }
 
 function trafficPayloadNodeValue(model, node) {
@@ -406,18 +456,25 @@ function trafficPayloadSection(id, title, meta) {
   return {element, head};
 }
 
-function trafficPayloadMatchesBy(shown, section) {
-  const by = new Map();
-  shown.find.matches.forEach((match, index) => {
-    if (match.section !== section) return;
-    const key = match.id ?? match.row;
-    if (!by.has(key)) by.set(key, []);
-    by.get(key).push({...match, match: index});
-  });
-  return by;
+function trafficPayloadPairText(pair) {
+  const shown = trafficPayloadPair(pair);
+  return `${shown.name}\n${shown.value}`;
 }
 
-function trafficPayloadPairRow(pair, index, marks, current) {
+function trafficPayloadPartText(part) {
+  return [part.name, part.filename, part.type, part.value].join('\n');
+}
+
+// A row is marked when its text holds the query; the current match is named by its row.
+function trafficPayloadRowMark(row, shown, section, index, text) {
+  const {needle} = shown.find;
+  if (!needle || !text.toLowerCase().includes(needle)) return;
+  row.classList.add('is-match');
+  const current = trafficPayloadFindCurrent(shown.find);
+  if (current?.section === section && current.row === index) row.classList.add('is-current');
+}
+
+function trafficPayloadPairRow(pair, index, shown, section) {
   const shownPair = trafficPayloadPair(pair);
   const row = trafficNode('div', 'traffic-payload-pair');
   row.setAttribute('role', 'row');
@@ -428,18 +485,15 @@ function trafficPayloadPairRow(pair, index, marks, current) {
     row.classList.add('is-undecodable');
     row.title = 'Not valid percent-encoding; shown as sent.';
   }
-  const match = marks.get(index);
-  if (match) row.classList.add('is-match');
-  if (match?.some(entry => entry.match === current)) row.classList.add('is-current');
+  trafficPayloadRowMark(row, shown, section, index, trafficPayloadPairText(pair));
   row.append(name, value);
   return row;
 }
 
 function trafficPayloadPairsArea(pairs, label, section, shown) {
-  const marks = trafficPayloadMatchesBy(shown, section);
   const area = trafficPayloadArea({className: 'traffic-payload-pairs', label, role: 'table', count: pairs.length, selectable: true,
     selected: shown.selected?.section === section ? shown.selected.index : -1,
-    makeRow: index => trafficPayloadPairRow(pairs[index], index, marks, shown.find.current),
+    makeRow: index => trafficPayloadPairRow(pairs[index], index, shown, section),
     onSelect: index => {shown.selected = {section, index};}});
   const head = trafficNode('div', 'traffic-payload-pair traffic-payload-columns');
   head.setAttribute('role', 'row');
@@ -452,7 +506,7 @@ function trafficPayloadPairsArea(pairs, label, section, shown) {
   return area;
 }
 
-function trafficPayloadPartRow(part, index, marks, current) {
+function trafficPayloadPartRow(part, index, shown) {
   const row = trafficNode('div', 'traffic-payload-part');
   row.setAttribute('role', 'listitem');
   const head = trafficNode('div', 'traffic-payload-part-head');
@@ -463,18 +517,32 @@ function trafficPayloadPartRow(part, index, marks, current) {
   row.append(head);
   if (part.value !== null) row.append(trafficNode('div', 'traffic-payload-value', part.value));
   else if (part.filename === null && part.size) row.append(trafficNode('div', 'traffic-payload-part-meta', 'Not UTF-8 text or over 64 KiB; see Source.'));
-  const match = marks.get(index);
-  if (match) row.classList.add('is-match');
-  if (match?.some(entry => entry.match === current)) row.classList.add('is-current');
+  trafficPayloadRowMark(row, shown, 'payload', index, trafficPayloadPartText(part));
   return row;
 }
 
+// Source text or one hex window, marked from the body's count over the whole document.
 function trafficPayloadLinesArea(rows, shown, status) {
-  const marks = trafficPayloadMatchesBy(shown, 'payload');
-  return createCodeView({text: rows.text, rows: rows.rows, syntax: rows.syntax, label: rows.hex ? 'Request payload hex' : 'Request payload source',
+  const base = rows.hex?.base ?? 0;
+  const searchOf = () => shown.find.parts.find(part => part.search && part.section === 'payload')?.search ?? null;
+  const marks = (first, last) => codeViewFindMarks(searchOf(), rows.rows, first, last, base);
+  const offset = () => {
+    const current = trafficPayloadFindCurrent(shown.find);
+    return current?.part.search && current.part.search === searchOf() ? current.offset : -1;
+  };
+  const view = createCodeView({text: rows.text, rows: rows.rows, syntax: rows.syntax, label: rows.hex ? 'Request payload hex' : 'Request payload source',
     className: 'traffic-payload-view traffic-payload-lines', rowClass: 'traffic-payload-line', wrap: trafficPayloadPrefs.wrap && !rows.hex,
-    marks, current: shown.find.current, layout: rows.layout?.status === 'ready' && rows.layout.map ? rows.layout : null,
+    marks, current: offset(), layout: rows.layout?.status === 'ready' && rows.layout.map ? rows.layout : null,
     onRaw: raw => {status.textContent = codeViewRawText(raw);}});
+  // Marks again for a new current match or more of the count, painting the
+  // current match's row now; the row a document offset is on.
+  view.remark = () => {
+    const at = offset();
+    view.mark(marks, at, at < 0 ? [] : [codeViewRowAt(rows.rows, at - base)]);
+  };
+  view.rowOf = at => codeViewRowAt(rows.rows, at - base);
+  view.shows = rows;
+  return view;
 }
 
 function trafficPayloadProgress(text) {
@@ -484,16 +552,16 @@ function trafficPayloadProgress(text) {
 }
 
 function trafficPayloadPartsArea(parts, shown) {
-  const marks = trafficPayloadMatchesBy(shown, 'payload');
   return trafficPayloadArea({className: 'traffic-payload-parts', label: 'Multipart parts', role: 'list', count: parts.length,
     selectable: true, selected: shown.selected?.section === 'payload' ? shown.selected.index ?? -1 : -1,
-    makeRow: index => trafficPayloadPartRow(parts[index], index, marks, shown.find.current),
+    makeRow: index => trafficPayloadPartRow(parts[index], index, shown),
     onSelect: index => {shown.selected = {section: 'payload', index};}});
 }
 
 function trafficPayloadTreeArea(model, shown, rerender, label = 'Request payload tree') {
   const visible = trafficPayloadVisible(model, shown.expanded);
-  const marks = trafficPayloadMatchesBy(shown, 'payload');
+  const {needle} = shown.find;
+  const current = needle ? trafficPayloadFindCurrent(shown.find) : null;
   const selectedId = shown.selected?.section === 'payload' ? shown.selected.id : null;
   const expandable = node => node.group || trafficPayloadContainer(node.value);
   const toggle = (index, open) => {
@@ -528,9 +596,10 @@ function trafficPayloadTreeArea(model, shown, rerender, label = 'Request payload
         }
         row.append(leaf);
       }
-      const match = marks.get(node.id);
-      if (match) row.classList.add('is-match');
-      if (match?.some(entry => entry.match === shown.find.current)) row.classList.add('is-current');
+      if (needle && !node.group && trafficPayloadNodeMatches(node.key, node.value, needle)) {
+        row.classList.add('is-match');
+        if (current?.section === 'payload' && current.id === node.id) row.classList.add('is-current');
+      }
       return row;
     },
     onSelect: index => {shown.selected = {section: 'payload', id: visible[index].id};},
@@ -562,12 +631,13 @@ function trafficPayloadTreeArea(model, shown, rerender, label = 'Request payload
   return area;
 }
 
+// The index of every row whose text holds the query.
 function trafficPayloadSearchRows(items, needle, text) {
-  const matches = [];
-  for (let row = 0; row < items.length && matches.length < TRAFFIC_PAYLOAD_FIND_LIMIT; row += 1) {
-    if (text(items[row]).toLowerCase().includes(needle)) matches.push({row});
+  const rows = [];
+  for (let row = 0; row < items.length; row += 1) {
+    if (text(items[row]).toLowerCase().includes(needle)) rows.push(row);
   }
-  return matches;
+  return rows;
 }
 
 function trafficPayloadPartJson(part) {
@@ -597,10 +667,7 @@ function trafficPayloadQuerySection(query, shown, panel) {
       area = trafficPayloadPairsArea(query.pairs, 'Query string parameters', 'query', shown);
       holder.replaceChildren(area.box);
     },
-    search: (_raw, needle) => trafficPayloadSearchRows(query.pairs, needle, pair => {
-      const shownPair = trafficPayloadPair(pair);
-      return `${shownPair.name}\n${shownPair.value}`;
-    }).map(match => ({...match, section: 'query'})),
+    search: (_raw, needle) => [{section: 'query', list: trafficPayloadSearchRows(query.pairs, needle, trafficPayloadPairText)}],
     reveal(match) {
       this.render();
       return area.reveal(match.row);
@@ -615,18 +682,19 @@ function trafficPayloadQuerySection(query, shown, panel) {
     dispose: () => area?.dispose()};
 }
 
-// Whether this body parses into a table or tree, which needs every retained byte.
-function trafficPayloadParses(body, view) {
-  const type = body?.contentType ?? '';
-  if (type.startsWith('multipart/') || type === 'application/x-www-form-urlencoded' || /[/+]json$/.test(type)) return true;
-  return !TRAFFIC_PAYLOAD_BINARY_TYPES.test(type) && !view?.lossy && /^\s*[[{]/.test(view?.text ?? '');
+// Cancel during a read and Read the body after one, handled by app.js.
+function trafficPayloadReadButton(action, label, key) {
+  const button = trafficPayloadButton(label, 'secondary-button traffic-body-read');
+  button.dataset.contentAction = action;
+  button.dataset.contentKey = key;
+  return button;
 }
 
 function trafficPayloadBodySection(body, view, shown, panel) {
   const {element, head} = trafficPayloadSection('payload', 'Request Payload', body?.contentType ?? '');
   element.dataset.state = body === undefined ? 'none' : body === null ? 'missing' : body.malformed ? 'malformed' : body.state;
   const note = text => {if (text) element.append(trafficNode('p', 'traffic-payload-note', text));};
-  const inert = {name: 'payload', element, render() {}, search: () => [], reveal: () => null, copy: () => null, copyAll: () => null, dispose() {}};
+  const inert = {name: 'payload', element, render() {}, search: () => [], reveal: () => null, progress() {}, copy: () => null, copyAll: () => null, dispose() {}};
   const model = shown.model;
   if (body === undefined) {
     note('This row has no native body record.');
@@ -637,23 +705,13 @@ function trafficPayloadBodySection(body, view, shown, panel) {
     return inert;
   }
   if (view?.status !== 'ready') note(`${trafficBodyContent(body, view).note}${model ? ' Showing the last read copy.' : ''}`);
+  if (view?.status === 'loading' && view.controller && view.key) element.append(trafficPayloadReadButton('cancel', 'Cancel', view.key));
+  if (view?.status === 'cancelled' && view.key) element.append(trafficPayloadReadButton('read', 'Read the body', view.key));
   if (!model) return inert;
-  if (view?.status === 'ready' && view.complete === false) {
-    // Ranged reads (protocol/native-network-v2.md): a prefix parses as source until every byte is read.
-    note(trafficBodyContent(body, view).note);
-    const more = trafficNode('button', 'secondary-button traffic-body-more', view.loadingMore ? 'Loading…' : 'Show the next 2 MiB');
-    more.type = 'button';
-    more.dataset.contentKey = view.key;
-    // Not `disabled`, so keyboard focus stays on it while the range loads.
-    more.setAttribute('aria-disabled', String(Boolean(view.loadingMore)));
-    element.append(more);
-  } else if (view?.status === 'ready' && view.verified === false) note('The retained digest could not be rechecked in this view.');
+  if (view?.status === 'ready' && view.verified === false) note('The retained digest could not be rechecked in this view.');
   const parsed = Boolean(model.json || model.pairs || model.parts);
   const sourceMode = () => !parsed || trafficPayloadPrefs.source;
-  // app.js reads every range of a body that parses without a click. Until the
-  // last one its prefix does not parse, and coloring each 2 MiB prefix as code
-  // froze the page for most of a second per range, so progress is shown instead.
-  const reading = !parsed && view?.status === 'ready' && view.complete === false && !view.moreError && trafficPayloadParses(body, view);
+  const sourceRows = () => trafficPayloadSourceRows(model, shown.hexOffset);
   const options = trafficNode('div', 'traffic-payload-options');
   head.append(options);
   const holder = trafficNode('div', 'traffic-payload-holder');
@@ -663,13 +721,7 @@ function trafficPayloadBodySection(body, view, shown, panel) {
     render({focus = false, keepScroll = false} = {}) {
       const scroll = keepScroll ? area?.box.scrollTop ?? 0 : 0;
       area?.dispose();
-      if (reading) {
-        options.replaceChildren();
-        area = trafficPayloadProgress(`Reading the rest of the body to show it parsed: ${trafficByteCount(view.loaded)} of ${trafficByteCount(view.total)} read.`);
-        holder.replaceChildren(area.box);
-        return;
-      }
-      const source = sourceMode(), rows = source ? trafficPayloadSourceRows(model) : null;
+      const source = sourceMode(), rows = source ? sourceRows() : null;
       const pending = rows?.status === 'pending';
       const focusedOption = options.contains(globalThis.document?.activeElement) ? document.activeElement.textContent : null;
       options.replaceChildren();
@@ -692,38 +744,50 @@ function trafficPayloadBodySection(body, view, shown, panel) {
       const notes = [model.parsedNote, pending ? '' : rows?.note, rows?.hex ? 'Binary bytes are shown as hex and never interpreted.' : '',
         !source && model.parts && !model.parts.parts.length ? 'No part precedes the closing boundary.' : '']
         .filter(Boolean).map(text => trafficNode('p', 'traffic-payload-note', text));
+      // Every byte is shown, one hex window at a time.
+      const pager = rows?.hex && rows.hex.total > CODE_VIEW_HEX_BYTES ? [trafficHexPager(rows.hex, start => {
+        shown.hexOffset = start;
+        controller.render();
+      })] : [];
       const raw = trafficNode('p', 'traffic-payload-note code-view-raw');
       raw.setAttribute('role', 'status');
       area = pending ? trafficPayloadProgress(rows.note) : source ? trafficPayloadLinesArea(rows, shown, raw)
         : model.json ? trafficPayloadTreeArea(model, shown, () => controller.render({focus: true, keepScroll: true}))
           : model.pairs ? trafficPayloadPairsArea(model.pairs, 'Form fields', 'payload', shown)
             : trafficPayloadPartsArea(model.parts.parts, shown);
-      holder.replaceChildren(...notes, area.box, ...(rows?.layout?.status === 'ready' && rows.layout.map ? [raw] : []));
+      holder.replaceChildren(...notes, ...pager, area.box, ...(rows?.layout?.status === 'ready' && rows.layout.map ? [raw] : []));
       area.box.scrollTop = scroll;
       if (focusedOption) [...options.querySelectorAll('button')].find(button => button.textContent === focusedOption)?.focus();
       if (focus) area.box.querySelector('[tabindex="0"]')?.focus();
     },
     search(raw, needle) {
-      if (reading) return [];
       if (sourceMode()) {
         // A pending layout is searched once it arrives (shown.relayout).
-        const rows = trafficPayloadSourceRows(model);
+        const rows = sourceRows();
         if (rows.status === 'pending') return [];
-        return findSourceOccurrences(rows.rows.map(row => row.text), raw, TRAFFIC_PAYLOAD_FIND_LIMIT).matches
-          .map(({line, column, length}) => ({section: 'payload', row: line, column, length}));
+        const document = rows.hex ? sourceFindHexDocument(model.bytes) : sourceFindTextDocument(rows.text);
+        return [{section: 'payload', search: startSourceFind(document, raw, {onProgress: search => panel.progress(search)})}];
       }
-      if (model.json) return trafficPayloadTreeSearch(model, needle);
-      if (model.pairs) {
-        return trafficPayloadSearchRows(model.pairs, needle, pair => Object.values(trafficPayloadPair(pair)).join('\n'))
-          .map(match => ({...match, section: 'payload'}));
-      }
-      return trafficPayloadSearchRows(model.parts.parts, needle, part => [part.name, part.filename, part.type, part.value].join('\n'))
-        .map(match => ({...match, section: 'payload'}));
+      if (model.json) return [{section: 'payload', tree: true, list: trafficPayloadTreeSearch(model, needle)}];
+      return [{section: 'payload', list: model.pairs ? trafficPayloadSearchRows(model.pairs, needle, trafficPayloadPairText)
+        : trafficPayloadSearchRows(model.parts.parts, needle, trafficPayloadPartText)}];
     },
     reveal(match) {
       if (match.steps) trafficPayloadExpand(model, shown.expanded, match.steps);
+      if (match.part.search) {
+        // A hex match in another window opens that window; the shown view is marked again in place.
+        const hex = sourceMode() ? sourceRows().hex : null;
+        if (hex && hex.windowOf(match.offset) !== hex.start) shown.hexOffset = hex.windowOf(match.offset);
+        if (area?.shows === sourceRows()) area.remark();
+        else this.render();
+        return area.rowOf ? area.reveal(area.rowOf(match.offset)) : null;
+      }
       this.render();
       return area.reveal(match.steps ? area.indexOf(match.id) : match.row);
+    },
+    // More of the count: the shown source is marked again.
+    progress() {
+      area?.remark?.();
     },
     copy(asJson) {
       if (shown.selected?.section !== 'payload' || sourceMode()) return null;
@@ -739,7 +803,7 @@ function trafficPayloadBodySection(body, view, shown, panel) {
       return {text: asJson ? JSON.stringify(value, null, 2) : value.value ?? value.filename ?? '', what: 'the selected value'};
     },
     copyAll(asJson) {
-      if (!asJson) return {text: model.binary ? trafficPayloadSourceRows(model).text : model.text, what: model.binary ? 'the payload hex' : 'the payload as sent'};
+      if (!asJson) return model.binary ? {text: sourceRows().text, what: sourceRows().what} : {text: model.text, what: 'the payload as sent'};
       const value = model.json ? model.json.value : model.pairs ? model.pairs.map(pair => trafficPayloadPair(pair))
         : model.parts ? model.parts.parts.map(trafficPayloadPartJson) : model.binary ? undefined : model.text;
       return value === undefined ? null : {text: JSON.stringify(value, null, 2), what: 'the payload'};
@@ -788,10 +852,14 @@ function trafficPayloadTools(panel, shown) {
   const copyValue = trafficPayloadButton('Copy value'), copyJson = trafficPayloadButton('Copy as JSON');
   const status = trafficNode('span', 'traffic-payload-status');
   status.setAttribute('role', 'status');
+  // Until a running count is done, its total ends in + and its progress is shown.
   panel.count = () => {
-    const {query, matches, current, truncated} = shown.find;
-    count.textContent = !query ? '' : !matches.length ? 'No matches' : `${current + 1} of ${matches.length}${truncated ? '+' : ''}`;
-    previous.disabled = next.disabled = matches.length < 2;
+    const {query, rank, parts} = shown.find, total = trafficPayloadFindTotal(shown.find), running = trafficPayloadFindRunning(shown.find);
+    const error = parts.find(part => part.search?.error)?.search.error;
+    const progress = running ? ` · finding ${Math.floor(100 * running.scanned / running.document.chunks)}%` : '';
+    count.textContent = !query ? '' : error && !total ? error : !total ? (running ? `No matches yet${progress}` : 'No matches')
+      : `${(rank + 1).toLocaleString('en-US')} of ${total.toLocaleString('en-US')}${running ? '+' : ''}${progress}`;
+    previous.disabled = next.disabled = total < 2;
   };
   find.addEventListener('input', () => {
     shown.find.query = find.value;
@@ -837,32 +905,45 @@ function renderTrafficPayload(container, request, view, targetView = null) {
   const sameRequest = trafficPayloadShown?.identity === identity;
   if (!sameRequest) {
     trafficPayloadShown?.dispose();
-    trafficPayloadShown = {identity, source: null, model: null, expanded: new Set(['$']), selected: null,
-      find: {query: '', matches: [], current: -1, truncated: false}, dispose() {}};
+    trafficPayloadShown = {identity, source: null, model: null, expanded: new Set(['$']), selected: null, hexOffset: 0,
+      find: trafficPayloadNoFind(), dispose() {}};
   }
   const shown = trafficPayloadShown;
   if (!['captured', 'captured_truncated'].includes(body?.state)) shown.model = null;
   else if (view?.status === 'ready' && shown.source !== (view.bytes ?? view.text)) {
     shown.source = view.bytes ?? view.text;
     shown.model = trafficPayloadModel(body, view);
+    shown.hexOffset = 0;
   } else if (view?.status === 'error' && !view.retryable) {
     // An integrity failure discards the last read; any other failure keeps it.
     shown.model = shown.source = null;
   }
   const key = JSON.stringify([identity, body, request?.path, request?.target, request?.urlTruncated, request?.hostOnly,
     targetView?.status ?? null, targetView?.loaded ?? null, targetView?.unknown ?? null, targetView?.error ?? targetView?.reason ?? '',
-    view?.status ?? null, view?.error ?? view?.reason ?? '', view?.verified ?? null, view?.loaded ?? null,
-    Boolean(view?.loadingMore), view?.moreError ?? '', Boolean(shown.model)]);
+    view?.status ?? null, view?.error ?? view?.reason ?? '', view?.verified ?? null, view?.received ?? null, view?.verifying ?? null,
+    Boolean(shown.model)]);
   if (container.dataset.renderKey === key) return;
   container.dataset.renderKey = key;
   shown.dispose();
   const query = trafficPayloadQuery(request, targetView);
   const panel = {
     search() {
+      trafficPayloadStopFind(shown.find);
       const raw = shown.find.query, needle = raw.toLowerCase();
-      const matches = raw ? panel.sections.flatMap(section => section.search(raw, needle)) : [];
-      shown.find = {query: raw, matches: matches.slice(0, TRAFFIC_PAYLOAD_FIND_LIMIT), current: matches.length ? 0 : -1,
-        truncated: matches.length >= TRAFFIC_PAYLOAD_FIND_LIMIT};
+      shown.find = {...trafficPayloadNoFind(), query: raw, needle, parts: raw ? panel.sections.flatMap(section => section.search(raw, needle)) : []};
+    },
+    // A running count repaints its marks and count about every 200 ms and
+    // once at the end; a Find typed before its first match moves to it.
+    progress(search) {
+      if (!shown.find.parts.some(part => part.search === search)) return;
+      if (search.status === 'running' && Date.now() - (shown.find.painted ?? 0) < 200) return;
+      shown.find.painted = Date.now();
+      if (shown.find.reveal && trafficPayloadFindTotal(shown.find)) {
+        panel.go(0);
+        return;
+      }
+      for (const section of panel.sections) section.progress?.();
+      panel.count?.();
     },
     refresh() {
       if (shown.find.query) {
@@ -873,10 +954,15 @@ function renderTrafficPayload(container, request, view, targetView = null) {
       for (const section of panel.sections) section.render();
       panel.count?.();
     },
+    // Until a running count is done, Next stops at the last match counted.
     go(step) {
-      const {matches} = shown.find;
-      if (matches.length) shown.find.current = (shown.find.current + step + matches.length) % matches.length;
-      const match = matches[shown.find.current];
+      const find = shown.find, total = trafficPayloadFindTotal(find), running = trafficPayloadFindRunning(find);
+      if (total) {
+        const moved = find.rank + step;
+        find.rank = running ? Math.max(0, Math.min(total - 1, moved)) : (moved + total) % total;
+      }
+      const match = total ? trafficPayloadFindCurrent(find) : null;
+      find.reveal = !match && Boolean(running);
       for (const section of panel.sections) if (section.name !== match?.section) section.render();
       const row = match ? panel.sections.find(section => section.name === match.section).reveal(match) : null;
       (row?.querySelector('.is-current') ?? row)?.scrollIntoView?.({block: 'center'});
@@ -898,9 +984,10 @@ function renderTrafficPayload(container, request, view, targetView = null) {
   }
   if (query?.pairs?.length || shown.model) nodes.push(trafficPayloadTools(panel, shown));
   nodes.push(...panel.sections.map(section => section.element), trafficPayloadDetails(body, view));
-  // Keyboard focus stays on the body when its next range replaces the button.
-  const refocus = container.querySelector('.traffic-body-more') === globalThis.document?.activeElement;
-  // The same request keeps its place when a new range arrives or the view redraws.
+  // Keyboard focus stays on Cancel or Read the body as one replaces the other, then moves to the body.
+  const reading = container.querySelector('.traffic-body-read');
+  const refocus = Boolean(reading) && reading === globalThis.document?.activeElement;
+  // The same request keeps its place when the view redraws.
   const scrolls = sameRequest && !shown.find.query ? new Map([...container.querySelectorAll('.traffic-payload-section')].map(section =>
     [section.dataset.section, section.querySelector('.traffic-payload-view')?.scrollTop ?? 0])) : null;
   container.replaceChildren(...nodes);
@@ -909,8 +996,11 @@ function renderTrafficPayload(container, request, view, targetView = null) {
     const view = section.querySelector('.traffic-payload-view'), top = scrolls?.get(section.dataset.section);
     if (view && top) view.scrollTop = top;
   }
-  if (refocus) (container.querySelector('.traffic-body-more') ?? container.querySelector('.traffic-payload-view'))?.focus?.();
-  shown.dispose = () => panel.sections.forEach(section => section.dispose());
+  if (refocus) (container.querySelector('.traffic-body-read') ?? container.querySelector('.traffic-payload-view'))?.focus?.();
+  shown.dispose = () => {
+    trafficPayloadStopFind(shown.find);
+    panel.sections.forEach(section => section.dispose());
+  };
   shown.relayout = () => {
     if (container.isConnected === false || !shown.model) return;
     const body = panel.sections.find(section => section.name === 'payload');

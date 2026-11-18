@@ -3422,17 +3422,24 @@
         targetState.vmOpcodeWorkspace = targetState.lastValidVmOpcodeWorkspace;
       }
 
+      // One window of a module's inspection. Rows are in binary order and sit
+      // exactly where row_window says, so a page joins its neighbors by index.
       function isWasmInspection(value, source) {
-        return value?.schema === 'wasm-inspection-v1' && value.artifact_id === source.artifact_id &&
+        const window = value?.row_window;
+        return value?.schema === 'wasm-inspection-v2' && value.artifact_id === source.artifact_id &&
           value.sha256 === source.sha256 && value.byte_size === source.byte_size &&
-          ['decoded', 'partial'].includes(value.status) && Array.isArray(value.rows) && value.rows.length <= 8192 &&
+          ['decoded', 'partial'].includes(value.status) && Array.isArray(value.rows) && value.rows.length <= 2048 &&
           typeof value.notice === 'string' && value.notice.length <= 512 &&
           Array.isArray(value.omissions) && value.omissions.length <= 128 && value.omissions.every(v => typeof v === 'string' && v.length <= 512) &&
           ['sections', 'defined_functions', 'imported_functions', 'instructions'].every(key => Number.isSafeInteger(value[key]) && value[key] >= 0) &&
-          value.rows.every(row => row && typeof row.kind === 'string' && row.kind.length <= 32 &&
-            typeof row.text === 'string' && row.text.length <= 540 && !/[\r\n\u2028\u2029]/u.test(row.text) && typeof row.text_truncated === 'boolean' &&
+          Number.isSafeInteger(window?.offset) && Number.isSafeInteger(window.total_rows) && window.rows === value.rows.length &&
+          window.offset + window.rows <= window.total_rows &&
+          window.next_offset === (window.offset + window.rows < window.total_rows ? window.offset + window.rows : null) &&
+          value.rows.every((row, index) => row && typeof row.kind === 'string' && row.kind.length <= 32 &&
+            typeof row.text === 'string' && !/[\r\n\u2028\u2029]/u.test(row.text) &&
             Number.isSafeInteger(row.byte_offset) && row.byte_offset >= 0 && row.byte_offset <= value.byte_size &&
             Number.isSafeInteger(row.byte_end) && row.byte_end >= row.byte_offset && row.byte_end <= value.byte_size &&
+            (index === 0 || row.byte_offset >= value.rows[index - 1].byte_offset) &&
             (row.function_index === null || (Number.isSafeInteger(row.function_index) && row.function_index >= 0)));
       }
 

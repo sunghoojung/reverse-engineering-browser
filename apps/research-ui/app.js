@@ -8200,7 +8200,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const fallback = view?.formatted && view.formatted.engine !== 'oxc' && view.formatNotice && !state.sourceDeobfuscated
           ? `Pretty-printed with the whitespace layout because ${view.formatNotice}.` : '';
         const limit = [sourceLimitText(source, view), fallback].filter(Boolean).join(' ');
-        if (elements.sourceLimitNotice) {elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;}
+        if (elements.sourceLimitNotice) {
+          elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;
+          // The Inspect summary describes rows; Graph and Readable give its space to their own view.
+          elements.sourceLimitNotice.dataset.kind = view?.wasm ? 'inspection' : 'layout';
+        }
         // The status bar names the evidence state; the full provenance is its tooltip.
         const label = sourceViewLabel(source, view);
         elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || !sourcePreviewLoaded(source) ? label

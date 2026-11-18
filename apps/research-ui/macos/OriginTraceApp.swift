@@ -90,12 +90,43 @@ private struct SchemeTaskRegistry {
   }
 }
 
+// The four evidence stores the offline workspace reads: the ones the app was
+// started with, or an ended live session's folder opened for review.
+private struct EvidenceStores: Equatable {
+  var events: URL
+  var trace: URL
+  var signals: URL
+  var artifacts: URL
+  // The ended session folder these are in, or nil for the configured stores.
+  var endedSession: URL?
+
+  // The stores at the paths the launcher writes in each session folder
+  // (scripts/run-live-session.sh).
+  static func session(_ folder: URL) -> EvidenceStores {
+    EvidenceStores(
+      events: folder.appendingPathComponent("events.jsonl"),
+      trace: folder.appendingPathComponent("origin-trace.jsonl"),
+      signals: folder.appendingPathComponent("request-signals.jsonl"),
+      artifacts: folder.appendingPathComponent("artifacts", isDirectory: true),
+      endedSession: folder)
+  }
+}
+
 private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   private let indexURL: URL
-  private let eventStoreURL: URL
-  private let traceStoreURL: URL
-  private let signalStoreURL: URL
-  private let artifactStoreURL: URL
+  // Open Session replaces the stores while scheme tasks read them on
+  // background queues, so every read takes them under this lock.
+  private let storesLock = NSLock()
+  private var openStores: EvidenceStores
+  var stores: EvidenceStores {
+    storesLock.lock()
+    defer { storesLock.unlock() }
+    return openStores
+  }
+  private var eventStoreURL: URL { stores.events }
+  private var traceStoreURL: URL { stores.trace }
+  private var signalStoreURL: URL { stores.signals }
+  private var artifactStoreURL: URL { stores.artifacts }
   private let apiCollectionStoreURL: URL
   private let localAnalystStoreURL: URL
   private let analystRunnerURL: URL
@@ -115,10 +146,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   init(
     indexURL: URL,
-    eventStoreURL: URL,
-    traceStoreURL: URL,
-    signalStoreURL: URL,
-    artifactStoreURL: URL,
+    stores: EvidenceStores,
     apiCollectionStoreURL: URL,
     localAnalystStoreURL: URL,
     analystRunnerURL: URL,
@@ -129,10 +157,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     demoEvidenceEnabled: Bool
   ) {
     self.indexURL = indexURL
-    self.eventStoreURL = eventStoreURL
-    self.traceStoreURL = traceStoreURL
-    self.signalStoreURL = signalStoreURL
-    self.artifactStoreURL = artifactStoreURL
+    openStores = stores
     self.apiCollectionStoreURL = apiCollectionStoreURL
     self.localAnalystStoreURL = localAnalystStoreURL
     self.analystRunnerURL = analystRunnerURL
@@ -147,6 +172,15 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
 
   func stopStoredBackend() {
     storedBackend.stop()
+  }
+
+  // Points the offline workspace, and the bundled backend's Rust-only reads,
+  // at other stores. The caller then loads the page again.
+  func open(_ stores: EvidenceStores, backendArguments: [String]) {
+    storesLock.lock()
+    openStores = stores
+    storesLock.unlock()
+    storedBackend.replace(arguments: backendArguments)
   }
 
   deinit {
@@ -1773,6 +1807,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
         "event_window": window.coverage,
         "broker_connected": brokerConnected(),
         "capture_mode": captureMode(),
+        // An ended session opened for review captures nothing more.
+        "session_ended": stores.endedSession != nil,
       ],
       options: []
     )
@@ -2616,7 +2652,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 
   private func captureMode() -> String {
-    if brokerSocketURL != nil { return "live" }
+    if brokerSocketURL != nil || stores.endedSession != nil { return "live" }
     if demoEvidenceEnabled { return "demo" }
     return FileManager.default.fileExists(atPath: eventStoreURL.path) ? "live" : "idle"
   }
@@ -2670,7 +2706,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   }
 }
 
-private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation {
+private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, NSMenuItemValidation, NSMenuDelegate {
   private var window: NSWindow?
   private weak var webView: WKWebView?
   private var contentHandler: LocalContentHandler?
@@ -2682,10 +2718,20 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var closeSmoke: NativeCloseGuardSmoke?
   private let liveSessionCoordinator = LiveSessionCoordinator()
   private let smokeTest = ProcessInfo.processInfo.environment["REB_APP_SMOKE_TEST"] == "1"
+  // The start panel's last mode and session options, saved for later app
+  // runs (LiveSessionPreferences). An explicit environment switch still
+  // decides at launch.
+  private lazy var preferencesURL = LiveSessionPreferences.storeURL(
+    environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL())
+  private lazy var savedPreferences = LiveSessionPreferences.load(preferencesURL)
   // The researcher's capture mode for this app run. It starts from the
-  // environment and follows the start panel, so a later panel or reopen never
-  // replaces Metadata with the default.
-  private lazy var selectedCaptureMode = LiveCaptureMode.configured(ProcessInfo.processInfo.environment)
+  // environment and the saved choice and follows the start panel, so a later
+  // panel or reopen never replaces Metadata with the default.
+  private lazy var selectedCaptureMode = LiveCaptureMode.configured(
+    ProcessInfo.processInfo.environment, saved: savedPreferences.mode)
+  // The session options for this app run, held and saved as the mode is.
+  private lazy var selectedOptions = LiveSessionOptions.configured(
+    ProcessInfo.processInfo.environment, saved: savedPreferences.options)
   // The content limits last chosen in the panel, held for the run as the mode
   // is. Nil until the panel starts a Content session: until then a session
   // takes them from the environment, and the panel offers those.
@@ -2706,6 +2752,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private var openLiveWorkspaceWhenLoaded = false
   // When the app last reloaded after the web content process stopped.
   private var lastContentProcessReload: Date?
+  // The stores the app was started with, which the offline workspace shows
+  // again once a session opened for review is left by New Live Session.
+  private var configuredStores: EvidenceStores?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     if smokeTest {
@@ -2732,21 +2781,15 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     let analystRunnerCoreURL = researchUIURL.appendingPathComponent("analyst_runner_core.js")
     let decoderExecutableURL = Bundle.main.bundleURL
       .appendingPathComponent("Contents/MacOS/OriginTraceDecoder")
+    let stores = EvidenceStores(
+      events: eventStoreURL, trace: traceStoreURL, signals: signalStoreURL, artifacts: artifactStoreURL)
+    configuredStores = stores
     let storedBackend = StoredEvidenceBackend(
       executableURL: Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/OriginTraceBackend"),
-      arguments: [
-        "--store", eventStoreURL.path, "--trace-store", traceStoreURL.path,
-        "--signal-store", signalStoreURL.path, "--artifacts", artifactStoreURL.path,
-        "--api-collection", apiCollectionStoreURL.path, "--local-analyst", localAnalystStoreURL.path,
-        "--js-invocation-site-store", InvocationSiteSet.storeURL(
-          environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL()).path,
-      ])
+      arguments: storedBackendArguments(stores))
     let handler = LocalContentHandler(
       indexURL: indexURL,
-      eventStoreURL: eventStoreURL,
-      traceStoreURL: traceStoreURL,
-      signalStoreURL: signalStoreURL,
-      artifactStoreURL: artifactStoreURL,
+      stores: stores,
       apiCollectionStoreURL: apiCollectionStoreURL,
       localAnalystStoreURL: localAnalystStoreURL,
       analystRunnerURL: analystRunnerURL,
@@ -2824,6 +2867,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       liveSessionCoordinator.start(
         braveExecutableURL: resourcesURL.appendingPathComponent("__missing_smoke_browser__"),
         content: content,
+        options: .defaults,
         useSystemKeychain: false,
         ready: { _ in
           print("SMOKE_ERROR Unexpected live session readiness")
@@ -2860,7 +2904,6 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       closeGuard?.navigationWillStart()
       clientProjectExport?.navigationWillStart()
       agentBridge?.navigationWillStart()
-    agentBridge?.navigationWillStart()
       sessionPanel?.navigationWillStart()
     }
     decisionHandler(.allow)
@@ -2953,6 +2996,7 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       LiveCaptureContent.resolve(
         environment: ProcessInfo.processInfo.environment, mode: selectedCaptureMode,
         limits: selectedCaptureMode.capturesNetworkContent ? selectedContentLimits : nil, modeChosen: panelChoseMode),
+      options: selectedOptions,
       useSystemKeychain: configuredAutomaticSystemKeychain()
     )
   }
@@ -2967,6 +3011,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     // preselects Metadata (LiveCaptureMode.configured), and the panel says so.
     let environment = ProcessInfo.processInfo.environment
     sessionPanel.modeNote = !panelChoseMode && LiveCaptureMode.requestContentOptedOut(environment) ? LiveCaptureMode.optOutNote : nil
+    sessionPanel.options = selectedOptions
+    sessionPanel.researchProfile = LiveSessionOptions.researchProfile(
+      environment: environment, originTrace: originTraceSupportURL(), systemKeychain: false)
     sessionPanel.content = .choose(
       mode: selectedCaptureMode,
       limits: selectedContentLimits ?? ContentLimits.configured(environment))
@@ -2977,38 +3024,58 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
   private func answerLiveSessionPanel(_ choice: NativeSessionPanel.Choice) {
     guard let sessionPanel else { return }
     switch (choice, sessionPanel.content) {
-    // A session the panel starts or retries uses the isolated, prompt-free
-    // research profile; the page cannot ask for the macOS Keychain.
-    case (.start(let mode, let limits), .choose):
+    // A session the panel starts or retries uses the prompt-free mock
+    // Keychain; the page cannot ask for the macOS Keychain.
+    case (.start(let mode, let limits, let options), .choose):
       automaticSessionSuppressed = false
       selectedCaptureMode = mode
+      selectedOptions = options
       panelChoseMode = true
       // A Metadata start keeps the last Content limits for a later Content one.
       if let limits { selectedContentLimits = limits }
+      saveLiveSessionPreferences()
       // The panel names limits only for a session they apply to: a category
       // mask without Network and Artifact keeps no request content.
       let content = LiveCaptureContent.resolve(
         environment: ProcessInfo.processInfo.environment, mode: mode, limits: limits, modeChosen: true)
       // Not a decision, so the start below is not refused as one behind it.
       sessionPanel.content = .starting(content)
-      startAutomaticLiveSession(content, useSystemKeychain: false)
-    // Exactly the failed start's content switches, never a new reading of the
-    // environment, so the session is the one the panel names.
+      startAutomaticLiveSession(content, options: options, useSystemKeychain: false)
+    // Exactly the failed start's content switches and options, never a new
+    // reading of the environment, so the session is the one the panel names.
     case (.retry, .failed(_, let content)):
+      let options = sessionPanel.options
       sessionPanel.content = .starting(content)
       liveSessionCoordinator.stop()
-      startAutomaticLiveSession(content, useSystemKeychain: false)
+      startAutomaticLiveSession(content, options: options, useSystemKeychain: false)
     case (.offline, .choose), (.offline, .failed):
       sessionPanel.content = .hidden
       automaticSessionSuppressed = true
       presentOriginTraceWindow()
       leaveEndedLiveWorkspace()
+    case (.review(let folder), .failed):
+      reviewSession(folder)
     default:
       break
     }
   }
 
-  private func startAutomaticLiveSession(_ content: LiveCaptureContent, useSystemKeychain: Bool) {
+  private func saveLiveSessionPreferences() {
+    let preferences = LiveSessionPreferences(mode: selectedCaptureMode, options: selectedOptions)
+    guard preferences != savedPreferences else { return }
+    do {
+      try preferences.write(to: preferencesURL)
+      savedPreferences = preferences
+    } catch {
+      // The session still starts with these choices; only the next app run
+      // offers the earlier ones.
+      NSLog("Origin Trace could not save the start panel choices to %@: %@", preferencesURL.path, error.localizedDescription)
+    }
+  }
+
+  private func startAutomaticLiveSession(
+    _ content: LiveCaptureContent, options: LiveSessionOptions, useSystemKeychain: Bool
+  ) {
     guard !liveSessionCoordinator.isRunning, !liveSessionDecisionOpen else { return }
     guard let braveURL = customBraveApplicationURL(),
       let braveBundle = Bundle(url: braveURL),
@@ -3026,9 +3093,13 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       )
       return
     }
+    // The panel holds the options of the session starting, so Retry and Start
+    // Again repeat them.
+    sessionPanel?.options = options
     liveSessionCoordinator.start(
       braveExecutableURL: braveExecutableURL,
       content: content,
+      options: options,
       useSystemKeychain: useSystemKeychain,
       ready: { [weak self] liveURL in
         guard let self else { return }
@@ -3109,6 +3180,104 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     })
   }
 
+  // The bundled backend's arguments: these evidence stores and the app's own.
+  private func storedBackendArguments(_ stores: EvidenceStores) -> [String] {
+    [
+      "--store", stores.events.path, "--trace-store", stores.trace.path,
+      "--signal-store", stores.signals.path, "--artifacts", stores.artifacts.path,
+      "--api-collection", configuredApiCollectionStore().path, "--local-analyst", configuredLocalAnalystStore().path,
+      "--js-invocation-site-store", InvocationSiteSet.storeURL(
+        environment: ProcessInfo.processInfo.environment, applicationSupport: originTraceSupportURL()).path,
+    ]
+  }
+
+  // Opens an ended session's folder in the offline workspace, asking first
+  // about unsaved work in the current document. A running session keeps
+  // running; Open Live Workspace returns to it.
+  private func reviewSession(_ folder: URL) {
+    guard let contentHandler, let localApplicationURL else { return }
+    guard let session = RecordedSession.at(folder) else {
+      presentSessionReviewError(
+        "\((folder.path as NSString).abbreviatingWithTildeInPath) holds no event store, so it is not a live session folder.")
+      return
+    }
+    guard !RecordedSession.recording(session.folder) else {
+      presentSessionReviewError(
+        "This session is still recording. Open Live Workspace shows it while it runs; open it here once it has ended.")
+      return
+    }
+    closeGuard?.replaceDocument(.init(
+      question: "Open this session with unsaved or unconfirmed changes?",
+      actionTitle: "Open Session"
+    ) { [weak self] in
+      guard let self else { return }
+      self.sessionPanel?.content = .hidden
+      // As after Continue Offline, a reopen starts nothing behind the review.
+      self.automaticSessionSuppressed = true
+      let stores = EvidenceStores.session(session.folder)
+      contentHandler.open(stores, backendArguments: self.storedBackendArguments(stores))
+      self.load(localApplicationURL)
+      self.presentOriginTraceWindow()
+    })
+  }
+
+  private func presentSessionReviewError(_ message: String) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Origin Trace could not open this session"
+    alert.informativeText = message
+    if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+  }
+
+  private var recordedSessionsRoot: URL {
+    RecordedSession.root(environment: ProcessInfo.processInfo.environment, originTrace: originTraceSupportURL())
+  }
+
+  @objc private func openSession(_ sender: Any?) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    panel.canCreateDirectories = false
+    panel.directoryURL = recordedSessionsRoot
+    panel.prompt = "Open Session"
+    panel.message = "Choose a live session folder to open its evidence in the offline workspace."
+    let open = { [weak self] (response: NSApplication.ModalResponse) in
+      guard response == .OK, let url = panel.url else { return }
+      self?.reviewSession(url)
+    }
+    if let window { panel.beginSheetModal(for: window, completionHandler: open) } else { open(panel.runModal()) }
+  }
+
+  @objc private func openRecentSession(_ sender: NSMenuItem) {
+    guard let folder = sender.representedObject as? URL else { return }
+    reviewSession(folder)
+  }
+
+  @objc private func showSessionFolders(_ sender: Any?) {
+    try? FileManager.default.createDirectory(
+      at: recordedSessionsRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    NSWorkspace.shared.open(recordedSessionsRoot)
+  }
+
+  // Open Recent Session lists the newest ended sessions each time it opens.
+  func menuNeedsUpdate(_ menu: NSMenu) {
+    menu.removeAllItems()
+    let sessions = RecordedSession.recent(in: recordedSessionsRoot, limit: 10)
+    if sessions.isEmpty {
+      menu.addItem(withTitle: "No Ended Sessions", action: nil, keyEquivalent: "").isEnabled = false
+    }
+    for session in sessions {
+      let item = menu.addItem(withTitle: session.title, action: #selector(openRecentSession(_:)), keyEquivalent: "")
+      item.target = self
+      item.representedObject = session.folder
+      item.toolTip = (session.folder.path as NSString).abbreviatingWithTildeInPath
+    }
+    menu.addItem(.separator())
+    menu.addItem(withTitle: "Show Session Folders in Finder", action: #selector(showSessionFolders(_:)), keyEquivalent: "")
+      .target = self
+  }
+
   private func configuredAutomaticSystemKeychain() -> Bool {
     ProcessInfo.processInfo.environment["REB_AUTOMATIC_USE_SYSTEM_KEYCHAIN"] == "1"
   }
@@ -3124,6 +3293,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       self.automaticSessionSuppressed = false
       self.liveSessionCoordinator.stop()
       self.sessionPanel?.content = .hidden
+      if let contentHandler = self.contentHandler, let configured = self.configuredStores, contentHandler.stores != configured {
+        contentHandler.open(configured, backendArguments: self.storedBackendArguments(configured))
+      }
       if let localApplicationURL = self.localApplicationURL { self.load(localApplicationURL) }
       self.presentLiveSessionSetup()
     })
@@ -3381,6 +3553,14 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
       action: #selector(openLiveWorkspace(_:)),
       keyEquivalent: ""
     ).target = self
+    applicationMenu.addItem(
+      withTitle: "Open Session…",
+      action: #selector(openSession(_:)),
+      keyEquivalent: "o"
+    ).target = self
+    let recentMenu = NSMenu(title: "Open Recent Session")
+    recentMenu.delegate = self
+    applicationMenu.addItem(withTitle: "Open Recent Session", action: nil, keyEquivalent: "").submenu = recentMenu
     applicationMenu.addItem(.separator())
     applicationMenu.addItem(
       withTitle: "Hide Origin Trace",
@@ -3449,8 +3629,9 @@ private final class OriginTraceApp: NSObject, NSApplicationDelegate, WKNavigatio
     NSApp.terminate(nil)
   }
 
-  // A failed or ended session is a decision in the start panel, with Retry
-  // and Continue Offline, over whichever workspace the window shows.
+  // A failed or ended session is a decision in the start panel over whichever
+  // workspace the window shows: Retry or Continue Offline for a failed start,
+  // Start Again or Review Session for an ended session.
   private func presentLiveSessionError(_ failure: LiveSessionCoordinator.Failure, content: LiveCaptureContent) {
     // No modal any more, so a failure at launch, before the event loop runs,
     // is held by the panel and drawn once the page loads.

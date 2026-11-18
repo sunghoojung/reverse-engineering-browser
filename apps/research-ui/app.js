@@ -813,7 +813,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (capture.calls.length === 0 || !capture.width || !capture.height || !capture.demo) {
           frame.classList.add('unavailable');
           const explanation = capturedOutput && !state.canvasImageCaptureEnabled
-            ? 'Image capture is off for this session. Restart with REB_CAPTURE_CANVAS_IMAGES=1 to retain sensitive Canvas output.'
+            ? 'Image capture is off for this session. To retain sensitive Canvas output, start a Content session with Canvas images on, under Advanced options in New Live Session….'
             : capturedOutput && capture.artifact
               ? capture.artifact.canvasPreviewNotice || owner?.imageError || capture.previewReason || capture.artifact.loadError || (capture.artifact.loading
                 ? 'Loading the retained Canvas preview…' : 'Canvas preview is waiting for a bounded read slot.')
@@ -1296,11 +1296,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const offline = state.broker === 'unavailable' || failed;
         const retainedLabel = signalEvents.length ? 'Evidence retained' : 'Disconnected';
         elements.signalSessionBadge.textContent = failed ? retainedLabel
+          : state.sessionEnded ? 'Session ended'
           : state.captureStopped ? 'Probes stopped'
           : offline ? retainedLabel
           : state.sessionMode === 'demo' ? 'Demo evidence'
             : state.sessionMode === 'live' ? 'Live native capture' : 'No capture';
-        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
+        elements.signalSessionBadge.dataset.kind = failed ? 'offline' : state.sessionEnded ? 'idle'
+          : state.captureStopped ? 'stopped' : offline ? 'offline' : state.sessionMode;
 
         elements.signalViewTabs.forEach(button => {
           const selected = button.dataset.signalView === state.signalView;
@@ -1534,20 +1536,23 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           (!state.artifactReceiverConnected || state.artifactReceiverError);
         const offline = brokerOffline;
         const connecting = live && state.broker === 'connecting';
-        const modeLabel = live ? (offline ? 'Live offline'
+        const ended = live && state.sessionEnded;
+        const modeLabel = ended ? 'Ended session' : live ? (offline ? 'Live offline'
           : artifactOffline ? 'Live degraded' : 'Live session')
           : idle ? 'Ready' : preview ? 'Preview' : 'Demo evidence';
-        const captureLabel = connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
-          : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
+        const captureLabel = ended ? 'Ended' : connecting ? 'Connecting' : offline ? 'Offline' : artifactOffline ? 'Artifacts offline'
+          : live && state.captureStopped ? 'Stopped' : live ? 'Capturing' : idle ? 'No session' : preview ? 'Preview' : 'Demo';
         elements.sessionMode.textContent = modeLabel;
-        elements.sessionMode.dataset.kind = state.sessionMode;
-        elements.sessionMode.title = live
-          ? 'Only native broker evidence is shown; sample rows are hidden.'
-          : idle
-            ? 'No evidence is bundled. Start a live capture to populate the workspace.'
-            : preview
+        elements.sessionMode.dataset.kind = ended ? 'ended' : state.sessionMode;
+        elements.sessionMode.title = ended
+          ? 'An ended live session opened for review. Its evidence stays in its session folder; it captures nothing more.'
+          : live
+            ? 'Only native broker evidence is shown; sample rows are hidden.'
+            : idle
               ? 'No evidence is bundled. Start a live capture to populate the workspace.'
-              : 'Deterministic developer evidence is loaded.';
+              : preview
+                ? 'No evidence is bundled. Start a live capture to populate the workspace.'
+                : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
         const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies',
@@ -1568,8 +1573,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
         elements.capture.classList.toggle('preview', preview);
-        // No session is a neutral state; the ok color belongs to a live broker.
-        elements.capture.classList.toggle('idle', idle && !offline && !artifactOffline);
+        // No session and an ended one are neutral; the ok color belongs to a
+        // live broker.
+        elements.capture.classList.toggle('idle', (idle || ended) && !offline && !artifactOffline);
         elements.capture.querySelector('span:last-child').textContent = captureLabel;
         elements.capture.setAttribute('aria-label', `${modeLabel}: ${captureLabel}`);
         elements.broker.classList.toggle('offline', offline);
@@ -4501,7 +4507,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             renderInspectorDetails([
               { key: 'First event', value: request.firstTimestamp, type: 'ns' },
               { key: 'Last event', value: request.lastTimestamp, type: 'ns' },
-              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              // Exact here; the Traffic column shows it compact.
+              { key: 'Duration', value: request.time === 'pending' ? trafficTimeLabel(request.time) : String(request.time), type: 'time' },
               { key: 'Lifecycle', value: request.operation, type: 'state' },
               { key: 'Events', value: request.events.length, type: 'count' },
               { key: 'Phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }
@@ -9157,6 +9164,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.eventEtag = response.headers.get('ETag');
           const brokerConnected = body.broker_connected !== false;
           state.captureStopped = body.capture_stopped === true;
+          state.sessionEnded = body.session_ended === true;
           state.captureControlsAvailable = body.capture_controls_available === true;
           const nextSessionMode = ['demo', 'idle'].includes(body.capture_mode)
             ? body.capture_mode : 'live';

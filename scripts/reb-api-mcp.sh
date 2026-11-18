@@ -22,7 +22,6 @@ base_url=""
 allow_effects=0
 allow_session_start=0
 permission=""
-allow_sensitive_capture=0
 require_live=0
 timeout=""
 mode="serve"
@@ -85,8 +84,8 @@ flags, with the same meaning as the Origin Trace agent's setting. read-only,
 ask and auto omit captured content from results; ask and auto also list
 effectful tools (your client decides whether it asks before each); full adds
 live session start and the content reads, so captured source and bodies go to
-the model provider. Sensitive capture under full also needs
---allow-sensitive-capture. None of these is authorization.
+the model provider, and the sessions it starts capture what the Origin Trace
+app's do, request content included. None of these is authorization.
 
 Options:
   --allow-effects       Advertise effectful operations. Not authorization.
@@ -94,9 +93,6 @@ Options:
                         Requires --allow-effects. Not authorization.
   --permission LEVEL    read-only, ask, auto or full, in place of the flags
                         above. Not authorization.
-  --allow-sensitive-capture
-                        With --permission full, let session starts name
-                        sensitive capture options. Not authorization.
   --require-live        Refuse idle capture or a disconnected native capture broker.
                         get_session_context remains readable after startup until
                         the endpoint file or backend instance changes.
@@ -351,9 +347,6 @@ build_mcp_args() {
   if [[ -n "$permission" ]]; then
     mcp_exec_args+=(--permission "$permission")
   fi
-  if [[ "$allow_sensitive_capture" == 1 ]]; then
-    mcp_exec_args+=(--allow-sensitive-capture)
-  fi
   if [[ "$allow_effects" == 1 ]]; then
     mcp_exec_args+=(--allow-effects)
   fi
@@ -404,10 +397,7 @@ effects_note() {
   ask) printf 'Permission ask: effectful tools are listed; keep your client asking before each call. Captured content is omitted. Not authorization.\n' >&2; return ;;
   auto) printf 'Permission auto: effectful tools are listed and may run without asking if your client allows it. Captured content is omitted. Not authorization.\n' >&2; return ;;
   full)
-    printf 'Permission full: effects, live session start and content reads; captured source and bodies go to the model provider. Start sessions only for an authorized target. Not authorization.\n' >&2
-    if [[ "$allow_sensitive_capture" == 1 ]]; then
-      printf 'Sensitive capture options are allowed for sessions this connection starts.\n' >&2
-    fi
+    printf 'Permission full: effects, live session start and content reads; captured source and bodies go to the model provider, and its sessions capture request content as the app does. Start sessions only for an authorized target. Not authorization.\n' >&2
     return
     ;;
   esac
@@ -632,7 +622,8 @@ parse_args() {
       shift 2
       ;;
     --allow-sensitive-capture)
-      allow_sensitive_capture=1
+      # Accepted from configs written before --permission full became the
+      # one consent for session capture, and ignored.
       shift
       ;;
     --timeout)
@@ -684,9 +675,6 @@ main() {
   fi
   if [[ -n "$permission" && ("$allow_effects" == 1 || "$allow_session_start" == 1) ]]; then
     die "--permission replaces --allow-effects and --allow-session-start; pass one or the other. No server was started."
-  fi
-  if [[ "$allow_sensitive_capture" == 1 && "$permission" != full ]]; then
-    die "--allow-sensitive-capture needs --permission full. No server was started."
   fi
   case "$mode" in
   list) run_list ;;

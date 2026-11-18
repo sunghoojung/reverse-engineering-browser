@@ -61,7 +61,7 @@ export async function checkPackageContract() {
   assert(native.includes('(NSApp.modalWindow ?? window).makeKeyAndOrderFront(nil)'),
     'Activation/reopen must preserve the active modal alert keyboard target');
   assert(coordinator.includes('let prefix = "REB_LIVE_SESSION_FAILURE: "'));
-  assert(coordinator.includes('report(.exited(log: try? Data(contentsOf: configuration.logURL)))'));
+  assert(coordinator.includes('report(.exited(log: try? Data(contentsOf: configuration.logURL), status: process.terminationStatus))'));
   assert(coordinator.includes('failureCause(in: log, fallback: fallback)'));
   assert(build.includes('tools/check-live-session-failure.swift'),
     'The native build must execute the production failure-cause regression cases');

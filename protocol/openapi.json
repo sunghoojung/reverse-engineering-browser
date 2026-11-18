@@ -39,7 +39,7 @@
     "message_limit_bytes": 33554432,
     "permission": {
       "flag": "--permission",
-      "description": "One ordered setting for clients that let a model act. Each level names the individual flags it stands for, and the server applies exactly those. read-only, ask and auto also omit captured content from every result (--omit-content). ask and auto list the same tools: whether a person approves each effectful call is the client's own setting, and get_session_context reports the level so the model can say which applies. full adds starting, driving and ending its own live capture sessions and the content reads; its sensitive capture options also need --allow-sensitive-capture. The levels are not authorization, and the individual flags keep working on their own.",
+      "description": "One ordered setting for clients that let a model act. Each level names the individual flags it stands for, and the server applies exactly those. read-only, ask and auto also omit captured content from every result (--omit-content). ask and auto list the same tools: whether a person approves each effectful call is the client's own setting, and get_session_context reports the level so the model can say which applies. full adds starting, driving and ending its own live capture sessions and the content reads. Those sessions take the Origin Trace app's defaults, request content and its other sensitive capture included, so choosing full is the researcher's one consent to them; no start asks again. The levels are not authorization, and the individual flags keep working on their own.",
       "levels": [
         {
           "name": "read-only",
@@ -73,19 +73,7 @@
             "--allow-content"
           ]
         }
-      ],
-      "sensitive_capture": {
-        "flag": "--allow-sensitive-capture",
-        "requires": "--permission full",
-        "options": [
-          "canvas_images",
-          "request_content",
-          "response_media",
-          "js_invocation_digests",
-          "confirm_sensitive_capture"
-        ],
-        "description": "Under --permission full, start_live_session refuses these options before launching anything unless this flag is also set. The legacy --allow-session-start flag keeps accepting them with confirm_sensitive_capture, as before."
-      }
+      ]
     },
     "paused_values": {
       "flag": "--allow-content",
@@ -137,7 +125,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. Every option is off unless named and none is inherited from the environment. document_start permits document-start Console scripts (arming is a separate Console action). request_stacks records the call stack that started each renderer request (get_request_stack). request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. response_body_budget_mib (1 to 16384, default 512) sets how much unique response content is kept, and response_media also keeps element images, audio, video and fonts; both need request_content. Sensitive capture needs confirm_sensitive_capture: canvas_images, request_content (request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies) and js_invocation_digests. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. response_body_budget_mib (1 to 16384, default 512) sets how much unique response content is kept, and response_media also keeps element images, audio, video and fonts; both need request_content. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -158,7 +146,7 @@
             "effects": [
               "sensitive-capture"
             ],
-            "when": "canvas_images, request_content or js_invocation_digests is true."
+            "when": "canvas_images, request_content or js_invocation_digests is on, as each is by default."
           }
         ],
         "uncertainties": [
@@ -170,51 +158,8 @@
             "condition": "run-live-session.sh beside this reb-api build, or REB_LIVE_SESSION_SCRIPT, and a Brave build that defines the requested native V8 flags."
           }
         ],
-        "confirmations": [
-          {
-            "field": "confirm_sensitive_capture",
-            "value": true,
-            "when": {
-              "properties": {
-                "canvas_images": {
-                  "const": true
-                }
-              },
-              "required": [
-                "canvas_images"
-              ]
-            }
-          },
-          {
-            "field": "confirm_sensitive_capture",
-            "value": true,
-            "when": {
-              "properties": {
-                "request_content": {
-                  "const": true
-                }
-              },
-              "required": [
-                "request_content"
-              ]
-            }
-          },
-          {
-            "field": "confirm_sensitive_capture",
-            "value": true,
-            "when": {
-              "properties": {
-                "js_invocation_digests": {
-                  "const": true
-                }
-              },
-              "required": [
-                "js_invocation_digests"
-              ]
-            }
-          }
-        ],
-        "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended, Brave is closed, or capture expires.",
+        "confirmations": [],
+        "notes": "Runs the same launcher as make live, detached from this process, so the session outlives the MCP connection until it is ended (session_action end) or Brave is closed, or until duration_seconds when that is set.",
         "sources": [
           {
             "path": "apps/origin-trace-backend/src/session_launch.rs",
@@ -533,7 +478,7 @@
             }
           },
           "409": {
-            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed.",
+            "description": "Not a live capture, capture not recording, capture browser not running or not frontmost, no matching control, Accessibility not granted, or launcher gone. Nothing was changed, except that a relay stopped at its deadline (command_outcome_unknown) may still have opened the page.",
             "content": {
               "application/json": {
                 "schema": {
@@ -31309,8 +31254,7 @@
               "effects",
               "session_start",
               "content_reads",
-              "content_omitted",
-              "sensitive_capture"
+              "content_omitted"
             ],
             "properties": {
               "permission": {
@@ -31333,10 +31277,6 @@
               },
               "content_omitted": {
                 "type": "boolean"
-              },
-              "sensitive_capture": {
-                "type": "boolean",
-                "description": "start_live_session may name canvas_images, request_content, response_media or js_invocation_digests. False under --permission full without --allow-sensitive-capture."
               }
             }
           },
@@ -40348,7 +40288,7 @@
                 }
               ],
               "confirmations": [],
-              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 10 seconds. No page JavaScript runs.",
+              "notes": "Hands the URL to this session's running capture browser, which opens it in a new tab, then waits up to 10 seconds for a new stored record and reports capture_observed. Refused unless the session's capture broker is running, capture is not stopped, and a live process holds the session profile. The broker check cannot prove the browser records; capture_observed does. The relay process carries switches that leave it no network if it ever starts a browser of its own, and it is stopped after 15 seconds, before Chromium would replace a busy capture browser; that refusal is command_outcome_unknown, since the page may still open. No page JavaScript runs.",
               "sources": [
                 {
                   "path": "apps/origin-trace-backend/src/live_browser.rs",
@@ -41073,7 +41013,7 @@
       "LiveSessionStart": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Named capture options for a new live session. Every switch is off unless set, and none is inherited from the caller's environment.",
+        "description": "Named capture options for a new live session. A switch left unset takes the Origin Trace app's default (StartOptions::resolve in session_launch.rs), and none is inherited from the caller's environment. A default whose category bits category_mask lacks is off; a switch set to true still needs them and is refused without them.",
         "properties": {
           "url": {
             "type": "string",
@@ -41083,13 +41023,13 @@
           },
           "wasm_dispatch": {
             "type": "boolean",
-            "default": false,
-            "description": "Sample Wasm br_table dispatch. The configuration keeps at most 16 observations; a hot function can be limited with the sample budget options instead of raising that cap. Needs category bits 512 and 1024."
+            "default": true,
+            "description": "Sample Wasm br_table dispatch. The configuration keeps at most 16 observations; a hot function can be limited with the sample budget options instead of raising that cap. Needs category bits 512 and 1024. On by default when category_mask holds 512 and 1024."
           },
           "wasm_call_indirect": {
             "type": "boolean",
-            "default": false,
-            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024. Each stream still keeps at most 16 observations per configuration; sample budget options below restrict which of those 16 are kept."
+            "default": true,
+            "description": "Sample Wasm call_indirect targets. Needs category bits 512 and 1024. Each stream still keeps at most 16 observations per configuration; sample budget options below restrict which of those 16 are kept. On by default when category_mask holds 512 and 1024."
           },
           "wasm_samples_per_function": {
             "type": "integer",
@@ -41152,8 +41092,8 @@
           },
           "quiet": {
             "type": "boolean",
-            "default": false,
-            "description": "Ignore page debugger statements."
+            "default": true,
+            "description": "Ignore page debugger statements. On by default."
           },
           "category_mask": {
             "type": "integer",
@@ -41165,9 +41105,8 @@
           "duration_seconds": {
             "type": "integer",
             "minimum": 60,
-            "maximum": 3600,
-            "default": 3600,
-            "description": "Capture expires after this many seconds."
+            "maximum": 3155760000,
+            "description": "Stop capture after this many seconds. Unset, the session runs until it is ended: session_action end, closing Brave, or ending it in Origin Trace. The maximum is the launcher's open-ended limit, a century."
           },
           "localhost_only": {
             "type": "boolean",
@@ -41176,13 +41115,11 @@
           },
           "canvas_images": {
             "type": "boolean",
-            "default": false,
-            "description": "Store Canvas images, which can contain sensitive page content. Requires confirm_sensitive_capture and category bits 1 and 1024."
+            "description": "Store Canvas images, which can contain sensitive page content. On by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 1 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits."
           },
           "request_content": {
             "type": "boolean",
-            "default": false,
-            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session unless request_content_budget_mib) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture: requires confirm_sensitive_capture and category bits 256 and 1024. Off, Network capture still records each body's length, type and digest."
+            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session unless request_content_budget_mib) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture, on by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 256 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits. Off, Network capture still records each body's length, type and digest."
           },
           "request_content_budget_mib": {
             "type": "integer",
@@ -41203,13 +41140,28 @@
           },
           "request_stacks": {
             "type": "boolean",
-            "default": false,
-            "description": "Record the JavaScript and Wasm call stack that started each renderer request (request_initiator_stack events and stack artifacts, read with get_request_stack). Frames are identities, not values. Needs category bits 256 and 1024 and a Brave that defines --reb-request-stacks; a Brave without it refuses the start."
+            "default": true,
+            "description": "Record the JavaScript and Wasm call stack that started each renderer request (request_initiator_stack events and stack artifacts, read with get_request_stack). Frames are identities, not values. On by default when category_mask holds 256 and 1024; a Brave that does not define --reb-request-stacks then starts without stacks, and get_session_context capture_options says so. Set to true, it needs those category bits, and such a Brave refuses the start."
           },
           "document_start": {
             "type": "boolean",
+            "default": true,
+            "description": "Permit document-start Console scripts in this capture browser. On by default. Arms nothing: a rule still needs a live Console connection (connect_live) and a confirmed arm_document_start. Needs a Brave with the Native Console v3 overlay; get_native_console reports document_start_supported."
+          },
+          "browser_internal": {
+            "type": "boolean",
             "default": false,
-            "description": "Permit document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection (connect_live) and a confirmed arm_document_start. Needs a Brave with the Native Console v3 overlay; get_native_console reports document_start_supported."
+            "description": "Record browser-internal pages (chrome:, devtools: and WebUI renderers). Off, their requests are excluded and counted."
+          },
+          "extension_traffic": {
+            "type": "boolean",
+            "default": false,
+            "description": "Record extension worker traffic under each extension id. Off, it is excluded and counted."
+          },
+          "fresh_profile": {
+            "type": "boolean",
+            "default": false,
+            "description": "Start signed out, in a new, empty browser profile kept in this session's folder. Off, the session uses the browser profile agent sessions share (~/.config/origin-trace/agent-sessions/research-profiles), so sign-ins and site data carry over; that profile is never the app's, and a session that finds it held by a running Brave is refused."
           },
           "js_invocation_sites": {
             "type": "string",
@@ -41224,13 +41176,12 @@
           },
           "js_invocation_digests": {
             "type": "boolean",
-            "default": false,
-            "description": "Record SHA-256 and rolling-hash digests of settled string and byte values of armed calls. Sensitive capture: requires js_invocation_sites or js_invocation_saved_sites and confirm_sensitive_capture."
+            "description": "Record SHA-256 and rolling-hash digests of settled string and byte values of armed calls. Sensitive capture: requires js_invocation_sites or js_invocation_saved_sites. On by default for a confirmed start with request_content and armed sites. Set to true through the CLI, it requires confirm_sensitive_capture."
           },
           "confirm_sensitive_capture": {
             "const": true,
             "type": "boolean",
-            "description": "The researcher authorized the sensitive capture named in this start for this target: Canvas images, request content or invocation value digests. Required with canvas_images, request_content or js_invocation_digests; never set it by inference."
+            "description": "The researcher authorized sensitive capture for this target: Canvas images, request content and invocation value digests, which then default on as in the app. reb-api session start needs it for those; start_live_session is confirmed by the --permission full or --allow-session-start choice that lists it, so it need not be set there. Never set it by inference."
           },
           "publish_canonical_endpoint": {
             "type": "boolean",

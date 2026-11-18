@@ -767,18 +767,26 @@ function createBlockGraphView(root, options = {}) {
     }
     keyToggle.hidden = !legend.childElementCount;
   }
-  /** First view: actual size, centered on the selected block or the entry in
-   * the part of the stage the minimap leaves clear, so its successors do not
-   * open under the minimap. A graph that fits at actual size is centered
-   * whole. Fit is one key away. */
+  /** First view: actual size, from the selected block or the entry, in the
+   * part of the stage the minimap leaves clear. The block and the successors
+   * that start on that first screen are centered together when they fit, so
+   * none opens under the minimap; otherwise the block is. A graph that fits
+   * at actual size is centered whole. Fit is one key away. */
   function start() {
     if (!layout || !cssW) return;
     view.z = 1;
     const whole = fitView();
     if (whole.z >= 1) { view = whole; fitted = true; requestDraw(); return; }
     fitted = false;
-    const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0);
-    view.x = layout.x[block] + layout.w[block] / 2 - clearArea(false).w / 2;
+    const block = selectedBlock >= 0 ? selectedBlock : Math.max(0, graph.roots?.[0] ?? 0), clear = clearArea(false);
+    let left = layout.x[block], right = left + layout.w[block];
+    for (let i = outs.start[block]; i < outs.start[block + 1]; i += 1) {
+      const edge = outs.list[i], next = graph.to[edge];
+      if (isStub(edge) || layout.y[next] >= layout.y[block] - 24 + clear.h) continue;
+      left = Math.min(left, layout.x[next]); right = Math.max(right, layout.x[next] + layout.w[next]);
+    }
+    if (right - left > clear.w) { left = layout.x[block]; right = left + layout.w[block]; }
+    view.x = (left + right) / 2 - clear.w / 2;
     view.y = layout.y[block] - 24;
     requestDraw();
   }

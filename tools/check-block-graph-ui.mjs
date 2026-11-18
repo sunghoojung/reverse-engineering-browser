@@ -572,6 +572,43 @@ globalThis.create = createBlockGraphView;`, context);
   frames = [];
 }
 {
+  // The opening view, at actual size, frames the entry and the successors on
+  // its first screen in the part of the stage the minimap leaves clear: a
+  // wide branch beside the entry's spine does not open under the minimap.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="host"></div></body></html>');
+  let shift = null;
+  const recording = new Proxy({}, {get: (_, key) => key === 'measureText' ? () => ({width: 6.6}) : key === 'setTransform' ? (a, b, c, d, e, f) => { if (e || f) shift = {x: -e / a, y: -f / d}; } : () => {}, set: () => true});
+  window.HTMLCanvasElement.prototype.getContext = () => recording;
+  const rect = {left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700}, mini = {left: 750, top: 480, width: 250, height: 220, right: 1000, bottom: 700};
+  let frames = [];
+  const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}), Path2D: class { rect() {} moveTo() {} lineTo() {} arcTo() {} closePath() {} },
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; }, cancelAnimationFrame: () => {}, devicePixelRatio: 1, console, ResizeObserver: class { observe() {} disconnect() {} }};
+  runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph_layout.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
+globalThis.create = createBlockGraphView;`, context);
+  const host = document.querySelector('#host');
+  host.getBoundingClientRect = () => rect;
+  const view = context.create(host, {runner: {run: async () => null, skip() {}, cancel() {}}});
+  const none = {left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0};
+  for (const element of host.querySelectorAll('*')) element.getBoundingClientRect = () => (element.matches('.block-graph-stage, .block-graph-canvas') ? rect : element.matches('.block-graph-minimap') ? mini : none);
+  view.activate();
+  // A diamond with wide arms, then a chain too tall to fit at actual size.
+  const count = 40, edges = [[0, 1, KIND.taken], [0, 2, KIND.not_taken], [1, 3], [2, 3]];
+  for (let block = 3; block + 1 < count; block += 1) edges.push([block, block + 1]);
+  const graph = fixture(count, edges, {title: 'func 0', status: 'decoded', instructions: count, omissions: [], evidence: 'declared',
+    rows: Array.from({length: count}, (_, index) => `${(index * 8).toString(16)} i32.const ${index < 3 ? '7'.repeat(36) : index}\n`).join('')});
+  const layout = {...lay(graph), engine: {name: 'layered'}};
+  assert(layout.height > rect.height && layout.y[1] === layout.y[2], 'the arms sit side by side and the graph is taller than the stage');
+  view.setResult({graph, starts: layoutModule.rowStarts(graph.rows), layout});
+  while (frames.length) frames.shift()();
+  assert(shift, 'the view drew at actual size');
+  for (const block of [0, 1, 2]) {
+    assert(layout.x[block] >= shift.x && layout.x[block] + layout.w[block] <= shift.x + mini.left, `block ${block} opens left of the minimap: ${layout.x[block]}..${layout.x[block] + layout.w[block]} in ${shift.x}..${shift.x + mini.left}`);
+  }
+  frames = [];
+}
+{
   // The flow graph over a realm past the size Triskel runs on unasked: a call
   // tree of 2,047 cards, which nothing folds. The layered layout is drawn
   // with nothing sent; Lay out with Triskel sends the realm, counts its

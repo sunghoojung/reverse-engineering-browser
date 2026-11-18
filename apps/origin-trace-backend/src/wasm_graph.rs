@@ -1269,6 +1269,70 @@ fn branch_target(decoded: &Decoded, instruction: u32, graph: &Graph) -> Option<u
         .map(|_| decoded.offsets[target as usize])
 }
 
+/// One body's basic blocks as successor lists, for analyses that need the
+/// control flow graph itself rather than a document (value flow's control
+/// dependence). The blocks are exactly the graph route's.
+pub(crate) struct ControlFlow {
+    /// Instruction index of each block leader; a block runs to the next.
+    pub(crate) leaders: Vec<u32>,
+    successor_start: Vec<u32>,
+    successors: Vec<u32>,
+    /// Blocks that leave the function: a return, the final `end`, a trap, a
+    /// tail call, a throw or a branch whose target is unresolved.
+    pub(crate) exits: Vec<bool>,
+}
+
+impl ControlFlow {
+    pub(crate) fn successors(&self, block: u32) -> &[u32] {
+        let start = self.successor_start[block as usize] as usize;
+        let end = self.successor_start[block as usize + 1] as usize;
+        &self.successors[start..end]
+    }
+    /// The block holding instruction `index`.
+    pub(crate) fn block_of(&self, index: u32) -> u32 {
+        self.leaders.partition_point(|leader| *leader <= index) as u32 - 1
+    }
+}
+
+pub(crate) fn control_flow(
+    body: &wasmparser::FunctionBody<'_>,
+    cancelled: &AtomicBool,
+) -> Result<ControlFlow> {
+    let decoded = decode(body, cancelled)?;
+    let graph = build(&decoded);
+    let blocks = graph.leaders.len();
+    let mut lists: Vec<Vec<u32>> = vec![Vec::new(); blocks];
+    let mut exits = vec![false; blocks];
+    for (from, to, _, _) in &graph.edges {
+        match to {
+            Some(to) => {
+                if !lists[*from as usize].contains(to) {
+                    lists[*from as usize].push(*to);
+                }
+            }
+            None => exits[*from as usize] = true,
+        }
+    }
+    for (block, flags) in graph.flags.iter().enumerate() {
+        if flags & (EXIT | TRAP) != 0 {
+            exits[block] = true;
+        }
+    }
+    let mut successor_start = Vec::with_capacity(blocks + 1);
+    let mut successors = Vec::new();
+    for list in &lists {
+        successor_start.push(successors.len() as u32);
+        successors.extend_from_slice(list);
+    }
+    successor_start.push(successors.len() as u32);
+    Ok(ControlFlow {
+        leaders: graph.leaders,
+        successor_start,
+        successors,
+        exits,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

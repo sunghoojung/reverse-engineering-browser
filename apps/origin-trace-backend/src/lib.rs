@@ -8,6 +8,7 @@ mod artifact_query;
 mod artifact_text;
 mod capture;
 mod config;
+mod control_dependence;
 mod debugger_observation;
 mod debugger_watch;
 mod decoder;

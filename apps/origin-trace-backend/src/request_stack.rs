@@ -3549,7 +3549,7 @@ pub(crate) mod tests {
         wasm.push(0);
         wasm.push(custom.len() as u8);
         wasm.extend(custom);
-        let frames = vec![
+        let frames = [
             frame(1, 0, 7, fetch_at, send_at),
             frame(2, 0, 30, 0x2a1, 3),
             frame(1, 0, 8, 0, 0),

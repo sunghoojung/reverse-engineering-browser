@@ -1255,12 +1255,21 @@ mod tests {
         let artifact = json!({"artifact_id":"31","session_id":"9","kind":"request_body",
             "capture_origin":"network_request","creator_event_id":"2","byte_size":body.len(),
             "sha256":hash,"content_path":format!("blobs/{hash}.bin")});
-        let bodies =
-            retained_request_bodies(&[record.clone()], &[artifact.clone()], "900", root.path());
+        let bodies = retained_request_bodies(
+            &[record.clone()],
+            std::slice::from_ref(&artifact),
+            "900",
+            root.path(),
+        );
         assert_eq!(bodies.get(&key(84, 1)), Some(&body));
         assert!(
-            retained_request_bodies(&[record.clone()], &[artifact.clone()], "901", root.path())
-                .is_empty()
+            retained_request_bodies(
+                &[record.clone()],
+                std::slice::from_ref(&artifact),
+                "901",
+                root.path()
+            )
+            .is_empty()
         );
         for (field, value) in [
             ("creator_event_id", json!("3")),

@@ -1325,23 +1325,26 @@ Triskel's waypoints as a flat `x0, y0, x1, y1, ...` list from the source to the
 target. Values are rounded to 2 decimals and moved so the drawing, waypoints
 included, starts at `0, 0`; `width` and `height` are its extent. Separate
 weakly connected parts are laid out one at a time and packed in rows, largest
-first. Any other graph has `status` `too_large`, `failed` or `timeout` and a
-`reason`.
+first. Any other graph has `status` `failed` or `timeout` and a `reason`.
 
-The limits exist because Triskel's cost grows with about the square of the node
-count (measured on tree-like graphs with some back edges: 1,000 nodes 0.6 s,
-3,000 nodes 6.6 s, 8,000 nodes 85 s, and roughly three times that on a loaded
-machine):
+The route lays out any number of graphs of any size, with no request deadline.
+Triskel's cost grows faster than the node count, so the caller decides what to
+send. Measured on structured control flow graphs: 2,000 nodes about 1.5 s,
+4,000 about 3 s, 8,000 about 10 s, 16,000 about a minute and 32,000 about 4
+minutes, with at most 68 MiB of worker memory. On tree-like graphs with some
+back edges it is about the square of the node count: 1,000 nodes 0.6 s, 3,000
+nodes 6.6 s, 8,000 nodes 85 s. The UI sends a graph of up to 2,000 nodes and
+8,000 edges unasked and a larger one when the researcher asks.
 
-- A body holds at most 64 graphs and 8,000 nodes in all, within 8 MiB. Over
-  that, or with malformed JSON, an unknown member, a bad size or an index
-  outside its graph, the route returns 400 with an `error` and lays out
-  nothing.
-- A graph over 2,000 nodes or 8,000 edges is `too_large`; the others are still
-  laid out.
-- One request has 10 s. A graph has its own budget inside that, 1 s plus 8 µs
-  times its node count squared, so a graph Triskel never finishes costs only
-  its budget.
+- A body is at most 64 MiB, twice the 32 MiB structure budget of a Wasm
+  function's block graph, the largest graph the UI sends. Malformed JSON, an
+  unknown member, a bad size or an index outside its graph returns 400 with an
+  `error` and lays out nothing.
+- A client that closes the connection drops the request, which stops its
+  worker.
+- A graph has its own budget, 1 s plus 8 µs times the square of its node and
+  edge count together. It separates a slow layout from one Triskel never
+  finishes (see below), and it grows with the graph, so it limits no size.
 
 Triskel is third-party C++ fed graphs shaped by captured pages, and this
 revision can loop forever, crash or place nodes on top of each other on some
@@ -1351,8 +1354,7 @@ network access (on macOS no file access either) and a 2 GiB resident memory
 limit; at most two run at once and later requests wait for a slot. A graph
 whose budget passes is
 `timeout`; one that crashes the worker or reaches the memory limit is `failed`;
-either way a new worker continues with the graphs after it. When the request
-deadline passes, every graph without a result is `timeout`. A layout with
+either way a new worker continues with the graphs after it. A layout with
 overlapping nodes or an edge that does not reach its nodes is `failed`, so a
 `laid_out` result never has either. The worker adds a virtual root and, where a
 part has no node without out-edges, a virtual exit, both of size 0, which

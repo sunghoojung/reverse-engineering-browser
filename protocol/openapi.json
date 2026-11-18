@@ -8372,12 +8372,12 @@
       "post": {
         "operationId": "post_graph_layout",
         "summary": "Lay out graphs with the vendored Triskel engine",
-        "description": "Side-effect-free layout of caller-supplied graphs for Flow graph and the Sources Graph view: node widths and heights and from, to edges in; each node's top-left corner and each edge's Triskel waypoints out, in request order. Triskel (SESE regions and Sugiyama layering, pinned revision) runs in a contained worker process, never in the server, with a 10 s deadline per request; at most two workers run at once and later requests wait for a slot. At most 64 graphs and 8000 nodes in all per request. A graph over 2000 nodes or 8000 edges is not laid out and gets too_large while the others are; a deadline, crash or memory limit marks every graph without a result timeout or failed. Coordinates are rounded to 2 decimals and moved so the drawing starts at 0, 0. Reads no evidence, writes nothing and never echoes input values.",
+        "description": "Side-effect-free layout of caller-supplied graphs for Flow graph and the Sources Graph view: node widths and heights and from, to edges in; each node's top-left corner and each edge's Triskel waypoints out, in request order. Triskel (SESE regions and Sugiyama layering, pinned revision) runs in a contained worker process, never in the server; at most two workers run at once and later requests wait for a slot. A request has no size limit beyond its body and no deadline: a client that closes the connection stops its worker. Each graph has a budget of 1 s plus 8 µs times the square of its node and edge count together, which separates a slow layout from Triskel's known non-terminating one and grows with the graph; a graph past its budget is timeout, and one that crashes the worker or reaches its memory limit is failed, while a new worker lays out the graphs after it. Coordinates are rounded to 2 decimals and moved so the drawing starts at 0, 0. Reads no evidence, writes nothing and never echoes input values.",
         "tags": [
           "graph-layout"
         ],
         "x-source": "apps/origin-trace-backend/src/graph_layout.rs",
-        "x-max-body-bytes": 8388608,
+        "x-max-body-bytes": 67108864,
         "requestBody": {
           "required": true,
           "content": {
@@ -8414,7 +8414,7 @@
             }
           },
           "400": {
-            "description": "Invalid framing or body size, malformed JSON, an unknown or missing member, a node size that is not a finite number above 0 and at most 100000, an edge index that is not an integer naming a node of its graph, more than 64 graphs or more than 8000 nodes in all. No input values are echoed.",
+            "description": "Invalid framing or body size, malformed JSON, an unknown or missing member, a node size that is not a finite number above 0 and at most 100000, or an edge index that is not an integer naming a node of its graph. No input values are echoed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -35615,11 +35615,10 @@
         "required": [
           "graphs"
         ],
-        "description": "Graphs to lay out, at most 64 and 8000 nodes in all.",
+        "description": "Graphs to lay out, any number of any size.",
         "properties": {
           "graphs": {
             "type": "array",
-            "maxItems": 64,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -35791,7 +35790,6 @@
             "properties": {
               "status": {
                 "enum": [
-                  "too_large",
                   "failed",
                   "timeout"
                 ]

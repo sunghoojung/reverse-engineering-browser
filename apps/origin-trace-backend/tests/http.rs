@@ -9022,16 +9022,16 @@ async fn graph_layout_lays_out_in_order_and_refuses_bad_bodies() {
             .body(body)
             .send()
     };
-    // A diamond with a back edge, a graph over the 2000-node limit, an
-    // empty graph and a lone node, in that order.
+    // A diamond with a back edge, a graph past the former 2000-node limit,
+    // an empty graph and a lone node, in that order.
     let diamond = json!({
         "nodes": [[120, 40], [80.5, 30], [80, 30], [120, 40]],
         "edges": [[0, 1], [0, 2], [1, 3], [2, 3], [3, 0]]
     });
-    let oversized = json!({"nodes": vec![json!([10, 10]); 2001], "edges": []});
+    let large = json!({"nodes": vec![json!([10, 10]); 2001], "edges": []});
     let request = json!({"graphs": [
         diamond,
-        oversized,
+        large,
         {"nodes": [], "edges": []},
         {"nodes": [[64, 24]], "edges": []}
     ]});
@@ -9050,12 +9050,8 @@ async fn graph_layout_lays_out_in_order_and_refuses_bad_bodies() {
     let edges = graphs[0]["edges"].as_array().unwrap();
     assert_eq!((nodes.len(), edges.len()), (4, 5));
     // Geometry is the unit tests' (graph_layout::tests::assert_sound).
-    assert_eq!(graphs[1]["status"], "too_large");
-    assert!(
-        graphs[1]["reason"].as_str().unwrap().contains("2001 nodes"),
-        "{}",
-        graphs[1]
-    );
+    assert_eq!(graphs[1]["status"], "laid_out", "{}", graphs[1]["status"]);
+    assert_eq!(graphs[1]["nodes"].as_array().map(Vec::len), Some(2001));
     assert_eq!(
         graphs[2],
         json!({"status": "laid_out", "nodes": [], "edges": [], "width": 0, "height": 0, "elapsed_ms": 0})

@@ -2480,23 +2480,33 @@ The layout runs in a Web Worker. When the backend serves
 `POST /api/graph-layout` ([HTTP API](../../protocol/http-api.md#graph-layout)),
 the function is laid out by [Triskel](https://github.com/triskellib/triskel), a
 CFG layout engine built on single-entry single-exit regions. It is vendored in
-the backend and runs in a separate worker process with size and time limits.
-The project-authored region layout in `block_graph_layout.js` stays in four
-cases:
+the backend and runs in a separate worker process, with no size limit or
+deadline. While it runs, the view counts its seconds and offers **Use the
+region layout**, which stops it. The project-authored region layout in
+`block_graph_layout.js` draws any function, and stays in four cases:
 - Triskel would draw the function more than 1.6 times wider and over 1,400 px.
   A flattened dispatcher's fan is the usual case: the region layout stacks it
   into a grid, where Triskel puts every arm in one row.
-- The function has more than 2,000 blocks or 8,000 edges.
+- The function has more than 2,000 blocks or 8,000 edges. Triskel is not run
+  unasked there: on structured control flow it takes about 10 s at 8,000
+  blocks and a minute at 16,000, and at this revision it places nodes on top
+  of each other in most functions over about 1,000 blocks. The region layout,
+  close to linear in the block count, is drawn at once and the header offers **Lay
+  out with Triskel**, which runs it on the drawn function with no size limit.
+  The drawing stays while it runs, the header counts its seconds, and the
+  button becomes **Cancel**.
 - Triskel's answer does not match the function.
 - The route is missing or fails, as in the stored-evidence window.
 
-The header says `Triskel layout` when Triskel was used, and hovering the counts
-says why the region layout stayed. The region layout also stays when Triskel's
-drawing would be more than 1.6 times taller and over 1,600 px taller, as nested
-loops can make it. Both layout workers reach the route through
-`graph_layout_client.js`, which holds its limits, the 20 s request budget, the
-answer check and this acceptance rule, and gives each graph it does not lay out
-a reason code that each view words for itself. Triskel's and fmt's licence
+The header says `Triskel layout` when Triskel was used, `region layout` with
+the reason otherwise (stopped, failed, wider or taller), and hovering the
+counts says why the region layout stayed. The region layout also stays when
+Triskel's drawing would be more than 1.6 times taller and over 1,600 px
+taller, as nested loops can make it. Both layout workers reach the route
+through `graph_layout_client.js`, which holds the size Triskel runs on unasked,
+the answer check and this acceptance rule, and gives each graph it does not lay
+out a reason code that each view words for itself. It sets no timeout: the
+caller's signal stops a request, and the backend then stops its worker. Triskel's and fmt's licence
 texts ship as `Contents/Resources/GraphLayoutLicenses.txt`.
 
 The region layout uses dominator regions: each subtree is entered once, so it
@@ -3042,17 +3052,20 @@ same engine report either way, on card sizes measured from their text.
   calls between bands run as straight as the cards allow.
 
 **Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
-to 2,000 cards is then sent to
-[Triskel](https://github.com/triskellib/triskel), in band order, at most 64
-realms and 8,000 cards per request; a realm past either total keeps the layered
-layout and says which total it hit. The layout worker keeps Triskel's last 64
+to 2,000 cards and up to 8,000 calls is then sent to
+[Triskel](https://github.com/triskellib/triskel) in one request, in band
+order, with no deadline. While it runs over no drawing, the view counts its
+seconds and offers **Use the layered layout**; over a drawing, the status bar
+counts them beside **Cancel**. A larger realm keeps the layered layout, and the
+status bar offers **Lay out with Triskel**, which sends every realm whatever
+its size until the session changes or a run is stopped. The layout worker keeps Triskel's last 64
 answers by realm, so a new layout of mostly the same realms, such as a chain
 folded or a refresh, sends only the realms that changed. A realm takes Triskel's coordinates and waypoints unless Triskel would
 draw it more than 1.6 times wider than the layered layout and over 1,400 px,
 or more than 1.6 times taller and over 1,600 px taller.
 Triskel does not stack a wide fan of calls, and a call tree's breadth would
 otherwise run off to the side. The layered layout also stays when Triskel's
-answer is missing, too large or the wrong shape. Either way the bands keep the
+answer is missing, failed or the wrong shape. Either way the bands keep the
 layered order and are stacked, aligned and routed between the same way. The
 status bar says `Triskel layout`, or how many realms it took, and hovering it
 gives each other realm's reason.

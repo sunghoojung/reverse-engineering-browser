@@ -1396,6 +1396,7 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
                                   std::memory_order_relaxed);
   exclusion_counter_.store(active ? network_scope.exclusion_counter : nullptr,
                            std::memory_order_relaxed);
+  target_emitter_.store(active ? network_scope.target_emitter : nullptr, std::memory_order_relaxed);
   emitter_.store(emitter, std::memory_order_relaxed);
   artifact_emitter_.store(artifact_emitter, std::memory_order_relaxed);
   // A replacement configuration starts both Wasm sample indexes at 0. The
@@ -2169,11 +2170,12 @@ void NativeProbeSink::NameRequestOwner(NativeProbeHeader& header,
 }
 
 void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
-                                         const std::string_view target_prefix,
+                                         const std::string_view target_text,
                                          const std::size_t target_length,
                                          const int port,
                                          const std::uint64_t config_generation,
-                                         const NativeRendererProbeEmitter emitter) noexcept {
+                                         const NativeRendererProbeEmitter emitter,
+                                         const std::string_view host) noexcept {
   // The same child the browser records after request_started, here of the
   // renderer's own start record.
   NativeRequestTarget target;
@@ -2185,14 +2187,46 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   target.port = port > 0 && port <= 65535 ? static_cast<std::uint16_t>(port) : 0;
   target.target_length = static_cast<std::uint32_t>(
       std::min<std::size_t>(target_length, std::numeric_limits<std::uint32_t>::max()));
-  std::copy_n(target_prefix.begin(),
-              std::min({target_prefix.size(), target_length, target.prefix.size()}),
+  std::copy_n(target_text.begin(),
+              std::min({target_text.size(), target_length, target.prefix.size()}),
               target.prefix.begin());
-  // The renderer has no artifact channel for the rest of a long target.
+  // The scheme, host and explicit port that name a long target's artifact,
+  // as the browser names its own (an origin, never user info).
+  std::array<char, kNativeArtifactMaxUrlBytes> origin_bytes;
+  std::size_t origin_length = 0;
   if (target_length > target.prefix.size()) {
-    target.retention = target.scheme == NativeRequestScheme::kOther
-                           ? NativeRequestTargetRetention::kNotRetainedUrl
-                           : NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    // As the browser decides for its own requests: no origin or a target past
+    // what an artifact keeps is not retained.
+    const std::string_view scheme = target.scheme == NativeRequestScheme::kHttps  ? "https://"
+                                    : target.scheme == NativeRequestScheme::kHttp ? "http://"
+                                    : target.scheme == NativeRequestScheme::kWss  ? "wss://"
+                                    : target.scheme == NativeRequestScheme::kWs   ? "ws://"
+                                                                                  : "";
+    char port_text[8] = {};
+    std::size_t port_length = 0;
+    if (target.port != 0) {
+      port_text[0] = ':';
+      std::array<char, 5> digits{};
+      std::size_t count = 0;
+      for (std::uint16_t value = target.port; value != 0; value /= 10) {
+        digits[count++] = static_cast<char>('0' + value % 10);
+      }
+      for (port_length = 1; count != 0; ++port_length) {
+        port_text[port_length] = digits[--count];
+      }
+    }
+    if (scheme.empty() || target_length > kNativeRequestTargetMaxBytes ||
+        scheme.size() + host.size() + port_length > origin_bytes.size()) {
+      target.retention = NativeRequestTargetRetention::kNotRetainedUrl;
+    } else if (host.empty() || target_text.size() != target_length) {
+      // A row whose caller converted only the prefix.
+      target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+    } else {
+      origin_length = scheme.size() + host.size() + port_length;
+      std::copy(scheme.begin(), scheme.end(), origin_bytes.begin());
+      std::copy(host.begin(), host.end(), origin_bytes.begin() + scheme.size());
+      std::copy_n(port_text, port_length, origin_bytes.begin() + scheme.size() + host.size());
+    }
   }
   NativeProbeEvent child;
   child.header.category = NativeProbeCategory::kNetwork;
@@ -2206,6 +2240,18 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
   child.header.request_id = start.request_id;
   child.header.parent_event_id = start.initiated_sequence;
   child.header.payload_size = static_cast<std::uint32_t>(kNativeRequestPayloadSize);
+  if (origin_length != 0) {
+    // The browser fills in the retention and artifact it keeps.
+    child.inline_payload = EncodeNativeRequestTargetPayload(target);
+    const NativeRendererTargetEmitter target_emitter =
+        target_emitter_.load(std::memory_order_relaxed);
+    if (target_emitter &&
+        target_emitter(child, std::string_view(origin_bytes.data(), origin_length), target_text,
+                       config_generation)) {
+      return;
+    }
+    target.retention = NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
+  }
   child.inline_payload = EncodeNativeRequestTargetPayload(target);
   static_cast<void>(emitter(child, config_generation));
 }
@@ -2328,37 +2374,15 @@ NativeMemoryCacheAdmission NativeProbeSink::AdmitMemoryCacheReuse(
       monotonic_time_ns >= expires_at_monotonic_ns) {
     return {};
   }
-  const auto count_not_recorded = [&](const std::uint8_t exclusion_class) {
-    if (exclusion_counter) {
-      exclusion_counter(exclusion_class, session_id, config_generation);
-    }
-  };
-  // An SVG image's own document or a page popup belongs to no tab, so its
-  // count is kept apart from the budget's overflow.
+  // An SVG image's own document or a page popup belongs to no tab, so it is
+  // counted instead of recorded.
   if (!ordinary_page) {
-    count_not_recorded(kNativeNonOrdinaryPageReuseExclusion);
+    if (exclusion_counter) {
+      exclusion_counter(kNativeNonOrdinaryPageReuseExclusion, session_id, config_generation);
+    }
     return {};
   }
-  // Reuses can be frequent, so a configuration records a bounded number and
-  // counts the rest. The count is tagged with its generation.
-  const auto tag = static_cast<std::uint32_t>(config_generation);
-  std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
-  for (;;) {
-    const auto word_tag = static_cast<std::uint32_t>(word >> 32U);
-    if (word_tag != tag && static_cast<std::int32_t>(word_tag - tag) > 0) {
-      // A newer configuration owns the budget; this one was replaced.
-      return {};
-    }
-    const std::uint32_t used = word_tag == tag ? static_cast<std::uint32_t>(word) : 0;
-    if (used >= kNativeMemoryCacheReuseBudget) {
-      count_not_recorded(kNativeMemoryCacheReuseExclusion);
-      return {};
-    }
-    if (memory_cache_budget_.compare_exchange_weak(word, (std::uint64_t{tag} << 32U) | (used + 1U),
-                                                   std::memory_order_relaxed)) {
-      return {.generation = config_generation, .capture_request_content = capture_request_content};
-    }
-  }
+  return {.generation = config_generation, .capture_request_content = capture_request_content};
 }
 
 void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& admission,
@@ -2382,13 +2406,7 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& a
   }
   const NativeSchemeClass scheme_class = ClassifyNativeScheme(reuse.scheme);
   if (IsBrowserInternalSchemeClass(scheme_class) && !capture_browser_internal) {
-    // Counted as the scheme class a request would be, not against the budget.
-    const auto tag = static_cast<std::uint32_t>(config_generation);
-    std::uint64_t word = memory_cache_budget_.load(std::memory_order_relaxed);
-    while (static_cast<std::uint32_t>(word >> 32U) == tag &&
-           static_cast<std::uint32_t>(word) != 0 &&
-           !memory_cache_budget_.compare_exchange_weak(word, word - 1, std::memory_order_relaxed)) {
-    }
+    // Counted as the scheme class a request would be.
     if (exclusion_counter) {
       exclusion_counter(static_cast<std::uint8_t>(scheme_class), session_id, config_generation);
     }
@@ -2431,8 +2449,8 @@ void NativeProbeSink::RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& a
   row.thread_id = event.header.thread_id;
   row.request_id = static_cast<std::uint32_t>(event.header.request_id);
   row.scheme_class = scheme_class;
-  EmitRendererTarget(row, reuse.target, reuse.target_length, reuse.port, config_generation,
-                     emitter);
+  EmitRendererTarget(row, reuse.target, reuse.target_length, reuse.port, config_generation, emitter,
+                     reuse.host);
 }
 
 void NativeProbeSink::NoteVmDispatchLoss(const std::uint64_t generation,

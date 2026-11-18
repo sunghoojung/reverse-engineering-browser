@@ -20,6 +20,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_compiled_script.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_dispatch.h"
 #include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
 #include "brave/components/reverse_engineering_browser/common/native_vm_dispatch_emit.h"
@@ -64,6 +65,15 @@ using NativeProbeExclusionCounter = void (*)(std::uint8_t exclusion_class,
                                              std::uint64_t session_id,
                                              std::uint64_t config_generation) noexcept;
 
+// Sends one request_target child whose whole target does not fit its inline
+// prefix to the browser, which emits it with the target as an artifact.
+// `origin` is the URL's scheme, host and explicit port; `target` its path and
+// query. False when nothing was sent.
+using NativeRendererTargetEmitter = bool (*)(const NativeProbeEvent& child,
+                                             std::string_view origin,
+                                             std::string_view target,
+                                             std::uint64_t config_generation) noexcept;
+
 // Network gates of one configuration, published by SetEmitters.
 struct NativeNetworkScope final {
   // --reb-capture-request-content: renderer request targets follow it.
@@ -71,13 +81,15 @@ struct NativeNetworkScope final {
   // --reb-capture-browser-internal: record internal schemes instead of counting.
   bool capture_browser_internal = false;
   NativeProbeExclusionCounter exclusion_counter = nullptr;
+  NativeRendererTargetEmitter target_emitter = nullptr;
 };
 
 // The configuration that admitted one memory-cache reuse, from
 // NativeProbeSink::AdmitMemoryCacheReuse; default: not admitted.
 struct NativeMemoryCacheAdmission final {
   std::uint64_t generation = 0;
-  // Whether the reuse gets a request_target child, so the caller slices one.
+  // Whether the reuse gets a request_target child, so the caller converts
+  // its target (NativeMemoryCacheTargetBytes) and the host for its origin.
   bool capture_request_content = false;
   [[nodiscard]] constexpr bool admitted() const noexcept { return generation != 0; }
 };
@@ -89,8 +101,11 @@ struct NativeMemoryCacheReuse final {
   std::int32_t request_id = 0;
   NativeFetchOwner owner;
   std::string_view scheme;
+  // At most kNativeMemoryCacheReuseHostSize + 1 bytes, or in a content
+  // capture NativeMemoryCacheHostBytes, so a target artifact names its origin.
   std::string_view host;
-  // The URL's path and query: a prefix of target_length bytes.
+  // The URL's path and query: a prefix of target_length bytes, the whole of
+  // it when NativeMemoryCacheTargetBytes keeps it.
   std::string_view target;
   std::size_t target_length = 0;
   int port = -1;
@@ -104,6 +119,28 @@ struct NativeMemoryCacheReuse final {
   // request_initiated record carries. 0 when no request set one.
   std::int32_t source_request_id = 0;
 };
+
+// The bytes of a memory-cache reuse's path and query Blink converts for a
+// content capture: the whole of an http(s) target up to the length the
+// browser keeps as an artifact for its own requests, else the inline prefix.
+// A data: URL can be megabytes long and has no origin to name an artifact.
+[[nodiscard]] constexpr std::size_t NativeMemoryCacheTargetBytes(
+    const bool http_family,
+    const std::size_t length) noexcept {
+  return http_family && length <= kNativeRequestTargetMaxBytes
+             ? length
+             : (length < kNativeRequestTargetPrefixBytes ? length
+                                                         : kNativeRequestTargetPrefixBytes);
+}
+// The host bytes Blink converts: one past what the record keeps, so the sink
+// sees a longer host, or in a content capture one past what an artifact URL
+// holds, so a long target's artifact names its whole origin.
+[[nodiscard]] constexpr std::size_t NativeMemoryCacheHostBytes(const bool content,
+                                                               const std::size_t length) noexcept {
+  const std::size_t limit =
+      content ? std::size_t{kNativeArtifactMaxUrlBytes} + 1 : kNativeMemoryCacheReuseHostSize + 1;
+  return length < limit ? length : limit;
+}
 
 // Trusted native detector output only. Registration is not exposed to page JS.
 enum class NativeRuntimeScriptObservation : std::uint8_t {
@@ -545,15 +582,15 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       RecordServiceWorkerRequestEndSlow(request_id, target, target_length, port, error_code);
     }
   }
-  // Charges one memory-cache reuse to the configuration's budget, after the
-  // Network category, expiry and page checks, so the caller converts nothing
-  // for a reuse it will not record. A reuse in a page that is not ordinary is
-  // counted as exclusion class 71, one past kNativeMemoryCacheReuseBudget as
-  // class 70, instead. Callers check IsCaptureArmed first.
+  // Admits one memory-cache reuse into the configuration after the Network
+  // category, expiry and page checks, so the caller converts nothing for a
+  // reuse it will not record. A reuse in a page that is not ordinary is
+  // counted as exclusion class 71 instead. Every other reuse is recorded.
+  // Callers check IsCaptureArmed first.
   [[nodiscard]] NativeMemoryCacheAdmission AdmitMemoryCacheReuse(bool ordinary_page) noexcept;
   // One memory_cache_reuse record and, in content sessions, its target, into
   // the configuration that admitted it. A browser-internal URL is counted per
-  // scheme class instead and returns its budget charge.
+  // scheme class instead.
   void RecordMemoryCacheReuse(const NativeMemoryCacheAdmission& admission,
                               const NativeMemoryCacheReuse& reuse) noexcept;
   // Copies one guest step the caller already observed. The instruction
@@ -644,12 +681,15 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   // (loader kind script_context) when no owner reached the loader.
   void NameRequestOwner(NativeProbeHeader& header, const NativeFetchOwner& owner) const noexcept;
   // The content-mode request_target child of a renderer row's start record.
+  // With the row's host and its whole target past the inline prefix, the
+  // browser emits it with that target as an artifact (NativeRendererTargetEmitter).
   void EmitRendererTarget(const NativeRendererRequest& start,
-                          std::string_view target_prefix,
+                          std::string_view target,
                           std::size_t target_length,
                           int port,
                           std::uint64_t config_generation,
-                          NativeRendererProbeEmitter emitter) noexcept;
+                          NativeRendererProbeEmitter emitter,
+                          std::string_view host = {}) noexcept;
 
   // Writes a gap into the renderer sequence slot a record already took but
   // could not deliver, so the broker sees an explicit omission there. A full
@@ -941,11 +981,7 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<bool> capture_request_content_{false};
   std::atomic<bool> capture_browser_internal_{false};
   std::atomic<NativeProbeExclusionCounter> exclusion_counter_{nullptr};
-  // memory_cache_reuse admissions: the admitting configuration generation's
-  // low 32 bits, then its count, at most kNativeMemoryCacheReuseBudget. A
-  // newer generation starts a fresh count, so reuses still in flight from a
-  // replaced configuration never charge or reset the new one.
-  std::atomic<std::uint64_t> memory_cache_budget_{0};
+  std::atomic<NativeRendererTargetEmitter> target_emitter_{nullptr};
   // Source bytes queued in this configuration, across every thread.
   std::atomic<std::uint64_t> compiled_script_source_bytes_{0};
   // Monotonic generation claims are never reset: an old capture cannot spend

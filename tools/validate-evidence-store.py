@@ -149,7 +149,7 @@ EVENT_TYPES = {
 SCHEME_CLASSES = {*range(0, 9), 15, *range(16, 21)}
 SCHEME_CLASS_TYPES = {"request_initiated", "request_started", "request_completed", "request_failed",
                       "memory_cache_reuse"}
-# 70 and 71 are memory-cache reuses past the budget and in pages that are not ordinary.
+# 70 is earlier renderers' memory-cache reuses past their budget, 71 those in pages that are not ordinary.
 EXCLUSION_CLASSES = {*range(16, 21), *range(64, 72)}
 # Loader kinds, shared with include/reb/tab_link.hpp.
 LOADER_KINDS = {"request_started": range(1, 11), "request_initiated": range(16, 23),

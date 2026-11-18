@@ -966,7 +966,7 @@ pub fn build(store: &Path, artifacts: &Path, state: &CaptureState<'_>) -> Result
             "memory_cache_reuse_not_recorded",
             "info",
             format!(
-                "{reuses} memory-cache reuses were counted, not recorded: each renderer records at most 4,096 per capture configuration. This is a named exclusion, not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are counted apart as non_ordinary_page_reuse."
+                "{reuses} memory-cache reuses were counted, not recorded: renderers from an earlier build recorded at most 4,096 per capture configuration. This is a named exclusion, not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are counted apart as non_ordinary_page_reuse."
             ),
         );
         item["count"] = json!(reuses.to_string());

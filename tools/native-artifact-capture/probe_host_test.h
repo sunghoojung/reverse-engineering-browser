@@ -531,6 +531,111 @@ void NativeProbeHostStackRefusal() {
                "and refuses content from a renderer that became browser-internal\n";
 }
 
+// protocol/native-network-v3.md "Memory-cache reuse": a reuse's target past
+// the inline prefix arrives over Mojo after its parent entered the ring. The
+// host drains the parent first, then emits the child in the slot the renderer
+// took, with the whole target as its request_target artifact.
+void NativeProbeHostRendererTargets() {
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.request_content = true;
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  events.clear();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  transfers.clear();
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  auto mapping = client.region.Map();
+  auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  const std::string target = "/" + std::string(299, 'q') + "?x=1";
+  const auto reuse = [&](const std::uint64_t sequence) {
+    NativeProbeEvent parent;
+    parent.header.category = reb::NativeProbeCategory::kNetwork;
+    parent.header.type = NativeProbeType::kMemoryCacheReuse;
+    parent.header.session_id = kSession;
+    parent.header.process_id = 123;
+    parent.header.sequence_number = sequence;
+    parent.header.monotonic_time_ns = 100;
+    parent.header.frame_id = kFrame;
+    parent.header.request_id = 55;
+    Check(queue->TryPush(parent), "The ring admits the reuse");
+    NativeProbeEvent child = parent;
+    child.header.type = NativeProbeType::kRequestTarget;
+    child.header.sequence_number = sequence + 1;
+    child.header.parent_event_id = sequence;
+    child.header.payload_size = reb::kNativeRequestPayloadSize;
+    reb::NativeRequestTarget sent;
+    sent.target_length = static_cast<std::uint32_t>(target.size());
+    sent.scheme = reb::NativeRequestScheme::kHttps;
+    sent.port = 8443;
+    std::copy_n(target.begin(), sent.prefix.size(), sent.prefix.begin());
+    child.inline_payload = reb::EncodeNativeRequestTargetPayload(sent);
+    return child;
+  };
+  const auto bytes = [](const NativeProbeEvent& event) {
+    std::vector<std::uint8_t> record(sizeof(event));
+    std::memcpy(record.data(), &event, sizeof(event));
+    return record;
+  };
+  const auto retention = [](const NativeProbeEvent& event) {
+    return static_cast<reb::NativeRequestTargetRetention>(event.inline_payload[9]);
+  };
+  host.CaptureRendererTarget(bytes(reuse(800)), "https://cdn.example.test:8443", target);
+  Check(events.size() == 2 && events[0].header.sequence_number == 800 &&
+            events[1].header.sequence_number == 801 &&
+            events[1].header.type == NativeProbeType::kRequestTarget &&
+            retention(events[1]) == reb::NativeRequestTargetRetention::kRetained &&
+            events[1].header.artifact_id != 0 && transfers.size() == 1,
+        "The parent is drained first, then the child names its retained target");
+  Check(base::ThreadPool::RunPending() == 1, "The whole target is copied off the UI sequence");
+  const auto& artifact = *transfers.begin()->second;
+  Check(artifact.header.kind == reb::NativeArtifactKind::kRequestTarget &&
+            artifact.header.capture_origin == reb::NativeArtifactCaptureOrigin::kNetworkRequest &&
+            (artifact.header.flags & reb::kNativeArtifactFlagSensitive) != 0 && artifact.ended &&
+            artifact.url == "https://cdn.example.test:8443" && artifact.mime_type == "text/plain" &&
+            std::string(artifact.content.begin(), artifact.content.end()) == target &&
+            artifact.header.artifact_id == events[1].header.artifact_id &&
+            artifact.header.creator_event_id == 801,
+        "The artifact holds the whole target, named by its origin and created by the child");
+  events.clear();
+  transfers.clear();
+  // A prefix that is not the target's, or an origin of another scheme, is
+  // not this renderer's record: an explicit gap takes its slot.
+  auto forged = reuse(810);
+  forged.inline_payload[12] = std::byte{'x'};
+  host.CaptureRendererTarget(bytes(forged), "https://cdn.example.test", target);
+  host.CaptureRendererTarget(bytes(reuse(820)), "http://cdn.example.test", target);
+  Check(events.size() == 4 && events[1].header.type == NativeProbeType::kGap &&
+            events[1].header.sequence_number == 811 &&
+            Payload(events[1]) == "renderer_target_malformed" &&
+            events[3].header.type == NativeProbeType::kGap &&
+            events[3].header.sequence_number == 821 && transfers.empty(),
+        "A malformed child leaves a gap in its slot and keeps nothing");
+  events.clear();
+  // Another process's identity is not this renderer's slot to fill.
+  auto foreign = reuse(830);
+  foreign.header.process_id = 999;
+  host.CaptureRendererTarget(bytes(foreign), "https://cdn.example.test", target);
+  Check(events.size() == 1 && events[0].header.sequence_number == 830 && transfers.empty(),
+        "A child naming another process is dropped");
+  events.clear();
+  // Outside a content capture no renderer sends one.
+  session.request_content = false;
+  host.CaptureRendererTarget(bytes(reuse(840)), "https://cdn.example.test", target);
+  Check(events.size() == 2 && events[1].header.type == NativeProbeType::kGap && transfers.empty(),
+        "A child outside a content capture keeps nothing");
+  events.clear();
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost emits a renderer's long target after its parent "
+               "with the whole target as its artifact, and gaps a malformed one\n";
+}
+
 void NativeProbeHostBrowserInternalScope() {
   auto& session = reb::NativeProbeSession::Get();
   session.active = true;
@@ -575,7 +680,7 @@ void NativeProbeHostBrowserInternalScope() {
   Check(session.exclusions.size() == 4 && session.exclusions[3].process == 123 &&
             session.exclusions[3].exclusion_class == 70 && session.exclusions[3].count == 2 &&
             events.empty(),
-        "Memory-cache reuses past the renderer's budget are reported as class 70");
+        "Class 70 counts, from an earlier renderer's memory-cache budget, are still reported");
   queue->CountExclusion(reb::kNativeNonOrdinaryPageReuseExclusion);
   host.EventsAvailable();
   Check(session.exclusions.size() == 5 && session.exclusions[4].exclusion_class == 71 &&

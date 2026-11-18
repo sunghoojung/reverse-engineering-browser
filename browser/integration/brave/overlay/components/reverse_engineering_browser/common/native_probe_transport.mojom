@@ -149,6 +149,13 @@ interface NativeProbeHost {
                      mojo_base.mojom.BigBuffer wasm_module,
                      mojo_base.mojom.BigBuffer bytecode);
   CaptureNativeGuestHost(uint64 capture_epoch, array<uint8> event_record);
+  // The request_target child of a renderer record (a memory-cache reuse)
+  // whose path and query pass the record's inline prefix, in a content
+  // capture. The renderer took its sequence; the browser drains the ring, so
+  // the parent is emitted first, then emits this record with the whole target
+  // as its request_target artifact, named by `origin` (scheme, host and
+  // explicit port). protocol/native-network-v3.md, Memory-cache reuse.
+  CaptureRendererTarget(array<uint8> event_record, string origin, string target);
   CaptureGeneratedArtifact(uint16 kind,
                            uint16 capture_origin,
                            uint64 creator_event_id,

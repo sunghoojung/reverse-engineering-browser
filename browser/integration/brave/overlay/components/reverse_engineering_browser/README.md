@@ -179,12 +179,15 @@ response, race network requests included, through
 recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
 `0040-record-memory-cache-reuse` records each
 `ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
-`memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
-with the rest counted in the queue (version 4) as class 70 and those of pages
-that are not ordinary as class 71. Chromium patch
-`0062-name-memory-cache-reuse-sources` passes the reused resource's
-`ResourceResponse::RequestId()`, the renderer request that loaded it, which the
-record (payload version 2) names through its initiator fields.
+`memory_cache_reuse` record once the sink admits it, every one, with those of
+pages that are not ordinary counted in the queue (version 4) as class 71.
+Chromium patch `0062-name-memory-cache-reuse-sources` passes the reused
+resource's `ResourceResponse::RequestId()`, the renderer request that loaded
+it, which the record (payload version 2) names through its initiator fields.
+Chromium patch `0065-record-whole-memory-cache-targets` converts the whole
+http(s) target in a content session; the sink sends a target past the inline
+prefix to the browser over `NativeProbeHost.CaptureRendererTarget`, which
+drains the parent first and keeps the target as the child's artifact.
 See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch

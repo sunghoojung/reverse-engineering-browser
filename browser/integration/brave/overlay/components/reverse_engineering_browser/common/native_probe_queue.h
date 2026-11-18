@@ -164,8 +164,8 @@ class alignas(64) NativeProbeQueue final {
   }
 
   // Browser-internal requests the producer did not record, per scheme class,
-  // memory-cache reuses past its budget and those in pages that are not
-  // ordinary (protocol/native-network-v3.md).
+  // and memory-cache reuses in pages that are not ordinary
+  // (protocol/native-network-v3.md).
   // Like drops they are counts, never records; the consumer reports them.
   void CountExclusion(const std::uint8_t exclusion_class) noexcept {
     const std::size_t slot = NativeRendererExclusionSlot(exclusion_class);

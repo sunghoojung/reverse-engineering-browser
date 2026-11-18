@@ -114,7 +114,8 @@ void NativeProbeTransport::Configure(const std::uint64_t session_id,
       category_mask, expires_at_monotonic_ns, capture_canvas_images, &CurrentFrameId,
       {.capture_request_content = capture_request_content,
        .capture_browser_internal = capture_browser_internal,
-       .exclusion_counter = &NativeProbeTransport::CountExclusion});
+       .exclusion_counter = &NativeProbeTransport::CountExclusion,
+       .target_emitter = &NativeProbeTransport::EmitRendererTarget});
   NativeScriptCookieSink::Get().Configure(capture_request_content, &CurrentNativeScriptFrame);
   if (!guest_adapter_json.empty())
     NativeProbeSink::Get().ConfigureNativeWasmGuest(ParseNativeWasmGuestAdapter(guest_adapter_json),
@@ -289,6 +290,25 @@ bool NativeProbeTransport::EmitNativeGuestHost(const NativeProbeEvent& event,
       !NativeProbeSink::Get().CanAdmitEvent(event, generation))
     return false;
   (*host)->CaptureNativeGuestHost(epoch, EventRecordBytes(event));
+  return true;
+}
+
+// The renderer took the child's sequence; the browser emits the record with
+// its target artifact after draining the parent from the ring.
+bool NativeProbeTransport::EmitRendererTarget(const NativeProbeEvent& child,
+                                              const std::string_view origin,
+                                              const std::string_view target,
+                                              const std::uint64_t generation) noexcept {
+  auto& transport = Get();
+  if (!transport.queue_.load(std::memory_order_acquire) ||
+      !NativeProbeSink::Get().CanAdmitEvent(child, generation)) {
+    return false;
+  }
+  auto* host = transport.HostForCurrentSequence();
+  if (!*host) {
+    return false;
+  }
+  (*host)->CaptureRendererTarget(EventRecordBytes(child), std::string(origin), std::string(target));
   return true;
 }
 

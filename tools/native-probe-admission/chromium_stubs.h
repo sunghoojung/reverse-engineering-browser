@@ -170,6 +170,19 @@ struct NativeProbeHost {
   void CaptureNativeGuestHost(Args&&...) {
     ++artifacts;
   }
+  // The newest request_target child sent with its whole target.
+  inline static std::vector<std::uint8_t> target_record;
+  inline static std::string target_origin;
+  inline static std::string target_text;
+  inline static std::atomic<unsigned> targets{0};
+  void CaptureRendererTarget(std::vector<std::uint8_t> record,
+                             std::string origin,
+                             std::string text) {
+    ++targets;
+    target_record = std::move(record);
+    target_origin = std::move(origin);
+    target_text = std::move(text);
+  }
   // The newest stack artifact (capture origin 12), for content checks.
   inline static std::vector<std::uint8_t> generated;
   inline static std::uint64_t generated_creator = 0;

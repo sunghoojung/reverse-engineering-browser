@@ -779,6 +779,9 @@ class NativeProbeHost {
                                   mojo_base::BigBuffer,
                                   mojo_base::BigBuffer) = 0;
   virtual void CaptureNativeGuestHost(std::uint64_t, const std::vector<std::uint8_t>&) = 0;
+  virtual void CaptureRendererTarget(const std::vector<std::uint8_t>&,
+                                     const std::string&,
+                                     const std::string&) = 0;
   virtual void CaptureGeneratedArtifact(std::uint16_t,
                                         std::uint16_t,
                                         std::uint64_t,

@@ -392,8 +392,7 @@ class RefusedDigests final {
     }
   }
   [[nodiscard]] bool Contains(const std::array<std::uint8_t, 32>& digest) const noexcept {
-    for (std::size_t at = Mix(DigestKey(digest)) & kMask; slots_[at] != 0;
-         at = (at + 1) & kMask) {
+    for (std::size_t at = Mix(DigestKey(digest)) & kMask; slots_[at] != 0; at = (at + 1) & kMask) {
       if (digests_[slots_[at] - 1] == digest) {
         return true;
       }
@@ -427,7 +426,8 @@ bool DrainRefusals(NativeRequestStackTables& state, const std::uint64_t generati
       static_cast<std::size_t>(std::min<std::uint64_t>(head - tail, kNativeStackRefusalMailbox));
   RefusedSet creators;
   for (std::size_t i = 0; i < count; ++i) {
-    if (const std::uint64_t creator = state.refused[(tail + i) & (kNativeStackRefusalMailbox - 1)]) {
+    if (const std::uint64_t creator =
+            state.refused[(tail + i) & (kNativeStackRefusalMailbox - 1)]) {
       creators.Add(creator);
     }
   }
@@ -484,8 +484,7 @@ bool DrainRefusals(NativeRequestStackTables& state, const std::uint64_t generati
 
 // This thread's existing tables with every routed refusal applied, or null.
 // Never allocates; for calls that run only under a segment a walk made.
-NativeRequestStackTables* ThreadTables(const std::uint64_t generation,
-                                       bool& overflowed) noexcept {
+NativeRequestStackTables* ThreadTables(const std::uint64_t generation, bool& overflowed) noexcept {
   NativeRequestStackTables* const state = t_tables;
   if (state) {
     overflowed = DrainRefusals(*state, generation);
@@ -497,8 +496,7 @@ NativeRequestStackTables* ThreadTables(const std::uint64_t generation,
 // capture is active, with every routed refusal applied. Null on a thread
 // with no scope. Every worker gets its own: their cost grows with the
 // workers a page starts, which already pay for their own isolates.
-NativeRequestStackTables* ActiveTables(const std::uint64_t generation,
-                                       bool& overflowed) noexcept {
+NativeRequestStackTables* ActiveTables(const std::uint64_t generation, bool& overflowed) noexcept {
   if (t_tables) {
     return ThreadTables(generation, overflowed);
   }
@@ -751,10 +749,10 @@ void NativeRequestStackWalk::RecordAdmitted(const std::int32_t request_id,
   }
   NativeRequestStackPayload payload;
   payload.protocol_version = kNativeRequestStackScopePayloadVersion;
-  payload.state = static_cast<std::uint8_t>(result == NativeRequestStackWalkResult::kNoScript &&
-                                                    state
-                                                ? NativeRequestStackState::kNoScript
-                                                : NativeRequestStackState::kUnsupportedThread);
+  payload.state =
+      static_cast<std::uint8_t>(result == NativeRequestStackWalkResult::kNoScript && state
+                                    ? NativeRequestStackState::kNoScript
+                                    : NativeRequestStackState::kUnsupportedThread);
   walk.Emit(payload);
 }
 
@@ -1507,14 +1505,9 @@ void NativeRequestStackWalk::AsyncTaskFramesReady(std::uint32_t recorded,
     // Looked up by V8's task ID when the reaction runs; nothing links it yet.
     if (state.registrations) {
       auto& entry = (*state.registrations)[task_id_ & (kNativePromiseRegistrationRing - 1)];
-      entry = {generation_,
-               task_id_,
-               recorded,
-               payload.digest,
-               creator,
-               static_cast<std::uint8_t>(segment_state),
-               payload.registration,
-               payload.flags};
+      entry = {generation_,          task_id_,     recorded,
+               payload.digest,       creator,      static_cast<std::uint8_t>(segment_state),
+               payload.registration, payload.flags};
     }
     return;
   }

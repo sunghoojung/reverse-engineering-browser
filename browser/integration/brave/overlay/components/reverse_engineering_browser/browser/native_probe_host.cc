@@ -22,9 +22,11 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_capture_scope.h"
+#include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
@@ -674,6 +676,93 @@ void NativeProbeHost::CaptureNativeGuestHost(const std::uint64_t capture_epoch,
   }
   event.header.tab_id = FrameTab(CurrentFrameTabs(renderer_process_id_), event.header.frame_id);
   NativeArtifactCaptureSink::Get().CaptureNativeGuestHost(event, capture_epoch);
+}
+
+// Whether a renderer's request_target child names this target: version 2,
+// complete as sent, its length and inline prefix those of `target`, and an
+// origin of its own scheme. The browser fills in what it retained.
+bool IsRendererTargetChild(const NativeProbeEvent& event,
+                           const std::string_view origin,
+                           const std::string_view target) {
+  const auto byte = [&](const std::size_t at) {
+    return static_cast<std::uint8_t>(event.inline_payload[at]);
+  };
+  const auto read = [&](const std::size_t at, const std::size_t width) {
+    std::uint64_t value = 0;
+    for (std::size_t i = 0; i < width; ++i) {
+      value |= std::uint64_t{byte(at + i)} << (8U * i);
+    }
+    return value;
+  };
+  const auto scheme = static_cast<NativeRequestScheme>(byte(8));
+  const std::string_view prefix = scheme == NativeRequestScheme::kHttps  ? "https://"
+                                  : scheme == NativeRequestScheme::kHttp ? "http://"
+                                  : scheme == NativeRequestScheme::kWss  ? "wss://"
+                                  : scheme == NativeRequestScheme::kWs   ? "ws://"
+                                                                         : "";
+  if (event.header.category != NativeProbeCategory::kNetwork ||
+      event.header.type != NativeProbeType::kRequestTarget ||
+      event.header.payload_size != kNativeRequestPayloadSize || !event.header.parent_event_id ||
+      !event.header.request_id || event.header.artifact_id != 0 ||
+      read(0, 2) != kNativeRequestTargetPayloadVersion || read(2, 2) != kNativeRequestPayloadSize ||
+      read(4, 4) != target.size() || byte(9) != 0 || prefix.empty() ||
+      target.size() <= kNativeRequestTargetPrefixBytes ||
+      target.size() > kNativeRequestTargetMaxBytes || origin.size() <= prefix.size() ||
+      origin.size() > kNativeArtifactMaxUrlBytes || !origin.starts_with(prefix)) {
+    return false;
+  }
+  for (std::size_t i = 0; i < kNativeRequestTargetPrefixBytes; ++i) {
+    if (byte(12 + i) != static_cast<std::uint8_t>(target[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void NativeProbeHost::CaptureRendererTarget(const std::vector<std::uint8_t>& event_record,
+                                            const std::string& origin,
+                                            const std::string& target) {
+  // The renderer pushed the parent before sending this, so draining first
+  // emits it, and its exclusion decision, ahead of its child.
+  Drain();
+  if (!queue_ || browser_internal_ || IsBrowserInternal() || !session_->IsActive() ||
+      event_record.size() != sizeof(NativeProbeEvent)) {
+    return;
+  }
+  NativeProbeEvent event = EventFromRecord(event_record);
+  auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
+  if (!process || event.header.session_id != session_->session_id() ||
+      !event.header.sequence_number ||
+      event.header.process_id != static_cast<std::uint32_t>(process->GetProcess().Pid())) {
+    // Another identity's slot is not this renderer's to fill.
+    return;
+  }
+  const auto now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  // Only a content capture keeps targets; a child the renderer could not have
+  // sent leaves an explicit gap in its slot.
+  if (!session_->capture_request_content() || !event.header.monotonic_time_ns ||
+      event.header.monotonic_time_ns > now || !IsRendererTargetChild(event, origin, target)) {
+    NativeProbeEvent gap = RendererGap(event, "renderer_target_malformed");
+    gap.header.category = NativeProbeCategory::kNetwork;
+    session_->Emit(gap);
+    return;
+  }
+  if (IsExcludedRequestRecord(event)) {
+    return;
+  }
+  if (const std::uint32_t tab =
+          FrameTab(CurrentFrameTabs(renderer_process_id_), event.header.frame_id)) {
+    event.header.tab_id = tab;
+  }
+  NativeRequestTarget kept;
+  kept.target_length = static_cast<std::uint32_t>(target.size());
+  kept.scheme = static_cast<NativeRequestScheme>(event.inline_payload[8]);
+  kept.port = static_cast<std::uint16_t>(static_cast<std::uint8_t>(event.inline_payload[10]) |
+                                         static_cast<std::uint8_t>(event.inline_payload[11]) << 8U);
+  std::copy_n(target.begin(), kept.prefix.size(), kept.prefix.begin());
+  NativeNetworkCaptureSink::RetainRendererTarget(event, kept, origin, target);
+  session_->Emit(event);
 }
 
 void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,

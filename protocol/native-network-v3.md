@@ -60,6 +60,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
 | `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
+| Chromium patch 0065 | `record-whole-memory-cache-targets` | Request scope and tabs |
+| Mojo `NativeProbeHost.CaptureRendererTarget` | a renderer `request_target` child with its whole target | Request scope and tabs |
 | Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
 | `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
 | `response_headers` source 2 | `network`: what `OnRawResponse` reported, with `Set-Cookie` | Headers and cookies |
@@ -321,20 +323,28 @@ in the document's cached resources. Chromium patch `0040-record-memory-cache-reu
 handles each call after its detached and observer check:
 
 1. `NativeProbeSink::AdmitMemoryCacheReuse` checks the Network category,
-   expiry and the page, then charges the configuration's budget. A reuse in a
-   page that is not ordinary (`Page::IsOrdinary`, checked by
+   expiry and the page. A reuse in a page that is not ordinary
+   (`Page::IsOrdinary`, checked by
    `FetchContext::IsOrdinaryPageForNativeCapture`: an SVG image's own document,
    whose `IsolatedSVGDocumentHost` frame the browser never registers, or a
    page popup) belongs to no tab: it is counted as exclusion class 71 and
-   charges no budget. A reuse past the budget is counted as class 70. Either
-   way nothing else is done.
-2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner,
-   and bounded prefixes of its host and, in content sessions only, its target
+   nothing else is done. Every other reuse is recorded; nothing counts them.
+2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner
+   and its host: 121 bytes, one past what the record keeps, or in content
+   sessions the whole host up to one past an artifact URL's 8,192 bytes. In
+   content sessions only it also takes its target
    (`NativeRequestTargetRange` keeps the range inside the URL whatever the
-   parser left).
+   parser left): the whole path and query of an `http` or `https` URL up to
+   the 2 MiB the browser keeps for its own requests
+   (`NativeMemoryCacheTargetBytes`, Chromium patch
+   `0065-record-whole-memory-cache-targets`), else a 116-byte prefix, since a
+   `data:` URL can be megabytes long and has no origin to name an artifact.
 3. One `memory_cache_reuse` (type 52) record, a Traffic row of its own, and in
    content sessions a `request_target` child, as above, with `parent_event_id`
-   its sequence.
+   its sequence. A target that fits the 116-byte prefix is complete in the
+   ring. A longer `http(s)` target goes whole to the browser (below), which
+   keeps it as that child's `request_target` artifact exactly as for its own
+   requests.
 
 The record names no method: Blink adds only GET resources to the memory cache
 (`ShouldResourceBeAddedToMemoryCache`), and static data is GET too, so
@@ -410,16 +420,40 @@ zero. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
 Version 1 records, which name no source, stay valid.
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
-would be, unless the configuration opts in, and returns its budget charge.
-Each renderer configuration records at most 4,096 reuses. Every later one is
-counted, not recorded, in the queue's counter for exclusion class 70
-`memory_cache_reuse`, and every reuse in a page that is not ordinary in the one
-for class 71 `non_ordinary_page_reuse`, so a researcher can tell lost tab rows
-from reuses no tab owned. The browser reports each as a cumulative
-`capture_exclusion` of that renderer like the scheme counters. The count is tagged with the admitting configuration's generation,
-so a reuse still in flight from a replaced configuration neither charges nor
-resets the new one's budget, and one it admitted is not recorded into the new
-configuration.
+would be, unless the configuration opts in. Every reuse in a page that is not
+ordinary is counted, not recorded, in the queue's counter for exclusion class
+71 `non_ordinary_page_reuse`, so a researcher can tell reuses no tab owned. The
+browser reports it as a cumulative `capture_exclusion` of that renderer like
+the scheme counters. Earlier renderers recorded at most 4,096 reuses per
+configuration and counted the rest as class 70 `memory_cache_reuse`; the class
+and its queue counter stay so that evidence still reads, and current renderers
+never count it. A reuse admitted by a replaced configuration is not recorded
+into the new one.
+
+##### Whole targets
+
+A content-session reuse whose `http(s)` target passes the 116-byte prefix
+takes the next renderer sequence for its `request_target` child and sends the
+child, its origin (scheme, host and explicit port, never user info) and its
+whole target to the browser over Mojo
+(`NativeProbeHost.CaptureRendererTarget`) instead of the ring. The renderer
+pushed the parent to the ring first, so the host drains the ring before it
+reads the child: the parent, and any exclusion decision for its row, always
+come first. The host emits the child in the slot the renderer took, with the
+retention and artifact `EmitRequestTarget` gives a browser request's long
+target (retained as a sensitive `request_target` artifact of kind 9, capture
+origin 10, named by the origin and created by the child; or not retained for
+the session budget, an unavailable artifact path or a refused transfer). It
+checks the child against the renderer's own identity: session, process and
+nonzero sequence, a `request_target` version 2 child of a nonzero parent and
+request ID, complete as sent, whose length and prefix are those of the target,
+of 117 bytes to 2 MiB, and whose origin has its scheme and fits an artifact
+URL. A child that fails, or that arrives outside a content capture, leaves a
+`renderer_target_malformed` gap in its slot and keeps nothing; one naming
+another process or session is dropped. A child the renderer could not send
+(no host on its thread) stays in the ring as `not_retained_artifact_unavailable`
+with its prefix. A target with no origin or longer than 2 MiB stays in the ring
+as `not_retained_url`, as the browser decides for its own.
 
 ### Request owners and tabs
 
@@ -790,13 +824,15 @@ the row has one, else the newest nonzero loader kind of a browser
   then reports as lost), and each end reads one slot and emits at most two
   records and one gap.
 - Memory-cache reuse, inactive: one atomic load before the hook converts
-  anything. Active: one virtual page check and the admission (the category,
-  expiry and budget reads and one compare-and-swap of the budget word). Past
-  4,096, or in a page that is not ordinary, that is all, plus one counter
-  increment; nothing is converted or allocated. An admitted reuse then takes a
-  request ID and its owner, copies at most 121 host bytes and, with request
-  content only, a 116-byte target prefix, and emits one fixed-size record and
-  that target.
+  anything. Active: one virtual page check and the admission (the category
+  and expiry reads). In a page that is not ordinary that is all, plus one
+  counter increment; nothing is converted or allocated. An admitted reuse then
+  takes a request ID and its owner, copies at most 121 host bytes and emits
+  one fixed-size record. With request content it also copies its host and the
+  target Blink converts (at most 2 MiB of an http(s) path and query, else 116
+  bytes) and emits that target: inline, or for a long http(s) target one Mojo
+  message carrying the target to the browser, which copies it once more into
+  the artifact it queues. Nothing else per reuse is bounded or counted.
 - Tabs, inactive: the loaders' owner scope and the proxy's factory hook add at
   most one atomic load and allocate nothing. Active: one virtual
   call and a thread-local write per load, one registry insert per factory, and
@@ -822,8 +858,9 @@ the row has one, else the newest nonzero loader kind of a browser
 - `get_session_summary` lists `exclusions` by class and adds the info checks
   `browser_internal_excluded` and `no_tab_traffic_excluded` (classes 65, 66,
   68 and 69), `request_tabs` (with `extension_rows` and `unresolved_reasons`),
-  and the error check `network_tab_unresolved`. Class 70 is its own info check,
-  `memory_cache_reuse_not_recorded`; class 71 is listed in `exclusions` only,
+  and the error check `network_tab_unresolved`. Class 70, from earlier
+  renderers only, is its own info check, `memory_cache_reuse_not_recorded`;
+  class 71 is listed in `exclusions` only,
   since no tab lost a row. The backend keeps types 36 to 38, 50 and 52 in its
   network window.
 - Traffic has no Unattributed group. A row is in every tab its records or link
@@ -872,10 +909,18 @@ gap names, an earlier configuration, one completion on either side of the
 on one start slot, where any accepted mix of two starts fails (accepting every
 read, or ignoring the odd version, fails it); target ranges with empty and
 invalid components; and memory-cache reuses with their owner, host, status,
-size, target, static data, a 200-byte host, counted internal URLs that return
-their charge, a page that is not ordinary and its class 71 count, the 4,096 budget and its class 70
-count at no allocation, a new configuration's fresh budget, a reuse admitted
-by a replaced configuration, and the inactive path.
+size, target, static data, a 200-byte host, counted internal URLs, a page
+that is not ordinary and its class 71 count, 12,000 content reuses with
+300-byte paths each sent whole with their origin and prefix in the slot after
+their parent, long `data:`, over-2 MiB and prefix-only targets kept inline
+with their retention, 20,000 metadata reuses all recorded with no class 70
+count and admission at no allocation, a reuse admitted by a replaced
+configuration, and the inactive path. `make native-artifact-capture-check`
+drives the production `NativeProbeHost` through `CaptureRendererTarget`: the
+parent drained first, the child retained with its whole target as a sensitive
+`request_target` artifact under its origin, a forged prefix and a wrong
+scheme each leaving a `renderer_target_malformed` gap in its slot, another
+process's child dropped, and a child outside a content capture gapped.
 `tests/network_scope_test.cpp` also checks type 52 and classes 70 and 71 for parity and
 malformed records and keeps 68 and 69 valid, and `make network-scope-wire-check`
 drives the Traffic model through memory-cache rows, a service-worker failure, a

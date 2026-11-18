@@ -161,10 +161,10 @@ it.
   and is still recorded as one row: its host, status, decoded size, Blink
   resource type, frame and the ID of the renderer request that loaded it
   always, and its path and query only in content
-  capture and only as a 116-byte prefix, which for a `data:` URL is the start
-  of the data itself. At most 4,096 are recorded per renderer configuration;
-  the rest, and those in pages that are not ordinary, such as an SVG image's
-  own document, are counted
+  capture: an http(s) path and query whole, the part past a 116-byte prefix as
+  the row's `request_target` artifact, and a `data:` URL only as its first 116
+  bytes, the start of the data itself. Every reuse is recorded; those in pages
+  that are not ordinary, such as an SVG image's own document, are counted
   ([Native network v3](protocol/native-network-v3.md#memory-cache-reuse)).
 - Browser-internal pages (WebUI, DevTools) and extension background workers are
   counted, not recorded. `REB_CAPTURE_BROWSER_INTERNAL=1` and

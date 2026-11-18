@@ -2495,16 +2495,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) pretty-printed source map")
       try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed source map")
       try await ui.screenshot("sources-pretty-printed-\(size.name)")
-      // A file past the preview limit states it above the code. The record is marked rather than
-      // retained at 16 MiB, which would dominate this suite; the loader has its own check.
-      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = true; renderSources(); return true; })()")
-      try await ui.waitUntil("!document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice did not appear")
-      let limit = try await ui.value("document.querySelector('#source-limit-notice').innerText") as? String ?? ""
-      XCTAssertTrue(limit.contains("first 16 MiB"), "\(size.name): the notice states the limit: \(limit)")
-      try await assertLayout(ui, "#screen-sources", "\(size.name) source past the preview limit")
-      try await ui.screenshot("sources-limit-notice-\(size.name)")
-      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = false; renderSources(); return true; })()")
-      try await ui.waitUntil("document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice stayed after the record changed")
+      // Sources reads every byte of a file, so no preview limit is stated above the code.
+      let whole = try await ui.json("""
+        (() => { const source = state.artifacts.find(item => item.artifact_id === state.selectedArtifactId);
+          return {noticeHidden: document.querySelector('#source-limit-notice').hidden, truncated: Boolean(source?.contentTruncated)}; })()
+        """)
+      XCTAssertEqual(whole["noticeHidden"] as? Bool, true, "\(size.name): a whole source states no preview limit: \(whole)")
+      XCTAssertEqual(whole["truncated"] as? Bool, false, "\(size.name): the source is read whole: \(whole)")
       try await ui.click("#source-window-next")
       try await ui.waitUntil("document.querySelector('.source-line[data-line=\"1001\"]') && \(settled) && document.querySelectorAll('#source-code .syntax-string').length > 0",
         "\(size.name): the window after line 1,000 lost its colors")

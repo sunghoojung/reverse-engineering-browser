@@ -365,7 +365,9 @@ async function checkConfiguredProject() {
     const {sendRequest,parseClientJSON,parseInputJSON}=await import(join(folder,'src/client.mjs'));
     const input={method:'GET',url:origin+'/stock',headers:[],body:'',timeout_ms:15000};
     const provenance={format:'reb-client-project-v1',mode:'raw',problems:[]};
-    const valid={configVersion:'reb-client-config-v1',allowedOrigin:origin,transport:{mode:'standard',browserProfile:null},timeoutMs:500,redirectPolicy:'manual',cookiePolicy:'omit',responseChecks:{statuses:[200],contentType:'application/json',jsonFields:[
+    // Cases that expect an answer get a long deadline so scheduler load never
+    // turns them into timeouts; the timeout cases set their own short one.
+    const valid={configVersion:'reb-client-config-v1',allowedOrigin:origin,transport:{mode:'standard',browserProfile:null},timeoutMs:10000,redirectPolicy:'manual',cookiePolicy:'omit',responseChecks:{statuses:[200],contentType:'application/json',jsonFields:[
       {pointer:'/availability',type:'string',equals:'in_stock'},
       {pointer:'/quantity',type:'number',equals:4},
       {pointer:'/store/a~1b/~0key',type:'boolean',equals:true},

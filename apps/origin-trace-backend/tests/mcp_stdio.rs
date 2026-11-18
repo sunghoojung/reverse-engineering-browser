@@ -1985,6 +1985,14 @@ backend=$!
 trap 'kill "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; kill "$backend" 2>/dev/null; wait "$backend" 2>/dev/null; echo ended > "$dir/ended"; exit 0' TERM
 for _ in $(seq 1 400); do [[ -s "$dir/research-ui.endpoint" ]] && break; sleep 0.05; done
 echo "Origin Trace live session $(basename "$dir")"
+# A test that fails before it ends this session removes the root without
+# stopping it. The backend waits on this launcher, so stop it here instead of
+# leaving both running.
+while kill -0 "$backend" 2>/dev/null && [[ -d "$dir" ]]; do sleep 0.2; done
+if [[ ! -d "$dir" ]]; then
+  kill "$broker" "$backend" 2>/dev/null || true
+  exit 0
+fi
 wait "$backend"
 "#,
                 backend = env!("CARGO_BIN_EXE_origin-trace-backend")

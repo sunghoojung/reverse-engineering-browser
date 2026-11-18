@@ -73,7 +73,10 @@ impl Server {
             }
         }
         let mut child = child.args(args).spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // The first launches of a freshly linked binary wait on macOS code
+        // signing assessment, which takes longer than ten seconds on a loaded
+        // machine. A started backend writes its endpoint in under a second.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let url = loop {
             if let Ok(url) = std::fs::read_to_string(&endpoint) {
                 break url.trim().to_owned();

@@ -1271,9 +1271,7 @@ mod tests {
         let mut quiet = json!({"checks": []});
         add_response_bodies(
             &mut quiet,
-            Ok(
-                json!({"complete": true, "requests": "2", "cases": {"captured": "2"}}),
-            ),
+            Ok(json!({"complete": true, "requests": "2", "cases": {"captured": "2"}})),
         );
         assert!(quiet["checks"].as_array().unwrap().is_empty());
         // An index that cannot answer leaves the counts unavailable, never the summary.

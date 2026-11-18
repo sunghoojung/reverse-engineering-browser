@@ -11394,7 +11394,11 @@ async fn request_index_reaches_every_request_of_a_large_session() {
     assert_eq!(first["index"]["complete"], true);
     assert_eq!(first["facets"]["tabs"].as_array().unwrap().len(), 4);
     assert!(
-        server.root.path().join("events.jsonl.requests-v2").is_file(),
+        server
+            .root
+            .path()
+            .join("events.jsonl.requests-v2")
+            .is_file(),
         "the index is kept beside the store"
     );
     let unchanged = server

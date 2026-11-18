@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     path::{Path, PathBuf},
     sync::LazyLock,
     time::{Duration, Instant},
@@ -2095,11 +2095,10 @@ impl Batch {
     }
 
     fn row(&mut self, transaction: &Transaction<'_>, ordinal: i64) -> Result<&mut Row> {
-        if !self.rows.contains_key(&ordinal) {
-            let row = load(transaction, ordinal)?;
-            self.rows.insert(ordinal, row);
-        }
-        Ok(self.rows.get_mut(&ordinal).expect("held row"))
+        Ok(match self.rows.entry(ordinal) {
+            Entry::Occupied(held) => held.into_mut(),
+            Entry::Vacant(slot) => slot.insert(load(transaction, ordinal)?),
+        })
     }
 
     fn create(

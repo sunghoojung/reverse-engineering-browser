@@ -7,14 +7,25 @@ module reb.mojom;
 
 import "mojo/public/mojom/base/unguessable_token.mojom";
 
+// Bound on the renderer's IO thread, so a Stop is heard while a command holds
+// the main thread. It reaches only the command that `request_id` names: a Stop
+// that arrives after that command returned does nothing.
+interface NativeConsoleControl {
+  Stop(uint64 request_id);
+};
+
 // Frame-associated ordering plus an exact document token prevents a console
 // request queued before navigation from executing in the replacement page.
 interface NativeConsoleAgent {
   Describe() => (mojo_base.mojom.UnguessableToken? document);
+  // Sent before any command, while the main thread is free to bind it.
+  BindControl(pending_receiver<NativeConsoleControl> control);
   Runtime(mojo_base.mojom.UnguessableToken document,
+          uint64 request_id,
           uint64 expires_at_monotonic_us,
           string command) => (uint16 status, uint16 type, string text, bool truncated);
   Evaluate(mojo_base.mojom.UnguessableToken document,
+           uint64 request_id,
            uint64 expires_at_monotonic_us,
            string source) => (uint16 status, uint16 type, string text, bool truncated);
 };

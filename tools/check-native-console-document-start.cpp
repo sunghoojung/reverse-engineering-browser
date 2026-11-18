@@ -237,9 +237,9 @@ void CheckWireAdmission() {
   NativeConsoleResponse response;
   response.request_id = 1;
   response.type = NativeConsoleType::kDocumentStart;
-  response.payload_bytes = kNativeConsolePayloadLimit;
+  response.payload_bytes = kNativeConsoleReplyLimit;
   Check(IsNativeConsoleResponseFor(response, request), "a bounded JSON reply is admitted");
-  response.payload_bytes = kNativeConsolePayloadLimit + 1;
+  response.payload_bytes = kNativeConsoleReplyLimit + 1;
   Check(!IsNativeConsoleResponseFor(response, request), "an oversized reply is refused");
   response.payload_bytes = 4;
   response.type = NativeConsoleType::kRuntime;

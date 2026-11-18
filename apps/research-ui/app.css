@@ -2896,13 +2896,15 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-input { display: block; padding: 4px 10px 4px; background: var(--chrome); border-top: 1px solid var(--line); }
 .native-console-input:focus-within { box-shadow: inset 2px 0 var(--accent); }
 .native-console-composer-line { display: flex; align-items: flex-start; gap: 6px; }
-#native-console-run { min-width: 52px; margin: 0 0 0 6px; }
+#native-console-run, #native-console-interrupt { min-width: 52px; margin: 0 0 0 6px; }
+#native-console-interrupt:not(:disabled) { border-color: color-mix(in srgb, var(--red) 45%, transparent); color: var(--red); }
 .native-console-composer-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2px 14px; color: var(--faint); font: 10px/16px var(--sans); }
 #native-console-composer-status { color: var(--muted); overflow-wrap: anywhere; }
 #native-console-input-help { position: static; width: auto; height: auto; white-space: normal; clip-path: none; }
 .native-console-command { background: color-mix(in srgb, var(--chrome) 65%, transparent); }
 .native-console-command-status { display: block; padding-left: 16px; margin-bottom: 2px; color: var(--faint); font: 10px/14px var(--sans); }
 .native-console-command-failure { color: var(--red); margin: 4px 0 0 16px; font: 11px/16px var(--sans); }
+.native-console-command-rest { color: var(--muted); margin: 2px 0 0 16px; font: 10px/16px var(--sans); }
 .native-console-result-details > summary { opacity: 1; padding: 0 4px; }
 .native-console-expression { padding-right: 10px; }
 .native-console-result-details button, .native-console-property-pager button { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--muted); padding: 3px 6px; margin: 3px 4px 0 0; font: 10px/16px var(--sans); }

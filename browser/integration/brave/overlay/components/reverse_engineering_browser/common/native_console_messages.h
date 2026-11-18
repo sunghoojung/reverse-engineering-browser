@@ -78,7 +78,7 @@ class NativeConsoleMessages final {
  private:
   // JSON envelope and the saturated ten-digit drop count fit within 64 bytes.
   static constexpr std::size_t kEnvelopeLimit = 64;
-  static_assert(kByteLimit + kCapacity + kEnvelopeLimit <= kNativeConsolePayloadLimit);
+  static_assert(kByteLimit + kCapacity + kEnvelopeLimit <= kNativeConsoleReplyLimit);
 
   void Pop() noexcept {
     bytes_ -= messages_[head_].size();

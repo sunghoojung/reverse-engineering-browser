@@ -236,7 +236,7 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     // A snippet that synchronously creates a frame reenters this path. The
     // single watchdog slot refuses the nested injection and records it, rather
     // than running page JavaScript that nothing could interrupt.
-    if (!deadline.Begin(isolate, kNativeConsoleDocumentStartExecutionMillis)) {
+    if (!deadline.Begin(isolate, 0, kNativeConsoleDocumentStartExecutionMillis)) {
       Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, false,
            "Execution watchdog unavailable; the snippet did not run");
       return;
@@ -287,10 +287,10 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
         }
       }
     }
-    if (deadline.Finish()) {
+    if (deadline.Finish() != NativeConsoleDeadline::End::kReturned) {
       failure.Reset();
       Emit(frame, index, NativeConsoleDocumentStartRecord::kScriptError, false,
-           "Snippet exceeded its 50 ms document-start budget; changes are not rolled back");
+           "Snippet exceeded its document-start budget; changes are not rolled back");
       return;
     }
     if (!ran) {

@@ -856,7 +856,13 @@ Each submitted command has a numbered running/completed/error state. A transport
 failure marks its outcome unavailable, preserves the next draft and delivered
 output, and never automatically retries the command. Use Session settings to
 refresh documents explicitly, or disconnect and start a fresh disposable session.
-The Run button and Enter both submit; the composer also shows its UTF-8 byte count.
+The Run button and Enter both submit; the composer also shows its UTF-8 size.
+A command runs until it returns: while it runs, Run becomes **Stop**, which ends
+it in the page and marks it Stopped, keeping the changes it already made. Input
+of any size up to the 64 MiB command record is accepted. The transcript shows a
+long command's first 4096 characters with its full size, and history keeps the
+newest command whole however large; inputs over 64 KiB are shown uncolored so
+typing stays fast.
 An empty prompt has no placeholder text. Fully typed built-in names do not open
 automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
 their completions explicitly.
@@ -894,11 +900,13 @@ unchanged; Ctrl+Space explicitly requests completion.
 
 Results expand into property pages, DOM element previews, function source and
 source locations. Getters remain labeled, proxies are opaque, and retained values
-expire after 60 seconds. Explicit actions copy bounded property previews, store a
+stay until they are released, the output is cleared or the page navigates.
+Explicit actions copy bounded property previews, store a
 value as `window.tempN`, or release it. `$_` reads the previous result. `copy(value)`,
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
-argument once. Event monitoring is explicit and lasts at most 60 seconds.
+argument once. Event monitoring is explicit and lasts until
+`unmonitorEvents(element)` or the page navigates.
 `getEventListeners` also takes `window` and `document`, and an element, `window`
 or `document` result offers **Event listeners** among its value actions. The
 runtime describes `window` and `document` as a plain `Object`, so a plain

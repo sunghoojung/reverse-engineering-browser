@@ -25,10 +25,15 @@ use tokio::{
 };
 
 const MAGIC: u32 = 0x43424552;
-const SOURCE_LIMIT: usize = 8192;
+// Wire version 3 adds Stop (operation 5) and the stopped status (7).
+const VERSION: u16 = 3;
+// One command record carries at most 64 MiB, the browser's payload bound
+// (common/native_console_protocol.h); a runtime command counts its JSON.
+const SOURCE_LIMIT: usize = 64 * 1024 * 1024;
 const TEXT_LIMIT: usize = 8192;
 const TARGET_LIMIT: usize = 64;
 const TARGET_SIZE: usize = 920;
+// The renderer encodes one runtime or document-start reply in at most 64 KiB.
 const RUNTIME_LIMIT: usize = 65536;
 const DOCUMENT_START_SCRIPT_LIMIT: usize = 4;
 const DOCUMENT_START_SOURCE_LIMIT: usize = 4096;
@@ -94,7 +99,9 @@ struct Session {
     bridge: OwnedProcess,
     // None when this bridge is bound to the capture browser. Stop must not kill it.
     browser: Option<OwnedProcess>,
-    input: ChildStdin,
+    // Shared with `interrupt`, which writes a Stop while an action holds the
+    // session for a running command.
+    input: Arc<Mutex<ChildStdin>>,
     output: ChildStdout,
     directory: ConsoleDir,
     next_request: u64,
@@ -119,6 +126,37 @@ struct Session {
     document_start_armed: bool,
     // The document and rules the renderer last confirmed armed through `watch`.
     watch: Option<(u64, Value)>,
+    // The last live listing, which a state read reports while a command runs.
+    listing: Value,
+}
+// A command the renderer runs until it returns or is stopped. Registered while
+// the session's input is locked to send it, so a Stop written under the same
+// lock can name only this command or the one just answered, which the bridge
+// and browser ignore; never a later command.
+struct Running {
+    session_id: String,
+    request_id: u64,
+    input: Arc<Mutex<ChildStdin>>,
+    stopping: bool,
+    // What a state read reports until the command returns.
+    state: Value,
+}
+#[derive(Default)]
+struct RunningSlot {
+    running: std::sync::Mutex<Option<Running>>,
+    // Wakes a state read that waits for the session, because the action
+    // holding it has started a command that may run for a long time.
+    registered: tokio::sync::Notify,
+}
+impl RunningSlot {
+    fn state(&self) -> Option<Value> {
+        let running = self.running.lock().unwrap();
+        let running = running.as_ref()?;
+        let mut state = running.state.clone();
+        state["command"] = json!({"status":if running.stopping {"stopping"} else {"running"},
+            "request_id":running.request_id.to_string()});
+        Some(state)
+    }
 }
 impl Session {
     async fn stop(mut self) {
@@ -181,6 +219,7 @@ impl Session {
             .map(|target| json!(target.to_string()))
             .unwrap_or(Value::Null);
         listing["selection"] = self.selection();
+        self.listing = listing.clone();
         Ok(listing)
     }
     fn selection(&self) -> Value {
@@ -234,6 +273,19 @@ impl Session {
         }
     }
     async fn exchange(&mut self, operation: u16, target: u64, source: &str) -> Result<Value> {
+        self.exchange_running(operation, target, source, None).await
+    }
+    // Commands (operations 2 and 3) run in the page until they return, so they
+    // are awaited until the browser ends the session at its hour, and `running`
+    // registers them for `interrupt`. Listings and document-start operations
+    // are browser work with a short deadline.
+    async fn exchange_running(
+        &mut self,
+        operation: u16,
+        target: u64,
+        source: &str,
+        running: Option<(&RunningSlot, Value)>,
+    ) -> Result<Value> {
         // If the HTTP future is cancelled mid-exchange, the session stays
         // poisoned. Never retry an expression or reuse an ambiguous pipe.
         self.poisoned = true;
@@ -243,16 +295,34 @@ impl Session {
         })?;
         let mut header = [0u8; 32];
         header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        header[4..6].copy_from_slice(&2u16.to_le_bytes());
+        header[4..6].copy_from_slice(&VERSION.to_le_bytes());
         header[6..8].copy_from_slice(&operation.to_le_bytes());
         header[8..16].copy_from_slice(&id.to_le_bytes());
         header[16..24].copy_from_slice(&target.to_le_bytes());
         header[24..28].copy_from_slice(&(source.len() as u32).to_le_bytes());
-        let timeout = if id == 1 { 35 } else { 6 };
-        let result = tokio::time::timeout(Duration::from_secs(timeout), async {
-            self.input.write_all(&header).await?;
-            self.input.write_all(source.as_bytes()).await?;
-            self.input.flush().await?;
+        let timeout = if running.is_some() {
+            Duration::from_secs(3600).saturating_sub(self.started.elapsed())
+                + Duration::from_secs(10)
+        } else {
+            Duration::from_secs(if id == 1 { 35 } else { 6 })
+        };
+        let (session_id, shared) = (self.id.clone(), self.input.clone());
+        let result = tokio::time::timeout(timeout, async {
+            let mut input = shared.lock().await;
+            if let Some((slot, state)) = running {
+                *slot.running.lock().unwrap() = Some(Running {
+                    session_id,
+                    request_id: id,
+                    input: shared.clone(),
+                    stopping: false,
+                    state,
+                });
+                slot.registered.notify_waiters();
+            }
+            input.write_all(&header).await?;
+            input.write_all(source.as_bytes()).await?;
+            input.flush().await?;
+            drop(input);
             let mut response = [0u8; 32];
             self.output.read_exact(&mut response).await?;
             let parsed = ResponseHeader::parse(&response, id, operation)?;
@@ -306,10 +376,10 @@ impl ResponseHeader {
             bytes: u32_at(24) as usize,
         };
         if u32_at(0) != MAGIC
-            || u16_at(4) != 2
+            || u16_at(4) != VERSION
             || u64::from_le_bytes(bytes[8..16].try_into().unwrap()) != request
             || u32_at(28) != 0
-            || parsed.status > 6
+            || parsed.status > 7
             || parsed.kind > 12
             || (parsed.kind == 11 && operation != 3)
             || (parsed.kind == 12 && operation != 4)
@@ -444,6 +514,7 @@ impl ResponseHeader {
             "exception",
             "timeout",
             "disconnected",
+            "stopped",
         ];
         let text = std::str::from_utf8(payload)
             .map_err(|_| Error::protocol("Native result is not UTF-8"))?;
@@ -456,6 +527,7 @@ impl ResponseHeader {
             4 => Some(Reason::new(Code::ApplicationFailed)),
             5 => Some(Reason::uncertain(Cause::Timeout)),
             6 => Some(Reason::uncertain(Cause::Disconnected)),
+            7 => Some(Reason::new(Code::Cancelled)),
             _ => None,
         };
         if let Some(reason) = reason {
@@ -551,7 +623,10 @@ impl LiveBridge {
 struct Inner {
     helper: PathBuf,
     browser: Option<PathBuf>,
-    // Lock order: `session`, then `live`.
+    // Lock order: `action`, `session`, then `live`. An action holds `action`
+    // throughout, so a second action is refused rather than queued; reads take
+    // only `session`, so a read never makes an action fail.
+    action: Mutex<()>,
     session: Mutex<Option<Session>>,
     live: Mutex<LiveBridge>,
     live_directory: Option<PathBuf>,
@@ -564,6 +639,7 @@ struct Inner {
     // browser that still lists no support then lacks the overlay, which is a
     // different next step from a capture started without the permission.
     live_document_start_permitted: bool,
+    running: RunningSlot,
 }
 impl Inner {
     fn new(options: &Options) -> Self {
@@ -574,12 +650,14 @@ impl Inner {
                 "build/reb-console",
             ),
             browser: options.brave_binary.clone(),
+            action: Mutex::new(()),
             session: Mutex::new(None),
             live: Mutex::new(LiveBridge::Absent),
             live_directory: options.native_console_live_directory.clone(),
             handshake: std::sync::Mutex::new(None),
             document_start_unconfirmed: AtomicBool::new(false),
             live_document_start_permitted: options.session_document_start,
+            running: RunningSlot::default(),
         }
     }
     fn unavailable_message(&self, session: &Session) -> &'static str {
@@ -621,10 +699,30 @@ impl Inner {
         worker::executable(&self.helper)
             && self.browser.as_ref().is_some_and(|p| worker::executable(p))
     }
+    // The session, once a short action or read holding it is done. A command
+    // runs until it returns, so while one runs this returns its state instead
+    // of waiting.
+    async fn session(
+        &self,
+    ) -> std::result::Result<tokio::sync::MutexGuard<'_, Option<Session>>, Value> {
+        loop {
+            let registered = self.running.registered.notified();
+            tokio::pin!(registered);
+            registered.as_mut().enable();
+            if let Some(state) = self.running.state() {
+                return Err(state);
+            }
+            tokio::select! {
+                guard = self.session.lock() => return Ok(guard),
+                () = &mut registered => {}
+            }
+        }
+    }
     async fn state(&self) -> Value {
-        // A running action holds `session` for its exchanges. This waits for
-        // it rather than failing it.
-        let mut guard = self.session.lock().await;
+        let mut guard = match self.session().await {
+            Ok(guard) => guard,
+            Err(running) => return running,
+        };
         if let Some(why) = guard.as_mut().and_then(Session::ended) {
             // Records an end that already happened; a usable session is never
             // ended by a read.
@@ -688,10 +786,11 @@ impl Inner {
     // a session, including an expired or poisoned one: retirement stays with
     // the explicit actions so a read can never destroy a researcher's context.
     async fn document_start(&self, after: u64) -> Result<Value> {
-        let mut guard = self
-            .session
-            .try_lock()
-            .map_err(|_| Error::conflict("Another native console action is running"))?;
+        let mut guard = self.session().await.map_err(|_| {
+            Error::conflict(
+                "A Console command is running; read document-start output once it returns or is stopped",
+            )
+        })?;
         let Some(session) = guard.as_mut() else {
             if self.document_start_unconfirmed.load(Ordering::Relaxed) {
                 return Ok(
@@ -755,7 +854,14 @@ impl Inner {
         if let Some(handshake) = handshake {
             handshake.abort();
         }
-        if let Some(session) = self.session.lock().await.take() {
+        // A running command holds the session until it returns. Stop it, and
+        // wait no longer than the browser's own Stop deadline: processes left
+        // with the action are killed when it is dropped at exit.
+        let _ = self.stop_running(None).await;
+        if let Ok(mut guard) =
+            tokio::time::timeout(Duration::from_secs(10), self.session.lock()).await
+            && let Some(session) = guard.take()
+        {
             session.stop().await;
         }
         let mut live = self.live.lock().await;
@@ -766,11 +872,96 @@ impl Inner {
             session.stop().await;
         }
     }
+    // What a state read reports while `session` runs a command, the same as
+    // it would report between commands.
+    fn running_state(&self, session: &Session) -> Value {
+        if !session.live || self.live_directory.is_none() {
+            return json!({"contract_version":2,"available":self.available(),"state":"ready",
+                "session_id":session.id,"message":"Native console uses a separate disposable browser profile"});
+        }
+        let mut state = session.listing.clone();
+        state["available"] = json!(self.available());
+        state["live_available"] = json!(true);
+        state["binding_state"] = json!("connected");
+        state["message"] = json!(LIVE_CAPTURE_MESSAGE);
+        state
+    }
+    // Stops the command another action is running, without waiting for that
+    // action. The renderer ends the command at its next interrupt check and
+    // answers it as `stopped`; changes it already made stay.
+    async fn interrupt(&self, request: &Value) -> Result<Value> {
+        validation::fields(
+            request,
+            &["action", "session_id"],
+            "Native console interrupt",
+        )?;
+        validation::canonical(&request["session_id"], 64, true, "Console session")?;
+        let answer = |command: &str| {
+            json!({"contract_version":2,"state":"ready","session_id":request["session_id"],
+                "command":command})
+        };
+        if self.stop_running(Some(&request["session_id"])).await? {
+            return Ok(answer("stopping"));
+        }
+        // Nothing runs for this session. A free session still checks the
+        // identity, like every other action.
+        if let Ok(guard) = self.session.try_lock()
+            && guard
+                .as_ref()
+                .is_none_or(|session| request["session_id"] != session.id)
+        {
+            return Err(Error::conflict(SESSION_CHANGED));
+        }
+        Ok(answer("none"))
+    }
+    // Sends Stop to the running command, of `session_id` when one is named.
+    // False when no such command runs.
+    async fn stop_running(&self, session_id: Option<&Value>) -> Result<bool> {
+        let running = {
+            let running = self.running.running.lock().unwrap();
+            running
+                .as_ref()
+                .filter(|running| session_id.is_none_or(|id| *id == running.session_id))
+                .map(|running| (running.input.clone(), running.request_id))
+        };
+        let Some((input, request_id)) = running else {
+            return Ok(false);
+        };
+        let mut input = input.lock().await;
+        // Under the input lock no later command can be sent, so the Stop names
+        // the running command or the one just answered, which is ignored.
+        {
+            let mut running = self.running.running.lock().unwrap();
+            match running.as_mut() {
+                Some(running) if running.request_id == request_id => running.stopping = true,
+                _ => return Ok(false),
+            }
+        }
+        let mut header = [0u8; 32];
+        header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        header[4..6].copy_from_slice(&VERSION.to_le_bytes());
+        header[6..8].copy_from_slice(&5u16.to_le_bytes());
+        header[8..16].copy_from_slice(&request_id.to_le_bytes());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            input.write_all(&header).await?;
+            input.flush().await
+        })
+        .await
+        .map_err(|_| Error::new(503, "Native console did not accept the Stop"))?
+        .map_err(|_| Error::new(503, "Native console disconnected before the Stop"))?;
+        Ok(true)
+    }
     async fn action(&self, request: &Value) -> Result<Value> {
-        let mut guard = self
-            .session
+        if request["action"] == "interrupt" {
+            return self.interrupt(request).await;
+        }
+        let _action = self
+            .action
             .try_lock()
             .map_err(|_| Error::conflict("Another native console action is running"))?;
+        // Only a read can hold the session here, and briefly: no command runs
+        // without this action.
+        let mut guard = self.session.lock().await;
         let action = request["action"].as_str().unwrap_or("");
         if action == "start" {
             // The experiment opt-in is optional so an existing caller that never
@@ -964,8 +1155,8 @@ impl Inner {
         } else if action == "runtime" {
             validate_command(&request["command"])?;
             runtime_source = serde_json::to_string(&request["command"])?;
-            if runtime_source.len() > RUNTIME_LIMIT {
-                return Err(Error::bad("Runtime command exceeds 65536 bytes"));
+            if runtime_source.len() > SOURCE_LIMIT {
+                return Err(Error::bad("Runtime command exceeds 64 MiB"));
             }
             (
                 3,
@@ -1003,7 +1194,16 @@ impl Inner {
             }
             session.accessed_targets.insert(target);
         }
-        let mut result = session.exchange(operation, target, source).await;
+        let mut result = if operation == 2 || operation == 3 {
+            let state = self.running_state(session);
+            let result = session
+                .exchange_running(operation, target, source, Some((&self.running, state)))
+                .await;
+            *self.running.running.lock().unwrap() = None;
+            result
+        } else {
+            session.exchange(operation, target, source).await
+        };
         if session.live
             && let Ok(value) = result.as_mut()
             && value["status"] == "stale_target"
@@ -1248,7 +1448,7 @@ impl BridgeProcess {
             id: self.id,
             bridge: self.bridge,
             browser: None,
-            input: self.input,
+            input: Arc::new(Mutex::new(self.input)),
             output: self.output,
             directory,
             next_request: 1,
@@ -1262,6 +1462,7 @@ impl BridgeProcess {
             document_start: false,
             document_start_armed: false,
             watch: None,
+            listing: Value::Null,
         }
     }
     async fn stop(mut self) {
@@ -2245,7 +2446,16 @@ while True:
     delay = root / ('slow-listing' if operation == 1 else 'slow-command')
     if delay.exists():
         time.sleep(float(delay.read_text() or '1'))
-    if operation == 1:
+    # A command that runs until the owner's Stop names it, as the bridge
+    # forwards one while the command is in flight.
+    stopped = operation in (2, 3) and (root / 'endless-command').exists()
+    if stopped:
+        stop = request.unpack(sys.stdin.buffer.read(32))
+        with (root / 'requests.jsonl').open('a') as log:
+            log.write(json.dumps({'operation':stop[2],'target':stop[4],'source':'','request':stop[3]}) + '\n')
+        assert stop[2] == 5 and stop[3] == sequence and stop[4] == 0 and stop[5] == 0
+        payload, kind, wire_status = b'Stopped; changes are not rolled back', 0, 7
+    elif operation == 1:
         documents = json.loads((root / 'targets.json').read_text())
         records = []
         for item in documents:
@@ -2299,7 +2509,7 @@ while True:
             binding_id: "42".into(),
             bridge,
             browser: None,
-            input,
+            input: Arc::new(Mutex::new(input)),
             output,
             directory: ConsoleDir::Live(tempfile::tempdir().unwrap()),
             next_request: 1,
@@ -2313,6 +2523,7 @@ while True:
             document_start: false,
             document_start_armed: false,
             watch: None,
+            listing: Value::Null,
         };
         (session, directory)
     }
@@ -2778,6 +2989,68 @@ while True:
         console.stop().await;
     }
     #[tokio::test]
+    async fn interrupt_stops_a_running_command_without_waiting_for_its_action() {
+        let (console, directory) = live_fixture().await;
+        let identity = connect_fixture(&console, "22").await;
+        let interrupt = json!({"action":"interrupt","session_id":identity});
+        // With nothing running, nothing is sent.
+        let idle = console.action(&interrupt).await.unwrap();
+        assert_eq!(idle["command"], "none");
+        crate::validation::schema("NativeConsoleInterrupt", &idle, 500).unwrap();
+        let stale = console
+            .action(&json!({"action":"interrupt","session_id":"9"}))
+            .await
+            .unwrap_err();
+        assert_eq!(stale.status, 409);
+        std::fs::write(directory.path().join("endless-command"), "").unwrap();
+        let inner = console.inner.clone();
+        let evaluate = json!({"action":"runtime","session_id":identity,"target_id":"22",
+            "command":{"operation":"evaluate","source":"for (;;);"}});
+        let running = tokio::spawn(async move { inner.action(&evaluate).await });
+        let state = loop {
+            let state = console.state().await;
+            if state.get("command").is_some() {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(state["command"]["status"], "running");
+        assert_eq!(state["binding_state"], "connected");
+        assert_eq!(state["selected_target_id"], "22");
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
+        let request = state["command"]["request_id"].as_str().unwrap().to_owned();
+        // Another action is refused while the command holds the session.
+        let busy = console
+            .action(&json!({"action":"targets","session_id":identity}))
+            .await
+            .unwrap_err();
+        assert_eq!(busy.status, 409);
+        let sent = console.action(&interrupt).await.unwrap();
+        assert_eq!(sent["command"], "stopping");
+        crate::validation::schema("NativeConsoleInterrupt", &sent, 500).unwrap();
+        let stopped = running.await.unwrap().unwrap();
+        assert_eq!(stopped["status"], "stopped");
+        assert_eq!(stopped["code"], "cancelled");
+        crate::validation::schema("NativeConsoleEvaluation", &stopped, 500).unwrap();
+        let stop = requests(&directory)
+            .into_iter()
+            .find(|request| request["operation"] == 5)
+            .unwrap();
+        assert_eq!(stop["request"].to_string(), request);
+        assert!(console.state().await.get("command").is_none());
+        // The session stays usable after a stopped command.
+        std::fs::remove_file(directory.path().join("endless-command")).unwrap();
+        let next = console
+            .action(
+                &json!({"action":"runtime","session_id":identity,"target_id":"22",
+                "command":{"operation":"evaluate","source":"1"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next["runtime"]["status"], "ok");
+        console.stop().await;
+    }
+    #[tokio::test]
     async fn a_client_that_disconnects_mid_command_does_not_end_the_live_binding() {
         let (console, directory) = live_fixture().await;
         let identity = connect_fixture(&console, "22").await;
@@ -2791,11 +3064,17 @@ while True:
                 .is_err()
         );
         std::fs::remove_file(directory.path().join("slow-command")).unwrap();
-        // The command finishes on its own; this read waits for it.
+        // The command finishes on its own. A read reports it while it runs
+        // rather than waiting for it.
         let state = console.state().await;
         assert_eq!(state["state"], "ready");
         assert_eq!(state["session_id"], identity);
         assert_eq!(state["binding_state"], "connected");
+        assert_eq!(state["command"]["status"], "running");
+        crate::validation::schema("NativeConsoleState", &state, 500).unwrap();
+        while console.state().await.get("command").is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let before = requests(&directory).len();
         let next = console.action(&evaluate).await.unwrap();
         assert_eq!(next["runtime"]["status"], "ok");
@@ -2932,7 +3211,7 @@ while True:
         for (status, cause) in [(5u16, "timeout"), (6, "disconnected")] {
             let mut bytes = [0; 32];
             bytes[..4].copy_from_slice(&MAGIC.to_le_bytes());
-            bytes[4..6].copy_from_slice(&2u16.to_le_bytes());
+            bytes[4..6].copy_from_slice(&VERSION.to_le_bytes());
             bytes[6..8].copy_from_slice(&status.to_le_bytes());
             bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
             let error = ResponseHeader::parse(&bytes, 1, 2).err().unwrap();

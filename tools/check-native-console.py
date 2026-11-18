@@ -23,6 +23,10 @@ import urllib.error
 import urllib.request
 
 MAGIC = 0x43424552
+VERSION = 3
+# One command record carries at most 64 MiB (common/native_console_protocol.h).
+PAYLOAD_LIMIT = 64 * 1024 * 1024
+STOPPED = b"Stopped; changes are not rolled back"
 REQUEST = struct.Struct("<IHHQQII")
 RESPONSE = struct.Struct("<IHHQHHIII")
 HELLO = struct.Struct("<IHHQ32s16s")
@@ -55,7 +59,7 @@ def connect(path):
 
 
 def response(stream, request, kind, payload=b"", status=0, count=0, flags=0):
-    stream.sendall(RESPONSE.pack(MAGIC, 2, status, request, kind, flags, count, len(payload), 0) + payload)
+    stream.sendall(RESPONSE.pack(MAGIC, VERSION, status, request, kind, flags, count, len(payload), 0) + payload)
 
 
 def fnv1a(text):
@@ -225,10 +229,22 @@ def fake_browser(arguments):
     logs = []
     next_handle = 0
     last = None
+    answered = 0
+    def endless(request):
+        # A command runs until the owner's Stop names it, forwarded while it
+        # is in flight; then it answers stopped, as the renderer does.
+        magic, version, operation, stop, target, size, reserved = REQUEST.unpack(exact(stream, 32))
+        assert (magic, version, operation, stop, target, size, reserved) == (MAGIC, VERSION, 5, request, 0, 0, 0)
+        response(stream, request, 0, STOPPED, status=7)
     try:
         while True:
             magic, version, operation, request, target, size, reserved = REQUEST.unpack(exact(stream, 32))
-            assert magic == MAGIC and version == 2 and reserved == 0 and size <= (65536 if operation == 3 else 8192)
+            assert magic == MAGIC and version == VERSION and reserved == 0 and size <= PAYLOAD_LIMIT
+            # A Stop that crossed the answer to the request it names is spent.
+            if operation == 5:
+                assert request == answered and target == 0 and size == 0
+                continue
+            answered = request
             source = exact(stream, size).decode()
             frame = next((entry for entry in frames if entry["id"] == target), None) if frames else None
             if operation == 1 and frames:
@@ -274,10 +290,10 @@ def fake_browser(arguments):
                 if op == "evaluate":
                     expression = command["source"]
                     if expression == "while (true) {}":
-                        response(stream, request, 0, b"fixture execution timeout", status=5)
+                        endless(request)
                         continue
                     elif expression == "__malformed_native_reply__":
-                        stream.sendall(RESPONSE.pack(MAGIC, 2, 0, request, 11, 0, 0, 0xFFFFFFFF, 0))
+                        stream.sendall(RESPONSE.pack(MAGIC, VERSION, 0, request, 11, 0, 0, 0xFFFFFFFF, 0))
                         continue
                     elif expression.startswith("throw "):
                         value = {"status": "exception", "text": "Error: fixture exception", "location": {"url": "reb-console", "line": 1, "column": 7}, "stack": [{"url": "reb-console", "line": 1, "column": 7}]}
@@ -324,7 +340,7 @@ def fake_browser(arguments):
                 elif op == "last":
                     value["value"] = last
                 elif command.get("handle") not in handles:
-                    value = {"status": "error", "text": "Value expired, was released, or belongs to another document"}
+                    value = {"status": "error", "text": "Value was released, cleared, or belongs to another document"}
                 elif op == "inspect":
                     properties = [{"name": "value", "accessor": True, "value": {"type": "accessor", "text": "[Getter / Setter]", "truncated": False}}, {"name": "fixture", "value": {"type": "number", "text": "41", "truncated": False}}] if command["offset"] == 0 else []
                     value.update(properties=properties, more=False, offset=2)
@@ -345,11 +361,13 @@ def fake_browser(arguments):
                     value["text"] = "Synthetic event monitor response"
                 response(stream, request, 11, json.dumps(value).encode())
             elif source == "__malformed_native_reply__":
-                stream.sendall(RESPONSE.pack(MAGIC, 2, 0, request, 4, 0, 0, 0xFFFFFFFF, 0))
+                stream.sendall(RESPONSE.pack(MAGIC, VERSION, 0, request, 4, 0, 0, 0xFFFFFFFF, 0))
             elif source.startswith("throw "):
                 response(stream, request, 0, b"fixture exception", status=4)
             elif source == "while (true) {}":
-                response(stream, request, 0, b"fixture execution timeout", status=5)
+                endless(request)
+            elif source.startswith("/*") and source.endswith("*/ 6 * 7"):
+                response(stream, request, 3, b"42")
             elif source == "window.fixture + 1":
                 response(stream, request, 3, b"42")
             else:
@@ -420,17 +438,25 @@ def bridge(binary, browser=None, binary_mode=True, document_start=False):
                 console.stderr.close()
 
 
-def exchange(process, request, operation=1, target=0, source=""):
+def send(process, request, operation=1, target=0, source=""):
     encoded = source.encode()
-    process.stdin.write(REQUEST.pack(MAGIC, 2, operation, request, target, len(encoded), 0) + encoded)
+    process.stdin.write(REQUEST.pack(MAGIC, VERSION, operation, request, target, len(encoded), 0) + encoded)
     process.stdin.flush()
+
+
+def exchange(process, request, operation=1, target=0, source=""):
+    send(process, request, operation, target, source)
+    return receive(process, request)
+
+
+def receive(process, request):
     header = process.stdout.read(32)
     # The bridge reports a startup failure, such as a browser that never
     # authenticated, as text and exits.
     assert not header.startswith(b"error:"), (header + process.stdout.read()).decode(errors="replace").strip()
     assert len(header) == 32, "C++ bridge closed before a response"
     fields = RESPONSE.unpack(header)
-    assert fields[:2] == (MAGIC, 2) and fields[3] == request and fields[8] == 0, f"Unexpected response {fields} to request {request}"
+    assert fields[:2] == (MAGIC, VERSION) and fields[3] == request and fields[8] == 0, f"Unexpected response {fields} to request {request}"
     payload = process.stdout.read(fields[7])
     assert len(payload) == fields[7]
     return fields, payload
@@ -470,7 +496,7 @@ def check(binary, browser):
         kill_browser_group(exited)
         assert exited.wait(timeout=5) == 0, "Exited browser fixture was not reaped"
     for flag in ["--version", "-v", "-V"]:
-        assert subprocess.check_output([binary, flag]) == b"2\n"
+        assert subprocess.check_output([binary, flag]) == b"3\n"
     invalid = subprocess.run([binary, "--unexpected"], capture_output=True)
     assert invalid.returncode == 2 and b"USAGE" in invalid.stdout
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
@@ -504,10 +530,21 @@ def check(binary, browser):
             assert header[2] == 0 and header[4] == 3 and payload == b"42"
             header, _ = run(2, target, "throw 'fixture'")
             assert header[2] == 4
-            header, _ = run(2, target, "while (true) {}")
-            assert header[2] == 5
+            # A command runs until it returns. A Stop from the owner, sent while
+            # it runs, ends it in the page and the session goes on.
+            request += 1
+            send(process, request, 2, target, "while (true) {}")
+            time.sleep(0.5)
+            send(process, request, 5)
+            header, payload = receive(process, request)
+            assert header[2] == 7 and payload == STOPPED, (header, payload)
+            # A Stop that crosses the answer is spent, not an error.
+            send(process, request, 5)
             header, payload = run(2, target, "window.fixture + 1")
-            assert header[2] == 0 and payload == b"42", "Execution did not recover after timeout"
+            assert header[2] == 0 and payload == b"42", "Execution did not recover after Stop"
+            # Input of any size up to the record bound reaches the page whole.
+            header, payload = run(2, target, "/*" + "a" * (8 << 20) + "*/ 6 * 7")
+            assert header[2] == 0 and payload == b"42", (header, payload)
             if browser:
                 header, _ = run(2, target, "window.previewObject")
                 assert header[4] == 8
@@ -678,20 +715,32 @@ def check(binary, browser):
             assert cleared["output"]["records"] == [] and cleared["output"]["dropped"] == 0
             # Operation 4 is session-scoped: a target makes it malformed, so a
             # stale document can never satisfy or block the armed set.
-            process.stdin.write(REQUEST.pack(MAGIC, 2, 4, request + 1, 1, 2, 0) + b"{}")
+            process.stdin.write(REQUEST.pack(MAGIC, VERSION, 4, request + 1, 1, 2, 0) + b"{}")
             process.stdin.flush()
             assert process.wait(timeout=5) == 1, "A document-start request with a target was accepted"
         with bridge(binary) as process:
             _, targets = exchange(process, 1)
             target = TARGET.unpack(targets)[0]
-            process.stdin.write(REQUEST.pack(MAGIC, 2, 2, 2, target, 8193, 0))
+            process.stdin.write(REQUEST.pack(MAGIC, VERSION, 2, 2, target, PAYLOAD_LIMIT + 1, 0))
             process.stdin.flush()
             assert process.wait(timeout=5) == 1, "Oversized input was accepted"
+        with bridge(binary) as process:
+            exchange(process, 1)
+            # A Stop that names neither the running nor the answered request
+            # makes the exchange ambiguous, so the bridge ends.
+            send(process, 5, 5)
+            assert process.wait(timeout=5) == 1, "A Stop for an unknown request was accepted"
+        with bridge(binary) as process:
+            _, targets = exchange(process, 1)
+            target = TARGET.unpack(targets)[0]
+            send(process, 2, 2, target, "while (true) {}")
+            send(process, 3, 5)
+            assert process.wait(timeout=5) == 1, "A Stop for another request was forwarded"
         with bridge(binary) as process:
             _, targets = exchange(process, 1)
             target = TARGET.unpack(targets)[0]
             malformed = b"__malformed_native_reply__"
-            process.stdin.write(REQUEST.pack(MAGIC, 2, 2, 2, target, len(malformed), 0) + malformed)
+            process.stdin.write(REQUEST.pack(MAGIC, VERSION, 2, 2, target, len(malformed), 0) + malformed)
             process.stdin.flush()
             assert process.wait(timeout=7) == 1, "Oversized peer response was accepted"
         with bridge(binary, binary_mode=False) as process:
@@ -700,9 +749,9 @@ def check(binary, browser):
         with bridge(binary, binary_mode=False) as process:
             process.communicate(b":unknown\n:quit\n", timeout=10)
             assert process.returncode == 2, "Invalid stdin commands must exit with a usage error"
-        print("PASS native console version/usage, authentication, actual C++ pipe/socket handoff, malformed lengths, stale selection, exception/timeout responses")
+        print("PASS native console version/usage, authentication, actual C++ pipe/socket handoff, malformed lengths, stale selection, exception responses, Stop of a running command, 8 MiB input")
         print("PASS document-start capability advertisement, session-scoped operation 4, non-draining cursor, bounded ring drops, refusals that preserve the armed set")
-        print("PASS real Blink/V8 execution, timeout recovery, preview isolation and Unicode bounds" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
+        print("PASS real Blink/V8 execution, Stop of an endless loop and recovery, 8 MiB input, preview isolation and Unicode bounds" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
     finally:
         server.shutdown()
         server.server_close()
@@ -823,16 +872,33 @@ def check_backend(binary, backend):
             assert call()["state"] == "ready", "A refused arm retired the session"
             assert call({**base, "source": "window.fixture + 1"})["text"] == "42"
             call({**base, "session_id": "1", "source": "1"}, 409)
-            call({**base, "source": "雪" * 2731}, 400)
+            # Input of any size up to the record bound; past it, nothing runs.
+            assert call({**base, "source": "/*" + "雪" * 2731 + "*/ 6 * 7"})["text"] == "42"
+            call({**base, "source": "a" * (PAYLOAD_LIMIT + 1)}, 400)
             call({**base, "source": "a\0b"}, 400)
             call({**base, "target_id": "01", "source": "1"}, 400)
             call({**base, "target_id": "18446744073709551616", "source": "1"}, 400)
             failure = call({**base, "source": "throw 'fixture'"})
             assert failure["status"] == "exception" and failure["code"] == "application_failed"
             assert failure["details"] == {}
-            failure = call({**base, "source": "while (true) {}"})
-            assert failure["status"] == "timeout" and failure["code"] == "command_outcome_unknown"
-            assert failure["details"] == {"phase": "command_exchange", "cause": "timeout"}
+            # A command runs until it returns. State reads report it rather
+            # than waiting, and interrupt stops it without waiting either.
+            assert call({"action": "interrupt", "session_id": session})["command"] == "none"
+            stopped = {}
+            endless = threading.Thread(target=lambda: stopped.update(call({**base, "source": "while (true) {}"})))
+            endless.start()
+            deadline = time.monotonic() + 10
+            while "command" not in (state := call()):
+                assert time.monotonic() < deadline, "A running command was not reported"
+                time.sleep(0.02)
+            assert state["state"] == "ready" and state["command"]["status"] == "running", state
+            call({**base, "source": "1"}, 409)
+            assert call({"action": "interrupt", "session_id": session})["command"] == "stopping"
+            endless.join(timeout=10)
+            assert not endless.is_alive(), "Stop did not end the command"
+            assert stopped["status"] == "stopped" and stopped["code"] == "cancelled", stopped
+            assert stopped["text"] == STOPPED.decode()
+            assert "command" not in call()
             assert call({**base, "source": "window.fixture + 1"})["text"] == "42"
             runtime = {"action": "runtime", "session_id": session, "target_id": target}
             def command(operation, **fields):
@@ -982,7 +1048,7 @@ def check_backend(binary, backend):
             assert lost["live_available"] is False, "An unconfirmed clear handed the live binding back"
             assert lost["binding_state"] == "lost" and "restart the capture" in lost["message"], lost
             print("PASS live Disconnect clears and confirms armed document-start scripts, and an unconfirmed clear is never reported idle")
-            print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, timeout recovery, malformed peer retirement and profile disposal")
+            print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, Stop of a running command while reads go on, malformed peer retirement and profile disposal")
         finally:
             process.terminate()
             process.wait(timeout=10)

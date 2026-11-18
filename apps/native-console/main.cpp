@@ -16,6 +16,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include "components/reverse_engineering_browser/common/native_console_io.h"
 #include "components/reverse_engineering_browser/common/native_console_protocol.h"
@@ -160,6 +162,10 @@ const char* TypeName(reb::NativeConsoleType type) {
   return names[static_cast<std::size_t>(type)];
 }
 
+// A record already being sent must keep moving; however large, it fails only
+// when it stalls this long.
+constexpr std::chrono::milliseconds kStall(reb::kNativeConsoleTransferMillis);
+
 class Console final {
  public:
   explicit Console(int socket) : socket_(socket) {}
@@ -219,7 +225,7 @@ class Console final {
     if (selected_ == 0 || expression.empty() ||
         expression.size() > reb::kNativeConsoleSourceLimit) {
       exit_code_ = 2;
-      Error("INVALID_INPUT", "Select a target and supply 1 to 8192 bytes of JavaScript",
+      Error("INVALID_INPUT", "Select a target and supply JavaScript",
             "Run :targets, then :use <id>", 2);
       return true;
     }
@@ -245,14 +251,18 @@ class Console final {
 
  private:
   bool Exchange(const reb::NativeConsoleRequest& request, std::string_view source) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(5000);
-    if (!reb::NativeConsoleWrite(socket_, reb::NativeConsoleBytes(request), deadline) ||
+    // A command runs until it returns; the browser ends a session's wait at
+    // its hour, so the answer is awaited that long.
+    const auto answered = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    if (!reb::NativeConsoleWrite(socket_, reb::NativeConsoleBytes(request), kStall) ||
         !reb::NativeConsoleWrite(socket_, std::as_bytes(std::span(source.data(), source.size())),
-                                 deadline) ||
-        !reb::NativeConsoleRead(socket_, reb::NativeConsoleBytes(response_), deadline) ||
-        !reb::IsNativeConsoleResponseFor(response_, request) ||
-        !reb::NativeConsoleRead(socket_, std::span(payload_).first(response_.payload_bytes),
-                                deadline)) {
+                                 kStall) ||
+        !reb::NativeConsoleRead(socket_, reb::NativeConsoleBytes(response_), answered) ||
+        !reb::IsNativeConsoleResponseFor(response_, request)) {
+      return Fail("Native console disconnected, timed out, or returned a malformed response");
+    }
+    payload_.resize(response_.payload_bytes);
+    if (!reb::NativeConsoleRead(socket_, std::span(payload_), kStall)) {
       return Fail("Native console disconnected, timed out, or returned a malformed response");
     }
     return true;
@@ -278,7 +288,7 @@ class Console final {
   std::uint32_t target_count_ = 0;
   std::array<reb::NativeConsoleTarget, reb::kNativeConsoleTargetLimit> targets_{};
   reb::NativeConsoleResponse response_;
-  std::array<std::byte, reb::kNativeConsolePayloadLimit> payload_{};
+  std::vector<std::byte> payload_;
 };
 
 void Help() {
@@ -286,39 +296,108 @@ void Help() {
             << "usage: reb-console --socket <path> --token-file <path> --session <id> [--repl | "
                "--bridge]\n"
             << "commands: :targets, :use <id>, :begin ... :end, :quit, or JavaScript\n"
-            << "limits: 8192 source bytes, 8192 result bytes, 64 targets, 200 ms execution budget\n"
+            << "limits: 64 MiB source, 8192 result bytes, 64 targets; a command runs until it "
+               "returns\n"
             << "help: \"Run make native-console REB_BRAVE_BINARY=<binary>; pass REB_CONSOLE_REPL=0 "
                "for scripted stdin\"\n";
 }
 
+// Blocking reads of the owner's pipe. A pipe is not a socket, so this does not
+// share NativeConsoleRead. False on EOF or error; `*eof` reports a clean EOF
+// before the first byte.
+bool ReadInput(std::span<std::byte> bytes, bool* eof = nullptr) {
+  const std::size_t wanted = bytes.size();
+  while (!bytes.empty()) {
+    const ssize_t count = read(STDIN_FILENO, bytes.data(), bytes.size());
+    if (count > 0) {
+      bytes = bytes.subspan(static_cast<std::size_t>(count));
+    } else if (count == 0) {
+      if (eof)
+        *eof = bytes.size() == wanted;
+      return false;
+    } else if (errno != EINTR) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool WriteOutput(std::span<const std::byte> bytes) {
+  while (!bytes.empty()) {
+    const ssize_t count = write(STDOUT_FILENO, bytes.data(), bytes.size());
+    if (count > 0)
+      bytes = bytes.subspan(static_cast<std::size_t>(count));
+    else if (count < 0 && errno != EINTR)
+      return false;
+  }
+  return true;
+}
+
+// Forwards the owner's records verbatim. A command runs as long as it runs:
+// while it is in flight the only record the owner may send is a Stop naming
+// it, which is forwarded at once, and the command's own answer still follows.
+// The browser bounds the wait, so this never times a command out itself.
 int Bridge(int socket) {
-  std::array<std::byte, reb::kNativeConsolePayloadLimit> buffer{};
+  std::vector<std::byte> buffer;
   std::uint64_t previous = 0;
   for (;;) {
     reb::NativeConsoleRequest request;
-    std::cin.read(reinterpret_cast<char*>(&request), sizeof(request));
-    if (std::cin.gcount() == 0 && std::cin.eof())
-      return 0;
-    if (std::cin.gcount() != sizeof(request) || !reb::IsNativeConsoleRequest(request) ||
-        request.request_id <= previous)
+    bool eof = false;
+    if (!ReadInput(reb::NativeConsoleBytes(request), &eof))
+      return eof ? 0 : 1;
+    if (!reb::IsNativeConsoleRequest(request))
+      return 1;
+    // A Stop that crossed the answer to the request it names is spent.
+    if (request.operation == reb::NativeConsoleOperation::kStop) {
+      if (request.request_id != previous)
+        return 1;
+      continue;
+    }
+    if (request.request_id <= previous)
       return 1;
     previous = request.request_id;
-    std::cin.read(reinterpret_cast<char*>(buffer.data()), request.source_bytes);
-    if (std::cin.gcount() != request.source_bytes)
+    buffer.resize(request.source_bytes);
+    if (!ReadInput(std::span(buffer)))
       return 1;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    if (!reb::NativeConsoleWrite(socket, reb::NativeConsoleBytes(request), kStall) ||
+        !reb::NativeConsoleWrite(socket, std::span(std::as_const(buffer)), kStall))
+      return 1;
+    bool owner_open = true;
+    for (;;) {
+      std::array<pollfd, 2> ready{{{socket, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}}};
+      const int count = poll(ready.data(), owner_open ? 2 : 1, -1);
+      if (count < 0 && errno == EINTR)
+        continue;
+      if (count < 0)
+        return 1;
+      if (ready[0].revents != 0)
+        break;
+      if (ready[1].revents == 0)
+        continue;
+      reb::NativeConsoleRequest stop;
+      if (!ReadInput(reb::NativeConsoleBytes(stop), &eof)) {
+        // The owner left mid-command; still deliver the answer it may read.
+        if (!eof)
+          return 1;
+        owner_open = false;
+        continue;
+      }
+      if (!reb::IsNativeConsoleRequest(stop) ||
+          stop.operation != reb::NativeConsoleOperation::kStop || stop.request_id != previous ||
+          !reb::NativeConsoleWrite(socket, reb::NativeConsoleBytes(stop), kStall))
+        return 1;
+    }
     reb::NativeConsoleResponse response;
-    if (!reb::NativeConsoleWrite(socket, reb::NativeConsoleBytes(request), deadline) ||
-        !reb::NativeConsoleWrite(socket, std::span(buffer).first(request.source_bytes), deadline) ||
-        !reb::NativeConsoleRead(socket, reb::NativeConsoleBytes(response), deadline) ||
-        !reb::IsNativeConsoleResponseFor(response, request) ||
-        !reb::NativeConsoleRead(socket, std::span(buffer).first(response.payload_bytes), deadline))
+    if (!reb::NativeConsoleRead(socket, reb::NativeConsoleBytes(response), kStall) ||
+        !reb::IsNativeConsoleResponseFor(response, request))
       return 1;
-    std::cout.write(reinterpret_cast<const char*>(&response), sizeof(response));
-    std::cout.write(reinterpret_cast<const char*>(buffer.data()), response.payload_bytes);
-    std::cout.flush();
-    if (!std::cout)
+    buffer.resize(response.payload_bytes);
+    if (!reb::NativeConsoleRead(socket, std::span(buffer), kStall) ||
+        !WriteOutput(reb::NativeConsoleBytes(std::as_const(response))) ||
+        !WriteOutput(std::span(std::as_const(buffer))))
       return 1;
+    if (!owner_open)
+      return 0;
   }
 }
 
@@ -471,8 +550,7 @@ int main(int argc, char** argv) {
         multiline = false;
         if (too_large) {
           input_exit_code = 2;
-          Error("SOURCE_LIMIT", "Multiline input exceeds 8192 bytes", "Submit a smaller expression",
-                2);
+          Error("SOURCE_LIMIT", "Multiline input exceeds 64 MiB", "Submit a smaller expression", 2);
         } else if (!console.Evaluate(expression))
           return 1;
         expression.clear();
@@ -488,7 +566,7 @@ int main(int argc, char** argv) {
     }
     if (overflow) {
       input_exit_code = 2;
-      Error("SOURCE_LIMIT", "Input exceeds 8192 bytes", "Submit a smaller expression", 2);
+      Error("SOURCE_LIMIT", "Input exceeds 64 MiB", "Submit a smaller expression", 2);
       continue;
     }
     if (line == ":begin") {

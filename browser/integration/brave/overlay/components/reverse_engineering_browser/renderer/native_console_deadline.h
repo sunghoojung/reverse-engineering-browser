@@ -6,6 +6,8 @@
 #ifndef BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_CONSOLE_DEADLINE_H_
 #define BRAVE_COMPONENTS_REVERSE_ENGINEERING_BROWSER_RENDERER_NATIVE_CONSOLE_DEADLINE_H_
 
+#include <cstdint>
+
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/synchronization/condition_variable.h"
@@ -23,8 +25,14 @@ namespace reb {
 // One slot is enough: every caller runs synchronously on the renderer main
 // thread, so an explicit console command and a document-start injection can
 // never hold the deadline at the same time. A second Begin fails closed.
+//
+// An explicit command has no budget: it runs until it returns or its owner
+// sends Stop, which arrives on the IO thread. A document-start injection has
+// a budget instead, because it runs inside a page load with no command to stop.
 class NativeConsoleDeadline final {
  public:
+  enum class End { kReturned, kExpired, kStopped };
+
   static NativeConsoleDeadline& Get();
 
   NativeConsoleDeadline(const NativeConsoleDeadline&) = delete;
@@ -32,9 +40,14 @@ class NativeConsoleDeadline final {
 
   // False when the slot is taken or the watchdog thread is unavailable. A
   // caller that cannot be interrupted must not run page JavaScript at all.
-  [[nodiscard]] bool Begin(v8::Isolate* isolate, int budget_millis);
-  // True when the budget expired and execution was terminated.
-  [[nodiscard]] bool Finish();
+  // `request_id` names an explicit command that Stop may end; 0 names none.
+  // `budget_millis` 0 means no budget.
+  [[nodiscard]] bool Begin(v8::Isolate* isolate, std::uint64_t request_id, int budget_millis);
+  // Any thread. Terminates the running command only when it is `request_id`.
+  void Stop(std::uint64_t request_id);
+  // How the execution ended. After kExpired or kStopped execution was
+  // terminated, and termination is already canceled for the next task.
+  [[nodiscard]] End Finish();
 
  private:
   friend class base::NoDestructor<NativeConsoleDeadline>;
@@ -45,8 +58,9 @@ class NativeConsoleDeadline final {
   base::Lock lock_;
   base::ConditionVariable changed_{&lock_};
   raw_ptr<v8::Isolate> isolate_ = nullptr;
+  std::uint64_t request_id_ = 0;
   base::TimeTicks expires_;
-  bool expired_ = false;
+  End end_ = End::kReturned;
   bool worker_running_ = false;
 };
 

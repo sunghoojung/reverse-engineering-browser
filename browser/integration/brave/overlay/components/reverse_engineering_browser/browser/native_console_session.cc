@@ -5,8 +5,11 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_console_session.h"
 
+#include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#include <cerrno>
 
 #include <algorithm>
 #include <atomic>
@@ -49,6 +52,7 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "mojo/public/cpp/bindings/callback_helpers.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
 #include "third_party/blink/public/mojom/loader/resource_load_info.mojom.h"
 #include "url/gurl.h"
@@ -76,6 +80,8 @@ struct Target final {
   content::WeakDocumentPtr document;
   base::UnguessableToken renderer_document;
   mojo::AssociatedRemote<mojom::NativeConsoleAgent> agent;
+  // Reaches the renderer's IO thread, so Stop is heard during a command.
+  mojo::Remote<mojom::NativeConsoleControl> control;
   std::string origin;
   std::string label;
   std::string url;
@@ -173,26 +179,39 @@ class Session final {
     }
     active_.store(true, std::memory_order_release);
     const auto expires = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    // A record already being sent must keep moving; however large, it fails
+    // only when it stalls this long.
+    constexpr std::chrono::milliseconds stall(kNativeConsoleTransferMillis);
     std::uint64_t last_request = 0;
     for (;;) {
       NativeConsoleRequest request;
       if (!NativeConsoleRead(socket.get(), NativeConsoleBytes(request), expires) ||
-          !IsNativeConsoleRequest(request) || request.request_id <= last_request)
+          !IsNativeConsoleRequest(request))
+        break;
+      // A Stop that crossed the answer to the request it names is spent.
+      if (request.operation == NativeConsoleOperation::kStop) {
+        if (request.request_id != last_request)
+          break;
+        continue;
+      }
+      if (request.request_id <= last_request)
         break;
       last_request = request.request_id;
       std::string source(request.source_bytes, '\0');
-      const auto deadline =
-          std::chrono::steady_clock::now() + std::chrono::milliseconds(kNativeConsoleReplyMillis);
-      if (!NativeConsoleRead(socket.get(), std::as_writable_bytes(std::span(source)), deadline))
+      if (!NativeConsoleRead(socket.get(), std::as_writable_bytes(std::span(source)), stall))
         break;
       auto reply = std::make_shared<Reply>(request.request_id);
-      const auto execute_before = base::TimeTicks::Now() + base::Milliseconds(500);
+      const auto execute_before =
+          base::TimeTicks::Now() + base::Milliseconds(kNativeConsoleDispatchMillis);
       if (!ui->PostTask(FROM_HERE,
                         base::BindOnce(&Session::Dispatch, base::Unretained(this), request,
                                        std::move(source), execute_before, reply)))
         break;
-      if (!reply->ready.TimedWait(base::Milliseconds(kNativeConsoleReplyMillis))) {
+      if (!Await(socket.get(), ui, request, *reply, expires)) {
         active_.store(false, std::memory_order_release);
+        // Nobody can read a later answer, so the command must not run on.
+        ui->PostTask(FROM_HERE, base::BindOnce(&Session::Stop, base::Unretained(this),
+                                               request.target_id, request.request_id));
         // Do not touch Reply while a late UI callback may still write it.
         NativeConsoleResponse timeout;
         timeout.request_id = request.request_id;
@@ -202,12 +221,57 @@ class Session final {
                                std::chrono::steady_clock::now() + std::chrono::milliseconds(100)));
         break;
       }
-      if (!NativeConsoleWrite(socket.get(), NativeConsoleBytes(reply->header), deadline) ||
-          !NativeConsoleWrite(socket.get(), std::as_bytes(std::span(reply->payload)), deadline))
+      if (!NativeConsoleWrite(socket.get(), NativeConsoleBytes(reply->header), stall) ||
+          !NativeConsoleWrite(socket.get(), std::as_bytes(std::span(reply->payload)), stall))
         break;
     }
     active_.store(false, std::memory_order_release);
     ui->PostTask(FROM_HERE, base::BindOnce(&Session::Retire, base::Unretained(this)));
+  }
+
+  // Waits for the reply to `request` for as long as the command runs, while
+  // listening for the owner's Stop. False when the session hour ends, the
+  // owner sends anything but a Stop for this request, or a Stop gets no reply
+  // in time: the exchange is then ambiguous and the session retires.
+  bool Await(int socket,
+             const scoped_refptr<base::SingleThreadTaskRunner>& ui,
+             const NativeConsoleRequest& request,
+             Reply& reply,
+             std::chrono::steady_clock::time_point expires) {
+    std::optional<std::chrono::steady_clock::time_point> stopping;
+    while (!reply.ready.TimedWait(base::Milliseconds(50))) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= expires || (stopping && now >= *stopping))
+        return false;
+      pollfd owner{socket, POLLIN, 0};
+      const int ready = poll(&owner, 1, 0);
+      if (ready < 0 && errno != EINTR)
+        return false;
+      if (ready <= 0)
+        continue;
+      if ((owner.revents & POLLIN) == 0)
+        return false;
+      NativeConsoleRequest stop;
+      if (!NativeConsoleRead(socket, NativeConsoleBytes(stop),
+                             now + std::chrono::milliseconds(kNativeConsoleTransferMillis)) ||
+          !IsNativeConsoleRequest(stop) || stop.operation != NativeConsoleOperation::kStop ||
+          stop.request_id != request.request_id)
+        return false;
+      if (stopping)
+        continue;
+      stopping = now + std::chrono::milliseconds(kNativeConsoleStopMillis);
+      if (!ui->PostTask(FROM_HERE, base::BindOnce(&Session::Stop, base::Unretained(this),
+                                                  request.target_id, request.request_id)))
+        return false;
+    }
+    return true;
+  }
+
+  void Stop(std::uint64_t target_id, std::uint64_t request_id) {
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
+    for (auto& target : targets_)
+      if (target.id == target_id && target.control.is_bound())
+        target.control->Stop(request_id);
   }
 
   void Retire() {
@@ -334,7 +398,7 @@ class Session final {
       value.Set("dropped", static_cast<int>(activity_drops_));
       activity_drops_ = 0;
       if (!base::JSONWriter::Write(value, &reply->payload) ||
-          reply->payload.size() > kNativeConsolePayloadLimit) {
+          reply->payload.size() > kNativeConsoleReplyLimit) {
         reply->Fail(NativeConsoleStatus::kMalformed, "Activity exceeded bounded transport");
         return;
       }
@@ -358,11 +422,11 @@ class Session final {
               }
               // Target listings and document-start results are produced by the
               // browser process; a renderer that claims either is malformed.
-              if (status > static_cast<std::uint16_t>(NativeConsoleStatus::kDisconnected) ||
+              if (status > static_cast<std::uint16_t>(NativeConsoleStatus::kStopped) ||
                   type > static_cast<std::uint16_t>(NativeConsoleType::kRuntime) ||
                   type == static_cast<std::uint16_t>(NativeConsoleType::kTargets) ||
                   text.size() > (type == static_cast<std::uint16_t>(NativeConsoleType::kRuntime)
-                                     ? kNativeConsolePayloadLimit
+                                     ? kNativeConsoleReplyLimit
                                      : kNativeConsoleTextLimit) ||
                   !base::IsStringUTF8(text)) {
                 result->Fail(NativeConsoleStatus::kMalformed,
@@ -382,9 +446,11 @@ class Session final {
         std::string("Renderer disconnected"), false);
     const auto expires = static_cast<std::uint64_t>(deadline.since_origin().InMicroseconds());
     if (request.operation == NativeConsoleOperation::kRuntime)
-      selected->agent->Runtime(selected->renderer_document, expires, source, std::move(callback));
+      selected->agent->Runtime(selected->renderer_document, request.request_id, expires, source,
+                               std::move(callback));
     else
-      selected->agent->Evaluate(selected->renderer_document, expires, source, std::move(callback));
+      selected->agent->Evaluate(selected->renderer_document, request.request_id, expires, source,
+                                std::move(callback));
   }
 
   void List(std::shared_ptr<Reply> reply) {
@@ -456,6 +522,7 @@ class Session final {
             (target.main_frame || name.empty() ? "" : " " + name) + " · " +
             (contents ? base::UTF16ToUTF8(contents->GetTitle().substr(0, 64)) : std::string());
         frame->GetRemoteAssociatedInterfaces()->GetInterface(&target.agent);
+        target.agent->BindControl(target.control.BindNewPipeAndPassReceiver());
         targets_.push_back(std::move(target));
       });
     }
@@ -579,7 +646,7 @@ class Session final {
       result = failure("Unknown document-start operation");
     }
     if (!base::JSONWriter::Write(result, &reply->payload) ||
-        reply->payload.size() > kNativeConsolePayloadLimit) {
+        reply->payload.size() > kNativeConsoleReplyLimit) {
       reply->payload.clear();
       reply->Fail(NativeConsoleStatus::kMalformed,
                   "Document-start result exceeded bounded transport");

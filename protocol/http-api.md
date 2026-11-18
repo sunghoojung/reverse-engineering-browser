@@ -629,7 +629,12 @@ state lasts until `stop` or the next `connect_live`. A command for any other
 `status: stale_target`, `code: target_unavailable` and text that names the next
 step, and nothing is sent to the browser. A second `connect_live` while one is
 open, a stale `session_id` and a stale `binding_id` are 409 refusals that say
-what to read or send next. Document-start rules for a child frame name that
+what to read or send next. A command runs until it returns, with no execution
+budget, and its request waits that long; a client that stops waiting leaves it
+running. Meanwhile `get_native_console` answers at once with `command`, other
+actions are 409 refusals, and `interrupt` (`session_id`) stops it: the command
+answers `status: stopped`, `code: cancelled`, and keeps the changes it already
+made. Document-start rules for a child frame name that
 frame's exact origin with `frame: child`; see
 [Native Console v3](native-console-v3.md).
 

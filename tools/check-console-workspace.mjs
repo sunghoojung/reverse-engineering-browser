@@ -5,7 +5,7 @@ import {join} from 'node:path';
 import {runInNewContext} from 'node:vm';
 
 export function createConsoleFixture() {
-  const fixture = {session:null, sequence:10, target:'101', calls:[], messages:[], pending:[], inspectMode:'ok', stateMode:'ok', pollMode:'ok', propertyCount:48, request:0, receipts:[], receiptSequence:0, errors:[]};
+  const fixture = {session:null, sequence:10, target:'101', calls:[], messages:[], pending:[], endless:[], inspectMode:'ok', stateMode:'ok', pollMode:'ok', propertyCount:48, request:0, receipts:[], receiptSequence:0, errors:[]};
   const value = (type,text,handle) => ({type,text,truncated:false,...(handle?{handle}:{})});
   const state = () => ({contract_version:2,state:fixture.session?'ready':'idle',session_id:fixture.session,available:true});
   const targets = () => [{id:fixture.target,origin:'https://fixture.invalid',label:'Console workbench fixture',url:'https://fixture.invalid/console',main_frame:true,truncated:false}];
@@ -20,12 +20,15 @@ export function createConsoleFixture() {
     if (action.action === 'start') {fixture.session=String(++fixture.sequence);fixture.request=0;return {status:200,body:{...state(),targets:targets(),truncated:false}};}
     if (action.action === 'stop') {fixture.session=null;return {status:200,body:state()};}
     if (action.action === 'targets') {fixture.target=String(Number(fixture.target)+1);return {status:200,body:{...state(),targets:targets(),truncated:false}};}
+    // Stop reaches the running command without its session lock.
+    if (action.action === 'interrupt') {assert.equal(action.session_id,fixture.session);const stop=fixture.endless.shift();if(stop)stop();return {status:200,body:{contract_version:2,state:'ready',session_id:fixture.session,command:stop?'stopping':'none'}};}
     assert.equal(action.session_id,fixture.session);
     assert.equal(action.target_id,fixture.target);
     const command=action.command, requestId=String(++fixture.request);
     let runtime={status:'ok',text:'Complete'};
     if (command.operation === 'evaluate') {
       if (command.source === 'fixture.slow') await new Promise(resolve=>fixture.pending.push(resolve));
+      if (command.source === 'fixture.endless') {await new Promise(resolve=>fixture.endless.push(resolve));return {status:200,body:{...state(),status:'stopped',type:'undefined',text:'Stopped; changes are not rolled back',truncated:false,code:'cancelled',details:{}}};}
       if (command.source === 'fixture.fail') return {status:503,body:{error:'Synthetic transport failure'}};
       if (command.source === 'fixture.stale') return {status:200,body:{...state(),status:'stale_target',text:'Synthetic document replaced',request_id:requestId}};
       runtime={status:'ok',value:command.source==='fixture.object'?value('object','Object {alpha, guarded, nested}', '1'):command.source==='fixture.malformed'?{type:'invented',text:'bad',truncated:false}:command.source==='fixture.throw'?null:value('number','42')};
@@ -313,6 +316,24 @@ export async function checkConsoleDOM(root) {
   fixture.respond=response;
   const pending=submit('fixture.slow');await settle();assert.equal(get('source').disabled,false);get('source').value='next draft';await get('source').emit('input');await get('form').emit('submit');assert.equal(fixture.calls.filter(call=>call.command?.source==='next draft').length,0);
   fixture.release();await pending;assert.equal(get('source').value,'next draft');assert.equal(api.state().submitting,false);
+  // A command runs until it returns. Stop takes Run's place while it runs and
+  // bypasses the queue the command holds; the command then reads Stopped.
+  assert.equal(get('run').hidden,false);assert.equal(get('interrupt').hidden,true);
+  const endless=submit('fixture.endless');await settle();
+  assert.equal(get('run').hidden,true);assert.equal(get('interrupt').hidden,false);assert.equal(get('interrupt').textContent,'Stop');assert.match(get('composer-status').textContent,/Stop ends it/);
+  await get('interrupt').click();await endless;await settle();
+  assert.equal(fixture.calls.filter(call=>call.action==='interrupt').length,1);
+  assert.equal(get('run').hidden,false);assert.equal(get('interrupt').hidden,true);assert.equal(get('interrupt').disabled,false);
+  assert.match(get('output').textContent,/· Stopped/);assert.match(get('output').textContent,/changes are not rolled back/);
+  // Input of any size up to the record: the transcript shows its opening, and
+  // a command past the record is refused before anything is sent.
+  const long='/*'+'x'.repeat(10000)+'*/ fixture.long';await submit(long);await settle();
+  const longRow=get('output').querySelectorAll('.native-console-command').at(-1);
+  assert.equal(longRow.dataset.command.length,4096);assert.match(longRow.textContent,/more characters not shown/);
+  assert.equal(fixture.calls.filter(call=>call.command?.source===long).length,1,'A long command is sent whole');
+  const sentBefore=fixture.calls.length;await submit('x'.repeat(64*1024*1024));await settle();
+  assert.equal(fixture.calls.length,sentBefore);assert.match(get('notice').textContent,/at most 64 MiB/);
+  get('source').value='';await get('source').emit('input');
   await submit('fixture.fail');assert.match(get('output').textContent,/Outcome unavailable/);assert.match(get('notice').textContent,/never retried/);assert.equal(get('source').disabled,true);
   const retained=get('output').textContent;await get('refresh').click();await settle();assert.equal(get('output').textContent.startsWith(retained),true);get('target').value=fixture.target;await get('target').emit('change');await settle();
   // An old object cannot silently bind to the replacement document.

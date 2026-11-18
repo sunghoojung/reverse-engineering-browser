@@ -21,6 +21,7 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
+#include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
 #include "third_party/blink/public/platform/web_string.h"
@@ -32,9 +33,6 @@
 
 namespace reb {
 namespace {
-std::int64_t Now() {
-  return base::TimeTicks::Now().since_origin().InMicroseconds();
-}
 std::string Bounded(std::string text, std::size_t limit = 2048) {
   if (text.size() > limit) {
     text.resize(limit);
@@ -164,11 +162,7 @@ NativeConsoleRuntime::~NativeConsoleRuntime() {
 }
 
 void NativeConsoleRuntime::Reset() {
-  for (auto& slot : slots_) {
-    slot.value.Reset();
-    slot.id = 0;
-  }
-  expiration_.Stop();
+  retained_.clear();
   monitors_.clear();
   last_ = 0;
   messages_.Reset();
@@ -285,35 +279,16 @@ void NativeConsoleRuntime::Message(const std::string& text,
   else
     messages_.Drop();
 }
-void NativeConsoleRuntime::Expire() {
-  bool retained = false;
-  for (auto& slot : slots_) {
-    if (slot.id && slot.expires_us <= Now()) {
-      slot.value.Reset();
-      slot.id = 0;
-    }
-    retained |= slot.id != 0;
-  }
-  std::erase_if(monitors_, [](const Monitor& monitor) { return monitor.expires_us <= Now(); });
-  if (!retained && monitors_.empty())
-    expiration_.Stop();
-}
 std::uint64_t NativeConsoleRuntime::Retain(v8::Isolate* isolate,
                                            v8::Local<v8::Value> value,
                                            bool repl) {
   if (next_handle_ == UINT64_MAX)
     return 0;
-  if (!expiration_.IsRunning())
-    expiration_.Start(FROM_HERE, base::Seconds(1),
-                      base::BindRepeating(&NativeConsoleRuntime::Expire, base::Unretained(this)));
-  // Reusing a slot does not reuse its identity. The UI sees an expired-handle
-  // error instead of accidentally inspecting a more recent command's value.
-  auto& slot = slots_[next_slot_++ % slots_.size()];
-  slot.value.Reset(isolate, value);
-  slot.id = next_handle_++;
-  slot.expires_us = Now() + 60000000;
-  slot.repl = repl;
-  return slot.id;
+  const std::uint64_t id = next_handle_++;
+  auto& retained = retained_[id];
+  retained.repl = repl;
+  retained.value.Reset(isolate, value);
+  return id;
 }
 v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate,
                                                   const std::string& handle,
@@ -321,13 +296,12 @@ v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate,
   std::uint64_t id = 0;
   if (!base::StringToUint64(handle, &id) || !id || base::NumberToString(id) != handle)
     return {};
-  for (auto& slot : slots_)
-    if (slot.id == id && slot.expires_us > Now()) {
-      if (repl)
-        *repl = slot.repl;
-      return slot.value.Get(isolate);
-    }
-  return {};
+  const auto found = retained_.find(id);
+  if (found == retained_.end())
+    return {};
+  if (repl)
+    *repl = found->second.repl;
+  return found->second.value.Get(isolate);
 }
 base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
                                             v8::Local<v8::Context> context,
@@ -647,11 +621,6 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
                                       v8::Local<v8::Context> context,
                                       blink::WebLocalFrame* frame,
                                       const std::string& command) {
-  for (auto& slot : slots_)
-    if (slot.id && slot.expires_us <= Now()) {
-      slot.value.Reset();
-      slot.id = 0;
-    }
   const base::AutoReset<bool> running(&g_running, true);
   const auto parsed = base::JSONReader::ReadDict(command, base::JSON_PARSE_RFC);
   base::DictValue result;
@@ -673,9 +642,8 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     result = base::DictValue().Set("status", "ok").Set("text", "Watch rules disarmed");
   } else if (*operation == "evaluate") {
     const auto* source = parsed->FindString("source");
-    if (!source || source->empty() || source->size() > 8192 ||
-        source->find('\0') != std::string::npos)
-      result = Failure("JavaScript must be 1 to 8192 bytes without NUL");
+    if (!source || source->empty() || source->find('\0') != std::string::npos)
+      result = Failure("JavaScript must be non-empty without NUL");
     else {
       auto text = v8::String::NewFromUtf8(isolate, source->data(), v8::NewStringType::kNormal,
                                           static_cast<int>(source->size()))
@@ -715,7 +683,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
   } else if (*operation == "last") {
     bool repl = false;
     auto value = Lookup(isolate, base::NumberToString(last_), &repl);
-    result = value.IsEmpty() ? Failure("Previous result expired")
+    result = value.IsEmpty() ? Failure("Previous result was released or cleared")
                              : base::DictValue()
                                    .Set("status", "ok")
                                    .Set("value", Value(isolate, context, value, repl));
@@ -724,13 +692,11 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     bool repl = false;
     auto value = handle ? Lookup(isolate, *handle, &repl) : v8::Local<v8::Value>();
     if (value.IsEmpty())
-      result = Failure("Value expired, was released, or belongs to another document");
+      result = Failure("Value was released, cleared, or belongs to another document");
     else if (*operation == "release" || *operation == "cancel") {
-      for (auto& slot : slots_)
-        if (base::NumberToString(slot.id) == *handle) {
-          slot.value.Reset();
-          slot.id = 0;
-        }
+      std::uint64_t id = 0;
+      if (base::StringToUint64(*handle, &id))
+        retained_.erase(id);
       result.Set("status", "ok");
       result.Set("text", *operation == "cancel" ? "Stopped waiting; page work is not rolled back"
                                                 : "Value released");
@@ -788,23 +754,21 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       } else {
         std::erase_if(monitors_,
                       [&](const Monitor& monitor) { return monitor.element.Equals(node); });
-        if (monitors_.size() >= 8)
-          result = Failure("At most 8 event monitors; stop a monitor first");
-        else {
-          Monitor monitor{node, Now() + 60000000, {}};
-          for (const char* type : {"click", "input", "keydown", "submit"}) {
-            monitor.removals.push_back(node.AddConsoleEventListener(
-                blink::WebString::FromUtf8(type),
-                base::BindRepeating(
-                    [](NativeConsoleRuntime* runtime, std::string type, blink::WebDOMEvent) {
-                      runtime->Message("event: " + type, "", "", 0, 1);
-                    },
-                    base::Unretained(this), std::string(type))));
-          }
-          monitors_.push_back(std::move(monitor));
-          result.Set("status", "ok");
-          result.Set("text", "Monitoring click, input, keydown and submit for 60 seconds");
+        Monitor monitor{node, {}};
+        for (const char* type : {"click", "input", "keydown", "submit"}) {
+          monitor.removals.push_back(node.AddConsoleEventListener(
+              blink::WebString::FromUtf8(type),
+              base::BindRepeating(
+                  [](NativeConsoleRuntime* runtime, std::string type, blink::WebDOMEvent) {
+                    runtime->Message("event: " + type, "", "", 0, 1);
+                  },
+                  base::Unretained(this), std::string(type))));
         }
+        monitors_.push_back(std::move(monitor));
+        result.Set("status", "ok");
+        result.Set("text",
+                   "Monitoring click, input, keydown and submit until unmonitorEvents or the "
+                   "page navigates");
       }
     } else if (*operation == "inspect") {
       const int offset = parsed->FindInt("offset").value_or(-1);
@@ -876,7 +840,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     }
   }
   std::string encoded;
-  if (!base::JSONWriter::Write(result, &encoded) || encoded.size() > 65536)
+  if (!base::JSONWriter::Write(result, &encoded) || encoded.size() > kNativeConsoleReplyLimit)
     return "{\"status\":\"error\",\"text\":\"Result exceeded bounded transport\"}";
   return encoded;
 }

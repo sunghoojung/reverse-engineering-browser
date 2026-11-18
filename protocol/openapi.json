@@ -6653,7 +6653,7 @@
             }
           },
           "409": {
-            "description": "Another native console action holds the session lock.",
+            "description": "A Console command is running; it runs until it returns or is stopped. A short action holding the session is awaited instead.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6694,7 +6694,7 @@
             },
             {
               "id": "native-action-idle",
-              "condition": "No other native console action may hold the session lock."
+              "condition": "No Console command may be running. A short action or read holding the session is awaited."
             }
           ],
           "confirmations": [],
@@ -6715,7 +6715,7 @@
       "post": {
         "operationId": "native_console_action",
         "summary": "Connect the Console to one document, evaluate there, arm document-start scripts",
-        "description": "Live capture: connect_live selects one document from get_native_console, top or child, cross-site frames included, and returns a new session_id. evaluate runs up to 8 KiB of JavaScript in that document's main world and returns status, type and text (at most 8 KiB, truncated marked); runtime adds inspect, await, poll for console messages, and traffic. Commands run only in the selected document: another target_id, or one that navigated, returns status stale_target with the next step, and nothing runs. To switch frames, stop, then connect_live with the new id. arm_document_start replaces the armed set: at most 4 rules, each one exact origin, frame top or child, an optional path_prefix and a snippet that calls report(value). It runs only in documents created after arming, so reload or navigate, then read get_native_console_document_start. clear_document_start removes the set; stop clears it too and must be confirmed. start opens a separate disposable browser instead. Refusals: 409 with another connection open or a stale session_id or binding_id; 503 for arming where document-start is not permitted (an agent session needs start_live_session document_start true). Never retried. Output is ephemeral page data, not evidence.",
+        "description": "Live capture: connect_live selects one document from get_native_console, top or child, cross-site frames included, and returns a new session_id. evaluate runs up to 64 MiB of JavaScript in that document's main world and returns status, type and text (at most 8 KiB, truncated marked); runtime adds inspect, await, poll for console messages, and traffic. A command runs until it returns: while it runs, get_native_console reports it under command, and interrupt stops it, which answers the command with status stopped and keeps the changes it made. Commands run only in the selected document: another target_id, or one that navigated, returns status stale_target with the next step, and nothing runs. To switch frames, stop, then connect_live with the new id. arm_document_start replaces the armed set: at most 4 rules, each one exact origin, frame top or child, an optional path_prefix and a snippet that calls report(value). It runs only in documents created after arming, so reload or navigate, then read get_native_console_document_start. clear_document_start removes the set; stop clears it too and must be confirmed. start opens a separate disposable browser instead. Refusals: 409 with another connection open or a stale session_id or binding_id; 503 for arming where document-start is not permitted (an agent session needs start_live_session document_start true). Never retried. Output is ephemeral page data, not evidence.",
         "tags": [
           "native-console"
         ],
@@ -6738,6 +6738,9 @@
                   "oneOf": [
                     {
                       "$ref": "#/components/schemas/NativeConsoleStopped"
+                    },
+                    {
+                      "$ref": "#/components/schemas/NativeConsoleInterrupt"
                     },
                     {
                       "$ref": "#/components/schemas/NativeConsoleTargets"
@@ -6827,7 +6830,7 @@
             }
           }
         },
-        "x-max-body-bytes": 65536,
+        "x-max-body-bytes": 402718720,
         "x-source": "apps/origin-trace-backend/src/native_console.rs",
         "x-reb-execution": {
           "kind": "action-dependent",
@@ -27126,6 +27129,28 @@
               "lost"
             ],
             "description": "Live capture binding lifecycle, present with document_source. The capture browser connects its binding once, at launch, so lost lasts until the capture restarts; message says why. connecting means the browser has not answered its first listing yet. ready is idle and listable; connected is held by the Console session."
+          },
+          "command": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "running",
+                  "stopping"
+                ]
+              },
+              "request_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$"
+              }
+            },
+            "required": [
+              "status",
+              "request_id"
+            ],
+            "description": "Present while this session runs an evaluate or runtime command, which runs until it returns. The rest of the state is what it was when the command was sent; stopping means interrupt was sent."
           }
         },
         "required": [
@@ -27168,6 +27193,38 @@
           "contract_version",
           "state",
           "session_id"
+        ]
+      },
+      "NativeConsoleInterrupt": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "contract_version": {
+            "const": 2,
+            "type": "integer"
+          },
+          "state": {
+            "const": "ready",
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          },
+          "command": {
+            "type": "string",
+            "enum": [
+              "stopping",
+              "none"
+            ],
+            "description": "stopping: a Stop was sent to the running command, whose own request answers stopped. none: no command was running, and nothing was sent."
+          }
+        },
+        "required": [
+          "contract_version",
+          "state",
+          "session_id",
+          "command"
         ]
       },
       "NativeConsoleTargets": {
@@ -27283,7 +27340,8 @@
               "forbidden",
               "exception",
               "timeout",
-              "disconnected"
+              "disconnected",
+              "stopped"
             ]
           },
           "type": {
@@ -27574,6 +27632,49 @@
             "additionalProperties": false,
             "properties": {
               "action": {
+                "const": "interrupt",
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]{0,19}$",
+                "description": "Canonical nonzero uint64 decimal identifier."
+              }
+            },
+            "required": [
+              "action",
+              "session_id"
+            ],
+            "x-reb-execution": {
+              "kind": "action",
+              "effects": [
+                "browser-control"
+              ],
+              "state_dependent_effects": [],
+              "uncertainties": [
+                "The command stops at its next interrupt check and keeps every change it made before then. Its own evaluate or runtime request answers with status stopped."
+              ],
+              "prerequisites": [
+                {
+                  "id": "matching-native-interrupt",
+                  "condition": "session_id must name the current session. It does not wait for the session lock, which the running command's action holds."
+                }
+              ],
+              "confirmations": [],
+              "notes": "Stops the evaluate or runtime command this session is running, without waiting for it, and answers command stopping. With no command running it sends nothing and answers command none. A command that does not stop within 5 seconds, such as one that never started because the page is busy, ends the session as a timeout.",
+              "sources": [
+                {
+                  "path": "apps/origin-trace-backend/src/native_console.rs",
+                  "symbol": "Inner::interrupt"
+                }
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
                 "const": "targets",
                 "type": "string"
               },
@@ -27648,8 +27749,8 @@
               "source": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 8192,
-                "x-max-utf8-bytes": 8192
+                "maxLength": 67108864,
+                "x-max-utf8-bytes": 67108864
               }
             },
             "required": [
@@ -27692,7 +27793,7 @@
                 }
               ],
               "uncertainties": [
-                "Expression effects, including browser storage changes and navigation, depend on the supplied code. Execution may have occurred after a timeout or disconnect."
+                "Expression effects, including browser storage changes and navigation, depend on the supplied code. Execution may have occurred after a timeout or disconnect, and a stopped command keeps the changes it made before it stopped."
               ],
               "prerequisites": [
                 {
@@ -30229,7 +30330,7 @@
               "source": {
                 "type": "string",
                 "minLength": 1,
-                "x-max-utf8-bytes": 8192
+                "x-max-utf8-bytes": 67108864
               }
             },
             "required": [

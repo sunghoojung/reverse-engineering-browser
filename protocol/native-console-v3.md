@@ -16,8 +16,10 @@ origin. It is not a site-specific hook, and it has no vendor-specific behavior.
 - Not native evidence. Output is page-JavaScript observation with provenance
   `console-document-start-script`. It is never written to the evidence store,
   never joined into `correlated_links`, and never presented as capture.
-- Not a replacement for v1 or v2. The wire version stays **2**. Operation 4 is
-  additive, and the owner only sends it after the browser advertises support.
+- Not a replacement for v1 or v2. The wire version is the one
+  [v2](native-console-v2.md#wire-and-api) defines, now **3** for Stop.
+  Operation 4 is additive, and the owner only sends it after the browser
+  advertises support.
 - Not a content-script platform. There is no extension, no isolated world, no
   CSS, no messaging, no persistence across sessions, and no page-origin API.
 - Not undetectable. A snippet runs in the page main world; a page can see what

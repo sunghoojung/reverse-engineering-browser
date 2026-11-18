@@ -2,7 +2,8 @@
 
 Status: implemented in the Rust backend (`apps/origin-trace-backend/src/flow_graph.rs`
 and `src/flow_graph/`) and the Flow workspace's **Graph** pane
-(`apps/research-ui/flow_graph.js`, `flow_graph_layout.js`).
+(`apps/research-ui/flow_graph.js`, with `flow_graph_model.js`,
+`flow_graph_layout.js` and `flow_graph_worker.js`).
 
 Version 2 replaces version 1, which folded at most 16,384 stacks, 32,768
 nodes and 131,072 edges, read one source budget and stopped at a 30-second
@@ -50,7 +51,7 @@ A record of the session that its decoder refuses counts in
 `get_cookie_provenance` applies. A store line the event index refused (not a
 record, or a duplicate) is never read by any fold; the first such line is
 `coverage.index_damage`. Stack, script and module artifacts are found by
-SHA-256 in the artifact lookup's digest table (`reb-artifact-lookup-v1/3`),
+SHA-256 in the artifact lookup's digest table (`reb-artifact-lookup-v1/4`),
 then read in parallel and verified against their digest.
 
 ## Folding
@@ -237,11 +238,21 @@ rather than a card, unless no edge reaches it. Edges are coloured by kind:
 `navigation` and `cookie_write`; `omitted` is dotted. Frame boundaries, task
 kinds, JS and Wasm transitions and calls into eval are also written on their
 rows, never colour alone. Pass-through frames inside one realm fold into a
-chain card. Selecting a card asks `get_flow_graph_paths` for the stacks
-through it and lights them; choosing a request asks for its own stacks and
-lays out its lineage alone, left to right, at reading size. The layout is
-presentation only and never changes this document. See the
-[Research UI README](../apps/research-ui/README.md#flow-graph).
+chain card. A card lists every edge it starts, a page of rows at a time.
+
+The pane reads, models, folds and measures in a worker (the page measures
+font advances and sends them, and runs the same pipeline itself where no
+worker starts) and lands each page in time slices. It draws the layered
+layout first, then lays out each realm the Triskel budget accepts in the
+background and swaps it in, keeping the selected card where it was on
+screen. Selecting a card asks `get_flow_graph_paths` for the stacks through
+it and lights them; choosing a request asks for its own. Lineage (V) draws
+only the lit stacks' cards, left to right. Zoomed out below 4.5%, each realm
+is one block with its name and counts, and the edges between realms are
+bundled. A page the backend answers with a newer generation is read from
+cursor 0 again, and a refold made while it was read is applied to the new
+graph. The layout is presentation only and never changes this document. See
+the [Research UI README](../apps/research-ui/README.md#flow-graph).
 
 ## Validation
 

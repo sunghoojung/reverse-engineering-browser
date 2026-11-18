@@ -143,7 +143,8 @@ Every option is off unless the start names it, and none is inherited.
 | Flow Lineage: load a trace, steps, events | `get_origin_trace`, `get_events` | R | Covered |
 | Flow Timeline: tracked calls and Wasm samples in record order | `get_events` (type and session filters, `after` paging) | R | Covered |
 | Flow CFG: a Wasm function's basic blocks | `get_wasm_function_graph`, `get_wasm_functions` | R | Covered |
-| Flow graph: every recorded stack across frames, realms, JavaScript, eval and Wasm | `get_flow_graph` | R | Added |
+| Flow graph: every recorded stack across frames, realms, JavaScript, eval and Wasm | `get_flow_graph` (pages by `cursor` and `generation`) | R | Added |
+| Flow graph: the stacks through a selected card or one request, lit on the graph | `get_flow_graph_paths` (`node`, `process_id` with `request_id`, or `digest`) | R | Added |
 | Flow graph and Sources Graph layout: node corners and edge routes from Triskel for node sizes and edges the caller sends | `post_graph_layout` | A | Added; it reads no evidence, but it starts a contained layout worker, so it needs actions |
 
 ## Evidence screen and metadata packages
@@ -196,7 +197,7 @@ Every option is off unless the start names it, and none is inherited.
 
 ## Totals
 
-The tables have 112 rows.
+The tables have 115 rows.
 
 - **Before the change that added this page**, 76 rows were covered for a
   client started with `--allow-effects --allow-session-start`. The in-app agent had nine fixed
@@ -205,20 +206,21 @@ The tables have 112 rows.
   `get_analysis_catalog`, `get_js_invocation_sites`, `inspect_wasm`) plus,
   with actions on, every effectful operation. It could not read content or
   start sessions, and every action needed Allow once.
-- **Now** 97 rows are covered: 79 marked Covered (the 76, plus three rows
-  later changes added as covered) and 18 marked Added (request and response
-  bodies, source text, search across files and within one, Wasm row windows,
-  guest bytecode, the two response options, the session flow graph, graph
-  layout, Wasm function names, offline Wasm function runs and their stored
-  records, Wasm library identification, the readable Wasm function, the Wasm
-  module diff and Wasm value flow), and the in-app agent can use all of them at
-  the level each row names, including session control at Full access.
+- **Now** 102 rows are covered: 80 marked Covered (the 76, plus four rows
+  later changes added as covered) and 22 marked Added (request and response
+  bodies, the HAR and copy exports, source text, search across files and
+  within one, Wasm row windows, guest bytecode, the two response options,
+  browser-internal and extension capture, a fresh profile, the session flow
+  graph and its stacks, graph layout, Wasm function names, offline Wasm
+  function runs and their stored records, Wasm library identification, the
+  readable Wasm function, the Wasm module diff and Wasm value flow), and the
+  in-app agent can use all of them at the level each row names, including
+  session control at Full access.
 - **3 rows are partial**: Decode value and Decode range need the value read
   first (Full access, or a pin), and the Static bytecode, Contextual and
   Opcode ledger views decode researcher-imported definitions in the page.
-- **12 rows are not exposed**, each for the reason in its row: per-viewer
+- **10 rows are not exposed**, each for the reason in its row: per-viewer
   layout and preferences (columns, panes, theme, navigation history, Console
   snippets and history), the clipboard, the app's own windows and menus, the
-  researcher's own session and its Keychain route, browser-internal and extension
-  capture, the packaged app's own opt-outs, the Save-dialog client export, and
-  the agent's own controls.
+  researcher's own session and its Keychain route, the Save-dialog client
+  export, and the agent's own controls.

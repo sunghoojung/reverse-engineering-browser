@@ -1,7 +1,14 @@
-# Flow graph v2: request lineage and VM evidence
+# Flow graph v3: request lineage and VM evidence
 
-Status: draft for review. No code exists for anything in this document beyond
-[flow graph v1](../../protocol/flow-graph-v1.md), which it extends.
+Status: draft for review. It extends the implemented
+[flow graph v2](../../protocol/flow-graph-v2.md), and its proposed contract is
+`flow-graph-v3`. The [Flow workspace](../../apps/research-ui/README.md#flow-workspace)
+already has parts of it: choosing a request lights that request's stacks, and
+Lineage (V) lays out only the cards they walk, left to right (the stack part
+of Design A, from `get_flow_graph_paths`), the CFG pane
+opens a Wasm card's function beside the graph, and the Timeline pane draws
+tracked calls in record order (a first form of Design C). The layers, their
+joins and `flow-graph-v3` have no code.
 
 ## Why
 
@@ -12,8 +19,8 @@ joins it:
 
 | Today | What it shows | What it cannot show |
 | --- | --- | --- |
-| Backtraces **Steps** ([Request Origin Trace v1](request-origin-trace-v1.md)) | one request's recorded predecessors | one chain only: each step keeps one edge and drops the rest, so `issued_during_invocation` and `invocation_value_flow` never appear together |
-| Backtraces **Flow graph** (v1) | every recorded stack, folded across realms, JavaScript, eval and Wasm | invocations, VM records, signals; requests are rows labelled `METHOD host` |
+| Flow **Lineage**, formerly Steps ([Request Origin Trace v1](request-origin-trace-v1.md)) | one request's recorded predecessors | one chain only: each step keeps one edge and drops the rest, so `issued_during_invocation` and `invocation_value_flow` never appear together |
+| Flow **Graph** (v2) | every recorded stack, folded across realms, JavaScript, eval and Wasm | invocations, VM records, signals; requests are rows labelled `METHOD host` |
 | VM **fingerprint evidence graph** ([anti-bot VM detection v1](anti-bot-vm-detection-v1.md)) | artifact → VM candidate → browser signals → requests, with an epistemic state per edge | it is computed in `vm.rs` and never drawn; the UI lists "correlated requests" |
 | Sources and VM **Graph** (#447) | a Wasm or bytecode function's basic blocks | no runtime overlay: which `br_table` arms ran, how often, in which call |
 | VM Lab **Native observations**, **Host links**, Xrefs | `br_table`, `call_indirect`, guest dispatch and host-link rows | where in the call graph each row ran, and which request it led to |
@@ -34,7 +41,8 @@ joins:
 - **Tracked call ↔ Wasm and requests.** `(session, process, invocation_id)`
   is on `br_table` v2+, `call_indirect` v2+, guest invocation v4, execution
   outcomes and `js_invocation_request`. That record's `request_id` is the
-  renderer request ID, the same ID flow-graph paths list.
+  renderer request ID, the same ID `get_flow_graph_paths` takes, with
+  `process_id`, to find a request's stacks.
 - **Tracked call ↔ request body.** `invocation_value_flow` already matches a
   settle digest in a retained request body (correlated, exact bytes only).
 - **Request ↔ signals.** The request signal profile names canvas through
@@ -74,8 +82,8 @@ right edge of the drawing and its causes extend left.
 
 **Sources.**
 - **Request lifecycle hops:** the origin-trace edges.
-- **The stacks naming the request:** the flow-graph paths whose
-  `requests` include it.
+- **The stacks naming the request:** what `get_flow_graph_paths` answers for
+  its `process_id` and `request_id`, the part v2 already draws.
 - **The tracked call that issued it:** `issued_during_invocation`.
 - **That call's Wasm records:** matched by invocation ID.
 - **Value flow:** into the body.
@@ -83,7 +91,8 @@ right edge of the drawing and its causes extend left.
 - **VM candidates:** from the analysis graph.
 
 **Limits.**
-- Bounded to about 512 nodes per request.
+- No node bound: as v2's stack lineage does, it lays out every card the
+  request lights, however many.
 - Alternatives are kept, with their states, instead of dropped.
 
 **Strengths.**
@@ -94,11 +103,12 @@ right edge of the drawing and its causes extend left.
 **Weaknesses.**
 - It is per request: no session picture, and no way to see that two requests
   share a function.
-- It repeats flow-graph folding in a second place.
+- Built on its own, it would fold stacks a second time; v2 reads a request's
+  stacks from the one session fold instead.
 
 ## Design B: one evidence graph with layers
 
-**Idea.** Generalize flow graph v1 into one typed, session-wide graph with
+**Idea.** Generalize flow graph v2 into one typed, session-wide graph with
 layers. Every view above becomes a projection of it:
 - Steps is the request's lineage drawn as a chain.
 - The VM finding graph is the Analysis layer for one artifact.
@@ -106,7 +116,7 @@ layers. Every view above becomes a projection of it:
 
 **Nodes.**
 - **Realm:** drawn as a cluster.
-- **Function:** `js`, `eval`, `wasm`, `chain` or top level, as in v1.
+- **Function:** `js`, `eval`, `wasm`, `chain` or top level, as in v2.
 - **Request:** method, host, path, status and renderer ID, with its
   lifecycle hops collapsed into it.
 - **Navigation and cookie write.**
@@ -136,10 +146,10 @@ layers. Every view above becomes a projection of it:
 | `candidate` | artifact or function → VM candidate → request | `vm.rs` finding graph | inferred, then correlated |
 
 **Layers.**
-- **Calls** is v1 and on by default. Requests, Tracked calls, VM, Signals and
-  Analysis are toggles.
-- Each layer has its own bounds, coverage and omissions, so turning one on can
-  only add evidence and labelled gaps.
+- **Calls** is the v2 graph and on by default. Requests, Tracked calls, VM,
+  Signals and Analysis are toggles.
+- Each layer has its own coverage and omissions, so turning one on can only
+  add evidence and labelled gaps.
 - All joins happen in the backend on exact keys. The UI never joins.
 
 **Strengths.**
@@ -193,12 +203,13 @@ The reasoning:
 - C needs records no live build has produced yet.
 
 **What the UI gains.**
-- **Request picker.** Choosing a request switches to lineage. Its causes read
-  left to right into the request card. **Lineage only** hides the rest of the
-  session, and the full graph stays one toggle away.
+- **Request picker.** Choosing a request switches to lineage, as v2's
+  Lineage already does for the request's stacks. Its causes read left to
+  right into the request card. **Lineage only** hides the rest of the session, and the full
+  graph stays one toggle away.
 - **Request cards.** A request becomes a card when it is the subject: method,
   host, path, status, body fields, and any value-flow edge into a field.
-  Elsewhere it stays a row of the function that made it, as in v1.
+  Elsewhere it stays a row of the function that made it, as in v2.
 - **Wasm cards.** Dispatch rows such as `br_table +0x2a · 16 samples ·
   5 selectors` and `call_indirect +0x91 → hash`, each tagged with the tracked
   call it ran in.
@@ -212,28 +223,33 @@ The reasoning:
 
 ## Contract
 
-`get_flow_graph` stays the one operation. It gains:
-- `layers`, a list of layer names;
-- an optional request selector (process, renderer request ID, or the four-field
-  request root VM analysis already takes).
+`get_flow_graph` and `get_flow_graph_paths` stay the two operations. Both
+gain `layers`, a list of layer names. `get_flow_graph_paths` already selects a
+request by process and renderer request ID; it also gains the four-field
+request root VM analysis already takes.
 
-The schema becomes `flow-graph-v2`, a superset of v1. Each layer adds its
-node and edge kinds, a `coverage` and `omissions` block, and its own bounds,
-modelled on the VM workspace limits (4,096 rows per stream). A v1 client
-asking without `layers` gets the v1 answer.
+The schema becomes `flow-graph-v3`, a superset of v2. Each layer adds its
+node and edge kinds and a `coverage` and `omissions` block. A layer is folded
+and paged as v2 folds and pages the Calls layer: it reads every record, keeps
+its place between requests and adds no budget of its own, so a large session
+costs pages, not omissions. `generation` names the graph of one set of layers,
+so a paths answer names the IDs of the layers it was asked with. A v2 client
+asking without `layers` gets the v2 answer.
 
 ## Phases
 
 | Phase | Scope | Can be built and checked here |
 | --- | --- | --- |
 | 0 | Request rows and cards name path, status and renderer ID, not only `METHOD host`. The value-flow body limit is stated two ways (16 MiB retained, as the invocation protocol and design say, and 1 MiB read by `origin_trace.rs`); settle on one. | yes |
-| 1 | `flow-graph-v2` with the Requests and Tracked calls layers; request lineage replaces Steps' single chain; the side-by-side pane | yes, on synthetic stores from the existing C++ invocation encoders |
+| 1 | `flow-graph-v3` with the Requests and Tracked calls layers; request lineage replaces Steps' single chain; the side-by-side pane | yes, on synthetic stores from the existing C++ invocation encoders |
 | 2 | The VM layer: `br_table`, `call_indirect`, guest and host-link joins; dispatch rows on Wasm cards; the runtime overlay on Sources Graph | yes, on the native Wasm goldens `make native-wasm-golden-check` already exports |
 | 3 | Signals and Analysis layers; the fingerprint evidence graph drawn for the first time | yes |
-| 4 | Live acceptance of request stacks, invocations and the VM streams on a rebuilt Brave, then the probes v1 names as not covered: the caller of `.then`, cross-process `postMessage`, workers, and a complete call-edge table | needs the Brave build machine |
+| 4 | Live acceptance of request stacks, invocations and the VM streams on a rebuilt Brave, then probes for what v2 lists in `not_shown`: worklet stacks, cross-process `postMessage`, and a complete call-edge table (calls that never reached a recorded request, navigation, task or cookie write) | needs the Brave build machine |
 
 ## Bounds that stay
 
+- The fold keeps v2's bounds, which cut nothing: a request folds for 10
+  seconds and then answers, and four sessions' folds stay in memory.
 - Every native stream keeps its own bounds and gaps. The renderer no longer
   caps stacks, tracked calls or Wasm samples per configuration; a layer
   never hides a stream's gap or a sample policy the capture chose.
@@ -249,5 +265,5 @@ asking without `layers` gets the v1 answer.
    only for the chosen request, as above?
 3. Which comes first after phase 1: the VM layer (phase 2) or Signals and
    Analysis (phase 3)?
-4. Should a tracked call open the timeline (Design C) in the side pane, or as
-   its own Backtraces mode?
+4. Should a tracked call open the timeline (Design C) in the side pane, or in
+   Flow's Timeline pane?

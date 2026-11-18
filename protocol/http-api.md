@@ -1110,7 +1110,7 @@ offsets (end exclusive) of the summaries' scope, `scan_limit`, separate
 cut-through record prefix is omitted, not parsed as a new record.
 
 The summaries cover the whole store. The event index
-(`events.jsonl.events-v1`, layout `reb-event-index-v1/2`) folds every appended
+(`events.jsonl.events-v1`, layout `reb-event-index-v1/4`) folds every appended
 record into per-stream sequence bounds, the drop total, every named gap pair
 and the unreadable-line count, so a poll reads them without scanning the
 store. Once the index has caught up, `scope` is `"store"`, `scan_start` is
@@ -1367,18 +1367,63 @@ reads captured source bodies.
 
 ## Flow graph
 
-`get_flow_graph` (`GET /api/flow-graph?session_id=`) folds every recorded stack
-of one session (request, navigation, async scheduling and walked cookie-write
-stacks) into one observed graph: realms as contexts, JavaScript, eval and Wasm
-functions and request, navigation and cookie-write sinks as nodes, and call,
-await, task and omitted edges that name the frame, language and eval
-boundaries they cross. Each distinct stack is decoded once and each retained
-source read once; `paths` lists every stack's edges and request IDs. It is
-read-only, cached until the stores change, and stops at a 30-second deadline
-with `complete` false. A frame that does not resolve keeps its script ID and a
-reason; a lost scheduling stack is a `chain_cut`, never a bridged edge. Bounds
-and folding rules are in [flow-graph-v1.md](flow-graph-v1.md). The `reb://`
-stored-evidence workspace does not serve it.
+`get_flow_graph` (`GET /api/flow-graph?session_id=[&generation=&cursor=&limit=]`)
+folds every recorded stack of one session (request, navigation, async
+scheduling and walked cookie-write stacks) into one observed graph: realms as
+contexts, JavaScript, eval and Wasm functions and request, navigation and
+cookie-write sinks as nodes, and call, await, task and omitted edges that name
+the frame, language and eval boundaries they cross. The fold reads every
+record, with no stack, node, edge or path budget and no deadline that cuts it.
+It is kept per session in memory (the four sessions asked for most recently)
+and only moves forward, so a request reads only the records appended since the
+last. A request folds for at most 10 seconds and then answers what it has with
+`coverage.caught_up` false; the next request goes on from there. `complete` is
+true once every record and artifact the stores held is folded. A frame that
+does not resolve keeps its script ID and a reason; a lost scheduling stack is
+a `chain_cut`, never a bridged edge.
+
+The answer is paged by node, so no answer has to hold a whole large session:
+
+- Every page carries the head (`coverage`, `stacks`, `not_shown`,
+  `node_count`, `edge_count`), every context and `analyst_names`. Nodes are
+  grouped by context, so a context's nodes are the IDs from its `first_node`
+  on.
+- `nodes` holds the IDs from `cursor` on: at least one, and as many more as
+  keep the page within `limit` nodes and edges (default 65,536). Each edge
+  comes on the page that holds its later end, so a client that reads from
+  cursor 0 along `next_cursor` has both ends of every edge it reads.
+- `generation` names the graph's node and edge IDs and is never reused, even
+  across restarts. A request without it folds first. A request with it folds
+  nothing and answers a page of that graph, so the pages of one generation
+  stay one graph while the stores grow; once the graph has moved on it answers
+  409, and the client asks again without one.
+
+Each node carries `stacks`, the distinct stacks through it. An edge with no
+crossing omits `crosses`, and one whose sites resolve to no position omits
+`sites`. A cursor past the last node returns 400.
+
+The stacks themselves are not in the graph answer, because a large session
+holds far more of them than any page should carry.
+`get_flow_graph_paths` (`GET /api/flow-graph/paths?session_id=[&generation=]`,
+`flow-graph-paths-v1`) serves them on demand. It takes exactly one selector:
+`node`, the stacks that walk it; `process_id` and `request_id`, the stacks one
+renderer request's `request_initiator_stack` record named, as its
+`request_initiated` record carries them; or `digest`, 64 lowercase hex
+characters, optionally narrowed by `process_id`. `nodes` and `edges` list
+every node and edge any matching stack walks, so one answer lights them all.
+`paths` is one page of the matching stacks in the order the session first
+recorded them: `cursor` and `next_cursor`, and `limit` (default 64, clamped to
+1 to 1,024). Each path carries its own nodes and edges, its occurrences,
+whether its frames were retained and the number of requests it started. Pass
+the generation the node IDs came from: the route never folds a session
+further, so it answers 409 once that graph has moved on. A session not folded
+yet is folded first. No selector, more than one, `request_id` without
+`process_id` or a node the graph does not have returns 400.
+
+Both routes are read-only. A client that disconnects stops the fold where it
+is, and two requests for one session share one fold. Folding rules, the answer
+and the bounds that remain are in [flow-graph-v2.md](flow-graph-v2.md). The
+`reb://` stored-evidence workspace serves neither route.
 
 ## Graph layout
 

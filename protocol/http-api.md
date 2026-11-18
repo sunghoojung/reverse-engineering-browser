@@ -1108,6 +1108,11 @@ The respective `_saturated` flags distinguish clamping at u64 maximum.
 Malformed or incomplete JSON in the scanned records fails the refresh; the UI
 retains its last valid data. A complete final record without a newline is valid.
 The cache verifies exact overlap/boundary bytes and file identity before reuse.
+The ETag of this poll, and of a filtered or paged read, is the SHA-256 of the
+answer's own bytes (for a page, with what its sites depend on), so `304` means
+the same bytes would be sent, however the store changed, and costs the answer
+rather than a pass over the store. A record still being written does not change
+the answer, so it does not change the tag.
 The Rust endpoint answers this poll in every mode; stored-evidence native mode
 forwards it to the bundled backend and sets only `broker_connected` and
 `capture_mode`, which it folds into the ETag. A response that omits the fields is still accepted, and

@@ -2316,10 +2316,10 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     let response = server.get("/api/events?limit=2").await;
     let previous_etag = response.headers()["etag"].clone();
     drop(response);
-    // The next poll sees appended evidence rather than retaining an earlier
-    // response tree. Once the event index has caught up, the window ends where
-    // it does, at the last complete line: a final record without its newline
-    // is a record still being written, as it is to the request list.
+    // Once the event index has caught up, the window ends where it does, at
+    // the last complete line: a final record without its newline is a record
+    // still being written, as it is to the request list. The answer is then
+    // the same bytes, and its tag, the digest of those bytes, is unchanged.
     events.push(metadata_event(5002));
     let append = |bytes: &[u8]| {
         use std::io::Write;
@@ -2334,11 +2334,14 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
     let response = server
         .client
         .get(format!("{}/api/events?limit=2", server.url))
-        .header("If-None-Match", previous_etag)
+        .header("If-None-Match", previous_etag.clone())
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), 304);
+    assert_eq!(response.headers()["etag"], previous_etag);
+    let response = server.get("/api/events?limit=2").await;
+    assert_eq!(response.headers()["etag"], previous_etag);
     assert_eq!(
         response.bytes().await.unwrap().as_ref(),
         serde_json::to_vec(&event_response(
@@ -2348,6 +2351,7 @@ async fn evidence_polling_preserves_bytes_windows_and_file_changes() {
         ))
         .unwrap()
     );
+    // The newline completes the record, which changes the answer and its tag.
     append(b"\n");
     assert_poll_response(
         &server,

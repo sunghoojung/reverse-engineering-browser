@@ -1096,20 +1096,6 @@ impl App {
                 // describe the same bytes. Until then they are the scanned
                 // tail's, and say so.
                 let totals = self.event_totals().await;
-                let scope = totals
-                    .as_ref()
-                    .map_or("tail".to_owned(), |totals| totals.indexed_to.to_string());
-                etag = Some(event_window::etag(
-                    &self.options.store,
-                    &format!(
-                        "{}-{limit}-{}-{scope}",
-                        capture.mode.as_str(),
-                        capture.state.as_str()
-                    ),
-                ));
-                if matches_etag(headers, etag.as_deref()) {
-                    return Ok(not_modified(etag.as_deref().unwrap()));
-                }
                 let mut window = self
                     .read_event_window(limit, totals.as_ref().map(|totals| totals.indexed_to))
                     .await?;
@@ -1148,7 +1134,7 @@ impl App {
                         serde_json::from_str(include_str!("../assets/demo-canvas.json"))
                             .expect("Demo canvas capture");
                 }
-                result
+                return Ok(tagged_json(&result, headers, ""));
             }
             "/api/requests" => {
                 let query = request_index::RequestQuery::parse(&q, raw_query)?;
@@ -1898,31 +1884,9 @@ impl App {
         let cursor = event_query::cursor(q)?;
         let capture = self.capture_view();
         let may_hold_sites = filter.may_hold_sites();
-        // The store's tag digests its whole contents, so it is computed once;
-        // what the page's sites depend on is folded into it.
-        let base = event_window::etag(
-            &self.options.store,
-            &format!(
-                "query:{}-{}-{limit}:{cursor:?}:{}",
-                capture.mode.as_str(),
-                capture.state.as_str(),
-                filter.echo()
-            ),
-        );
-        let tag = |sources: &str| {
-            if sources.is_empty() {
-                base.clone()
-            } else {
-                format!(
-                    "\"{}\"",
-                    hex::encode(sha2::Sha256::digest(format!("{base}{sources}")))
-                )
-            }
-        };
-        let etag = tag(&self.sites_tag(may_hold_sites));
-        if matches_etag(headers, Some(&etag)) {
-            return Ok(not_modified(&etag));
-        }
+        // What the page's sites depend on besides its records, taken before
+        // the read: whatever lands during it makes the next tag differ.
+        let sources = self.sites_tag(may_hold_sites);
         let (path, artifacts, requests, sites) = (
             self.options.store.clone(),
             self.options.artifacts.clone(),
@@ -1954,27 +1918,22 @@ impl App {
                 Ok(document)
             })
             .await?;
-        // The tag of the state before the read: whatever landed while the
-        // page was read makes the next read's tag differ, so it is never
-        // called unchanged. A read that resolved sites costs one more full
-        // answer. A page still holding a deferred site gets a tag no later
-        // read matches, since reading it again is its recourse.
+        // The page is tagged by its own bytes and the sites' sources. A read
+        // that resolved sites costs one more full answer. A page still holding
+        // a deferred site gets a tag no later read matches, since reading it
+        // again is its recourse.
         let deferred = document["events"].as_array().is_some_and(|events| {
             events.iter().any(|event| {
                 event["debugger_observation"]["site"]["resolution"]["status"] == "deferred"
             })
         });
-        let etag = if deferred {
-            tag(&format!(":deferred-{}", unique_token()))
-        } else {
-            etag
-        };
         self.event_state(&mut document, capture);
-        let mut response = axum::Json(document).into_response();
-        response
-            .headers_mut()
-            .insert("etag", HeaderValue::from_str(&etag).unwrap());
-        Ok(response)
+        let sources = if deferred {
+            format!("{sources}:deferred-{}", unique_token())
+        } else {
+            sources
+        };
+        Ok(tagged_json(&document, headers, &sources))
     }
     /// What a page's sites depend on besides the store, for its tag: the
     /// artifacts retained, the script identities indexed and what was resolved
@@ -2902,6 +2861,29 @@ fn analysis_input_signature(path: &Path) -> String {
     #[cfg(not(unix))]
     let identity = String::new();
     evidence::resource_etag(path, &identity)
+}
+/// A JSON answer tagged by the digest of its own bytes and of `sources`,
+/// whatever else the answer depends on. Two reads share a tag exactly when
+/// they would send the same bytes, so a store rewritten in place cannot be
+/// called unchanged, and the cost is the answer's size rather than the store's.
+fn tagged_json(value: &Value, headers: &HeaderMap, sources: &str) -> Response {
+    let body = serde_json::to_vec(value).expect("a JSON value serializes");
+    let mut digest = sha2::Sha256::new();
+    digest.update(&body);
+    digest.update(sources.as_bytes());
+    let etag = format!("\"{}\"", hex::encode(digest.finalize()));
+    if matches_etag(headers, Some(&etag)) {
+        return not_modified(&etag);
+    }
+    let mut response = (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert("etag", HeaderValue::from_str(&etag).unwrap());
+    response
 }
 fn matches_etag(headers: &HeaderMap, etag: Option<&str>) -> bool {
     etag.is_some_and(|tag| headers.get("if-none-match").and_then(|v| v.to_str().ok()) == Some(tag))

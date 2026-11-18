@@ -57,6 +57,10 @@ the artifact manifest and event store, including event-only appends, replacement
 and clearing. On Unix the cache key includes file identity, change time, and a
 content hash, so a same-size replacement or rewrite with a restored modification
 time cannot reuse stale analysis when the filesystem does not advance change time.
+The hash is read again whenever identity, size or either time moves, and is
+reused only once its read began 3 seconds after the file's change time, longer
+than any supported filesystem's change-time tick, so a long session is not
+rehashed on every request.
 A symlink is identified as a link and is not hashed through. Other platforms
 recompute before deciding whether to return 304. The same bounded analyzer powers the HTTP API and offline CLI.
 This increment does not implement the broader stack, semantic VM, or exact value

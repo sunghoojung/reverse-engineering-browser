@@ -1021,7 +1021,7 @@ export async function buildEvidence({root, sessions, guestStore, dispatchStore, 
       capture_origin: 'network_response', kind: 'javascript', mime_type: 'text/javascript', url: 'https://large.test/bundle.js'},
     await readFile(join(largeDirectory, 'bundle.js'))),
     await artifact(artifacts, {artifact_id: '951', session_id: '1', navigation_id: '100', frame_id: '200',
-      capture_origin: 'webassembly_compile', kind: 'wasm', execution_context_id: '0', mime_type: 'application/wasm', url: 'https://large.test/module.wasm'},
+      capture_origin: 'webassembly_compile', kind: 'wasm', execution_context_id: '1', mime_type: 'application/wasm', url: 'https://large.test/module.wasm'},
     await readFile(join(largeDirectory, 'module.wasm'))),
   ] : [];
   const manifest = [...demoArtifacts, ...large, source, bytecode, parseFailure, glue, sourceMap, mapped, graphWasm, namedWasm, offlineRunner, identified, readable, ...diffBuilds, valueFlowWasm, ...withBodies.artifacts, ...bodyCases.artifacts, ...workerStack.artifacts, ...guest.artifacts, ...physical.artifacts, ...observed.artifacts, ...debuggerRecords.artifacts];

@@ -3282,6 +3282,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
   func test43LargeSourcesOpenWhole() async throws {
     let ui = try await prepare(windowSizes[0])
     try await show(ui, "sources")
+    // The catalog loads after the screen opens; decide only once it has.
+    try await ui.waitUntil("state.artifacts.length > 0", "the artifact catalog did not load")
     guard try await ui.value("state.artifacts.some(artifact => artifact.artifact_id === '951')") as? Bool == true else {
       throw XCTSkip("Set REB_RENDERED_UI_LARGE_SOURCES to a directory with bundle.js and module.wasm")
     }

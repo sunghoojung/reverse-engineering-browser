@@ -312,6 +312,15 @@ the stopped request: answering one raises an exception that ended the app. The
 next run, of a script that returns, must get its own `completed` answer, not
 409.
 
+`test21bDecoderQueueHasNoDeadline` opens the bundled `reb://` workspace and
+sends 160 gzip transforms of 768 KiB each to the packaged decoder at once. The
+decoder runs one at a time with no deadline, so every request must be answered
+with 200, however long the queue takes; with the old two-second wait most were
+refused as busy. It then sends 150 more, aborts them after 300 ms, and the next
+request must be answered within 1.5 s, since the abandoned ones would take
+seconds to drain if WebKit stopping them did not take them off the queue. It
+prints the times as a `decoder queue in the packaged app` line.
+
 `test22NewLiveSessionAsksAboutUnsavedWork` first opens the bundled workspace
 through **New Live Session…** and the start panel's **Continue Offline**, because the close guard
 trusts only a document the app loaded itself. When an earlier test left the

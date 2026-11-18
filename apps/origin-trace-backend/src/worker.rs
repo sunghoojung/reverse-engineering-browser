@@ -28,6 +28,8 @@ pub struct Output {
     pub stderr: Vec<u8>,
     pub success: bool,
     pub exit_code: Option<i32>,
+    /// The signal that ended the worker, when one did.
+    pub signal: Option<i32>,
     pub duration_us: u64,
 }
 /// Reads a worker stream to its end. An analysis worker's output grows with
@@ -190,6 +192,7 @@ pub async fn run_cancel(
             stderr,
             success: status.success(),
             exit_code: status.code(),
+            signal: std::os::unix::process::ExitStatusExt::signal(&status),
             duration_us: started
                 .elapsed()
                 .as_micros()

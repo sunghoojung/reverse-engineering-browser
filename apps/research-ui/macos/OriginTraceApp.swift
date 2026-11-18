@@ -362,6 +362,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     analystRunnerLock.unlock()
     // A page that aborts a forwarded analysis stops its backend work too.
     forwarded.removeValue(forKey: ObjectIdentifier(urlSchemeTask))?.cancel()
+    decoderService.cancel(ObjectIdentifier(urlSchemeTask))
   }
 
   private func healthResponse() throws -> Data {
@@ -1698,18 +1699,19 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
       sendError("Decoder action body is malformed", status: 400, to: task)
       return
     }
-    DispatchQueue.global(qos: .userInitiated).async {
-      do {
+    decoderService.action(action, task: ObjectIdentifier(task)) { result in
+      switch result {
+      case .success(let data):
         self.send(
-          try self.decoderService.action(action),
+          data,
           contentType: "application/json; charset=utf-8",
           status: 200,
           headers: [:],
           to: task
         )
-      } catch let error as NativeDecoderError {
+      case .failure(let error as NativeDecoderError):
         self.sendError(error.message, status: error.status, to: task)
-      } catch {
+      case .failure(let error):
         self.sendError(error.localizedDescription, status: 500, to: task)
       }
     }

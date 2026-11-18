@@ -625,11 +625,12 @@ async fn assert_contract_response(
     route: &str,
     expected_status: u16,
 ) -> Vec<u8> {
-    assert_eq!(
-        response.status().as_u16(),
-        expected_status,
-        "{method} {route}"
-    );
+    let status = response.status().as_u16();
+    if status != expected_status {
+        // The answer's reason says which deadline or check refused it.
+        let text = response.text().await.unwrap_or_default();
+        panic!("{method} {route}: expected {expected_status}, got {status}: {text}");
+    }
     let spec = specification();
     let operation = &spec["paths"][route][method];
     assert!(
@@ -6217,6 +6218,62 @@ async fn analyst_libraries_variables_and_errors_have_no_shape_limits() {
     let result: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(result["outcome"], "failed");
     assert_eq!(result["error"], "e".repeat(4000), "the error is kept whole");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn decoder_requests_wait_their_turn_and_its_cpu_limit_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    let helper_root = tempfile::tempdir().unwrap();
+    let decoder = helper_root.path().join("decoder-fixture");
+    // A transform takes 0.1 s, so the queue below waits well past the two
+    // seconds a request once had to reach the decoder. A JWT inspection
+    // ends the way the decoder's CPU-time limit ends it.
+    std::fs::write(
+        &decoder,
+        "#!/bin/sh\n/bin/cat >/dev/null\ncase \"$1\" in\n  transform) /bin/sleep 0.1; printf ok ;;\n  *) ulimit -c 0; kill -XCPU $$ ;;\nesac\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&decoder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server =
+        Server::start_with_args(&["--decoder".into(), decoder.display().to_string()]).await;
+    let mut queue = tokio::task::JoinSet::new();
+    for operation_id in 1..=30 {
+        let (client, url) = (server.client.clone(), server.url.clone());
+        queue.spawn(async move {
+            let response = client
+                .post(format!("{url}/api/decoder/actions"))
+                .json(&json!({"action":"transform","protocol_version":1,"operation_id":operation_id,"operation":"sha256","input_base64":"AA=="}))
+                .send()
+                .await
+                .unwrap();
+            (response.status().as_u16(), response.text().await.unwrap())
+        });
+    }
+    let started = std::time::Instant::now();
+    while let Some(answer) = queue.join_next().await {
+        let (status, text) = answer.unwrap();
+        assert_eq!(status, 200, "{text}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["output_base64"],
+            "b2s="
+        );
+    }
+    assert!(started.elapsed() >= std::time::Duration::from_secs(2));
+
+    let response = server
+        .action(
+            "/api/decoder/actions",
+            json!({"action":"jwt_inspect","protocol_version":1,"token":"a.b.c"}),
+        )
+        .await;
+    let bytes = assert_contract_response(response, "post", "/api/decoder/actions", 422).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["code"], "resource_limit");
+    assert_eq!(
+        result["error"],
+        "The native decoder reached its two-second CPU-time limit"
+    );
 }
 
 #[cfg(unix)]

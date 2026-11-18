@@ -2729,6 +2729,53 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await returnToHarness(ui, harnessURL)
   }
 
+  // The packaged decoder runs one request at a time with no deadline. A queue
+  // that lasts seconds, longer than the two a request once had, is answered
+  // in full, and requests the page abandons leave the queue at once.
+  @MainActor
+  func test21bDecoderQueueHasNoDeadline() async throws {
+    let ui = try Harness()
+    try await ui.waitForInitialLoad()
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    ui.webView.load(URLRequest(url: try XCTUnwrap(URL(string: "reb://app/index.html?native=1"))))
+    try await ui.waitUntil("location.protocol === 'reb:' && document.readyState === 'complete' && typeof state === 'object'",
+      timeout: 30, "the bundled workspace did not load")
+    let result = try await ui.json(
+      """
+      (async () => {
+        const bytes = new Uint8Array(768 * 1024);
+        for (let offset = 0; offset < bytes.length; offset += 65536) crypto.getRandomValues(bytes.subarray(offset, offset + 65536));
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        const input = btoa(binary);
+        const send = (id, signal) => fetch('/api/decoder/actions', {method: 'POST', cache: 'no-store', signal,
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({protocol_version: 1, action: 'transform', operation_id: id, operation: 'gzip-compress', input_base64: input})})
+          .then(response => response.status, () => 'aborted');
+        let started = performance.now();
+        const queued = await Promise.all(Array.from({length: 160}, (_, index) => send(index + 1)));
+        const queuedMs = Math.round(performance.now() - started);
+        const controller = new AbortController();
+        const abandoned = Array.from({length: 150}, (_, index) => send(index + 1, controller.signal));
+        await new Promise(resolve => setTimeout(resolve, 300));
+        controller.abort();
+        const stopped = await Promise.all(abandoned);
+        started = performance.now();
+        const next = await send(1);
+        const nextMs = Math.round(performance.now() - started);
+        return {answered: queued.filter(status => status === 200).length, statuses: [...new Set(queued)].join(','), queuedMs,
+          aborted: stopped.filter(status => status === 'aborted').length, next, nextMs};
+      })()
+      """)
+    print("decoder queue in the packaged app: \(result)")
+    XCTAssertEqual(result["answered"] as? Int, 160, "every queued request is answered: \(result)")
+    XCTAssertGreaterThan(result["aborted"] as? Int ?? 0, 0, "the page abandoned queued requests: \(result)")
+    XCTAssertEqual(result["next"] as? Int, 200, "the next request is answered: \(result)")
+    // The abandoned queue would take seconds to drain if it still ran.
+    XCTAssertLessThan(result["nextMs"] as? Int ?? .max, 1_500, "abandoned requests left the queue: \(result)")
+    try await returnToHarness(ui, harnessURL)
+  }
+
   @MainActor
   private func panelText(_ ui: Harness) async throws -> String {
     try await ui.value("document.querySelector('#session-panel')?.innerText ?? ''") as? String ?? ""

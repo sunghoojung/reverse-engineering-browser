@@ -6530,10 +6530,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             value.protocol_version !== 1 || typeof value.available !== 'boolean' || typeof value.busy !== 'boolean') return false;
         const limits = value.limits;
         if (!decoderHasExactKeys(limits, ['input_bytes', 'output_bytes', 'pipeline_steps', 'retained_bytes',
-          'jwt_bytes', 'secret_bytes', 'json_depth', 'json_tokens', 'timeout_ms', 'operations', 'jwt_algorithms'])) return false;
+          'jwt_bytes', 'secret_bytes', 'json_depth', 'json_tokens', 'operations', 'jwt_algorithms'])) return false;
         if (limits.input_bytes !== 1048576 || limits.output_bytes !== 1048576 || limits.pipeline_steps !== 16 ||
             limits.retained_bytes !== 4194304 || limits.jwt_bytes !== 65536 || limits.secret_bytes !== 4096 ||
-            limits.json_depth !== 64 || limits.json_tokens !== 100000 || limits.timeout_ms !== 2000) return false;
+            limits.json_depth !== 64 || limits.json_tokens !== 100000) return false;
         return Array.isArray(limits.operations) && limits.operations.length === decoderNativeOperations.size &&
           limits.operations.every(operation => decoderNativeOperations.has(operation)) &&
           new Set(limits.operations).size === decoderNativeOperations.size &&

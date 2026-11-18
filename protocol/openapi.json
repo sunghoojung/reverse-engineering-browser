@@ -4207,7 +4207,7 @@
             }
           },
           "408": {
-            "description": "The bounded request-body read deadline expired, or the native decoder was busy or timed out.",
+            "description": "The bounded request-body read deadline expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -21097,14 +21097,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -21150,14 +21150,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -21208,14 +21208,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [],
@@ -21294,14 +21294,14 @@
                   "effects": [
                     "process-stop"
                   ],
-                  "when": "Worker completion, timeout, or a dropped request cleans up the owned process group (worker::run_cancel)."
+                  "when": "Worker completion or a dropped request cleans up the owned process group (worker::run_cancel)."
                 }
               ],
               "uncertainties": [],
               "prerequisites": [
                 {
                   "id": "decoder-available",
-                  "condition": "The decoder must be executable and its serialized worker must become available within two seconds."
+                  "condition": "The decoder must be executable. Operations run one at a time, so a request waits for the one before it."
                 }
               ],
               "confirmations": [

@@ -55,7 +55,6 @@
           secret_bytes: 4 * 1024,
           json_depth: 64,
           json_tokens: 100000,
-          timeout_ms: 2000,
           operations: [],
           jwt_algorithms: ['HS256', 'HS384', 'HS512', 'none']
         }

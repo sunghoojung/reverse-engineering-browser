@@ -53,8 +53,11 @@ The process applies core-dump, CPU, file-size, and open-file limits before
 parsing input. Linux also applies a 128 MiB address-space limit. macOS does not
 provide a reliable address-space resource limit for this process, so every
 input, output, parser, compression buffer, and cryptographic allocation is
-bounded structurally. Both native bridges enforce a two-second wall-clock
-timeout and serialize operations through one worker lock.
+bounded structurally. Both native bridges run one operation at a time, and a
+request waits for the one before it as a queued task rather than a blocked
+thread. Neither has a wall-clock deadline, which would refuse work only because
+the machine is busy: the two-second CPU-time limit ends runaway work, and the
+request going away cancels it, whether it is waiting or running.
 
 The C++ engine uses zlib for streaming compression and decompression. It stops
 before retaining output over the configured cap. Gzip decoding consumes all
@@ -78,12 +81,13 @@ early byte mismatch exit.
 | HMAC secret | 4 KiB |
 | JSON nesting | 64 levels |
 | JSON tokens | 100,000 |
-| Native operation | 2 seconds |
+| Native operation | 2 seconds of CPU time |
 
 Malformed encodings, invalid JSON, decompression bombs, unsupported operations,
-oversized data, unavailable helpers, and timeouts remain visible errors. The UI
-keeps the last completed chain intact when a later operation fails. Binary
-results can be viewed as a bounded hex dump or Base64 without forcing UTF-8.
+oversized data, unavailable helpers, and the CPU-time limit remain visible
+errors. The UI keeps the last completed chain intact when a later operation
+fails. Binary results can be viewed as a bounded hex dump or Base64 without
+forcing UTF-8.
 
 ## JWT trust model
 

@@ -925,8 +925,15 @@ Known behavior worth preserving in clients:
   bounds; offsets and identifiers must be canonical unsigned decimals.
 - At the application handler, malformed JSON, non-object bodies, invalid body
   lengths and unsupported chunked bodies return JSON 400 errors. A body read
-  exceeding five seconds, plus one second per declared 16 MiB, returns 408. Transport-level HTTP framing failures
-  may be rejected before the application handler and have no JSON guarantee.
+  exceeding five seconds, plus one second per declared 16 MiB, returns 408.
+  The Local Analyst and VM pack routes instead parse their body as it
+  arrives, so it is held once, as its parsed value, and their
+  `x-max-body-bytes` is 2^53 - 1, no practical bound. Their deadline follows
+  what arrived: five seconds plus one per 16 MiB received, not counting time
+  the parser takes, so a client that keeps sending is never refused for its
+  size and one that stalls is refused within seconds. Transport-level HTTP
+  framing failures may be rejected before the application handler and have
+  no JSON guarantee.
 - Unknown API paths return JSON 404; unsupported methods return JSON 405.
   Every application response includes `Cache-Control: no-store` and
   `X-Content-Type-Options: nosniff`. HEAD is not an equivalent of API GET.

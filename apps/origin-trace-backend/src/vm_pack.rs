@@ -77,7 +77,17 @@ impl<'de> Deserialize<'de> for StrictJson {
 /// validation, canonical encoding and drop off the end of the stack, and no
 /// versioned VM document nests anywhere near it.
 pub fn parse(bytes: &[u8]) -> Result<Value> {
-    let StrictJson(value) = serde_json::from_slice(bytes).map_err(|_| {
+    object(serde_json::from_slice(bytes))
+}
+
+/// [`parse`] of a document read as it arrives, so its text is never held
+/// whole beside the parsed value.
+pub fn parse_reader(reader: impl std::io::Read) -> Result<Value> {
+    object(serde_json::from_reader(reader))
+}
+
+fn object(parsed: serde_json::Result<StrictJson>) -> Result<Value> {
+    let StrictJson(value) = parsed.map_err(|_| {
         Error::bad(
             "Invalid VM JSON: duplicate keys, noninteger numbers, nesting past 128 levels and malformed text are refused",
         )
@@ -89,8 +99,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
 }
 
 /// HTTP adapter for the exact offline library operations. No files or code run.
-pub fn request(bytes: &[u8], comparison: bool) -> Result<Value> {
-    let request = parse(bytes)?;
+pub fn request(request: Value, comparison: bool) -> Result<Value> {
     let expected: &[&str] = if comparison {
         &["pack", "left", "left_artifact", "right", "right_artifact"]
     } else {
@@ -630,6 +639,8 @@ mod tests {
 
     #[test]
     fn vm_pack_http_adapter_matches_cli_and_refuses_malformed_identity() {
+        // The route's path: the body parses as it is read, then runs.
+        let http = |bytes: &[u8], comparison| request(parse_reader(bytes)?, comparison);
         let pack = fixture("pack.json");
         let left = fixture("build-a.workspace.json");
         let right = fixture("build-b.workspace.json");
@@ -637,10 +648,10 @@ mod tests {
             json!({"pack":pack,"left":left,"left_artifact":"1","right":right,"right_artifact":"1"});
         let encoded = serde_json::to_vec(&body).unwrap();
         assert_eq!(
-            request(&encoded, true).unwrap(),
+            http(&encoded, true).unwrap(),
             compare_fixture(&left, &right)
         );
-        assert!(request(&encoded, false).is_err());
+        assert!(http(&encoded, false).is_err());
         for (field, value) in [
             ("left_artifact", json!("2")),
             ("right_artifact", json!("01")),
@@ -649,31 +660,31 @@ mod tests {
         ] {
             let mut bad = body.clone();
             bad[field] = value;
-            assert!(request(&serde_json::to_vec(&bad).unwrap(), true).is_err());
+            assert!(http(&serde_json::to_vec(&bad).unwrap(), true).is_err());
         }
         let mut tampered = body.clone();
         tampered["left"]["document_digest"] = json!("0".repeat(64));
-        assert!(request(&serde_json::to_vec(&tampered).unwrap(), true).is_err());
+        assert!(http(&serde_json::to_vec(&tampered).unwrap(), true).is_err());
         let mut extra = body.clone();
         extra["execute"] = json!(true);
-        assert!(request(&serde_json::to_vec(&extra).unwrap(), true).is_err());
-        assert!(request(br#"{"pack":{},"pack":{},"analysis":{}}"#, false).is_err());
+        assert!(http(&serde_json::to_vec(&extra).unwrap(), true).is_err());
+        assert!(http(br#"{"pack":{},"pack":{},"analysis":{}}"#, false).is_err());
         let mut oversized = body.clone();
         oversized["pack"]["rules"] =
             json!([{"rule_id":"antibot.test","weight":1,"label":"x".repeat(65537)}]);
-        assert!(request(&serde_json::to_vec(&oversized).unwrap(), true).is_err());
+        assert!(http(&serde_json::to_vec(&oversized).unwrap(), true).is_err());
         let generic = analysis("function owned(x) { return x + 1; }");
         let defaults: Value =
             serde_json::from_str(include_str!("../assets/anti-bot-pack-v1.json")).unwrap();
         let apply_body = json!({"pack":defaults,"analysis":generic});
         assert_eq!(
-            request(&serde_json::to_vec(&apply_body).unwrap(), false).unwrap(),
+            http(&serde_json::to_vec(&apply_body).unwrap(), false).unwrap(),
             apply(&defaults, &generic).unwrap()
         );
         let mut padded = serde_json::to_vec(&apply_body).unwrap();
         padded.resize(padded.len() + (17 << 20), b' ');
         assert_eq!(
-            request(&padded, false).unwrap(),
+            http(&padded, false).unwrap(),
             apply(&defaults, &generic).unwrap()
         );
     }

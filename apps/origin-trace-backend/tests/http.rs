@@ -928,9 +928,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
         (
             "AnalystAction",
             include_str!("../src/app.rs"),
-            "\"/api/local-analyst/actions\" => match",
-            "\"/api/capture/actions\"",
-            16,
+            "async fn analyst_action(",
+            "    async fn post(",
+            12,
         ),
     ] {
         assert_eq!(
@@ -1448,6 +1448,74 @@ async fn incomplete_request_body_keeps_coarse_reason_and_legacy_text() {
     assert_eq!(value["error"], "The request body exceeds its size limit");
     assert_eq!(value["code"], "invalid_request");
     assert_eq!(value["details"], json!({}));
+}
+#[tokio::test]
+async fn streamed_request_bodies_keep_deadline_interruption_and_malformed_answers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let server = Server::start().await;
+    let address = server.url.strip_prefix("http://").unwrap();
+    // These routes parse their body as it arrives instead of buffering it.
+    // A late, cut off or malformed body still answers as a buffered one did,
+    // and work never starts on part of a body.
+    for route in [
+        "/api/local-analyst/actions",
+        "/api/analysis/vm/packs/apply",
+        "/api/analysis/vm/packs/compare",
+    ] {
+        for (body, length, interrupted, status, error) in [
+            (
+                "{",
+                100,
+                false,
+                408,
+                "The request body deadline was exceeded",
+            ),
+            (
+                "{",
+                100,
+                true,
+                400,
+                "The request body exceeds its size limit",
+            ),
+            ("{\"pack\":{} ]", 12, false, 400, ""),
+            ("{\"pack\":{}}  ", 13, false, 400, ""),
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream.write_all(format!("POST {route} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}").as_bytes()).await.unwrap();
+            if interrupted {
+                stream.shutdown().await.unwrap();
+            }
+            let mut raw = Vec::new();
+            tokio::time::timeout(Duration::from_secs(15), stream.read_to_end(&mut raw))
+                .await
+                .unwrap()
+                .unwrap();
+            let response = String::from_utf8(raw).unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{route} {body:?}: {response}"
+            );
+            let value: Value =
+                serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+            if status == 408 {
+                assert_eq!(value["code"], "timeout");
+                assert_eq!(value["details"], json!({"phase":"request_body"}));
+            }
+            if !error.is_empty() {
+                assert_eq!(value["error"], error, "{route} {body:?}");
+            }
+        }
+    }
+    // A refused or late pack body releases the comparison permit.
+    let pack: Value =
+        serde_json::from_str(include_str!("../assets/anti-bot-pack-v1.json")).unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/analysis/vm/packs/apply", server.url))
+        .json(&json!({"pack":pack,"analysis":{}}))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(response.status(), 503);
 }
 fn metadata_event(sequence: u64) -> Value {
     json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),"monotonic_time_ns":(sequence*1000).to_string(),"navigation_id":"1","frame_id":"1","artifact_id":"0","request_id":sequence.to_string(),"process_id":100,"thread_id":101,"tab_id":1,"category":"network","type":"request_started","payload_encoding":"hex","payload":hex::encode("GET fixture.local"),"payload_size":17,"parent_event_id":"0","browser_context_id_high":"1","browser_context_id_low":"2","initiator_request_id":0,"initiator_process_id":0,"status_code":0,"error_code":0,"resource_type":13,"flags":0,"payload_truncated":false,"encoded_data_length":"0","decoded_body_length":"0"})
@@ -2978,7 +3046,7 @@ fn vm_runtime_audio_is_bounded_relevance_not_vm_structure_or_value_capture() {
                 .any(|e| e["from"] == "event:1:10:1" && e["state"] == "correlated")
         );
         assert!(!document.to_string().contains("must-not-copy"));
-        assert_eq!(document["producer"]["version"], "1.10.0");
+        assert_eq!(document["producer"]["version"], "1.11.0");
         assert_eq!(
             document["profile"]["runtime_rule_weights"]["antibot.runtime-web-audio"],
             25
@@ -3702,7 +3770,7 @@ async fn vm_lexical_scoring_retains_dispatch_families_and_original_artifacts() {
         .unwrap()
         .validate(&document)
         .unwrap();
-    assert_eq!(document["producer"]["version"], "1.10.0");
+    assert_eq!(document["producer"]["version"], "1.11.0");
     assert_eq!(document["profile"]["javascript_scoring_version"], 3);
     assert_eq!(document["profile"]["runtime_evidence_version"], 2);
     let profile = origin_trace_backend::vm::canonical(&document["profile"]).unwrap();
@@ -3872,13 +3940,11 @@ async fn vm_lexical_scoring_preserves_region_failures_and_limits() {
             .iter()
             .any(|omission| omission["reason"] == "javascript-unterminated-function")
     );
-    assert_eq!(results[1]["status"], "partial");
+    // 4,098 functions, past the 4,096 regions that used to be scored.
+    assert_eq!(results[1]["status"], "complete");
     assert_eq!(results[1]["tier"], "none");
-    assert_eq!(results[1]["coverage"]["complete"], false);
-    assert_eq!(
-        results[1]["coverage"]["omissions"][0]["reason"],
-        "javascript-function-region-limit"
-    );
+    assert_eq!(results[1]["coverage"]["complete"], true);
+    assert_eq!(results[1]["coverage"]["omissions"], json!([]));
     assert_eq!(results[2]["tier"], "candidate");
     assert_eq!(results[2]["vm_score"], 75);
     assert!(
@@ -6588,7 +6654,7 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
     assert_eq!(catalog["current_producer"], document["producer"]);
     assert_eq!(
         catalog["current_producer"],
-        json!({"id":"origin-trace-vm-detector","version":"1.10.0"})
+        json!({"id":"origin-trace-vm-detector","version":"1.11.0"})
     );
     assert_eq!(catalog["compatibility"]["build_identity"], "not-recorded");
     assert_eq!(catalog["current_profile"], document["profile"]);
@@ -6643,7 +6709,22 @@ async fn analysis_catalog_resolves_every_generated_rule_and_preserves_profile_id
         .as_object_mut()
         .unwrap()
         .remove("javascript_likely_vm_requires_handlers");
+    // The version 2 profile still had the input limits producer 1.11.0
+    // removed.
     historical_profile["javascript_scoring_version"] = json!(2);
+    let limits = historical_profile["limits"].as_object_mut().unwrap();
+    for (name, value) in [
+        ("max_artifact_bytes", 16777216),
+        ("max_js_function_regions", 4096),
+        ("max_js_matches_per_rule", 32),
+        ("max_js_region_work_bytes", 67108864),
+        ("max_wasm_functions", 100000),
+        ("max_wasm_instructions", 1000000),
+        ("max_wasm_sections", 128),
+        ("max_wasm_section_bytes", 2097152),
+    ] {
+        limits.insert(name.into(), json!(value));
+    }
     assert_eq!(
         hex::encode(Sha256::digest(
             origin_trace_backend::vm::canonical(&historical_profile).unwrap()

@@ -116,9 +116,11 @@ log entries**. The selected file and run are always shown. The result or
 error is shown whole in the shared code view, which mounts only the rows near
 view. Past eight levels a folder's indent stays put so its name keeps room;
 its `aria-level` still gives the depth.
-The loopback API buffers at most 1 GiB per request, which the library and
-evidence snapshot use and the selected artifact does not, since the host reads
-it from the store.
+The loopback API parses a library or run request as it arrives, with no size
+bound. The evidence snapshot is held once, as its parsed value, and is encoded
+into the runner's input while the runner reads it. The selected artifact is
+never in the request: the host reads and verifies it from the store, and frees
+it once the runner has it.
 
 Each run exposes time, source file, operation, outcome, duration, generation,
 file, and run correlation identifiers. Cancellation, malformed runner output,

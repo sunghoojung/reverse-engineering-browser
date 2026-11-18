@@ -22,7 +22,8 @@ const spec = JSON.parse(await readFile(new URL('protocol/openapi.json', root), '
 for (const mode of ['apply', 'compare']) {
   const route = spec.paths[`/api/analysis/vm/packs/${mode}`].post;
   assert.equal(route.operationId, `vm_pack_${mode}`);
-  assert.equal(route['x-max-body-bytes'], 1073741824);
+  // The body parses as it arrives, so its size needs no bound.
+  assert.equal(route['x-max-body-bytes'], Number.MAX_SAFE_INTEGER);
   assert.deepEqual(route['x-reb-execution'].effects, ['analysis']);
   assert.equal(route.requestBody.content['application/json'].schema.additionalProperties, false);
 }

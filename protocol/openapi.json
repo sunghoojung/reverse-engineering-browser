@@ -1628,7 +1628,7 @@
       "get": {
         "operationId": "get_cookie_provenance",
         "summary": "get cookie provenance",
-        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from the newest 5000 cookie list, request start, redirect, script call and script identity records within the last 64 MiB of events and at most 256 distinct retained cookie lists, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false when older records were not read, so an absent response or request is unknown. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
+        "description": "What touched one cookie name in a session (\"Cookies\" in protocol/native-network-v3.md): the document.cookie and Cookie Store API calls that wrote or read it anywhere in the session, with frame, count, script frame and stack digest, which the request index locates (script_coverage says whether every call was read); and, from every cookie list of the session's indexed requests, also located by the index and each distinct list read once, the responses that set it, with attributes and block reasons, and the requests that sent it. coverage.complete is false while the index is still catching up with the store, so an absent response or request is then unknown. Each distinct script position resolves to source once. A sent cookie names the script writes whose value SHA-256 equals its own. Values are withheld with their length and SHA-256 unless credential_values=1, which reb-api mcp passes only with --allow-content (--permission full). A script record keeps 24 name bytes, so a longer name matches by length and prefix. A document.cookie read names each cookie it returned, at most 360 per read; read_coverage counts the reads that may hold the name without naming it.",
         "tags": [
           "request-cookies"
         ],
@@ -12655,16 +12655,16 @@
               "located_outside_window",
               "unreadable"
             ],
-            "description": "How script lists every script_cookie record of the session: the request index locates each one, so a call older than coverage's window is read too. An absent call is proof only when complete is true and read_coverage.complete is true.",
+            "description": "How script lists every script_cookie record of the session: the request index locates each one. An absent call is proof only when complete is true and read_coverage.complete is true.",
             "properties": {
               "complete": {
                 "type": "boolean",
-                "description": "The index has caught up with the store, located every script_cookie record, and each one older than the window was read back."
+                "description": "The index has caught up with the store, located every script_cookie record, and each one was read back."
               },
               "located_outside_window": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Located records older than coverage.scan_start, read back by byte range; script lists those of them that concern this name."
+                "description": "Located records older than coverage.scan_start. The read starts at byte 0, so this is 0; backends that read a newest-record window counted the older calls read back here."
               },
               "unreadable": {
                 "type": "integer",
@@ -12700,17 +12700,17 @@
           "lists_read": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 256
+            "description": "Distinct retained lists read. Backends before every list was read stopped at 256."
           },
           "lists_unread": {
             "type": "integer",
             "minimum": 0,
-            "description": "Distinct retained lists past the 256 read."
+            "description": "Distinct retained lists whose manifest record could not be read in time, so their cookies are unknown; a later read asks again. Backends before every list was read counted the lists past 256 here."
           },
           "stacks_unresolved": {
             "type": "integer",
             "minimum": 0,
-            "description": "Script calls not resolved to source because 64 distinct positions already were."
+            "description": "Script calls not resolved to source because the artifact manifest could not be read in time. Backends before every position was resolved counted the calls past 64 distinct positions here."
           },
           "read_coverage": {
             "type": "object",
@@ -12752,7 +12752,7 @@
               "records_dropped": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category at or after the oldest record read (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
+                "description": "Records a full queue dropped, from the drop counts of the session's gap records of any category anywhere in the session (a renderer's gap takes the category of the last record it drained, and a named reason is no loss); one may have named this cookie."
               }
             }
           },

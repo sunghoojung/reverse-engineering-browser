@@ -11808,11 +11808,11 @@ async fn request_har_exports_redirect_and_failed_hops_with_their_headers() {
     }
 }
 
-/// A cookie spans the session: a script write older than provenance's newest
-/// 5,000 records is still listed, found through the request index, and a
-/// write of another name stays out of the answer.
+/// A cookie spans the session: the response that set it, a script write and
+/// the request that sent it are all listed with 6,000 records between them,
+/// found through the request index, and a write of another name stays out.
 #[tokio::test]
-async fn cookie_provenance_lists_a_script_write_older_than_its_window() {
+async fn cookie_provenance_reads_every_list_and_script_call_of_the_session() {
     let server = Server::start().await;
     let spec = specification();
     let write = |name: &[u8], value: &[u8]| {
@@ -11825,25 +11825,108 @@ async fn cookie_provenance_lists_a_script_write_older_than_its_window() {
         out[104..104 + name.len()].copy_from_slice(name);
         out
     };
-    let mut lines = String::new();
-    let mut sequence = 0u64;
-    let mut push = |kind: &str, request: u64, payload: &[u8]| {
-        sequence += 1;
-        let event = json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
-            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":"0",
-            "parent_event_id":"0","request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
+    // One included cookie, as protocol/native-network-v3.md lays a list out.
+    let list = |sent: bool, name: &[u8], value: &[u8]| {
+        let mut out = b"RBCK".to_vec();
+        out.extend_from_slice(&[1, 0, if sent { 1 } else { 2 }, 0]);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        let strings: [&[u8]; 6] = [name, value, b".a.test", b"/", b"", b""];
+        let mut fixed = [0u8; 64];
+        fixed[16..24].copy_from_slice(&1_700_000_000_000i64.to_le_bytes());
+        (fixed[24], fixed[25], fixed[26], fixed[27], fixed[28]) = (1, 3, 2, 2, 2);
+        fixed[32..36].copy_from_slice(&443i32.to_le_bytes());
+        for (index, string) in strings.iter().enumerate() {
+            fixed[36 + 4 * index..40 + 4 * index]
+                .copy_from_slice(&(string.len() as u32).to_le_bytes());
+        }
+        out.extend_from_slice(&fixed);
+        for string in strings {
+            out.extend_from_slice(string);
+        }
+        out
+    };
+    let list_record = |sent: bool, bytes: &[u8]| {
+        let mut out = vec![0u8; 128];
+        (out[0], out[2], out[4], out[5]) = (1, 128, if sent { 1 } else { 2 }, 1);
+        out[8..12].copy_from_slice(&1u32.to_le_bytes());
+        out[16..20].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out[32..64].copy_from_slice(&Sha256::digest(bytes));
+        out
+    };
+    let artifacts = server.root.path().join("artifacts");
+    std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
+    let mut events = Vec::new();
+    let mut manifest = Vec::new();
+    let push = |events: &mut Vec<Value>,
+                kind: &str,
+                request: u64,
+                parent: u64,
+                artifact: &str,
+                payload: &[u8]| {
+        let sequence = events.len() as u64 + 1;
+        events.push(json!({"protocol_version":3,"session_id":"1","sequence_number":sequence.to_string(),
+            "monotonic_time_ns":(1000 * sequence).to_string(),"navigation_id":"0","frame_id":"9","artifact_id":artifact,
+            "parent_event_id":parent.to_string(),"request_id":request.to_string(),"process_id":7,"thread_id":1,"tab_id":1,
             "category":"network","type":kind,"flags":0,"status_code":0,"error_code":0,"encoded_data_length":"0",
             "decoded_body_length":"0","resource_type":0,"initiator_process_id":0,"initiator_request_id":0,
-            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false});
-        lines.push_str(&event.to_string());
-        lines.push('\n');
+            "payload_encoding":"hex","payload":hex::encode(payload),"payload_size":payload.len(),"payload_truncated":false}));
+        sequence
     };
-    push("script_cookie", 0, &write(b"sid", b"1"));
-    push("script_cookie", 0, &write(b"other", b"2"));
-    for request in 1..=6_000u64 {
-        push("request_started", request, b"GET a.test");
+    // A request that sets or sends sid=value-1, with its list as artifact `id`.
+    let cookie_list = |events: &mut Vec<Value>,
+                       manifest: &mut Vec<Value>,
+                       request: u64,
+                       id: &str,
+                       sent: bool| {
+        let start = push(events, "request_started", request, 0, "0", b"GET a.test");
+        let bytes = list(sent, b"sid", b"value-1");
+        let hash = hex::encode(Sha256::digest(&bytes));
+        std::fs::write(artifacts.join(format!("blobs/{hash}.bin")), &bytes).unwrap();
+        let creator = push(
+            events,
+            "cookie_list",
+            request,
+            start,
+            id,
+            &list_record(sent, &bytes),
+        );
+        manifest.push(json!({"protocol_version":1,"artifact_id":id,"session_id":"1","navigation_id":"0",
+            "frame_id":"9","parent_artifact_id":"0","creator_event_id":creator.to_string(),
+            "execution_context_id":"0","capture_origin":"network_request","kind":"cookie_list",
+            "url":"https://a.test/","mime_type":"application/x-reb-cookie-list","byte_size":bytes.len(),
+            "sha256":hash,"sensitive":true,"content_path":format!("blobs/{hash}.bin")}));
+    };
+    cookie_list(&mut events, &mut manifest, 1, "1", false);
+    push(
+        &mut events,
+        "script_cookie",
+        0,
+        0,
+        "0",
+        &write(b"sid", b"1"),
+    );
+    push(
+        &mut events,
+        "script_cookie",
+        0,
+        0,
+        "0",
+        &write(b"other", b"2"),
+    );
+    for request in 2..=6_001u64 {
+        push(
+            &mut events,
+            "request_started",
+            request,
+            0,
+            "0",
+            b"GET a.test",
+        );
     }
-    server.file("events.jsonl", lines.as_bytes());
+    cookie_list(&mut events, &mut manifest, 6_002, "2", true);
+    server.file("artifacts/manifest.jsonl", &jsonl(&manifest));
+    server.file("events.jsonl", &jsonl(&events));
     let document: Value = server
         .get("/api/cookie-provenance?session_id=1&name=sid")
         .await
@@ -11856,16 +11939,33 @@ async fn cookie_provenance_lists_a_script_write_older_than_its_window() {
         &document,
         "provenance",
     );
-    assert_eq!(document["coverage"]["limited"], true, "{document}");
-    assert_eq!(document["coverage"]["complete"], false);
+    assert_eq!(document["coverage"]["scope"], "store", "{document}");
+    assert_eq!(document["coverage"]["complete"], true);
+    assert_eq!(document["coverage"]["limited"], false);
+    let set_by = document["set_by"].as_array().unwrap();
+    assert_eq!(set_by.len(), 1, "{document}");
+    assert_eq!(set_by[0]["request_id"], "1");
+    assert_eq!(set_by[0]["sequence_number"], "2");
+    assert_eq!(
+        (&set_by[0]["value_withheld"], &set_by[0]["value_bytes"]),
+        (&json!(true), &json!(7))
+    );
+    let sent_with = document["sent_with"].as_array().unwrap();
+    assert_eq!(sent_with.len(), 1, "{document}");
+    assert_eq!(sent_with[0]["request_id"], "6002");
     let script = document["script"].as_array().unwrap();
     assert_eq!(script.len(), 1, "{document}");
     assert_eq!(script[0]["api"], "document.cookie set");
-    assert_eq!(script[0]["sequence_number"], "1");
+    assert_eq!(script[0]["sequence_number"], "3");
+    assert_eq!(
+        (&document["lists_read"], &document["lists_unread"]),
+        (&json!(2), &json!(0))
+    );
     assert_eq!(
         document["script_coverage"],
-        json!({"complete": true, "located_outside_window": 2, "unreadable": 0})
+        json!({"complete": true, "located_outside_window": 0, "unreadable": 0})
     );
+    assert!(!document.to_string().contains("value-1"));
 }
 
 #[tokio::test]

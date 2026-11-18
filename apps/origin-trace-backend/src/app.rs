@@ -1487,11 +1487,9 @@ impl App {
                 if name.len() > 4096 {
                     return Err(Error::bad("name is longer than 4096 bytes"));
                 }
-                // Only the records provenance reads, so its window spans more of
-                // the session than every network record would.
+                // The session's script calls and cookie lists, wherever they sit.
                 let filter = event_query::event_filter(&Query::new(&format!(
-                    "session_id={session}&category=network&type=cookie_list,request_started,\
-                     request_redirected,script_cookie,script_identity"
+                    "session_id={session}&category=network&type=cookie_list,script_cookie"
                 )))?;
                 let options = self.options.clone();
                 let progress = self.requests.lock().await.progress_marker();
@@ -1509,66 +1507,78 @@ impl App {
                 let gaps = self.gaps.clone();
                 let requests = self.requests.clone();
                 self.blocking(move || {
-                    // A cookie spans the session, so no one request's bytes bound it.
-                    let mut detail =
-                        event_query::read_request_records(&options.store, None, 5000, &filter)?;
-                    // Its script calls are read wherever they sit: the index
-                    // locates every script_cookie record, and those older than
-                    // the window join it when they concern this name.
-                    let (located, exhaustive) =
-                        requests.blocking_lock().script_cookies(&session)?;
-                    let older: Vec<_> = located
-                        .into_iter()
-                        .filter(|range| range.end <= detail.coverage.scan_start())
-                        .collect();
-                    let (earlier, unreadable) =
-                        event_query::read_records_at(&options.store, &older, |event| {
-                            filter.matches(event)
-                                && request_cookies::script_record_used(event, &name)
+                    // A cookie spans the session, so no one request's bytes
+                    // bound it: the index locates every script call and
+                    // every list of an indexed request, read in store order.
+                    let (mut ranges, caught_up, (indexed_to, store_end)) = {
+                        let mut index = requests.blocking_lock();
+                        let (scripts, scripts_caught_up) = index.script_cookies(&session)?;
+                        let (lists, lists_caught_up) = index.cookie_lists(&session)?;
+                        let mut ranges = scripts;
+                        ranges.extend(lists);
+                        (ranges, scripts_caught_up && lists_caught_up, index.extent())
+                    };
+                    ranges.sort_by_key(|range| range.first);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    let lookup = |id: &str| match crate::artifact_lookup::find(
+                        &options.artifacts,
+                        id,
+                        deadline,
+                    ) {
+                        Ok(artifact) => Ok(Some(artifact)),
+                        Err(error) if error.status == 404 => Ok(None),
+                        Err(_) => Err(()),
+                    };
+                    let mut fold = request_cookies::Provenance::new(
+                        &options.artifacts,
+                        &session,
+                        &name,
+                        credentials,
+                        &lookup,
+                    );
+                    let unreadable =
+                        event_query::visit_records_at(&options.store, &ranges, |event| {
+                            if filter.matches(&event) {
+                                fold.record(&event);
+                            }
                         })?;
-                    let script_coverage = json!({
-                        "complete": exhaustive && unreadable == 0,
-                        "located_outside_window": older.len(),
-                        "unreadable": unreadable,
-                    });
-                    detail.records.splice(0..0, earlier);
-                    // Script writes resolve through this session's stacks and sources.
-                    let artifacts =
-                        evidence::artifacts_named(&options.artifacts, &detail.records, |a| {
-                            a["session_id"].as_str() == Some(session.as_str())
-                                && matches!(
-                                    a["kind"].as_str(),
-                                    Some("stack" | "javascript" | "wasm")
-                                )
-                        })?;
-                    let complete = detail.coverage.complete();
                     let identities = |process: u64| {
                         requests
                             .blocking_lock()
                             .identities(&session, process as u32)
-                            .map_or((HashMap::new(), complete), |(indexed, exhaustive)| {
+                            .map_or((HashMap::new(), false), |(indexed, exhaustive)| {
                                 (
                                     crate::request_stack::decode_indexed_identities(
                                         process as u32,
                                         &indexed,
                                     ),
-                                    exhaustive || complete,
+                                    exhaustive,
                                 )
                             })
                     };
+                    // Script writes resolve through this session's stacks and sources.
+                    let select = |wanted: &std::collections::BTreeSet<String>| {
+                        evidence::select_artifacts(&options.artifacts, |a| {
+                            a["session_id"].as_str() == Some(session.as_str())
+                                && matches!(
+                                    a["kind"].as_str(),
+                                    Some("stack" | "javascript" | "wasm")
+                                )
+                                && a["sha256"].as_str().is_some_and(|sha| wanted.contains(sha))
+                        })
+                        .ok()
+                    };
                     let drops = gaps.drops(&options.store, &session)?;
-                    let mut document = request_cookies::provenance(
-                        &detail.records,
-                        &drops,
-                        &artifacts,
-                        &options.artifacts,
-                        &session,
-                        &name,
-                        &identities,
-                        credentials,
-                    );
-                    document["coverage"] = detail.coverage.to_json();
-                    document["script_coverage"] = script_coverage;
+                    let mut document = fold.finish(&drops, &identities, &select);
+                    document["coverage"] = event_query::Coverage::located(
+                        indexed_to, store_end, caught_up, unreadable,
+                    )
+                    .to_json();
+                    document["script_coverage"] = json!({
+                        "complete": caught_up && unreadable == 0,
+                        "located_outside_window": 0,
+                        "unreadable": unreadable,
+                    });
                     Ok(document)
                 })
                 .await?

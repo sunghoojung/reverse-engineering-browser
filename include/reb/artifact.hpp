@@ -24,26 +24,17 @@ inline constexpr std::size_t kArtifactAckSize = 32;
 inline constexpr std::uint32_t kMaxArtifactUrlBytes = 8'192;
 inline constexpr std::uint32_t kMaxArtifactMimeTypeBytes = 255;
 inline constexpr std::uint16_t kArtifactFlagSensitive = 1U << 0U;
-// The count and manifest bounds keep the receiver's identifier set and the
-// backend's manifest index in memory (artifact_lookup.rs indexes 262,144 rows
-// and 256 MiB), whatever a session captures. Disk is bounded by the reserve.
-inline constexpr std::uint64_t kDefaultMaxStoredArtifacts = 262'144;
-inline constexpr std::uint64_t kDefaultMaxManifestBytes = 256ULL * 1024ULL * 1024ULL;
-// Free space the store's volume keeps: an admission that would leave less is
-// refused as kDiskReserve (docs/architecture/artifact-transfer-channel.md).
+// Free space the store's volume keeps. The store has no byte, artifact count
+// or manifest size limit: an admission that would leave less free space than
+// this is refused as kDiskReserve, a status of its own that the browser
+// records as such (services/artifact-receiver/README.md#disk-reserve).
 inline constexpr std::uint64_t kDefaultArtifactDiskReserveBytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
-// A rejected frame whose header was valid is read and discarded so the socket
-// connection can carry the next frame. This covers the browser's 16 MiB
-// per-artifact cap; a larger declared size than this and the configured
-// artifact limit cannot come from a supported sender, so it closes instead.
-inline constexpr std::uint64_t kMaxDiscardedArtifactBytes = 16ULL * 1024ULL * 1024ULL;
 // Version 2 streams an artifact: an open header, then stream frames
 // (docs/architecture/artifact-transfer-channel.md).
 inline constexpr std::uint16_t kArtifactStreamProtocolVersion = 2;
 inline constexpr std::uint32_t kArtifactStreamMagic = 0x53424552U;
 inline constexpr std::size_t kArtifactStreamFrameSize = 80;
 inline constexpr std::uint32_t kMaxArtifactStreamChunkBytes = 64U * 1024U;
-inline constexpr std::size_t kMaxOpenArtifactStreams = 128;
 
 enum class ArtifactKind : std::uint16_t {
   kUnknown = 0,
@@ -153,6 +144,8 @@ enum class ArtifactReceiveStatus : std::uint32_t {
   kAccepted,
   kEndOfStream,
   kInvalid,
+  // No longer sent: the receiver has no size, count or stream limit. The value
+  // keeps its number so later statuses keep theirs.
   kTooLarge,
   kSensitiveCaptureDisabled,
   kConflict,
@@ -166,8 +159,8 @@ enum class ArtifactReceiveStatus : std::uint32_t {
 enum class ArtifactStreamPosition : std::uint8_t {
   // The whole frame was consumed, whether it was accepted or rejected.
   kFrameBoundary,
-  // The header was invalid, the stream ended early, or a declared length was
-  // too large to discard, so the next byte's meaning is unknown.
+  // The header was invalid or the stream ended early, so the next byte's
+  // meaning is unknown.
   kUnsynchronized,
 };
 
@@ -191,7 +184,6 @@ struct ArtifactReceiverStats final {
   std::uint64_t accepted = 0;
   std::uint64_t bytes_accepted = 0;
   std::uint64_t invalid = 0;
-  std::uint64_t too_large = 0;
   std::uint64_t sensitive_rejected = 0;
   std::uint64_t conflicts = 0;
   std::uint64_t io_errors = 0;
@@ -201,9 +193,6 @@ struct ArtifactReceiverStats final {
 };
 
 struct ArtifactReceiverLimits final {
-  std::uint64_t max_artifact_bytes = 0;
-  std::uint64_t max_artifacts = kDefaultMaxStoredArtifacts;
-  std::uint64_t max_manifest_bytes = kDefaultMaxManifestBytes;
   std::uint64_t disk_reserve_bytes = kDefaultArtifactDiskReserveBytes;
   std::uint64_t expected_session_id = 0;
   bool allow_sensitive = false;

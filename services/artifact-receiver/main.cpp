@@ -29,7 +29,6 @@ namespace {
 using reb::services::ScopedDescriptor;
 using reb::services::ScopedSocketPath;
 
-constexpr std::uint64_t kDefaultMaxArtifactBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr int kSocketTimeoutSeconds = 30;
 
 volatile std::sig_atomic_t g_stop_requested = 0;
@@ -57,9 +56,6 @@ struct Options final {
   std::string socket_path;
   std::string token_path;
   std::uint64_t session_id = 0;
-  std::uint64_t max_artifact_bytes = kDefaultMaxArtifactBytes;
-  std::uint64_t max_artifacts = reb::kDefaultMaxStoredArtifacts;
-  std::uint64_t max_manifest_bytes = reb::kDefaultMaxManifestBytes;
   std::uint64_t disk_reserve_bytes = reb::kDefaultArtifactDiskReserveBytes;
   bool allow_sensitive = false;
 };
@@ -92,14 +88,10 @@ class DescriptorStreamBuffer final : public std::streambuf {
 
 void PrintUsage(const char* program) {
   std::cerr << "Usage: " << program
-            << " --store PATH [--max-artifact-bytes COUNT] [--max-artifacts COUNT]"
-               " [--max-manifest-bytes COUNT] [--disk-reserve-bytes COUNT]"
-               " [--allow-sensitive]\n"
+            << " --store PATH [--disk-reserve-bytes COUNT] [--allow-sensitive]\n"
             << "       " << program
             << " --store PATH --socket PATH --token-file PATH --session-id ID"
-               " [--max-artifact-bytes COUNT] [--max-artifacts COUNT]"
-               " [--max-manifest-bytes COUNT] [--disk-reserve-bytes COUNT]"
-               " [--allow-sensitive]\n";
+               " [--disk-reserve-bytes COUNT] [--allow-sensitive]\n";
 }
 
 bool ParseSize(const std::string_view value, std::uint64_t& result) {
@@ -120,18 +112,6 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       options.token_path = argv[++index];
     } else if (argument == "--session-id" && index + 1 < argc) {
       if (!ParseSize(argv[++index], options.session_id)) {
-        return false;
-      }
-    } else if (argument == "--max-artifact-bytes" && index + 1 < argc) {
-      if (!ParseSize(argv[++index], options.max_artifact_bytes)) {
-        return false;
-      }
-    } else if (argument == "--max-artifacts" && index + 1 < argc) {
-      if (!ParseSize(argv[++index], options.max_artifacts)) {
-        return false;
-      }
-    } else if (argument == "--max-manifest-bytes" && index + 1 < argc) {
-      if (!ParseSize(argv[++index], options.max_manifest_bytes)) {
         return false;
       }
     } else if (argument == "--disk-reserve-bytes" && index + 1 < argc) {
@@ -298,7 +278,6 @@ void PrintStats(const reb::ArtifactReceiver& receiver) {
   const reb::ArtifactReceiverStats stats = receiver.Stats();
   std::cerr << "Artifact receiver stopped: accepted=" << stats.accepted
             << " bytes_accepted=" << stats.bytes_accepted << " invalid=" << stats.invalid
-            << " too_large=" << stats.too_large
             << " sensitive_rejected=" << stats.sensitive_rejected
             << " conflicts=" << stats.conflicts << " io_errors=" << stats.io_errors
             << " disk_reserve=" << stats.disk_reserve
@@ -318,9 +297,6 @@ int main(const int argc, char* argv[]) {
 
   try {
     reb::ArtifactReceiverLimits limits;
-    limits.max_artifact_bytes = options.max_artifact_bytes;
-    limits.max_artifacts = options.max_artifacts;
-    limits.max_manifest_bytes = options.max_manifest_bytes;
     limits.disk_reserve_bytes = options.disk_reserve_bytes;
     limits.expected_session_id = options.session_id;
     limits.allow_sensitive = options.allow_sensitive;

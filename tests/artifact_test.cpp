@@ -61,7 +61,6 @@ std::string Frame(const std::uint64_t artifact_id,
 
 reb::ArtifactReceiverLimits Limits() {
   reb::ArtifactReceiverLimits limits;
-  limits.max_artifact_bytes = 1024;
   limits.expected_session_id = 7;
   return limits;
 }
@@ -123,7 +122,7 @@ void CheckFraming() {
                               Frame(4, "four();") + std::string(128, '\0'));
     using Status = reb::ArtifactReceiveStatus;
     for (const Status expected : {Status::kSensitiveCaptureDisabled, Status::kAccepted,
-                                  Status::kTooLarge, Status::kConflict, Status::kAccepted}) {
+                                  Status::kAccepted, Status::kConflict, Status::kAccepted}) {
       Expect(receiver.ReceiveOne(stream) == expected, "valid frame status in a shared stream");
       Expect(receiver.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary,
              "a valid rejected frame is consumed to its end");
@@ -131,13 +130,14 @@ void CheckFraming() {
     Expect(receiver.ReceiveOne(stream) == Status::kInvalid &&
                receiver.StreamPosition() == reb::ArtifactStreamPosition::kUnsynchronized,
            "an invalid header leaves the stream unsynchronized");
-    Expect(Receive(receiver, Frame(5, "", false, 32ULL * 1024 * 1024)) == Status::kTooLarge &&
+    Expect(Receive(receiver, Frame(5, "", false, 32ULL * 1024 * 1024)) == Status::kInvalid &&
                receiver.StreamPosition() == reb::ArtifactStreamPosition::kUnsynchronized,
-           "a declared size past the discard bound is not read");
-    Expect(Lines(store / "manifest.jsonl") == 2, "only accepted frames are recorded");
-    FrameBuffer rejected(Frame(6, std::string(4096, 'y')));
+           "content that ends before its declared size leaves the stream unsynchronized");
+    Expect(Lines(store / "manifest.jsonl") == 3,
+           "only accepted frames are recorded, with no artifact size limit");
+    FrameBuffer rejected(Frame(6, std::string(4096, 'y'), true));
     std::istream rejected_stream(&rejected);
-    Expect(receiver.ReceiveOne(rejected_stream) == Status::kTooLarge &&
+    Expect(receiver.ReceiveOne(rejected_stream) == Status::kSensitiveCaptureDisabled &&
                receiver.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
                !rejected.ReadPastFrame(),
            "a discarded frame is consumed without reading past its end");
@@ -309,13 +309,14 @@ void CheckStreams() {
     // Refusals keep the connection at a frame boundary.
     std::istringstream refusals(
         Open(30) + Chunk(Op::kData, 30, std::string(1000, 'a')) +
-        Chunk(Op::kData, 30, std::string(100, 'b')) + Chunk(Op::kData, 30, "c") + Open(31) +
+        Chunk(Op::kData, 30, std::string(100, 'b')) + Chunk(Op::kCheckpoint, 30, "", 34, 5) +
+        Chunk(Op::kData, 30, "c") + Open(31) +
         Chunk(Op::kData, 31, "d") + Chunk(Op::kEnd, 31, "", 0, 1, 0xab) + Open(32) +
         Chunk(Op::kData, 32, "e") + Chunk(Op::kAbort, 32) + Chunk(Op::kData, 32, "f") +
         Chunk(Op::kEnd, 33, "", 0, 0) + Open(10));
     for (const Status expected :
-         {Status::kAccepted, Status::kAccepted, Status::kTooLarge, Status::kInvalid,
-          Status::kAccepted, Status::kAccepted, Status::kInvalid, Status::kAccepted,
+         {Status::kAccepted, Status::kAccepted, Status::kAccepted, Status::kInvalid,
+          Status::kInvalid, Status::kAccepted, Status::kAccepted, Status::kInvalid, Status::kAccepted,
           Status::kAccepted, Status::kAccepted, Status::kInvalid, Status::kInvalid,
           Status::kConflict}) {
       Expect(receiver.ReceiveOne(refusals) == expected &&
@@ -381,14 +382,6 @@ void CheckStreams() {
                checkpoints.LastArtifactId() == 71 && checkpoints.OpenStreams() == 0,
            "a checkpoint with the wrong digest is refused and drops the stream");
 
-    auto counted = Limits();
-    counted.max_artifacts = 1;
-    reb::ArtifactReceiver full(store / "checkpoint-count", counted);
-    Expect(Receive(full, Open(72)) == Status::kAccepted &&
-               Receive(full, Chunk(Op::kData, 72, "ab")) == Status::kAccepted &&
-               Receive(full, Chunk(Op::kCheckpoint, 72, "", 73, 2)) == Status::kTooLarge,
-           "a checkpoint past the artifact count limit is refused");
-
     // The store has no byte limit. Each admission reads its volume's free
     // space and refuses what would leave less than the reserve.
     constexpr std::uint64_t kFree = 1ULL << 20;
@@ -427,23 +420,28 @@ void CheckStreams() {
                ContainsText(tight.LastError(), "free space"),
            "a volume whose free space cannot be read refuses as an I/O error");
     g_free_space_fails = false;
-    Expect(tight.Stats().disk_reserve == 4 && tight.Stats().too_large == 0,
-           "each reserve refusal is counted as such, never as too large");
+    Expect(tight.Stats().disk_reserve == 4 && tight.Stats().io_errors == 1,
+           "each reserve refusal is counted as such");
     g_free_bytes = 1ULL << 40;
   }
   {
-    // The open-stream cap: the 129th open is refused and the connection stays usable.
-    reb::ArtifactReceiver capped(store / "stream-cap", Limits());
-    for (std::uint64_t id = 1; id <= reb::kMaxOpenArtifactStreams; ++id) {
-      Expect(Receive(capped, Open(id)) == Status::kAccepted, "open within the stream cap");
+    // No open-stream cap: more bodies at once than the 128 streams older
+    // receivers held all publish.
+    constexpr std::uint64_t kStreams = 300;
+    reb::ArtifactReceiver many(store / "many-streams", Limits());
+    bool opened = true;
+    for (std::uint64_t id = 1; id <= kStreams; ++id) {
+      opened = opened && Receive(many, Open(id)) == Status::kAccepted;
     }
-    Expect(Receive(capped, Open(reb::kMaxOpenArtifactStreams + 1)) == Status::kTooLarge &&
-               capped.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
-               capped.OpenStreams() == reb::kMaxOpenArtifactStreams,
-           "an open past the stream cap is refused at a frame boundary");
-    Expect(Receive(capped, Chunk(Op::kAbort, 1)) == Status::kAccepted &&
-               Receive(capped, Open(reb::kMaxOpenArtifactStreams + 1)) == Status::kAccepted,
-           "closing a stream makes room for another");
+    Expect(opened && many.OpenStreams() == kStreams, "every concurrent stream opens");
+    bool ended = true;
+    for (std::uint64_t id = 1; id <= kStreams; ++id) {
+      ended = ended && Receive(many, Chunk(Op::kData, id, "x")) == Status::kAccepted &&
+              Receive(many, Chunk(Op::kEnd, id, "", 0, 1)) == Status::kAccepted;
+    }
+    Expect(ended && many.OpenStreams() == 0 &&
+               Lines(store / "many-streams" / "manifest.jsonl") == kStreams,
+           "every concurrent stream publishes");
   }
   {
     // A sensitive stream needs the receiver started for sensitive capture.
@@ -470,16 +468,6 @@ void CheckStreams() {
                std::filesystem::exists(killed / "artifact-x.part") &&
                std::filesystem::exists(killed / "note.part"),
            "startup removes only partial stream files and counts them");
-  }
-  {
-    auto limits = Limits();
-    limits.max_artifacts = 2;
-    reb::ArtifactReceiver bounded(store / "bounded", limits);
-    std::istringstream stream(Open(1) + Open(2) + Open(3));
-    Expect(bounded.ReceiveOne(stream) == Status::kAccepted &&
-               bounded.ReceiveOne(stream) == Status::kAccepted &&
-               bounded.ReceiveOne(stream) == Status::kTooLarge,
-           "open streams count against the artifact limit");
   }
   std::filesystem::remove_all(store);
 }

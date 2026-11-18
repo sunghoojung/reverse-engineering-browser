@@ -695,10 +695,6 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
 ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
                                    ArtifactReceiverLimits limits)
     : store_directory_(std::move(store_directory)), limits_(limits) {
-  if (limits_.max_artifact_bytes == 0 || limits_.max_artifacts == 0 ||
-      limits_.max_manifest_bytes == 0) {
-    throw std::invalid_argument("Artifact receiver limits are invalid");
-  }
   std::error_code error;
   const bool created_store = std::filesystem::create_directories(store_directory_, error);
   if (error) {
@@ -762,9 +758,8 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
     }
     throw std::runtime_error("Unable to inspect artifact manifest");
   }
-  if (!EvidenceGuard::SafeFile(metadata) || metadata.st_size < 0 ||
-      static_cast<std::uint64_t>(metadata.st_size) > limits_.max_manifest_bytes) {
-    throw std::runtime_error("Existing artifact manifest is unsafe or exceeds its byte limit");
+  if (!EvidenceGuard::SafeFile(metadata) || metadata.st_size < 0) {
+    throw std::runtime_error("Existing artifact manifest is unsafe");
   }
   manifest_bytes_ = static_cast<std::uint64_t>(metadata.st_size);
   EvidenceFile manifest;
@@ -797,9 +792,6 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
         !artifact_ids_.insert(artifact_id).second) {
       throw std::runtime_error(
           "Artifact manifest contains an invalid, duplicate, or mismatched record");
-    }
-    if (artifact_ids_.size() > limits_.max_artifacts) {
-      throw std::runtime_error("Existing artifact manifest exceeds its artifact count limit");
     }
   }
   if (!manifest.eof() || manifest.Failed()) {
@@ -884,18 +876,6 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveWhole(std::istream& stream,
   if (store_state_ == StoreState::kFailed) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kIoError,
                        "Artifact store stopped accepting after an unrecoverable manifest failure");
-  }
-  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts) {
-    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact count exceeds its configured limit");
-  }
-  if (open && streams_.size() >= kMaxOpenArtifactStreams) {
-    return RejectFrame(stream, metadata_size, 0, ArtifactReceiveStatus::kTooLarge,
-                       "Too many open artifact streams");
-  }
-  if (header.content_size > limits_.max_artifact_bytes) {
-    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact exceeds the configured artifact byte limit");
   }
   if ((header.flags & kArtifactFlagSensitive) != 0 && !limits_.allow_sensitive) {
     return RejectFrame(stream, metadata_size, header.content_size,
@@ -1045,12 +1025,6 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
     return frame.op == ArtifactStreamOp::kCheckpoint ? Checkpoint(open, frame)
                                                      : End(frame.artifact_id, frame);
   }
-  if (frame.data_size >
-      limits_.max_artifact_bytes - std::min(limits_.max_artifact_bytes, open.size)) {
-    DropStream(frame.artifact_id);
-    return RejectFrame(stream, 0, frame.data_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact stream exceeds the configured artifact byte limit");
-  }
   ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
   if (const char* const why = DiskReserveRefusal(frame.data_size, refusal)) {
     DropStream(frame.artifact_id);
@@ -1091,10 +1065,6 @@ ArtifactReceiveStatus ArtifactReceiver::Checkpoint(Stream& open, const ArtifactS
   }
   if (artifact_ids_.contains(snapshot_id) || streams_.contains(snapshot_id)) {
     return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");
-  }
-  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts) {
-    return Reject(ArtifactReceiveStatus::kTooLarge,
-                  "Artifact checkpoint exceeds the artifact count limit");
   }
   // The copy writes every byte the stream holds; the stream stays open.
   ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
@@ -1250,11 +1220,6 @@ ArtifactReceiveStatus ArtifactReceiver::Publish(const ArtifactHeader& header,
                  << ((header.flags & kArtifactFlagSensitive) != 0 ? "true" : "false")
                  << ",\"content_path\":\"blobs/" << digest_hex << ".bin\"}\n";
   const std::string manifest_line = manifest_entry.str();
-  if (manifest_line.size() > limits_.max_manifest_bytes - manifest_bytes_) {
-    retire_blob();
-    return Reject(ArtifactReceiveStatus::kTooLarge,
-                  "Artifact manifest exceeds its configured byte limit");
-  }
 
   EvidenceFile manifest;
   manifest.Open(EvidenceGuard::OpenFile(directory, "manifest.jsonl", O_WRONLY | O_APPEND | O_CREAT),
@@ -1367,9 +1332,6 @@ ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus statu
     case ArtifactReceiveStatus::kInvalid:
       SaturatingAdd(stats_.invalid, 1);
       break;
-    case ArtifactReceiveStatus::kTooLarge:
-      SaturatingAdd(stats_.too_large, 1);
-      break;
     case ArtifactReceiveStatus::kSensitiveCaptureDisabled:
       SaturatingAdd(stats_.sensitive_rejected, 1);
       break;
@@ -1384,6 +1346,7 @@ ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus statu
       break;
     case ArtifactReceiveStatus::kAccepted:
     case ArtifactReceiveStatus::kEndOfStream:
+    case ArtifactReceiveStatus::kTooLarge:
       break;
   }
   return status;
@@ -1396,24 +1359,23 @@ ArtifactReceiveStatus ArtifactReceiver::RejectFrame(std::istream& stream,
                                                     std::string message) {
   // Reading the rest of the frame before the acknowledgment also lets a
   // sender that is still writing finish and read this status, rather than
-  // fail on a closed connection and record an I/O error instead.
-  if (unread_content <= std::max(limits_.max_artifact_bytes, kMaxDiscardedArtifactBytes)) {
-    std::uint64_t remaining = unread_metadata + unread_content;
-    // read(), not ignore(): libstdc++'s ignore(n) peeks one byte past n, which
-    // blocks on a socket whose sender is waiting for this acknowledgment.
-    std::array<char, 64 * 1024> discarded{};
-    while (remaining > 0) {
-      const auto requested = static_cast<std::streamsize>(
-          std::min(remaining, static_cast<std::uint64_t>(discarded.size())));
-      stream.read(discarded.data(), requested);
-      if (stream.gcount() != requested) {
-        break;
-      }
-      remaining -= static_cast<std::uint64_t>(requested);
+  // fail on a closed connection and record an I/O error instead. Discarding
+  // costs no memory, so every size is read through.
+  std::uint64_t remaining = unread_metadata + unread_content;
+  // read(), not ignore(): libstdc++'s ignore(n) peeks one byte past n, which
+  // blocks on a socket whose sender is waiting for this acknowledgment.
+  std::array<char, 64 * 1024> discarded{};
+  while (remaining > 0) {
+    const auto requested = static_cast<std::streamsize>(
+        std::min(remaining, static_cast<std::uint64_t>(discarded.size())));
+    stream.read(discarded.data(), requested);
+    if (stream.gcount() != requested) {
+      break;
     }
-    if (remaining == 0) {
-      stream_position_ = ArtifactStreamPosition::kFrameBoundary;
-    }
+    remaining -= static_cast<std::uint64_t>(requested);
+  }
+  if (remaining == 0) {
+    stream_position_ = ArtifactStreamPosition::kFrameBoundary;
   }
   return Reject(status, std::move(message));
 }

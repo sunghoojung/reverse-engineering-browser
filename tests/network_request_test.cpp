@@ -990,8 +990,7 @@ void CheckArtifacts() {
   std::error_code ignored;
   std::filesystem::remove_all(root, ignored);
   {
-    reb::ArtifactReceiver refusing(root / "refusing",
-                                   {.max_artifact_bytes = 1U << 20});
+    reb::ArtifactReceiver refusing(root / "refusing", {});
     std::istringstream stream(Frame(header, url, mime, content));
     Check(refusing.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled,
           "default receiver refuses request bodies");
@@ -999,7 +998,7 @@ void CheckArtifacts() {
   {
     reb::ArtifactReceiver receiver(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
+        {.allow_sensitive = true});
     std::istringstream stream(Frame(header, url, mime, content));
     Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
           "receiver started with --allow-sensitive keeps request bodies: " + receiver.LastError());
@@ -1015,7 +1014,7 @@ void CheckArtifacts() {
     // Reopening validates every retained manifest line again.
     reb::ArtifactReceiver reopened(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
+        {.allow_sensitive = true});
     std::istringstream duplicate(Frame(header, url, mime, content));
     Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
           "reopened store accepted the request body manifest line and kept its identity");
@@ -1039,7 +1038,7 @@ void CheckArtifacts() {
     Check(!reb::IsValidArtifactHeader(other), "header block artifact keeps the request origin");
     reb::ArtifactReceiver receiver(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
+        {.allow_sensitive = true});
     std::istringstream stream(Frame(block, url, "text/plain", text));
     Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
           "receiver keeps header blocks: " + receiver.LastError());
@@ -1047,7 +1046,7 @@ void CheckArtifacts() {
   {
     reb::ArtifactReceiver reopened(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
+        {.allow_sensitive = true});
     std::istringstream duplicate(Frame(block, url, "text/plain", text));
     Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
           "reopened store accepted the header block manifest lines");
@@ -1069,7 +1068,7 @@ void CheckArtifacts() {
     Check(!reb::IsValidArtifactHeader(plain), "cookie list artifact must be sensitive");
     reb::ArtifactReceiver receiver(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
+        {.allow_sensitive = true});
     std::istringstream stream(
         Frame(list, url, "application/x-reb-cookie-list",
               std::string("RBCK\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16)));

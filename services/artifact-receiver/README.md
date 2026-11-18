@@ -23,9 +23,6 @@ To receive a browser-process artifact stream directly:
 build/reb-artifact-producer |
   build/reb-artifact-receiver \
     --store build/sessions/artifacts \
-    --max-artifact-bytes 16777216 \
-    --max-artifacts 4096 \
-    --max-manifest-bytes 67108864 \
     --disk-reserve-bytes 4294967296
 ```
 
@@ -43,9 +40,9 @@ build/reb-artifact-receiver \
 Version 2 streams interleave with whole frames on one input: an open header,
 then data, checkpoint, end or abort frames, each acknowledged
 ([wire contract](../../docs/architecture/artifact-transfer-channel.md#streamed-artifacts-version-2)).
-An open stream counts against the artifact count limit until it publishes.
-At most 128 are open at once; a stream still open when its connection closes,
-or when standard input ends, is discarded and counted as `streams_abandoned`.
+Any number of streams may be open at once; each holds only its metadata and a
+partial file. A stream still open when its connection closes, or when standard
+input ends, is discarded and counted as `streams_abandoned`.
 
 The socket is mode 0600 and accepts only same-user peers that prove possession
 of the 256-bit token. Every frame must also match the authenticated session ID.
@@ -54,13 +51,12 @@ artifact receives a fixed acknowledgment only after its immutable blob,
 manifest entry, and containing directory entries are committed.
 
 A rejected frame keeps the connection when its header is valid and matches the
-authenticated session: those lengths are bounded, so the receiver reads and
-discards the rest of the frame (at most 16 MiB of content, the browser's own
-cap, or the configured artifact limit if larger) and then acknowledges it. The
+authenticated session: the receiver reads and discards the rest of the frame,
+whatever its size, through a fixed 64 KiB buffer and then acknowledges it. The
 browser therefore always reads the real status, even for a body larger than the
-socket buffers. An invalid header, a session mismatch, a truncated stream or a
-larger declared body leaves the stream unsynchronized, so the receiver
-acknowledges and closes that connection. Socket mode then keeps the listener and
+socket buffers. An invalid header, a session mismatch or a truncated stream
+leaves the stream unsynchronized, so the receiver acknowledges and closes that
+connection. Socket mode then keeps the listener and
 accepts a later authenticated connection; the browser reconnects within a
 bounded budget and records an `artifact_channel_lost` gap if it cannot. The live
 launcher stops the listener explicitly when the browser session ends.
@@ -76,11 +72,12 @@ The store contains immutable SHA-256-named blobs plus `manifest.jsonl`.
 Manifest records preserve execution-context and capture-origin provenance for
 runtime-generated source while remaining readable when those fields are absent
 from older version 1 sessions.
-Each artifact's bytes, the artifact count and the manifest bytes have
-independent bounds, so empty artifacts cannot grow storage or duplicate checks
-indefinitely. The count (262,144 by default) and the manifest (256 MiB) bound
-the memory that the receiver's identifier set and the backend's manifest index
-hold; neither follows from how much content a session keeps.
+The store has no artifact size, artifact count or manifest size limit. Its only
+bound is the disk reserve below: every artifact, empty ones included, adds a
+manifest record, and the reserve counts those bytes like any other. The
+receiver's identifier set holds 8 bytes per artifact; readers that index the
+manifest bound their own memory
+([artifact lookup](../../apps/origin-trace-backend/src/artifact_lookup.rs)).
 
 ### Disk reserve
 
@@ -103,12 +100,13 @@ stop: the event store, which records every refusal; the capture browser's
 profile and HTTP cache; and macOS itself, which places its swap files (1 GiB
 each) and local snapshots on the boot volume and slows down or fails writes as
 that volume nears full. It is small next to a typical free volume, and large
-against the most a session can have in flight, 128 open streams of at most
-16 MiB. The live launcher passes `REB_ARTIFACT_DISK_RESERVE_MIB`, when set, as
-`--disk-reserve-bytes`; tests set it above the free space to force the
-refusal. In
-standard-input mode, the receiver stops on invalid or rejected input: there is
-no acknowledgment, so the exit status is the producer's only signal.
+against what one admission can add: a data frame is at most 64 KiB, and a
+checkpoint copies at most the stream it names. The live launcher passes
+`REB_ARTIFACT_DISK_RESERVE_MIB`, when set, as `--disk-reserve-bytes`; tests set
+it above the free space to force the refusal.
+
+In standard-input mode, the receiver stops on invalid or rejected input: there
+is no acknowledgment, so the exit status is the producer's only signal.
 
 The receiver's stored-byte and manifest accounting always matches the files on
 disk. A new blob counts from the moment it is linked. Any failure before its

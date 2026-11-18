@@ -38,6 +38,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 namespace reb {
@@ -188,6 +189,12 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   session_id_ = session_id;
   wasm_budget_reset_file_ = command_line.GetSwitchValueASCII("reb-wasm-budget-reset-file");
   applied_wasm_budget_reset_ = 0;
+  js_invocation_sites_file_ = command_line.GetSwitchValueASCII("reb-js-invocation-sites");
+  js_invocation_generation_file_ =
+      js_invocation_sites_file_.empty()
+          ? std::string()
+          : command_line.GetSwitchValueASCII("reb-js-invocation-sites-generation");
+  applied_js_invocation_generation_ = 0;
   // Every drop records its category, but a gap can be built before that store
   // is visible; the session's lowest admitted category covers that window.
   last_dropped_category_.store(
@@ -294,6 +301,7 @@ void NativeProbeSocketClient::Run() {
                                   ((connection.revents & POLLIN) != 0 &&
                                    recv(socket_descriptor_, &control_byte, 1, MSG_PEEK) == 0));
     PollWasmBudgetReset();
+    PollJsInvocationSites();
     if (peer_closed) {
       browser_task_runner_->PostTask(
           FROM_HERE,
@@ -352,6 +360,31 @@ void NativeProbeSocketClient::PollWasmBudgetReset() {
       FROM_HERE, base::BindOnce([] { NativeProbeSession::Get().ResetWasmSampleBudgets(); }));
 }
 
+void NativeProbeSocketClient::PollJsInvocationSites() {
+  if (js_invocation_generation_file_.empty())
+    return;
+  // The generation file has the Wasm reset file's format.
+  const auto generation = ReadNativeWasmBudgetResetGeneration(js_invocation_generation_file_);
+  if (!generation || *generation <= applied_js_invocation_generation_)
+    return;
+  applied_js_invocation_generation_ = *generation;
+  // The backend replaces the site file before it advances the generation, so
+  // this read sees that revision or a newer one. Each revision is a whole slot
+  // table, so a newer one applied twice changes nothing. An unreadable file
+  // reaches the session as a refused revision and its gap.
+  std::string json;
+  if (!base::ReadFileToStringWithMaxSize(base::FilePath(js_invocation_sites_file_), &json,
+                                         kNativeJsInvocationSitesFileLimit)) {
+    json.clear();
+  }
+  browser_task_runner_->PostTask(FROM_HERE,
+                                 base::BindOnce(
+                                     [](const std::string& sites) {
+                                       NativeProbeSession::Get().UpdateJsInvocationSites(sites);
+                                     },
+                                     std::move(json)));
+}
+
 void NativeProbeSocketClient::HandleDisconnect() {
   if (!connected_.exchange(false, std::memory_order_acq_rel)) {
     return;
@@ -389,6 +422,7 @@ NativeProbeEvent NativeProbeSocketClient::MakeTransportGap(std::uint64_t) const 
 }
 void NativeProbeSocketClient::Run() {}
 void NativeProbeSocketClient::PollWasmBudgetReset() {}
+void NativeProbeSocketClient::PollJsInvocationSites() {}
 void NativeProbeSocketClient::HandleDisconnect() {}
 
 }  // namespace reb

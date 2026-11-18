@@ -625,7 +625,7 @@ for (const mutate of [
   doc=>{doc.workspaces[0].native_wasm_observations[0].table_count=199;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].selector=-1;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].selected_arm=1;},
-  doc=>{doc.workspaces[0].native_wasm_observations[0].sample_index=16;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].sample_index=0xffffffff;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].guest_pc=1;},
   doc=>{doc.workspaces[0].handlers[2].sample_count=doc.workspaces[0].handlers[2].native_wasm_sample_count=1;doc.workspaces[0].handlers[2].state='observed';},
   doc=>{delete doc.workspaces[0].native_wasm_observation_count;}

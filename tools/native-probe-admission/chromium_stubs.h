@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -152,12 +153,13 @@ struct NativeProbeClient {
                          std::uint64_t,
                          const std::string&,
                          const std::vector<std::uint8_t>&,
-                         const std::vector<std::uint8_t>&,
+                         const std::optional<std::vector<std::uint8_t>>&,
                          bool,
                          bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
+  virtual void UpdateJsInvocationSites(const std::vector<std::uint8_t>&) = 0;
   virtual void SetDebuggerWatchScope(NativeWatchScopePtr) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;

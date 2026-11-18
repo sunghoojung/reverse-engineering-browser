@@ -46,12 +46,14 @@ interface NativeProbeClient {
             mojo_base.mojom.UnsafeSharedMemoryRegion queue_region,
             uint64 wasm_capture_epoch,
             string guest_adapter_json,
-            // Fixed 44-byte native JavaScript dispatch site records (at most 8),
-            // already validated by the browser; empty when not armed.
+            // Fixed 44-byte native JavaScript dispatch site records (at most
+            // 256), already validated by the browser; empty when not armed.
             array<uint8> js_dispatch_sites,
-            // Fixed 44-byte function-entry site records (shape 3, at most 8)
-            // for native JavaScript invocation identity; empty when not armed.
-            array<uint8> js_invocation_sites,
+            // Fixed 44-byte function-entry site records (shape 3, at most 256)
+            // for native JavaScript invocation identity, one per slot; null
+            // when the session tracks no functions, and empty when it tracks
+            // functions but has armed none yet.
+            array<uint8>? js_invocation_sites,
             // The session's sensitive opt-in for settled-value digests.
             bool js_invocation_digests,
             // --reb-capture-request-content: renderer request targets,
@@ -61,12 +63,17 @@ interface NativeProbeClient {
             bool capture_request_content,
             // --reb-capture-browser-internal: record internal schemes.
             bool capture_browser_internal);
-  // Fixed 524-byte sample-budget policy, or empty for the unrestricted
-  // historical budgets. The next Configure publishes it. It does not arm
+  // Fixed 524-byte sample-budget policy, or empty for no per-function, per-site
+  // or filter rule. The next Configure publishes it. It does not arm
   // compilation, so a later session may replace it.
   SetWasmSampleBudget(array<uint8> policy);
-  // Restarts both sample indexes without Disable or a new configuration.
+  // Starts a new sample window now, without Disable or a new configuration.
+  // Each renderer also starts one every kNativeWasmSampleWindowNs.
   ResetWasmSampleBudgets();
+  // A revision of this configuration's function-entry site records: every
+  // earlier slot keeps its site, its armed flag may change, and new slots are
+  // appended. Calls in flight keep their invocation IDs and settle.
+  UpdateJsInvocationSites(array<uint8> js_invocation_sites);
   // Replaces the kept debugger watch scope, or clears it when null. Sent on
   // this channel, so a document that commits after it starts armed.
   SetDebuggerWatchScope(NativeWatchScope? scope);
@@ -118,9 +125,16 @@ interface NativeProbeHost {
                       uint8 js_invocation_state,
                       uint32 js_invocation_id,
                       string source_url,
+                      // sample_index is the stream's ordinal in this
+                      // configuration. content carries the module when
+                      // module_token is 0. Otherwise it is empty and
+                      // module_token is the sequence number of this renderer
+                      // thread's earlier Wasm record that carried it, in the
+                      // same sample window.
+                      uint64 module_token,
                       mojo_base.mojom.BigBuffer content);
   // Physical call_indirect observation; same admission and module transfer as
-  // CaptureWasmDispatch, with its own 16-record budget.
+  // CaptureWasmDispatch, with its own window budget.
   CaptureWasmIndirect(uint64 capture_epoch,
                       uint64 session_id,
                       uint64 sequence_number,
@@ -141,10 +155,11 @@ interface NativeProbeHost {
                       uint8 js_invocation_state,
                       uint32 js_invocation_id,
                       string source_url,
+                      uint64 module_token,
                       mojo_base.mojom.BigBuffer content);
   // Trap or still-executing follow-up for one host-visible Wasm call.
-  // content may be empty: the browser then binds the one module already
-  // captured for this document, or records an explicit gap.
+  // content may be empty: with module_token 0 the browser then binds the one
+  // module already captured for this document, or records an explicit gap.
   CaptureWasmExecution(uint64 capture_epoch,
                        uint64 session_id,
                        uint64 sequence_number,
@@ -167,6 +182,7 @@ interface NativeProbeHost {
                        uint8 js_invocation_state,
                        uint32 js_invocation_id,
                        string source_url,
+                       uint64 module_token,
                        mojo_base.mojom.BigBuffer content);
   CaptureNativeGuest(uint64 capture_epoch,
                      array<uint8> invocation_record,

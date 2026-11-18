@@ -519,6 +519,15 @@ class NativeRequestBodyReader {
   static inline std::vector<Read> reads;
 };
 class NativeProbeHost;
+namespace mojom {
+// The host forwards the session's debugger watch scope unread.
+struct NativeWatchScope {};
+// mojo::StructPtr's nullable value with its Clone().
+struct NativeWatchScopePtr {
+  std::shared_ptr<const NativeWatchScope> value;
+  NativeWatchScopePtr Clone() const { return *this; }
+};
+}  // namespace mojom
 // Session boundary seen by NativeProbeHost; the policy is set by each test.
 class NativeProbeSession {
  public:
@@ -535,8 +544,11 @@ class NativeProbeSession {
   bool capture_canvas_images() const { return canvas_images; }
   const std::string& guest_adapter_json() const { return adapter_json; }
   const std::vector<std::uint8_t>& js_dispatch_sites() const { return js_sites; }
-  const std::vector<std::uint8_t>& js_invocation_sites() const { return invocation_sites; }
+  const std::optional<std::vector<std::uint8_t>>& js_invocation_sites() const {
+    return invocation_sites;
+  }
   bool js_invocation_digests() const { return invocation_digests; }
+  const mojom::NativeWatchScopePtr& debugger_watch_scope() const { return watch_scope; }
   bool capture_request_content() const { return request_content; }
   bool capture_browser_internal() const { return browser_internal; }
   bool capture_extension_traffic() const { return extension_traffic; }
@@ -558,8 +570,9 @@ class NativeProbeSession {
   std::uint64_t id = 0, mask = 0, expires = 0;
   std::string adapter_json;
   std::vector<std::uint8_t> js_sites;
-  std::vector<std::uint8_t> invocation_sites;
+  std::optional<std::vector<std::uint8_t>> invocation_sites;
   bool invocation_digests = false;
+  mojom::NativeWatchScopePtr watch_scope;
   // Content capture by default, so script text no response body carried is
   // accepted unless a test opts the session out.
   bool request_content = true, browser_internal = false, extension_traffic = false;
@@ -688,12 +701,14 @@ class NativeProbeClient {
                          std::uint64_t,
                          const std::string&,
                          const std::vector<std::uint8_t>&,
-                         const std::vector<std::uint8_t>&,
+                         const std::optional<std::vector<std::uint8_t>>&,
                          bool,
                          bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
+  virtual void UpdateJsInvocationSites(const std::vector<std::uint8_t>&) = 0;
+  virtual void SetDebuggerWatchScope(NativeWatchScopePtr) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
   virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
@@ -723,6 +738,7 @@ class NativeProbeHost {
                                    std::uint8_t,
                                    std::uint32_t,
                                    const std::string&,
+                                   std::uint64_t,
                                    mojo_base::BigBuffer) = 0;
   virtual void CaptureWasmIndirect(std::uint64_t,
                                    std::uint64_t,
@@ -744,6 +760,7 @@ class NativeProbeHost {
                                    std::uint8_t,
                                    std::uint32_t,
                                    const std::string&,
+                                   std::uint64_t,
                                    mojo_base::BigBuffer) = 0;
   virtual void CaptureWasmExecution(std::uint64_t,
                                     std::uint64_t,
@@ -767,6 +784,7 @@ class NativeProbeHost {
                                     std::uint8_t,
                                     std::uint32_t,
                                     const std::string&,
+                                    std::uint64_t,
                                     mojo_base::BigBuffer) = 0;
   virtual void CaptureNativeGuest(std::uint64_t,
                                   const std::vector<std::uint8_t>&,

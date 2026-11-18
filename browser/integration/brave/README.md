@@ -639,9 +639,11 @@ with its site's ordinal, and every refusal is a coalesced `gap`. V8 patch
 `0023` and Chromium patch `0066` removed the earlier 8-site limit and the 256
 and 64 sample budgets.
 
-The V8 flag turns off code caching, script streaming and the in-memory
-compilation cache browser-wide and never optimizes an armed function, so this
-mode is not performance-neutral. See the
+The V8 flag sends only a script that an armed site names through the capture
+compile path (no code cache, no compilation cache, a main-thread recompile of a
+streamed result and eager source positions) and never optimizes an armed
+function. Every other script keeps its caches and streaming, so the cost falls
+on the tracked scripts. See the
 [wire contract and limits](../../../protocol/native-js-dispatch-v1.md) and the
 [design review](../../../docs/product/native-js-dispatch-v1.md).
 `./tools/check-native-probe-admission.sh` covers the renderer ordinals, expiry
@@ -666,7 +668,15 @@ main-thread isolate only and records `js_invocation_request` beside
 `request_initiated`. Wasm `br_table`, `call_indirect` and guest invocation
 records carry the current context. V8 patch `0023` and Chromium patch `0066`
 record every call: V8 carries and settles only the starts the renderer
-recorded, and each start takes its site's ordinal. Workers are unsupported.
+recorded, and each start takes its site's ordinal. With
+`REB_NATIVE_JS_INVOCATION_LIVE=1` the launcher also passes
+`--reb-js-invocation-sites-generation=<path>`: the broker writer polls that
+generation, rereads the site file as a version 2 slot table, and the browser
+sends it to every renderer with `UpdateJsInvocationSites`, so the running
+capture follows the saved set. A slot keeps its site for the browser's
+lifetime; a table that renumbers one is refused with a gap. V8 patch `0025`
+and Chromium patch `0067` add the revision callback, which copies the sites
+again without ending calls in flight. Workers are unsupported.
 See the
 [wire contract](../../../protocol/native-js-invocation-v1.md) and the
 [design](../../../docs/product/native-js-invocation-v1.md).

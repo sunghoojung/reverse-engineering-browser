@@ -1544,9 +1544,19 @@ categories in Fingerprinting. The configured sampling budgets
 sampled. That includes the per-function and per-call-site Wasm budgets. A
 function, module, call-site, or stream refusal also keeps a compact overflow
 identity up to a ring of 32, and identities past the ring are a count; those
-records are not full observations. `reset_wasm_sample_budgets` publishes that
-count and starts both rings again. See
+records are not full observations. Each one-second window has its own ring
+and count, and starts the Wasm budgets again; `reset_wasm_sample_budgets`
+closes the window at once. See
 [overflow identities](../../protocol/native-wasm-dispatch-v1.md#overflow-identities).
+For a live session that records a Wasm stream, VM Lab shows the session
+context's `capture_options.wasm_sampling` under its notice: the streams, the
+records each window keeps, the per-function and per-call-site allowances (an
+unnamed per-function allowance is the browser's 64), and the function and
+module filters. Its Reset sample budgets button posts
+`reset_wasm_sample_budgets` and shows the new reset generation or the
+backend's refusal, for example while capture is stopped. It is disabled when
+the session has no reset file, and a malformed label is named rather than
+shown. The strip is hidden for every other session.
 Filter reasons (`native_wasm_dispatch_filtered`, `native_wasm_indirect_filtered`,
 and their `_browser_` counterparts) are sample-policy exclusions: the
 execution was not sampled and did not consume a sample slot. The notice and
@@ -2382,8 +2392,8 @@ worker makes AST operations unavailable with an explicit error. Deob stays insid
 
 ## Track calls to a function
 
-To follow calls of a page function such as `window.hsw` in the next capture,
-open its captured script in **Sources** and either type the name in the
+To follow calls of a page function such as `window.hsw`, open its captured
+script in **Sources** and either type the name in the
 **Track function calls** pane of **Details** and press Return, or put the
 cursor in the function (click it, or use **Go to line**) and
 choose **Track calls** in **More**. The position must be in the original
@@ -2395,11 +2405,17 @@ bare-parameter or `async` arrow, a generator, a class constructor or a class
 initializer is refused with its reason, as is top-level code. Context lines
 and labels are captured text, inserted as text.
 
-Saving changes nothing in the open page or the running capture. The pane says
-tracking starts with the next capture: the start panel that **New Live
-Session…** opens shows "Tracking N functions" with each label and
-script URL, a Remove for each and Clear All (which asks once more), and the
-capture it starts arms a private copy of the set. The native app reads and
+Saving changes nothing in the open page. A capture the app started follows the
+saved set: the pane says it tracks a saved function at once, and a removed one
+stops recording new calls while a call already running still settles. A
+function the page compiled before it was saved is tracked after the page
+reloads. A function saved once the capture has used all 256 site slots waits
+for the next capture, and the pane says so. With a Brave built before site
+revisions the pane says tracking starts with the next capture. The start panel
+that **New Live Session…** opens shows "Tracking N functions" with each label
+and script URL, a Remove for each and Clear All (which asks once more), and
+the capture it starts arms a private copy of the set, which its backend
+rewrites as a slot table when the set changes. The native app reads and
 rewrites the saved file for the panel; a Remove names the list the panel
 showed, so a list that changed since is refused rather than edited. Content mode also records
 the calls' settled-value digests; Metadata mode does not. The titlebar names

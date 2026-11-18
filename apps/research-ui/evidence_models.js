@@ -219,9 +219,11 @@
       // Same identifier rule as both stored-window readers, which list every pair.
       const namedGapCategoryPattern = /^[a-z][a-z0-9_]{0,31}$/;
       const namedGapReasonPattern = /^[a-z][a-z0-9_]{0,127}$/;
-      // Configured per-configuration sampling caps in the native dispatch and
-      // guest contracts: retained observations stay exact and later ones were
-      // not sampled. Filter reasons are policy exclusions. Every other reason,
+      // Configured sampling limits in the native dispatch and guest contracts:
+      // retained observations stay exact and later ones were not sampled. Wasm
+      // dispatch limits are per one-second window; captures from earlier builds
+      // held them per configuration, and their _browser_ function and site
+      // reasons. Filter reasons are policy exclusions. Every other reason,
       // known or not, is reported as lost.
       const samplingBudgetGapLabels = new Map([
         ['native_wasm_dispatch_budget_incomplete', 'Wasm br_table dispatch'],
@@ -238,6 +240,12 @@
         ['native_js_dispatch_site_budget_incomplete', 'JavaScript dispatch per site'],
         ['native_guest_sample_limit', 'Wasm guest samples'],
         ['native_guest_browser_sample_budget', 'Wasm guest samples (browser)']
+      ]);
+      // Renderer window limits whose later executions keep overflow identities.
+      const wasmWindowBudgetReasons = new Set([
+        'native_wasm_dispatch_budget_incomplete', 'native_wasm_indirect_budget_incomplete',
+        'native_wasm_dispatch_function_budget_incomplete', 'native_wasm_indirect_function_budget_incomplete',
+        'native_wasm_indirect_site_budget_incomplete'
       ]);
       // Allow and deny decisions. They are not capacity losses and they do not
       // spend a sample slot. The reason string stays in the sentence.
@@ -304,9 +312,8 @@
         }
         if (budgets.length) {
           messages.push(`Sampling budget reached in ${scope} for ${namedGapItems(budgets, gap => `${samplingBudgetGapLabels.get(gap.reason)} (${gap.reason})`)}. Retained observations are exact; later ones were not sampled.`);
-          if (budgets.some(gap => gap.reason === 'native_wasm_dispatch_budget_incomplete' ||
-              gap.reason === 'native_wasm_indirect_budget_incomplete')) {
-            messages.push('Wasm executions past that cap keep a compact identity in an overflow record, up to the ring; identities past the ring are a count on that record, not another full observation.');
+          if (budgets.some(gap => wasmWindowBudgetReasons.has(gap.reason))) {
+            messages.push('Wasm sampling is paced per second: executions past a full window or function allowance keep a compact identity in an overflow record, up to the ring, and identities past the ring are a count on that record, not another full observation. The next second samples again.');
           }
         }
         return messages.join(' ');
@@ -429,7 +436,7 @@
         return state ? {js_invocation: {state, invocation_id: String(context.id)}} : {};
       }
 
-      // Compact identity past a 16-record Wasm budget. Null is malformed, not a
+      // Compact identity past a Wasm sample window. Null is malformed, not a
       // partial observation. The callee index is not in an indirect identity.
       function decodeWasmOverflow(event) {
         const indirect = event?.type === 'wasm_indirect_overflow';
@@ -500,7 +507,7 @@
           selector:view.getUint32(12,true),table_count:view.getUint32(16,true),sample_index:view.getUint32(20,true),
           ...nativeInvocationRow(context), ...(directCaller ? {direct_caller: directCaller} : {})};
         return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
-          row.table_count < 16777216 && row.sample_index < 16 ? row : null;
+          row.table_count < 16777216 && row.sample_index < 0xffffffff ? row : null;
       }
 
       // Physical call_indirect: function, offset, table, slot, callee, resolution, sample.
@@ -522,7 +529,7 @@
           resolution:view.getUint32(24,true),sample_index:view.getUint32(28,true),...nativeInvocationRow(context)};
         return row.function_index < 16777216 && row.module_byte_offset >= 8 && row.module_byte_offset < 16777216 &&
           row.table_index < 16777216 && row.callee_function_index < 16777216 && row.resolution < 5 &&
-          (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 16 ? row : null;
+          (row.resolution === 0 || row.callee_function_index === 0) && row.sample_index < 0xffffffff ? row : null;
       }
 
       // Trap or still-executing follow-up. A clear known bit stores 0, which is
@@ -551,7 +558,7 @@
         if (offsetKnown ? row.module_byte_offset < 8 || row.module_byte_offset >= 16777216 : row.module_byte_offset !== 0) return null;
         if (row.kind === 1 ? row.reason !== 0 || row.bounds !== 0 : row.reason >= 6) return null;
         if (row.reason === 3 ? row.bounds >= 7 : row.bounds !== 0) return null;
-        if (row.related_stream === 0 ? row.related_sample_index !== 0xffffffff : row.related_sample_index >= 16) return null;
+        if ((row.related_sample_index === 0xffffffff) !== (row.related_stream === 0)) return null;
         return row;
       }
       // Native JavaScript dispatch, protocol/native-js-dispatch-v1.md: a
@@ -2707,7 +2714,7 @@
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !vmNativeInvocationValid(row) ||
           !vmNativeDirectCallerValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
           !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !isSafeIntegerInRange(row.selector,0,0xffffffff) ||
-          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,15) ||
+          !isSafeIntegerInRange(row.table_count,0,16777215) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           row.selected_arm !== Math.min(row.selector,row.table_count) || row.is_default !== (row.selector >= row.table_count)) return false;
         const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
         return site ? site.kind === 'br_table' && site.function_index === row.function_index && site.arm_count === row.table_count
@@ -2722,7 +2729,7 @@
           !vmSampleEvent(row.event) || !vmNativeRowTimeValid(row) || !isSafeIntegerInRange(row.function_index,0,16777215) ||
           !isSafeIntegerInRange(row.module_byte_offset,8,16777215) || !['call_indirect','return_call_indirect'].includes(row.instruction) ||
           !isSafeIntegerInRange(row.table_index,0,16777215) || !isSafeIntegerInRange(row.slot,0,0xffffffff) ||
-          !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,15) ||
+          !vmIndirectResolutions.includes(row.resolution) || !isSafeIntegerInRange(row.sample_index,0,0xfffffffe) ||
           (row.resolution === 'resolved' ? !isSafeIntegerInRange(row.callee_function_index,0,16777215) : row.callee_function_index !== null)) return false;
         const site = workspace.dispatch_inventory?.candidates.find(site => site.byte_offset === row.module_byte_offset);
         if (site && (site.kind !== 'call_indirect' || row.instruction !== 'call_indirect' || site.function_index !== row.function_index)) return false;

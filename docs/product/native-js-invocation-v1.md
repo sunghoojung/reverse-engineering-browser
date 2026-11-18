@@ -117,10 +117,16 @@ The refusal is the gap `native_js_invocation_site_<n>_unsupported_function`.
 `native-js-invocation-sites-v1` has the exact form of
 `native-js-dispatch-sites-v1` with `shape` fixed to `function-entry`: compact
 canonical JSON, at most 128 KiB, 1 to 256 sites, each
-`(source_sha256, anchor_offset)` unique. The browser validates it once, sends
-the renderer only fixed 44-byte records (shape byte 3), and the renderer never
-parses JSON. The file is immutable for the browser lifetime, like the other
-site files.
+`(source_sha256, anchor_offset)` unique. Version 2 of the same file is a slot
+table of 0 to 256 sites with an `armed` flag each. The browser validates each
+version it reads, sends the renderer only fixed 44-byte records (shape byte 3
+and a disarmed flag), and the renderer never parses JSON.
+
+Records name a site by its one-byte slot, so a slot keeps its site for the
+browser's lifetime. That is what lets a running capture change its sites: a
+removed site is disarmed in place instead of shifting every later slot, so
+each record still names the site it was recorded for. The browser and the
+renderer refuse a table that renumbers a slot.
 
 ### Saving sites from Origin Trace
 
@@ -167,12 +173,27 @@ user-only permissions; an empty set has no site file. At most 256 sites, and a
 duplicate `(source_sha256, anchor_offset)` is refused.
 
 Every capture the app starts arms the saved set from a private copy made at
-launch: the browser rereads the file it was given and refuses a session whose
-file changed, and Sources can save more sites while the capture runs. Tracking
-therefore starts with the **next** capture, never the open page, and a
-function compiled before arming could not gain tracking anyway. The start
-dialog shows "Tracking N functions" with each label and Remove and Clear All;
-the titlebar names what the running capture tracks.
+launch, an empty slot table when nothing is saved, and follows the set while
+it runs ([revisions](../../protocol/native-js-invocation-v1.md#revisions)).
+The store itself never changes under the browser: the capture's backend
+rewrites only its copy, as a slot table, whenever it sees the saved set
+change, and Brave applies it to every renderer of the session within about
+250 ms. Saving a function in Sources therefore tracks it in the running
+capture; removing one stops recording its new calls while a call already
+running still settles. A function the page compiled before its site was armed
+still cannot gain an entry call, so its calls are recorded after the page
+reloads, which recompiles it on the capture path. Once a capture has used all
+256 slots, a newly saved site waits for the next capture, and the pane says
+so. A Brave built before revisions keeps the startup sites, and the next
+capture arms the set as before. The start dialog shows "Tracking N functions"
+with each label and Remove and Clear All; the titlebar names what the running
+capture tracks.
+
+An empty set still turns on `--reb-js-invocation-capture` for app captures, so
+the first function saved during a capture can be armed. With no armed site
+its cost is the dispatch flag's: off-thread compile tasks, which are
+experimental and off by default, stay off, and each compile compares the
+script length with no armed site.
 
 Digests follow the capture mode: on in Content mode when sites are saved, off
 in Metadata mode whatever the environment holds. An explicit
@@ -183,9 +204,9 @@ when the start request names them (`js_invocation_sites` or
 record digests as a Content session does, with request content under the
 same consent, unless `js_invocation_digests` is `false`. They keep
 their own saved set at `~/.config/origin-trace/agent-sessions/`, which an
-agent session's site routes edit and a later `js_invocation_saved_sites`
-start arms, so an agent never reads or changes the researcher's next capture.
-A named set is strict: a Brave without invocation capture refuses the start.
+agent session's site routes edit and a `js_invocation_saved_sites` start arms
+and follows, so an agent never reads or changes the researcher's set. A named
+set is strict: a Brave without invocation capture refuses the start.
 
 A Brave built before invocation capture would refuse a session that asks for
 `--reb-js-invocation-capture`. For the app's saved sites only, the launcher
@@ -197,12 +218,14 @@ match the new version.
 ### Compilation paths and late arming
 
 Arming is decided at bytecode generation, so the compilation-path review of the
-dispatch probe applies unchanged: code caches are neither consumed nor
-produced, the in-memory compilation cache, script streaming and off-thread
-compiles are off, and source positions are eager. The new V8 flag
-`--reb-js-invocation-capture` implies `--reb-js-dispatch-capture` to inherit
-exactly those guarantees rather than restating them. With no dispatch site
-file the dispatch probe arms nothing.
+dispatch probe applies unchanged: off-thread compiles are off, and a script
+whose text an armed invocation site names neither consumes nor produces a code
+cache, skips the in-memory compilation cache, recompiles a streamed result on
+the main thread and records source positions eagerly. Every other script
+compiles as without the flag. The new V8 flag `--reb-js-invocation-capture`
+implies `--reb-js-dispatch-capture` to inherit exactly those guarantees rather
+than restating them. With no dispatch site file the dispatch probe arms
+nothing.
 
 A function compiled before its site was armed cannot gain an entry call. When
 the arming table changes, V8 scans scripts whose length matches an armed site,
@@ -442,7 +465,9 @@ The value-flow join counts as a correlated link only when all hold:
 
 | Bound or failure | Value | Visible as |
 | --- | --- | --- |
-| Armed sites per configuration | 256 | site file refused at browser startup |
+| Armed sites per configuration | 256 | site file refused at browser startup; in a following capture a later site waits for the next capture (`armed_in_capture: false`) |
+| Site revision that renumbers a slot or is invalid | per revision | browser gap `native_js_invocation_sites_revision_refused`, renderer gap `native_js_invocation_input_unavailable`; the capture keeps its table |
+| Slot table the backend could not write | per change | `revision_error` in the site set; the capture keeps its table and the next listing retries |
 | Invocations per configuration or site | none | every call is recorded with its site's ordinal |
 | Request records per configuration | none | every attributable request is recorded with its ordinal |
 | Invocation IDs per isolate | 2^30 - 1 | `native_js_invocation_ids_exhausted`, once per configuration |
@@ -467,8 +492,9 @@ the last known invocation.
 - **Flag off.** No wrapper exists. The CPED API adds one flag test per call;
   bytecode is byte-identical (the generator checks one flag per function).
 - **Flag on, epoch 0 or no armed site.** Bytecode for unarmed functions is
-  byte-identical; the dispatch probe's browser-wide cache and streaming costs
-  apply.
+  byte-identical, and a script no armed site names keeps its code cache,
+  compilation cache, streaming and lazy source positions. Each compile entry
+  compares the script's length with the armed lengths.
 - **Armed but not called.** One frame-record register and the handler table
   entry in the armed function only.
 - **Armed and called.** Per recorded call: one runtime entry call, one
@@ -507,7 +533,9 @@ settled promises, async functions; interleaved invocations keep separate IDs
 through awaits and `then`; CPED reads and writes preserve Blink's value;
 unhandled rejection still reported; a refused start is neither carried nor
 settled; every slot up to the 256-site limit arms; compiled-before-arming and
-unsupported-kind statuses.
+unsupported-kind statuses; a site revision that disarms a slot while its call
+is pending, appends slots and re-arms a slot keeps the call's ID and records
+again without recompiling (`RebNativeJsInvocationRevisionKeepsCallsInFlight`).
 
 Live (needs a rebuilt Brave, on the build machine):
 
@@ -524,12 +552,12 @@ Live (needs a rebuilt Brave, on the build machine):
 
 | Layer | Change |
 | --- | --- |
-| V8 | patch `v8/0011`: flag (implies the dispatch flag), embedder interface, arming table and statuses, entry/exit/handler emission, frame record, CPED wrapper and API rules, settle reaction, digests, `GetCurrentJsInvocation`, cctests |
-| Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync` |
-| Overlay | wire header, site-file parsing for `function-entry`, renderer ordinals and gaps, Mojo configuration, browser forwarding of Wasm context |
+| V8 | patch `v8/0011`: flag (implies the dispatch flag), embedder interface, arming table and statuses, entry/exit/handler emission, frame record, CPED wrapper and API rules, settle reaction, digests, `GetCurrentJsInvocation`, cctests; `v8/0024` limits the capture compile path to armed scripts; `v8/0025` adds the revision callback |
+| Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync`; `chromium/0067` installs the revision callback |
+| Overlay | wire header, site-file and slot-table parsing for `function-entry`, the browser's lifetime slot table and revision polling, renderer ordinals, armed flags and gaps, Mojo configuration and `UpdateJsInvocationSites`, browser forwarding of Wasm context |
 | Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in the Rust trace builder, which the native app also answers through, viewer labels |
-| Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` and `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` |
-| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set and routes (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
+| Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS`, `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` and `REB_NATIVE_JS_INVOCATION_LIVE` |
+| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set, routes and slot-table follower (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python
 validator, the Rust readers and value search, the shared trace cases over slices

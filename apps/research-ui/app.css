@@ -3937,12 +3937,22 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-session-status { grid-column: 3; grid-row: 1; justify-self: end; padding: 0; min-width: 0; }
 #screen-vm .vm-session-copy { display: none; }
 #screen-vm .vm-session-chip { padding: 3px 6px; font-size: 10px; letter-spacing: 0; }
-#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; }
+#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; }
 #vm-findings-workspace > .vm-notice { margin: 0; padding: 4px 12px; font-size: 10px; max-height: 48px; overflow: auto; border-bottom: 1px solid var(--line); }
 #vm-findings-workspace > .vm-grid { height: auto; min-height: 0; max-height: none; grid-template-columns: 210px minmax(0, 1fr); }
 #vm-findings-workspace > .vm-notice { grid-row: 1; }
-#vm-findings-workspace > .vm-grid { grid-row: 2; }
-#vm-findings-workspace > .vm-program-example { grid-row: 3; }
+#vm-findings-workspace > .vm-wasm-sampling { grid-row: 2; }
+#vm-findings-workspace > .vm-grid { grid-row: 3; }
+#vm-findings-workspace > .vm-program-example { grid-row: 4; }
+/* The Wasm sample policy this session runs with, beside its window reset. */
+.vm-wasm-sampling { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); color: var(--muted); font-size: 10px; line-height: 1.4; }
+.vm-wasm-sampling-policy { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
+.vm-wasm-sampling-status { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.vm-wasm-sampling-status:empty { display: none; }
+.vm-wasm-sampling-status[data-kind="failed"] { color: var(--red); }
+.vm-wasm-sampling-status[data-kind="done"] { color: var(--text); }
+.vm-wasm-sampling > .secondary-button { flex: 0 0 auto; min-height: 22px; padding: 0 8px; font-size: 10px; }
+.vm-wasm-sampling > .secondary-button[aria-disabled="true"] { cursor: progress; opacity: .45; }
 #vm-analysis-toggle { display: none; }
 #screen-vm .vm-list-pane { background: var(--chrome); }
 #screen-vm .vm-list-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 12px; font: 600 10px var(--sans); text-transform: none; letter-spacing: 0; color: var(--muted); }
@@ -4039,10 +4049,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 @media (max-width: 900px), (max-height: 650px) {
   /* A short workbench shows either the analysis or the dock. The complete
      disclosure header stays outside both scrollers, never a sliver of text. */
-  #vm-findings-workspace:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr) auto; }
-  #vm-findings-workspace > #vm-analysis-toggle { grid-row: 2; }
-  #vm-findings-workspace > .vm-grid { grid-row: 3; }
-  #vm-findings-workspace > .vm-program-example { grid-row: 4; }
+  #vm-findings-workspace:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
+  #vm-findings-workspace > #vm-analysis-toggle { grid-row: 3; }
+  #vm-findings-workspace > .vm-grid { grid-row: 4; }
+  #vm-findings-workspace > .vm-program-example { grid-row: 5; }
   #vm-findings-workspace:has(.vm-workbench-inspector) > #vm-analysis-toggle { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 10px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--chrome); color: var(--text); font: 600 11px/20px var(--sans); text-align: left; }
   #vm-analysis-toggle::before { content: '▸'; }
   #vm-analysis-toggle[aria-expanded="true"]::before { content: '▾'; }
@@ -5325,7 +5335,7 @@ details.decoder-card > header p { margin-top: 0; }
 #screen-vm .vm-selection-inspector .evidence-name-editor { padding: 8px 10px; }
 
 /* Saved JavaScript invocation sites. The header chip names what this capture
-   tracks; the Sources pane saves functions for the next capture. Context lines
+   tracks; the Sources pane saves the functions captures track. Context lines
    are captured text and wrap rather than widen the sidebar. */
 .session-tracking {
   min-width: 0; max-width: min(46vw, 420px); min-height: 20px; padding: 0 8px; overflow: hidden;

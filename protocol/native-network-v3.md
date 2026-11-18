@@ -2150,12 +2150,11 @@ no values, no debugger.
   record `unsupported_thread`. A synchronous XHR's start is recorded and walked
   on its calling thread, not on the pool thread that sends it
   ([synchronous requests](#synchronous-requests)).
-- V8 flag `--reb-promise-stacks` adds
-  [promise registrations](#promise-registrations). The launcher adds it for
-  `REB_NATIVE_PROMISE_STACKS=1` with request stacks on. The packaged app sets
-  that whenever it turns request stacks on, and drops it, with a launch log
-  line, from a Brave that does not define the flag; `make live` leaves it off
-  unless asked.
+- V8 flag `--reb-promise-stacks`, off by default everywhere including the
+  packaged app, adds [promise registrations](#promise-registrations). The
+  launcher adds it for `REB_NATIVE_PROMISE_STACKS=1` with request stacks on.
+  The app's start panel offers it as an option, and the launcher drops that
+  choice, with a launch log line, from a Brave that does not define the flag.
 
 ### `request_initiator_stack` (type 34)
 
@@ -2774,11 +2773,9 @@ active or not, as it does while DevTools records async stacks, a runtime call
 on each promise creation, `then` and reaction. In an active capture each user
 registration adds V8's own scan to the first user frame, which allocates a
 small vector per frame scanned as it does for DevTools, plus one walk of up to
-32 frames, one SHA-256 and one table entry, a few microseconds. That is the
-cost DevTools pays for its own async stacks, and a chain that stops at every
-`.then` or `await` hides the call researchers most often need, so the packaged
-app turns the flag on with request stacks; `REB_NATIVE_PROMISE_STACKS=0` turns
-it off, and `make live` leaves it off unless asked. On each microtask
+32 frames, one SHA-256 and one table entry, a few microseconds. The flag is
+therefore off by default, including in the packaged app, whose start panel
+can turn it on. On each microtask
 segment without a registration the Initiator tab says which applies: flag bit
 1 clear, promise registration stacks were off; set, they were on but the
 thread remembered no registration (a builtin registered it, capture was off

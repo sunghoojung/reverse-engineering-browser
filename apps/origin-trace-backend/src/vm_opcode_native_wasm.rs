@@ -37,6 +37,9 @@ fn envelope(event: &Value, artifact: &Value) -> bool {
 }
 
 const LIMIT: u32 = 16 * 1024 * 1024;
+/// A sample index is its configuration's ordinal for one stream. `u32::MAX`
+/// stays the execution outcome's no-sample value.
+const LAST_SAMPLE_INDEX: u32 = u32::MAX - 1;
 const RESOLUTIONS: [&str; 5] = ["resolved", "null", "out-of-bounds", "foreign", "unresolved"];
 
 struct DispatchPayload {
@@ -142,7 +145,7 @@ fn decode_dispatch_payload(bytes: &[u8]) -> Option<DispatchPayload> {
     (fields.function_index < LIMIT
         && (8..LIMIT).contains(&fields.module_byte_offset)
         && fields.table_count < LIMIT
-        && fields.sample_index < 16)
+        && fields.sample_index <= LAST_SAMPLE_INDEX)
         .then_some(fields)
 }
 
@@ -173,7 +176,7 @@ fn decode_indirect_payload(bytes: &[u8]) -> Option<IndirectPayload> {
         && (8..LIMIT).contains(&fields.module_byte_offset)
         && fields.table_index < LIMIT
         && fields.callee_function_index < LIMIT
-        && fields.sample_index < 16
+        && fields.sample_index <= LAST_SAMPLE_INDEX
         && (resolved || fields.callee_function_index == 0))
         .then_some(fields)
 }
@@ -528,7 +531,7 @@ pub(super) mod tests {
         assert_eq!(trap.rows[0]["resolution"], "out-of-bounds");
         assert!(trap.rows[0]["callee_function_index"].is_null());
         // Wrong table, a non-site offset, a callee on a null entry, an unknown
-        // resolution, a callee past the function space, the sample budget and
+        // resolution, a callee past the function space, the reserved sample index and
         // a reserved byte are each rejected.
         for (offset, value) in [
             (12, 1u32),
@@ -536,7 +539,7 @@ pub(super) mod tests {
             (24, 1),
             (24, 5),
             (20, 3),
-            (28, 16),
+            (28, u32::MAX),
             (32, 1),
         ] {
             let mut bad = event.clone();
@@ -716,7 +719,7 @@ pub(super) mod tests {
             bad[field] = json!("2");
             assert_eq!(read(&artifact, &module(), &[bad]).count, 0);
         }
-        for (offset, value) in [(4, 1u32), (8, 46), (16, 3), (20, 16), (24, 1)] {
+        for (offset, value) in [(4, 1u32), (8, 46), (16, 3), (20, u32::MAX), (24, 1)] {
             let mut bad = event.clone();
             let mut bytes = hex::decode(bad["payload"].as_str().unwrap()).unwrap();
             bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1211,12 +1214,12 @@ pub(super) mod tests {
         put_u32(&mut edge, 4, LIMIT - 1);
         put_u32(&mut edge, 8, 8);
         put_u32(&mut edge, 16, LIMIT - 1);
-        put_u32(&mut edge, 20, 15);
+        put_u32(&mut edge, 20, LAST_SAMPLE_INDEX);
         let row = query_observation(&payload_event("wasm_dispatch_observation", &edge)).unwrap();
         assert_eq!(
             row,
             json!({"status":"decoded","function_index":LIMIT - 1,"module_byte_offset":8,
-                "selector":u32::MAX,"table_count":LIMIT - 1,"sample_index":15,
+                "selector":u32::MAX,"table_count":LIMIT - 1,"sample_index":LAST_SAMPLE_INDEX,
                 "js_invocation_state":1,"js_invocation_id":0})
         );
         let mut far = dispatch_bytes(2, 0, 0);
@@ -1314,7 +1317,7 @@ pub(super) mod tests {
         put_u32(&mut count, 16, LIMIT);
         rejected.push(("wasm_dispatch_observation", count.to_vec()));
         let mut sample = dispatch_bytes(2, 0, 0);
-        put_u32(&mut sample, 20, 16);
+        put_u32(&mut sample, 20, u32::MAX);
         rejected.push(("wasm_dispatch_observation", sample.to_vec()));
         rejected.push((
             "wasm_dispatch_observation",

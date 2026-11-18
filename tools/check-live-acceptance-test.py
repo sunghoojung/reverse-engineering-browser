@@ -31,7 +31,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from live_acceptance import (baseline, bodies, budget, cookies, debugger, driver, headers, limits, metadata,
-                             nostacks, stacks, tabs)
+                             nostacks, stacks, tabs, wasm)
 from live_acceptance.evidence import Api, ApiError, Session, decode_request_body, decode_request_target, parse_header_block
 from live_acceptance.fixture import POLL_SECONDS, payload, sha256
 from live_acceptance.pages import line_of, locate
@@ -105,7 +105,7 @@ class FixtureRoutes(unittest.TestCase):
     def test_index_links_every_page_area(self):
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
-        for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "budget"):
+        for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "budget", "wasm"):
             self.assertIn(f"/{name}/index.html".encode(), body)
 
     def test_header_hops_redirect_twice_with_repeated_headers(self):
@@ -291,17 +291,20 @@ class FixtureRoutes(unittest.TestCase):
     def test_wasm_modules_validate_and_run(self):
         from live_acceptance.binary import wasm_dispatch, wasm_import_caller
         script = """
-const [dispatch, caller] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
+const [dispatch, caller, paced] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
 const {pick} = new WebAssembly.Instance(new WebAssembly.Module(dispatch)).exports;
 let stack = '';
 const imports = {env: {f: () => { stack = new Error().stack; }}};
 new WebAssembly.Instance(new WebAssembly.Module(caller), imports).exports.run();
-console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack}));
+const {run} = new WebAssembly.Instance(new WebAssembly.Module(paced)).exports;
+console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack, runs: [0, 1, 39, 40, 41].map(run)}));
 """
-        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex()],
+        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex(), wasm.MODULE.hex()],
                              capture_output=True, text=True, check=True).stdout
         result = json.loads(out)
         self.assertEqual(result["picks"], baseline.PICKS)
+        # Selector 0 takes the br_table's first arm in every function; any other its default.
+        self.assertEqual(result["runs"], [1, 2, 2, 2, 2])
         self.assertRegex(result["stack"], r"reb_inner[\s\S]*reb_run")
 
 
@@ -849,11 +852,11 @@ class Evidence(unittest.TestCase):
         for target in nostacks.TARGETS:
             self.build.row(target)
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses(), {"no stack walk without --request-stacks": "PASS"}, self.report.lines)
+        self.assertEqual(self.statuses(), {"no stack walk with --request-stacks=false": "PASS"}, self.report.lines)
         self.report.lines.clear()
         self.backend.events.append({"type": "request_initiator_stack", "process_id": 7, "request_id": "101"})
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses()["no stack walk without --request-stacks"], "FAIL")
+        self.assertEqual(self.statuses()["no stack walk with --request-stacks=false"], "FAIL")
 
     def test_session_context_matches_each_kind(self):
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
@@ -964,6 +967,67 @@ class Evidence(unittest.TestCase):
         self.assertIs(debugger.settle(lambda: waiting, debugger.top_frame, 0, 0), waiting)
         site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
         self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
+
+    WASM_SAMPLING = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000,
+                     "records_per_window": 1024, "samples_per_function": None, "samples_per_indirect_site": None,
+                     "function_allow_count": 0, "function_deny_count": 0, "module_allowlist": False,
+                     "reset": "available"}
+
+    def wasm_evidence(self, records=3000, indirect=200, seconds=3.4, function=None, gap=True, generation=3):
+        """A paced capture of the hot loop: records spread over the loop, every function, one ordinal."""
+        module = self.backend.artifact("wasm_module", wasm.MODULE)
+        other = self.backend.artifact("wasm_module", b"another module")
+        self.get("/__beacon?m=wasm:hot", method="POST", body=json.dumps({"ok": True, "value": 900000}).encode())
+        self.backend.context = {"capture_options": {"wasm_sampling": dict(self.WASM_SAMPLING)}}
+
+        def observation(kind, artifact, index, count, function_index):
+            time = 10**9 + index * int(seconds * wasm.SECOND_NS) // max(count, 1)
+            return {"type": kind, "artifact_id": artifact, "process_id": 7, "monotonic_time_ns": str(time),
+                    "wasm_observation": {"status": "decoded", "function_index": function_index, "sample_index": index}}
+        events = [observation("wasm_dispatch_observation", module, index, records,
+                              index % wasm.FUNCTIONS if function is None else function) for index in range(records)]
+        events += [observation("wasm_indirect_observation", module, index, indirect, wasm.RUN_INDEX)
+                   for index in range(indirect)]
+        # Another page's module never counts toward this loop.
+        events.append(observation("wasm_dispatch_observation", other, 0, 1, 0))
+        events.append({"type": "wasm_dispatch_overflow", "artifact_id": "0", "process_id": 7})
+        self.backend.events = events
+        if gap:
+            self.backend.summary["checks"] = [{"code": "named_gap", "category": "vm", "count": "9",
+                                               "reason": "native_wasm_dispatch_budget_incomplete"}]
+        wasm.STATE = wasm.State()
+        wasm.STATE.reset = {"ok": True, "action": "reset_wasm_sample_budgets", "generation": generation}
+
+    def test_wasm_pacing_passes_on_a_paced_capture(self):
+        self.wasm_evidence()
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses(), {"session context wasm_sampling": "PASS", "br_table paced per window": "PASS",
+                                           "call_indirect paced per window": "PASS",
+                                           "paced remainder is named": "PASS",
+                                           "reset_wasm_sample_budgets mid-loop": "PASS"}, self.report.lines)
+
+    def test_wasm_pacing_fails_on_each_difference(self):
+        cases = [
+            ("a 16-record cap", {"records": 16, "indirect": 16},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("a session-wide stop after one second", {"seconds": 0.9},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("one function past its allowance", {"function": 3, "seconds": 2.5}, {"br_table paced per window"}),
+            ("a silent remainder", {"gap": False}, {"paced remainder is named"}),
+            ("a refused reset", {"generation": 0}, {"reset_wasm_sample_budgets mid-loop"}),
+        ]
+        for name, changes, failing in cases:
+            with self.subTest(name):
+                self.setUp()
+                self.wasm_evidence(**changes)
+                wasm.verify(self.run_)
+                self.assertEqual({case for case, status in self.statuses().items() if status == "FAIL"}, failing,
+                                 self.report.lines)
+        self.setUp()
+        self.wasm_evidence()
+        self.backend.context["capture_options"]["wasm_sampling"]["records_per_window"] = 16
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses()["session context wasm_sampling"], "FAIL")
 
     def test_report_never_passes_a_manual_or_skipped_case(self):
         report = Report("x")

@@ -2443,8 +2443,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(status as? Int, 200, "the saved set could not be cleared")
   }
 
-  // Sources saves functions for the next capture by position and by name,
-  // refuses what it cannot name exactly, and the titlebar says what is saved.
+  // Sources saves functions by position and by name, refuses what it cannot
+  // name exactly, the capture follows the saved set, and the titlebar says
+  // what it tracks.
   @MainActor
   func test18TrackCallsFromSources() async throws {
     let expected = try Expectations.load()
@@ -2484,7 +2485,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("(document.querySelector('#invocation-site-status')?.innerText ?? '').includes('Saved window.hsw')",
         "\(size.name): window.hsw was not saved")
       let savedStatus = try await ui.value("document.querySelector('#invocation-site-status').innerText") as? String ?? ""
-      XCTAssertTrue(savedStatus.contains("not the open page"), "\(size.name): saving says tracking starts with the next capture")
+      XCTAssertTrue(savedStatus.contains("This capture tracks a saved function at once"), "\(size.name): saving says this capture tracks it: \(savedStatus)")
       // Line 2 at the awb( call names the then-callback around it.
       try await ui.click("#source-more > summary")
       try await ui.click("#source-goto")
@@ -2515,7 +2516,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
             complete: chip.scrollWidth <= chip.clientWidth + 1, overlaps};
         })()
         """)
-      XCTAssertEqual(chip["text"] as? String, "2 functions saved for the next capture", "\(size.name): chip text: \(chip)")
+      XCTAssertEqual(chip["text"] as? String, "Tracking 2 functions", "\(size.name): chip text: \(chip)")
+      // The backend published both sites to the running capture's slot table.
+      let session = try await ui.json(
+        "fetch('/api/js-invocation-sites', {cache: 'no-store'}).then(response => response.json()).then(set => ({live: set.session.live, count: set.session.count, armed: set.sites.map(site => site.armed_in_capture)}))")
+      XCTAssertEqual(session["live"] as? Bool, true, "\(size.name): the capture follows the saved set: \(session)")
+      XCTAssertEqual(session["count"] as? Int, 2, "\(size.name): both sites armed: \(session)")
+      XCTAssertEqual(session["armed"] as? [Bool], [true, true], "\(size.name): each saved site armed in this capture: \(session)")
       XCTAssertEqual(chip["inside"] as? Bool, true, "\(size.name): the chip leaves the titlebar: \(chip)")
       XCTAssertEqual(chip["complete"] as? Bool, true, "\(size.name): the chip text is truncated: \(chip)")
       XCTAssertEqual(chip["overlaps"] as? [String], [], "\(size.name): the chip overlaps the titlebar")

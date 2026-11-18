@@ -103,7 +103,7 @@ buttonNamed('Confirm Clear All').click();
 await settle();
 assert.deepEqual(posted.at(-1), {op: 'clearSites', generation: 2});
 assert(text().includes('Tracking no functions'));
-assert(text().includes('Choose Track calls in Sources during a capture to save a function.'));
+assert(text().includes('Choose Track calls in Sources during the capture to save a function. The capture tracks its calls from then on'));
 assert.equal(buttonNamed('Clear All'), undefined, 'nothing to clear');
 
 // Start sends the page's selection; native validates it.

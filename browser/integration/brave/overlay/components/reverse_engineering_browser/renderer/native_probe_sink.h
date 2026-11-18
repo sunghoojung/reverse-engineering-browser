@@ -348,27 +348,27 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                 std::uint32_t caller_function_index = 0,
                                 bool caller_observed = false) noexcept;
   // Physical call_indirect observations share the br_table admission rules
-  // with their own emitter, 16-record budget and coalesced omission gaps. The
+  // with their own emitter, window budget and coalesced omission gaps. The
   // caller fills identity, site, slot and resolution; the sink fills the rest.
   void SetNativeWasmIndirectEmitter(NativeWasmIndirectEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmIndirectEnabled() const noexcept;
   void RecordNativeWasmIndirect(NativeWasmIndirectObservation observation) noexcept;
-  // Published by the next SetEmitters. Empty lists and zero caps keep the
-  // historical 16-record stream budgets. Invalid policies are ignored.
+  // Published by the next SetEmitters. Empty lists and zero caps pace only
+  // by the window budgets. Invalid policies are ignored.
   void SetNativeWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) noexcept;
-  // Restarts both sample-index ranges and both overflow rings in this
-  // configuration. It first publishes each stream's pending omitted count for
-  // the epoch being closed, the same snapshot a configuration retirement
-  // publishes. The next retained sample of each stream is index 0, and the
-  // next overflow identity may reuse ring index 0. It does not change the
-  // session, the emitters, the policy, or the capture generation, and it does
-  // not invent a sample, a caller, or a parent edge.
+  // Starts a new sample window now, the same turnover a window reaches after
+  // kNativeWasmSampleWindowNs: each stream's pending omitted count for the
+  // epoch being closed is published first, then every window budget,
+  // per-function and per-site count and overflow ring starts empty. Sample
+  // indexes keep counting. It does not change the session, the emitters, the
+  // policy, or the capture generation, and it does not invent a sample, a
+  // caller, or a parent edge.
   void ResetNativeWasmSampleBudgets() noexcept;
   // Coalesced once per configuration. A notice that arrives is kept after
-  // sample budgets are exhausted. The admission predicate stays true past the
-  // 16-record stream cap so a later execution can be named; it turns false
-  // when the omitted counter saturates or the budget epoch is resetting. Not
-  // an observation: no selector, offset, or function index is stored. False
+  // sample budgets are exhausted. The admission predicate stays true past a
+  // full window so a later execution can be named; it turns false when the
+  // omitted counter saturates or the budget epoch is resetting. Not an
+  // observation: no selector, offset, or function index is stored. False
   // means it was not retained and was not already retained, so the caller can
   // retry.
   bool NoteNativeWasmDispatchScope(NativeWasmScopeGap gap) noexcept;
@@ -380,8 +380,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   using NativeWasmLimitProbe = void (*)() noexcept;
   void SetNativeWasmLimitProbe(NativeWasmLimitProbe probe) noexcept;
   void ProbeNativeWasmLimits() const noexcept;
-  // Host-visible Wasm call ledger. Entry and exit stay paired after the
-  // 16-record outcome budget is spent; that budget only refuses records.
+  // Host-visible Wasm call ledger. Entry and exit stay paired after a
+  // window's outcome budget is spent; that budget only refuses records.
   // These never call the frame-id provider or allocate V8 handles.
   void SetNativeWasmExecutionEmitter(NativeWasmExecutionEmitter emitter) noexcept;
   [[nodiscard]] bool IsNativeWasmExecutionEnabled() const noexcept;
@@ -452,19 +452,31 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                   NativeJsDispatchSiteStatus status) noexcept;
   void NoteNativeJsDispatchInputUnavailable(std::uint64_t epoch, std::uint64_t frame_id) noexcept;
   // Native JavaScript invocation identity, protocol/native-js-invocation-v1.md.
-  // The site list follows the dispatch rules: immutable for the browser
-  // lifetime, configured after SetEmitters, disarmed by the next one.
-  // digests is the session's sensitive value-digest opt-in.
+  // Configured after SetEmitters and disarmed by the next one. A slot keeps
+  // its site for the renderer lifetime: a list that names another site at a
+  // retained slot, or is not `valid`, arms nothing and is the configuration's
+  // input gap. A slot the list omits is disarmed. An empty valid list tracks
+  // functions a later revision arms. digests is the session's sensitive
+  // value-digest opt-in.
   void ConfigureNativeJsInvocation(std::span<const NativeJsInvocationSite> sites,
-                                   bool digests) noexcept;
+                                   bool digests,
+                                   bool valid = true) noexcept;
+  // A revision of the current configuration's sites under the same slot rule.
+  // Ordinals, open invocations and digests stay: V8 copies the sites again
+  // and calls in flight settle under their IDs.
+  void UpdateNativeJsInvocationSites(std::span<const NativeJsInvocationSite> sites,
+                                     bool valid) noexcept;
   // V8 pulls these on the isolate thread; none of them calls back into V8,
   // allocates or blocks.
   [[nodiscard]] std::uint64_t NativeJsInvocationEpoch() const noexcept;
+  // Changes with every accepted revision of the epoch's sites.
+  [[nodiscard]] std::uint64_t NativeJsInvocationRevision(std::uint64_t epoch) const noexcept;
+  // Every slot, a disarmed one with source length 0, which V8 never arms.
   [[nodiscard]] std::size_t CopyNativeJsInvocationSites(
       std::uint64_t epoch,
       std::span<NativeJsInvocationSite> out) const noexcept;
-  // True for every configured slot while the configuration is active: every
-  // call is wrapped and recorded.
+  // True for every armed slot while the configuration is active: every call
+  // is wrapped and recorded.
   [[nodiscard]] bool IsNativeJsInvocationEnabled(std::uint64_t epoch,
                                                  std::uint32_t slot) const noexcept;
   [[nodiscard]] bool NativeJsInvocationDigests(std::uint64_t epoch) const noexcept;
@@ -730,11 +742,11 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                           std::uint32_t thread_id,
                           std::uint64_t interpreter_artifact_id) noexcept;
 
-  // Coalesced per budget epoch. A refused transport emit is not: it fills
-  // the sequence slot its record took. A filter, per-function cap, per-site
-  // cap, or the 16-record stream cap records an overflow identity and does
-  // not stop the rest of the stream. The hook stays enabled until the omitted
-  // counter saturates.
+  // Coalesced per budget epoch, so once per sample window. A refused
+  // transport emit is not: it fills the sequence slot its record took. A
+  // filter, per-function cap, per-site cap, or a full window records an
+  // overflow identity and does not stop the rest of the stream. The hook
+  // stays enabled until the omitted counter saturates.
   enum class NativeWasmOmission : std::size_t {
     kInput,
     kBudget,
@@ -837,10 +849,17 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   void PublishNativeJsInvocationGaps(std::uint64_t generation) noexcept;
   // One recorded start of generation settled or can no longer settle.
   void CloseNativeJsInvocation(std::uint64_t generation) noexcept;
-  // Written once before native_invocation_site_count_ is release-published
-  // and never rewritten, as for dispatch sites.
+  // Applies the slot rule; false changes nothing.
+  [[nodiscard]] bool MergeNativeJsInvocationSites(
+      std::span<const NativeJsInvocationSite> sites) noexcept;
+  // Each slot's site, written once before native_invocation_site_count_ is
+  // release-published and never rewritten, as for dispatch sites. Only the
+  // armed flags change, and each change advances the revision. Configuration
+  // and revisions arrive on the renderer main thread.
   std::array<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> native_invocation_sites_{};
+  std::array<std::atomic<bool>, kNativeJsInvocationSiteLimit> native_invocation_armed_{};
   std::atomic<std::size_t> native_invocation_site_count_{0};
+  std::atomic<std::uint64_t> native_invocation_revision_{0};
   std::atomic<std::uint64_t> native_invocation_generation_{0};
   std::atomic<std::uint64_t> native_invocation_digest_generation_{0};
   // Each site's next start ordinal and the next request ordinal, zeroed
@@ -861,17 +880,30 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
   std::atomic<std::int64_t> native_invocation_open_{0};
   std::atomic<NativeJsInvocationContextProvider> native_invocation_context_provider_{nullptr};
   std::atomic<NativeWasmDispatchEmitter> native_wasm_emitter_{nullptr};
-  std::array<std::atomic<std::uint64_t>, kNativeWasmDispatchSampleBudget> native_wasm_slots_{};
+  // Closes the current budget epoch: publishes each stream's omitted count,
+  // then advances the epoch. One caller of several closes it.
+  void CloseNativeWasmBudgetEpoch() noexcept;
+  // Closes the epoch once the current sample window is
+  // kNativeWasmSampleWindowNs old. The renderer keeps the time itself, so a
+  // busy main thread cannot hold a window open.
+  void AdvanceNativeWasmWindow(std::uint64_t now) noexcept;
+  [[nodiscard]] bool NativeWasmWindowElapsed() const noexcept;
+  // The current window's retained count of each stream, tagged with its
+  // budget epoch (ClaimNativeWasmWindow), and each stream's next sample index
+  // in this configuration.
+  std::atomic<std::uint64_t> native_wasm_window_claims_{0};
+  std::atomic<std::uint64_t> native_wasm_next_sample_{0};
+  std::atomic<std::uint64_t> native_wasm_window_started_ns_{0};
   std::array<std::atomic<std::uint64_t>, 5> native_wasm_gap_epochs_{};
-  // Saturation of the overflow omitted count, not the 16-observation cap and
-  // not a per-function, per-module, or per-site refusal. The hook stays
-  // enabled after those refusals so later executions can be named. A reset
+  // Saturation of the overflow omitted count, not a full window and not a
+  // per-function, per-module, or per-site refusal. The hook stays enabled
+  // after those refusals so later executions can be named. The next window
   // advances the budget epoch, so a saturated epoch does not keep the next
   // one disabled.
   std::atomic<std::uint64_t> native_wasm_capped_epoch_{0};
-  // Even values are stable. SetEmitters and Reset each advance it by two so
-  // the next claimed sample slot and the next overflow ring slot start empty.
-  // Odd is the in-flight reset.
+  // Even values are stable. SetEmitters and each window turnover advance it by
+  // two so every window count, key and overflow ring slot starts empty. Odd
+  // is the in-flight turnover.
   std::atomic<std::uint64_t> native_wasm_budget_epoch_{2};
   NativeWasmSampleBudgetPolicy native_wasm_budget_policy_{};
   NativeWasmSampleBudgetPolicy native_wasm_budget_policy_pending_{};
@@ -892,8 +924,8 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                                                     NativeWasmOmission reason,
                                                     std::uint64_t budget_epoch) noexcept;
   std::atomic<NativeWasmIndirectEmitter> native_wasm_indirect_emitter_{nullptr};
-  std::array<std::atomic<std::uint64_t>, kNativeWasmIndirectSampleBudget>
-      native_wasm_indirect_slots_{};
+  std::atomic<std::uint64_t> native_wasm_indirect_window_claims_{0};
+  std::atomic<std::uint64_t> native_wasm_indirect_next_sample_{0};
   std::array<std::atomic<std::uint64_t>, 5> native_wasm_indirect_gap_epochs_{};
   // Same saturation rule as native_wasm_capped_epoch_.
   std::atomic<std::uint64_t> native_wasm_indirect_capped_epoch_{0};
@@ -901,7 +933,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
       native_wasm_indirect_overflow_slots_{};
   NativeWasmOverflowAccount native_wasm_indirect_overflow_{};
   [[nodiscard]] bool SnapshotWasmExecutionAdmission(VmAdmission& admission) const noexcept;
-  bool NoteNativeWasmExecutionOmission(const VmAdmission& admission, std::size_t reason) noexcept;
+  bool NoteNativeWasmExecutionOmission(const VmAdmission& admission,
+                                       std::size_t reason,
+                                       std::uint64_t budget_epoch) noexcept;
   void NoteWasmInstrumentedSite(std::uint64_t generation,
                                 std::uint64_t execution_context_id,
                                 std::uint64_t frame_id,
@@ -933,9 +967,9 @@ class COMPONENT_EXPORT(REB_NATIVE_PROBE_SINK) NativeProbeSink final {
                          std::span<const std::uint8_t> module_bytes) noexcept;
   std::atomic<NativeWasmExecutionEmitter> native_wasm_execution_emitter_{nullptr};
   std::atomic<NativeWasmExecutionNudge> native_wasm_execution_nudge_{nullptr};
-  std::array<std::atomic<std::uint64_t>, kNativeWasmExecutionBudget> native_wasm_execution_slots_{};
-  std::array<std::atomic<std::uint64_t>, 2> native_wasm_execution_gap_generations_{};
-  std::atomic<std::uint64_t> native_wasm_execution_capped_generation_{0};
+  std::atomic<std::uint64_t> native_wasm_execution_window_claims_{0};
+  // Per budget epoch, like native_wasm_gap_epochs_.
+  std::array<std::atomic<std::uint64_t>, 2> native_wasm_execution_gap_epochs_{};
   // Configuration generation to interrupt, or 0 when no request is waiting.
   // A stack check consumes it only when that thread has an open host call
   // for the same generation.

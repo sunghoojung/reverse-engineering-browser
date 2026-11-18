@@ -16,6 +16,9 @@ use std::{
 const READY_LINE: &str = "Origin Trace live session ";
 const FAILURE_LINE: &str = "REB_LIVE_SESSION_FAILURE: ";
 const POLL: Duration = Duration::from_millis(200);
+/// Full Wasm samples one renderer keeps per stream per second. A per-function
+/// or per-site allowance past it cannot change what is kept.
+const WASM_SAMPLE_WINDOW: u32 = 1024;
 /// run-live-session.sh's open-ended duration, the longest limit it accepts.
 const MAX_DURATION_SECONDS: u32 = 3_155_760_000;
 
@@ -59,6 +62,10 @@ pub struct StartOptions {
     /// Set when request_stacks took its default: a Brave that predates the
     /// flag then starts without stacks and says so, as in the app.
     pub request_stacks_if_supported: bool,
+    /// Also record the stack that registered each Promise reaction a request
+    /// is later made in (protocol/native-network-v3.md, Promise registrations).
+    /// Off unless named, as in the app's start panel; needs request_stacks.
+    pub promise_stacks: bool,
     /// Permit document-start Console scripts in this capture browser. Arming
     /// one stays a separate confirmed Console action.
     pub document_start: bool,
@@ -212,6 +219,7 @@ impl StartOptions {
             browser_internal: flag("browser_internal"),
             extension_traffic: flag("extension_traffic"),
             fresh_profile: flag("fresh_profile"),
+            promise_stacks: flag("promise_stacks"),
             js_invocation_sites: path("js_invocation_sites"),
             js_invocation_saved_sites: flag("js_invocation_saved_sites"),
             confirm_sensitive_capture: flag("confirm_sensitive_capture"),
@@ -275,15 +283,15 @@ impl StartOptions {
         }
         if self
             .wasm_samples_per_function
-            .is_some_and(|limit| !(1..=16).contains(&limit))
+            .is_some_and(|limit| !(1..=WASM_SAMPLE_WINDOW).contains(&limit))
         {
-            return Err("wasm_samples_per_function must be from 1 to 16".into());
+            return Err("wasm_samples_per_function must be from 1 to 1024".into());
         }
         if self
             .wasm_samples_per_indirect_site
-            .is_some_and(|limit| !(1..=16).contains(&limit))
+            .is_some_and(|limit| !(1..=WASM_SAMPLE_WINDOW).contains(&limit))
         {
-            return Err("wasm_samples_per_indirect_site must be from 1 to 16".into());
+            return Err("wasm_samples_per_indirect_site must be from 1 to 1024".into());
         }
         for (name, indexes) in [
             ("wasm_function_allow", &self.wasm_function_allow),
@@ -379,6 +387,11 @@ impl StartOptions {
         if self.request_stacks && mask & 1280 != 1280 {
             return Err("request_stacks needs Network and Artifact category bits (256 and 1024) in category_mask".into());
         }
+        if self.promise_stacks && !self.request_stacks {
+            return Err(
+                "promise_stacks rides on request stacks and requires request_stacks".into(),
+            );
+        }
         if invocation && mask & 512 == 0 {
             return Err(
                 "JavaScript invocation sites need the VM category bit (512) in category_mask"
@@ -426,6 +439,7 @@ impl StartOptions {
             "response_body_budget_mib": self.request_content.then(|| self.response_body_budget_mib.unwrap_or(512)),
             "response_media": self.response_media,
             "request_stacks": self.request_stacks,
+            "promise_stacks": self.promise_stacks,
             "document_start": self.document_start,
             "browser_internal": self.browser_internal,
             "extension_traffic": self.extension_traffic,
@@ -662,6 +676,7 @@ fn with_option_names(cause: &str) -> String {
         ("REB_RESPONSE_BODY_BUDGET_MIB", "response_body_budget_mib"),
         ("REB_CAPTURE_RESPONSE_MEDIA", "response_media"),
         ("REB_NATIVE_REQUEST_STACKS", "request_stacks"),
+        ("REB_NATIVE_PROMISE_STACKS", "promise_stacks"),
         ("REB_CONSOLE_DOCUMENT_START", "document_start"),
         ("REB_CAPTURE_BROWSER_INTERNAL", "browser_internal"),
         ("REB_CAPTURE_EXTENSION_TRAFFIC", "extension_traffic"),
@@ -710,9 +725,10 @@ fn with_option_names(cause: &str) -> String {
 }
 
 /// The agent's saved invocation sites, shared by the sessions agents start
-/// under this HOME and never the app's own set. Sites saved with
-/// `js_invocation_site_action` in one agent session arm the next one started
-/// with `js_invocation_saved_sites`.
+/// under this HOME and never the app's own set. A session started with
+/// `js_invocation_saved_sites` follows the sites `js_invocation_site_action`
+/// saves or removes while it runs, when its Brave follows site revisions,
+/// and every later such session starts with them.
 pub fn agent_site_store(home: &Path) -> PathBuf {
     home.join(".config/origin-trace/agent-sessions/js-invocation-sites-v1.json")
 }
@@ -754,14 +770,17 @@ fn wasm_module_allowlist_file(
     Ok(Some(path))
 }
 
-/// The site file this session arms, as a private copy nothing changes while
-/// it runs: the browser rereads the file it was given and refuses a session
-/// whose file changed. Returns the copy and how many sites it names.
+/// The site file this session arms, as a private copy. A named file is armed
+/// as it is for the whole session. The agent sessions' saved set, even an
+/// empty one, starts as that copy and the session's backend then follows the
+/// saved set, rewriting the copy as a slot table the browser applies while
+/// it runs. Returns the copy, how many sites it names, and whether the
+/// session follows the saved set.
 fn invocation_sites(
     options: &StartOptions,
     home: &Path,
     agent: &Path,
-) -> Result<Option<(PathBuf, usize)>, String> {
+) -> Result<Option<(PathBuf, usize, bool)>, String> {
     let sites = if options.js_invocation_saved_sites {
         let store = agent_site_store(home);
         let saved = js_invocation_sites::Store::new(store)
@@ -772,9 +791,6 @@ fn invocation_sites(
                     error.message
                 )
             })?;
-        if saved.is_empty() {
-            return Err("js_invocation_saved_sites names the agent's saved set, which is empty. In an agent session, resolve a function with resolve_js_invocation_site and save it with js_invocation_site_action add; it arms in the next session started with js_invocation_saved_sites.".into());
-        }
         saved.into_iter().map(|saved| saved.site).collect()
     } else if let Some(path) = &options.js_invocation_sites {
         let bytes = std::fs::read(path)
@@ -786,8 +802,12 @@ fn invocation_sites(
     } else {
         return Ok(None);
     };
-    let text = js_invocation_sites::sites_file(&sites)
-        .map_err(|_| "The invocation site set cannot be written as a site file")?;
+    let text = if sites.is_empty() {
+        js_invocation_sites::slot_table_file(&[])
+    } else {
+        js_invocation_sites::sites_file(&sites)
+    }
+    .map_err(|_| "The invocation site set cannot be written as a site file")?;
     let copy = agent.join("js-invocation-sites.json");
     crate::durable::write_private(&copy, text.as_bytes()).map_err(|error| {
         format!(
@@ -795,7 +815,7 @@ fn invocation_sites(
             error.message
         )
     })?;
-    Ok(Some((copy, sites.len())))
+    Ok(Some((copy, sites.len(), options.js_invocation_saved_sites)))
 }
 
 fn ready(log: &str) -> Option<String> {
@@ -914,7 +934,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // is visible beside what the launcher reports it passed to Brave.
         use std::io::Write;
         let mut named = options.effective();
-        if let Some((_, count)) = &armed_sites {
+        if let Some((_, count, _)) = &armed_sites {
             named["js_invocation_site_count"] = json!(count);
         }
         writeln!(&log, "Agent session options: {named}")
@@ -954,10 +974,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         // without invocation capture refuses the start instead of dropping it.
         "REB_NATIVE_JS_INVOCATION_SITES",
         "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED",
+        "REB_NATIVE_JS_INVOCATION_LIVE",
         "REB_NATIVE_REQUEST_STACKS",
         "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
         // Request stacks are on by default, so an inherited Promise stacks
-        // switch would now apply silently; agent options name no such switch.
+        // switch would apply silently; only the named option turns it on.
         "REB_NATIVE_PROMISE_STACKS",
         "REB_BRAVE_BINARY",
         "REB_CAPTURE_DURATION_SECONDS",
@@ -971,7 +992,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     command
         .env("REB_LIVE_SESSION_ROOT", &sessions_root)
         .env("REB_ACTIVE_ENDPOINT_FILE", &active_endpoint)
-        // The app's saved invocation sites arm its next capture, so agent
+        // The app's saved invocation sites arm its captures, so agent
         // sessions keep their own saved set and never change the researcher's.
         .env("REB_JS_INVOCATION_SITE_STORE", agent_site_store(&home))
         .env("REB_NATIVE_WASM_DISPATCH", switch(options.wasm_dispatch))
@@ -994,6 +1015,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
             switch(options.request_stacks_if_supported),
         )
+        .env("REB_NATIVE_PROMISE_STACKS", switch(options.promise_stacks))
         // Browser-internal and extension evidence are opt-ins, never inherited.
         .env(
             "REB_CAPTURE_BROWSER_INTERNAL",
@@ -1078,8 +1100,11 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
     if let Some(path) = &options.js_dispatch_sites {
         command.env("REB_NATIVE_JS_DISPATCH_SITES", path);
     }
-    if let Some((path, _)) = &armed_sites {
+    if let Some((path, _, live)) = &armed_sites {
         command.env("REB_NATIVE_JS_INVOCATION_SITES", path);
+        if *live {
+            command.env("REB_NATIVE_JS_INVOCATION_LIVE", "1");
+        }
     }
     if let Some(path) = &brave {
         command.env("REB_BRAVE_BINARY", path);
@@ -1149,7 +1174,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
                         url_opened: None,
                         url_error: None,
                         capture_observed: None,
-                        js_invocation_sites_armed: armed_sites.as_ref().map(|(_, count)| *count),
+                        js_invocation_sites_armed: armed_sites.as_ref().map(|(_, count, _)| *count),
                     };
                 }
             }
@@ -1247,6 +1272,10 @@ mod tests {
                 "request_stacks needs Network and Artifact",
             ),
             (
+                json!({"promise_stacks":true,"request_stacks":false}),
+                "requires request_stacks",
+            ),
+            (
                 json!({"js_invocation_saved_sites":true,"category_mask":1024}),
                 "VM category",
             ),
@@ -1269,7 +1298,7 @@ mod tests {
             ),
             (
                 json!({"wasm_samples_per_function":0,"wasm_dispatch":true}),
-                "from 1 to 16",
+                "from 1 to 1024",
             ),
             (
                 json!({"wasm_function_allow":[1,1],"wasm_dispatch":true}),
@@ -1323,6 +1352,7 @@ mod tests {
             ("browser_internal", false),
             ("extension_traffic", false),
             ("fresh_profile", false),
+            ("promise_stacks", false),
         ] {
             assert_eq!(effective[key], on, "{key}");
         }

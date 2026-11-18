@@ -231,9 +231,10 @@ struct LiveCaptureContent: Equatable {
 // starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
 // is exactly the browser's native-js-invocation-sites-v1 form with 1 to 256
 // sites; a sidecar the browser never reads keeps each label, source URL and
-// session. The backend's routes add sites from Sources, the start panel lists
-// and removes them, and each capture arms a private copy, because the browser
-// rereads the file it was given and refuses a session whose file changed.
+// session. The backend's routes add sites from Sources and the start panel
+// lists and removes them. Each capture arms a private copy, which its backend
+// rewrites as a slot table when the saved set changes, so the running capture
+// follows the set without the store file ever changing under the browser.
 struct InvocationSiteSet: Equatable {
   struct Site: Equatable {
     let anchorOffset: UInt32
@@ -267,6 +268,9 @@ struct InvocationSiteSet: Equatable {
 
   static let limit = 256
   static let fileLimit = 128 * 1024
+  // A version 2 slot table with no slots: a capture that follows the saved
+  // set starts from it when nothing is saved, or when the store is unreadable.
+  static let emptySlotTable = "{\"sites\":[],\"version\":2}"
   static let fileName = "js-invocation-sites-v1.json"
 
   // An explicit REB_JS_INVOCATION_SITE_STORE wins, as for the other app stores.
@@ -668,14 +672,17 @@ final class LiveSessionCoordinator {
     environment["REB_RESEARCH_PROFILE_ROOT"] = LiveSessionOptions.researchProfileRoot(
       environment: environment, originTrace: originTraceURL).path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
-    // Sources can save sites while this capture runs; the browser keeps
-    // reading the copy it was given, which nothing changes.
+    // Sources can save and remove sites while this capture runs. The browser
+    // reads this private copy, and the backend rewrites it as a slot table
+    // when the saved set changes, so even an empty set gets one.
     let siteStoreURL = InvocationSiteSet.storeURL(environment: environment, applicationSupport: originTraceURL)
     environment["REB_JS_INVOCATION_SITE_STORE"] = siteStoreURL.path
     var invocationSitesURL: URL?
-    if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil,
-      case .saved(let sites) = InvocationSiteSet.load(siteStoreURL), let text = InvocationSiteSet.file(sites)
-    {
+    if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil {
+      var text = InvocationSiteSet.emptySlotTable
+      if case .saved(let sites) = InvocationSiteSet.load(siteStoreURL), let file = InvocationSiteSet.file(sites) {
+        text = file
+      }
       let copy = FileManager.default.temporaryDirectory.appendingPathComponent(
         "origin-trace-live-\(identifier)-js-invocation-sites.json")
       try InvocationSiteSet.writePrivate(Data(text.utf8), to: copy)
@@ -800,9 +807,11 @@ final class LiveSessionCoordinator {
   // turns nothing on.
   //
   // `savedInvocationSites` is this launch's private copy of the app's saved
-  // site set, or nil when the set is empty. The sites need the VM category
-  // (512). The launcher arms them only if this Brave defines invocation
-  // capture, and otherwise starts without them and says so. Canvas images and
+  // site set, an empty slot table when nothing is saved, or nil without one.
+  // The sites need the VM category (512). The launcher arms them only if this
+  // Brave defines invocation capture, and otherwise starts without them and
+  // says so. The capture follows the saved set if this Brave can revise armed
+  // sites while it runs; an older one keeps the copy's sites. Canvas images and
   // the settled-value digests of armed sites are sensitive capture: they follow
   // `options` in Content mode and are never recorded in Metadata mode.
   static func captureDefaults(
@@ -827,6 +836,7 @@ final class LiveSessionCoordinator {
     if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil, let saved = savedInvocationSites, allows(512) {
       environment["REB_NATIVE_JS_INVOCATION_SITES"] = saved.path
       environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] = environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] ?? "1"
+      environment["REB_NATIVE_JS_INVOCATION_LIVE"] = environment["REB_NATIVE_JS_INVOCATION_LIVE"] ?? "1"
     }
     let sitesArmed = !(environment["REB_NATIVE_JS_INVOCATION_SITES"] ?? "").isEmpty
     environment[LiveCaptureContent.invocationDigests] = capturesContent && options.invocationDigests && sitesArmed ? "1" : "0"

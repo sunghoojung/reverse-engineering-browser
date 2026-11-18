@@ -1,4 +1,4 @@
-"""Session without --request-stacks (#429): no stack walk runs."""
+"""Session with --request-stacks=false (#429): no stack walk runs."""
 
 from __future__ import annotations
 
@@ -51,5 +51,5 @@ def verify(run: Run) -> None:
         stack = request_stack(run.api, rows[0])
         if stack.get("status") != "not_recorded" or rows[0].get("initiator_frame"):
             problems.append(f"{target}: stack {stack.get('status')}, initiator_frame {rows[0].get('initiator_frame')}")
-    run.report.check(ISSUE, "no stack walk without --request-stacks", problems,
+    run.report.check(ISSUE, "no stack walk with --request-stacks=false", problems,
                      f"no stack records or artifacts; {len(TARGETS)} script requests read not_recorded")

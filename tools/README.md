@@ -77,8 +77,10 @@ It drives each page with `session_action` `open_url` (a trusted click opens the
 #425 popup), compares the stored evidence with the requests the fixture server
 received and the responses it sent, and ends each session with `end`. Each case
 prints `PASS`, `FAIL`, `SKIP` with its reason, or `MANUAL` with the exact steps
-when it needs a person, DevTools, a profiler or HTTPS; a `MANUAL` case never
-passes. The command exits 1 on any `FAIL` and 2, after
+when it needs a person, DevTools, a profiler or HTTPS. A `SKIP` (the machine
+could not set the case up, such as no brotli encoder or fewer than 30 service
+worker clients) or `MANUAL` case never passes, and the final `RESULT` line
+counts both. The command exits 1 on any `FAIL` and 2, after
 `UNAVAILABLE: ...`, when no browser is given.
 
 ```sh

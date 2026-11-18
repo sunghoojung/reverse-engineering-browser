@@ -2068,6 +2068,26 @@
         return findings.sort((left, right) => (right.analysis?.vm_score ?? 0) - (left.analysis?.vm_score ?? 0));
       }
 
+      // A failed analysis is listed in every view but is never a finding, so
+      // VM Lab counts failures by error code. Counted once per document.
+      const vmAnalysisFailureNotices = new WeakMap();
+      function vmAnalysisFailureNotice(document) {
+        if (!document) return '';
+        if (!vmAnalysisFailureNotices.has(document)) {
+          const codes = new Map();
+          for (const result of document.results) {
+            if (result.status === 'failed') codes.set(result.error.code, (codes.get(result.error.code) ?? 0) + 1);
+          }
+          let total = 0;
+          for (const count of codes.values()) total += count;
+          const byCode = [...codes].sort((left, right) => right[1] - left[1] || (left[0] < right[0] ? -1 : 1))
+            .map(([code, count]) => `${code} ${count.toLocaleString('en-US')}`).join(', ');
+          vmAnalysisFailureNotices.set(document, total === 0 ? ''
+            : `${total.toLocaleString('en-US')} ${total === 1 ? 'artifact' : 'artifacts'} could not be analyzed (${byCode}).`);
+        }
+        return vmAnalysisFailureNotices.get(document);
+      }
+
       function hasOnlyKeys(value, allowed) {
         return Object.keys(value).every(key => allowed.has(key));
       }

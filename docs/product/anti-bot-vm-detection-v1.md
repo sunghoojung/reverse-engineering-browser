@@ -65,8 +65,10 @@ analyzed again if it reappears. Each result is spooled in canonical form to an
 unnamed private file in the artifact store as it is produced. Memory then holds
 the document's other fields, a byte range per result, and the indexes of
 findings and exact request links. The document is digested, published and
-served as a stream, and VM Lab reads the `view=findings` projection, which
-lists failures and candidate or likely-vm tiers and counts the rest.
+served as a stream. VM Lab reads the `view=findings` projection, which lists
+failures and candidate or likely-vm tiers and counts the rest. It is streamed
+from the spool too, because every failure is listed, and VM Lab counts the
+failures by error code in its notice.
 
 Runtime evidence profile version `2`, introduced in producer `1.1.0`, binds the
 relevance weights and identity semantics. The HTTP analysis cache tracks changes to both

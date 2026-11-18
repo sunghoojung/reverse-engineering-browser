@@ -1680,10 +1680,30 @@ impl App {
                 }
                 let selection = selected
                     .then(|| [request, session, sequence].map(|value| value.unwrap().to_owned()));
-                let mut response = if selection.is_none() && !findings {
+                // The whole document and its findings view are streamed: every
+                // failure is listed, so the view can be as long as the document.
+                let mut response = if let Some([request, session, sequence]) = selection {
+                    let bytes = self
+                        .blocking(move || {
+                            let mut document =
+                                analysis.select(&request, &session, process_id, &sequence)?;
+                            if findings {
+                                vm::document::findings_of(&mut document);
+                            }
+                            Ok(serde_json::to_vec(&document)?)
+                        })
+                        .await?;
+                    bytes_response(bytes, "application/json")
+                } else {
                     let (sender, receiver) = tokio::sync::mpsc::channel(4);
-                    let length = analysis.byte_length();
-                    tokio::task::spawn_blocking(move || vm::document::stream(analysis, sender));
+                    let length = if findings {
+                        analysis.findings_length()?
+                    } else {
+                        analysis.byte_length()
+                    };
+                    tokio::task::spawn_blocking(move || {
+                        vm::document::stream(analysis, findings, sender)
+                    });
                     let mut response = bytes_response(
                         Body::from_stream(request_har::Chunks(receiver)),
                         "application/json",
@@ -1692,24 +1712,6 @@ impl App {
                         .headers_mut()
                         .insert("content-length", HeaderValue::from(length));
                     response
-                } else {
-                    let bytes = self
-                        .blocking(move || {
-                            let document = match selection {
-                                Some([request, session, sequence]) => {
-                                    let mut document = analysis
-                                        .select(&request, &session, process_id, &sequence)?;
-                                    if findings {
-                                        vm::document::findings_of(&mut document);
-                                    }
-                                    document
-                                }
-                                None => analysis.findings()?,
-                            };
-                            Ok(serde_json::to_vec(&document)?)
-                        })
-                        .await?;
-                    bytes_response(bytes, "application/json")
                 };
                 response
                     .headers_mut()

@@ -1599,7 +1599,10 @@ file in the artifact store as it is produced and streams the published canonical
 bytes, so memory holds the document's other fields and a byte range per result,
 however long the session. `view=findings` lists only failed results and those
 with a candidate or likely-vm tier, and `results_view` counts the tier-none
-results it leaves out. VM Lab reads this view. The view combines with a request
+results it leaves out. Every failure is listed, so the session view is streamed
+from the spool like the whole document. VM Lab reads this view and counts the
+failures by error code in its notice, because a failure is never a finding.
+The view combines with a request
 selection, and both are in the ETag. A request
 selection must supply all four nonzero canonical fields: `request_id`,
 `session_id`, `root_process_id` (32-bit), and `root_sequence_number` (64-bit).

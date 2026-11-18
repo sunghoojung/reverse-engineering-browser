@@ -772,7 +772,7 @@ assert.match(panel.nodes.selection.textContent,/1024 \/ 1,024/);assert.equal(pan
 console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, caps, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
 
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
-const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,trafficTargetParts,TRAFFIC_ROW_LIMIT})", {
+const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,trafficTargetParts,trafficTimeLabel,TRAFFIC_ROW_LIMIT})", {
   document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
   navigator: {clipboard: {writeText: async () => {}}}, setTimeout: () => 0,
   createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
@@ -792,6 +792,11 @@ for (const direction of [1, -1]) {
 }
 assert.equal(trafficUI.trafficSortedRequests([uiRequest("pending"), uiRequest("done", {time: 2})], "time", -1)[0].id, "done");
 assert.deepEqual(Array.from(trafficUI.trafficSortedRequests([uiRequest("native", {time: "12.300 ms"}), uiRequest("cdp", {time: 2})], "time"), request => request.id), ["cdp", "native"]);
+// A captured row's exact duration text gets the compact label a number gets,
+// so a request over a second fits the Time column.
+for (const [time, label] of [["1172.569 ms", "1.17 s"], ["3.705 ms", "3.7 ms"], ["349.031 ms", "349 ms"], [1172.569, "1.17 s"], ["pending", "—"]]) {
+  assert.equal(trafficUI.trafficTimeLabel(time), label, String(time));
+}
 // Supplied-package comparison is secondary, explicit, bounded and read-only.
 const comparisonResult = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-equal-v1.json'),'utf8'));
 const comparisonChangedInput = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-input-v1.json')));

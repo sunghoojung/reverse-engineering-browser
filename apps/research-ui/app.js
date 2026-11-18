@@ -4507,7 +4507,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             renderInspectorDetails([
               { key: 'First event', value: request.firstTimestamp, type: 'ns' },
               { key: 'Last event', value: request.lastTimestamp, type: 'ns' },
-              { key: 'Duration', value: trafficTimeLabel(request.time), type: 'time' },
+              // Exact here; the Traffic column shows it compact.
+              { key: 'Duration', value: request.time === 'pending' ? trafficTimeLabel(request.time) : String(request.time), type: 'time' },
               { key: 'Lifecycle', value: request.operation, type: 'state' },
               { key: 'Events', value: request.events.length, type: 'count' },
               { key: 'Phase breakdown', value: 'DNS, connection, TLS, waiting and download phases were not captured.', type: 'unavailable' }

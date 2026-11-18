@@ -2309,7 +2309,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
   // nil: the manifest's size and SHA-256 must both match the stored file.
   private func verifiedRequestBodyBytes(_ artifact: [String: Any]) -> [UInt8]? {
     guard let relativePath = artifact["content_path"] as? String,
-      let byteSize = artifact["byte_size"] as? Int, byteSize >= 0, byteSize <= 1 << 20,
+      let byteSize = artifact["byte_size"] as? Int, byteSize >= 0,
       let sha256 = artifact["sha256"] as? String
     else { return nil }
     let root = artifactStoreURL.resolvingSymlinksInPath().standardizedFileURL

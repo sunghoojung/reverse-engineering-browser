@@ -1376,7 +1376,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                self.blocking(move || {
+                self.cancellable(move |cancelled| {
                     origin_trace::build(
                         &evidence::recent(&options.store, 10000, 4096, "event")?,
                         &evidence::recent(&options.trace_store, 30000, 4096, "origin trace edge")?,
@@ -1386,6 +1386,7 @@ impl App {
                         process,
                         sequence.as_deref(),
                         Some(&options.artifacts),
+                        cancelled,
                     )
                 })
                 .await?

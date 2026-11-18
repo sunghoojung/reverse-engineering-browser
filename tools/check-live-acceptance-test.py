@@ -811,6 +811,10 @@ class Evidence(unittest.TestCase):
         rest, peak = memory
         self.run_.measurements[volume.NAME] = volume.Memory(
             4242, [rest] * 8, {"responses": [rest, peak, rest], "requests": [rest, peak], "script": [rest]})
+        # The same Brave without a session grows by half as much.
+        alone = rest + (peak - rest) // 2
+        self.run_.measurements[volume.REFERENCE] = volume.Memory(
+            4343, [rest] * 8, {"responses": [rest, alone], "requests": [alone], "script": [rest]})
 
     def test_volume_bodies_script_posts_and_memory(self):
         sizes = {"RESPONSE_SIZE": 64 * 1024, "REQUEST_SIZE": 48 * 1024, "SCRIPT_BYTES": 4096, "POSTS": 40,
@@ -823,7 +827,9 @@ class Evidence(unittest.TestCase):
             cases = ["response bodies past 512 MiB", "request bodies past 256 MiB", "compiled script past 16 MiB",
                      "40 small POSTs", "no content budget or size limit", "browser memory while the bodies pass"]
             self.assertEqual(self.statuses(), {case: "PASS" for case in cases}, self.report.lines)
-            self.assertIn("responses (0 MiB): peak 117 MiB (+19.5 MiB, 3 samples)", self.report.lines[-1].detail)
+            self.assertIn("responses (0 MiB) +20 MiB with capture, +10 MiB without, capture's share +10 MiB",
+                          self.report.lines[-1].detail)
+            self.assertTrue(any(note.startswith("volume memory: ") for note in self.run_.notes), self.run_.notes)
 
             # A body cut at an older browser's 16 MiB, a summary naming a budget, an
             # uncounted refusal and a browser that held a whole body each fail.
@@ -831,7 +837,8 @@ class Evidence(unittest.TestCase):
             self.backend.summary["checks"][0]["count"] = "1"
             self.backend.summary["checks"].append({"code": "request_content_not_retained", "category": "response_body",
                                                    "reason": "not_captured_session_budget", "count": "1"})
-            self.run_.measurements[volume.NAME].phases["responses"].append(100_000 + volume.RESPONSE_GROWTH_LIMIT // 1024)
+            self.run_.measurements[volume.NAME].phases["responses"].append(
+                110_000 + volume.SHARE_LIMITS["responses"] // 1024)
             self.report.lines.clear()
             self.run_.rows(refresh=True)
             volume.verify(self.run_)
@@ -845,6 +852,13 @@ class Evidence(unittest.TestCase):
         volume.check_memory(self.run_)
         self.assertEqual(self.report.lines[-1].status, "FAIL")
         self.assertIn("not found", self.report.lines[-1].detail)
+
+    def test_volume_memory_needs_the_page_without_a_session(self):
+        self.run_.measurements[volume.NAME] = volume.Memory(4242, [100_000] * 8, {"responses": [120_000]})
+        self.run_.measurements[volume.REFERENCE] = "no Brave executable to run the page without a session"
+        volume.check_memory(self.run_)
+        self.assertEqual(self.report.lines[-1].status, "FAIL")
+        self.assertIn("without a session: no Brave executable", self.report.lines[-1].detail)
 
     def test_reserve_refusals_are_named_and_counted(self):
         with tempfile.TemporaryDirectory() as directory:

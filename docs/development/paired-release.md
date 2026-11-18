@@ -234,7 +234,7 @@ debugger observations. An agent connected with
 | Content session | A 150-frame stack through wrappers matches DevTools frame for frame; 5,000-deep recursion keeps 1,024 frames and the omitted count; inline, `eval` and network script frames resolve; `fetch` from a Wasm import shows Wasm frames; an `await` chain shows async frames; one call site's stack is sent once | #429 |
 | Content session | A JS-set cookie and server `Set-Cookie` with SameSite and Secure variants: sent, received and blocked cookies match the server, and the JS write links to its script position | #430 |
 | Content session | An 8 KB GraphQL GET URL; a 5 MiB JSON POST, a multipart upload with a file, a 17 MiB POST and a password form post kept whole with exact bytes and digest, the password form marked `credential_form`; a stream-body `fetch`; 40 parallel scripts all kept | #436 |
-| Volume session (the content start, in a session of its own) | Four 72 MiB POSTs (288 MiB) and six 96 MiB responses (576 MiB) kept whole with the server's digests; a 24 MiB script kept whole as its compiled source; 5,000 small POSTs kept, any the artifact queue refused counted in `get_session_summary`; no budget or truncation named; the browser process grows by less than one body while they pass | #428, #436 |
+| Volume session (the content start, in a session of its own) | Four 72 MiB POSTs (288 MiB) and six 96 MiB responses (576 MiB) kept whole with the server's digests; a 24 MiB script kept whole as its compiled source; 5,000 small POSTs kept, any the artifact queue refused counted in `get_session_summary`; no budget or truncation named; capture adds less than one body to the browser process's footprint while they pass, against the same page in the same Brave without a session | #428, #436 |
 | Disk reserve session (the content start with `REB_ARTIFACT_DISK_RESERVE_MIB` above the free space) | A request and a response body are `not_captured_disk_reserve`, none is stored, and `get_session_summary` counts them under that reason | #436 |
 | Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation | #434 phase 1 |
 | Metadata session (the same start without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images`) | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` | #427, #429, #430 |
@@ -243,8 +243,13 @@ debugger observations. An agent connected with
 
 One acceptance item needs a profiler rather than a fixture: "the inactive probe
 path costs one atomic load and allocates nothing" (#425, #427, #434, #436).
-Record how it was measured. The volume session samples the browser process's
-resident memory itself and reports it at rest and at its peak.
+Record how it was measured. The volume session measures the browser process's
+physical footprint (`footprint -p`) itself: first through the same page in the
+same Brave without a session, then in the session, and reports each phase's
+growth and capture's share, the difference. Resident size would also count
+pages the allocator freed but had not returned, and Brave without a session
+already keeps hundreds of MiB after the uploads, so neither alone measures
+capture.
 
 The pausing debugger has no launch path: nothing in `run-live-session.sh` or the
 app passes `--reb-native-debugger` to Brave or `--native-debugger-socket` to the

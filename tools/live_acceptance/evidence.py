@@ -107,7 +107,9 @@ class Api:
         return found[0] if found else None
 
     def artifacts(self, **filters: object) -> list[dict]:
-        found, after = [], None
+        # From the manifest start: a listing without a cursor pages backward
+        # from the newest record, and next_after would then end it.
+        found, after = [], "0"
         while True:
             page = self.get("/api/artifacts", limit=5000, after=after, **filters)
             found += page["artifacts"]

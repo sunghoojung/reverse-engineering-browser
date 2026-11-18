@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import shutil
 import subprocess
 from typing import Callable
@@ -33,6 +34,8 @@ def brotli_encoder() -> tuple[Callable[[bytes], bytes] | None, str]:
 class Options:
     brotli: Callable[[bytes], bytes] | None = None
     brotli_source: str = ""
+    # The Brave under test, for a page an area runs again without a session.
+    brave: Path | None = None
 
 
 @dataclass

@@ -2,7 +2,7 @@
 
 A content session of its own moves more than 256 MiB of request bodies and
 more than 512 MiB of response bodies, each over 64 MiB, a script over 16 MiB
-and 5,000 small POSTs, and samples the browser process's memory while they
+and 5,000 small POSTs, and measures the browser process's memory while they
 pass. Older browsers stopped at a 256 MiB request and a 512 MiB response
 budget and kept at most 16 MiB of a body. Current capture has no such limit:
 the 32 MiB in-flight pool bounds what the browser holds, so a fast body waits
@@ -14,7 +14,10 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import cache
+from pathlib import Path
+import re
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -38,24 +41,32 @@ POSTS = 5000
 # behind: a regression.
 TRANSFER_REFUSED_LIMIT = 288
 TRANSFER_REFUSED = "not_captured_transfer_refused"
-# Response bodies stream from the network service through the browser's tee
-# to the renderer, so Chromium itself holds none of them in the browser
-# process: while they pass it may grow by less than one body. A browser that
-# held a whole body would grow by at least 96 MiB; the in-flight pool is
-# 32 MiB, and the rest is its own working set.
-RESPONSE_GROWTH_LIMIT = RESPONSE_SIZE
-# Chromium itself keeps an in-memory request body in the browser process
-# while its request runs, so that phase may grow by one body and still less
-# than a second: capture that held its own copy would reach two.
-REQUEST_GROWTH_LIMIT = 2 * REQUEST_SIZE
+# The browser's own memory follows what a page sends and receives: the same
+# Brave without a session keeps hundreds of MiB after these uploads. So the
+# same phases first run in that Brave without a session, and capture's share
+# is the session's growth less that one. The pool holds 32 MiB; a capture
+# that kept a body after its request, or copied one, adds a whole body, so
+# each phase's share stays under one of its bodies.
+SHARE_LIMITS = {"responses": RESPONSE_SIZE, "requests": REQUEST_SIZE}
 SAMPLE_SECONDS = 0.25
 BASELINE_SECONDS = 3
 # What the session must move past: the budgets older browsers stopped at.
 REQUEST_TOTAL_MIN, RESPONSE_TOTAL_MIN = 256 * MIB, 512 * MIB
 # What older browsers stopped at; the summary must name none of it.
 OLDER_LIMITS = {"not_captured_session_budget", "not_retained_session_budget", "captured_truncated"}
+# The same phases without capture, at their own paths and beacons.
+REFERENCE = "volume-reference"
+PHASES = ("responses", "requests", "script")
 
-INDEX = document("volume", f"""<script>
+
+def page(name: str, base: str, posts: bool) -> str:
+    post_step = f"""
+  await REB.run('{name}:posts', async () => {{
+    const pad = 'p'.repeat(400);
+    for (let i = 0; i < {POSTS}; i++) await fetch('{base}/post', {{method: 'POST', body: 'reb-post-' + i + '-' + pad}});
+    return {POSTS};
+  }});""" if posts else ""
+    return document(name, f"""<script>
 function bytes(length, seed) {{
   const out = new Uint8Array(length);
   const words = new Uint32Array(out.buffer);
@@ -68,35 +79,34 @@ function bytes(length, seed) {{
 }}
 (async () => {{
   // The driver reads the browser's memory at rest first.
-  await REB.wait('volume:go', 120);
-  await REB.run('volume:responses', async () => {{
+  await REB.beacon('{name}:ready');
+  await REB.wait('{name}:go', 120);
+  await REB.run('{name}:responses', async () => {{
     const sizes = [];
     for (let i = 0; i < {RESPONSES}; i++) {{
-      sizes.push((await (await fetch('/volume/response?i=' + i)).arrayBuffer()).byteLength);
+      sizes.push((await (await fetch('{base}/response?i=' + i)).arrayBuffer()).byteLength);
     }}
     return sizes;
   }});
-  await REB.run('volume:requests', async () => {{
+  await REB.run('{name}:requests', async () => {{
     for (let i = 0; i < {REQUESTS}; i++) {{
-      await fetch('/volume/request?i=' + i, {{method: 'POST', body: bytes({REQUEST_SIZE}, 1000 + i)}});
+      await fetch('{base}/request?i=' + i, {{method: 'POST', body: bytes({REQUEST_SIZE}, 1000 + i)}});
     }}
     return {REQUESTS};
   }});
-  await REB.run('volume:script', () => new Promise((resolve, reject) => {{
+  await REB.run('{name}:script', () => new Promise((resolve, reject) => {{
     const script = document.createElement('script');
-    script.src = '/volume/script.js';
+    script.src = '{base}/script.js';
     script.onload = () => resolve(globalThis.rebVolumeScript);
     script.onerror = () => reject(new Error('the volume script failed'));
     document.head.append(script);
-  }}));
-  await REB.run('volume:posts', async () => {{
-    const pad = 'p'.repeat(400);
-    for (let i = 0; i < {POSTS}; i++) await fetch('/volume/post', {{method: 'POST', body: 'reb-post-' + i + '-' + pad}});
-    return {POSTS};
-  }});
+  }}));{post_step}
 }})();
 </script>""")
-RESULTS = ["volume:responses", "volume:requests", "volume:script", "volume:posts"]
+
+
+INDEX = page(NAME, "/volume", posts=True)
+RESULTS = [f"{NAME}:{phase}" for phase in PHASES] + [f"{NAME}:posts"]
 
 
 def script_source() -> bytes:
@@ -110,12 +120,15 @@ def _script(size: int) -> bytes:
 
 def install(fx: Fixture, _options: Options) -> None:
     fx.page("/volume/index.html", INDEX)
-    fx.route("/volume/response", lambda r: bytes_response(
-        payload(f"volume-response-{r.query.get('i')}", RESPONSE_SIZE), "application/octet-stream"),
-        keep_bodies=False)
-    fx.route("/volume/request", lambda r: text_response(f"received {len(r.body)} bytes\n", "text/plain"),
-             keep_bodies=False)
-    fx.route("/volume/script.js", lambda _r: bytes_response(script_source(), "text/javascript"), keep_bodies=False)
+    fx.page("/volume/reference/index.html", page(REFERENCE, "/volume/reference", posts=False))
+    for base in ("/volume", "/volume/reference"):
+        fx.route(f"{base}/response", lambda r: bytes_response(
+            payload(f"volume-response-{r.query.get('i')}", RESPONSE_SIZE), "application/octet-stream"),
+            keep_bodies=False)
+        fx.route(f"{base}/request", lambda r: text_response(f"received {len(r.body)} bytes\n", "text/plain"),
+                 keep_bodies=False)
+        fx.route(f"{base}/script.js", lambda _r: bytes_response(script_source(), "text/javascript"),
+                 keep_bodies=False)
     fx.route("/volume/post", lambda r: text_response("ok\n", "text/plain"))
 
 
@@ -134,34 +147,44 @@ def browser_pid(session: Session) -> int | None:
     return None
 
 
-def resident_kib(pid: int) -> int | None:
-    out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True,
-                         check=False).stdout.strip()
-    return int(out) if out.isdigit() else None
+FOOTPRINT = re.compile(r"Footprint: ([0-9.]+) (KB|MB|GB)")
+
+
+def footprint_kib(pid: int) -> int | None:
+    """The process's physical footprint, the memory macOS charges it for.
+
+    Resident size also counts pages the allocator has freed but not yet
+    returned, so it would charge capture for memory nothing holds.
+    """
+    out = subprocess.run(["footprint", "-p", str(pid)], capture_output=True, text=True, check=False).stdout
+    found = FOOTPRINT.search(out)
+    if not found:
+        return None
+    return round(float(found[1]) * {"KB": 1, "MB": 1024, "GB": 1024 * 1024}[found[2]])
 
 
 @dataclass
 class Memory:
-    """Resident memory samples of the browser process, in KiB, by page phase."""
+    """Physical footprint samples of a browser process, in KiB, by page phase."""
 
     pid: int
     baseline: list[int] = field(default_factory=list)
     phases: dict[str, list[int]] = field(default_factory=dict)
-    phase: str = "responses"
+    phase: str = PHASES[0]
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
 
     def rest(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            if (kib := resident_kib(self.pid)) is not None:
+            if (kib := footprint_kib(self.pid)) is not None:
                 self.baseline.append(kib)
             time.sleep(SAMPLE_SECONDS)
 
     def start(self) -> None:
         def sample() -> None:
             while not self._stop.is_set():
-                if (kib := resident_kib(self.pid)) is not None:
+                if (kib := footprint_kib(self.pid)) is not None:
                     self.phases.setdefault(self.phase, []).append(kib)
                 self._stop.wait(SAMPLE_SECONDS)
 
@@ -173,28 +196,63 @@ class Memory:
         if self._thread:
             self._thread.join()
 
+    def growth(self, phase: str) -> int | None:
+        """The phase's peak over the median at rest, in bytes."""
+        samples = self.phases.get(phase)
+        if not self.baseline or not samples:
+            return None
+        return (max(samples) - sorted(self.baseline)[len(self.baseline) // 2]) * 1024
+
+
+def measure(run: Run, name: str, pid: int) -> Memory:
+    """Samples one browser through the page's phases; each ends when the page reports it."""
+    memory = Memory(pid)
+    run.fixture.wait_beacons([f"{name}:ready"], 120)
+    memory.rest(BASELINE_SECONDS)
+    memory.start()
+    run.fixture.release(f"{name}:go")
+    try:
+        for phase, after in zip(PHASES, PHASES[1:] + ("",)):
+            run.wait(ISSUE, [f"{name}:{phase}"], 900)
+            memory.phase = after
+    finally:
+        memory.stop()
+    return memory
+
+
+def reference(run: Run) -> Memory | str:
+    """The same phases in the same Brave without a session, or why they did not run."""
+    if run.options.brave is None:
+        return "no Brave executable to run the page without a session"
+    with tempfile.TemporaryDirectory(prefix="reb-volume-reference-") as profile:
+        browser = subprocess.Popen(
+            [str(run.options.brave), f"--user-data-dir={Path(profile) / 'profile'}", "--no-first-run",
+             "--no-default-browser-check", run.url("/volume/reference/index.html")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            return measure(run, REFERENCE, browser.pid)
+        finally:
+            browser.terminate()
+            try:
+                browser.wait(60)
+            except subprocess.TimeoutExpired:
+                browser.kill()
+                browser.wait()
+
 
 def drive(run: Run) -> None:
+    # Before the session's page, so the two browsers never pass bodies at once.
+    run.measurements[REFERENCE] = reference(run)
     run.open("/volume/index.html")
     pid = browser_pid(run.session)
-    memory = Memory(pid) if pid else None
-    run.measurements[NAME] = memory
-    if memory:
-        memory.rest(BASELINE_SECONDS)
-        memory.start()
-    run.fixture.release("volume:go")
-    try:
-        # Each phase ends when the page reports it, so a sample is charged to
-        # the bodies that were passing when it was taken.
-        for name, after in (("volume:responses", "requests"), ("volume:requests", "script")):
-            run.wait(ISSUE, [name], 900)
-            if memory:
-                memory.phase = after
-        run.wait(ISSUE, ["volume:script"], 300)
-    finally:
-        if memory:
-            memory.stop()
-    run.wait(ISSUE, ["volume:posts"], 900)
+    if pid is None:
+        run.measurements[NAME] = None
+        run.fixture.release(f"{NAME}:go")
+        for phase in PHASES:
+            run.wait(ISSUE, [f"{NAME}:{phase}"], 900)
+    else:
+        run.measurements[NAME] = measure(run, NAME, pid)
+    run.wait(ISSUE, [f"{NAME}:posts"], 900)
 
 
 # Verification ----------------------------------------------------------------
@@ -333,33 +391,36 @@ def check_no_older_limit(run: Run) -> None:
 
 
 def check_memory(run: Run) -> None:
-    memory: Memory | None = run.measurements.get(NAME)
     case = "browser memory while the bodies pass"
+    memory: Memory | None = run.measurements.get(NAME)
+    without: Memory | str = run.measurements.get(REFERENCE) or "it did not run"
     if memory is None:
-        run.report.failed(ISSUE, case, "the capture browser's process was not found")
+        run.report.failed("#428 #436", case, "the capture browser's process was not found")
         return
-    if not memory.baseline or not memory.phases.get("responses") or not memory.phases.get("requests"):
-        counts = {phase: len(samples) for phase, samples in memory.phases.items()}
-        run.report.failed(ISSUE, case, f"{len(memory.baseline)} samples at rest and {counts} while they passed")
+    if isinstance(without, str):
+        run.report.failed("#428 #436", case, f"the same page without a session: {without}")
         return
-    rest = sorted(memory.baseline)[len(memory.baseline) // 2]
     problems: list[str] = []
     shown = []
-    for phase, limit, moved in (("responses", RESPONSE_GROWTH_LIMIT, RESPONSES * RESPONSE_SIZE),
-                                ("requests", REQUEST_GROWTH_LIMIT, REQUESTS * REQUEST_SIZE),
-                                ("script", None, len(script_source()))):
-        samples = memory.phases.get(phase) or []
-        if not samples:
+    for phase, moved in (("responses", RESPONSES * RESPONSE_SIZE), ("requests", REQUESTS * REQUEST_SIZE),
+                         ("script", len(script_source()))):
+        grew, alone = memory.growth(phase), without.growth(phase)
+        if grew is None or alone is None:
+            problems.append(f"no {phase} samples: {len(memory.phases.get(phase) or [])} with capture, "
+                            f"{len(without.phases.get(phase) or [])} without")
             continue
-        growth = (max(samples) - rest) * 1024
-        shown.append(f"{phase} ({moved / MIB:.0f} MiB): peak {max(samples) / 1024:.0f} MiB "
-                     f"(+{growth / MIB:.1f} MiB, {len(samples)} samples)")
-        if limit is not None and growth >= limit:
-            problems.append(f"the browser grew by {growth / MIB:.1f} MiB while the {phase} passed, "
-                            f"at least {limit // MIB} MiB")
-    run.report.check("#428 #436", case, problems,
-                     f"browser process {memory.pid} resident {rest / 1024:.0f} MiB at rest; " + "; ".join(shown)
-                     + f"; sampled every {SAMPLE_SECONDS} s")
+        share = grew - alone
+        shown.append(f"{phase} ({moved / MIB:.0f} MiB) +{grew / MIB:.0f} MiB with capture, "
+                     f"+{alone / MIB:.0f} MiB without, capture's share {share / MIB:+.0f} MiB")
+        limit = SHARE_LIMITS.get(phase)
+        if limit is not None and share >= limit:
+            problems.append(f"capture added {share / MIB:.0f} MiB while the {phase} passed, at least one "
+                            f"{limit // MIB} MiB body")
+    rest = sorted(memory.baseline)[len(memory.baseline) // 2] if memory.baseline else 0
+    measured = (f"browser process {memory.pid} footprint {rest / 1024:.0f} MiB at rest; " + "; ".join(shown)
+                + f"; sampled every {SAMPLE_SECONDS} s")
+    run.notes.append(f"volume memory: {measured}")
+    run.report.check("#428 #436", case, problems, measured)
 
 
 def verify(run: Run) -> None:

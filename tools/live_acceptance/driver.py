@@ -214,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
     if not (args.brave.is_file() and os.access(args.brave, os.X_OK)):
         print(f"UNAVAILABLE: no Brave executable at {args.brave}", file=sys.stderr)
         return 2
+    options.brave = args.brave
     if not args.reb_api.is_file():
         print(f"UNAVAILABLE: no reb-api at {args.reb_api}; run make origin-trace-backend", file=sys.stderr)
         return 2

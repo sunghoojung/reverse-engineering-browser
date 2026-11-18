@@ -85,8 +85,7 @@ read the run's values anyway (see below).
 | `call_depth` | 1,000 | 10,000 |
 | `deadline_ms` (wall clock, from when the run starts reading the module) | 2,000 | 10,000 |
 
-Fixed bounds: a 16 MiB module (larger artifacts are refused before compilation,
-which no deadline can interrupt), a 1 MiB request body, 1,000 arguments, 256
+Fixed bounds: a module of any size, a 1 MiB request body, 1,000 arguments, 256
 stubs with up to 256 sequence entries, 16 writes of at most 256 KiB in total,
 16 reads of at most 32 KiB in total, 256 recorded import calls with up to 16
 arguments and 16 results each (`args_truncated`, `results_truncated`), 16
@@ -134,20 +133,24 @@ A module with more than 16 memories or tables ends as `memory_limit` or
 table, element or data initializer) over 64 operators is refused with 422
 before the interpreter sees it, because wasmi builds and evaluates one
 recursively, one native stack frame per operator; real modules use one to
-three. Every function is compiled when the module is (eager compilation), so a
-large body costs no fuel and a call never stops for compilation. Element
-segments hold at most 262,144 items in total, active or passive, because
-instantiation materializes every one; data segments are bounded by the module
-size.
+three. Every body is validated when the module is, and each function is
+translated to wasmi's bytecode on its first call (lazy translation).
+Translation costs no fuel, so a large body runs within an ordinary fuel limit.
+Element segments hold at most 262,144 items in total, active or passive,
+because instantiation materializes every one; data segments are bounded by
+the module size.
 
-Compilation and instantiation cannot be interrupted. They are bounded only by
-those caps: the 16 MiB module, 64-operator constant expressions and 262,144
-element items. Their time counts toward the deadline, and a deadline that
-passes during them ends the run as `deadline_exceeded` in phase `instantiate`
-before any function is called. Compiling needs about 25 to 30 times the module
-size in memory at its peak (a 6.9 MB body of nested ifs peaked near 320 MB
-resident), so a module at the 16 MiB cap can hold about 480 MB of the backend's
-memory while it compiles.
+Validation, instantiation and one function's translation cannot be
+interrupted. Validation is linear in the module and small in memory;
+instantiation is bounded by the 64-operator constant expressions and 262,144
+element items; one translation is bounded by the 7,654,321-byte body engines
+accept. Their time counts toward the deadline, and a deadline that passes
+during validation or instantiation ends the run as `deadline_exceeded` in phase
+`instantiate` before any function is called. Translating needs about 25 to 30
+times the body size in memory at its peak (a 6.9 MB body of nested ifs peaked
+near 320 MB resident), and only the functions a run reaches are translated, so
+a module of tens of MiB costs what its called functions cost, not gigabytes up
+front.
 
 Fuel is granted in 100,000-unit slices. The deadline is checked before each
 call, between slices and at every import call, so a run ends within one

@@ -39,18 +39,9 @@
           folders: 32,
           files: 64,
           folder_depth: 4,
-          file_bytes: 32 * 1024,
-          total_file_bytes: 512 * 1024,
-          document_bytes: 1024 * 1024,
           variables: 32,
           variable_value_bytes: 4 * 1024,
-          variable_bytes: 16 * 1024,
-          evidence_bytes: 768 * 1024,
-          selected_artifact_bytes: 64 * 1024,
-          execution_timeout_ms: 2000,
-          logs: 64,
-          log_bytes: 1024,
-          result_bytes: 32 * 1024
+          variable_bytes: 16 * 1024
         }
       });
 
@@ -104,8 +95,15 @@
         sourceNoticeKind: 'warning',
         sourceSearchIndex: 0,
         sourceWasm: false,
-        wasmCache: new Map(),
-        wasmRequests: new Map(),
+        // A Find in Inspect waiting for its count or its page of matches.
+        sourceWasmFind: null,
+        // A line asked for on another page, scrolled to once it mounts.
+        sourcePagedReveal: null,
+        // The Find counting over the selected document, and the hex page shown last.
+        sourceFind: null,
+        sourceHexPage: null,
+        // Ticks the elapsed seconds of a first Inspect page while it is read.
+        wasmInspectionTicker: null,
         sourceDeobfuscated: false,
         sourceFormatted: false,
         sourceFormatChoices: new Map(),
@@ -254,7 +252,7 @@
         analystActiveRunId: null,
         analystCancelRunId: null,
         analystNextRunId: 1,
-        analystTotalRuns: 0,
+        analystRunStartedAt: null,
         analystHistoryEvictions: 0,
         analystRuns: [],
         analystSelectedRunId: null,

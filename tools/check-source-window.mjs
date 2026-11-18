@@ -5,17 +5,15 @@ import {runInNewContext} from 'node:vm';
 import {performance} from 'node:perf_hooks';
 
 export async function checkSourceWindowModel(root) {
-  const model=runInNewContext((await readFile(join(root,'apps/research-ui/source_syntax.js'),'utf8'))+
-    ';({sourceDocumentIndex,sourceDocumentOffset,sourceDocumentPosition,sourceDocumentLine,sourceDocumentMatches,sourceDocumentWindow,sourceWindowMapping,prettyPrintSource,sourceName,formatWasmHex,wasmHexByteLimit,'+
-    'createSourceHighlighter,createSourceTokenizer,sourceSyntaxTokens,sourceHasLongLine,sourcePrettyByDefault,SOURCE_COLOR_SLICE_UNITS,SOURCE_DOCUMENT_LIMIT,SOURCE_PRETTY_INPUT_LIMIT,SOURCE_HIGHLIGHT_TOKEN_LIMIT})', {URL});
-  const wasmLimit=model.wasmHexByteLimit();
-  assert.equal(wasmLimit % 16, 0);
-  assert(wasmLimit >= 990157, 'A retained ~990 KB module must format in full');
+  const script=await readFile(join(root,'apps/research-ui/source_syntax.js'),'utf8');
+  // Without TextDecoder the hex rows are built from character codes instead.
+  const plain=runInNewContext(script+';({formatWasmHex})', {URL});
+  const model=runInNewContext(script+
+    ';({sourceDocumentIndex,sourceDocumentOffset,sourceDocumentPosition,sourceDocumentLine,sourceDocumentMatches,sourceDocumentWindow,sourceWindowMapping,prettyPrintSource,sourceName,formatWasmHex,'+
+    'sourceHexText,sourceHexLayout,sourceHexPage,sourceHexRows,sourceHexColumnByte,SOURCE_HEX_PAGE_ROWS,startSourceFind,cancelSourceFind,sourceFindMatch,sourceFindBetween,sourceFindMarks,sourceFindTextDocument,sourceFindHexDocument,SOURCE_FIND_CHUNK_UNITS,'+
+    'createSourceHighlighter,createSourceTokenizer,sourceSyntaxTokens,sourceHasLongLine,sourcePrettyByDefault,SOURCE_COLOR_SLICE_UNITS,SOURCE_HIGHLIGHT_TOKEN_LIMIT})', {URL, TextDecoder});
   assert.equal(model.formatWasmHex(new Uint8Array(32)).split('\n')[0].length, 77);
-  const formattedLimit=model.formatWasmHex(new Uint8Array(wasmLimit));
-  const hexNotice=`\n\n[Hex preview limited to the first ${wasmLimit} bytes; original bytes are unchanged]`;
-  assert.equal(formattedLimit.length, (wasmLimit / 16) * 78 - 1);
-  assert(formattedLimit.length + hexNotice.length <= 8 * 1024 * 1024, 'The labeled prefix must stay inside the editor index');
+  const hexCosts = checkHexPages(model, plain);
   assert.equal(model.sourceName({kind:'wasm', url:'https://accounts.hcaptcha.com/hcaptcha.html', capture_origin:'webassembly_instantiate', artifact_id:'5', source_type:'artifact'}), 'wasm webassembly instantiate');
   assert.equal(model.sourceName({kind:'wasm', url:'https://cdn.invalid/path/module.wasm?x=1', capture_origin:'webassembly_instantiate', artifact_id:'6', source_type:'artifact'}), 'module.wasm');
   assert.equal(model.sourceName({kind:'javascript', url:'https://accounts.hcaptcha.com/hcaptcha.html', artifact_id:'7', source_type:'artifact'}), 'hcaptcha.html');
@@ -34,7 +32,7 @@ export async function checkSourceWindowModel(root) {
   const index=model.sourceDocumentIndex(text);
   const matches=model.sourceDocumentMatches(index,'lateNeedle');
   assert.equal(matches.matches.length,1);assert.equal(matches.matches[0].line,20000);assert.equal(matches.matches[0].column,6);
-  assert.equal(index.complete,true);assert.equal(index.anchors.length,157);
+  assert.equal(index.length,text.length);assert.equal(index.anchors.length,157);
   for(const line of [0,998,999,1000,1001,19999,20000]) {
     const window=model.sourceDocumentWindow(index,line,6);
     assert(window.rows.some(row=>row.line===line));assert(window.rows.length<=1000);
@@ -64,9 +62,9 @@ export async function checkSourceWindowModel(root) {
     assert(window.rows.reduce((sum,row)=>sum+row.text.length,0)<=528384);
     costs.push({name,codeUnits:source.length,indexMs:Math.round(indexedAt-before),searchMs:Math.round(searchedAt-indexedAt),windowMs:Math.round(performance.now()-searchedAt),anchors:indexed.anchors.length,rows:window.rows.length,matches:result.matches.length});
   }
-  const bounded=model.sourceDocumentIndex('a'.repeat(model.SOURCE_DOCUMENT_LIMIT)+'outside');assert.equal(bounded.complete,false);assert.equal(model.sourceDocumentMatches(bounded,'outside').matches.length,0);
+  costs.push(...hexCosts, ...checkDocumentFind(model));
   costs.push(...checkCheckpointedColors(model));
-  console.log('PASS sparse retained-source index, complete 20,001-line Find, Unicode/CRLF/BOM, bounds, minified late-column excerpts, checkpointed colors and formatted-line mapping on a 12 MiB one-line bundle; measured model costs '+JSON.stringify(costs));
+  console.log('PASS sparse retained-source index, complete 20,001-line Find, Unicode/CRLF/BOM, bounds, minified late-column excerpts, an exact any-size Find in slices (chunk-spanning matches, ranks, row marks) over a 72 Mi-unit text and a 20 MiB hex view, paged hex rows, checkpointed colors and formatted-line mapping on a 12 MiB one-line bundle; measured model costs '+JSON.stringify(costs));
   return costs;
 }
 
@@ -85,6 +83,114 @@ export function minifiedBundle(units) {
 }
 
 // Checkpointed windows must color exactly as one tokenizer run from the start.
+// The hex rows of the old whole-buffer formatter, for comparison.
+function referenceHex(bytes, base = 0) {
+  const rows = [], digits = Math.max(8, Math.max(0, base + bytes.length - 1).toString(16).length);
+  for (let offset = 0; offset < bytes.length; offset += 16) {
+    const chunk = [...bytes.subarray(offset, offset + 16)];
+    rows.push(`${(base + offset).toString(16).padStart(digits, '0')}  ${chunk.map(byte => byte.toString(16).padStart(2, '0')).join(' ').padEnd(47, ' ')}  |${chunk.map(byte => byte >= 32 && byte < 127 ? String.fromCharCode(byte) : '.').join('')}|`);
+  }
+  return rows.join('\n');
+}
+
+function seeded(length, seed = 7) {
+  const bytes = new Uint8Array(length);
+  for (let index = 0, value = seed; index < length; index++) {value = (Math.imul(value, 1103515245) + 12345) >>> 0; bytes[index] = value >>> 24;}
+  return bytes;
+}
+
+function checkHexPages(model, plain) {
+  for (const [length, base] of [[0, 0], [1, 0], [15, 0], [16, 0], [17, 0], [1000, 0], [4096 + 7, 0], [40, 0xfffffff0], [33, 2 ** 40]]) {
+    const bytes = seeded(length, length + 1);
+    assert.equal(model.formatWasmHex(bytes, base), referenceHex(bytes, base), `hex rows of ${length} bytes at ${base}`);
+    assert.equal(plain.formatWasmHex(bytes, base), referenceHex(bytes, base), `hex rows of ${length} bytes at ${base} without TextDecoder`);
+  }
+  // Pages are slices of the whole view, every row the same width.
+  const bytes = seeded(16 * 2500 + 9), whole = referenceHex(bytes), rows = whole.split('\n');
+  assert.equal(model.sourceHexRows(bytes), 2501);
+  for (const line of [0, 999, 1000, 2499, 2500, 99999]) {
+    const page = model.sourceHexPage(bytes, line), block = Math.min(2, Math.floor(line / 1000));
+    assert.equal(page.lineBase, block * 1000);assert.equal(page.lineCount, 2501);assert.equal(page.rowUnits, 78);
+    assert.equal(page.text, rows.slice(block * 1000, block * 1000 + 1000).join('\n'));
+    assert.equal(page.row(page.lineBase), page.lineBase * 16);assert.equal(page.row(page.lineBase - 1), null);
+  }
+  const empty = model.sourceHexPage(new Uint8Array(0));
+  assert.deepEqual([empty.text, empty.lineCount], ['', 1]);
+  // Every column of a row names its byte: two digits, then its printable character.
+  const page = model.sourceHexPage(bytes, 2500), last = rows[2500];
+  const named = Array.from({length: last.length}, (_, column) => model.sourceHexColumnByte(page, 2500, column));
+  assert.deepEqual(named.map((byte, column) => byte === null ? null : `${column}:${byte - 2500 * 16}`).filter(Boolean),
+    [...Array.from({length: 9}, (_, index) => [`${10 + 3 * index}:${index}`, `${11 + 3 * index}:${index}`]).flat(), ...Array.from({length: 9}, (_, index) => `${60 + index}:${index}`)]);
+  const large = seeded(20 * 1024 * 1024), started = performance.now();
+  let units = 0;
+  for (let line = 0; line < model.sourceHexRows(large); line += model.SOURCE_HEX_PAGE_ROWS) units += model.sourceHexPage(large, line).text.length;
+  return [{name: 'hex pages of 20 MiB', pages: Math.ceil(model.sourceHexRows(large) / 1000), units, ms: Math.round(performance.now() - started)}];
+}
+
+// Runs a search to its end in slices of at most one chunk each.
+function finish(model, document, query) {
+  const queue = [];
+  const search = model.startSourceFind(document, query, {schedule: step => queue.push(step), sliceMs: 0, now: () => 0});
+  let slices = 1;
+  while (queue.length) {queue.shift()(); slices++;}
+  return {search, slices};
+}
+
+function reference(text, query) {
+  const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu'), found = [];
+  for (let match = pattern.exec(text); match; match = pattern.exec(text)) found.push({offset: match.index, length: match[0].length});
+  return found;
+}
+
+function checkDocumentFind(model) {
+  const units = model.SOURCE_FIND_CHUNK_UNITS;
+  // Runs that cross chunk boundaries, so a match runs into the next chunk and
+  // that chunk's rescan starts after it; folded and astral characters too.
+  const pieces = [];
+  for (let at = 0; at < 6; at++) pieces.push('x'.repeat(units - 3 - at), 'a'.repeat(5 + 2 * at), 'KKkİi😀🌍');
+  const text = pieces.join('');
+  for (const query of ['aa', 'aaa', 'a', 'k', 'KK', 'i', '😀', 'x😀', 'absent', 'xa']) {
+    const expected = reference(text, query), {search, slices} = finish(model, model.sourceFindTextDocument(text), query);
+    assert.equal(search.status, 'done');assert.equal(search.total, expected.length, `count of ${query}`);assert(slices > 1);
+    expected.forEach((match, rank) => assert.deepEqual({...model.sourceFindMatch(search, rank)}, match, `${query} match ${rank}`));
+    assert.equal(model.sourceFindMatch(search, expected.length), null);
+    const from = units - 10, to = 3 * units + 40;
+    assert.deepEqual(Array.from(model.sourceFindBetween(search, from, to), match => ({...match})), expected.filter(match => match.offset >= from && match.offset < to));
+    const ranges = [[0, 10], [units - 6, units + 4], [units, 2 * units + 1], [2 * units + 5, 6 * units], [6 * units, text.length]];
+    assert.deepEqual(Array.from(model.sourceFindMarks(search, ranges)), ranges.map(([start, end]) => expected.some(match => match.offset >= start && match.offset < end)));
+  }
+  for (const query of ['x'.repeat(513), 'x\ny', 'x y']) assert(model.startSourceFind(model.sourceFindTextDocument(text), query).error);
+  assert.equal(model.startSourceFind(model.sourceFindTextDocument(text), '').status, 'done');
+  // Cancel stops the remaining slices.
+  const queue = [], cancelled = model.startSourceFind(model.sourceFindTextDocument(text), 'a', {schedule: step => queue.push(step), sliceMs: 0, now: () => 0});
+  model.cancelSourceFind(cancelled);
+  while (queue.length) queue.shift()();
+  assert.equal(cancelled.status, 'running');assert(cancelled.scanned < cancelled.document.chunks);
+  const costs = [];
+  // Past the former 64 Mi-unit document bound, every match is counted.
+  const big = 'f'.repeat(72 * 1024 * 1024 - 32) + 'lateNeedle lateneedle LATENEEDLE', started = performance.now();
+  const late = model.startSourceFind(model.sourceFindTextDocument(big), 'lateNeedle', {schedule: step => step(), sliceMs: 1e9});
+  assert.equal(late.status, 'done');assert.equal(late.total, 3);
+  assert.equal(model.sourceFindMatch(late, 2).offset, big.length - 10);
+  costs.push({name: 'Find in 72 Mi units', matches: late.total, ms: Math.round(performance.now() - started)});
+  const frequent = performance.now(), every = model.startSourceFind(model.sourceFindTextDocument(big), 'f', {schedule: step => step(), sliceMs: 1e9});
+  assert.equal(every.total, big.length - 32);
+  costs.push({name: 'count 75,497,440 matches', ms: Math.round(performance.now() - frequent), chunks: every.counts.length});
+  // Hex: the rows of every page, laid end to end, are the searched text.
+  const bytes = seeded(4 * 1024 * 1024 + 5), whole = referenceHex(bytes);
+  for (const query of ['00 0', 'ff  |', '|..', '0001000']) {
+    const expected = reference(whole, query).map(match => ({offset: match.offset, length: match.length}));
+    assert(expected.length > 1, `the fixture holds ${query}`);
+    const {search} = finish(model, model.sourceFindHexDocument(bytes), query);
+    assert.equal(search.total, expected.length, `hex count of ${query}`);
+    for (const rank of [0, 1, Math.floor(expected.length / 2), expected.length - 1]) assert.deepEqual({...model.sourceFindMatch(search, rank)}, expected[rank]);
+  }
+  const hex = seeded(20 * 1024 * 1024), hexStarted = performance.now();
+  const counted = model.startSourceFind(model.sourceFindHexDocument(hex), '00 00', {schedule: step => step(), sliceMs: 1e9});
+  costs.push({name: 'Find over 20 MiB of hex rows', matches: counted.total, ms: Math.round(performance.now() - hexStarted)});
+  return costs;
+}
+
 function checkCheckpointedColors(model) {
   const javascript = {kind: 'javascript'};
   const types = text => {

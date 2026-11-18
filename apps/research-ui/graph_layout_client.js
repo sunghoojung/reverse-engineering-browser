@@ -2,12 +2,12 @@
  * (graph-layout-v1, protocol/http-api.md#graph-layout), shared by the flow
  * graph and block graph layout workers, which load it with importScripts; the
  * page loads it for the flow graph's on-thread fallback. It sends the graphs
- * that fit the route's limits, checks each answer's shape, and keeps
- * Triskel's drawing only where it is not much wider or taller than the
- * caller's own layout. A graph it does not lay out gets a reason, `{code}`
- * with the detail its code names, which each view words for itself:
- *   too_large       past the route's per-graph limits, or Triskel says so
- *   request_budget  past what one request holds: `limit` is graphs or nodes
+ * it is given, checks each answer's shape, and keeps Triskel's drawing only
+ * where it is not much wider or taller than the caller's own layout. A graph
+ * it does not lay out gets a reason, `{code}` with the detail its code
+ * names, which each view words for itself:
+ *   large           past AUTOMATIC, so only sent when the caller asks (`all`)
+ *   cancelled       the caller's signal stopped the request
  *   wider, taller   Triskel's drawing is `ratio` times the caller's
  *   mismatch        the answer does not fit what was sent
  *   failed          Triskel's `status` (failed or timeout) and `detail`
@@ -18,16 +18,18 @@
 'use strict';
 
 const graphLayoutClient = (() => {
-  /* The route's limits (graph_layout.rs MAX_GRAPHS, MAX_TOTAL_NODES,
-   * MAX_GRAPH_NODES and MAX_GRAPH_EDGES): a request over them is refused
-   * whole with a 400. */
-  const LIMITS = Object.freeze({graphs: 64, nodes: 8000, graphNodes: 2000, graphEdges: 8000});
+  /* The route lays out graphs of any size with no deadline. Triskel is sent
+   * a graph without being asked only up to this size: on structured control
+   * flow it takes about 1.5 s at 2,000 nodes, 10 s at 8,000 and a minute at
+   * 16,000, and on tree-like graphs its time grows with the square of the
+   * node count. Past it, the caller draws its own layout at once and offers
+   * Triskel, which then runs on request with no size limit. */
+  const AUTOMATIC = Object.freeze({graphNodes: 2000, graphEdges: 8000});
   /* Triskel's drawing is kept unless it is more than `widen` times as wide
    * as the caller's and over `freeWidth` px, or as many times as tall and
    * `freeHeight` px taller: Triskel does not stack a wide fan, and it stacks
    * loop bodies. */
   const ACCEPT = Object.freeze({widen: 1.6, freeWidth: 1400, freeHeight: 1600});
-  const TIMEOUT_MS = 20000;
   /* Triskel's answers by graph: a new layout of mostly the same graphs (a
    * chain folded in one realm, a refresh) sends only those that changed. A
    * worker lives while its view is shown; this keeps its last answers. */
@@ -75,38 +77,27 @@ const graphLayoutClient = (() => {
 
   /** Each graph's place in one request, in order, its cached answer, or the
    * reason it stays out. A cached graph takes no room in the request. */
-  function plan(graphs) {
-    let sent = 0, nodes = 0;
+  function plan(graphs, all) {
+    let sent = 0;
     return graphs.map(graph => {
-      if (graph.nodes.length > LIMITS.graphNodes || graph.edges.length > LIMITS.graphEdges) return {reason: {code: 'too_large'}};
+      if (!all && (graph.nodes.length > AUTOMATIC.graphNodes || graph.edges.length > AUTOMATIC.graphEdges)) return {reason: {code: 'large'}};
       const key = graphKey(graph), cached = cache.get(key);
       if (cached) { remember(key, cached); return {cached}; }
-      if (sent >= LIMITS.graphs) return {reason: {code: 'request_budget', limit: 'graphs'}};
-      if (nodes + graph.nodes.length > LIMITS.nodes) return {reason: {code: 'request_budget', limit: 'nodes'}};
-      nodes += graph.nodes.length;
       return {position: sent++, key};
     });
   }
 
-  /** The answer's JSON, or an Error that carries the HTTP status. */
-  async function post(body) {
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    try {
-      const response = await fetch('/api/graph-layout', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body), signal: controller.signal, cache: 'no-store'});
-      if (!response.ok) throw Object.assign(Error(`The layout route returned ${response.status}.`), {status: response.status});
-      return await response.json();
-    } catch (error) {
-      if (controller.signal.aborted) throw Error(`The layout route gave no answer in ${TIMEOUT_MS / 1000} s.`);
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
+  /** The answer's JSON, or an Error that carries the HTTP status. Nothing
+   * times it out: `signal` stops it, and the route then stops its worker. */
+  async function post(body, signal) {
+    const response = await fetch('/api/graph-layout', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body), signal, cache: 'no-store'});
+    if (!response.ok) throw Object.assign(Error(`The layout route returned ${response.status}.`), {status: response.status});
+    return response.json();
   }
 
   /** Triskel's drawing of `graph`, or why the caller's own layout stays. */
   function judge(result, graph) {
     if (!result) return {reason: {code: 'mismatch'}};
-    if (result.status === 'too_large') return {reason: {code: 'too_large'}};
     if (result.status !== 'laid_out') return {reason: {code: 'failed', status: result.status, detail: result.reason ?? null}};
     const nodes = Array.isArray(result.nodes) && result.nodes.length === graph.nodes.length && result.nodes.every(point => Number.isFinite(point?.[0]) && Number.isFinite(point?.[1]));
     const edges = Array.isArray(result.edges) && result.edges.length === graph.edges.length && result.edges.every(list => Array.isArray(list) && list.length >= 4 && list.every(Number.isFinite));
@@ -121,10 +112,12 @@ const graphLayoutClient = (() => {
    * height}, with width and height the caller's own drawing of it. Resolves
    * to {outcomes, revision, failure}: per graph either {result}, Triskel's
    * laid-out graph to use, or {reason}; the engine revision; and why the
-   * whole request failed, or null.
+   * whole request failed, or null. `all` sends graphs past AUTOMATIC too;
+   * `signal` stops the request, which leaves each graph sent `cancelled`;
+   * `onSend` is called once a request is sent, never for cached answers.
    */
-  async function layOut(graphs) {
-    const planned = plan(graphs);
+  async function layOut(graphs, {all = false, signal = null, onSend = null} = {}) {
+    const planned = plan(graphs, all);
     const body = {graphs: []};
     planned.forEach((entry, index) => {
       if (entry.position === undefined) return;
@@ -138,8 +131,11 @@ const graphLayoutClient = (() => {
     if (!body.graphs.length) return everySent(null, null);
     let answer;
     try {
-      answer = await post(body);
+      signal?.throwIfAborted();
+      onSend?.();
+      answer = await post(body, signal);
     } catch (error) {
+      if (signal?.aborted) return everySent({code: 'cancelled'}, null);
       const failure = error?.message ?? 'The layout route failed.';
       return everySent(error?.status ? {code: 'status', status: error.status} : {code: 'route_failed', detail: failure}, failure);
     }
@@ -147,14 +143,13 @@ const graphLayoutClient = (() => {
       return everySent({code: 'mismatch'}, 'The layout route returned an unexpected answer.');
     const fresh = answer.engine?.revision ?? null;
     planned.forEach(entry => {
-      // Only a layout or a size refusal is the same next time; a timeout or
-      // a failure may not be.
+      // Only a layout is the same next time; a timeout or a failure may not be.
       const result = entry.position === undefined ? null : answer.graphs[entry.position];
-      if (result?.status === 'laid_out' || result?.status === 'too_large') remember(entry.key, {result, revision: fresh});
+      if (result?.status === 'laid_out') remember(entry.key, {result, revision: fresh});
     });
     const outcomes = planned.map((entry, index) => (entry.position === undefined ? unsent(entry, index) : judge(answer.graphs[entry.position], graphs[index])));
     return {outcomes, revision: fresh ?? revision, failure: null};
   }
 
-  return {LIMITS, layOut, routePoints};
+  return {AUTOMATIC, layOut, routePoints};
 })();

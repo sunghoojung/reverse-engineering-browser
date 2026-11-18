@@ -1,6 +1,6 @@
 // The shipped Trace value panel (apps/research-ui/value_flow_view.js) in a DOM
-// model: the operand list from the chosen row, loading and error states that
-// keep the last trace, Graph hiding and restoring the panel, the header tied
+// model: the operand list from the chosen row, elapsed seconds and Cancel
+// instead of a deadline, loading and error states that keep the last trace, Graph hiding and restoring the panel, the header tied
 // to the trace shown after a reveal, and captured text inserted as text. Not
 // rendered QA; rendered acceptance is test41TraceValueInInspect.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
@@ -53,7 +53,8 @@ const mount = () => code.replaceChildren(...rows.map((row, line) => {
 }));
 mount();
 
-const state = {sourceWasm: true, sourceEditorView: {view: {wasmRows: rows}}};
+// Inspect mounts one page of rows; row(line) reads one of them.
+const state = {sourceWasm: true, sourceEditorView: {view: {wasm: {row: line => rows[line] ?? null}}}};
 const moved = [];
 const pending = [];
 const fetches = [];
@@ -63,7 +64,14 @@ const context = createContext({
   requestAnimationFrame: callback => setTimeout(callback, 0),
   state,
   selectedSource: () => ({kind: 'wasm', source_type: 'artifact', artifact_id: '7', sha256: 'a'.repeat(64)}),
-  moveSourceWindow: (line, column, options) => { moved.push(line); mount(); return true; },
+  // The backend finds the row for a byte; Sources moves to its page.
+  revealWasmInspectionByte: async (source, offset) => {
+    const line = rows.findIndex(row => row.byte_offset === offset);
+    if (line < 0) return false;
+    moved.push(line);
+    mount();
+    return true;
+  },
   fetch: (url, options) => {
     fetches.push(String(url));
     return new Promise((resolve, reject) => pending.push({resolve, reject, options}));
@@ -97,7 +105,9 @@ console.log('PASS Trace value operands: fixed-arity rows list their operands bef
 // Loading, then a trace with an end that is both a source and a sink and
 // captured markup in its text.
 click($('value-flow-run'));
-assert.match($('value-flow-status').textContent, /Tracing 0xd0/);
+assert.match($('value-flow-status').textContent, /Tracing 0xd0… 0 s\. Cancel stops the backend analysis\./);
+assert.equal($('value-flow-run').textContent, 'Cancel', 'a running trace has no deadline; its button stops it');
+assert.equal($('value-flow-run').disabled, false);
 assert.match(fetches[0], /function=2&offset=208&direction=both&max_nodes=512/);
 answer(trace(0xd0, [
   node(0, 'import_call', 0xd0, {role: 'seed', source: true, direction: 'seed', depth: 0, import: {module: 'env', name: 'send'}}),
@@ -121,9 +131,22 @@ assert.match($('value-flow-status').textContent, /boom.*last trace is unchanged/
 assert.equal($('value-flow-list').querySelectorAll('.value-flow-row').length, 2, 'the rows stay');
 console.log('PASS Trace value error: a failed read names the error and keeps the last trace');
 
+// Cancel stops the request, and so the backend analysis, and keeps the last trace.
+click($('value-flow-run'));
+const running = pending[0];
+click($('value-flow-run'));
+assert.equal(running.options.signal.aborted, true, 'Cancel aborts the request');
+pending.shift().reject(Object.assign(new Error('aborted'), {name: 'AbortError'}));
+await settle();
+assert.match($('value-flow-status').textContent, /cancelled; its backend analysis was stopped\. The last trace is unchanged/);
+assert.equal($('value-flow-run').textContent, 'Trace value');
+assert.equal($('value-flow-list').querySelectorAll('.value-flow-row').length, 2, 'the rows stay');
+console.log('PASS Trace value Cancel: a running trace shows elapsed seconds, and Cancel stops it and keeps the last trace');
+
 // Revealing a row from the list selects it, but the header keeps naming the
 // trace shown; the button names the row it would trace next.
 click(items[1].querySelector('.value-flow-link'));
+await settle();
 assert.deepEqual(moved, [1]);
 line(0x7e).querySelector('.source-gutter').dispatchEvent(new window.Event('focusin', {bubbles: true}));
 assert.match($('value-flow-target').textContent, /0xd0/, 'the header names the trace shown');

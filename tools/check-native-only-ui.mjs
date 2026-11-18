@@ -229,10 +229,12 @@ const initiatorRows = Object.fromEntries([...document.querySelectorAll('#screen-
   .map(row => [row.querySelector('.field-key').textContent, row.querySelector('.field-value').textContent]));
 assert.equal(initiatorRows['Renderer request'], '21', 'a reuse shows its own renderer request, not its source');
 assert.match(initiatorRows['Reused response of'] ?? '', /^S1:R61:20: Blink reused this request's response; it did not start this load$/);
-// Hex is paged by range, never cut at a fixed read.
-const responseSource = sources.find(([file]) => file === 'traffic_response.js')[1];
-assert(!/subarray\(0, TRAFFIC_RESPONSE_HEX_BYTES\)/.test(responseSource), 'Response hex is paged, not a fixed first read');
-assert(/function hexPager/.test(responseSource), 'Response hex has a range pager');
+// Response and Payload hex page every byte by window, never a fixed first read.
+for (const file of ['traffic_response.js', 'traffic_payload.js']) {
+  const source = sources.find(([name]) => name === file)[1];
+  assert(/codeViewHexWindow\(/.test(source) && /trafficHexPager\(/.test(source), `${file} hex pages every byte by window`);
+  assert(!/formatWasmHex\(|subarray\(0, \w*HEX_BYTES\)/.test(source), `${file} never cuts hex at a fixed read`);
+}
 // The Headers tab reads native header records only, never a CDP exchange.
 runInContext(`state.inspectorTab = 'headers'; renderInspector();`, context);
 const headersPanel = document.getElementById('headers-inspector');
@@ -319,7 +321,7 @@ assert.equal(runInContext("sourceHexArtifact({kind: 'bytecode_buffer'}) && sourc
 assert.equal(runInContext("sourceSyntaxLabel(sourceSyntaxLanguage({kind: 'bytecode_buffer', mime_type: 'application/octet-stream', url: 'fixture://guest'}))", context), 'Guest bytecode hex');
 assert.equal(runInContext("formatWasmHex(new Uint8Array([0, 0x42, 0, 0, 0x3c, 0xff]))", context), '00000000  00 42 00 00 3c ff' + ' '.repeat(32) + '|.B..<.|');
 const app = sources.find(([file]) => file === 'app.js')[1];
-assert(/const content = sourceHexArtifact\(artifact\)\s*\?\s*formatWasmHex/.test(app), 'the artifact loader formats every hex artifact kind');
+assert(/if \(sourceHexArtifact\(artifact\)\) \{[^}]*artifact\.hexBytes = buffer;/.test(app), 'the artifact loader keeps the bytes of every hex artifact kind for paged hex');
 for (const [file, source] of sources.filter(([file]) => ['evidence_package.js', 'investigation_navigation.js', 'investigation_notebook.js'].includes(file))) {
   assert(/['"]bytecode_buffer['"]/.test(source), `${file} must offer the Sources hex view for guest bytecode`);
 }

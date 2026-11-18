@@ -46,6 +46,7 @@ class CiScope(unittest.TestCase):
             self.mode(
                 "apps/origin-trace-backend/Cargo.lock",
                 "apps/deobfuscator-worker/src/main.rs",
+                "apps/js-lexer/src/lib.rs",
                 "README.md",
             ),
             "rust",

@@ -1,6 +1,23 @@
 "use strict";
 
-async function REBExecuteAnalyst(input, userFunction) {
+// The host leaves the run's input as globals: REBInput (the JSON header
+// text), REBSelectedText (the selected artifact as UTF-8 text, or null when it
+// is not) and REBSelectedBytes (its bytes, made in this realm). They are taken
+// and removed before the script runs.
+function REBTakeInput() {
+  const input = JSON.parse(globalThis.REBInput);
+  const bytes = globalThis.REBSelectedBytes instanceof Uint8Array ? globalThis.REBSelectedBytes : null;
+  const selected = input && input.evidence && input.evidence.selected_artifact;
+  if (selected && typeof selected === "object") {
+    selected.content = typeof globalThis.REBSelectedText === "string" ? globalThis.REBSelectedText : null;
+  }
+  delete globalThis.REBInput;
+  delete globalThis.REBSelectedText;
+  delete globalThis.REBSelectedBytes;
+  return [input, bytes];
+}
+
+async function REBExecuteAnalyst(input, selectedBytes, userFunction) {
   const started = Date.now();
   const utf8Bytes = value => {
     let bytes = 0;
@@ -28,31 +45,26 @@ async function REBExecuteAnalyst(input, userFunction) {
     }
     return parts.join("");
   };
-  const serialize = (value, limit) => {
+  // Results and logs are kept whole. Only nesting is bounded, because each
+  // level is a frame of this recursion and of JSON.stringify.
+  const serialize = value => {
     const seen = new WeakSet();
-    let entries = 0;
     let truncated = false;
     const clone = (candidate, depth) => {
       if (candidate === null || typeof candidate === "boolean" || typeof candidate === "number") return candidate;
-      if (typeof candidate === "string") {
-        const result = boundedText(candidate, Math.min(limit, 8192));
-        if (result !== candidate) truncated = true;
-        return result;
-      }
+      if (typeof candidate === "string") return candidate;
       if (typeof candidate === "bigint") return `${candidate}n`;
       if (typeof candidate === "undefined") return "[undefined]";
       if (typeof candidate === "symbol") return boundedText(candidate, 256);
       if (typeof candidate === "function") return `[Function ${boundedText(candidate.name || "anonymous", 128)}]`;
-      if (depth >= 8) { truncated = true; return "[MaxDepth]"; }
+      if (depth >= 256) { truncated = true; return "[MaxDepth]"; }
       if (seen.has(candidate)) return "[Circular]";
       seen.add(candidate);
       let keys;
       try { keys = Reflect.ownKeys(candidate); } catch { return "[Uninspectable]"; }
       const output = Array.isArray(candidate) ? [] : {};
       for (const rawKey of keys) {
-        if (entries >= 512) { truncated = true; break; }
-        entries += 1;
-        const key = boundedText(rawKey, 256);
+        const key = typeof rawKey === "symbol" ? boundedText(rawKey, 256) : rawKey;
         let descriptor;
         try { descriptor = Object.getOwnPropertyDescriptor(candidate, rawKey); } catch { descriptor = null; }
         if (!descriptor) output[key] = "[Unavailable]";
@@ -62,20 +74,17 @@ async function REBExecuteAnalyst(input, userFunction) {
       return output;
     };
     let text;
-    try { text = JSON.stringify(clone(value, 0)); } catch { text = '"[Unserializable]"'; }
+    try { text = JSON.stringify(clone(value, 0)); } catch { text = '"[Unserializable]"'; truncated = true; }
     if (text === undefined) text = '"[undefined]"';
-    const byteLength = utf8Bytes(text);
-    return {text: boundedText(text, limit), truncated: truncated || byteLength > limit};
+    return {text, truncated};
   };
   const deepFreeze = value => {
     const pending = [value];
     const seen = new WeakSet();
-    let entries = 0;
     while (pending.length) {
       const current = pending.pop();
       if (!current || typeof current !== "object" || seen.has(current)) continue;
       seen.add(current);
-      if (entries++ > 50000) throw new Error("Evidence snapshot exceeds the runner entry limit");
       for (const key of Reflect.ownKeys(current)) {
         const descriptor = Object.getOwnPropertyDescriptor(current, key);
         if (descriptor && "value" in descriptor && descriptor.value && typeof descriptor.value === "object") {
@@ -103,32 +112,31 @@ async function REBExecuteAnalyst(input, userFunction) {
   });
 
   try {
-    if (!input || input.protocol_version !== 1 || !Number.isSafeInteger(input.run_id) || input.run_id <= 0 ||
+    if (!input || input.protocol_version !== 2 || !Number.isSafeInteger(input.run_id) || input.run_id <= 0 ||
         !Number.isSafeInteger(input.script_id) || input.script_id <= 0 ||
         !Number.isSafeInteger(input.library_generation) || input.library_generation < 0 ||
         !input.variables || typeof input.variables !== "object" || Array.isArray(input.variables) ||
         !input.evidence || typeof input.evidence !== "object" || Array.isArray(input.evidence) ||
-        typeof userFunction !== "function") {
+        (selectedBytes !== null && !(selectedBytes instanceof Uint8Array)) || typeof userFunction !== "function") {
       return failure("Analyst runner input is malformed");
     }
     const variables = deepFreeze(input.variables);
     const evidence = deepFreeze(input.evidence);
-    const safeJsonStringify = value => serialize(value, 32768).text;
+    const safeJsonStringify = value => serialize(value).text;
     function* iterate(value) {
       if (value == null) return;
-      let count = 0;
       if (value instanceof Map) {
-        for (const entry of value.entries()) { if (count++ >= 512) return; yield entry; }
+        yield* value.entries();
         return;
       }
       if (value instanceof Set || Array.isArray(value) || ArrayBuffer.isView(value)) {
-        for (const item of value) { if (count >= 512) return; yield [count++, item]; }
+        let count = 0;
+        for (const item of value) yield [count++, item];
         return;
       }
       let keys;
       try { keys = Object.keys(value); } catch { return; }
       for (const key of keys) {
-        if (count++ >= 512) return;
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         if (descriptor && "value" in descriptor) yield [key, descriptor.value];
       }
@@ -146,18 +154,22 @@ async function REBExecuteAnalyst(input, userFunction) {
       signalProfiles: () => arrayValue("signal_profiles"),
       vmAnalysis: () => evidence.vm_analysis || null,
       selectedArtifact: () => evidence.selected_artifact || null,
+      // A fresh copy of the selected artifact's bytes, or of [start, end), so
+      // the evidence a script reads stays as it was captured.
+      selectedArtifactBytes: (start, end) => selectedBytes ? selectedBytes.slice(start, end) : null,
       summary: () => evidence.summary || Object.freeze({}),
       capabilities: () => Object.freeze([
-        "events", "artifacts", "trace-edges", "signal-profiles", "vm-analysis", "selected-artifact"
+        "events", "artifacts", "trace-edges", "signal-profiles", "vm-analysis", "selected-artifact",
+        "selected-artifact-bytes"
       ])
     });
     const WB = Object.freeze({Node: Object.freeze({Utils, Evidence})});
     const logs = [];
     let logsTruncated = false;
     const capture = (level, values) => {
-      if (logs.length >= 64) { logsTruncated = true; return; }
-      const text = boundedText(values.map(value => safeJsonStringify(value)).join(" "), 1024);
-      logs.push({level, text});
+      const serialized = values.map(value => serialize(value));
+      if (serialized.some(value => value.truncated)) logsTruncated = true;
+      logs.push({level, text: serialized.map(value => value.text).join(" ")});
     };
     const analystConsole = Object.freeze({
       log: (...values) => capture("log", values),
@@ -168,7 +180,7 @@ async function REBExecuteAnalyst(input, userFunction) {
 
     try {
       const result = await userFunction(WB, Utils, analystConsole);
-      const serialized = serialize(result, 32768);
+      const serialized = serialize(result);
       return {
         protocol_version: 1,
         run_id: input.run_id,

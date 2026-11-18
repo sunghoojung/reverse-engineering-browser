@@ -15,7 +15,7 @@ operator effects and control frames come from the stack layer
 prints the document or `{error, status}`.
 
 The provider verifies the artifact's size and SHA-256 against the manifest
-before decoding, exactly as [WASM inspection](wasm-inspection-v1.md) does. It
+before decoding, exactly as [WASM inspection](wasm-inspection-v2.md) does. It
 never executes the module, invokes imports, writes analysis files or changes
 capture. Raw evidence stays as captured; every item in the document maps back
 to an original byte offset of the module whose `sha256` the document names.
@@ -96,8 +96,8 @@ way: a `global.get` is always a source, even right after a `global.set` of the
 same global.
 
 Operators whose stack effect v1 does not model (stack switching) stop the
-simulation with a named omission, and so do the instruction cap, the work
-budget and the deadline. When one instruction spends the last of the work
+simulation with a named omission, and so do the instruction cap and the work
+budget. When one instruction spends the last of the work
 budget (a `br_table` or `try_table` fan-out, or a call or `end` whose values
 take the stack past it), the stop is at that instruction's byte and value
 flow from it on is not computed. A body whose calls leave many values that
@@ -143,8 +143,10 @@ The [OpenAPI schema](openapi.json) defines `WasmValueFlow`.
   `params`, `locals` and `results` identify the function.
 - `evidence` is `declared_static` and `complete` is always `false`: the slice
   is derived from the bytes, not observed.
-- `status` is `computed`, or `partial` when any cap, deadline or unmodeled
-  operator cut it. `truncated` says which, and `omissions` says where.
+- `status` is `computed`, or `partial` when any cap or unmodeled operator cut
+  it. `truncated` says which, and `omissions` says where. `truncated.deadline`
+  is always `false`: the slice has no deadline, and the member stays so version
+  1 readers still parse the document.
 - `seed` repeats the request's seed, lists the seed nodes and, for an
   instruction seed, `operand_count`, the operands the instruction consumes.
 - `nodes` carry `id`, `kind`, `byte_offset`, `source` and `sink` (the node's
@@ -187,8 +189,8 @@ indices and edges stay readable at every level.
 
 ## Bounds
 
-- Input: 64 MiB, the block graph's limit. One body: 7,654,321 bytes, the size
-  engines accept. Locals: 50,000, the count engines accept. Larger is 400.
+- Input: a module of any size is read whole. One body: 7,654,321 bytes, the
+  size engines accept. Locals: 50,000, the count engines accept. Larger is 400.
 - Simulation: 2,000,000 instructions and 4,000,000 work units (instructions,
   loop-write, snapshot and join entries, every `br_table` target and every
   `try_table` catch clause with its values, and every value an instruction
@@ -201,13 +203,16 @@ indices and edges stay readable at every level.
   loop-write pass reads the whole body and records a write
   in the innermost loop only and passes each loop's set to its enclosing loop
   at `end`, so it is linear in the bytes plus the joins it implies. Loops that
-  each write many locals imply nesting depth times locals joins; the budget
-  and the deadline are checked inside those loops, and past either the prefix
-  is returned as `partial`.
+  each write many locals imply nesting depth times locals joins; the budget is
+  checked inside those loops, and past it the prefix is returned as `partial`.
 - Slice: `max_nodes`, four edges and four join entries per node of the cap
-  (`4 * max_nodes` in all), 64 entries per join, `max_depth`, and a
-  four-second deadline shared with the simulation. At most 32 omissions are
-  listed; the last says how many more there were.
+  (`4 * max_nodes` in all), 64 entries per join and `max_depth`. At most 32
+  omissions are listed; the last says how many more there were.
+- Time: no deadline. The simulation, the slice, the call-site scan and the
+  response cut poll the request, and a request that goes away stops them and
+  is answered 499 `cancelled`; a cancelled request never returns the part
+  walked before it. `limits` no longer reports `max_input_bytes` or
+  `deadline_ms`.
 - Response: 120,000 bytes pretty-printed, both as returned and with `text`,
   `expression` and long strings replaced by omission objects, as `reb-api mcp`
   does below Full access, so the result is inlined at every level (the inline
@@ -216,16 +221,15 @@ indices and edges stay readable at every level.
   `truncated.bytes` is set and an omission gives the counts. Every document
   lists at most four edges per listed node, nearest the seed first, with
   `truncated.edges` set past it, so a larger `max_nodes` never lists fewer
-  nodes. The cut's search ends at the deadline, or 500 ms after it starts when
-  the slice already used the deadline, and keeps the largest prefix found to
-  fit; an omission then says more nodes may have fit.
+  nodes. The cut's search runs to the end and keeps the largest prefix that
+  fits.
 - `expression`: three levels deep and 160 bytes. `text`: 160 bytes; a
   `try_table` lists its first 8 catch clauses and then their count. A float
   constant whose decimal form is longer than 24 characters is written in its
   shortest round-trip exponent form (`-2.2250738585072014e-308`), as the
   block graph's rows and labels write it, so the cap keeps its value. The seed
   ranks first in the byte cut, so a cut document always lists it.
-- Interprocedural: 64 steps and 256 direct call sites, within the same deadline.
+- Interprocedural: 64 steps and 256 direct call sites.
 
 The backend runs on the bounded blocking reader pool. The UI fetches one slice
 at a time and aborts a superseded request. The Sources panel seeds from Inspect

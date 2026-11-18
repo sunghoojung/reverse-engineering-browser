@@ -1,4 +1,9 @@
 //! Closed, bounded abstract evaluation. Never call JavaScript or object coercion hooks.
+//!
+//! Every expression the folder tries gets its own step and allocation
+//! allowance, because evaluating a decoder body can loop without end. The
+//! allowance bounds one evaluation, never the file: a bundle of any size is
+//! folded to its end, and an expression that needs more is left as written.
 mod decoder;
 mod value;
 use std::collections::{HashMap, HashSet};
@@ -9,7 +14,7 @@ use oxc_ast_visit::{Visit, walk};
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U};
 
-use crate::{MAX_TRANSFORMATIONS, Transformation, proxy::Proxy};
+use crate::{Transformation, proxy::Proxy};
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -17,7 +22,10 @@ use oxc_span::SourceType;
 const MAX_DEPTH: usize = 64;
 const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_STEPS: usize = 250_000;
-const MAX_REPLACEMENT_BYTES: usize = 512 * 1024;
+// A short table read can become a long string, so replacements may grow the
+// source. Growth stays proportional to the input, which keeps a table that is
+// read a million times from multiplying memory without end.
+const REPLACEMENT_GROWTH: usize = 8;
 
 fn int32(n: f64) -> i32 {
     if !n.is_finite() || n == 0.0 {
@@ -32,6 +40,8 @@ pub struct Folder<'s> {
     pub truncated: bool,
     steps: usize,
     value_budget: ValueBudget,
+    // The allowance each expression starts from. Tests narrow it.
+    allowance: ValueBudget,
     // Only preceding primitive const bindings in the SAME straight-line list.
     // Nested execution/scope boundaries never inherit these bindings.
     constants: HashMap<String, Value>,
@@ -60,6 +70,7 @@ impl<'s> Folder<'s> {
             truncated: false,
             steps: 0,
             value_budget: ValueBudget::default(),
+            allowance: ValueBudget::default(),
             constants: HashMap::new(),
             tables: HashMap::new(),
             proxies: HashMap::new(),
@@ -72,6 +83,14 @@ impl<'s> Folder<'s> {
     }
     pub fn is_truncated(&self) -> bool {
         self.truncated || self.value_budget.exhausted
+    }
+
+    /// Starts one top-level evaluation with a fresh allowance. Whether an
+    /// earlier evaluation ran out stays recorded in `truncated`.
+    fn fresh(&mut self) {
+        self.truncated |= self.value_budget.exhausted;
+        self.steps = 0;
+        self.value_budget = self.allowance.clone();
     }
 
     fn eval(&mut self, expression: &Expression<'_>, depth: usize) -> Option<Value> {
@@ -100,10 +119,6 @@ impl<'s> Folder<'s> {
             Expression::BooleanLiteral(b) => Value::Bool(b.value),
             Expression::NullLiteral(_) => Value::Null,
             Expression::ArrayExpression(array) if self.assume_intrinsics => {
-                if array.elements.len() > 256 {
-                    self.truncated = true;
-                    return None;
-                }
                 let mut values = self.value_budget.array(array.elements.len())?;
                 for element in &array.elements {
                     values.push(match element {
@@ -427,9 +442,12 @@ impl<'s> Folder<'s> {
         Some(value)
     }
     fn rewrite(&mut self, span: Span, replacement: String, kind: &'static str) -> bool {
-        if self.rewrites.len() >= MAX_TRANSFORMATIONS
-            || self.replacement_bytes + replacement.len() > MAX_REPLACEMENT_BYTES
-        {
+        let allowance = self
+            .source
+            .len()
+            .saturating_mul(REPLACEMENT_GROWTH)
+            .max(MAX_VALUE_BYTES);
+        if self.replacement_bytes.saturating_add(replacement.len()) > allowance {
             self.truncated = true;
             return false;
         }
@@ -445,6 +463,28 @@ impl<'s> Folder<'s> {
         });
         true
     }
+    /// Evaluates a string table one element at a time. A table of any length
+    /// is kept while its values stay proportional to its own source, which a
+    /// table of literals always does.
+    fn table(&mut self, array: &ArrayExpression<'_>) -> Option<Vec<Value>> {
+        let allowance = (array.span.size() as usize)
+            .saturating_mul(2)
+            .max(MAX_VALUE_BYTES);
+        let mut size = 0usize;
+        let mut values = Vec::with_capacity(array.elements.len());
+        for element in &array.elements {
+            self.fresh();
+            let value = self
+                .eval(element.as_expression()?, 0)
+                .filter(Value::is_primitive)?;
+            size = size.saturating_add(value.code(&mut self.value_budget)?.len());
+            if size > allowance {
+                return None;
+            }
+            values.push(value);
+        }
+        Some(values)
+    }
 }
 
 impl<'a> Visit<'a> for Folder<'_> {
@@ -454,6 +494,14 @@ impl<'a> Visit<'a> for Folder<'_> {
         // Keep the complete shorthand form and its exact original bytes.
         if !property.shorthand {
             walk::walk_object_property(self, property);
+        }
+    }
+
+    fn visit_property_key(&mut self, key: &PropertyKey<'a>) {
+        // A string key names a property in object literals, classes and
+        // destructuring alike: `{"\x41": 1}` cannot become `{("A"): 1}`.
+        if !matches!(key, PropertyKey::StringLiteral(_)) {
+            walk::walk_property_key(self, key);
         }
     }
 
@@ -471,53 +519,22 @@ impl<'a> Visit<'a> for Folder<'_> {
                             if declaration.kind == VariableDeclarationKind::Const
                                 && let BindingPattern::BindingIdentifier(id) = &declarator.id
                             {
+                                self.fresh();
                                 if let Some(value) = self.eval(init, 0)
                                     && value.is_primitive()
-                                    && self.constants.len() < 64
                                 {
                                     self.constants.insert(id.name.to_string(), value);
                                 }
-                                if self.proxies.len() < 64
-                                    && let Some(proxy) = Proxy::expression(init, self.source)
-                                {
+                                if let Some(proxy) = Proxy::expression(init, self.source) {
                                     self.proxies.insert(id.name.to_string(), proxy);
                                 }
                                 if let Expression::ArrayExpression(array) = init {
                                     let name = id.name.as_str();
                                     if self.list_depth > 1
-                                        && self.tables.len() < 16
-                                        && array.elements.len() <= 256
                                         && self.table_uses.safe(name, array.elements.len())
-                                        && self
-                                            .value_budget
-                                            .reserve(
-                                                0,
-                                                array.elements.len()
-                                                    * std::mem::size_of::<Value>()
-                                                    * 2,
-                                            )
-                                            .is_some()
+                                        && let Some(values) = self.table(array)
                                     {
-                                        let values: Option<Vec<_>> = array
-                                            .elements
-                                            .iter()
-                                            .map(|e| self.eval(e.as_expression()?, 0))
-                                            .collect();
-                                        if let Some(values) = values
-                                            .filter(|values| values.iter().all(Value::is_primitive))
-                                            && values
-                                                .iter()
-                                                .try_fold(0, |size, v| {
-                                                    Some(
-                                                        size + v
-                                                            .code(&mut self.value_budget)?
-                                                            .len(),
-                                                    )
-                                                })
-                                                .is_some_and(|size| size <= MAX_VALUE_BYTES)
-                                        {
-                                            self.tables.insert(name.to_string(), values);
-                                        }
+                                        self.tables.insert(name.to_string(), values);
                                     }
                                 }
                             }
@@ -531,7 +548,6 @@ impl<'a> Visit<'a> for Folder<'_> {
                 }
                 Statement::FunctionDeclaration(function) => {
                     if self.list_depth > 1
-                        && self.proxies.len() < 64
                         && let Some(id) = &function.id
                         && self.table_uses.proxy_safe(id.name.as_str())
                         && let Some(proxy) = Proxy::function(function, self.source)
@@ -591,6 +607,7 @@ impl<'a> Visit<'a> for Folder<'_> {
         self.proxies = proxies;
     }
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
+        self.fresh();
         if let Some(test) = self.eval(&statement.test, 0) {
             let (chosen, discarded) = if test.truthy() {
                 (Some(&statement.consequent), statement.alternate.as_ref())
@@ -625,6 +642,9 @@ impl<'a> Visit<'a> for Folder<'_> {
                 | Expression::BooleanLiteral(_)
                 | Expression::NullLiteral(_)
         );
+        if eligible {
+            self.fresh();
+        }
         if eligible && let Some(value) = self.eval(expression, 0).filter(Value::is_primitive) {
             let kind = match expression {
                 Expression::Identifier(_) => "constant-propagation",
@@ -807,7 +827,7 @@ impl<'a> Visit<'a> for TableUses {
                 && !self.deleting
                 && !member.optional
                 && index.value >= 0.0
-                && index.value < 256.0
+                && index.value < 4_294_967_295.0
                 && index.value.fract() == 0.0
             {
                 self.allowed.insert(id.span.start);
@@ -870,26 +890,26 @@ mod allocation_tests {
     use super::*;
 
     #[test]
-    fn direct_intrinsic_reserves_shared_budget_before_result_allocation() {
+    fn direct_intrinsic_reserves_its_allowance_before_result_allocation() {
         let source = "String.fromCharCode(65);";
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
         let mut folder = Folder::new(source, &parsed.program, true);
         // Call frame, argument vector and argument frame fit; output does not.
-        folder.value_budget = ValueBudget::limited(std::mem::size_of::<Value>() * 3 + 5, 100, 64);
+        folder.allowance = ValueBudget::limited(std::mem::size_of::<Value>() * 3 + 5, 100, 64);
         folder.visit_program(&parsed.program);
         assert!(folder.is_truncated());
         assert!(folder.rewrites.is_empty());
     }
 
     #[test]
-    fn tiny_shared_budget_preserves_a_small_decoder_call() {
+    fn tiny_allowance_preserves_a_decoder_call() {
         let source = "const f=function(){var a=[0];for(var i=0;i<3;i++){a=[a,a]}return a.length};const result=f();";
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
         assert!(parsed.diagnostics.is_empty());
         let mut folder = Folder::new(source, &parsed.program, true);
-        folder.value_budget = ValueBudget::limited(512, 1000, 64);
+        folder.allowance = ValueBudget::limited(512, 1000, 64);
         folder.visit_program(&parsed.program);
         assert!(folder.is_truncated());
         let call_start = source.rfind("f()").unwrap() as u32;

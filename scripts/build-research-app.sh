@@ -121,17 +121,20 @@ cargo build --locked --release --manifest-path "${repo_root}/apps/origin-trace-b
 graph_layout_vendor="${repo_root}/apps/origin-trace-backend/vendor"
 triskel_revision="196ba112eba992c1460af3097c038defcf7a7e45"
 {
-  echo "OriginTraceBackend includes these projects, unmodified, for graph layout."
+  echo "OriginTraceBackend includes these projects for graph layout."
   echo
   echo "Triskel, commit ${triskel_revision}, under the Mozilla Public License 2.0."
   echo "Source: https://github.com/triskellib/triskel/tree/${triskel_revision}"
   echo "The compiled files are lib/include and lib/src without lib/src/renderer and"
   echo "lib/src/llvm, also in this application's source at"
-  echo "apps/origin-trace-backend/vendor/triskel."
+  echo "apps/origin-trace-backend/vendor/triskel. One is modified:"
+  echo "lib/src/layout/sugiyama/sugiyama.cpp is compiled with std::ranges::stable_sort"
+  echo "in place of std::ranges::sort in coordinate_assignment_iteration, a change"
+  echo "apps/origin-trace-backend/build.rs makes to a copy at build time."
   echo
   cat "${graph_layout_vendor}/triskel/LICENSE"
   echo
-  echo "{fmt} 12.2.0, header only, under the MIT license."
+  echo "{fmt} 12.2.0, header only and unmodified, under the MIT license."
   echo "Source: https://github.com/fmtlib/fmt/tree/12.2.0"
   echo
   cat "${graph_layout_vendor}/fmt/LICENSE"

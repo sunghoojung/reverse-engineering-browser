@@ -40,7 +40,9 @@ remain opt-in, not authorization to inspect an unowned target.
 
 `POST /api/graph-layout` lays out graphs the UI sends with Triskel, vendored
 unmodified with its {fmt} headers under [`vendor/`](vendor/README.md).
-[`build.rs`](build.rs) compiles them with the C ABI bridge in
+[`build.rs`](build.rs) compiles them, one Triskel file from a copy with an
+upstream defect fixed ([Fixed at build time](vendor/README.md#fixed-at-build-time)),
+with the C ABI bridge in
 [`cpp/triskel_bridge.cpp`](cpp/triskel_bridge.cpp) as C++23 at `-O2` in every
 profile, so the backend build needs GCC 14 or later, Clang 18 or later, or a
 current Apple Clang; CI sets `CXX_x86_64_unknown_linux_gnu=g++-14` on Ubuntu

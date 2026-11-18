@@ -1385,9 +1385,10 @@ stored-evidence workspace does not serve it.
 `post_graph_layout` (`POST /api/graph-layout`) lays out caller-supplied graphs
 for the Flow graph and the Sources Graph view with Triskel, a control flow
 graph layout engine built on SESE regions and Sugiyama layering, vendored at
-commit `196ba112eba992c1460af3097c038defcf7a7e45`
-([vendor/README.md](../apps/origin-trace-backend/vendor/README.md)). It reads
-no evidence and writes nothing; it is pure computation over the body.
+commit `196ba112eba992c1460af3097c038defcf7a7e45` and built with one upstream
+defect fixed
+([vendor/README.md](../apps/origin-trace-backend/vendor/README.md#fixed-at-build-time)).
+It reads no evidence and writes nothing; it is pure computation over the body.
 
 ```json
 {"graphs": [{"nodes": [[120, 40], [80, 30]], "edges": [[0, 1], [1, 0]]}]}
@@ -1437,14 +1438,13 @@ machine):
   its budget.
 
 Triskel is third-party C++ fed graphs shaped by captured pages, and this
-revision can loop forever, crash or place nodes on top of each other on some
-inputs, so it never runs in the server. Each request starts the backend
-executable again as a contained `--graph-layout-worker` process with no
-network access (on macOS no file access either) and a 2 GiB resident memory
-limit; at most two run at once and later requests wait for a slot. A graph
-whose budget passes is
-`timeout`; one that crashes the worker or reaches the memory limit is `failed`;
-either way a new worker continues with the graphs after it. When the request
+revision can loop forever or crash on some inputs, so it never runs in the
+server. Each request starts the backend executable again as a contained
+`--graph-layout-worker` process with no network access (on macOS no file
+access either) and a 2 GiB resident memory limit; at most two run at once and
+later requests wait for a slot. A graph whose budget passes is `timeout`; one
+that crashes the worker or reaches the memory limit is `failed`; either way a
+new worker continues with the graphs after it. When the request
 deadline passes, every graph without a result is `timeout`. A layout with
 overlapping nodes or an edge that does not reach its nodes is `failed`, so a
 `laid_out` result never has either. The worker adds a virtual root and, where a

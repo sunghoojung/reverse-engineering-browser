@@ -15,7 +15,7 @@ operator effects and control frames come from the stack layer
 prints the document or `{error, status}`.
 
 The provider verifies the artifact's size and SHA-256 against the manifest
-before decoding, exactly as [WASM inspection](wasm-inspection-v1.md) does. It
+before decoding, exactly as [WASM inspection](wasm-inspection-v2.md) does. It
 never executes the module, invokes imports, writes analysis files or changes
 capture. Raw evidence stays as captured; every item in the document maps back
 to an original byte offset of the module whose `sha256` the document names.

@@ -12,7 +12,7 @@ and the constant catalog in [`wasm_constants.rs`](../apps/origin-trace-backend/s
 The [OpenAPI schema](openapi.json) defines `WasmIdentification`.
 
 The provider verifies the complete file size and SHA-256 against the manifest,
-as [WASM inspection](wasm-inspection-v1.md) does, then reads the module with the
+as [WASM inspection](wasm-inspection-v2.md) does, then reads the module with the
 same pinned `wasmparser`. It never executes the module, invokes imports, fetches
 resources, writes files or modifies capture.
 

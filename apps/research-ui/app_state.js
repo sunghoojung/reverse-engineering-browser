@@ -104,8 +104,12 @@
         sourceNoticeKind: 'warning',
         sourceSearchIndex: 0,
         sourceWasm: false,
-        wasmCache: new Map(),
-        wasmRequests: new Map(),
+        // A Find in Inspect waiting for its count or its page of matches.
+        sourceWasmFind: null,
+        // A line asked for on another page, scrolled to once it mounts.
+        sourcePagedReveal: null,
+        // Ticks the elapsed seconds of a first Inspect page while it is read.
+        wasmInspectionTicker: null,
         sourceDeobfuscated: false,
         sourceFormatted: false,
         sourceFormatChoices: new Map(),

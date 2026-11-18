@@ -41,6 +41,18 @@ invocationSitesPanel.refresh();
 const sourceFormatClient = createSourceFormatClient({
   onChange: source => { if (state.sourceFormatted && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }
 });
+// Inspect reads a Wasm module's rows one page at a time and finds text in all
+// of them on the backend (wasm_inspection.js). A Find waiting for its count or
+// its page of matches resumes when they arrive.
+const wasmInspection = createWasmInspectionClient({
+  onChange: source => { if (state.sourceWasm && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); },
+  onSearch: (source, query) => {
+    const pending = state.sourceWasmFind;
+    if (!state.sourceWasm || pending?.query !== query || pending.identity !== sourceIdentity(source) || sourceIdentity(selectedSource()) !== pending.identity ||
+        elements.sourceSearch.value !== query) return;
+    applySourceSearch(false, 0, {reveal: pending.reveal});
+  }
+});
 const entropyMap = createEntropyMap({
   button: document.querySelector('#source-map'), root: document.querySelector('#source-map-view'),
   codeWrap: elements.sourceCodeWrap, viewKind: elements.sourceViewKind,
@@ -7387,8 +7399,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           ['Parent', source.parent_artifact_id], ['MIME', source.mime_type], ['SHA-256', source.sha256],
           ['Sensitive', source.sensitive ? 'approved' : 'no']
         ];
-        const wasm = source.kind === 'wasm' ? state.wasmCache.get(wasmKey(source)) : null;
-        if (wasm) facts.push(['Inspection', wasm.notice], ['Coverage', wasm.status === 'partial' ? wasm.omissions.join(' ') : 'All sections and function bodies decoded.'], ['Limits', '2 MiB input, 8,192 rows, 128 sections, 2 seconds.']);
+        const wasm = source.kind === 'wasm' ? wasmInspection.state(source) : null;
+        if (wasm?.summary) facts.push(['Inspection', wasm.summary.notice], ['Coverage', wasm.summary.status === 'partial' ? wasm.summary.omissions.join(' ') : 'All sections and function bodies decoded.'],
+          ['Rows', `${wasm.totalRows.toLocaleString()} rows, read a page at a time.`]);
         facts.forEach(([label, value]) => {
           const term = document.createElement('dt'); term.textContent = label;
           const detail = document.createElement('dd'); detail.textContent = String(value);
@@ -7470,19 +7483,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const incomplete = Boolean(editor.view.searchIncomplete || !editor.index.complete);
         if (!query) {
           state.sourceSearchIndex = 0;
+          state.sourceWasmFind = null;
           elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', false));
           elements.sourcePosition.textContent = sourcePositionText(editor, editor.window.line, editor.window.column);
           status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
+          return;
+        }
+        if (editor.view.wasm) {
+          applyWasmInspectionSearch(editor, source, query, reset, direction, reveal, status);
           return;
         }
         if (editor.view.formatted?.paged) {
           applyPagedSourceSearch(editor, source, query, reset, direction, reveal, status);
           return;
         }
-        if (editor.search?.query !== query) {
-          editor.search = {query, ...sourceDocumentMatches(editor.index, query, 1000,
-            editor.view.wasmRows ? line => editor.view.wasmRows[line]?.byte_offset != null : null)};
-        }
+        if (editor.search?.query !== query) editor.search = {query, ...sourceDocumentMatches(editor.index, query, 1000)};
         const {matches, truncated, error} = editor.search;
         if (error) {elements.sourcePosition.textContent = error; status(coverage); return;}
         const matchingLines = new Set(matches.map(match => match.line));
@@ -7490,8 +7505,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           row.classList.toggle('search-match', matchingLines.has(Number(row.dataset.localLine))));
         if (!matches.length) {
           state.sourceSearchIndex = 0; highlightRows();
-          elements.sourcePosition.textContent = editor.view.wasmRows ? `0 matches in retained inspection rows; original module bytes were not searched.${incomplete ? ' Inspection coverage is incomplete.' : ''}`
-            : incomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
+          elements.sourcePosition.textContent = incomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
           status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
           return;
         }
@@ -7507,7 +7521,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
         const line = match.line;
         const column = match.column;
-        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${editor.view.wasmRows ? `Inspection row ${line + 1}, Column ${column + 1}` : sourcePositionText(editor, line, column)}`;
+        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${sourcePositionText(editor, line, column)}`;
         status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
         if (!row) return;
         const localColumn = match.column - Number(row.dataset.columnStart ?? 0);
@@ -7520,6 +7534,76 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const viewport = elements.sourceCodeWrap.getBoundingClientRect();
         elements.sourceCodeWrap.scrollLeft += rect.left - viewport.left - Math.min(120, viewport.width / 4);
         elements.sourceCodeWrap.scrollTop += rect.top - viewport.top - viewport.height / 2;
+      }
+
+      // Inspect holds one page of rows, so Find counts every row's matches on
+      // the backend and moves to each match's page. Analyst names and original
+      // bytes are not searched; Hex finds bytes.
+      function applyWasmInspectionSearch(editor, source, query, reset, direction, reveal, status) {
+        const coverage = 'Every inspection row, searched on the backend; analyst names and original bytes are not searched';
+        const search = wasmInspection.search(source, query);
+        clearTimeout(state.sourceWasmFindTimer);
+        const markRows = () => {
+          const lines = new Set(wasmInspection.matchesIn(source, query, editor.window.start, editor.window.end).map(match => match.row));
+          elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', lines.has(Number(row.dataset.localLine))));
+        };
+        const wait = message => {
+          state.sourceWasmFind = {identity: editor.identity, query, reveal: reveal || (state.sourceWasmFind?.query === query && state.sourceWasmFind.reveal)};
+          elements.sourcePosition.textContent = message;
+          status(coverage);
+          markRows();
+        };
+        if (reset) state.sourceSearchIndex = 0;
+        if (!search || search.status === 'loading') {
+          // The count needs every row once; the elapsed time says it is still going.
+          wait(`Finding in every inspection row… ${Math.floor((Date.now() - (search?.started ?? Date.now())) / 1000)} s`);
+          state.sourceWasmFindTimer = setTimeout(() => { if (state.sourceWasmFind?.query === query) applySourceSearch(false, 0, {reveal: false}); }, 1000);
+          return;
+        }
+        if (search.status === 'error') {
+          state.sourceWasmFind = null;
+          elements.sourcePosition.textContent = `Find failed: ${search.error}`;
+          status(coverage);
+          markRows();
+          return;
+        }
+        if (!search.total) {
+          state.sourceWasmFind = null;
+          state.sourceSearchIndex = 0;
+          elements.sourcePosition.textContent = '0 matches in every inspection row.';
+          status(coverage);
+          markRows();
+          return;
+        }
+        state.sourceSearchIndex = (state.sourceSearchIndex + direction + search.total) % search.total;
+        const rank = state.sourceSearchIndex, count = `${(rank + 1).toLocaleString()} of ${search.total.toLocaleString()} matches`;
+        const match = wasmInspection.match(source, query, rank);
+        if (!match) {wait(`${count} · reading its place…`); return;}
+        state.sourceWasmFind = null;
+        const row = editor.view.wasm.row(match.row);
+        if (!row) {
+          if (reveal) {
+            // Typing stays in Find. The match's page mounts once it is read,
+            // and that render resumes this search, which places and marks it.
+            state.sourcePagedFind = {identity: editor.identity, query, index: rank};
+            moveSourceWindow(match.row, 0, {focus: false});
+            if (!state.sourcePagedFind) return;
+          }
+          elements.sourcePosition.textContent = `${count} · inspection row ${(match.row + 1).toLocaleString()} · reading its page…`;
+          status(coverage);
+          markRows();
+          return;
+        }
+        const column = wasmInspectionTextColumn(row) + match.column;
+        if (reveal && !moveSourceCaretInMountedPage(editor, match.row, column, match.length)) {
+          renderSourceContent(source, editor.view, {line: match.row, column, search: false});
+          editor = state.sourceEditorView;
+        }
+        markRows();
+        status(coverage);
+        elements.sourcePosition.textContent = `${count} · Inspection row ${(match.row + 1).toLocaleString()}, Column ${column + 1}`;
+        if (!markSourceMatch(match.row, column, match.length) || !reveal) return;
+        revealSourceColumn(elements.sourceCode.querySelector(`[data-line="${match.row + 1}"]`), column);
       }
 
       // A paged layout holds one page, so Find searches the evidence and maps each match to its page.
@@ -7609,17 +7693,38 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       /** Keeps the graph's disassembly or hex pane on a block's offset without taking focus. */
       function revealGraphByteOffset(offset) {
-        const view = state.sourceEditorView?.view;
-        const rows = view?.wasmRows;
-        let line = Math.floor(offset / 16);
-        if (rows) {
-          const exact = rows.findIndex(row => row.byte_offset === offset);
-          line = exact >= 0 ? exact : rows.findLastIndex(row => row.byte_offset !== null && row.byte_offset <= offset);
-          if (line < 0) return;
+        if (state.sourceEditorView?.view.wasm) {
+          revealWasmInspectionByte(selectedSource(), offset, {graph: true});
+          return;
         }
+        const line = Math.floor(offset / 16);
         moveSourceWindow(line);
         const row = elements.sourceCode.querySelector(`[data-local-line="${line}"]`);
         if (row) { row.scrollIntoView({block: 'center'}); row.setAttribute('data-graph-reveal', 'true'); }
+      }
+
+      // Inspect holds one page of rows, so the row for an original byte (the
+      // first row at it, or else the last one before it) is found on the
+      // backend. False when this module is no longer inspected or the byte
+      // precedes every row.
+      async function revealWasmInspectionByte(source, offset, {graph = false, focus = false} = {}) {
+        const line = await wasmInspection.locate(source, offset);
+        if (line === null || !source || sourceIdentity(selectedSource()) !== sourceIdentity(source) || !state.sourceEditorView?.view.wasm) return false;
+        state.sourcePagedReveal = {identity: sourceIdentity(source), line, graph};
+        moveSourceWindow(line, 0, {focus});
+        revealPagedLine();
+        return true;
+      }
+
+      // A line asked for on another page is scrolled to once that page mounts.
+      function revealPagedLine() {
+        const reveal = state.sourcePagedReveal, editor = state.sourceEditorView;
+        if (!reveal || reveal.identity !== editor?.identity || editor.view.pageLoadingLine != null || !sourceDocumentLine(editor.index, reveal.line)) return;
+        state.sourcePagedReveal = null;
+        const row = elements.sourceCode.querySelector(`[data-local-line="${reveal.line}"]`);
+        if (!row) return;
+        row.scrollIntoView({block: 'center'});
+        if (reveal.graph) row.setAttribute('data-graph-reveal', 'true');
       }
 
       // Go to line and the pane controls move focus to the code; that move is
@@ -7627,7 +7732,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // passes focus: false so typing stays in its field.
       function moveSourceWindow(line, column = 0, {focus = true} = {}) {
         const editor = state.sourceEditorView, source = selectedSource();
-        const bounds = editor && sourceDocumentLine(editor.index, line), paged = Boolean(editor?.view.formatted?.paged);
+        const bounds = editor && sourceDocumentLine(editor.index, line), paged = Boolean(editor?.view.page ?? editor?.view.formatted?.paged);
         if (!editor || editor.identity !== sourceIdentity(source) || !Number.isSafeInteger(line) || line < 0 || line >= editor.index.lineCount ||
             !Number.isSafeInteger(column) || column < 0 || column > (bounds?.length ?? (paged ? Infinity : 0))) return false;
         const find = focus ? null : state.sourcePagedFind;
@@ -7637,6 +7742,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           // and that render (applySourceSearch) writes the position. A page
           // read earlier is shown at once.
           state.sourceWindow = {identity: editor.identity, representation: editor.representation, line, column};
+          if (state.sourcePagedReveal?.line !== line) state.sourcePagedReveal = {identity: editor.identity, line, graph: false};
           renderSourceContent(source, sourceDisplayView(source), {line, column, search: false});
           if (!sourceDocumentLine(state.sourceEditorView.index, line)) {
             elements.sourcePosition.textContent = `Line ${line + 1} · reading this part of the layout…`;
@@ -7708,12 +7814,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       function sourceDisplayView(source) {
         if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact') {
-          const report = state.wasmCache.get(wasmKey(source));
-          if (report) {
-            const headings = ['Static inspection. The module is never executed.', `${report.status === 'partial' ? 'Partial' : 'Decoded'} · ${report.sections} sections · ${report.imported_functions} imported · ${report.defined_functions} defined · ${report.instructions} instructions`, ...report.omissions];
-            const rows = [...headings.map(text => ({text, byte_offset: null})), ...report.rows];
-            return {content: rows.map(row => row.byte_offset === null ? `;; ${row.text}` : `${row.kind === 'instruction' ? `func ${row.function_index}`.padEnd(11) : row.kind.padEnd(11)} ${row.text}`).join('\n'), lineMap: null, wasmRows: rows,
-              searchCoverage: 'Retained static inspection rows with original byte offsets; headings and omissions excluded; not original source text', searchIncomplete: report.status === 'partial'};
+          // One row per line, a page at a time; while another page is read,
+          // the page shown last stays.
+          const wanted = sourceWantedLine(source), inspection = wasmInspection.page(source, wanted);
+          const page = inspection?.pending ? inspection.previous : inspection;
+          if (page) {
+            return {content: page.text, lineMap: null, wasm: page, page, pageLoadingLine: inspection.pending ? wanted : null,
+              searchCoverage: 'Every inspection row, searched on the backend; not original source text',
+              searchIncomplete: wasmInspection.state(source)?.summary?.status === 'partial'};
           }
         }
         const verifiedOriginal = sourceFactsPanel.original(source);
@@ -7767,26 +7875,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.sourceCodeEmpty.textContent = 'Select a JavaScript file, WASM module, source map, or approved response body.';
           return;
         }
-        if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact' && !state.wasmCache.has(wasmKey(source))) {
-          const request = state.wasmRequests.get(wasmKey(source));
-          resetEditor();
-          elements.sourceLanguage.textContent = 'WebAssembly';
-          elements.sourceCode.hidden = true;
-          elements.sourceCodeEmpty.hidden = false;
-          const pending = request?.status === 'loading';
-          const message = request?.status === 'error' ? request.error : pending ? 'Inspecting immutable module bytes…'
-            : 'This inspection preview was released to keep Sources memory bounded. Inspect the immutable module again.';
-          elements.sourceCodeEmpty.textContent = message;
-          if (!pending) {
-            const retry = textElement('button', 'secondary-button', 'Retry inspection');
-            retry.type = 'button';
-            retry.addEventListener('click', loadWasmInspection.bind(null, sourceReference(source), true));
-            const panel = document.createElement('div');
-            panel.className = 'wasm-inspection-error';
-            panel.setAttribute('role', 'alert');
-            panel.append(textElement('p', '', message), retry);
-            elements.sourceCodeEmpty.replaceChildren(panel);
-          }
+        if (state.sourceWasm && source.kind === 'wasm' && source.source_type === 'artifact' && !view?.wasm && wasmInspection.state(source)?.status !== 'ready') {
+          renderWasmInspectionPending(source);
           return;
         }
         if (source.loading && sourceFactsPanel.original(source) === undefined) {
@@ -7812,8 +7902,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         view ??= sourceDisplayView(source);
         const content = view.content;
         const representation = sourceRepresentation(source);
-        const page = view.formatted?.paged ? view.formatted : null;
-        const mapping = view.wasmRows ? state.wasmCache.get(wasmKey(source)) : view.derived ?? null;
+        const page = view.page ?? (view.formatted?.paged ? view.formatted : null);
+        const mapping = view.wasm ?? view.derived ?? null;
         const formatting = view.formatted ?? null;
         const previous = state.sourceEditorView;
         const sameDocument = previous?.representation === representation && previous.content === content && previous.mapping === mapping && previous.formatting === formatting;
@@ -7830,8 +7920,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           ? {identity, representation, line: window.line, column: window.column}
           : {identity, representation, line: view.pageLoadingLine, column: target.column ?? savedWindow?.column ?? 0};
         const highlighter = sameDocument && previous.highlighter ? previous.highlighter
-          : createSourceHighlighter(view.wasmRows ? {kind: 'plain', mime_type: 'text/plain'} : source, index,
-            page ? {highlighter: sourceOriginalHighlighter(source, view.active), offset: page.base} : null);
+          : createSourceHighlighter(view.wasm ? {kind: 'plain', mime_type: 'text/plain'} : source, index,
+            view.formatted?.paged ? {highlighter: sourceOriginalHighlighter(source, view.active), offset: page.base} : null);
         // The synchronous budget is spent in slices: a page of a large layout is
         // seeded only once the original's lexer reaches its first character, so a
         // page within the budget is colored before its first paint.
@@ -7892,10 +7982,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           gutter.title = mappedLine === null ? 'Retained source line' : `Original ${mappedLine + 1}:${(mapped?.originalColumn ?? 0) + 1} · show the original source`;
           gutter.addEventListener('click', event => {
             event.stopPropagation();
-            if (!view.wasmRows && mappedLine !== null) revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0);
+            if (!view.wasm && mappedLine !== null) revealOriginalLine(source, mappedLine, mapped?.originalColumn ?? 0);
           });
-          if (view.wasmRows) {
-            const offset = view.wasmRows[index]?.byte_offset;
+          if (view.wasm) {
+            const offset = view.wasm.row(index)?.byte_offset;
             gutter.textContent = offset == null ? '' : offset.toString(16).padStart(6, '0');
             const hexLimit = source.wasmHexBytes ?? wasmHexByteLimit();
             gutter.disabled = offset == null || offset >= hexLimit;
@@ -7918,7 +8008,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           displayed.append(text);
           if (excerpt.columnEnd < excerpt.fullLength) displayed.append(textElement('span', 'source-excerpt-notice', ` ⟪ columns ${excerpt.columnEnd + 1}–${excerpt.fullLength} omitted; use Find or Go to column ⟫`));
           row.append(gutter, displayed);
-          if (view.wasmRows && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow(row, view.wasmRows[index], source.sha256);
+          if (view.wasm && typeof RebWasmFunctionNames !== 'undefined') RebWasmFunctionNames.decorateInspectRow(row, view.wasm.row(index), source.sha256);
           return row;
         });
         elements.sourceCode.replaceChildren(...nodes);
@@ -7938,6 +8028,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else {
           elements.sourceCodeWrap.scrollTop = 0;
           elements.sourceCodeWrap.scrollLeft = 0;
+          revealPagedLine();
           const find = state.sourcePagedFind;
           if (find?.identity === identity && page && view.pageLoadingLine == null) {
             state.sourcePagedFind = null;
@@ -7951,7 +8042,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function renderSourceLanguage(view, highlighter, colors) {
         const layout = view.formatPending ? ' · formatting…' : view.formatError ? ` · ${view.formatError}`
           : view.formatted ? ` · ${view.formatted.engine === 'oxc' ? 'Oxc layout' : 'whitespace layout'}` : '';
-        elements.sourceLanguage.textContent = view.wasmRows ? 'WASM disassembly · byte offsets'
+        elements.sourceLanguage.textContent = view.wasm ? 'WASM disassembly · byte offsets'
           : `${sourceSyntaxLabel(highlighter.language)}${!colors ? ' · coloring…' : colors.truncated ? ' · color limit reached' : ''}${layout}`;
         elements.sourceLanguage.title = `${elements.sourceLanguage.textContent}${view.formatted?.engine !== 'oxc' && view.formatNotice ? `: ${view.formatNotice}` : ''}`;
       }
@@ -8031,8 +8122,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // The viewer's own limit, stated beside the code so it is never mistaken for captured text.
+      // Inspect states what was decoded there instead, outside the listing, so
+      // every line of the listing is one row.
       function sourceLimitText(source, view) {
-        if (!source?.contentTruncated || source.content === undefined || view?.wasmRows || view?.derived || sourceFactsPanel.original(source) !== undefined) return '';
+        if (view?.wasm) {
+          const inspection = wasmInspection.state(source), summary = inspection?.summary;
+          if (!summary) return '';
+          const counts = `${summary.status === 'partial' ? 'Partial' : 'Decoded'} · ${summary.sections.toLocaleString()} sections · ${summary.imported_functions.toLocaleString()} imported · ${summary.defined_functions.toLocaleString()} defined · ${summary.instructions.toLocaleString()} instructions · ${inspection.totalRows.toLocaleString()} rows`;
+          return [`Static inspection; the module is never executed. ${counts}.`, ...summary.omissions, inspection.pageError ? `A page failed to load: ${inspection.pageError}` : ''].filter(Boolean).join(' ');
+        }
+        if (!source?.contentTruncated || source.content === undefined || view?.derived || sourceFactsPanel.original(source) !== undefined) return '';
         const hex = sourceHexArtifact(source);
         const shown = hex ? `${source.wasmHexBytes.toLocaleString()} bytes` : `${SOURCE_PREVIEW_BYTES / 1048576} MiB`;
         return `${hex ? 'Hex preview' : 'Preview'} limited to the first ${shown} of this ${source.byte_size.toLocaleString()}-byte file. Later bytes are not shown or searched; the original bytes are unchanged.`;
@@ -8054,7 +8153,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
         elements.sourceWasm.setAttribute('aria-label', state.sourceWasm ? 'Show original WASM hex' : 'Inspect WebAssembly module');
         elements.sourceWasm.textContent = state.sourceWasm ? 'Hex' : 'Inspect';
-        elements.sourceCode.classList.toggle('wasm-inspection', Boolean(view?.wasmRows));
+        elements.sourceCode.classList.toggle('wasm-inspection', Boolean(view?.wasm));
         elements.sourcePretty.disabled = !source?.content || !sourcePrettySupported(source);
         elements.sourcePretty.setAttribute('aria-pressed', String(state.sourceFormatted));
         elements.sourcePretty.setAttribute('aria-label', state.sourceFormatted ? 'Show original source' : 'Pretty print source');
@@ -8081,9 +8180,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (source && source.content === undefined && source.loadError) return 'Preview unavailable';
         if (source && source.content === undefined && source.loading) return 'Preview loading';
         if (state.sourceWasm && source?.kind === 'wasm' && source.source_type === 'artifact') {
-          const report = state.wasmCache.get(wasmKey(source));
-          const request = state.wasmRequests.get(wasmKey(source));
-          return report ? `${report.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets` : request?.status === 'error' ? 'Inspection failed · original bytes preserved' : request?.status === 'loading' ? 'Inspection pending' : 'Inspection preview released';
+          const inspection = wasmInspection.state(source);
+          return inspection?.status === 'ready' ? `${inspection.summary.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets`
+            : inspection?.status === 'error' ? 'Inspection failed · original bytes preserved' : inspection?.status === 'cancelled' ? 'Inspection cancelled · original bytes preserved'
+              : inspection?.status === 'loading' ? 'Inspection pending' : 'Inspection preview released';
         }
         view ??= source?.content !== undefined ? sourceDisplayView(source) : null;
         const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
@@ -8757,37 +8857,61 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
       }
 
-      function wasmKey(source) {
-        return `${source.artifact_id}:${source.sha256}`;
+      // Inspect is explicit: the first page indexes the whole module on the
+      // backend, with no deadline. Later pages load as the editor moves. The
+      // promise settles once the first page is shown or has failed.
+      function loadWasmInspection(source, retry = false) {
+        if (!source) return Promise.resolve();
+        const loaded = wasmInspection.open(source, sourceWantedLine(source), retry);
+        if (sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources();
+        return loaded;
       }
 
-      async function loadWasmInspection(source, retry = false) {
-        const key = wasmKey(source);
-        if (state.wasmRequests.get(key)?.status === 'loading' || (!retry && state.wasmCache.has(key))) return;
-        state.wasmRequests.set(key, {status: 'loading'});
-        while (state.wasmRequests.size > 128) {
-          const retired = [...state.wasmRequests].find(([id, request]) => id !== key && request.status !== 'loading');
-          if (!retired) break;
-          state.wasmRequests.delete(retired[0]);
+      // The first page of an inspection, which indexes every section and body:
+      // elapsed seconds and Cancel while it runs, Retry after it fails or stops.
+      function renderWasmInspectionPending(source) {
+        const inspection = wasmInspection.state(source);
+        clearTimeout(state.wasmInspectionTicker);
+        state.sourceEditorView = null;
+        elements.sourceCode.replaceChildren();
+        renderSourceWindowControls(null);
+        if (elements.sourceSearchStatus) elements.sourceSearchStatus.textContent = 'Source text unavailable; nothing searched.';
+        if (elements.sourcePosition) elements.sourcePosition.textContent = '';
+        elements.sourceLanguage.textContent = 'WebAssembly';
+        elements.sourceCode.hidden = true;
+        elements.sourceCodeEmpty.hidden = false;
+        const key = `${sourceIdentity(source)}|${inspection?.status ?? 'released'}`;
+        if (inspection?.status === 'loading') {
+          const seconds = Math.floor((Date.now() - inspection.started) / 1000);
+          const message = `Indexing every section and function body of this module… ${seconds} s. Nothing is executed; Cancel stops the backend decode.`;
+          const shown = elements.sourceCodeEmpty.querySelector('.wasm-inspection-pending');
+          // The message updates in place, so focus stays on Cancel.
+          if (shown?.dataset.key === key) shown.querySelector('p').textContent = message;
+          else {
+            const panel = document.createElement('div');
+            panel.className = 'wasm-inspection-pending';
+            panel.dataset.key = key;
+            panel.setAttribute('role', 'status');
+            const cancel = textElement('button', 'secondary-button', 'Cancel');
+            cancel.type = 'button';
+            cancel.addEventListener('click', () => wasmInspection.cancel(source));
+            panel.append(textElement('p', '', message), cancel);
+            elements.sourceCodeEmpty.replaceChildren(panel);
+          }
+          state.wasmInspectionTicker = setTimeout(() => {
+            if (sourceIdentity(selectedSource()) === sourceIdentity(source) && state.sourceWasm && wasmInspection.state(source)?.status === 'loading') renderWasmInspectionPending(source);
+          }, 1000);
+          return;
         }
-        renderSources();
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
-        try {
-          const response = await fetch(`/api/wasm?artifact_id=${encodeURIComponent(source.artifact_id)}`, {cache: 'no-store', signal: controller.signal});
-          const report = await response.json();
-          if (!response.ok) throw new Error(report.error || `Inspection returned ${response.status}`);
-          if (!isWasmInspection(report, source)) throw new Error('The WASM inspector returned an invalid document.');
-          state.wasmCache.delete(key);
-          state.wasmCache.set(key, report);
-          while (state.wasmCache.size > 4) state.wasmCache.delete(state.wasmCache.keys().next().value);
-          state.wasmRequests.set(key, {status: 'ready'});
-        } catch (error) {
-          state.wasmRequests.set(key, {status: 'error', error: error.name === 'AbortError' ? 'Inspection timed out. Original bytes are preserved.' : error.message});
-        } finally {
-          clearTimeout(timeout);
-          if (wasmKey(selectedSource() ?? {}) === key) renderSources();
-        }
+        const message = inspection?.error ?? 'This inspection was released to keep Sources memory bounded. Inspect the immutable module again.';
+        const retry = textElement('button', 'secondary-button', 'Retry inspection');
+        retry.type = 'button';
+        retry.addEventListener('click', loadWasmInspection.bind(null, sourceReference(source), true));
+        const panel = document.createElement('div');
+        panel.className = 'wasm-inspection-error';
+        panel.setAttribute('role', 'alert');
+        panel.append(textElement('p', '', message), retry);
+        elements.sourceCodeEmpty.replaceChildren(panel);
       }
 
       // Same exact tuple as investigation-navigation v1. Kept here so a

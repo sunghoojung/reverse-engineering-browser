@@ -39,7 +39,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 82] = [
+const UI_ASSETS: [&str; 83] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -60,6 +60,7 @@ const UI_ASSETS: [&str; 82] = [
     "entropy_map.js",
     "wasm_identification.css",
     "wasm_identification.js",
+    "wasm_inspection.js",
     "agent_panel.css",
     "agent_panel.js",
     "session_panel.css",
@@ -727,10 +728,17 @@ impl App {
                 // A misspelled filter must fail rather than return a
                 // whole-module document the caller will read as scoped.
                 if q.0.keys().any(|key| {
-                    !["artifact_id", "sections", "row_offset", "row_limit"].contains(&key.as_str())
+                    ![
+                        "artifact_id",
+                        "sections",
+                        "row_offset",
+                        "row_limit",
+                        "byte_offset",
+                    ]
+                    .contains(&key.as_str())
                 }) {
                     return Err(Error::bad(
-                        "WASM inspection takes artifact_id with optional sections, row_offset and row_limit",
+                        "WASM inspection takes artifact_id with optional sections, row_offset or byte_offset, and row_limit",
                     ));
                 }
                 let id = q.required("artifact_id")?.to_owned();
@@ -738,26 +746,67 @@ impl App {
                     .one("sections")?
                     .map(wasm::requested_sections)
                     .transpose()?;
-                let window = if q.any(&["row_offset", "row_limit"]) {
-                    let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
-                    let default = wasm::WINDOW_MAX_ROWS.to_string();
-                    let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
-                    if limit > wasm::WINDOW_MAX_ROWS {
-                        return Err(Error::bad("row_limit is at most 2048"));
+                let start = match (q.any(&["row_offset"]), q.any(&["byte_offset"])) {
+                    (true, true) => {
+                        return Err(Error::bad("row_offset and byte_offset are exclusive"));
                     }
-                    Some((offset, limit))
-                } else {
-                    None
+                    (_, true) => {
+                        wasm::Start::Byte(q.number("byte_offset", None, 64, false)? as usize)
+                    }
+                    _ => wasm::Start::Row(q.number("row_offset", Some("0"), 64, false)?),
                 };
+                let default = wasm::WINDOW_MAX_ROWS.to_string();
+                let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+                if limit > wasm::WINDOW_MAX_ROWS {
+                    return Err(Error::bad("row_limit is at most 2048"));
+                }
                 let root = self.options.artifacts.clone();
                 let names = self.names_reader();
-                self.blocking(move || {
-                    let mut document = wasm::load(&root, &id, sections.as_ref())?;
-                    if let Some((offset, limit)) = window {
-                        wasm::window(&mut document, offset, limit)?;
-                    }
+                self.cancellable(move |cancelled| {
+                    let mut document =
+                        wasm::load(&root, &id, sections.as_ref(), start, limit, cancelled)?;
                     crate::wasm_names::annotate_inspection(&mut document, &names());
                     Ok(document)
+                })
+                .await?
+            }
+            "/api/wasm/search" => {
+                q.only(
+                    &[
+                        "artifact_id",
+                        "q",
+                        "sections",
+                        "match_offset",
+                        "match_limit",
+                    ],
+                    &[],
+                )?;
+                let id = q.required("artifact_id")?.to_owned();
+                let query = q
+                    .one("q")?
+                    .ok_or_else(|| Error::bad("q is required"))?
+                    .to_owned();
+                let sections = q
+                    .one("sections")?
+                    .map(wasm::requested_sections)
+                    .transpose()?;
+                let offset = q.number("match_offset", Some("0"), 64, false)?;
+                let default = wasm::MATCH_PAGE.to_string();
+                let limit = q.number("match_limit", Some(&default), 32, true)? as usize;
+                if limit > wasm::MATCH_PAGE {
+                    return Err(Error::bad("match_limit is at most 1000"));
+                }
+                let root = self.options.artifacts.clone();
+                self.cancellable(move |cancelled| {
+                    wasm::search(
+                        &root,
+                        &id,
+                        sections.as_ref(),
+                        &query,
+                        offset,
+                        limit,
+                        cancelled,
+                    )
                 })
                 .await?
             }

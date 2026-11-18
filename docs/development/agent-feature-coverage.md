@@ -103,7 +103,8 @@ Every option is off unless the start names it, and none is inherited.
 | Pretty print `{ }` | `get_source_format` | A (layout), F (text) | Covered; below Full access the laid-out text is omitted, at Full access request and response bodies are laid out too |
 | Search text in all retained files | `search_artifact_text` | F | Added (before: the page read every file itself) |
 | Find in source, Go to line | `search_artifact_text` (`artifact_id`), `get_artifact_text` (`offset`) | F | Added |
-| Inspect (Wasm disassembly) | `inspect_wasm` with `row_offset`, `row_limit`, `sections` | R (structure), F (instruction text) | Added row windows; below Full access row text is omitted |
+| Inspect (Wasm disassembly) | `inspect_wasm` with `row_offset` or `byte_offset`, `row_limit`, `sections` | R (structure), F (instruction text) | Added row windows over every row of any module; below Full access row text is omitted |
+| Find in Inspect | `search_wasm_inspection` (`q`, `match_offset`, `match_limit`) | F | Added; counts and pages every match in every row |
 | Graph (basic-block graph) | `get_wasm_functions`, `get_wasm_function_graph` | R | Covered |
 | Wasm function names (Inspect, Graph, Flow) | Read: `analyst_name` and `analyst_names` in `inspect_wasm`, `get_wasm_functions`, `get_wasm_function_graph`, `get_wasm_pseudocode`, `get_xrefs`, `get_flow_graph`, `get_request_stack`. Write: `analyst_action` `set_wasm_function_name` | R to read, A to write | Added; names are joined at every level and the write needs no other Analyst file |
 | Run offline… (one function in the stubbed local interpreter) | `run_wasm_function` | F | Added; Full access only, because a run's outcome, fuel, import calls, timing and expectations all disclose computed values |

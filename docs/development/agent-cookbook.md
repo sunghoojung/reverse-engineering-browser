@@ -530,8 +530,19 @@ inspect_wasm {"artifact_id": "9", "sections": "code", "row_offset": 1024, "row_l
 ```
 
 Good: `row_window` with `total_rows` and `next_offset`; continue until it is
-null. A window stops early to fit the inline limit. For one function's blocks
-use `get_wasm_functions` then `get_wasm_function_graph`.
+null. A window stops early to fit the inline limit. Every row of any module is
+reachable; nothing is cut at a row count or a size. To start at an offset from
+another tool, pass `byte_offset` instead of `row_offset`. To find text, use
+`search_wasm_inspection` (Full access):
+
+```text
+search_wasm_inspection {"artifact_id": "9", "q": "call { function_index: 42 }"}
+inspect_wasm {"artifact_id": "9", "row_offset": 81234, "row_limit": 16}
+```
+
+Its `total_matches` counts the whole module, and each match's `row` is a
+`row_offset`. For one function's blocks use `get_wasm_functions` then
+`get_wasm_function_graph`.
 
 ## 24. Work autonomously at Full access
 

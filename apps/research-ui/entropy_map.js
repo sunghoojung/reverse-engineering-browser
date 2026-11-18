@@ -110,14 +110,13 @@ function revealSourceByteOffset(source, offset, leaveMap) {
   const label = `Byte ${entropyMapHex(offset)}`;
   if (source.content === undefined) return `${label} cannot be shown yet: the artifact view has not loaded.`;
   if (sourceHexArtifact(source)) {
-    if (state.sourceWasm && source.kind === 'wasm' && state.wasmCache.has(wasmKey(source))) {
-      const rows = sourceDisplayView(source).wasmRows ?? [];
-      let line = -1;
-      rows.forEach((row, index) => { if (row.byte_offset !== null && row.byte_offset <= offset) line = index; });
-      if (line < 0) return `${label} comes before the first inspection row.`;
+    if (state.sourceWasm && source.kind === 'wasm' && wasmInspection.state(source)?.status === 'ready') {
+      // Inspect holds one page, so the backend finds the byte's row.
       leaveMap();
       renderSources();
-      moveSourceWindow(line);
+      revealWasmInspectionByte(source, offset, {focus: true}).then(found => {
+        if (!found && sourceIdentity(selectedSource()) === sourceIdentity(source)) elements.sourcePosition.textContent = `${label} comes before the first inspection row.`;
+      });
       return '';
     }
     const limit = source.wasmHexBytes ?? 0;

@@ -10,7 +10,7 @@ The native `reb://app/api/wasm/pseudocode` route and
 is refused with 400. The [OpenAPI schema](openapi.json) defines `WasmPseudocode`.
 
 The artifact passes the same identity, size and SHA-256 checks as
-[WASM inspection](wasm-inspection-v1.md). Nothing runs the module, calls an
+[WASM inspection](wasm-inspection-v2.md). Nothing runs the module, calls an
 import, fetches anything or writes analysis files. The lift is derived on
 request and never stored, so captured bytes and their hash stay the only
 evidence.

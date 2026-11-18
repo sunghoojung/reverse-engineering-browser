@@ -4,8 +4,8 @@ This directory owns contracts shared across the browser, event broker, and
 research UI. Authorization, capture, and privacy rules are defined in
 [`SAFETY.md`](../SAFETY.md).
 
-[WASM Inspection v1](wasm-inspection-v1.md) defines bounded static module
-inspection and its original-byte coordinates.
+[WASM Inspection v2](wasm-inspection-v2.md) defines paged static inspection
+of a module of any size, its Find, and its original-byte coordinates.
 
 [Wasm function names v1](wasm-function-names-v1.md) defines researcher names
 for Wasm functions, keyed by module SHA-256 and full function index, their

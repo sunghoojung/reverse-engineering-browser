@@ -24,11 +24,13 @@ struct Options {
     /// Print the `wasm-identification-v1` report instead.
     #[arg(long, conflicts_with_all = ["artifact_map", "functions", "pseudocode_function", "diff_with", "value_flow"])]
     identification: bool,
-    /// The first row of an identification report or a module diff page.
+    /// The first row of an inspection window, an identification report or a
+    /// module diff page.
     #[arg(long)]
     row_offset: Option<usize>,
-    /// Rows in an identification report (at most 1024, the default) or a
-    /// module diff page (1 to 1000, default 200).
+    /// Rows in an inspection window (1 to 2048, the default), an
+    /// identification report (at most 1024, the default) or a module diff
+    /// page (1 to 1000, default 200).
     #[arg(long)]
     row_limit: Option<usize>,
     /// Print one function's readable lift as `wasm-pseudocode-v1` instead.
@@ -144,18 +146,27 @@ fn main() {
         }
         return;
     }
-    let result = options
-        .sections
-        .as_deref()
-        .map(origin_trace_backend::wasm::requested_sections)
-        .transpose()
-        .and_then(|sections| {
-            origin_trace_backend::wasm::load(
-                &options.artifacts,
-                &options.artifact_id,
-                sections.as_ref(),
-            )
-        })
-        .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}));
+    use origin_trace_backend::wasm;
+    let row_limit = options.row_limit.unwrap_or(wasm::WINDOW_MAX_ROWS);
+    let result = if row_limit == 0 || row_limit > wasm::WINDOW_MAX_ROWS {
+        json!({"error":"row_limit is 1 to 2048","status":400})
+    } else {
+        options
+            .sections
+            .as_deref()
+            .map(wasm::requested_sections)
+            .transpose()
+            .and_then(|sections| {
+                wasm::load(
+                    &options.artifacts,
+                    &options.artifact_id,
+                    sections.as_ref(),
+                    wasm::Start::Row(options.row_offset.unwrap_or(0) as u64),
+                    row_limit,
+                    &running,
+                )
+            })
+            .unwrap_or_else(|e| json!({"error":e.message,"status":e.status}))
+    };
     println!("{result}");
 }

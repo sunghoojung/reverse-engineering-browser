@@ -531,7 +531,7 @@ client connected through `scripts/reb-api-mcp.sh` can run at the same level
 | **Read only** (default) | Structural reads | Nothing | Question, pins, structural results |
 | **Ask for actions** | Reads and actions | **Allow once** per action | The same |
 | **Auto-approve actions** | Reads and actions | Nothing; every call and result is in the transcript | The same |
-| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
+| **Full access** | Also content reads (`get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`), offline runs of captured Wasm (`run_wasm_function`, `get_wasm_runs`), store-path and draft reads, and its own live sessions (`start_live_session`, `session_action`) | Nothing | Also source, Wasm bytes and disassembly, VM bytecode, request and response bodies and every content field of results |
 
 Below Full access the tool server omits captured content from every result,
 and reads that return local store paths (`get_health`) or the researcher's own
@@ -1679,6 +1679,7 @@ capture, fetch anything or change a row.
 | --- | --- |
 | `index.html`, `app.css` | Document structure and visual layout |
 | `app_state.js`, `evidence_models.js`, `app.js` | Initial state and DOM bindings, evidence validation and projection, interaction and rendering |
+| `wasm_inspection.js` | Paged Inspect: 1,000-row pages of `inspect_wasm` read as the editor moves, byte-offset location and backend Find over every row, with Cancel for the first index |
 | `wasm_identification.js`, `wasm_identification.css` | The Inspect identification summary, its Details list and the Functions menu badges, all read from `get_wasm_identification` |
 | `entropy_map.js`, `entropy_map.css` | Sources Map: the fixed-size canvas view, its segmented modes, summary and states; the only color tokens the map uses |
 | `invocation_sites.js` | Track calls: the saved invocation site pane, byte offsets of Sources positions and the titlebar tracking chip |
@@ -1702,7 +1703,7 @@ capture, fetch anything or change a row.
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
 | `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
-| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one bounded value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
+| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one cancellable value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the literal matcher on the Find index, the bounded and cancellable search, partial-result notes and the results panel; `app.js` supplies the artifact reader and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
@@ -2505,13 +2506,15 @@ stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
 operands as soon as the row is chosen; calls and branches list theirs after
 the first trace, from its `operand_count`. The panel reads one
 [`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
-`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and a
-ten-second timeout, aborts a superseded read, and keeps the last slice when a
-read fails. Rows are ordered seed, backward, forward, then by distance, and show
+`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and no
+deadline: while it runs the status counts elapsed seconds and **Trace value**
+becomes **Cancel**, which stops the request and its backend analysis. A
+superseded read is aborted, and the last slice stays when a read fails or is
+cancelled. Rows are ordered seed, backward, forward, then by distance, and show
 offset, role, kind and the instruction as inert text; a join row lists its
 incoming edges. Arrow keys, Home and End move through the rows; Enter or a click
-reveals that offset in Inspect and focuses its gutter. Offsets with no retained
-Inspect row stay disabled. The slice's mounted rows carry `data-value-flow`
+asks the backend for the Inspect row at that offset, moves to its page and
+focuses its gutter. The slice's mounted rows carry `data-value-flow`
 (seed, source, sink or step), reapplied as the listing remounts. **×** clears
 the trace; Hex or another module hides the panel and drops it. While the block
 graph is open the panel and its marks are hidden, since the graph owns that
@@ -3067,15 +3070,21 @@ the graph footer and starts the linear scrollport below it, so no row can
 scroll under the divider. `pane_layout.js` owns the shared layout controller;
 no captured evidence is modified by resizing.
 
-Captured WASM opens in Hex. **Inspect** shows bounded sections, types, imports,
-exports and function disassembly with byte-offset links back to original bytes.
-Function indexes include imports. **Find** searches retained Hex text or
-offset-bearing inspection rows with an explicit inspection label. Inspection
-headings and omission messages are excluded; partial coverage stays visible. Failures
-provide **Retry inspection**. Partial coverage and display limits are explicit.
+Captured WASM opens in Hex. **Inspect** lists every section, type, import,
+export, data segment and function body of a module of any size, one row per
+line with its original byte offset in the gutter. `wasm_inspection.js` reads the
+rows 1,000 at a time from `inspect_wasm` as the editor moves, keeps 16 pages
+per module, and asks the backend for the row at a byte when an offset link, the
+map or Trace value reveals one. The first read indexes the whole module; it
+shows elapsed seconds and **Cancel**, which stops the backend decode, and Hex
+stays available. Function indexes include imports. **Find** in Inspect searches
+the text of every row on the backend (`search_wasm_inspection`), says how many
+matches the whole module holds, and moves to each match's page; in Hex it
+searches the Hex text. Inspection headings and omission messages are excluded;
+partial coverage stays visible. Failures provide **Retry inspection**.
 The stored-evidence window forwards inspection, graphs, identification,
 pseudocode, value flow, module diff and the artifact map to its bundled backend,
-so it runs the same Rust provider as HTTP. See [WASM Inspection v1](../../protocol/wasm-inspection-v1.md).
+so it runs the same Rust provider as HTTP. See [WASM Inspection v2](../../protocol/wasm-inspection-v2.md).
 
 **More > Run offline…** on a captured Wasm module opens a dialog that runs one
 function in the backend's local sandbox: the `wasmi` interpreter, offline, with

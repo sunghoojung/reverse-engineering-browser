@@ -13,7 +13,7 @@ Inspection is an explicit static action. It uses the existing pinned
 `wasmparser` dependency, verifies artifact integrity, and never executes the
 module or contacts its origin. Resource bounds, partial coverage, malformed
 input, and retry behavior follow the
-[versioned contract](../../protocol/wasm-inspection-v1.md).
+[versioned contract](../../protocol/wasm-inspection-v2.md).
 
 This completes the bounded section-inspection and disassembly increment in the
 [WASM Laboratory roadmap](feature-list.md#webassembly-laboratory). Remaining

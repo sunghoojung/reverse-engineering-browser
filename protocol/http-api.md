@@ -171,9 +171,9 @@ legacy `--allow-session-start` keeps accepting them with
 `confirm_sensitive_capture`. None of these flags is authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
-content, `get_artifact_text` and `search_artifact_text`, and the offline Wasm
-runs `run_wasm_function` and `get_wasm_runs`, since running captured code
-discloses what it computes. They are listed only
+content, `get_artifact_text`, `search_artifact_text` and
+`search_wasm_inspection`, and the offline Wasm runs `run_wasm_function` and
+`get_wasm_runs`, since running captured code discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
 it, `get_source_format` also lays out request and response bodies. Content is
@@ -358,7 +358,7 @@ in the ETag. The v1 response shape, stored evidence and capture policy are uncha
 `get_wasm_functions` and `get_wasm_function_graph` project
 `GET /api/wasm/functions` and `GET /api/wasm/graph`. Both are read-only and
 bounded by byte budgets; a partial status names what was cut. See
-[WASM inspection](wasm-inspection-v1.md#function-index-and-block-graph). The
+[WASM inspection](wasm-inspection-v2.md#function-index-and-block-graph). The
 graph is declared static flow for one function at a time. Edge kinds are never
 inferred from execution, and `complete` is always false.
 
@@ -1391,13 +1391,18 @@ reads at most 64 MiB and stops after 10 seconds. `coverage` names every file
 not fully searched, with its reason, and `complete` says whether the whole
 scope was searched; `offset` skips matches and `next_offset` continues.
 
-`inspect_wasm` takes `row_offset` and `row_limit` (1 to 2048). With either,
-`rows` holds only that window, which also stops at 98,304 bytes of serialized
-rows, and `row_window` gives `offset`, `rows`, `total_rows` and
-`next_offset`. Without them the document is unchanged.
+`inspect_wasm` returns one window of a module of any size: `row_offset` (or
+`byte_offset`, which starts at the row for an original byte) and `row_limit`
+(1 to 2048, default 2048). The window also stops at 98,304 bytes of serialized
+rows, and `row_window` gives `offset`, `rows`, `total_rows` and `next_offset`.
+`search_wasm_inspection` (`GET /api/wasm/search`) finds a case-insensitive
+literal `q` in the text of every row, counts every match and pages them with
+`match_offset` and `match_limit` (1 to 1000). Both decode with no deadline; a
+request that goes away is answered 499. See
+[WASM Inspection v2](wasm-inspection-v2.md).
 
-Both text operations return captured content and change nothing. MCP lists
-them only with `--allow-content`, as described in
+The two artifact text operations and `search_wasm_inspection` return captured
+content and change nothing. MCP lists them only with `--allow-content`, as described in
 [permission levels and content reads](#permission-levels-and-content-reads).
 
 ## Artifact map

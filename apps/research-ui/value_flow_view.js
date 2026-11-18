@@ -8,7 +8,7 @@
   const code = document.querySelector('#source-code');
   if (!split || !code) return;
 
-  const MAX_NODES = 512, REQUEST_TIMEOUT_MS = 10000, MAX_TEXT = 160;
+  const MAX_NODES = 512, MAX_TEXT = 160;
   const ROLE_LABELS = {seed: 'seed', source: 'source', sink: 'sink', interior: 'step', frontier: 'depth cap'};
   const KIND_LABELS = {param: 'param', local_init: 'local zero', phi: 'join', exception_value: 'exception', unknown: 'unknown', const: 'const',
     local_get: 'local.get', local_set: 'local.set', local_tee: 'local.tee', global_get: 'global.get', global_set: 'global.set', load: 'load',
@@ -40,7 +40,8 @@
   const node = (tag, className, text) => {const element = document.createElement(tag); if (className) element.className = className; if (text !== undefined) element.textContent = String(text); return element;};
   const clip = text => {const value = String(text ?? ''); return value.length > MAX_TEXT ? `${value.slice(0, MAX_TEXT)}…` : value;};
   const currentSource = () => typeof selectedSource === 'function' ? selectedSource() : null;
-  const inspectRows = () => (typeof state !== 'undefined' && state.sourceWasm) ? state.sourceEditorView?.view?.wasmRows ?? null : null;
+  // The Inspect page mounted in Sources; its row(line) reads one row.
+  const inspectRows = () => (typeof state !== 'undefined' && state.sourceWasm) ? state.sourceEditorView?.view?.wasm ?? null : null;
   const keyOf = source => source ? `${source.artifact_id}:${source.sha256 ?? ''}` : null;
   const editor = split.closest('.sources-editor');
   const graphOpen = () => Boolean(editor?.hasAttribute?.('data-graph'));
@@ -94,9 +95,10 @@
     const shown = trace?.target ?? null;
     const named = shown ?? selected;
     const fresh = selected && (!shown || selected.offset !== shown.offset || selected.functionIndex !== shown.functionIndex);
-    elements.run.disabled = !selected;
-    elements.run.textContent = shown && fresh ? `Trace ${hex(selected.offset)}` : 'Trace value';
-    elements.run.title = selected ? `Trace values at ${hex(selected.offset)} in function ${selected.functionIndex}` : 'Select an instruction row in Inspect first';
+    // A trace has no deadline; while one runs the button stops it.
+    elements.run.disabled = !selected && !controller;
+    elements.run.textContent = controller ? 'Cancel' : shown && fresh ? `Trace ${hex(selected.offset)}` : 'Trace value';
+    elements.run.title = controller ? 'Stop this trace on the backend' : selected ? `Trace values at ${hex(selected.offset)} in function ${selected.functionIndex}` : 'Select an instruction row in Inspect first';
     elements.target.textContent = named ? `func ${named.functionIndex} · ${hex(named.offset)} · ${clip(named.text)}` : 'Select an instruction row';
     elements.target.title = elements.target.textContent;
   }
@@ -134,7 +136,7 @@
     if (!available()) return;
     const element = event.target.closest?.('.source-line');
     if (!element) return;
-    const row = inspectRows()?.[Number(element.dataset.localLine)];
+    const row = inspectRows()?.row(Number(element.dataset.localLine));
     if (!row || row.kind !== 'instruction' || !Number.isSafeInteger(row.byte_offset) || !Number.isSafeInteger(row.function_index)) return;
     if (selected?.offset === row.byte_offset && selected.functionIndex === row.function_index) return;
     selected = {functionIndex: row.function_index, offset: row.byte_offset, text: row.text};
@@ -149,18 +151,27 @@
   }
 
   async function run() {
+    if (controller) {
+      controller.abort();
+      return;
+    }
     const source = currentSource();
     if (!selected || !source) return;
-    controller?.abort();
     const mine = ++generation;
+    const started = Date.now();
     controller = new AbortController();
-    const timer = setTimeout(() => controller?.abort(), REQUEST_TIMEOUT_MS);
     const target = selected;
     const params = new URLSearchParams({artifact_id: source.artifact_id, function: String(target.functionIndex), offset: String(target.offset),
       direction: elements.direction.value, max_nodes: String(MAX_NODES)});
     if (elements.operand.value !== '') params.set('operand', elements.operand.value);
-    setStatus(`Tracing ${hex(target.offset)}…`, 'loading');
-    elements.run.disabled = true;
+    let timer = 0;
+    const tick = () => {
+      if (mine !== generation) return;
+      setStatus(`Tracing ${hex(target.offset)}… ${Math.floor((Date.now() - started) / 1000)} s. Cancel stops the backend analysis.`, 'loading');
+      timer = setTimeout(tick, 1000);
+    };
+    tick();
+    renderTarget();
     try {
       const response = await fetch(`/api/wasm/value-flow?${params}`, {cache: 'no-store', signal: controller.signal});
       const body = await response.json().catch(() => null);
@@ -172,7 +183,7 @@
       render();
     } catch (error) {
       if (mine !== generation) return;
-      const message = error?.name === 'AbortError' ? 'Value flow timed out.' : clip(error?.message ?? 'Value flow failed.');
+      const message = error?.name === 'AbortError' ? 'Value flow cancelled; its backend analysis was stopped.' : clip(error?.message ?? 'Value flow failed.');
       setStatus(`${message} The last trace is unchanged.`, 'error');
     } finally {
       clearTimeout(timer);
@@ -195,19 +206,13 @@
   }
 
 
-  function rowLine(offset) {
-    const rows = inspectRows();
-    if (!rows) return -1;
-    return rows.findIndex(row => row.kind === 'instruction' && row.byte_offset === offset);
-  }
-
-  function reveal(offset) {
-    const line = rowLine(offset);
-    if (line < 0 || typeof moveSourceWindow !== 'function') return false;
-    moveSourceWindow(line, 0, {focus: false});
-    const element = code.querySelector(`[data-local-line="${line}"]`);
-    element?.scrollIntoView?.({block: 'center'});
-    element?.querySelector?.('.source-gutter')?.focus?.({preventScroll: true});
+  // Inspect holds one page of rows; the backend finds the page of a slice
+  // node's instruction, which every node of a decoded body has.
+  async function reveal(offset) {
+    const source = currentSource();
+    if (!inspectRows() || typeof revealWasmInspectionByte !== 'function' || !await revealWasmInspectionByte(source, offset)) return false;
+    const line = [...code.querySelectorAll('.source-line')].find(element => inspectRows()?.row(Number(element.dataset.localLine))?.byte_offset === offset);
+    line?.querySelector?.('.source-gutter')?.focus?.({preventScroll: true});
     return true;
   }
 
@@ -225,10 +230,8 @@
       const entry = node('li', `value-flow-row is-${item.role}${item.sink && item.role !== 'sink' ? ' is-sink' : ''}`);
       const button = node('button', 'value-flow-link');
       button.type = 'button';
-      const line = rowLine(item.byte_offset);
-      button.disabled = line < 0;
       const kind = describe(item), text = clip(item.expression || item.text);
-      button.title = `${kind} · ${text}\n${line < 0 ? `Byte ${item.byte_offset} has no retained Inspect row` : `Show the Inspect row at ${hex(item.byte_offset)}`}`;
+      button.title = `${kind} · ${text}\nShow the Inspect row at ${hex(item.byte_offset)}`;
       // Kind and text share one column so the index, import or join kind
       // stays visible at the minimum window, ahead of the instruction text.
       const detail = node('span', 'value-flow-detail');
@@ -265,7 +268,7 @@
     }
     if (!rows || marked.size === 0 || panel.hidden) return;
     for (const line of code.querySelectorAll('.source-line')) {
-      const row = rows[Number(line.dataset?.localLine)];
+      const row = rows.row(Number(line.dataset?.localLine));
       const role = row?.kind === 'instruction' ? marked.get(row.byte_offset) : undefined;
       if (role && line.dataset) line.dataset.valueFlow = role;
     }

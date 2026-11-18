@@ -291,18 +291,28 @@ const ui = runInNewContext(
     ";({isBrokerEvent,isWasmInspection})",
   { TextEncoder, URL },
 );
-// Reject foreign, malformed and unbounded binary listings before rendering them.
+// Reject foreign, malformed and misplaced binary listing windows before
+// rendering them. A row's text has no length limit: names and branch tables are
+// complete.
 const wasmSource = {artifact_id: "1", sha256: "a".repeat(64), byte_size: 32};
-const wasmReport = {schema: "wasm-inspection-v1", ...wasmSource, status: "decoded",
+const wasmRow = {kind: "instruction", byte_offset: 12, byte_end: 14, function_index: 0, text: "i32.const {value: 7}"};
+const wasmReport = {schema: "wasm-inspection-v2", ...wasmSource, status: "decoded",
   sections: 1, defined_functions: 1, imported_functions: 0, instructions: 1,
-  notice: "Static only", omissions: [], rows: [{kind: "instruction", byte_offset: 12,
-    byte_end: 14, function_index: 0, text: "i32.const {value: 7}", text_truncated: false}]};
+  notice: "Static only", omissions: [], rows: [wasmRow], row_window: {offset: 0, rows: 1, total_rows: 1, next_offset: null}};
 assert.equal(ui.isWasmInspection(wasmReport, wasmSource), true);
+assert.equal(ui.isWasmInspection({...wasmReport, rows: [{...wasmRow, text: "x".repeat(65536)}]}, wasmSource), true);
+assert.equal(ui.isWasmInspection({...wasmReport, rows: Array(2048).fill(wasmRow),
+  row_window: {offset: 4096, rows: 2048, total_rows: 9000, next_offset: 6144}}, wasmSource), true);
 for (const patch of [{sha256: "b".repeat(64)}, {artifact_id: "2"}, {byte_size: 33},
-  {status: "confirmed"}, {rows: Array(8193).fill(wasmReport.rows[0])},
-  {rows: [{...wasmReport.rows[0], byte_end: 33}]},
-  {rows: [{...wasmReport.rows[0], byte_offset: -1}]},
-  {rows: [{...wasmReport.rows[0], text: "x".repeat(541)}]},
+  {schema: "wasm-inspection-v1"}, {status: "confirmed"},
+  {rows: Array(2049).fill(wasmRow), row_window: {offset: 0, rows: 2049, total_rows: 2049, next_offset: null}},
+  {row_window: undefined}, {row_window: {offset: 0, rows: 2, total_rows: 2, next_offset: null}},
+  {row_window: {offset: 1, rows: 1, total_rows: 1, next_offset: null}},
+  {row_window: {offset: 0, rows: 1, total_rows: 3, next_offset: null}},
+  {row_window: {offset: 0, rows: 1, total_rows: 1, next_offset: 1}},
+  {rows: [wasmRow, {...wasmRow, byte_offset: 11}], row_window: {offset: 0, rows: 2, total_rows: 2, next_offset: null}},
+  {rows: [{...wasmRow, byte_end: 33}]},
+  {rows: [{...wasmRow, byte_offset: -1}]},
   {rows: [{...wasmReport.rows[0], text: "import e\nv"}]},
   {rows: [{...wasmReport.rows[0], text: "import e\rv"}]},
   {rows: [{...wasmReport.rows[0], text: "import e\u2028v"}]},
@@ -310,7 +320,7 @@ for (const patch of [{sha256: "b".repeat(64)}, {artifact_id: "2"}, {byte_size: 3
   {omissions: [null]}, {instructions: NaN}]) {
   assert.equal(ui.isWasmInspection({...wasmReport, ...patch}, wasmSource), false);
 }
-console.log("PASS WASM inspection identity, coordinate and resource bounds");
+console.log("PASS WASM inspection identity, coordinates and row windows");
 // A minimal DOM verifies the real reconciliation code and bounded state, not
 // pixels. `make rendered-ui-check` is the separate rendered interaction path.
 class TrafficFixtureNode {
@@ -1166,7 +1176,7 @@ const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsC
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
   'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
   'closeSource',
-  'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'renderSourceLanguage', 'recolorSourceWindow',
+  'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'revealPagedLine', 'renderWasmInspectionPending', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'renderSourceLanguage', 'recolorSourceWindow',
   'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceRepresentation', 'sourceWantedLine', 'sourceOriginalHighlighter', 'sourceFormattedView', 'sourceFormatWanted', 'sourcePositionText', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
   'discardStaticCleanup', 'toggleStaticCleanupComparison', 'updateDeobfuscationView', 'setDeobfuscationDisclosure', 'revealDeobfuscationChange', 'deobfuscationButton', 'deobfuscationDisclosure', 'renderDeobfuscationReport'];
 const canvasProductionRules=runInNewContext(
@@ -1174,6 +1184,14 @@ const canvasProductionRules=runInNewContext(
   appSection('      const canvasDataUrlPattern =','      function canvasReadbackName(')+
   ';({nativeCanvasCaptureDisplayLimit,canvasPreviewByteLimit,canvasPreviewReadLimit,canvasDataUrlPattern,canvasPreviewAxisLimit,canvasPreviewPixelLimit,canvasGalleryPixelLimit,inspectCanvasPng})', {atob});
 const ownershipModels = await readFile(join(root, 'apps/research-ui/evidence_models.js'), 'utf8');
+// The shipped paged Inspect client, wired as app.js wires it. A fresh client
+// stands for one that released a module's pages.
+const ownershipWasmInspection = await readFile(join(root, 'apps/research-ui/wasm_inspection.js'), 'utf8') + `
+function newWasmInspection() {
+  return createWasmInspectionClient({onChange: source => { if (state.sourceWasm && sourceIdentity(selectedSource()) === sourceIdentity(source)) renderSources(); }});
+}
+var wasmInspection = newWasmInspection();
+`;
 const ownershipSyntax = await readFile(join(root, 'apps/research-ui/source_syntax.js'), 'utf8');
 const ownershipProvenanceSite = '';
 const ownershipHash = async text => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',
@@ -1188,7 +1206,7 @@ const ownedPayload = (source, text) => ({schema:'deobfuscation-analysis-v1', eng
   representation:{text,offset_unit:'utf-8-byte',segments:text ? [{kind:'verbatim',original_start:0,original_end:Buffer.byteLength(text),derived_start:0,derived_end:Buffer.byteLength(text)}] : []}});
 function ownedContext(patch = {}) {
   const state = {artifacts:[], openArtifactIds:[], selectedArtifactId:null, deobfuscationRequests:new Map(), deobfuscationCache:new Map(),
-    sourceFormatCache:new Map(), wasmRequests:new Map(), wasmCache:new Map(),
+    sourceFormatCache:new Map(),
     sourceDeobfuscated:false, sourceFormatted:false, sourceWasm:false, sessionMode:'live', ...patch.state};
   const sandbox = {console, state, TextEncoder, TextDecoder, Uint8Array, crypto, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
     sourceFactsFields:sourceFactsUI.sourceFactsFields, sourceFactsIdentity:sourceFactsUI.sourceFactsIdentity, sourceFactsUnavailable:sourceFactsUI.sourceFactsUnavailable, sourceFactsReadBytes:sourceFactsUI.sourceFactsReadBytes,
@@ -1199,7 +1217,7 @@ function ownedContext(patch = {}) {
     sourceName:source=>source.url, sourceTreeFileIcon:()=>'file', evidencePackagePanel:{sync(){}}, evidenceWorkspace:{sync(){}},
     ...patch, state};
   const functions = [...(patch.productionFunctions ?? ownershipFunctionNames), ...(patch.functions ?? [])];
-  return {state, sandbox, api:runInNewContext(ownershipModels + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
+  return {state, sandbox, api:runInNewContext(ownershipModels + ownershipWasmInspection + ownershipSyntax + ownershipProvenanceSite + functions.map(sourceProductionFunction).join('\n') +
     (patch.productionSource ?? '') + `;({${functions.join(',')},${(patch.productionExports ?? []).join(',')}})`, sandbox)};
 }
 const sourceOwnershipReceipt = [];
@@ -1512,7 +1530,7 @@ function sourceReviewDOM() {
   const shown=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},document:shownDocument,elements:shownElements});
   const noticeFor=view=>{shown.api.syncSourceDisplayControls(over,view);return shownElements.sourceLimitNotice;};
   for(const view of [{},{formatted:{}},{formatPending:true}]){assert.equal(noticeFor(view).hidden,false);assert.equal(noticeFor(view).textContent,'Preview limited to the first 16 MiB of this 16,777,217-byte file. Later bytes are not shown or searched; the original bytes are unchanged.');}
-  for(const view of [{wasmRows:[]},{derived:{}}])assert.equal(noticeFor(view).hidden,true,'A view that is not the retained prefix states no limit');
+  for(const view of [{wasm:{row:()=>null}},{derived:{}}])assert.equal(noticeFor(view).hidden,true,'A view that is not the retained prefix states no limit');
   over.contentTruncated=false;assert.equal(noticeFor({}).hidden,true,'A whole file states no limit');
   sourceOwnershipReceipt.push({test:'over_cap_notice_is_rendered_beside_the_code',status:'passed'});
 }
@@ -1872,7 +1890,7 @@ async function sourceHistoryFixture(kind = 'artifact') {
     renderTools:noop,refreshDecoderEngine:noop,formatByteSize:String,applySourceSearch:noop,
     appendSourceSyntax(node,tokens){node.textContent=tokens.map(token=>token.text).join('');},
     fetch:async(url,options)=>{reads.push({url,signal:options.signal});if(url.startsWith('/api/artifacts?'))return Response.json({count:1,artifacts:[Object.fromEntries(sourceFactsUI.sourceFactsFields.filter(key=>Object.hasOwn(artifact,key)).map(key=>[key,artifact[key]]))]});return held.promise;},
-    productionFunctions:[...ownershipFunctionNames.filter(name=>!['renderSourceTabs','renderDeobfuscationReport'].includes(name)), 'renderSources','showScreen','wasmKey','loadWasmInspection'],
+    productionFunctions:[...ownershipFunctionNames.filter(name=>!['renderSourceTabs','renderDeobfuscationReport'].includes(name)), 'renderSources','showScreen','loadWasmInspection'],
     productionSource:sourceHistoryNavigation+'\ninvestigationNavigation=createInvestigationHistory({snapshot:investigationSnapshot,restore:restoreInvestigation,changed({back,forward}){document.querySelector("#investigation-back").disabled=!back;document.querySelector("#investigation-forward").disabled=!forward;}});',
     productionExports:['investigationSnapshot','restoreInvestigation','retireInvestigationReturn','history:investigationNavigation','pendingReturn:()=>investigationPendingReturn']});
   const {state,api}=fixture;
@@ -1882,15 +1900,19 @@ async function sourceHistoryFixture(kind = 'artifact') {
   fixture.sandbox.loadArtifactContent=completion.wrappers.artifact;
   fixture.sandbox.loadWasmInspection=completion.wrappers.wasm;
   if(kind==='wasm'){
+    // The backend's first page of this module, read before the history entry is saved.
     state.sourceWasm=true;
-    state.wasmCache.set(api.wasmKey(artifact),{...wasmReport,artifact_id:'7',sha256:artifact.sha256,byte_size:artifact.byte_size});
-    state.wasmRequests.set(api.wasmKey(artifact),{status:'ready'});
+    const reading=fixture.sandbox.fetch;
+    fixture.sandbox.fetch=async()=>Response.json({...wasmReport,artifact_id:'7',sha256:artifact.sha256,byte_size:artifact.byte_size});
+    await fixture.sandbox.wasmInspection.open(artifact);
+    fixture.sandbox.fetch=reading;
+    assert.equal(fixture.sandbox.wasmInspection.state(artifact).status,'ready');
   }
   api.renderSources();elements.sourcePretty.focus();elements.sourceCodeWrap.scrollTop=713;elements.sourceCodeWrap.scrollLeft=143;elements.sourceTree.scrollTop=81;
   const saved=api.investigationSnapshot();
   api.showScreen('tools');
   api.releaseSourcePreview(api.selectedSource());
-  if(kind==='wasm')state.wasmCache.clear();
+  if(kind==='wasm')fixture.sandbox.wasmInspection=fixture.sandbox.newWasmInspection();
   frames.length=0;
   const flush=async()=>{await new Promise(resolve=>setImmediate(resolve));for(const callback of frames.splice(0))callback();};
   const settle=async()=>{

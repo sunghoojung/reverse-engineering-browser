@@ -731,8 +731,9 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             assert!(ids.insert(id), "Duplicate operation ID: {id}");
         }
     }
-    assert_eq!(ids.len(), 67, "Review route coverage when the API changes");
+    assert_eq!(ids.len(), 68, "Review route coverage when the API changes");
     assert!(ids.contains("get_wasm_pseudocode"));
+    assert!(ids.contains("search_wasm_inspection"));
     assert!(ids.contains("get_request_headers"));
     assert!(ids.contains("get_request_cookies") && ids.contains("get_cookie_provenance"));
     assert!(ids.contains("get_xrefs"));
@@ -826,7 +827,7 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
             operation_count += 1;
         }
     }
-    assert_eq!(operation_count, 67);
+    assert_eq!(operation_count, 68);
     let schemas = &spec["components"]["schemas"];
     let mut action_count = 0;
     for name in [
@@ -4013,18 +4014,170 @@ async fn wasm_inspection_preserves_offsets_identity_limits_and_original_bytes() 
     assert_eq!(server.get("/api/wasm?artifact_id=2").await.status(), 404);
     put(&bytes, "javascript");
     assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 400);
-    put(&module(10000), "wasm");
-    let partial: Value = server
-        .get("/api/wasm?artifact_id=1")
-        .await
-        .json()
-        .await
+    // Every row of a module is reachable one window at a time, in binary
+    // order, where version 1 stopped at 8,192 rows.
+    let large = module(10000);
+    put(&large, "wasm");
+    let read = |route: String| {
+        let server = &server;
+        async move {
+            let response = server.get(&route).await;
+            assert_eq!(response.status(), 200, "{route}");
+            response.json::<Value>().await.unwrap()
+        }
+    };
+    let first = read("/api/wasm?artifact_id=1".into()).await;
+    contract(&first, "first window");
+    assert_eq!(first["status"], "decoded");
+    assert_eq!(first["omissions"], json!([]));
+    let total = first["row_window"]["total_rows"].as_u64().unwrap();
+    assert!(total > 10000);
+    let shown = first["rows"].as_array().unwrap().len();
+    assert!(shown > 0 && shown <= 2048);
+    assert_eq!(first["row_window"]["next_offset"], shown);
+    let mut every = Vec::new();
+    let mut next = Some(0);
+    while let Some(offset) = next {
+        let window = read(format!("/api/wasm?artifact_id=1&row_offset={offset}")).await;
+        contract(&window, "a later window");
+        assert_eq!(window["row_window"]["offset"], offset);
+        assert_eq!(window["defined_functions"], first["defined_functions"]);
+        every.extend(window["rows"].as_array().unwrap().iter().cloned());
+        next = window["row_window"]["next_offset"].as_u64();
+    }
+    assert_eq!(every.len() as u64, total);
+    assert!(
+        every
+            .windows(2)
+            .all(|pair| pair[0]["byte_offset"].as_u64() <= pair[1]["byte_offset"].as_u64())
+    );
+    assert_eq!(
+        every.iter().filter(|row| row["text"] == "nop").count(),
+        10000
+    );
+    assert_eq!(every.last().unwrap()["text"], "end");
+    let rest = read(format!("/api/wasm?artifact_id=1&row_offset={total}")).await;
+    assert_eq!(rest["rows"], json!([]));
+    assert_eq!(rest["row_window"]["next_offset"], Value::Null);
+    // A window starts at the row for an original byte: the row there, or the
+    // last one that starts before it.
+    let nop = every.iter().position(|row| row["text"] == "nop").unwrap() + 5000;
+    let byte = every[nop]["byte_offset"].as_u64().unwrap();
+    let located = read(format!(
+        "/api/wasm?artifact_id=1&byte_offset={byte}&row_limit=3"
+    ))
+    .await;
+    contract(&located, "located window");
+    assert_eq!(located["row_window"]["offset"], nop);
+    assert_eq!(located["rows"].as_array().unwrap()[..], every[nop..nop + 3]);
+    let constant = every
+        .iter()
+        .position(|row| row["text"].as_str().unwrap().starts_with("i32.const"))
         .unwrap();
-    assert_eq!(partial["status"], "partial");
-    assert_eq!(partial["rows"].as_array().unwrap().len(), 8192);
-    assert!(!partial["omissions"].as_array().unwrap().is_empty());
-    put(&vec![0; 2 * 1024 * 1024 + 1], "wasm");
-    assert_eq!(server.get("/api/wasm?artifact_id=1").await.status(), 400);
+    let inside = every[constant]["byte_offset"].as_u64().unwrap() + 1;
+    let within = read(format!(
+        "/api/wasm?artifact_id=1&byte_offset={inside}&row_limit=1"
+    ))
+    .await;
+    assert_eq!(within["row_window"]["offset"], constant);
+    for query in [
+        format!("&row_offset={}", total + 1),
+        "&row_offset=0&byte_offset=20".into(),
+        format!("&byte_offset={}", large.len()),
+        "&byte_offset=0".into(),
+        "&byte_offset=x".into(),
+        "&row_offset=-1".into(),
+        "&row_limit=0".into(),
+        "&row_limit=2049".into(),
+    ] {
+        assert_contract_response(
+            server.get(&format!("/api/wasm?artifact_id=1{query}")).await,
+            "get",
+            "/api/wasm",
+            400,
+        )
+        .await;
+    }
+    // Find counts every match in every row on the backend and pages them.
+    let search = |query: &str| format!("/api/wasm/search?artifact_id=1{query}");
+    let found: Value = serde_json::from_slice(
+        &assert_contract_response(
+            server.get(&search("&q=NOP")).await,
+            "get",
+            "/api/wasm/search",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(found["schema"], "wasm-inspection-search-v1");
+    assert_eq!(found["sha256"], first["sha256"]);
+    assert_eq!(found["query"], "NOP");
+    assert_eq!(found["total_matches"], 10000);
+    assert_eq!(found["total_rows"], total);
+    assert_eq!(found["matches"].as_array().unwrap().len(), 1000);
+    assert_eq!(found["match_window"]["next_offset"], 1000);
+    let first_nop = nop - 5000;
+    assert_eq!(
+        found["matches"][0],
+        json!({"row":first_nop,"byte_offset":every[first_nop]["byte_offset"],"column":0,"length":3})
+    );
+    let last = read(search("&q=nop&match_offset=9999")).await;
+    assert_eq!(last["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(last["matches"][0]["row"], first_nop + 9999);
+    assert_eq!(last["match_window"]["next_offset"], Value::Null);
+    assert_eq!(every[constant]["text"], "i32.const { value: 7 }");
+    let constant_match = read(search("&q=CONST%20%7B%20value%3A%207&match_limit=5")).await;
+    assert_eq!(constant_match["total_matches"], 1);
+    assert_eq!(
+        constant_match["matches"],
+        json!([{"row":constant,"byte_offset":every[constant]["byte_offset"],"column":4,"length":16}])
+    );
+    let none = read(search("&q=unreachable")).await;
+    assert_eq!(none["total_matches"], 0);
+    assert_eq!(none["matches"], json!([]));
+    let scoped = read(search("&q=nop&sections=export")).await;
+    assert_eq!(scoped["total_matches"], 0);
+    assert_eq!(scoped["requested_sections"], json!(["export"]));
+    for query in [
+        "",
+        "&q=",
+        "&q=a%0Ab",
+        "&q=nop&match_limit=0",
+        "&q=nop&match_limit=1001",
+        "&q=nop&match_offset=10001",
+        "&q=nop&q=nop",
+        "&q=nop&row_offset=0",
+    ] {
+        assert_contract_response(
+            server.get(&search(query)).await,
+            "get",
+            "/api/wasm/search",
+            400,
+        )
+        .await;
+    }
+    assert_contract_response(
+        server.get("/api/wasm/search?artifact_id=2&q=nop").await,
+        "get",
+        "/api/wasm/search",
+        404,
+    )
+    .await;
+    // No size refuses a module: one past version 1's 2 MiB limit decodes to
+    // its last byte.
+    let huge = module(2 * 1024 * 1024);
+    put(&huge, "wasm");
+    let tail = read(format!(
+        "/api/wasm?artifact_id=1&byte_offset={}",
+        huge.len() - 1
+    ))
+    .await;
+    contract(&tail, "a window past 2 MiB");
+    assert_eq!(tail["status"], "decoded");
+    assert_eq!(tail["rows"][0]["text"], "end");
+    assert_eq!(tail["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(tail["row_window"]["next_offset"], Value::Null);
     put(b"\0asm\x01\0\0\0", "wasm");
     let empty: Value = server
         .get("/api/wasm?artifact_id=1")
@@ -5450,32 +5603,45 @@ async fn wasm_section_requests_reach_late_tables_and_declare_what_they_left_out(
             .collect()
     };
 
-    // An unscoped request on a module whose bodies outrun the row budget never
-    // reaches the sections the format places after the code section.
+    // An unscoped request decodes the whole module, past the 8,192 rows where
+    // version 1 stopped inside the code section, and pages reach the sections
+    // the format places after it.
     put(&module(40, 250));
-    let whole = inspect("").await;
-    contract(&whole, "unscoped");
-    assert_eq!(whole["status"], "partial");
-    assert_eq!(whole["rows"].as_array().unwrap().len(), 8192);
-    assert_eq!(whole["coverage"]["requested_sections"], Value::Null);
+    let first = inspect("").await;
+    contract(&first, "unscoped");
+    assert_eq!(first["status"], "decoded");
     assert_eq!(
-        whole["coverage"],
+        first["coverage"],
         json!({"requested_sections":null,
-            "analyzed_sections":["type","import","function","export"],
-            "excluded_sections":[],"truncated_sections":["code"],"section_map_complete":false})
+            "analyzed_sections":["custom","type","import","function","export","code","data"],
+            "excluded_sections":[],"truncated_sections":[],"section_map_complete":true})
     );
-    assert!(kinds(&whole, "data").is_empty() && kinds(&whole, "custom").is_empty());
-    // Declaration rows are paid for only by a request that names `function`,
-    // so the unscoped budget still reaches exports and every body it can.
-    assert!(kinds(&whole, "declaration").is_empty());
+    let mut rows = Vec::new();
+    let mut next = Some(0);
+    while let Some(offset) = next {
+        let window = inspect(&format!("&row_offset={offset}")).await;
+        contract(&window, "unscoped window");
+        rows.extend(window["rows"].as_array().unwrap().iter().cloned());
+        next = window["row_window"]["next_offset"].as_u64();
+    }
+    assert!(rows.len() > 10_000);
+    assert_eq!(
+        rows.len() as u64,
+        first["row_window"]["total_rows"].as_u64().unwrap()
+    );
+    let whole = json!({"rows": rows});
+    assert_eq!(kinds(&whole, "data").len(), 1);
+    assert_eq!(kinds(&whole, "custom").len(), 1);
     assert_eq!(kinds(&whole, "export").len(), 1);
+    // Declarations are rows wherever the function section is selected.
+    assert_eq!(kinds(&whole, "declaration").len(), 40);
     assert!(
-        !whole["rows"]
+        whole["rows"]
             .as_array()
             .unwrap()
             .iter()
             .any(|row| row["text"].as_str().unwrap().starts_with("data section")),
-        "A truncated traversal must not name a section it never reached"
+        "The traversal names every section it reached"
     );
 
     // Scoping to the static tables resolves an export to its declared type
@@ -11915,8 +12081,13 @@ async fn artifact_text_pages_search_and_wasm_row_windows_follow_the_contract() {
         .json()
         .await
         .unwrap();
+    // A small module fits the first window, which says so.
     let total = all["rows"].as_array().unwrap().len();
-    assert!(total > 3 && all.get("row_window").is_none());
+    assert!(total > 3);
+    assert_eq!(
+        all["row_window"],
+        json!({"offset":0,"rows":total,"total_rows":total,"next_offset":null})
+    );
     let mut rows = Vec::new();
     let mut offset = 0;
     loop {

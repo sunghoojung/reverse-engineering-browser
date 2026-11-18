@@ -122,10 +122,11 @@
       "operations": [
         "get_artifact_text",
         "search_artifact_text",
+        "search_wasm_inspection",
         "run_wasm_function",
         "get_wasm_runs"
       ],
-      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
+      "description": "Operations whose purpose is captured content (source, bytecode, disassembly and request and response bodies) are listed only with --allow-content. With it, get_source_format also lays out request and response bodies, and no result has content fields omitted below the inline limit. Larger documents still return a structural summary, so content is read in pages: get_artifact_text, get_source_format with start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and get_wasm_pseudocode with line_offset and line_limit. Binary responses are still refused."
     },
     "session_start": {
       "tool": "start_live_session",
@@ -5799,7 +5800,7 @@
       "get": {
         "operationId": "inspect_wasm",
         "summary": "Inspect a captured WebAssembly module",
-        "description": "Inert bounded decoding of a hash-verified core WASM artifact. Never executes the module. The optional sections filter decodes rows for only the named sections, so export, type, import, custom and data tables stay reachable when code-section instructions would otherwise exhaust the 8,192-row budget. Per-function declaration rows appear only when sections names function. coverage names what was analyzed, excluded and truncated, and a filtered document is never decoded. Partial results name unvisited coverage; decoded does not assert type validity or runtime behavior. Researcher names (Analyst evidence names, keyed by module SHA-256 and function index) appear as analyst_name on function, import, declaration and start rows and as target_analyst_name beside target_function_index on call, return_call and ref.func rows, with the module's names in analyst_names; captured text is unchanged.",
+        "description": "Inert decoding of a hash-verified core WASM artifact of any size, read as a window of rows. Never executes the module. The first request indexes where every section, entry run and function body's rows begin and keeps that index by module SHA-256 and section request; a window decodes only the units it shows, so every row of a module is reachable with row_offset, or with byte_offset at the row for an original byte. row_window names the window and total_rows; next_offset continues. The optional sections filter decodes rows for only the named sections. coverage names what was analyzed, excluded and left opaque, and a filtered document is never decoded. decoded does not assert type validity or runtime behavior. A request that goes away stops the decode and is answered 499. search_wasm_inspection finds text in every row. Researcher names (Analyst evidence names, keyed by module SHA-256 and function index) appear as analyst_name on function, import, declaration and start rows and as target_analyst_name beside target_function_index on call, return_call and ref.func rows, with the module's names in analyst_names; captured text is unchanged.",
         "tags": [
           "artifacts"
         ],
@@ -5829,7 +5830,7 @@
             "name": "row_offset",
             "in": "query",
             "required": false,
-            "description": "First row of a row window. With row_offset or row_limit the document keeps only that window of rows and adds row_window, so a module whose rows exceed an inline limit can be read page by page. Default 0.",
+            "description": "First row of the window. Default 0. Exclusive with byte_offset.",
             "schema": {
               "type": "integer",
               "minimum": 0,
@@ -5844,7 +5845,18 @@
             "schema": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 2048
+              "maximum": 2048,
+              "default": 2048
+            }
+          },
+          {
+            "name": "byte_offset",
+            "in": "query",
+            "required": false,
+            "description": "Start the window at the row for this original byte instead: the first row whose byte_offset equals it, or else the last row that starts before it. row_window.offset names that row. A byte before the first row or past the module is refused. Exclusive with row_offset.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
             }
           }
         ],
@@ -5860,7 +5872,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5870,7 +5882,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5880,7 +5892,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5890,7 +5902,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5900,7 +5912,17 @@
             }
           },
           "500": {
-            "description": "Invalid identifier, unsupported input, missing artifact, or integrity/decoding failure.",
+            "description": "Invalid identifier or parameter, not a WebAssembly artifact, missing artifact, or integrity/decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its decode stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5924,19 +5946,191 @@
             },
             {
               "id": "stored-wasm-artifact",
-              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification."
             },
             {
               "id": "requested-sections",
               "condition": "A supplied sections value must be a comma separated list of known core section names; an empty or unknown name is refused instead of widening to the whole module."
+            },
+            {
+              "id": "one-start",
+              "condition": "Pass row_offset or byte_offset, not both. row_offset may not exceed total_rows."
             }
           ],
           "confirmations": [],
-          "notes": "Verifies captured artifact bytes and performs bounded inert WebAssembly decoding without executing the module. An optional sections filter decodes rows for only the named sections; an excluded section is never read, so nothing is claimed about its entries or function bodies. coverage reports the scope the response used, and a filtered document is always partial. Compare coverage.requested_sections with the filter you sent before reading a document as scoped.",
+          "notes": "Verifies the captured artifact bytes on every request and decodes them inertly without executing the module. The row index is kept by module SHA-256 and section request, so later windows decode only the units they show. An optional sections filter decodes rows for only the named sections; an excluded section is never read, so nothing is claimed about its entries or function bodies. coverage reports the scope the response used, and a filtered document is always partial. Compare coverage.requested_sections with the filter you sent before reading a document as scoped.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm.rs",
               "symbol": "load"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/wasm/search": {
+      "get": {
+        "operationId": "search_wasm_inspection",
+        "summary": "Find text in a WebAssembly module's inspection rows",
+        "description": "Captured content: finds every nonoverlapping case-insensitive occurrence of a single-line literal in the text of every inspect_wasm row of one module, with the same section request. Case folds by Unicode simple lowercase, as a JavaScript giu search does. Row text is searched, not analyst names or original bytes. The first request for a query reads the whole inspection and keeps how many matches each unit holds, by module SHA-256, section request and query, so total_matches is exact and a later page decodes only the units it lists. A request that goes away stops the search and is answered 499. Each match names its row (an inspect_wasm row_offset), the row's byte_offset, and a UTF-16 column and length in the row's text. match_offset skips matches and next_offset continues. The MCP projection lists this operation only with --allow-content (--permission full).",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "The literal, with no line separator.",
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "sections",
+            "in": "query",
+            "required": false,
+            "description": "Optional comma separated core section names to decode: custom, type, import, function, table, memory, global, export, start, element, code, data, data_count, tag. Omit it to request the whole module. An empty or unknown name is refused rather than widened, and the response echoes the scope it used in coverage.requested_sections.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag)(,(custom|type|import|function|table|memory|global|export|start|element|code|data|data_count|tag))*$"
+            }
+          },
+          {
+            "name": "match_offset",
+            "in": "query",
+            "required": false,
+            "description": "Matches to skip. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "match_limit",
+            "in": "query",
+            "required": false,
+            "description": "Matches in the page, 1 to 1000. Default 1000.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of matches with the exact total.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmInspectionSearch"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid q, an unknown or malformed parameter, a match_offset past the matches, or not a WebAssembly artifact.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Host/Origin/Sec-Fetch-Site rejected.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Artifact not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The module does not decode.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its search stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Store, read or integrity failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-source": "apps/origin-trace-backend/src/app.rs",
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Searches the inspection rows of verified module bytes without executing the module. Returns where captured disassembly text matches; nothing is changed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm.rs",
+              "symbol": "search"
             }
           ]
         },
@@ -26469,14 +26663,14 @@
           "imported_functions",
           "instructions",
           "rows",
+          "row_window",
           "omissions",
           "coverage",
-          "notice",
-          "limits"
+          "notice"
         ],
         "properties": {
           "schema": {
-            "const": "wasm-inspection-v1"
+            "const": "wasm-inspection-v2"
           },
           "artifact_id": {
             "type": "string",
@@ -26488,8 +26682,7 @@
           },
           "byte_size": {
             "type": "integer",
-            "minimum": 8,
-            "maximum": 2097152
+            "minimum": 8
           },
           "status": {
             "enum": [
@@ -26515,7 +26708,7 @@
           },
           "rows": {
             "type": "array",
-            "maxItems": 8192,
+            "maxItems": 2048,
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -26524,8 +26717,7 @@
                 "byte_offset",
                 "byte_end",
                 "function_index",
-                "text",
-                "text_truncated"
+                "text"
               ],
               "properties": {
                 "kind": {
@@ -26566,10 +26758,7 @@
                 },
                 "text": {
                   "type": "string",
-                  "maxLength": 540
-                },
-                "text_truncated": {
-                  "type": "boolean"
+                  "description": "One line. Names are quoted with escaped control characters; a branch table lists every target and a type every parameter and result. A data segment's text previews its first 32 bytes, and Hex shows every byte of its range."
                 },
                 "target_function_index": {
                   "type": "integer",
@@ -26589,6 +26778,41 @@
                   "maxLength": 80,
                   "description": "Researcher name of target_function_index. Researcher name from the local Analyst evidence-names document, keyed by module SHA-256 and function index. Interpretation, not evidence; present only when a name exists."
                 }
+              }
+            },
+            "description": "This window of rows, in binary order: byte_offset never decreases from one row to the next."
+          },
+          "row_window": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "The window rows holds. It stops at row_limit rows or 98,304 serialized bytes; next_offset continues, and is null at the last row.",
+            "required": [
+              "offset",
+              "rows",
+              "total_rows",
+              "next_offset"
+            ],
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rows": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2048
+              },
+              "total_rows": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Every row of the module under this section request."
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
               }
             }
           },
@@ -26639,7 +26863,7 @@
                 ]
               },
               "truncated_sections": {
-                "description": "Sections present in these bytes that were requested but are not completely covered, because a limit stopped decoding or this version cannot decode them. omissions names which.",
+                "description": "Sections present in these bytes that were requested but left opaque because this version cannot decode them. omissions names which.",
                 "allOf": [
                   {
                     "$ref": "#/components/schemas/WasmSectionNames"
@@ -26647,7 +26871,7 @@
                 ]
               },
               "section_map_complete": {
-                "description": "True when traversal reached the module end, so the three lists together name every section in these bytes and a requested section absent from all three is absent from the module.",
+                "description": "True when traversal reached the module end, so the three lists together name every section in these bytes and a requested section absent from all three is absent from the module. A module that decodes always reaches its end.",
                 "type": "boolean"
               }
             }
@@ -26656,14 +26880,104 @@
             "type": "string",
             "maxLength": 512
           },
-          "row_window": {
+          "analyst_names": {
+            "$ref": "#/components/schemas/WasmAnalystNames"
+          }
+        }
+      },
+      "WasmInspectionSearch": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Every case-insensitive occurrence of a literal in the text of a module's inspection rows, paged.",
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "query",
+          "requested_sections",
+          "total_matches",
+          "total_rows",
+          "matches",
+          "match_window"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-inspection-search-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requested_sections": {
+            "description": "The section request searched, or null for the whole module.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WasmSectionNames"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_matches": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_rows": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The inspection's total_rows under the same section request, so row indexes join to inspect_wasm windows."
+          },
+          "matches": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "row",
+                "byte_offset",
+                "column",
+                "length"
+              ],
+              "properties": {
+                "row": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The row index, as row_offset names it."
+                },
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "The row's byte_offset."
+                },
+                "column": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Where the match starts in the row's text, in UTF-16 code units as JavaScript counts them."
+                },
+                "length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "The match's length in UTF-16 code units of the row's text."
+                }
+              }
+            }
+          },
+          "match_window": {
             "type": "object",
             "additionalProperties": false,
-            "description": "Present only when row_offset or row_limit was given. rows holds this window, which stops at row_limit rows or 98,304 serialized bytes.",
             "required": [
               "offset",
-              "rows",
-              "total_rows",
+              "matches",
               "next_offset"
             ],
             "properties": {
@@ -26671,15 +26985,10 @@
                 "type": "integer",
                 "minimum": 0
               },
-              "rows": {
+              "matches": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 2048
-              },
-              "total_rows": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 8192
+                "maximum": 1000
               },
               "next_offset": {
                 "type": [
@@ -26689,37 +26998,6 @@
                 "minimum": 0
               }
             }
-          },
-          "limits": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "max_bytes",
-              "max_rows",
-              "max_sections",
-              "max_text_bytes",
-              "deadline_ms"
-            ],
-            "properties": {
-              "max_bytes": {
-                "const": 2097152
-              },
-              "max_rows": {
-                "const": 8192
-              },
-              "max_sections": {
-                "const": 128
-              },
-              "max_text_bytes": {
-                "const": 512
-              },
-              "deadline_ms": {
-                "const": 2000
-              }
-            }
-          },
-          "analyst_names": {
-            "$ref": "#/components/schemas/WasmAnalystNames"
           }
         }
       },

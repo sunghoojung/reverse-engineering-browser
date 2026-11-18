@@ -14,7 +14,7 @@ Rust provider. The CLI prints the document or `{error, status}`.
 
 The provider verifies each module's complete size and SHA-256 against the
 manifest before decoding, using the same `wasmparser` decoder as
-[WASM inspection](wasm-inspection-v1.md). It never executes either module,
+[WASM inspection](wasm-inspection-v2.md). It never executes either module,
 invokes an import, fetches anything, writes analysis files, or modifies capture.
 Original bytes are never changed: every derived row maps back to a body range
 in its module, and the module's SHA-256.

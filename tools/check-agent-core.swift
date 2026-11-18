@@ -383,6 +383,8 @@ enum AgentCoreChecks {
       ("get_wasm_runs", true, .readOnly, [:], false, refuse),
       ("get_wasm_runs", true, .auto, [:], false, refuse),
       ("get_wasm_runs", true, .full, [:], false, .run),
+      ("search_wasm_inspection", true, .auto, [:], false, refuse),
+      ("search_wasm_inspection", true, .full, [:], false, .run),
     ]
     for (name, readOnly, level, arguments, sensitive, expected) in cases {
       let decision = AgentToolGate.decide(name, readOnly: readOnly, arguments: arguments, level: level, sensitive: sensitive)

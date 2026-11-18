@@ -3198,13 +3198,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"440\"]", containing: "webassembly compile")
       try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the value-flow module")
       try await ui.click("#source-wasm")
-      try await ui.waitUntil("(state.sourceEditorView?.view?.wasmRows ?? []).some(row => row.byte_offset === 0xd0)", timeout: 30, "the inspection rows did not load")
+      try await ui.waitUntil("(state.sourceEditorView?.view?.wasm?.rows ?? []).some(row => row.byte_offset === 0xd0)", timeout: 30, "the inspection rows did not load")
       try await ui.waitUntil("!document.querySelector('#value-flow').hidden", "the Trace value panel follows Inspect")
       let idle = try await ui.value("document.querySelector('#value-flow-run').disabled") as? Bool
       XCTAssertEqual(idle, true, "\(size.name): nothing to trace before a row is chosen")
       // Bring the import call row into view, then pick it with the pointer.
       _ = try await ui.value("""
-        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0xd0);
+        (() => { const page = state.sourceEditorView.view.wasm, line = page.lineBase + page.rows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0xd0);
           moveSourceWindow(line, 0, {focus: false});
           const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testTarget = '1'; return line; })()
         """)
@@ -3248,7 +3248,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let reached = try await ui.value("document.activeElement?.textContent ?? ''") as? String ?? ""
       XCTAssertTrue(reached.hasPrefix("0x7e"), "\(size.name): arrow keys reach the load: \(reached)")
       try await ui.key(36, "\r")
-      try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasmRows[Number(line.dataset.localLine)].byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
+      try await ui.waitUntil("(() => { const line = document.activeElement?.closest?.('.source-line'); return line && state.sourceEditorView.view.wasm.row(Number(line.dataset.localLine))?.byte_offset === 0x7e; })()", "Enter reveals the load in Inspect")
       try await ui.waitUntil("document.activeElement.closest('.source-line').dataset.valueFlow === 'source'", "the revealed load is marked as a source")
       _ = try await ui.value("(document.documentElement.dataset.theme = 'light', 1)")
       try await Task.sleep(nanoseconds: 600_000_000)
@@ -3264,7 +3264,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.waitUntil("document.querySelectorAll('#source-code .source-line[data-value-flow]').length === 0", "Clear removes the marks")
       // A store row offers its two operands before any trace.
       _ = try await ui.value("""
-        (() => { const line = state.sourceEditorView.view.wasmRows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0x89);
+        (() => { const page = state.sourceEditorView.view.wasm, line = page.lineBase + page.rows.findIndex(row => row.kind === 'instruction' && row.byte_offset === 0x89);
           moveSourceWindow(line, 0, {focus: false});
           const row = document.querySelector(`#source-code [data-local-line="${line}"]`); row.scrollIntoView({block: 'center'}); row.dataset.testStore = '1'; return line; })()
         """)

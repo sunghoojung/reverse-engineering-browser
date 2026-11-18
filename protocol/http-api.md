@@ -887,7 +887,8 @@ body-size ceilings, conditional responses and known application errors. Trace,
 request-signal and VM schemas are embedded from their versioned protocol files
 so the OpenAPI document is portable. Update embedded schemas whenever their
 versioned source changes.
-The VM HTTP response additionally allows its actual optional `selection` field.
+The VM HTTP response additionally allows its actual optional `selection` and
+`results_view` fields.
 
 The action routes are multiplexed, not invented REST resources:
 
@@ -1487,7 +1488,14 @@ sources and the error statuses.
 
 ## Exact native Traffic to VM selection
 
-`GET /api/analysis/vm` without selectors remains session analysis. A request
+`GET /api/analysis/vm` without selectors remains session analysis. It lists
+every analyzed artifact. The backend spools each result to an unnamed private
+file in the artifact store as it is produced and streams the published canonical
+bytes, so memory holds the document's other fields and a byte range per result,
+however long the session. `view=findings` lists only failed results and those
+with a candidate or likely-vm tier, and `results_view` counts the tier-none
+results it leaves out. VM Lab reads this view. The view combines with a request
+selection, and both are in the ETag. A request
 selection must supply all four nonzero canonical fields: `request_id`,
 `session_id`, `root_process_id` (32-bit), and `root_sequence_number` (64-bit).
 Incomplete, malformed, or repeated selectors return 400. The selector and ETag
@@ -1511,8 +1519,9 @@ that native response, not that the source ran, dispatched a guest VM, or caused
 an outgoing request. Native redirects are one chain-level request, not an exact
 CDP redirect-hop claim. Mixed hypotheses, generated source, allocating-script
 snapshots, missing ACK/creator records, and historical captures without the new
-parent link are excluded from exact selection. `related_request_ids` remains
-legacy correlated context for unfiltered analysis and is never an exact filter.
+parent link are excluded from exact selection. `runtime_context` counts the
+artifact's frame records and names the `get_events` filter that lists them; it
+is correlated context for unfiltered analysis and is never an exact filter.
 
 Host/method/time correlations and incomplete roots stay in Traffic with an
 explanation. Use the VM workspace navigation explicitly for unfiltered session

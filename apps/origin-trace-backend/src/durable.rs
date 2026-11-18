@@ -28,6 +28,12 @@ pub fn read_private(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_private_from(path, &mut &bytes[..])
+}
+
+/// As `write_private`, copying from `source`, so a document larger than
+/// memory is published whole.
+pub fn write_private_from(path: &Path, source: &mut dyn Read) -> Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -38,7 +44,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     temporary
         .as_file()
         .set_permissions(fs::Permissions::from_mode(0o600))?;
-    temporary.write_all(bytes)?;
+    std::io::copy(source, &mut temporary)?;
     temporary.as_file().sync_all()?;
     temporary.persist(path).map_err(|e| Error::from(e.error))?;
     File::open(parent)?.sync_all()?;

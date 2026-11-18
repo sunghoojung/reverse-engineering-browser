@@ -62,7 +62,9 @@ function analysisDocument(selected = A, id = '101', tag = 'a') {
   const result = {artifact_id: id, artifact_sha256: digest(tag), finding_id: tag.repeat(24),
     runtime: 'javascript', status: 'complete', tier: 'likely-vm', vm_score: 80,
     anti_bot_score: 0, evidence_families: ['dispatch'], observations: [],
-    related_request_ids: [A.request_id], coverage: {complete: true},
+    runtime_context: {session_id: A.root_event.session_id, navigation_id: '1', frame_id: '1', frame_attribution: 'available',
+      request_records: 1, signal_records: [], events_filter: {session_id: A.root_event.session_id, navigation_id: '1', frame_id: '1'}},
+    coverage: {complete: true},
     exact_request_links: [linkFor(selected ?? A)]};
   return {contract_version: 1, document_kind: 'vm-analysis', document_digest: digest(tag),
     profile_digest: digest('f'), profile: {profile_id: 'anti-bot-vm-detection-v1'},
@@ -241,6 +243,19 @@ export async function checkVmRequestLinkageUI(root = repository) {
   ]) {
     const doc = copy(valid); mutate(doc); assert(!base.isVmAnalysisDocument(doc), label);
   }
+  // A findings view counts the results it leaves out and lists no tier-none row.
+  const view = {...copy(valid), results_view: {kind: 'findings', listed_results: 1, omitted_results: 309999}};
+  assert(base.isVmAnalysisDocument(view));
+  for (const [label, mutate] of [
+    ['listed count mismatch', doc => {doc.results_view.listed_results = 2;}],
+    ['negative omitted count', doc => {doc.results_view.omitted_results = -1;}],
+    ['fractional omitted count', doc => {doc.results_view.omitted_results = 1.5;}],
+    ['unknown view', doc => {doc.results_view.kind = 'all';}],
+    ['extra view field', doc => {doc.results_view.next = 'cursor';}],
+    ['tier-none row in a findings view', doc => {doc.results[0].tier = 'none';}]
+  ]) {
+    const doc = copy(view); mutate(doc); assert(!base.isVmAnalysisDocument(doc), label);
+  }
 
   // Invoke the actual Related VM click handler and renderer, including refusal.
   const f = create(); setNativeRow(f);
@@ -255,7 +270,7 @@ export async function checkVmRequestLinkageUI(root = repository) {
   await Promise.resolve();
   const queried = new URL(f.calls[0].url, 'http://localhost');
   assert.deepEqual(Object.fromEntries(queried.searchParams), {request_id: A.request_id, session_id: A.root_event.session_id,
-    root_process_id: '42', root_sequence_number: A.root_event.sequence_number});
+    root_process_id: '42', root_sequence_number: A.root_event.sequence_number, view: 'findings'});
   assert.equal(f.calls[0].options.headers['If-None-Match'], undefined);
   f.showScreen('sources', f.nav);
   held.resolve(response(valid)); await clicking;
@@ -292,7 +307,16 @@ export async function checkVmRequestLinkageUI(root = repository) {
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.state.vmAnalysisSelection, null, 'Explicit VM navigation is still session-wide');
   assert(f.state.vmFindings.some(item => item.findingId === 'session-only'));
-  assert.equal(f.calls.at(-1).url, '/api/analysis/vm');
+  assert.equal(f.calls.at(-1).url, '/api/analysis/vm?view=findings');
+  {
+    const plain = create();
+    plain.reply = () => response({...analysisDocument(null, '101', 'e'), results: [],
+      results_view: {kind: 'findings', listed_results: 0, omitted_results: 310001}}, 200, 'analysis-e');
+    await plain.refreshVmAnalysis(null);
+    assert.equal(plain.state.vmAnalysisStatus, 'ready', plain.state.vmAnalysisError);
+    assert.match(plain.elements.vmNotice.textContent, /No VM findings yet\. 310,001 analyzed artifacts show no VM structure\./,
+      'An empty findings view says how many artifacts were analyzed');
+  }
   const beforeCalls = f.calls.length;
   for (const mutate of [request => {delete request.events;}, request => {request.events = [request.event];}]) {
     setNativeRow(f); mutate(f.state.requests[0]); f.showScreen('traffic', f.nav);

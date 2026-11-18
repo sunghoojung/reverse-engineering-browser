@@ -3610,7 +3610,7 @@
       "get": {
         "operationId": "get_vm_analysis",
         "summary": "get vm analysis",
-        "description": "May calculate and write local analysis cache even on GET. Optional exact native request projection requires request_id, session_id, root_process_id and root_sequence_number together, or all four omitted. It selects only an explicit request-start to response-start to acknowledged captured response-body chain; absent or ambiguous linkage yields no matching results, never a URL/time/CDP heuristic or related_request_ids fallback. related_request_ids remains correlation, not causation. A 304 check happens after loading analysis; the full selector is included in the ETag.",
+        "description": "May calculate and write local analysis cache even on GET. Lists every analyzed artifact: the full document is streamed from the published canonical bytes, so a long session's read costs no more memory than a short one's. view=findings lists only failed results and candidate or likely-vm tiers and counts the rest in results_view. Optional exact native request projection requires request_id, session_id, root_process_id and root_sequence_number together, or all four omitted. It selects only an explicit request-start to response-start to acknowledged captured response-body chain; absent or ambiguous linkage yields no matching results, never a URL/time/CDP heuristic or frame-correlation fallback. runtime_context counts frame records as correlation, not causation. A 304 check happens after loading analysis; the full selector and the view are included in the ETag.",
         "tags": [
           "analysis"
         ],
@@ -3685,7 +3685,7 @@
             }
           },
           "400": {
-            "description": "Invalid, blank, duplicate, zero, out-of-range, or incomplete exact request selectors; supply all four selectors together or omit all four.",
+            "description": "Invalid, blank, duplicate, zero, out-of-range, or incomplete exact request selectors, or a view other than findings; supply all four selectors together or omit all four.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3733,6 +3733,16 @@
             "description": "Exact native request-start sequence number. Canonical nonzero uint64 decimal string. Optional only as a complete set with request_id, session_id, root_process_id and root_sequence_number; otherwise omit all four. Invalid, blank, duplicate, zero, or out-of-range values return 400.",
             "schema": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/nonzeroUint64"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "description": "findings lists only failed results and those with a candidate or likely-vm tier, and counts the tier-none results in results_view. Omit it for every result. Combines with an exact request selection.",
+            "schema": {
+              "const": "findings",
+              "type": "string"
             }
           },
           {
@@ -9792,8 +9802,8 @@
     "/api/analysis/vm/host-links": {
       "get": {
         "operationId": "get_vm_host_links",
-        "summary": "Read bounded host-event links to retained guest dispatch positions",
-        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis. state=unknown, reason=dispatch-samples-unavailable, and guest_position null means no dispatch samples were retained. That is static-only correlation for the shared session, navigation, and frame, not an empty workspace and not a guest program counter.",
+        "summary": "Read host-event links to retained guest dispatch positions",
+        "description": "May calculate and write the local derived workspace on GET. A workspace failure does not hide the base VM analysis document. A 304 check happens after loading analysis. state=unknown, reason=dispatch-samples-unavailable, and guest_position null means no dispatch samples were retained. That is static-only correlation for the shared session, navigation, and frame, not an empty workspace and not a guest program counter. Rows list host events whose direct parent is a VM record; frame_host_records and attributed_host_records count the rest, and events_filter lists them through get_events.",
         "tags": [
           "analysis"
         ],
@@ -17787,14 +17797,13 @@
           },
           "results": {
             "type": "array",
-            "maxItems": 10000,
             "items": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/result"
-            }
+            },
+            "description": "Every analyzed artifact, in manifest order. Producers before 1.11.0 listed at most 10,000."
           },
           "mixed_findings": {
             "type": "array",
-            "maxItems": 10000,
             "items": {
               "$ref": "#/components/schemas/VmAnalysis/$defs/mixedFinding"
             }
@@ -17859,6 +17868,29 @@
               }
             },
             "description": "Optional exact native request projection metadata outside the stored document digest. Only results with a matching exact_request_links request_id and full root_event are retained; mixed_findings is empty. related_request_ids remains correlation only and is not used for this projection."
+          },
+          "results_view": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "listed_results",
+              "omitted_results"
+            ],
+            "properties": {
+              "kind": {
+                "const": "findings"
+              },
+              "listed_results": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "omitted_results": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "description": "Optional view metadata outside the stored document digest, present in producer 1.11.0 and later when a read asks for view=findings. results then lists only failed results and those with a candidate or likely-vm tier, and omitted_results counts the tier-none results left out. The full document, or the selection without the view, lists them. summary still counts every result of the document or selection."
           }
         },
         "$defs": {
@@ -18087,6 +18119,93 @@
               }
             }
           },
+          "runtimeContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "session_id",
+              "navigation_id",
+              "frame_id",
+              "frame_attribution",
+              "request_records",
+              "signal_records",
+              "events_filter"
+            ],
+            "description": "Present in producer 1.11.0 and later. Records sharing the artifact's session, navigation and nonzero frame are counted here and listed by get_events with events_filter, never copied into each result. Correlation only: it establishes neither script attribution nor causation.",
+            "properties": {
+              "session_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "navigation_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "frame_id": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+              },
+              "frame_attribution": {
+                "enum": [
+                  "available",
+                  "unavailable"
+                ],
+                "description": "unavailable when frame_id is 0, for example in a worker: only records naming the artifact are counted, and coverage names the rest as runtime-frame-attribution-unavailable."
+              },
+              "request_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Native request_started and request_initiated records with a nonzero request ID in the frame."
+              },
+              "signal_records": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "rule_id",
+                    "observed",
+                    "correlated"
+                  ],
+                  "properties": {
+                    "rule_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "observed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Records of this browser-signal rule naming the artifact."
+                    },
+                    "correlated": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Other records of this rule in the frame."
+                    }
+                  }
+                }
+              },
+              "events_filter": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id"
+                ],
+                "description": "get_events parameters listing the frame's records, or the artifact's own records when frame attribution is unavailable.",
+                "properties": {
+                  "session_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "navigation_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "frame_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  },
+                  "artifact_id": {
+                    "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
+                  }
+                }
+              }
+            }
+          },
           "exactRequestLink": {
             "type": "object",
             "additionalProperties": false,
@@ -18273,12 +18392,9 @@
                   "max_js_region_work_bytes",
                   "max_wasm_sections",
                   "max_wasm_section_bytes",
-                  "max_graph_edges",
                   "max_bytecode_snapshot_bytes",
                   "max_manifest_line_bytes",
                   "max_event_line_bytes",
-                  "max_artifact_records",
-                  "max_event_records",
                   "max_wasm_functions",
                   "max_wasm_instructions"
                 ],
@@ -18307,10 +18423,6 @@
                     "type": "integer",
                     "minimum": 1
                   },
-                  "max_graph_edges": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
                   "max_bytecode_snapshot_bytes": {
                     "type": "integer",
                     "minimum": 1
@@ -18323,14 +18435,6 @@
                     "type": "integer",
                     "minimum": 1
                   },
-                  "max_artifact_records": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
-                  "max_event_records": {
-                    "type": "integer",
-                    "minimum": 1
-                  },
                   "max_wasm_functions": {
                     "type": "integer",
                     "minimum": 1
@@ -18338,6 +18442,21 @@
                   "max_wasm_instructions": {
                     "type": "integer",
                     "minimum": 1
+                  },
+                  "max_graph_edges": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: per-artifact runtime graph edges. Frame context is now counted in runtime_context."
+                  },
+                  "max_artifact_records": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: newest manifest records read. The whole manifest is now read."
+                  },
+                  "max_event_records": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Producers before 1.11.0 only: newest event records read. The whole event store is now read."
                   }
                 }
               }
@@ -18678,7 +18797,11 @@
                 "uniqueItems": true,
                 "items": {
                   "$ref": "#/components/schemas/VmAnalysis/$defs/uint64"
-                }
+                },
+                "description": "Producers before 1.11.0 only: request IDs sharing the artifact's session context. Replaced by runtime_context."
+              },
+              "runtime_context": {
+                "$ref": "#/components/schemas/VmAnalysis/$defs/runtimeContext"
               },
               "exact_request_links": {
                 "type": "array",
@@ -18883,7 +19006,6 @@
                     "observations",
                     "anti_bot_score",
                     "anti_bot_observations",
-                    "related_request_ids",
                     "graph",
                     "frontend"
                   ]
@@ -39642,6 +39764,9 @@
               "interpreter_artifact_id",
               "source_artifact_sha256",
               "links",
+              "frame_host_records",
+              "attributed_host_records",
+              "events_filter",
               "omissions"
             ],
             "properties": {
@@ -39655,19 +39780,52 @@
               },
               "links": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "$ref": "#/components/schemas/VmHostLinks/$defs/link"
+                },
+                "description": "Host events naming the interpreter artifact whose direct parent is a VM record: the only host events a dispatch sample can position."
+              },
+              "frame_host_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Host events sharing the interpreter's session, navigation and frame, listed or not."
+              },
+              "attributed_host_records": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Those of them naming the interpreter artifact."
+              },
+              "events_filter": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "session_id",
+                  "navigation_id",
+                  "frame_id"
+                ],
+                "description": "get_events parameters that list the frame's records.",
+                "properties": {
+                  "session_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "navigation_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  },
+                  "frame_id": {
+                    "type": "string",
+                    "pattern": "^(0|[1-9][0-9]{0,19})$"
+                  }
                 }
               },
               "omissions": {
                 "type": "array",
-                "maxItems": 4,
+                "maxItems": 3,
                 "items": {
                   "enum": [
                     "dispatch-samples-unavailable",
                     "dispatch-sample-retention-limit",
-                    "host-link-limit",
                     "host-events-unavailable"
                   ]
                 },

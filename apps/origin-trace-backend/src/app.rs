@@ -140,7 +140,9 @@ enum PackageOperation {
 }
 struct VmDocumentsCache {
     signature: String,
-    analysis: Value,
+    /// Shared, never copied per read: a long session's analysis lists every
+    /// artifact, so its results stay on disk and a full read streams them.
+    analysis: Arc<vm::Analysis>,
     opcode_workspace: Result<Value>,
     host_links: Result<Value>,
 }
@@ -419,7 +421,7 @@ impl App {
         .await
         .map_err(|e| Error::new(500, e.to_string()))?
     }
-    async fn vm_documents(&self) -> Result<(Value, Result<Value>)> {
+    async fn vm_documents(&self) -> Result<(Arc<vm::Analysis>, Result<Value>)> {
         let signature = format!(
             "{}:{}:{}",
             analysis_input_signature(&self.options.artifacts.join("manifest.jsonl")),
@@ -439,7 +441,7 @@ impl App {
                 .await?;
             *cache = Some(VmDocumentsCache {
                 signature,
-                analysis: documents.analysis,
+                analysis: Arc::new(documents.analysis),
                 opcode_workspace: documents.opcode_workspace,
                 host_links: documents.host_links,
             });
@@ -1634,25 +1636,61 @@ impl App {
                 } else {
                     0
                 };
-                let (mut value, _) = self.vm_documents().await?;
-                if selected {
-                    crate::vm_request_links::select(
-                        &mut value,
-                        request.unwrap(),
-                        session.unwrap(),
-                        process_id,
-                        sequence.unwrap(),
-                    );
-                }
-                etag = Some(format!(
-                    "\"{}-{}-{}-{}-{}\"",
-                    value["document_digest"].as_str().unwrap(),
+                let findings = match q.one("view")? {
+                    None => false,
+                    Some("findings") => true,
+                    Some(_) => return Err(Error::bad("view must be findings")),
+                };
+                let (analysis, _) = self.vm_documents().await?;
+                let etag = format!(
+                    "\"{}-{}-{}-{}-{}{}\"",
+                    analysis.digest(),
                     request.unwrap_or("all"),
                     session.unwrap_or("all"),
                     process.unwrap_or("all"),
-                    sequence.unwrap_or("all")
-                ));
-                value
+                    sequence.unwrap_or("all"),
+                    if findings { "-findings" } else { "" }
+                );
+                if matches_etag(headers, Some(&etag)) {
+                    return Ok(not_modified(&etag));
+                }
+                let selection = selected
+                    .then(|| [request, session, sequence].map(|value| value.unwrap().to_owned()));
+                let mut response = if selection.is_none() && !findings {
+                    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                    let length = analysis.byte_length();
+                    tokio::task::spawn_blocking(move || vm::document::stream(analysis, sender));
+                    let mut response = bytes_response(
+                        Body::from_stream(request_har::Chunks(receiver)),
+                        "application/json",
+                    );
+                    response
+                        .headers_mut()
+                        .insert("content-length", HeaderValue::from(length));
+                    response
+                } else {
+                    let bytes = self
+                        .blocking(move || {
+                            let document = match selection {
+                                Some([request, session, sequence]) => {
+                                    let mut document = analysis
+                                        .select(&request, &session, process_id, &sequence)?;
+                                    if findings {
+                                        vm::document::findings_of(&mut document);
+                                    }
+                                    document
+                                }
+                                None => analysis.findings()?,
+                            };
+                            Ok(serde_json::to_vec(&document)?)
+                        })
+                        .await?;
+                    bytes_response(bytes, "application/json")
+                };
+                response
+                    .headers_mut()
+                    .insert("etag", HeaderValue::from_str(&etag).unwrap());
+                return Ok(response);
             }
             "/api/flow-graph" => {
                 q.only(&["session_id"], &[])?;

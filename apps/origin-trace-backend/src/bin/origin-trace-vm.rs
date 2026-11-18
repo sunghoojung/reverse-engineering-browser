@@ -13,9 +13,12 @@ struct Options {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     origin_trace_backend::javascript_worker_entry();
     let options = Options::parse();
-    let document = origin_trace_backend::vm::store(&options.artifacts, &options.events)?;
+    let analysis = origin_trace_backend::vm::store_analysis(&options.artifacts, &options.events)?;
+    // Copied as a stream: a long session's document is larger than memory.
     if let Some(path) = options.output {
-        std::fs::write(path, serde_json::to_vec_pretty(&document)?)?;
+        let mut output = std::io::BufWriter::new(std::fs::File::create(path)?);
+        std::io::copy(&mut analysis.reader(), &mut output)?;
+        std::io::Write::flush(&mut output)?;
     }
     Ok(())
 }

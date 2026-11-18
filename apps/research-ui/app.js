@@ -322,9 +322,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.vmHostLinksGeneration += 1;
           state.selectedVmHandlerKey = null;
         }
-        const query = selection ? `?${new URLSearchParams({request_id: selection.request_id,
+        // The lab lists findings, so a session of many plain scripts reads as
+        // a count rather than one result per artifact.
+        const query = `?${new URLSearchParams({...(selection ? {request_id: selection.request_id,
           session_id: selection.root_event.session_id, root_process_id: String(selection.root_event.process_id),
-          root_sequence_number: selection.root_event.sequence_number})}` : '';
+          root_sequence_number: selection.root_event.sequence_number} : {}), view: 'findings'})}`;
         const headers = state.vmAnalysisEtag ? {'If-None-Match': state.vmAnalysisEtag} : {};
         state.vmAnalysisStatus = 'loading';
         state.vmAnalysisError = null;
@@ -1669,6 +1671,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         return field;
       }
 
+      function vmRuntimeContextText(result) {
+        const context = result.runtime_context;
+        if (!context) return result.runtime === 'mixed' ? 'see each linked artifact' : 'not recorded';
+        const count = (value, word) => `${value.toLocaleString('en-US')} ${word}${value === 1 ? '' : 's'}`;
+        const total = key => context.signal_records.reduce((sum, signal) => sum + signal[key], 0);
+        const own = `${count(total('observed'), 'browser-signal record')} naming this artifact`;
+        if (context.frame_attribution === 'unavailable') return `frame unknown · ${own}`;
+        return `frame ${context.frame_id} · ${count(context.request_records, 'request record')} · ` +
+          `${own} · ${count(total('correlated'), 'other signal record')}`;
+      }
+
       function vmSessionPresentation(targetState) {
         const analysis = targetState.vmAnalysisDocument;
         const finding = targetState.vmFindings?.find(item => item.findingId === targetState.selectedVmFindingId);
@@ -2330,6 +2343,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         banner.textContent = view.headline;
         section.append(banner);
+        if (view.countLine) section.append(textElement('p', 'vm-workspace-empty', view.countLine));
         if (row) {
           for (const omission of view.omissionLines) {
             const item = document.createElement('p');
@@ -2814,7 +2828,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           fields.append(
             vmField('tier', selected.confidence),
             vmField('source artifact', selected.sourceArtifactId),
-            vmField('correlated requests (session context only)', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('frame context (correlation only)', vmRuntimeContextText(result)),
             vmField('exact response-body links', result.exact_request_links?.map(link =>
               `${link.request_id} · session ${link.root_event.session_id} · process ${link.root_event.process_id} · root ${link.root_event.sequence_number} → response ${link.response_event.sequence_number} → capture ${link.capture_event.sequence_number}`).join('; ') || 'unlinked'),
             vmField('evidence families', result.evidence_families?.join(', ') || 'none'),
@@ -2938,7 +2952,9 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (state.malformedVmFindings > 0) {
           setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
         } else if (state.vmFindings.length === 0) {
-          const empty = state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.';
+          const omitted = state.vmAnalysisDocument?.results_view?.omitted_results ?? 0;
+          const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
+          const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain} The lab waits for observed or explicitly inferred evidence.`;
           setVmNotice(vmLimits ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
         } else if (gapCount > 0n || vmLimits) {
           setVmNotice('gap', [

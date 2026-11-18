@@ -62,6 +62,10 @@ pub struct StartOptions {
     /// Set when request_stacks took its default: a Brave that predates the
     /// flag then starts without stacks and says so, as in the app.
     pub request_stacks_if_supported: bool,
+    /// Also record the stack that registered each Promise reaction a request
+    /// is later made in (protocol/native-network-v3.md, Promise registrations).
+    /// Off unless named, as in the app's start panel; needs request_stacks.
+    pub promise_stacks: bool,
     /// Permit document-start Console scripts in this capture browser. Arming
     /// one stays a separate confirmed Console action.
     pub document_start: bool,
@@ -215,6 +219,7 @@ impl StartOptions {
             browser_internal: flag("browser_internal"),
             extension_traffic: flag("extension_traffic"),
             fresh_profile: flag("fresh_profile"),
+            promise_stacks: flag("promise_stacks"),
             js_invocation_sites: path("js_invocation_sites"),
             js_invocation_saved_sites: flag("js_invocation_saved_sites"),
             confirm_sensitive_capture: flag("confirm_sensitive_capture"),
@@ -382,6 +387,11 @@ impl StartOptions {
         if self.request_stacks && mask & 1280 != 1280 {
             return Err("request_stacks needs Network and Artifact category bits (256 and 1024) in category_mask".into());
         }
+        if self.promise_stacks && !self.request_stacks {
+            return Err(
+                "promise_stacks rides on request stacks and requires request_stacks".into(),
+            );
+        }
         if invocation && mask & 512 == 0 {
             return Err(
                 "JavaScript invocation sites need the VM category bit (512) in category_mask"
@@ -429,6 +439,7 @@ impl StartOptions {
             "response_body_budget_mib": self.request_content.then(|| self.response_body_budget_mib.unwrap_or(512)),
             "response_media": self.response_media,
             "request_stacks": self.request_stacks,
+            "promise_stacks": self.promise_stacks,
             "document_start": self.document_start,
             "browser_internal": self.browser_internal,
             "extension_traffic": self.extension_traffic,
@@ -665,6 +676,7 @@ fn with_option_names(cause: &str) -> String {
         ("REB_RESPONSE_BODY_BUDGET_MIB", "response_body_budget_mib"),
         ("REB_CAPTURE_RESPONSE_MEDIA", "response_media"),
         ("REB_NATIVE_REQUEST_STACKS", "request_stacks"),
+        ("REB_NATIVE_PROMISE_STACKS", "promise_stacks"),
         ("REB_CONSOLE_DOCUMENT_START", "document_start"),
         ("REB_CAPTURE_BROWSER_INTERNAL", "browser_internal"),
         ("REB_CAPTURE_EXTENSION_TRAFFIC", "extension_traffic"),
@@ -966,7 +978,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
         "REB_NATIVE_REQUEST_STACKS",
         "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
         // Request stacks are on by default, so an inherited Promise stacks
-        // switch would now apply silently; agent options name no such switch.
+        // switch would apply silently; only the named option turns it on.
         "REB_NATIVE_PROMISE_STACKS",
         "REB_BRAVE_BINARY",
         "REB_CAPTURE_DURATION_SECONDS",
@@ -1003,6 +1015,7 @@ pub async fn launch(options: &StartOptions) -> Result<Started, String> {
             "REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED",
             switch(options.request_stacks_if_supported),
         )
+        .env("REB_NATIVE_PROMISE_STACKS", switch(options.promise_stacks))
         // Browser-internal and extension evidence are opt-ins, never inherited.
         .env(
             "REB_CAPTURE_BROWSER_INTERNAL",
@@ -1259,6 +1272,10 @@ mod tests {
                 "request_stacks needs Network and Artifact",
             ),
             (
+                json!({"promise_stacks":true,"request_stacks":false}),
+                "requires request_stacks",
+            ),
+            (
                 json!({"js_invocation_saved_sites":true,"category_mask":1024}),
                 "VM category",
             ),
@@ -1335,6 +1352,7 @@ mod tests {
             ("browser_internal", false),
             ("extension_traffic", false),
             ("fresh_profile", false),
+            ("promise_stacks", false),
         ] {
             assert_eq!(effective[key], on, "{key}");
         }

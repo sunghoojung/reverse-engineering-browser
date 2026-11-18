@@ -544,8 +544,8 @@ returns 409 `dependency_unavailable` for these actions.
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
 `request_content_budget_mib`, `response_body_budget_mib`, `response_media`,
-`request_stacks`, `document_start`, `browser_internal`, `extension_traffic`,
-`fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
+`request_stacks`, `promise_stacks`, `document_start`, `browser_internal`,
+`extension_traffic`, `fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
 `wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
@@ -558,7 +558,7 @@ the Origin Trace app's default, and `false` turns it off: `wasm_dispatch` and
 (bits 256 and 1024, and only where the browser has `--reb-request-stacks`) and
 `document_start` are on; with the consent, `request_content` (bits 256 and
 1024), `canvas_images` (bits 1 and 1024) and, with named sites and request
-content, `js_invocation_digests` are on; `browser_internal`,
+content, `js_invocation_digests` are on; `promise_stacks`, `browser_internal`,
 `extension_traffic` and `fresh_profile` are off. A switch whose bits the mask
 lacks stays off. `duration_seconds` left unset runs the session until it is
 ended. Sessions use one persistent agent research profile,
@@ -570,7 +570,8 @@ alone; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
 `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
-`REB_NATIVE_REQUEST_STACKS` never reaches an agent session, and neither do
+`REB_NATIVE_REQUEST_STACKS` or `REB_NATIVE_PROMISE_STACKS` never reaches an
+agent session, and neither do
 `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB` or
 `REB_CAPTURE_RESPONSE_MEDIA`.
 
@@ -581,12 +582,13 @@ browser profile or embedded-session variable is ignored, so an inherited
 | `response_body_budget_mib` | `REB_RESPONSE_BODY_BUDGET_MIB` | 1..16384 MiB of unique response bodies, default 512. Needs `request_content`. |
 | `response_media` | `REB_CAPTURE_RESPONSE_MEDIA=1` | Also keeps the images, audio, video and fonts that page elements load. Needs `request_content`, so it is behind the same confirmation. |
 | `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Left unset, it is on with `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED=1`, so a Brave without `--reb-request-stacks` starts without it; named `true`, it is strict and such a Brave refuses the start. |
+| `promise_stacks` | `REB_NATIVE_PROMISE_STACKS=1` | Also records the stack that registered each Promise reaction a request is later made in, as the app's start panel offers. Needs `request_stacks` and follows its strictness: with the default request stacks a Brave without `--reb-promise-stacks` starts without them. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `browser_internal` | `REB_CAPTURE_BROWSER_INTERNAL=1` | Records requests of browser pages such as `brave://settings` and DevTools, which are otherwise counted and not recorded. |
 | `extension_traffic` | `REB_CAPTURE_EXTENSION_TRAFFIC=1` | Records requests of extension workers, which are otherwise counted and not recorded. |
 | `fresh_profile` | `REB_FRESH_PROFILE=1` | A new, empty browser profile for this session, in its session folder, instead of the shared agent research profile. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
-| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
+| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session, and follows it while the session runs: an empty set starts with nothing armed. Never the app's set. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and the consent; on by default with both and request content. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: on by default with the consent and category bits 1 and 1024. |
 | `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..1024 retained samples of each function on each Wasm stream per one-second window (default 64). Needs `wasm_dispatch` or `wasm_call_indirect`. |

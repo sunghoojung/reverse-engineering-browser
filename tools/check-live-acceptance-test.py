@@ -852,11 +852,11 @@ class Evidence(unittest.TestCase):
         for target in nostacks.TARGETS:
             self.build.row(target)
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses(), {"no stack walk without --request-stacks": "PASS"}, self.report.lines)
+        self.assertEqual(self.statuses(), {"no stack walk with --request-stacks=false": "PASS"}, self.report.lines)
         self.report.lines.clear()
         self.backend.events.append({"type": "request_initiator_stack", "process_id": 7, "request_id": "101"})
         nostacks.verify(self.run_)
-        self.assertEqual(self.statuses()["no stack walk without --request-stacks"], "FAIL")
+        self.assertEqual(self.statuses()["no stack walk with --request-stacks=false"], "FAIL")
 
     def test_session_context_matches_each_kind(self):
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log:

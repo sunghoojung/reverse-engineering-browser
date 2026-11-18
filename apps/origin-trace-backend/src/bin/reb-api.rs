@@ -209,6 +209,10 @@ enum SessionCommand {
         /// dropped by a Brave without the flag; naming it is strict.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
         request_stacks: Option<bool>,
+        /// Also record the stack that registered each Promise reaction a
+        /// request is later made in. Needs request stacks. Default: off.
+        #[arg(long)]
+        promise_stacks: bool,
         /// Permit document-start Console scripts in this capture browser.
         /// Arming one is still a separate confirmed Console action. Default: on.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
@@ -1325,6 +1329,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         response_body_budget_mib,
         response_media,
         request_stacks,
+        promise_stacks,
         document_start,
         browser_internal,
         extension_traffic,
@@ -1357,6 +1362,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         browser_internal,
         extension_traffic,
         fresh_profile,
+        promise_stacks,
         js_invocation_sites,
         js_invocation_saved_sites,
         confirm_sensitive_capture,

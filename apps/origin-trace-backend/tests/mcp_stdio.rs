@@ -2112,7 +2112,12 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     for option in ["canvas_images", "request_content", "js_invocation_digests"] {
         assert!(start["inputSchema"]["properties"].get(option).is_some());
     }
-    for option in ["browser_internal", "extension_traffic", "fresh_profile"] {
+    for option in [
+        "browser_internal",
+        "extension_traffic",
+        "fresh_profile",
+        "promise_stacks",
+    ] {
         assert_eq!(start["inputSchema"]["properties"][option]["default"], false);
     }
 
@@ -2161,6 +2166,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
         ("browser_internal", json!(false)),
         ("extension_traffic", json!(false)),
         ("fresh_profile", json!(false)),
+        ("promise_stacks", json!(false)),
         ("confirm_sensitive_capture", json!(true)),
     ] {
         assert_eq!(session["options"][option], value, "{option}");
@@ -2181,14 +2187,15 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     );
     // The app's defaults, and nothing inherited: not the shell's invocation
     // sites, digests, budget, duration, profile or browser-internal capture.
-    // The default request stacks are dropped by a Brave without the flag.
+    // The default request stacks are dropped by a Brave without the flag,
+    // and the shell's Promise stacks switch is replaced by the option's off.
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("options")).unwrap(),
         "1 4095 0 1 1 unset 0\n"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "1 1 unset\n"
+        "1 1 0\n"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("session")).unwrap(),
@@ -2379,7 +2386,7 @@ fn agent_session_options_are_named_never_inherited() {
         &mut mcp,
         json!({"document_start": true, "request_content": true,
             "request_content_budget_mib": 64, "response_body_budget_mib": 1024,
-            "response_media": true, "request_stacks": true,
+            "response_media": true, "request_stacks": true, "promise_stacks": true,
             "js_invocation_sites": agent_file, "js_invocation_digests": false,
             "canvas_images": false, "wasm_dispatch": false, "duration_seconds": 7200,
             "fresh_profile": true, "browser_internal": true, "timeout_seconds": 30}),
@@ -2400,6 +2407,7 @@ fn agent_session_options_are_named_never_inherited() {
         ("response_body_budget_mib", json!(1024)),
         ("response_media", json!(true)),
         ("request_stacks", json!(true)),
+        ("promise_stacks", json!(true)),
         ("js_invocation_saved_sites", json!(false)),
         ("js_invocation_digests", json!(false)),
         ("canvas_images", json!(false)),
@@ -2434,7 +2442,7 @@ fn agent_session_options_are_named_never_inherited() {
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "1 0 unset\n",
+        "1 0 1\n",
         "named stacks are strict"
     );
     assert_eq!(

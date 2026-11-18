@@ -24,9 +24,12 @@ from live_acceptance.pages import document
 from live_acceptance.report import Report
 from live_acceptance.run import Options, Run, brotli_encoder
 
-# The step 7 start command of docs/development/paired-release.md.
-CONTENT_FLAGS = ["--localhost-only", "--request-content", "--confirm-sensitive-capture", "--canvas-images",
-                 "--request-stacks", "--document-start", "--wasm-dispatch", "--wasm-call-indirect"]
+# The step 7 start command of docs/development/paired-release.md. A fresh profile keeps each run
+# from reading an earlier run's HTTP cache and cookies, and from waiting on a Brave that holds the
+# agent sessions' research profile.
+CONTENT_FLAGS = ["--localhost-only", "--fresh-profile", "--request-content", "--confirm-sensitive-capture",
+                 "--canvas-images", "--request-stacks", "--promise-stacks", "--document-start", "--wasm-dispatch",
+                 "--wasm-call-indirect"]
 METADATA_DROPS = {"--request-content", "--confirm-sensitive-capture", "--canvas-images"}
 SETTLE_SECONDS = 3
 # A session always turns the probes on, so the inactive path is measured outside one.
@@ -40,21 +43,18 @@ INACTIVE_STEPS = ("launch the same Brave without a session (every probe disabled
 @dataclass(frozen=True)
 class Kind:
     flags: list[str]
-    environment: dict[str, str]
     areas: list[ModuleType]
     duration: int
 
 
 KINDS = {
-    "content": Kind(CONTENT_FLAGS, {"REB_NATIVE_PROMISE_STACKS": "1"},
-                    [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs, wasm], 3600),
+    "content": Kind(CONTENT_FLAGS, [baseline, stacks, headers, cookies, bodies, limits, debugger, tabs, wasm], 3600),
     "budget": Kind([*CONTENT_FLAGS, "--request-content-budget-mib", str(budget.BUDGET_MIB),
-                    "--response-body-budget-mib", str(budget.BUDGET_MIB)],
-                   {"REB_NATIVE_PROMISE_STACKS": "1"}, [budget], 1800),
-    "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS],
-                     {"REB_NATIVE_PROMISE_STACKS": "1"}, [metadata], 900),
-    "no-stacks": Kind([flag for flag in CONTENT_FLAGS if flag != "--request-stacks"],
-                      {"REB_NATIVE_PROMISE_STACKS": "0"}, [nostacks], 900),
+                    "--response-body-budget-mib", str(budget.BUDGET_MIB)], [budget], 1800),
+    "metadata": Kind([flag for flag in CONTENT_FLAGS if flag not in METADATA_DROPS], [metadata], 900),
+    # Request stacks are on unless named off, and Promise stacks ride on them.
+    "no-stacks": Kind([*(flag for flag in CONTENT_FLAGS if flag not in ("--request-stacks", "--promise-stacks")),
+                       "--request-stacks=false"], [nostacks], 900),
 }
 AREAS = {area.NAME: area for kind in KINDS.values() for area in kind.areas}
 
@@ -136,7 +136,7 @@ def run_kind(name: str, args: argparse.Namespace, options: Options) -> Report:
         arguments = ["--url", fixture.origin + "/", *kind.flags, "--brave-binary", str(args.brave),
                      "--sessions-root", str(Path(root).absolute()), "--duration-seconds", str(kind.duration)]
         try:
-            session = start_session(args.reb_api, arguments, kind.environment)
+            session = start_session(args.reb_api, arguments, {})
         except (StartError, subprocess.TimeoutExpired, ValueError, KeyError) as error:
             report.failed("setup", "session start", str(error))
             fixture.stop()

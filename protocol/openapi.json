@@ -41381,6 +41381,11 @@
             "default": true,
             "description": "Record the JavaScript and Wasm call stack that started each renderer request (request_initiator_stack events and stack artifacts, read with get_request_stack). Frames are identities, not values. On by default when category_mask holds 256 and 1024; a Brave that does not define --reb-request-stacks then starts without stacks, and get_session_context capture_options says so. Set to true, it needs those category bits, and such a Brave refuses the start."
           },
+          "promise_stacks": {
+            "type": "boolean",
+            "default": false,
+            "description": "Also record the stack that registered each Promise reaction a request is later made in (native network v3, Promise registrations), as the app's start panel offers. Requires request_stacks, and follows it: with the default request stacks a Brave that does not define --reb-promise-stacks starts without them, and with request_stacks set to true such a Brave refuses the start."
+          },
           "document_start": {
             "type": "boolean",
             "default": true,

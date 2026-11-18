@@ -203,13 +203,14 @@ serves the fixtures in `tools/live_acceptance/`, runs every session below and
 prints PASS, FAIL or the exact MANUAL steps per case
 ([tools README](../../tools/README.md#live-acceptance)). The budget cases run in
 their own session with 1 MiB budgets, so they do not cut the content cases
-short. One content session covers most cases:
+short. Each session starts in a fresh profile, so no case reads an earlier
+run's HTTP cache or cookies. One content session covers most cases:
 
 ```sh
-REB_NATIVE_PROMISE_STACKS=1 "$REB_API" session start \
-  --url http://127.0.0.1:<port>/ --localhost-only \
+"$REB_API" session start \
+  --url http://127.0.0.1:<port>/ --localhost-only --fresh-profile \
   --request-content --confirm-sensitive-capture --canvas-images \
-  --request-stacks --document-start --wasm-dispatch --wasm-call-indirect \
+  --request-stacks --promise-stacks --document-start --wasm-dispatch --wasm-call-indirect \
   --brave-binary "$BRAVE" --sessions-root "$(mktemp -d)" \
   --duration-seconds 3600 > session.json
 EP="$(python3 -c 'import json; print(json.load(open("session.json"))["endpoint_file"])')"
@@ -239,7 +240,7 @@ debugger observations. An agent connected with
 | Content session | An 8 KB GraphQL GET URL; a 5 MiB JSON POST, a multipart upload with a file and a stream-body `fetch` with exact bytes and digest; 40 parallel scripts all kept; 5,000 small POSTs kept until the request budget runs out, which is shown, and any body the artifact queue refused before then counted in `get_session_summary` | #436 |
 | Content session | An agent waits for the next fetch to `/api/x` and reads its stack, the next click handler and its position, and the next CSP violation; then it keeps the rules for the origin, a new tab's top document records from its first script while its same-origin iframe records nothing, and after `unwatch` a new document records nothing | #434 phase 1 |
 | Metadata session (the same start without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images`) | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` | #427, #429, #430 |
-| Session without `--request-stacks` | No stack walk runs | #429 |
+| Session with `--request-stacks=false` | No stack walk runs | #429 |
 | Not runnable from Origin Trace | The pausing debugger: conditional breakpoint, scopes, step, resume, navigation and idle disarm, the lease deadline and the review cases in [native-debugger-v1.md](../product/native-debugger-v1.md#acceptance-still-required) | #434 phase 3 |
 
 Two acceptance items need a profiler rather than a fixture: "the inactive probe

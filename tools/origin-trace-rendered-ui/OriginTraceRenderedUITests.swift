@@ -514,6 +514,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
   @MainActor
   private func assertLayout(_ ui: Harness, _ scope: String, _ context: String,
                             file: StaticString = #filePath, line: UInt = #line) async throws {
+    // Layout is judged as it paints: a ResizeObserver resizes a canvas after
+    // layout in the same frame, so a probe between the DOM change and that
+    // frame measures a size the user never sees.
+    try await ui.settle()
     let layout = try await ui.json("__rebUiProbe.layoutIssues('\(scope)')")
     let issues = layout["issues"] as? [String] ?? ["probe failed"]
     XCTAssertGreaterThan(layout["inView"] as? Int ?? 0, 0, "\(context): no visible controls in \(scope)", file: file, line: line)

@@ -743,11 +743,11 @@ impl App {
                 let query = native_debugger_query(&q)?;
                 let console = self.native_console.state().await;
                 let watch = self.native_console.watch();
-                let store = self.options.store.clone();
+                let (store, indexes) = (self.options.store.clone(), self.indexes.clone());
                 // The peer exchange blocks, like the live Wasm read.
                 let pause = self.native_debugger_pause.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::native_debugger::state(&store, &console, watch, &query, &pause)
+                    crate::native_debugger::state(&store, &indexes, &console, watch, &query, &pause)
                 })
                 .await
                 .map_err(|_| Error::new(500, "Native debugger state read failed"))??
@@ -1041,19 +1041,20 @@ impl App {
                     ));
                 };
                 let value = q.number(name, None, 64, true)?;
-                let (store, artifacts, requests) = (
+                let (store, artifacts, requests, events) = (
                     self.options.store.clone(),
                     self.options.artifacts.clone(),
                     self.requests.clone(),
+                    self.indexes.clone(),
                 );
                 let names = self.names_reader();
                 self.blocking(move || {
                     let mut document = match name {
                         "navigation_sequence" => crate::request_stack::navigation_document(
-                            &store, &artifacts, &requests, session, process, value,
+                            &store, &artifacts, &requests, &events, session, process, value,
                         ),
                         "observation_sequence" => crate::request_stack::observation_document(
-                            &store, &artifacts, &requests, session, process, value,
+                            &store, &artifacts, &requests, &events, session, process, value,
                         ),
                         _ => crate::request_stack::document(
                             &store, &artifacts, &requests, session, process, value,

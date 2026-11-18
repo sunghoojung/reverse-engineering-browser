@@ -902,7 +902,11 @@ function debuggerThreadsSection() {
       } else if (thread?.kind === 'worker') {
         notes.push(debuggerNote('Workers record no observations: rules match only a document\'s main thread. Compiled worker scripts carry frame 0, so the Sources tree is not scoped.'));
       }
-      notes.push(debuggerNote(`Console listing: ${view.document.threads.console}. Workers come from the newest 2,048 request records, and observed frames from the observation records among the newest 2,048 records that are observations or gaps of any kind, each within the newest 64 MiB of the store.`));
+      const coverage = view.document.threads.coverage;
+      const covered = !coverage || coverage.scope === 'store'
+        ? 'the whole event store'
+        : `the first ${debuggerBytes(coverage.scan_end)} of the event store's ${debuggerBytes(coverage.store_end)}, while its index catches up`;
+      notes.push(debuggerNote(`Console listing: ${view.document.threads.console}. Workers and observed frames cover ${covered}.`));
       const gap = debuggerGapNote(view);
       if (gap) notes.push(gap);
       debuggerReplace(body.querySelector(':scope > .debugger-thread-notes'), notes);

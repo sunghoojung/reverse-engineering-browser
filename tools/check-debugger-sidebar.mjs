@@ -49,7 +49,9 @@ function createStore(count = 0) {
     const scanStart = limited ? chosen[0].offset : store.budget ? Math.max(0, end - 1000) : 0;
     return {contract_version: 1, availability: store.availability, reason: 'browser_debugger_unsupported', experiment_flag: '--reb-native-debugger',
       policy: 'proposed_pending_approval', detectable: true, lease_limit_ms: 60000, lease: null, paused: false, breakpoints: [],
-      threads: {console: 'idle', frames: store.frames, workers: [], observed: store.observed}, watch: store.watch,
+      threads: {console: 'idle', frames: store.frames, workers: [], observed: store.observed,
+        coverage: store.threadsCoverage ?? {scope: 'store', complete: true, scan_start: '0', scan_end: String(store.storeEnd()), store_end: String(store.storeEnd())}},
+      watch: store.watch,
       observations: chosen.reverse().map(item => item.value), observations_malformed: 0,
       observations_query: {type, thread: frame ? {session_id: '1', process_id: 42, frame_id: frame} : null,
         scope: store.scope ?? (scanStart === 0 && end === store.storeEnd() ? 'store' : 'bounded_range'), direction: 'backward', limit,
@@ -407,6 +409,19 @@ await check('selected thread details show every field', async () => {
   key(ui, list, 'Enter');
   await settle();
   assert.equal(ui.sidebar.querySelector('#debugger-threads [aria-selected="true"]')?.dataset.key, 'D:22', 'Home and Enter choose the first thread');
+  ui.close();
+});
+
+// The thread listing says what the event index covered.
+await check('the thread listing says what the event index covered', async () => {
+  const store = createStore(1);
+  const ui = mount({store});
+  ui.open();
+  const notes = () => ui.sidebar.querySelector('.debugger-thread-notes')?.textContent ?? '';
+  await until(() => /Workers and observed frames cover the whole event store\./.test(notes()), 'the whole-store note');
+  assert(!/newest|2,048|64 MiB/.test(notes()), `no window is named: ${notes()}`);
+  store.threadsCoverage = {scope: 'bounded_range', complete: false, scan_start: '0', scan_end: String(3 * 1024 * 1024), store_end: String(8 * 1024 * 1024)};
+  await until(() => /cover the first 3\.0 MiB of the event store's 8\.0 MiB, while its index catches up\./.test(notes()), 'the catching-up note');
   ui.close();
 });
 

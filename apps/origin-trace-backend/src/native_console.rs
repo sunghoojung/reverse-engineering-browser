@@ -1276,10 +1276,10 @@ const DOCUMENT_START_UNCONFIRMED: &str = "The capture browser did not confirm th
 const DOCUMENT_START_LIVE_RETIRE: &str = "This Console connection failed while document-start scripts may be armed. \
      They stay in the capture browser until the connection ends; Stop ends it.";
 
-const DOCUMENT_START_UNAVAILABLE: &str = "Document-start Console scripts are not available in this session. Rebuild the pinned browser, \
-     then start a disposable Console session with document_start enabled, or relaunch the live \
-     capture with REB_CONSOLE_DOCUMENT_START=1 (an agent session: start_live_session with \
-     document_start true). Nothing is relaunched automatically.";
+const DOCUMENT_START_UNAVAILABLE: &str = "Document-start Console scripts are not available in this session, which started without \
+     the permission. Start a disposable Console session with document_start enabled, or a new live session with \
+     Allow document-start Console scripts in Advanced options of New Live Session… (an agent session: \
+     start_live_session, unless document_start is false). Nothing is relaunched automatically.";
 
 const DOCUMENT_START_BROWSER_UNSUPPORTED: &str = "This capture was started with the document-start permission, but its browser \
      does not advertise document-start support: it was built without the Native Console v3 overlay. Use a Brave \
@@ -2515,7 +2515,8 @@ while True:
             "scripts":[{"origin":"https://same.test","frame":"child","source":"report(1);"}]});
         let missing = console.action(&arm).await.unwrap_err();
         assert_eq!(missing.status, 503);
-        assert!(missing.message.contains("document_start true"));
+        assert!(missing.message.contains("Allow document-start Console scripts"));
+        assert!(missing.message.contains("disposable Console session"));
         let mut console = console;
         Arc::get_mut(&mut console.inner)
             .expect("no task holds the console")

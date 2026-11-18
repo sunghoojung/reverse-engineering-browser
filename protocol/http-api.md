@@ -84,8 +84,10 @@ Successful JSON is printed to stdout without a wrapper. A 304 produces no
 stdout body; `--show-headers` prints status, ETag and other response headers to
 stderr. HTTP errors exit nonzero and show the server's error text. Binary
 content requires `--output PATH` (or explicit `--output -` for stdout), and a
-file path is never overwritten. JSON also accepts optional `--output`; file
-publication uses a synced mode-0600 temporary and atomic no-clobber persistence.
+file path is never overwritten: an existing path is refused before any request
+is sent, exiting 2. JSON also accepts optional `--output`; file publication
+uses a synced mode-0600 temporary and atomic no-clobber persistence, which
+still refuses a file created while the request ran.
 Exported evidence packages must validate before publication. The CLI does not provide additional permissions
 on its own.
 

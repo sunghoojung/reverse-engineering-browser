@@ -22444,6 +22444,21 @@
                   "field": "confirmed",
                   "value": true,
                   "when": {}
+                },
+                {
+                  "field": "confirmed_sensitive",
+                  "value": true,
+                  "when": {
+                    "type": "object",
+                    "required": ["evidence"],
+                    "properties": {
+                      "evidence": {
+                        "type": "object",
+                        "required": ["selected_artifact"],
+                        "properties": {"selected_artifact": {"type": "object"}}
+                      }
+                    }
+                  }
                 }
               ],
               "notes": "Executes an explicitly selected saved script in a disposable analyst helper, separate from the browser, over caller-supplied frozen evidence and the selected artifact's verified stored bytes. There is no execution deadline, CPU limit or input, result or log size limit.",

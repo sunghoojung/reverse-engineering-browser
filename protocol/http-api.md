@@ -965,9 +965,10 @@ descriptions. Individual execution entries have these fields:
   JSON Schema 2020-12 `when` predicate over the entire request. `{}` means
   unconditional. For example, unsigned JWT creation needs
   `allow_unsigned_confirmed=true` when `algorithm` is `none`; selected-field
-  capture needs `confirmed=true` when `enabled` is true. Analyst execution's
-  `confirmed_sensitive=true` depends on the stored manifest, not the request,
-  so it is the `sensitive-selected-artifact` state-dependent prerequisite.
+  capture needs `confirmed=true` when `enabled` is true. Analyst execution
+  lists `confirmed_sensitive=true` whenever the run names a selected artifact,
+  because only the stored manifest says whether it is sensitive; the
+  `sensitive-selected-artifact` prerequisite names that dependency.
   Ordinary requiredness and boolean types remain in the request schema.
 - `notes` supplies the effect scope and caveats. `sources` gives repository
   `path` and Rust `symbol` pointers for auditing, without fragile line numbers.

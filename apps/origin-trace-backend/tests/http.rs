@@ -1069,8 +1069,12 @@ fn execution_metadata_keeps_destructive_conditional_and_unproven_effects_visible
         .iter()
         .find(|c| c["field"] == "confirmed_sensitive")
         .unwrap();
+    // Only the stored manifest says whether the named artifact is sensitive,
+    // so the confirmation is listed whenever a run names one.
     let predicate = jsonschema::validator_for(&sensitive["when"]).unwrap();
-    assert!(predicate.is_valid(&json!({"evidence":{"selected_artifact":{"sensitive":true}}})));
+    assert!(predicate.is_valid(
+        &json!({"evidence":{"selected_artifact":{"artifact_id":"1","sha256":"0".repeat(64)}}})
+    ));
     assert!(!predicate.is_valid(&json!({"evidence":{"selected_artifact":null}})));
     // Empty records or invented-safe effects are not valid metadata.
     let schema =

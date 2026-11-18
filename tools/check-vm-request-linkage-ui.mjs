@@ -317,6 +317,33 @@ export async function checkVmRequestLinkageUI(root = repository) {
     assert.match(plain.elements.vmNotice.textContent, /No VM findings yet\. 310,001 analyzed artifacts show no VM structure\./,
       'An empty findings view says how many artifacts were analyzed');
   }
+  {
+    // A failed analysis is never a finding, so the notice counts failures by code.
+    const failed = (id, code) => ({artifact_id: id, runtime: 'javascript', status: 'failed',
+      error: {code, message: '<img src=x onerror=alert(1)>'}, coverage: {complete: false, omissions: [{reason: code}]}});
+    const broken = create();
+    broken.reply = () => response({...analysisDocument(null, '101', 'f'),
+      results: [failed('7', 'malformed-artifact'), failed('8', 'artifact-integrity'), failed('9', 'artifact-integrity')],
+      results_view: {kind: 'findings', listed_results: 3, omitted_results: 4}}, 200, 'analysis-f');
+    await broken.refreshVmAnalysis(null);
+    assert.equal(broken.state.vmAnalysisStatus, 'ready', broken.state.vmAnalysisError);
+    assert.equal(broken.elements.vmNotice.dataset.kind, 'gap');
+    assert.match(broken.elements.vmNotice.textContent,
+      /^No VM findings yet\. 4 analyzed artifacts show no VM structure\. 3 artifacts could not be analyzed \(artifact-integrity 2, malformed-artifact 1\)\. The lab waits/,
+      'Failed analyses are counted by code, never dropped');
+  }
+  {
+    const document = analysisDocument(null, '101', 'c');
+    document.results.push({artifact_id: '8', runtime: 'webassembly', status: 'failed',
+      error: {code: 'artifact-integrity', message: 'x'}, coverage: {complete: false, omissions: [{reason: 'artifact-integrity'}]}});
+    const mixed = create();
+    mixed.reply = () => response({...document, results_view: {kind: 'findings', listed_results: 2, omitted_results: 0}}, 200, 'analysis-c');
+    await mixed.refreshVmAnalysis(null);
+    assert.equal(mixed.state.vmAnalysisStatus, 'ready', mixed.state.vmAnalysisError);
+    assert.equal(mixed.state.vmFindings.length, 1);
+    assert.equal(mixed.elements.vmNotice.hidden, false, 'Findings do not hide failed analyses');
+    assert.equal(mixed.elements.vmNotice.textContent, '1 artifact could not be analyzed (artifact-integrity 1).');
+  }
   const beforeCalls = f.calls.length;
   for (const mutate of [request => {delete request.events;}, request => {request.events = [request.event];}]) {
     setNativeRow(f); mutate(f.state.requests[0]); f.showScreen('traffic', f.nav);

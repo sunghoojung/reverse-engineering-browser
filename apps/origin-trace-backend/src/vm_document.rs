@@ -217,18 +217,41 @@ impl Analysis {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    /// The findings view of the whole document.
-    pub(crate) fn findings(&self) -> Result<Value> {
-        let mut document = self.head.clone();
-        document["results"] = Value::Array(
-            self.findings
-                .iter()
-                .map(|&index| self.result(index))
-                .collect::<Result<_>>()?,
-        );
-        document["results_view"] = json!({"kind":"findings","listed_results":self.findings.len(),
+    /// The canonical bytes of the findings view around its results, and its
+    /// byte length. Every failure is listed, so the view can be as long as
+    /// the document.
+    fn findings_view(&self) -> Result<(Vec<u8>, Vec<u8>, u64)> {
+        let mut head = self.head.clone();
+        head["results_view"] = json!({"kind":"findings","listed_results":self.findings.len(),
             "omitted_results":self.ranges.len() - self.findings.len()});
-        Ok(document)
+        let (prefix, suffix) = split(&head)?;
+        let results = self
+            .findings
+            .iter()
+            .map(|&index| u64::from(self.ranges[index as usize].1))
+            .sum::<u64>()
+            + self.findings.len().saturating_sub(1) as u64;
+        let length = (prefix.len() + suffix.len()) as u64 + results;
+        Ok((prefix, suffix, length))
+    }
+
+    /// Bytes of the findings view.
+    pub(crate) fn findings_length(&self) -> Result<u64> {
+        Ok(self.findings_view()?.2)
+    }
+
+    /// The findings view of the whole document in canonical form, reading
+    /// each listed result from the spool as it is sent.
+    pub(crate) fn findings(&self) -> Result<impl Read + '_> {
+        let (prefix, suffix, _) = self.findings_view()?;
+        let listed = Listed {
+            analysis: self,
+            next: 0,
+            at: 0,
+        };
+        Ok(io::Cursor::new(prefix)
+            .chain(listed)
+            .chain(io::Cursor::new(suffix)))
     }
 
     /// The exact native request projection, read through the link index.
@@ -272,13 +295,25 @@ pub(crate) fn findings_of(document: &mut Value) {
         json!({"kind":"findings","listed_results":listed,"omitted_results":total - listed});
 }
 
-/// Streams the canonical document in chunks until it ends or the receiver
-/// has gone.
+/// Streams the canonical document, or its findings view, in chunks until it
+/// ends or the receiver has gone.
 pub(crate) fn stream(
     analysis: std::sync::Arc<Analysis>,
+    findings: bool,
     sender: tokio::sync::mpsc::Sender<io::Result<Vec<u8>>>,
 ) {
-    let mut reader = analysis.reader();
+    if !findings {
+        return send(analysis.reader(), &sender);
+    }
+    match analysis.findings() {
+        Ok(view) => send(view, &sender),
+        Err(error) => {
+            let _ = sender.blocking_send(Err(io::Error::other(error.message)));
+        }
+    }
+}
+
+fn send(mut reader: impl Read, sender: &tokio::sync::mpsc::Sender<io::Result<Vec<u8>>>) {
     loop {
         let mut chunk = Vec::with_capacity(CHUNK);
         match (&mut reader).take(CHUNK as u64).read_to_end(&mut chunk) {
@@ -334,9 +369,68 @@ impl Read for Reader<'_> {
     }
 }
 
+/// The findings' bytes, comma separated, read from the spool one result at a
+/// time.
+struct Listed<'a> {
+    analysis: &'a Analysis,
+    /// The next position in `findings`, and the bytes of it already read.
+    /// The comma before every result after the first is its first byte.
+    next: usize,
+    at: u64,
+}
+
+impl Read for Listed<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let analysis = self.analysis;
+        let Some(&index) = analysis.findings.get(self.next) else {
+            return Ok(0);
+        };
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let separator = u64::from(self.next > 0);
+        let count = if self.at < separator {
+            buffer[0] = b',';
+            1
+        } else {
+            let (offset, length) = analysis.ranges[index as usize];
+            let at = self.at - separator;
+            let wanted = buffer.len().min((u64::from(length) - at) as usize);
+            match read_at(&analysis.spool, &mut buffer[..wanted], offset + at)? {
+                0 => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "VM analysis spool ended early",
+                    ));
+                }
+                count => count,
+            }
+        };
+        self.at += count as u64;
+        if self.at == separator + u64::from(analysis.ranges[index as usize].1) {
+            self.next += 1;
+            self.at = 0;
+        }
+        Ok(count)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn findings(analysis: &Analysis) -> Value {
+        let mut bytes = Vec::new();
+        analysis
+            .findings()
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes.len() as u64, analysis.findings_length().unwrap());
+        let document: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(bytes, crate::vm::canonical(&document).unwrap());
+        document
+    }
 
     fn result(id: u32, tier: &str, link: Option<(&str, &str, u64, &str)>) -> Value {
         let mut result = json!({"artifact_id":id.to_string(),"tier":tier,"status":"complete",
@@ -391,6 +485,11 @@ mod tests {
             unsigned.as_object_mut().unwrap().remove("document_digest");
             assert_eq!(analysis.digest(), crate::vm::digest(&unsigned).unwrap());
             assert_eq!(analysis.document().unwrap(), document);
+            let view = findings(&analysis);
+            let shown: Vec<_> = results.iter().filter(|result| listed(result)).collect();
+            assert_eq!(view["results"], json!(shown));
+            assert_eq!(view["results_view"]["listed_results"], shown.len());
+            assert_eq!(view["document_digest"], analysis.digest());
         }
     }
 
@@ -405,7 +504,7 @@ mod tests {
             result(5, "likely-vm", None),
         ];
         let analysis = analysis(&results);
-        let findings = analysis.findings().unwrap();
+        let findings = findings(&analysis);
         assert_eq!(
             findings["results"],
             json!([results[1], results[2], results[4]])

@@ -2945,6 +2945,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderVmSessionStatus();
         const gapCount = shownSequenceGaps();
         const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
+        const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
+        const withFailures = message => failures ? `${message} ${failures}` : message;
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
         } else if (state.vmAnalysisStatus === 'loading' && state.vmAnalysisSelection) {
@@ -2954,18 +2956,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (state.vmAnalysisStatus === 'unavailable') {
           setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmAnalysisError ? `${state.vmAnalysisError} ` : ''}${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
         } else if (state.broker === 'unavailable') {
-          setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
+          setVmNotice('disconnected', withFailures(state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.'));
         } else if (state.malformedVmFindings > 0) {
-          setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
+          setVmNotice('malformed', withFailures(`${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`));
         } else if (state.vmFindings.length === 0) {
           const omitted = state.vmAnalysisDocument?.results_view?.omitted_results ?? 0;
           const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
-          const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain} The lab waits for observed or explicitly inferred evidence.`;
-          setVmNotice(vmLimits ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
-        } else if (gapCount > 0n || vmLimits) {
+          const failed = failures ? ` ${failures}` : '';
+          const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain}${failed} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain}${failed} The lab waits for observed or explicitly inferred evidence.`;
+          setVmNotice(vmLimits || failures ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
+        } else if (gapCount > 0n || vmLimits || failures) {
           setVmNotice('gap', [
             gapCount > 0n ? `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).` : '',
-            vmLimits
+            vmLimits,
+            failures
           ].filter(Boolean).join(' '));
         } else if (state.vmAnalysisSelection) {
           const selection = state.vmAnalysisSelection;

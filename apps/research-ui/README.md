@@ -1172,23 +1172,29 @@ captured path and query, and its Payload tab shows them parsed:
   Clicking a token shows its exact raw range. Form bodies are a name/value table and
   multipart bodies list each part's name, filename, type and size, with the
   boundary read from the first line. Other text is colored by its type. Binary
-  bytes are only shown as hex. Long sources render as they scroll, in blocks
+  bytes are only shown as hex: every byte, 256 KiB at a time with **Previous
+  256 KiB** and **Next 256 KiB**. Long sources render as they scroll, in blocks
   of at most 200 rows and 64 KiB, and no more than 64 KiB of them a frame, so
   a one-line body never lays out at once.
-- **Find**, **Copy value** and **Copy as JSON** act on the selected row, or on
-  the whole payload. Arrow keys move through, open and close tree rows.
+- **Find** counts every match in the query string and the body, with no match
+  cap: tree keys and leaf values, form fields and parts as listed, or in Source
+  the whole text, layout or every hex row. Source is counted in the background
+  as in Sources (`N of M+ · finding X%` until the exact count), and a hex match
+  in another window opens that window. **Copy value** and **Copy as JSON** act
+  on the selected row, or on the whole payload. Arrow keys move through, open
+  and close tree rows.
 - **Capture details**, collapsed, holds the state, type, lengths, SHA-256,
   kind and artifact ID. A body cut at the capture limit or a cut target is
-  noted at the top. Bodies are read 2 MiB at a time, and a body that parses
-  (JSON, form or multipart) reads on by itself until every byte is read, showing
-  how much is read instead of its unparsed prefix; other text uses **Show the
-  next 2 MiB**.
+  noted at the top. A body is read whole in one request of any size: while it
+  arrives Payload says how many bytes have been read and then that the SHA-256
+  is checked, with **Cancel**; a cancelled read offers **Read the body**. There
+  is no deadline.
 
 Without content capture, Payload still shows the body's length, type and digest
 and says that content capture was off. File, blob and stream bodies are read
 in content sessions; one that could not be read whole says why. Password form
 bodies keep neither bytes nor a digest. A body read
-that times out or gets an error status keeps the last read copy and its reason
+that fails or gets an error status keeps the last read copy and its reason
 and is read again on the next refresh; a size or SHA-256 mismatch, whether the
 bytes differ, the store reports `artifact_integrity`, or the request record's digest
 differs from the artifact's, shows no bytes and is not reread. A path and query past the 116-byte row prefix is loaded from
@@ -1329,12 +1335,17 @@ blocks ([native network v3](../../protocol/native-network-v3.md)). Response
 (`traffic_response.js`) shows a body's capture state, codings, lengths and
 digest, then its bytes in the shared code view with pretty print (the Oxc
 layout for JavaScript and JSON, else the in-page one with the reason), raw
-ranges of laid-out tokens, wrap, find, copy and hex, read 2 MiB at a time and
-rechecked by SHA-256. Hex shows 256 KiB at a time with **Previous** and
-**Next**, paged to the end of the retained body; a window past the loaded
-bytes reads the next range itself, and Copy copies the window shown. A body
+ranges of laid-out tokens, wrap, find, copy and hex. The body is read whole in
+one request of any size and rechecked by SHA-256; while it arrives Response says
+how many bytes have been read and then that the digest is checked, with
+**Cancel**, and a cancelled read offers **Read the body**. There is no deadline.
+Hex shows 256 KiB at a time with **Previous** and **Next**, paged to the end of
+the retained body, and Copy copies the window shown. Find counts every match of
+the whole text, its layout or every hex row in the background, as Sources does
+(`N of M+ · finding X%` until the exact count), marks only the rows on screen,
+and opens the hex window of a match. A body
 still arriving says how many bytes had arrived, when, and whether it was sealed
-at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Preview reads every remaining range itself. Text that is
+at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
@@ -1708,7 +1719,7 @@ capture, fetch anything or change a row.
 | `source_search.js` | Search all files: the paged, cancellable client of the backend's artifact search, coverage notes and the results panel; `app.js` supplies the catalog's text kinds, names and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
 | `source_format.js` | The backend layout client (whole bodies and 1,000-line Sources pages) and its whitespace-only mapping to the displayed evidence |
-| `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks, layouts with raw ranges and the colored textarea editor |
+| `code_view.js` | The code view Payload, Response, Native Console, Analyst and the agent panel share: Sources colors, rows mounted near the view in blocks of at most 200 rows and 64 KiB, find marks drawn per block from a whole-document count, 256 KiB hex windows, layouts with raw ranges and the colored textarea editor |
 | `native_console.js`, `native_console_completion.js` | Disposable browser console controls and local built-in API completion; the live document the debugger sidebar arms rules through |
 | `../origin-trace-backend/src/app.rs`, `evidence.rs` | Loopback HTTP routing and bounded evidence reads |
 | `../origin-trace-backend/src/workspace.rs`, `analyst.rs`, `workspace_lease.rs` | Workspace contracts, explicit analyst execution, private durable replacement |
@@ -2035,10 +2046,10 @@ evidence, or relink documents.
 Find searches the selected document's owned retained text, independently of
 which lines are mounted. It uses a case-insensitive single-line literal of at
 most 512 UTF-16 code units. Multiline pastes are refused before the browser can
-join their lines. Enter advances and Shift+Enter goes back through the first
-1,000 matches, including late matches in minified lines and after line 20,000.
-A visible `+` discloses the match cap. Search never fetches more bytes or runs an
-analyzer. Complete text, retained prefixes, lossy displays and unavailable or
+join their lines. Enter advances and Shift+Enter goes back through every
+match, including late matches in minified lines and after line 20,000; a `+`
+stays on the count until the background count ends (see Find in Sources
+below). Search never fetches more bytes or runs an analyzer. Complete text, retained prefixes, lossy displays and unavailable or
 evicted previews have separate coverage labels; an incomplete negative is never
 reported as absence from the complete source. Loading/truncation notices are
 excluded. Pretty/Deob Find names the retained display representation, with

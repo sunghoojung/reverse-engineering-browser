@@ -111,11 +111,43 @@ function trafficBodyRows(body, artifact = null) {
   ];
 }
 
+// Reads one retained artifact whole, in one request of any size; the backend
+// hashes the whole file for any range. This page checks the size and, where
+// it can hash, the SHA-256 again. `onBytes` hears the count read so far and
+// `onVerify` that hashing began. Bytes that are not the retained ones fail
+// with `integrity`; there is no deadline, and `signal` cancels the read.
+async function trafficReadArtifact(artifact, {signal, onBytes = null, onVerify = null} = {}) {
+  const mismatch = message => Object.assign(new Error(message), {integrity: true});
+  const size = Number(artifact.byte_size);
+  const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=0&limit=${Math.max(1, size)}`,
+    {cache: 'no-store', signal});
+  if (!response.ok) {
+    if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the retained SHA-256');
+    response.body?.cancel().catch(() => {});
+    throw new Error(`the artifact store returned ${response.status}`);
+  }
+  const bytes = await sourceFactsReadBytes(response, size, signal, onBytes);
+  if (bytes.length !== size) throw mismatch('its retained byte size changed');
+  if (!globalThis.crypto?.subtle) return {bytes, verified: false};
+  onVerify?.();
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), byte => byte.toString(16).padStart(2, '0')).join('');
+  if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
+  return {bytes, verified: true};
+}
+
+// What a read in progress has done: bytes so far, then the digest check.
+function trafficReadProgress(view) {
+  if (!Number.isSafeInteger(Number(view?.total))) return 'Loading the retained body…';
+  return view.verifying ? `Verifying ${trafficByteCount(view.total)} against the retained SHA-256…`
+    : `Reading the retained body: ${trafficByteCount(view.received ?? 0)} of ${trafficByteCount(view.total)}…`;
+}
+
 // The retained bytes, when there are any. Captured text is only ever assigned
 // to textContent, never parsed as markup.
 function trafficBodyContent(body, view) {
   if (!body || body.malformed || !['captured', 'captured_truncated'].includes(body.state)) return null;
-  if (!view || view.status === 'loading') return {note: 'Loading the retained body…'};
+  if (!view || view.status === 'loading') return {note: trafficReadProgress(view)};
+  if (view.status === 'cancelled') return {note: 'Reading the retained body was cancelled.'};
   if (view.status === 'refused') {
     return {note: view.reason === 'sensitive_capture_disabled'
       ? 'The artifact receiver refused it: the session receiver was not started for sensitive capture.'
@@ -131,13 +163,9 @@ function trafficBodyContent(body, view) {
   }
   const notes = [];
   if (body.state === 'captured_truncated') notes.push(`Prefix only: ${trafficByteCount(body.capturedLength)} of ${trafficByteCount(body.bodyLength)}.`);
-  const more = view.complete === false;
-  if (more) notes.push(`Showing the first ${trafficByteCount(view.loaded)} of ${trafficByteCount(view.total)} retained.`);
-  if (view.moreError) notes.push(`The next range could not be read: ${view.moreError}.`);
   if (view.lossy) notes.push('Not valid UTF-8; shown with replacement characters.');
-  if (!view.verified) notes.push(more ? 'The local backend checked the retained digest; this view rechecks it once every byte is shown.'
-    : 'The retained digest could not be rechecked in this view.');
-  return {text: view.text, note: notes.join(' '), url: view.url, more: more ? view.key : null, loadingMore: Boolean(view.loadingMore)};
+  if (!view.verified) notes.push('The retained digest could not be rechecked in this view.');
+  return {text: view.text, note: notes.join(' '), url: view.url};
 }
 
 // Request artifacts are read by ID (get_artifacts filters), not from the first 50,000
@@ -706,6 +734,28 @@ function trafficNode(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+// Previous and next hex windows of a body (codeViewHexWindow); `go(start)`
+// shows the window that starts at that byte.
+function trafficHexPager(range, go) {
+  const bar = trafficNode('div', 'traffic-hex-pager');
+  bar.setAttribute('role', 'group');
+  bar.setAttribute('aria-label', 'Hex range');
+  for (const [control, label, step, disabled] of [
+    ['hex-previous', 'Previous 256 KiB', -1, range.start === 0],
+    ['hex-next', 'Next 256 KiB', 1, range.end >= range.total]]) {
+    const button = trafficNode('button', 'secondary-button', label);
+    button.type = 'button';
+    button.dataset.control = control;
+    // Not `disabled`, so keyboard focus stays when a step reaches either end.
+    button.setAttribute('aria-disabled', String(disabled));
+    button.addEventListener('click', () => {
+      if (!disabled) go(Math.max(0, range.start + step * CODE_VIEW_HEX_BYTES));
+    });
+    bar.append(button);
+  }
+  return bar;
 }
 
 // Copies captured text and reports the outcome in a status region.

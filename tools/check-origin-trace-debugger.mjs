@@ -965,9 +965,10 @@ assert.equal(summaryElements.requestCopyUrl.disabled, true);
 console.log("PASS selected strip and inspector share current pending/response/failed/empty request metadata");
 
 {
-  // Production request body loading: a transient failure stays visible and is
-  // retried by a later refresh or selection; an integrity failure stays cached
-  // with its reason. A failed retry with the same result does not re-render.
+  // Production request body loading: one whole read of any size with its
+  // progress and Cancel and no deadline. A transient failure stays visible and
+  // is retried by a later refresh or selection; an integrity failure stays
+  // cached with its reason. A failed retry with the same result does not re-render.
   const text = '{"sitekey":"s"}', bytes = new TextEncoder().encode(text);
   const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), b => b.toString(16).padStart(2, "0")).join("");
   const artifact = {artifact_id: "901", kind: "request_body", session_id: "7", creator_event_id: "12", sha256,
@@ -975,34 +976,34 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   const request = {id: "r", body: {state: "captured", artifactId: "901", sessionId: "7", sequenceNumber: "12", processId: 42}};
   const bodyState = {artifacts: [artifact], events: [], requests: [request], selectedRequestId: "r", inspectorTab: "payload", requestBodyViewKey: ""};
   let clock = 1000, renders = 0;
-  const timers = [], fetches = [];
+  const fetches = [];
   const respond = [];
-  // Each content read arms one deadline timer and clears it when it finishes.
-  const armed = new Set();
-  let timerId = 0;
+  // Reads the loader started and has not finished (trafficReadArtifact, wrapped below).
+  const reads = {pending: 0};
   const context = {state: bodyState, location: {protocol: "http:"}, AbortController, TextDecoder, Uint8Array, crypto, URLSearchParams, AbortSignal,
     Date: {now: () => clock}, sourceFactsReadBytes: sourceFactsUI.sourceFactsReadBytes, decodePayload: () => "", isArtifactResponse: body => Array.isArray(body?.artifacts),
-    setTimeout: (fn) => {timers.push(fn); armed.add(++timerId); return timerId;}, clearTimeout: id => {armed.delete(id);},
-    fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);},
+    fetch: (url, {signal}) => {fetches.push(url); return respond.shift()(signal);}, reads,
     renderInspector: () => {renders++; bodyState.requestBodyViewKey = body.requestContentViewKey(request);}};
   const body = runInNewContext(trafficSource + "\n" +
-    appSection("      const REQUEST_BODY_PAGE_BYTES", "      function renderInspectorMessage(") +
-    ";({requestBodyView,requestContentViewKey,refreshSelectedRequestBody,loadMoreRequestBody,requestFullUrl})", context);
+    "{const read = trafficReadArtifact; trafficReadArtifact = async (...args) => {reads.pending++; try {return await read(...args);} finally {reads.pending--;}};}\n" +
+    appSection("      const REQUEST_CONTENT_CACHE_BYTES", "      function renderInspectorMessage(") +
+    ";({requestBodyView,requestContentViewKey,refreshSelectedRequestBody,cancelRequestContent,readRequestContent,requestFullUrl})", context);
   // Settled once every queued reply was requested and every read it started
   // finished. A fixed delay saw a 3 MiB digest still running on a loaded machine.
   const settle = async () => {
     const deadline = Date.now() + 30000;
     do {
-      assert(Date.now() < deadline, `${respond.length} replies unrequested and ${armed.size} reads unfinished after 30 s`);
+      assert(Date.now() < deadline, `${respond.length} replies unrequested and ${reads.pending} reads unfinished after 30 s`);
       await new Promise(resolve => setTimeout(resolve, 5));
-    } while (respond.length || armed.size);
+    } while (respond.length || reads.pending);
+    await new Promise(resolve => setTimeout(resolve, 0));
   };
-  // The first read times out.
-  respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))));
+  // The first read fails in transport.
+  respond.push(async () => {throw new TypeError("Load failed");});
   assert.equal(body.requestBodyView(request).status, "loading");
-  timers.shift()(); await settle();
+  await settle();
   let view = body.requestBodyView(request);
-  assert.equal(view.status, "error"); assert.match(view.error, /timed out after 10 seconds/); assert.equal(view.retryable, true);
+  assert.equal(view.status, "error"); assert.match(view.error, /Load failed/); assert.equal(view.retryable, true);
   assert.equal(fetches.length, 1, "A failure is not refetched by the render that reports it");
   // A later refresh retries while the failure stays visible, then shows the bytes.
   clock += 2000;
@@ -1059,34 +1060,64 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   respond.push(async () => new Response(bytes));
   assert.equal(body.requestBodyView(cut).status, "loading"); await settle();
   assert.equal(body.requestBodyView(cut).status, "ready");
-  // Bytes that fail integrity on a later range are not kept.
+  // A long body whose bytes fail the digest keeps none of them.
   const longBody = new Uint8Array(3 * 1024 * 1024).fill(97);
   bodyState.artifacts.push({...artifact, artifact_id: "908", sha256: "ef".repeat(32), byte_size: longBody.length});
   const long = {id: "g", body: {...request.body, artifactId: "908"}};
   bodyState.requests.push(long); bodyState.selectedRequestId = "g";
-  respond.push(async () => new Response(longBody.slice(0, 2 * 1024 * 1024)));
+  respond.push(async () => new Response(longBody));
   body.requestBodyView(long); await settle();
   view = body.requestBodyView(long);
-  respond.push(async () => new Response(longBody.slice(2 * 1024 * 1024)));
-  body.loadMoreRequestBody(view.key); await settle();
-  view = body.requestBodyView(long);
   assert.equal(view.status, "error"); assert.equal(view.bytes, undefined, "A mismatch keeps no bytes"); assert.equal(view.retryable, false);
-  // Bodies past one range load 2 MiB at a time, on request, and verify once whole.
+  // A body of any size is read whole in one request, its progress shown as it
+  // arrives, and verified.
   const large = new Uint8Array(3 * 1024 * 1024).map((_, index) => 97 + index % 26);
   const largeDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", large)), b => b.toString(16).padStart(2, "0")).join("");
   bodyState.artifacts.push({...artifact, artifact_id: "903", sha256: largeDigest, byte_size: large.length});
   const largeRequest = {id: "l", body: {...request.body, artifactId: "903"}};
   bodyState.requests.push(largeRequest); bodyState.selectedRequestId = "l";
-  respond.push(async () => new Response(large.slice(0, 2 * 1024 * 1024)));
-  body.requestBodyView(largeRequest); await settle();
+  let release = null;
+  respond.push(async () => new Response(new ReadableStream({async pull(controller) {
+    if (release === null) {
+      controller.enqueue(large.slice(0, 1024 * 1024));
+      await new Promise(resolve => {release = resolve;});
+      return;
+    }
+    controller.enqueue(large.slice(1024 * 1024));
+    controller.close();
+  }})));
+  body.requestBodyView(largeRequest);
+  const progressDeadline = Date.now() + 30000;
+  while (body.requestBodyView(largeRequest).received !== 1024 * 1024) {
+    assert(Date.now() < progressDeadline, "the bytes read so far are reported");
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
   view = body.requestBodyView(largeRequest);
-  assert.equal(view.complete, false); assert.equal(view.loaded, 2 * 1024 * 1024); assert.equal(view.verified, false);
-  assert.match(fetches.at(-1), /offset=0&limit=2097152$/);
-  respond.push(async () => new Response(large.slice(2 * 1024 * 1024)));
-  body.loadMoreRequestBody(view.key); await settle();
+  assert.deepEqual([view.status, view.total], ["loading", large.length]);
+  assert.match(view.key, /^7:903:/);
+  release();
+  await settle();
   view = body.requestBodyView(largeRequest);
-  assert.match(fetches.at(-1), /offset=2097152&limit=1048576$/, "The next range starts where the shown bytes end");
+  assert.match(fetches.at(-1), new RegExp(`offset=0&limit=${large.length}$`), "One read asks for every byte");
   assert.equal(view.complete, true); assert.equal(view.verified, true); assert.equal(view.text.length, large.length);
+  // Cancel stops a read; a refresh does not read it again, Read the body does.
+  bodyState.artifacts.push({...artifact, artifact_id: "909"});
+  const held = {id: "h", body: {...request.body, artifactId: "909"}};
+  bodyState.requests.push(held); bodyState.selectedRequestId = "h";
+  let aborted = false;
+  respond.push(signal => new Promise((_, reject) => signal.addEventListener("abort", () => {aborted = true; reject(new Error("aborted"));})));
+  const heldKey = body.requestBodyView(held).key;
+  body.cancelRequestContent(heldKey);
+  await settle();
+  assert(aborted, "Cancel aborts the read");
+  assert.equal(body.requestBodyView(held).status, "cancelled");
+  const afterCancel = fetches.length;
+  clock += 60000; body.refreshSelectedRequestBody(); body.requestBodyView(held); await settle();
+  assert.equal(fetches.length, afterCancel, "A cancelled body is read only on request");
+  respond.push(async () => new Response(bytes));
+  body.readRequestContent(heldKey); await settle();
+  assert.equal(fetches.length, afterCancel + 1);
+  assert.equal(body.requestBodyView(held).status, "ready");
   // A body past the catalog's cap is read by ID: one manifest read, then its bytes.
   const byIdRequest = {id: "byid", body: {...request.body, artifactId: "904"}};
   bodyState.requests.push(byIdRequest); bodyState.selectedRequestId = "byid";
@@ -1114,7 +1145,7 @@ console.log("PASS selected strip and inspector share current pending/response/fa
   await settle();
   assert.equal(body.requestFullUrl(targetRequest), `https://api.example${full}`);
   assert.match(fetches.at(-1), new RegExp(`/api/artifacts/904/content\\?offset=0&limit=${fullBytes.length}$`));
-  console.log("PASS request content loading retries transient failures after the visible error, keeps integrity failures with their reason, pages bodies by range, completes long URLs from their full target, and re-renders only on change (production app.js block)");
+  console.log("PASS request content loading reads a body of any size whole with its progress and Cancel, retries transient failures after the visible error, keeps integrity failures with their reason, completes long URLs from their full target, and re-renders only on change (production app.js block)");
 }
 
 // Exercise the actual production listeners: selecting a tab is idempotent,

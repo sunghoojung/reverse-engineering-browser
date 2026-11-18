@@ -2,8 +2,9 @@
 // tokenizer, shared code view and body record helpers in a DOM model: query
 // parameters, JSON tree and source laid out by Oxc or the in-page layout, raw
 // ranges of laid-out tokens, form, multipart, text, binary, empty and missing
-// bodies, capture limits, digest and load failures, a 5 MiB JSON body,
-// keyboard, find and copy. Captured markup must stay text. Not rendered QA.
+// bodies, capture limits, whole reads with Cancel, hex of every byte, digest
+// and load failures, a 5 MiB JSON body, keyboard, Find with an exact count and
+// copy. Captured markup must stay text. Not rendered QA.
 // Requires: npm ci --prefix tools/ui-startup-deps --ignore-scripts --no-audit --no-fund
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
@@ -361,31 +362,74 @@ render(request(record()), {status: 'refused', reason: 'sensitive_capture_disable
 assert.match(text('[data-section="payload"]'), /not started for sensitive capture/);
 render(request(record()), ready('{}', {verified: false}));
 assert.match(text('[data-section="payload"]'), /digest could not be rechecked/);
-// Ranged reads: a prefix stays source with the next-range control until every byte is read.
-const ranged = request(record({bodyLength: '300000', capturedLength: '300000'}));
-render(ranged, ready(prefix, {verified: false, complete: false, loaded: 262144, total: 300000, key: '7:901:x'}));
-assert.match(text('[data-section="payload"]'), /Showing the first 262,144 bytes of 300,000 bytes retained/);
-assert.equal(panel.querySelector('.traffic-body-more')?.dataset.contentKey, '7:901:x');
-assert.equal(panel.querySelector('.traffic-body-more')?.textContent, 'Show the next 2 MiB');
-assert.doesNotMatch(text('[data-section="payload"]'), /not valid JSON/, 'a partly read body is not judged invalid');
-render(ranged, ready(prefix, {verified: false, complete: false, loaded: 262000, total: 300000, key: '7:901:x', lossy: true}));
-assert.match(text('[data-section="payload"]'), /Not valid UTF-8; shown with replacement characters/);
-assert.equal(context.trafficPayloadParses({contentType: 'application/json'}, {}), true, 'JSON needs every byte to parse');
-assert.equal(context.trafficPayloadParses({contentType: 'application/x-www-form-urlencoded'}, {}), true);
-assert.equal(context.trafficPayloadParses({contentType: 'multipart/form-data'}, {}), true);
-assert.equal(context.trafficPayloadParses({contentType: 'text/plain'}, {text: 'plain text'}), false, 'Plain text pages on request');
-assert.equal(context.trafficPayloadParses({contentType: ''}, {text: ' {"a":1'}), true, 'Untyped JSON text is parsed');
-assert.equal(context.trafficPayloadParses({contentType: 'application/octet-stream'}, {text: '{'}), false, 'Binary is never parsed');
-// A next range keeps the reader's place in the same request.
-const rangedText = Array.from({length: 400}, (_, index) => `line ${index}`).join('\n');
-const rangedPlain = request(record({bodyLength: '300000', capturedLength: '300000', contentType: 'text/plain'}));
-render(rangedPlain, ready(rangedText, {verified: false, complete: false, loaded: 262144, total: 300000, key: '7:901:y'}));
+// The whole body is read in one request: its progress and Cancel while it
+// arrives, then the digest check; a cancelled read offers Read the body.
+const whole = request(record({bodyLength: '300000', capturedLength: '300000'}));
+render(whole, {status: 'loading', received: 65536, total: 300000, verifying: false, controller: {}, key: '7:901:x'});
+assert.match(text('[data-section="payload"]'), /Reading the retained body: 65,536 bytes of 300,000 bytes…/);
+const cancelControl = panel.querySelector('.traffic-body-read');
+assert.deepEqual([cancelControl?.textContent, cancelControl?.dataset.contentAction, cancelControl?.dataset.contentKey], ['Cancel', 'cancel', '7:901:x']);
+render(whole, {status: 'loading', received: 300000, total: 300000, verifying: true, controller: {}, key: '7:901:x'});
+assert.match(text('[data-section="payload"]'), /Verifying 300,000 bytes against the retained SHA-256…/);
+render(whole, {status: 'cancelled', key: '7:901:x'});
+assert.match(text('[data-section="payload"]'), /Reading the retained body was cancelled\./);
+const readControl = panel.querySelector('.traffic-body-read');
+assert.deepEqual([readControl?.textContent, readControl?.dataset.contentAction], ['Read the body', 'read']);
+render(whole, ready(json, {loaded: json.length, total: json.length}));
+assert.equal(panel.querySelector('.traffic-body-read'), null, 'a read body has no read control');
+assert(tree(), 'the whole body parses');
+// A redraw of the same request keeps the reader's place.
+const plainText = Array.from({length: 400}, (_, index) => `line ${index}`).join('\n');
+const plainRequest = request(record({bodyLength: String(plainText.length), capturedLength: String(plainText.length), contentType: 'text/plain'}));
+render(plainRequest, ready(plainText, {verified: false}));
 panel.querySelector('.traffic-payload-view').scrollTop = 72;
-render(rangedPlain, ready(`${rangedText}\nmore`, {verified: false, complete: false, loaded: 280000, total: 300000, key: '7:901:y'}));
-assert.equal(panel.querySelector('.traffic-payload-view').scrollTop, 72, 'the next range keeps the scroll position');
-render(ranged, ready(json, {complete: true, loaded: json.length, total: json.length}));
-assert.equal(panel.querySelector('.traffic-body-more'), null, 'a complete body has no next-range control');
-assert(tree(), 'the whole body parses once every byte is read');
+render(plainRequest, ready(plainText, {verified: true}));
+assert.equal(panel.querySelector('.traffic-payload-view').scrollTop, 72, 'a redraw keeps the scroll position');
+// Hex shows every byte of a binary body, a window at a time, and Find counts every row.
+{
+  const bytes = new Uint8Array(600 * 1024);
+  for (let offset = 0; offset < bytes.length; offset += 1) bytes[offset] = (offset * 7) & 0xff;
+  bytes[0] = 0;
+  const binary = request(record({contentType: 'application/octet-stream', bodyLength: String(bytes.length), capturedLength: String(bytes.length)}));
+  render(binary, {status: 'ready', bytes, text: new TextDecoder().decode(bytes), lossy: true, verified: true});
+  const hexText = () => text('.traffic-payload-lines');
+  assert.match(hexText(), /^00000000  00 07 0e/);
+  assert.match(text('[data-section="payload"]'), /Hex shows bytes 0 to 262,143 of 614,400 bytes\./);
+  click(panel.querySelector('[data-control="hex-next"]'));
+  assert.match(hexText(), /^00040000  /, 'Next shows the second window');
+  click(panel.querySelector('[data-control="hex-next"]'));
+  assert.match(text('[data-section="payload"]'), /Hex shows bytes 524,288 to 614,399 of 614,400 bytes\./);
+  assert.equal(panel.querySelector('[data-control="hex-next"]').getAttribute('aria-disabled'), 'true', 'the last window ends the body');
+  click(button('Copy value'));
+  await settle();
+  assert.match(text('.traffic-payload-status'), /^Copied the hex of bytes 524,288 to 614,399 of 614,400 bytes\.$/);
+  click(panel.querySelector('[data-control="hex-previous"]'));
+  click(panel.querySelector('[data-control="hex-previous"]'));
+  assert.match(hexText(), /^00000000  /);
+  find().value = '00095ff0';
+  event(find(), 'input');
+  for (let i = 0; i < 400 && text('.traffic-payload-matches') !== '1 of 1'; i++) await settle();
+  assert.equal(text('.traffic-payload-matches'), '1 of 1', 'the last row is found from the first window');
+  assert.match(text('[data-section="payload"]'), /Hex shows bytes 524,288 to 614,399/, 'its window opens');
+  assert.equal(text('.traffic-payload-lines mark.is-current'), '00095ff0');
+  press(find(), 'Escape');
+}
+// Find has no match cap: every match is counted and reachable.
+{
+  const many = JSON.stringify(Array.from({length: 3000}, (_, index) => `k${index}`));
+  render(request(record({bodyLength: String(many.length), capturedLength: String(many.length)})), ready(many));
+  find().value = 'k';
+  event(find(), 'input');
+  assert.equal(text('.traffic-payload-matches'), '1 of 3,000');
+  press(find(), 'Enter', {shiftKey: true});
+  assert.equal(text('.traffic-payload-matches'), '3,000 of 3,000');
+  assert.equal(text('.traffic-payload-tree .is-current'), '2999: "k2999"', 'the last match is revealed in its range');
+  click(button('Source'));
+  for (let i = 0; i < 400 && !/^\d[\d,]* of 3,000$/.test(text('.traffic-payload-matches')); i++) await settle();
+  assert.match(text('.traffic-payload-matches'), /^\d[\d,]* of 3,000$/, 'Source counts the same 3,000 matches');
+  press(find(), 'Escape');
+  click(button('Parsed'));
+}
 // Parsed and Source keep keyboard focus when the toggle redraws.
 {
   let active = null;
@@ -406,7 +450,8 @@ assert(tree(), 'the whole body parses once every byte is read');
   if (descriptor) Object.defineProperty(Object.getPrototypeOf(document), 'activeElement', descriptor);
   window.HTMLElement.prototype.focus = focus;
 }
-console.log('PASS Payload limits and failures: cut prefix noted at the top and shown as sent, ranged reads continue to the whole body, failed or pending re-reads keep the last view, digest mismatch shows none');
+console.log('PASS Payload limits and failures: cut prefix noted at the top and shown as sent, the whole body read with progress, Cancel and Read the body, ' +
+  'every byte of hex paged by window with Find opening a match in another window, Find without a match cap, failed or pending re-reads keep the last view, digest mismatch shows none');
 
 // A 5 MiB JSON body: parsing and every interaction render a bounded number of rows.
 // The layout worker runs inline, so this process's CPU time is the work each

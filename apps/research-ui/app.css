@@ -2446,15 +2446,14 @@ var(--panel);
       .traffic-body-text { max-height: 320px; margin: 8px 0 0; padding: 8px; overflow: auto; border: 1px solid var(--line); border-radius: 4px;
         background: var(--panel-2); font: 11px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
       .traffic-body-text:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-      .traffic-body-more { margin-top: 8px; }
-      .traffic-body-more[aria-disabled="true"] { cursor: progress; opacity: .45; }
+      .traffic-body-read { margin-top: 8px; }
       /* Response and Preview: record facts, then inert retained bytes that
          scroll inside the panel. */
       .traffic-response { padding: 12px; }
       .traffic-response > h2 { margin: 0 0 8px; font: 500 12px/16px var(--sans); }
       .traffic-response-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 12px 0 8px; }
-      .traffic-response-hex-pager, .traffic-response-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; }
-      .traffic-response-hex-pager .secondary-button[aria-disabled="true"] { cursor: default; opacity: .45; }
+      .traffic-hex-pager, .traffic-response-links { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; }
+      .traffic-hex-pager .secondary-button[aria-disabled="true"] { cursor: default; opacity: .45; }
       .traffic-response-toolbar .secondary-button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
       .traffic-response-find { flex: 1 1 120px; min-width: 0; height: 26px; padding: 0 8px; border: 1px solid var(--line); border-radius: 4px;
         background: var(--panel-2); color: var(--text); font: 12px var(--sans); }

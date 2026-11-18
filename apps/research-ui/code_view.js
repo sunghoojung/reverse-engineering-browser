@@ -7,6 +7,9 @@ const CODE_VIEW_BLOCK_ROWS = 200;
 const CODE_VIEW_BLOCK_CHARACTERS = 64 * 1024;
 const CODE_VIEW_ROW_HEIGHT = 18;
 const CODE_VIEW_LAYOUT_CHARACTERS = 32 * 1024 * 1024;
+// Hex of a body is drawn one window of this many bytes at a time, paged to
+// its end; Find searches every row of the whole body (sourceFindHexDocument).
+const CODE_VIEW_HEX_BYTES = 256 * 1024;
 
 function codeViewNode(tag, className, text) {
   const node = document.createElement(tag);
@@ -130,9 +133,60 @@ function codeViewRows(text) {
   return rows;
 }
 
+// The hex window of `bytes` that starts at or before byte `offset`, laid out
+// as rows of the whole body so a Find offset maps onto it: `base` is the
+// window's first unit in the whole hex document, and `windowOf(offset)` is the
+// first byte of the window that shows a document offset.
+function codeViewHexWindow(bytes, offset = 0) {
+  const total = bytes.length, layout = sourceHexLayout(total);
+  const last = Math.max(0, Math.floor((total - 1) / CODE_VIEW_HEX_BYTES) * CODE_VIEW_HEX_BYTES);
+  const start = Math.min(last, Math.max(0, Math.floor(offset / CODE_VIEW_HEX_BYTES) * CODE_VIEW_HEX_BYTES));
+  return {start, end: Math.min(total, start + CODE_VIEW_HEX_BYTES), total, rowUnits: layout.rowUnits, base: start / 16 * layout.rowUnits,
+    text: sourceHexText(bytes, start / 16, CODE_VIEW_HEX_BYTES / 16, layout),
+    windowOf: at => Math.floor(Math.floor(at / layout.rowUnits) * 16 / CODE_VIEW_HEX_BYTES) * CODE_VIEW_HEX_BYTES};
+}
+
+// The row that shows UTF-16 offset `offset` of the text: the last row starting at or before it.
+function codeViewRowAt(rows, offset) {
+  let low = 0, high = rows.length - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if (rows[middle].offset + rows[middle].columnStart <= offset) low = middle; else high = middle - 1;
+  }
+  return low;
+}
+
+// Find marks of rows [first, last) from a search of the whole document
+// (startSourceFind), whose offset `base` is the text's first unit. Only the
+// chunks under those rows are rescanned, so marks cost what is mounted, not
+// the number of matches. A match continues on the next rows of a long line;
+// each mark names its match by document offset.
+function codeViewFindMarks(search, rows, first, last, base = 0) {
+  const marks = new Map();
+  if (!search?.total || first >= last) return marks;
+  const start = rows[first].offset + rows[first].columnStart, end = rows[last - 1].offset + rows[last - 1].columnEnd;
+  let row = first;
+  for (const match of sourceFindBetween(search, Math.max(0, base + start - search.margin), base + end)) {
+    const from = match.offset - base, to = from + match.length;
+    if (to <= start) continue;
+    while (row < last - 1 && rows[row + 1].offset + rows[row + 1].columnStart <= from) row += 1;
+    for (let at = row; at < last; at += 1) {
+      const rowStart = rows[at].offset + rows[at].columnStart;
+      if (rowStart >= to) break;
+      const column = Math.max(from, rowStart) - rowStart, length = Math.min(to, rows[at].offset + rows[at].columnEnd) - rowStart - column;
+      if (length <= 0) continue;
+      if (!marks.has(at)) marks.set(at, []);
+      marks.get(at).push({column, length, match: match.offset});
+    }
+  }
+  return marks;
+}
+
 // A lazily mounted code block; with `layout` ({map, input}) a clicked token reports its raw range.
+// `marks` is a Map of row to marks, or a function of a block's rows [first, last) that returns one.
 function createCodeView({text, rows = codeViewRows(text), syntax, label, className = '', rowClass = '', wrap = false, marks = new Map(),
   current = -1, layout = null, onRaw = null}) {
+  let marksOf = typeof marks === 'function' ? marks : () => marks;
   const index = sourceDocumentIndex(text);
   const highlighter = createSourceHighlighter(syntax, index);
   const box = codeViewNode('div', `code-view ${className}${wrap ? ' is-wrapped' : ''}`);
@@ -163,12 +217,13 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
     if (!highlighter.ready(excerpts)) highlighter.advance(SOURCE_COLOR_SYNC_UNITS);
     const colors = highlighter.rows(excerpts);
     if (!colors) plain.add(block); else plain.delete(block);
+    const blockMarks = marksOf(from, from + excerpts.length);
     node.replaceChildren(...excerpts.map((row, offset) => {
       const tokens = colors?.rows[offset];
       const exact = tokens && tokens.map(token => token.text).join('') === row.text;
       const element = codeViewNode('div', `code-view-row${rowClass ? ` ${rowClass}` : ''}${row.columnStart ? ' is-continued' : ''}`);
       element.dataset.row = String(from + offset);
-      codeViewPaint(element, exact ? tokens : [{type: 'plain', text: row.text || ' '}], marks.get(from + offset) ?? [], current);
+      codeViewPaint(element, exact ? tokens : [{type: 'plain', text: row.text || ' '}], blockMarks.get(from + offset) ?? [], current);
       return mounted[from + offset] = element;
     }));
     if (plain.size && !pumping) pump();
@@ -256,6 +311,22 @@ function createCodeView({text, rows = codeViewRows(text), syntax, label, classNa
     reveal(row) {
       fill(blockOf(row));
       return mounted[row] ?? null;
+    },
+    // New marks and current match. Mounted blocks repaint as they come near
+    // the view again, so a long reading session does not repaint every block
+    // it mounted; `rows` are repainted now.
+    mark(next, at, now = []) {
+      marksOf = typeof next === 'function' ? next : () => next;
+      current = at;
+      const blocksNow = new Set(now.map(blockOf));
+      blocks.forEach((node, block) => {
+        if (!node.dataset.filled) return;
+        if (blocksNow.has(block) || !observer) paint(block, node);
+        else {
+          delete node.dataset.filled;
+          observer.observe(node);
+        }
+      });
     },
     dispose() {
       disposed = true;

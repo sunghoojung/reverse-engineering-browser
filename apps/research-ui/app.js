@@ -4110,19 +4110,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // Retained request content (protocol/native-network-v2.md) loads only for the
-      // selected request and by range: a body 2 MiB at a time, a full target in
-      // one read. The backend checks the catalog's size and SHA-256 on every read;
-      // this view rechecks the digest once every byte is loaded. Text is only ever
-      // assigned to textContent.
-      const REQUEST_BODY_PAGE_BYTES = 2 * 1024 * 1024;
-      // The backend's largest range read, which is also Chromium's URL limit.
-      const REQUEST_TARGET_READ_BYTES = 2 * 1024 * 1024;
-      // Loaded bytes kept for recently selected requests, never the session's content.
+      // selected request, whole, in one read of any size with its progress and
+      // Cancel and no deadline (trafficReadArtifact). The backend checks the
+      // catalog's size and SHA-256, and this view rechecks the digest. Text is
+      // only ever assigned to textContent.
+      // Loaded bytes kept for recently selected requests, never the session's
+      // content; the newest stays whatever its size.
       const REQUEST_CONTENT_CACHE_BYTES = 32 * 1024 * 1024;
-      // A transient read failure (timeout, HTTP status, transport) stays shown
-      // and is retried by the next refresh or selection at least this long
-      // after it, so a failing backend sees one read per poll, not a loop. A size
-      // or SHA-256 mismatch stays cached with its reason.
+      // A transient read failure (HTTP status, transport) stays shown and is
+      // retried by the next refresh or selection at least this long after it,
+      // so a failing backend sees one read per poll, not a loop. A size or
+      // SHA-256 mismatch stays cached with its reason.
       const REQUEST_BODY_RETRY_MS = 2000;
       const requestBodyViews = new Map();
       function requestContentArtifact(record, kind) {
@@ -4169,14 +4167,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const cut = record.state === 'captured_truncated';
         if (view?.retryable && Date.now() - view.failedAt >= REQUEST_BODY_RETRY_MS) {
           // The failed view stays visible until the retry settles.
-          requestBodyViews.set(key, {status: 'loading', previous: view});
-          void loadRequestContent(artifact, key, null, cut);
+          startRequestContent(artifact, key, cut, view);
           return {...view, url: artifact.url, key};
         }
-        if (view) return {...(view.previous ?? view), loadingMore: view.status === 'loading' && Boolean(view.previous?.bytes), url: artifact.url, key};
-        requestBodyViews.set(key, {status: 'loading'});
-        void loadRequestContent(artifact, key, null, cut);
-        return {status: 'loading', url: artifact.url, key};
+        if (view) return {...(view.status === 'loading' && view.previous ? view.previous : view), url: artifact.url, key};
+        return {...startRequestContent(artifact, key, cut), url: artifact.url, key};
       }
       function requestBodyView(request) {
         const body = request?.body;
@@ -4192,49 +4187,44 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const view = requestTargetView(request);
         return view?.status === 'ready' && view.complete ? `${view.url}${view.text}` : null;
       }
-      async function loadRequestContent(artifact, key, previous, cut = false) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
-        const mismatch = message => Object.assign(new Error(message), {integrity: true});
-        const loaded = previous?.bytes ?? new Uint8Array(0);
+      function startRequestContent(artifact, key, cut, previous = null) {
+        const entry = {status: 'loading', artifact, cut, received: 0, total: artifact.byte_size, verifying: false,
+          controller: new AbortController(), previous};
+        requestBodyViews.set(key, entry);
+        void loadRequestContent(entry, key);
+        return entry;
+      }
+      function refreshRequestContent() {
+        const selected = state.requests.find(request => request.id === state.selectedRequestId);
+        if (selected && requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
+      }
+      async function loadRequestContent(entry, key) {
+        const {artifact, controller, cut} = entry;
+        let painted = 0;
+        const repaint = () => {if (requestBodyViews.get(key) === entry) refreshRequestContent();};
         let view;
         try {
-          const page = artifact.kind === 'request_target' ? REQUEST_TARGET_READ_BYTES : REQUEST_BODY_PAGE_BYTES;
-          const limit = Math.min(artifact.byte_size - loaded.length, page);
-          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${loaded.length}&limit=${limit}`,
-            {cache: 'no-store', signal: controller.signal});
-          if (!response.ok) {
-            if (response.status === 500 && (await Promise.resolve(response.json?.()).catch(() => null))?.code === 'artifact_integrity') throw mismatch('its bytes do not match the retained SHA-256');
-            response.body?.cancel().catch(() => {});
-            throw new Error(`the artifact store returned ${response.status}`);
-          }
-          const chunk = await sourceFactsReadBytes(response, limit, controller.signal);
-          if (chunk.length !== limit) throw mismatch('its retained byte size changed');
-          const bytes = new Uint8Array(loaded.length + chunk.length);
-          bytes.set(loaded);
-          bytes.set(chunk, loaded.length);
-          const complete = bytes.length === artifact.byte_size;
-          let verified = false;
-          if (complete && globalThis.crypto?.subtle) {
-            const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
-              byte => byte.toString(16).padStart(2, '0')).join('');
-            if (digest !== artifact.sha256) throw mismatch('its bytes do not match the retained SHA-256');
-            verified = true;
-          }
-          // A prefix may end inside a character; streaming leaves that tail out instead of failing it.
-          const open = {stream: !complete || cut};
+          const {bytes, verified} = await trafficReadArtifact(artifact, {signal: controller.signal,
+            onBytes: received => {
+              entry.received = received;
+              if (Date.now() - painted < 100) return;
+              painted = Date.now();
+              repaint();
+            },
+            onVerify: () => {entry.verifying = true; repaint();}});
+          // A cut body may end inside a character; streaming leaves that tail out instead of failing it.
+          const open = {stream: cut};
           let lossy = false;
           try {new TextDecoder('utf-8', {fatal: true}).decode(bytes, open);} catch {lossy = true;}
           view = {status: 'ready', artifact, bytes, text: new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(bytes, open),
-            lossy, verified, complete, cut, loaded: bytes.length, total: artifact.byte_size};
+            lossy, verified, complete: true, cut, loaded: bytes.length, total: artifact.byte_size};
         } catch (error) {
-          const message = controller.signal.aborted ? 'timed out after 10 seconds' : String(error?.message ?? error).replace(/\.$/, '');
-          // A failed next range keeps the bytes already shown; bytes that fail integrity are not shown.
-          view = previous && error?.integrity !== true ? {...previous, moreError: message}
-            : {status: 'error', error: message, retryable: error?.integrity !== true, failedAt: Date.now()};
-        } finally {
-          clearTimeout(timeout);
+          // Bytes that fail integrity are not shown, and that failure is not retried.
+          view = controller.signal.aborted ? {status: 'cancelled', artifact, cut}
+            : {status: 'error', error: String(error?.message ?? error).replace(/\.$/, ''), retryable: error?.integrity !== true, failedAt: Date.now()};
         }
+        // A cancelled or evicted read has been replaced already.
+        if (requestBodyViews.get(key) !== entry) return;
         // Bounded: a few recently selected requests, never the session's content.
         requestBodyViews.delete(key);
         requestBodyViews.set(key, view);
@@ -4243,23 +4233,26 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (requestBodyViews.size <= 8 && retained <= REQUEST_CONTENT_CACHE_BYTES) break;
           if (oldest === key) continue;
           retained -= item.bytes?.length ?? 0;
+          item.controller?.abort();
           requestBodyViews.delete(oldest);
         }
-        const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        if (selected && requestContentViewKey(selected) !== state.requestBodyViewKey) renderInspector();
+        refreshRequestContent();
       }
-      function startMoreRequestBody(key) {
-        const view = requestBodyViews.get(key);
-        if (view?.status !== 'ready' || view.complete) return false;
-        requestBodyViews.set(key, {status: 'loading', previous: {...view, moreError: null}});
-        void loadRequestContent(view.artifact, key, view, view.cut);
-        return true;
+      function cancelRequestContent(key) {
+        const entry = requestBodyViews.get(key);
+        if (entry?.status !== 'loading') return;
+        entry.controller.abort();
+        requestBodyViews.set(key, {status: 'cancelled', artifact: entry.artifact, cut: entry.cut});
+        renderInspector();
       }
-      function loadMoreRequestBody(key) {
-        if (startMoreRequestBody(key)) renderInspector();
+      function readRequestContent(key) {
+        const entry = requestBodyViews.get(key);
+        if (entry?.status !== 'cancelled') return;
+        startRequestContent(entry.artifact, key, entry.cut);
+        renderInspector();
       }
       function requestBodyViewKey(view) {
-        return view ? `${view.status}|${view.unknown ?? ''}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}|${view.loaded ?? ''}|${view.moreError ?? ''}|${view.loadingMore ?? ''}` : '';
+        return view ? `${view.status}|${view.unknown ?? ''}|${view.reason ?? view.error ?? ''}|${view.url ?? ''}|${view.received ?? ''}|${view.verifying ?? ''}` : '';
       }
       // General and Headers read the full target; Payload reads the body and its query from the full target.
       function requestContentViewKey(request) {
@@ -4389,10 +4382,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!payloadInspector.hidden) {
           elements.requestInspector.hidden = true;
           document.querySelector('.detail-pane').classList.add('showing-exchange');
-          // A parsed view needs every retained byte, so ranges are read on without a click.
-          const bodyView = requestBodyView(request);
-          if (bodyView?.status === 'ready' && bodyView.complete === false && !bodyView.loadingMore && !bodyView.moreError &&
-              trafficPayloadParses(request.body, bodyView)) startMoreRequestBody(bodyView.key);
           state.requestBodyViewKey = requestContentViewKey(request);
           renderTrafficPayload(payloadInspector, request, requestBodyView(request), requestTargetView(request));
           return;
@@ -9705,8 +9694,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         renderRequests();
       });
       document.querySelector('#payload-inspector').addEventListener('click', event => {
-        const key = event.target.closest?.('.traffic-body-more')?.dataset.contentKey;
-        if (key) loadMoreRequestBody(key);
+        const control = event.target.closest?.('.traffic-body-read');
+        if (!control?.dataset.contentKey) return;
+        if (control.dataset.contentAction === 'cancel') cancelRequestContent(control.dataset.contentKey);
+        else readRequestContent(control.dataset.contentKey);
       });
       // The list holds focus while a keyboard target loads; rows handle their own keys.
       elements.requestRows.addEventListener('keydown', event => {

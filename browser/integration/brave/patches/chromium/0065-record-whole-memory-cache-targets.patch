@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-index 1ddec4e..d1bb088 100644
+index 1ddec4e..c96dc8e 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 @@ -413,8 +413,8 @@ void RecordDeferUnusedPreloadHistograms(const Resource* resource) {
@@ -26,7 +26,7 @@ index 1ddec4e..d1bb088 100644
 -                        static_cast<wtf_size_t>(std::min(
 -                            range.length, reb::kNativeRequestTargetPrefixBytes)))
 +                        static_cast<wtf_size_t>(reb::NativeMemoryCacheTargetBytes(
-+                            url.ProtocolIsInHTTPFamily(), range.length)))
++                            url.ProtocolIsInHttpFamily(), range.length)))
                   .Utf8();
    }
 -  // One byte past the 120 the record keeps tells the sink the host is longer.

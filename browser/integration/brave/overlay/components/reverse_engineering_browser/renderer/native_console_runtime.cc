@@ -204,7 +204,8 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
     const auto* url = rule ? rule->FindString("url_contains") : nullptr;
     const auto* method = rule ? rule->FindString("method") : nullptr;
     if (!url || !armed.AddRequest(*url, method ? *method : std::string()))
-      return Failure("At most 32 request rules, each url_contains of 1 to 256 bytes and an uppercase method");
+      return Failure(
+          "At most 32 request rules, each url_contains of 1 to 256 bytes and an uppercase method");
   }
   const auto* events = rules->FindList("events");
   for (std::size_t i = 0; events && i < events->size(); ++i) {

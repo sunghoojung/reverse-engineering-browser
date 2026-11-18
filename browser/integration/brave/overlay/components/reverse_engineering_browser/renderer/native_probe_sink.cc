@@ -2202,7 +2202,7 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
                                     : target.scheme == NativeRequestScheme::kWss  ? "wss://"
                                     : target.scheme == NativeRequestScheme::kWs   ? "ws://"
                                                                                   : "";
-    char port_text[8] = {};
+    std::array<char, 8> port_text{};
     std::size_t port_length = 0;
     if (target.port != 0) {
       port_text[0] = ':';
@@ -2225,7 +2225,8 @@ void NativeProbeSink::EmitRendererTarget(const NativeRendererRequest& start,
       origin_length = scheme.size() + host.size() + port_length;
       std::copy(scheme.begin(), scheme.end(), origin_bytes.begin());
       std::copy(host.begin(), host.end(), origin_bytes.begin() + scheme.size());
-      std::copy_n(port_text, port_length, origin_bytes.begin() + scheme.size() + host.size());
+      std::copy_n(port_text.begin(), port_length,
+                  origin_bytes.begin() + scheme.size() + host.size());
     }
   }
   NativeProbeEvent child;

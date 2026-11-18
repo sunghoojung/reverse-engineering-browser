@@ -803,7 +803,8 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const percent = view.z * 100;
-    zoomLabel.textContent = `${percent >= 10 ? Math.round(percent) : percent.toFixed(percent >= 1 ? 1 : 2)}%`;
+    // Two significant digits below 1%, where Fit on a large session goes.
+    zoomLabel.textContent = `${percent >= 10 ? Math.round(percent) : percent >= 1 ? percent.toFixed(1) : Number(percent.toPrecision(2))}%`;
     drawMinimap();
   }
 
@@ -845,11 +846,30 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       pairs.set(key, item);
     });
     const bundles = [...pairs.values()].sort((x, y) => y.count - x.count), straight = new Uint32Array(lanes.length);
-    let right = 0, left = 0;
+    const ports = lanes.map(() => ({left: [], right: []})), sides = {left: [], right: []};
     for (const bundle of bundles) {
       if (sideways() || bundle.to === bundle.from + 1) straight[bundle.from] += 1;
-      else if (bundle.to > bundle.from) right += 1; else left += 1;
+      else sides[bundle.to > bundle.from ? 'right' : 'left'].push(bundle);
     }
+    // A gutter's lines nest instead of crossing: a shorter span takes an
+    // inner track, and each block's ends on a side are spread over its height,
+    // those to blocks above first, nearest first, then those to blocks below,
+    // farthest first.
+    for (const [side, list] of Object.entries(sides)) {
+      list.sort((x, y) => Math.abs(x.to - x.from) - Math.abs(y.to - y.from) || y.count - x.count);
+      list.forEach((bundle, track) => {
+        bundle.track = track;
+        ports[bundle.from][side].push({bundle, other: bundle.to, end: 'out'});
+        ports[bundle.to][side].push({bundle, other: bundle.from, end: 'in'});
+      });
+    }
+    ports.forEach((block, index) => {
+      for (const list of [block.left, block.right]) {
+        const order = port => (port.other < index ? index - port.other : lanes.length * 2 - (port.other - index));
+        list.sort((x, y) => order(x) - order(y)).forEach((port, k) => { port.bundle[port.end] = (k + 1) / (list.length + 1); });
+      }
+    });
+    const right = sides.right.length, left = sides.left.length;
     return (overview = {layout, lanes: counts.map(count => ({cards: count.cards, requests: count.requests.size})), bundles, straight, right, left,
       max: bundles.reduce((most, bundle) => Math.max(most, bundle.count), 1)});
   }
@@ -876,7 +896,6 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     let right = -Infinity, left = Infinity;
     for (const lane of lanes) { right = Math.max(right, lane.x + lane.w); left = Math.min(left, lane.x); }
     const spread = new Uint32Array(lanes.length), log = Math.log(data.max + 1), color = tokens.edge.cross;
-    let rightTrack = 0, leftTrack = 0;
     ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = color; ctx.fillStyle = color;
     for (const bundle of data.bundles) {
       const a = lanes[bundle.from], b = lanes[bundle.to], width = (1.2 + 3 * Math.log(bundle.count + 1) / log) * hair;
@@ -893,9 +912,10 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
         ctx.moveTo(x, a.y + a.h); ctx.lineTo(x, b.y);
         tip = {x, y: b.y, dx: 0, dy: 1};
       } else {
-        const down = bundle.to > bundle.from, track = down ? rightTrack++ : leftTrack++, gap = trackGap(down ? data.right : data.left);
-        const gx = down ? right + (GUTTER + track * gap) * hair : left - (GUTTER + track * gap) * hair, y0 = a.y + a.h * (down ? 0.6 : 0.4), y1 = b.y + b.h * (down ? 0.4 : 0.6), side = down ? a.x + a.w : a.x, into = down ? b.x + b.w : b.x;
-        ctx.moveTo(side, y0); ctx.lineTo(gx, y0); ctx.lineTo(gx, y1); ctx.lineTo(into, y1);
+        const down = bundle.to > bundle.from, gap = trackGap(down ? data.right : data.left);
+        const gx = down ? right + (GUTTER + bundle.track * gap) * hair : left - (GUTTER + bundle.track * gap) * hair, y0 = a.y + a.h * bundle.out, y1 = b.y + b.h * bundle.in, side = down ? a.x + a.w : a.x, into = down ? b.x + b.w : b.x;
+        const radius = Math.min(8 * hair, Math.abs(gx - side) / 2, Math.abs(gx - into) / 2, Math.abs(y1 - y0) / 2);
+        ctx.moveTo(side, y0); ctx.arcTo(gx, y0, gx, y1, radius); ctx.arcTo(gx, y1, into, y1, radius); ctx.lineTo(into, y1);
         tip = {x: into, y: y1, dx: down ? -1 : 1, dy: 0};
       }
       ctx.globalAlpha = 0.7; ctx.lineWidth = width; ctx.stroke();
@@ -908,9 +928,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     // to bottom, each within its block's height. A label that has no room
     // left there is the band's hover.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.textBaseline = 'alphabetic';
-    const inset = topInset(), gutters = overviewGutters();
+    const inset = topInset(), gutters = overviewGutters(), edge = openEdge();
     const outRight = (right - view.x) * view.z + gutters.right + 14, outLeft = (left - view.x) * view.z - gutters.left - 14;
-    const outside = !across && cssW - outRight >= 160 ? 'right' : !across && outLeft >= 160 ? 'left' : null;
+    const outside = !across && edge - outRight >= 160 ? 'right' : !across && outLeft >= 160 ? 'left' : null;
     let below = inset;
     lanes.forEach((lane, index) => {
       const x = (lane.x - view.x) * view.z, y = (lane.y - view.y) * view.z, w = lane.w * view.z, h = lane.h * view.z;
@@ -921,15 +941,15 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       const line = [label?.detail?.split(' · ')[0], `${counts.cards.toLocaleString()} ${counts.cards === 1 ? 'card' : 'cards'}`, `${counts.requests.toLocaleString()} ${counts.requests === 1 ? 'request' : 'requests'}`].filter(Boolean).join(' · ');
       let start, room, top, two;
       if (within) {
-        if (x > cssW || x + w < 0) return;
-        start = Math.max(x + 10, 8); room = Math.min(x + w, cssW) - start - 10;
+        if (x > edge || x + w < 0) return;
+        start = Math.max(x + 10, 8); room = Math.min(x + w, edge) - start - 10;
         top = Math.min(Math.max(y + 6, inset), y + h - 16); two = h >= 38 && y + h - top >= 36;
       } else {
         if (!outside) return;
         two = true;
         top = Math.max(y + h / 2 - 16, below, inset);
         if (top > y + h || top + 34 > cssH) return;
-        room = outside === 'right' ? cssW - outRight - 12 : outLeft - 12;
+        room = outside === 'right' ? edge - outRight - 12 : outLeft - 12;
         start = outside === 'right' ? outRight : outLeft - room;
         below = top + 36;
       }
@@ -999,12 +1019,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
   /** Labels at their home corner, in graph space, under the cards. */
   function drawBandLabels() {
     if (!labelSides) chooseLabelSides();
-    const inset = topInset(), mini = miniRect();
+    const inset = topInset(), mini = miniRect(), edge = openEdge();
     layout.lanes.forEach(lane => {
       if (!visibleBox(lane.x, lane.y, lane.w, lane.h) || pinnedTop(lane, inset) !== null) return;
       const top = lane.y + LABEL.top, width = Math.min(bandLabelWidth(lane), lane.w - LABEL.inset * 2);
       // A label level with the minimap stops short of it.
-      const screenTop = (top - view.y) * view.z, miniLeft = mini && screenTop + LABEL.height * view.z > mini.top ? mini.left - 8 : cssW;
+      const screenTop = (top - view.y) * view.z, miniLeft = mini && screenTop + LABEL.height * view.z > mini.top ? Math.min(edge, mini.left - 8) : edge;
       const viewLeft = Math.max(lane.x, view.x), viewRight = Math.min(lane.x + lane.w, view.x + miniLeft / view.z);
       const left = labelSides.get(lane.key) === 'left' ? viewLeft + LABEL.inset : Math.max(lane.x + LABEL.inset, viewRight - LABEL.inset - width);
       paintLabel(lane, left, top, width);
@@ -1015,12 +1035,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
    * card: while one is under it, the band's hue alone names the realm. */
   function drawPinnedLabels() {
     if (!labelSides) chooseLabelSides();
-    const inset = topInset(), mini = miniRect();
+    const inset = topInset(), mini = miniRect(), edge = openEdge();
     layout.lanes.forEach(lane => {
       if (!visibleBox(lane.x, lane.y, lane.w, lane.h)) return;
       const top = pinnedTop(lane, inset);
       if (top === null) return;
-      const miniLeft = mini && top + LABEL.height > mini.top ? mini.left - 8 : cssW;
+      const miniLeft = mini && top + LABEL.height > mini.top ? Math.min(edge, mini.left - 8) : edge;
       const x0 = Math.max(0, (lane.x - view.x) * view.z), x1 = Math.min(miniLeft, (lane.x + lane.w - view.x) * view.z);
       const width = Math.min(bandLabelWidth(lane), x1 - x0 - LABEL.inset * 2);
       if (width < 40) return;
@@ -1046,12 +1066,12 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
    * plate, since its top pad is too small to hold it. */
   function drawScreenBandLabels() {
     ctx.textBaseline = 'alphabetic'; ctx.font = `600 11px ${tokens.sans}`;
-    const inset = topInset();
+    const inset = topInset(), edge = openEdge();
     layout.lanes.forEach(lane => {
       const x = (lane.x - view.x) * view.z, y = (lane.y - view.y) * view.z, w = lane.w * view.z, h = lane.h * view.z;
-      if (x > cssW || x + w < 0 || y > cssH || y + h < 0 || w < 24 || h < 18) return;
+      if (x > edge || x + w < 0 || y > cssH || y + h < 0 || w < 24 || h < 18) return;
       const left = Math.max(x + 6, 6), base = Math.min(Math.max(y + 14, inset + 8), y + h - 4);
-      const text = fitText(model.contexts[lane.key]?.label.title ?? 'Realm', Math.min(x + w, cssW) - left - 22), width = ctx.measureText(text).width;
+      const text = fitText(model.contexts[lane.key]?.label.title ?? 'Realm', Math.min(x + w, edge) - left - 22), width = ctx.measureText(text).width;
       ctx.globalAlpha = 0.88; ctx.fillStyle = tokens.bg; ctx.beginPath(); graphRoundedRect(ctx, left - 2, base - 12, width + 20, 16, 4); ctx.fill(); ctx.globalAlpha = 1;
       ctx.fillStyle = realmHue(lane.key); ctx.beginPath(); ctx.arc(left + 5, base - 4, 3, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = tokens.muted; ctx.fillText(text, left + 13, base);
@@ -1442,6 +1462,9 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     view.x = clamp(view.x, -(margin + side.left) / z, layout.width - (cssW - margin - side.right) / z);
     view.y = clamp(view.y, -inset / z, layout.height - (cssH - margin) / z);
   }
+  /** The canvas's right edge short of a Details drawer over it, which a
+   * label stops at instead of running under. */
+  const openEdge = () => freeArea().right + 8;
   /** The part of the stage a card can be shown in: under the heading, above
    * a Details sheet, and clear of the minimap. */
   function freeArea() {

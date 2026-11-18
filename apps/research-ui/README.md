@@ -2859,9 +2859,10 @@ a tall minimap.
   frame its stacks were recorded in and the process. The label takes the
   corner no edge crosses, the right one when both are clear, so it never sits
   on the spine. It stays pinned under the heading while its band is in view,
-  at the same size at every zoom, and stops short of the minimap. A pinned
-  label is left out while a card is under it, so it never hides a card's
-  name; the band's tint still marks the realm.
+  at the same size at every zoom, and stops short of the minimap and of a
+  Details drawer over the canvas. A pinned label is left out while a card is
+  under it, so it never hides a card's name; the band's tint still marks the
+  realm.
 - **Rows of the graph:** inside a band they are call depth, callers above
   callees. A band entered from another starts at its own top row.
 - **Card header:** each card is one function. The header is tinted by the
@@ -3065,8 +3066,10 @@ The canvas announces this list through `aria-describedby`.
   become hairlines.
 - Below 4.5% each realm is one block with its name and its card and request
   counts, and the calls between realms are bundled: adjacent realms straight,
-  later ones down the right gutter, earlier ones up the left. Clicking a
-  block shows its realm.
+  later ones down the right gutter, earlier ones up the left. In a gutter a
+  shorter span runs inside a longer one and each block's ends are spread over
+  its height, so the bundles nest instead of crossing. Clicking a block shows
+  its realm.
 - The minimap takes the graph's shape: a tall graph gets a tall column (up to
   440 px, or 55% of the canvas) with bands, cards in their kinds' colours,
   edges in theirs and the view box; a wide one a short strip. Its width

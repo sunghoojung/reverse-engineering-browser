@@ -2428,8 +2428,32 @@ final class OriginTraceRenderedUITests: XCTestCase {
         const tick = () => { const now = performance.now(); window.__rebFlowLag.max = Math.max(window.__rebFlowLag.max, now - last); last = now; window.__rebFlowLag.timer = setTimeout(tick, 16); };
         tick(); return true; })()
       """)
+    // Flow takes its session from the captured requests, so the list is
+    // read first.
+    try await show(ui, "traffic")
+    try await ui.waitUntil("document.querySelector('#screen-traffic .request-row') !== null", timeout: 600, "large: the session's requests were not listed")
+    // Each state the pane passes through, timed from Flow being shown.
+    _ = try await ui.value("""
+      (() => { const host = document.querySelector('#flow-graph-host'), box = host.querySelector('.flow-graph-state'), started = performance.now();
+        const phases = window.__rebFlowPhases = [];
+        const note = () => { const phase = `${host.dataset.state}: ${box.hidden ? '' : box.querySelector('strong')?.textContent ?? ''}`;
+          if (phases.at(-1)?.phase !== phase) phases.push({phase, at: Math.round(performance.now() - started) / 1000}); };
+        new MutationObserver(note).observe(host, {attributes: true, attributeFilter: ['data-state'], subtree: false});
+        new MutationObserver(note).observe(box, {childList: true, subtree: true, characterData: true, attributes: true});
+        // WebKit slows a page whose window is hidden or in the background.
+        const mark = phase => phases.push({phase, at: Math.round(performance.now() - started) / 1000});
+        document.addEventListener('visibilitychange', () => mark(`page ${document.visibilityState}`));
+        window.addEventListener('blur', () => mark('window blurred'));
+        window.addEventListener('focus', () => mark('window focused'));
+        note(); return true; })()
+      """)
+    let reportPhases: () async throws -> Void = {
+      let phases = try await ui.value("window.__rebFlowPhases.map(item => `${item.phase} at ${item.at} s`).join(' → ')") as? String ?? ""
+      print("RENDERED_UI_FLOW large phases: \(phases)")
+    }
     try await show(ui, "backtrace")
-    try await flowGraphPane(ui, "large", ready: 1800)
+    do { try await flowGraphPane(ui, "large", ready: 1800) } catch { try? await reportPhases(); throw error }
+    try await reportPhases()
     let lag = try await ui.json("({max: Math.round(window.__rebFlowLag.max), seconds: Math.round(performance.now() - window.__rebFlowLag.started) / 1000})")
     print("RENDERED_UI_FLOW large session: longest task gap \(lag["max"] ?? "?") ms over \(lag["seconds"] ?? "?") s")
     try await ui.load(harnessPage)

@@ -135,6 +135,9 @@ function createTrafficRowMenu({rows, button, select = () => {}, actions}) {
         enabled[next].focus();
       }
     });
+    // WebKit does not focus a clicked button: the press would blur the focused
+    // item with nowhere to go and close the menu before the click lands.
+    menu.addEventListener('mousedown', event => event.preventDefault());
     menu.addEventListener('focusout', event => {
       if (menu && !menu.contains(event.relatedTarget)) close(false);
     });

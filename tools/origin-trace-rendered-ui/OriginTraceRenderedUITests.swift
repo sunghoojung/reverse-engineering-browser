@@ -811,6 +811,14 @@ final class OriginTraceRenderedUITests: XCTestCase {
     XCTAssertEqual(droppedColumnsRead, 0, "\(context): a column the width dropped must not read as shown")
     try await assertLayout(ui, ".column-menu", "\(context) column menu")
     try await ui.screenshot("traffic-column-menu-\(context)")
+    // A mouse click toggles a column and keeps the menu open: WebKit does not
+    // focus a clicked button, so the press must not read as focus leaving.
+    let protocolItem = ".column-menu [data-column-id=\"protocol\"]"
+    try await ui.click(protocolItem)
+    try await ui.waitUntil("document.querySelector('\(protocolItem)')?.getAttribute('aria-checked') !== 'false'", "\(context): a click did not turn the Protocol column on")
+    try await ui.click(protocolItem)
+    try await ui.waitUntil("document.querySelector('\(protocolItem)')?.getAttribute('aria-checked') === 'false'", "\(context): a second click did not turn the Protocol column off")
+    _ = try await ui.value("document.querySelector('.column-menu [role=menuitemcheckbox]:not(:disabled)').focus()")
     try await ui.key(53, "\u{1B}")
     try await ui.waitUntil("document.querySelector('.column-menu') === null && document.activeElement?.dataset.column === 'name'",
       "\(context): Escape did not close the column menu and return focus")
@@ -1711,7 +1719,9 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.screenshot("traffic-copy-menu-\(size.name)")
       pasteboard.clearContents()
       try await ui.click(".traffic-row-menu [role=menuitem]", containing: "Copy as cURL")
-      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent === 'Copied'", "Copy as cURL did not finish")
+      try await ui.waitUntil("document.querySelector('#request-copy-url').textContent !== 'Copy'", "Copy as cURL did not finish")
+      let copied = try await ui.json("({label: document.querySelector('#request-copy-url').textContent, notice: document.querySelector('#investigation-notice')?.textContent ?? ''})")
+      XCTAssertEqual(copied["label"] as? String, "Copied", "\(size.name): \(copied)")
       let curl = pasteboard.string(forType: .string) ?? ""
       XCTAssertTrue(curl.hasPrefix("curl 'https://\(expected.requestBodyHost)/getcaptcha/site-key?s="), "\(size.name): \(curl)")
       for part in ["-H 'cookie: sid=fixture'", "-H 'x-note: \(expected.headerValueMarker)'", "--data-raw '"] {

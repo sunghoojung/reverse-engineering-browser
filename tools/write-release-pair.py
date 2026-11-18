@@ -143,7 +143,7 @@ def notes_text(tag, brave_tag, source_sha, run_url, assets, browser):
     if reused:
         browser_change = (
             f"- **Browser:** the Brave build is the {brave_tag} build byte for byte: the same "
-            "ZIP, provenance and code signature. The browser inputs and protocol match its "
+            "ZIP, provenance and code signature. Every input the Brave build reads matches its "
             "build commit.\n"
         )
         validation = (
@@ -305,7 +305,7 @@ def main():
             "platform": "macOS arm64",
             "installation": "Extract both app bundles into the same directory",
             "source_equivalence": (
-                "Browser inputs and protocol bytes match the browser build source"
+                "Every input the Brave build reads matches the browser build source"
             ),
             "checks": [
                 "Pinned Brave ZIP and provenance SHA256 from the hosted source",

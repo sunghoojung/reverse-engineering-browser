@@ -611,12 +611,11 @@ class AgentCLIDriver {
     guard level < configuration.permission else { return }
     let wasFull = configuration.permission == .full
     configuration.permission = level
-    if level != .full { configuration.sensitiveCapture = false }
     tools = tools.filter { AgentToolGate.lists($0.name, readOnly: $0.readOnly, level: level) }
     if let turn {
       for (callId, approval) in turn.approvals {
         let readOnly = tools.first { $0.name == approval.name }?.readOnly ?? false
-        if case .refuse = AgentToolGate.decide(approval.name, readOnly: readOnly, arguments: [:], level: level, sensitive: false) {
+        if case .refuse = AgentToolGate.decide(approval.name, readOnly: readOnly, level: level) {
           _ = decide(callId: callId, allow: false)
         }
       }
@@ -724,8 +723,7 @@ class AgentCLIDriver {
       return
     }
     let decision = tools.first(where: { $0.name == name }).map {
-      AgentToolGate.decide(name, readOnly: $0.readOnly, arguments: input as? [String: Any] ?? [:],
-        level: configuration.permission, sensitive: configuration.sensitive)
+      AgentToolGate.decide(name, readOnly: $0.readOnly, level: configuration.permission)
     } ?? .refuse("This tool is not available at \(configuration.permission.label). No request was sent.")
     if case .refuse(let text) = decision {
       respond(false, text)
@@ -803,7 +801,7 @@ final class AgentClaudeDriver: AgentCLIDriver {
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
       "--permission-prompt-tool", "stdio", "--permission-mode", "default", "--strict-mcp-config", "--mcp-config", mcp,
       "--tools", "", "--setting-sources", "", "--settings", #"{"disableAllHooks":true}"#, "--disable-slash-commands",
-      "--no-session-persistence", "--system-prompt", agentSystemPrompt(configuration.permission, sensitive: configuration.sensitive),
+      "--no-session-persistence", "--system-prompt", agentSystemPrompt(configuration.permission),
     ]
     if !configuration.model.isEmpty && configuration.model != "default" { arguments += ["--model", configuration.model] }
     // Tools the graph would not list are hidden from the model, not just refused.
@@ -975,7 +973,7 @@ final class AgentGrokDriver: AgentCLIDriver {
   }
 
   // An agent profile with only the two MCP tools and the shared system prompt.
-  nonisolated static func profile(_ level: AgentPermission, sensitive: Bool) -> String {
+  nonisolated static func profile(_ level: AgentPermission) -> String {
     """
     ---
     name: origin-trace-agent
@@ -988,7 +986,7 @@ final class AgentGrokDriver: AgentCLIDriver {
       - use_tool
     ---
 
-    \(agentSystemPrompt(level, sensitive: sensitive))
+    \(agentSystemPrompt(level))
 
     The reb-api tools are reached through search_tool and use_tool. Their names start with reb__.
 
@@ -1003,7 +1001,7 @@ final class AgentGrokDriver: AgentCLIDriver {
     let manager = FileManager.default
     try manager.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true,
       attributes: [.posixPermissions: 0o700])
-    try Data(Self.profile(configuration.permission, sensitive: configuration.sensitive).utf8).write(to: profileURL, options: .atomic)
+    try Data(Self.profile(configuration.permission).utf8).write(to: profileURL, options: .atomic)
     var stubs = Self.stubbedNames(in: (try? String(contentsOf: configURL, encoding: .utf8)) ?? "")
     try Self.writeStubs(stubs, to: configURL)
     var report = try await inspect()

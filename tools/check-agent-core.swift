@@ -206,9 +206,9 @@ enum AgentCoreChecks {
     }
     check(!endpoint.isEmpty, "the backend published its endpoint")
     let transcripts = root.appendingPathComponent("transcripts", isDirectory: true)
-    func configuration(_ level: AgentPermission, sensitive: Bool = false) -> AgentSession.Configuration {
+    func configuration(_ level: AgentPermission) -> AgentSession.Configuration {
       AgentSession.Configuration(provider: .claude, model: "claude-opus-5-5", apiExecutable: api, apiBaseURL: URL(string: endpoint)!,
-        permission: level, sensitiveCapture: sensitive, transcriptDirectory: transcripts,
+        permission: level, transcriptDirectory: transcripts,
         appEnvironment: ["HOME": "/Users/test", "REB_BRAVE_BINARY": "/tmp/brave", "SECRET_TOKEN": "must-not-pass"])
     }
     let events = Collected()
@@ -279,8 +279,7 @@ enum AgentCoreChecks {
     check(!(autoArtifacts["text"] as? String ?? "").contains("SECRET_SOURCE_BODY"), "Auto-approve still omits content")
     auto.disable()
 
-    // Full access: content reads, store paths and sessions are offered; a
-    // sensitive start is refused natively without the separate consent.
+    // Full access: content reads, store paths and sessions are offered.
     let full = AgentSession(emit: { events.add($0) })
     full.setPanelVisible(true)
     try! await full.enable(configuration(.full), sessionKey: "test-4")
@@ -291,10 +290,6 @@ enum AgentCoreChecks {
     check((page["text"] as? String ?? "").contains("SECRET_SOURCE_BODY"), "Full access reads captured content: \(page)")
     let found = try! await full.callTool(name: "search_artifact_text", arguments: ["q": "secret_source"], approved: false)
     check((found["text"] as? String ?? "").contains("\"byte_offset\""), "Full access searches captured content")
-    let sensitive = try! await full.callTool(name: "start_live_session",
-      arguments: ["request_content": true, "confirm_sensitive_capture": true], approved: false)
-    check((sensitive["text"] as? String ?? "").contains("were not allowed") && sensitive["isError"] as? Bool == true,
-      "a sensitive start is refused without its own consent")
     // Lowering applies at once: content leaves the list and the server
     // restarts at the lower level on its next call.
     try! full.lower(to: .ask)
@@ -322,15 +317,14 @@ enum AgentCoreChecks {
   // The level rules, the server flags each level stands for, and the prompt.
   static func checkPermissions() {
     let api = URL(fileURLWithPath: "/reb-api"), base = URL(string: "http://127.0.0.1:9")!, folder = URL(fileURLWithPath: "/tmp")
-    func arguments(_ level: AgentPermission, sensitive: Bool = false) -> [String] {
+    func arguments(_ level: AgentPermission) -> [String] {
       AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: level,
-        sensitiveCapture: sensitive, transcriptDirectory: folder).mcpArguments
+        transcriptDirectory: folder).mcpArguments
     }
+    // --permission full is the one consent for what its sessions capture.
     for level in AgentPermission.allCases {
       check(arguments(level) == ["mcp", "--base-url", "http://127.0.0.1:9", "--permission", level.rawValue], "\(level.rawValue): --permission")
     }
-    check(arguments(.full, sensitive: true).last == "--allow-sensitive-capture", "Full access with the sensitive option")
-    check(!arguments(.auto, sensitive: true).contains("--allow-sensitive-capture"), "the sensitive option means nothing below Full access")
     let environment = AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: .full,
       transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x", "SECRET": "no", "REB_LIVE_SESSION_ROOT": "/tmp/s",
         "REB_OPEN_COMMAND": "/usr/bin/true"]).mcpEnvironment
@@ -340,54 +334,44 @@ enum AgentCoreChecks {
     check(AgentSession.Configuration(provider: .claude, model: "m", apiExecutable: api, apiBaseURL: base, permission: .ask,
       transcriptDirectory: folder, appEnvironment: ["HOME": "/Users/x"]).mcpEnvironment == ["LANG": "C", "LC_ALL": "C"],
       "below Full access the tool server gets nothing from the app")
-    check(AgentPermission.allCases.sorted() == [.readOnly, .ask, .auto, .full] && AgentPermission.rememberedCeiling == .ask, "ordered levels")
-    // enable takes exactly one known level, and the sensitive option only as a
-    // boolean beside Full access; anything else turns nothing on.
-    for (body, expected) in [
-      (["permission": "read-only"] as [String: Any], "read-only false"), (["permission": "ask", "sensitive": false], "ask false"),
-      (["permission": "auto"], "auto false"), (["permission": "full", "sensitive": true], "full true"),
-      (["permission": "full", "sensitive": false], "full false"),
-    ] {
-      let requested = try? AgentPermission.requested(by: body)
-      check(requested.map { "\($0.0.rawValue) \($0.1)" } == expected, "enable accepts \(body)")
+    check(AgentPermission.allCases.sorted() == [.readOnly, .ask, .auto, .full], "ordered levels")
+    // enable takes exactly one known level; anything else turns nothing on.
+    for level in AgentPermission.allCases {
+      check((try? AgentPermission.requested(by: ["permission": level.rawValue])) == level, "enable accepts \(level.rawValue)")
     }
-    for body in [
-      [:] as [String: Any], ["permission": "everything"], ["permission": 3], ["permission": "Full access"],
-      ["permission": "auto", "sensitive": true], ["permission": "read-only", "sensitive": true],
-      ["permission": "full", "sensitive": "yes"], ["permission": "full", "sensitive": 1],
-    ] {
+    for body in [[:] as [String: Any], ["permission": "everything"], ["permission": 3], ["permission": "Full access"]] {
       check((try? AgentPermission.requested(by: body)) == nil, "enable refuses \(body)")
     }
-    typealias Case = (String, Bool, AgentPermission, [String: Any], Bool, AgentToolDecision)
+    typealias Case = (String, Bool, AgentPermission, [String: Any], AgentToolDecision)
     let refuse = AgentToolDecision.refuse("")
     let cases: [Case] = [
-      ("get_events", true, .readOnly, [:], false, .run),
-      ("capture_action", false, .readOnly, [:], false, refuse),
-      ("capture_action", false, .ask, [:], false, .ask),
-      ("capture_action", false, .auto, [:], false, .run),
-      ("capture_action", false, .full, [:], false, .run),
-      ("get_artifact_text", true, .auto, [:], false, refuse),
-      ("get_artifact_text", true, .full, [:], false, .run),
-      ("get_health", true, .ask, [:], false, refuse),
-      ("get_health", true, .full, [:], false, .run),
-      ("get_artifact_content", true, .full, [:], false, refuse),
-      ("start_live_session", false, .auto, [:], false, refuse),
-      ("start_live_session", false, .full, ["url": "http://127.0.0.1:8/"], false, .run),
-      ("start_live_session", false, .full, ["request_content": true, "confirm_sensitive_capture": true], false, refuse),
-      ("start_live_session", false, .full, ["response_media": true], false, refuse),
-      ("start_live_session", false, .full, ["request_content": true, "confirm_sensitive_capture": true], true, .run),
-      ("session_action", false, .auto, [:], false, refuse),
-      ("run_wasm_function", false, .ask, [:], false, refuse),
-      ("run_wasm_function", false, .auto, [:], false, refuse),
-      ("run_wasm_function", false, .full, [:], false, .run),
-      ("get_wasm_runs", true, .readOnly, [:], false, refuse),
-      ("get_wasm_runs", true, .auto, [:], false, refuse),
-      ("get_wasm_runs", true, .full, [:], false, .run),
-      ("search_wasm_inspection", true, .auto, [:], false, refuse),
-      ("search_wasm_inspection", true, .full, [:], false, .run),
+      ("get_events", true, .readOnly, [:], .run),
+      ("capture_action", false, .readOnly, [:], refuse),
+      ("capture_action", false, .ask, [:], .ask),
+      ("capture_action", false, .auto, [:], .run),
+      ("capture_action", false, .full, [:], .run),
+      ("get_artifact_text", true, .auto, [:], refuse),
+      ("get_artifact_text", true, .full, [:], .run),
+      ("get_health", true, .ask, [:], refuse),
+      ("get_health", true, .full, [:], .run),
+      ("get_artifact_content", true, .full, [:], refuse),
+      ("start_live_session", false, .auto, [:], refuse),
+      ("start_live_session", false, .full, ["url": "http://127.0.0.1:8/"], .run),
+      // Full access sessions take the app's capture defaults; no option is
+      // gated behind a second consent.
+      ("start_live_session", false, .full, ["request_content": true, "canvas_images": true], .run),
+      ("session_action", false, .auto, [:], refuse),
+      ("run_wasm_function", false, .ask, [:], refuse),
+      ("run_wasm_function", false, .auto, [:], refuse),
+      ("run_wasm_function", false, .full, [:], .run),
+      ("get_wasm_runs", true, .readOnly, [:], refuse),
+      ("get_wasm_runs", true, .auto, [:], refuse),
+      ("get_wasm_runs", true, .full, [:], .run),
+      ("search_wasm_inspection", true, .auto, [:], refuse),
+      ("search_wasm_inspection", true, .full, [:], .run),
     ]
-    for (name, readOnly, level, arguments, sensitive, expected) in cases {
-      let decision = AgentToolGate.decide(name, readOnly: readOnly, arguments: arguments, level: level, sensitive: sensitive)
+    for (name, readOnly, level, arguments, expected) in cases {
+      let decision = AgentToolGate.decide(name, readOnly: readOnly, level: level)
       let same: Bool
       switch (decision, expected) {
       case (.refuse, .refuse): same = true
@@ -400,9 +384,46 @@ enum AgentCoreChecks {
       check(prompt.contains("Permission: \(level.label).") && !prompt.contains("{permission}"), "the \(level.rawValue) prompt names its level")
       check(prompt.contains("stay on this Mac") == (level != .full), "only Full access says content goes to the provider")
     }
-    check(agentSystemPrompt(.full, sensitive: true).contains("also allowed sensitive capture options"), "the sensitive prompt says so")
+    check(agentSystemPrompt(.full).contains("request content and Canvas images included") && !agentSystemPrompt(.full).contains("not allowed"),
+      "Full access sessions take the app's defaults")
+    checkPreferences()
     check(agentPermissionChangeNote(.readOnly).contains("Permission: Read only."), "a lowered level is described to a running CLI")
-    print("PASS agent native: four permission levels, enable request validation, --permission mapping, Full access environment, per-call gate and prompts")
+    print("PASS agent native: four permission levels, enable request validation, --permission mapping, Full access environment, per-call gate, prompts and the dock choices saved between app runs")
+  }
+
+  // The dock's saved choices: any level, Full access included, survives an
+  // app run in a user-only file; anything unknown is dropped on load.
+  static func checkPreferences() {
+    let support = URL(fileURLWithPath: "/Users/x/Library/Application Support", isDirectory: true)
+    check(AgentPreferences.storeURL(environment: [:], applicationSupport: support).path
+      == "/Users/x/Library/Application Support/Origin Trace/agent-preferences-v1.json", "the default preferences file")
+    check(AgentPreferences.storeURL(environment: ["REB_AGENT_PREFERENCES": "/tmp/p.json"], applicationSupport: support).path == "/tmp/p.json"
+      && AgentPreferences.storeURL(environment: ["REB_AGENT_PREFERENCES": "relative.json"], applicationSupport: support).path.hasSuffix("Origin Trace/agent-preferences-v1.json"),
+      "an absolute REB_AGENT_PREFERENCES wins")
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("reb-agent-preferences-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let url = folder.appendingPathComponent("Origin Trace/agent-preferences-v1.json")
+    check(AgentPreferences.load(url) == AgentPreferences(), "no file is no saved choice")
+    let saved = AgentPreferences(provider: .grok, auth: [.grok: .subscription, .claude: .key], permission: .full)
+    check((try? saved.write(to: url)) != nil, "the choices are written")
+    check(AgentPreferences.load(url) == saved, "Full access and the payments come back in the next run")
+    let mode = (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue
+    check(mode == 0o600, "the file is the researcher's alone: \(String(describing: mode))")
+    try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+    check((try? saved.write(to: url)) != nil, "the choices are written again")
+    let rewritten = (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue
+    check(rewritten == 0o600, "a rewrite replaces a readable file with a user-only one: \(String(describing: rewritten))")
+    check((try? FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)) == [url.lastPathComponent],
+      "no temporary file is left beside the choices")
+    for (text, expected) in [
+      (#"{"version":2,"provider":"claude","permission":"full"}"#, AgentPreferences()),
+      (#"{"version":1,"provider":"other","permission":"everything","auth":{"grok":"key","claude":"subscription","x":"key"}}"#,
+        AgentPreferences(auth: [.claude: .subscription])),
+      ("not json", AgentPreferences()),
+    ] {
+      try? Data(text.utf8).write(to: url)
+      check(AgentPreferences.load(url) == expected, "a saved file keeps only known choices: \(text)")
+    }
   }
 
   static func checkRoutes() {

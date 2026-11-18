@@ -29,9 +29,14 @@ assert.equal(panel.hidden, true);
 assert.equal(panel.children.length, 0);
 
 const posted = [];
+// Every start also names all the session options. They are set aside here and
+// checked in their own section below.
+const startOptions = [];
 let answer = message => ({ok: true});
 context.webkit = {messageHandlers: {rebSession: {postMessage: async message => {
-  posted.push(JSON.parse(JSON.stringify(message)));
+  const copy = JSON.parse(JSON.stringify(message));
+  if (copy.op === 'start') { startOptions.push(copy.options); delete copy.options; }
+  posted.push(copy);
   const reply = answer(message);
   if (reply instanceof Error) throw reply;
   return reply;
@@ -52,7 +57,7 @@ for (const phrase of ['Start a live research session', 'Choose the evidence boun
   'Keeps request hosts and each request body’s length, type and SHA-256, without headers, cookies or Canvas images.',
   'Artifacts keep raw source URLs locally; only an explicitly exported redacted copy is altered.',
   'Tracking 2 functions', 'window.hsw', 'https://hcaptcha.test/glue.js', 'Source URL not recorded',
-  'Content mode also records settled-value digests of their string and byte results (sensitive capture)',
+  'Content mode can also record digests of their results, chosen below.', 'Record settled-value digests',
   'A Brave without invocation capture starts without them and says so.']) {
   assert(text().includes(phrase), `the start panel says: ${phrase}`);
 }
@@ -64,14 +69,16 @@ const radio = id => panel.querySelector(`#session-panel-mode-${id}`);
 assert.equal(radio('content').checked, true, 'native preselects the mode');
 // Sessions from the panel always use the isolated profile: no Keychain choice.
 assert(!/keychain/i.test(text()), 'the start panel offers no Keychain choice');
-assert.equal(panel.querySelectorAll('input[type="checkbox"]').length, 0);
+assert.deepEqual([...panel.querySelectorAll('input[type="checkbox"]')].map(box => box.id),
+  ['session-panel-option-invocation-digests', 'session-panel-option-fresh-profile'],
+  'the digest choice and the profile choice; Advanced options starts collapsed');
 assert.equal(posted.length, 0, 'drawing the panel asks native nothing');
 
 // The page selection drives the digest wording and is what Start sends.
 radio('metadata').checked = true;
 radio('metadata').dispatchEvent(new window.Event('change'));
 assert(text().includes('Metadata mode records no settled-value digests.'));
-assert(!text().includes('Content mode also records settled-value digests'));
+assert.equal(panel.querySelector('#session-panel-option-invocation-digests'), null, 'Metadata offers no digests');
 // Native republishing the same decision (a Remove reply) keeps that selection.
 push(choose(saved(1, [{label: 'window.hsw', sourceURL: 'https://hcaptcha.test/glue.js'}, {label: hostile, sourceURL: null}])));
 assert.equal(radio('metadata').checked, true, 'a redraw keeps the researcher’s mode');
@@ -181,7 +188,7 @@ assert.equal(field('response-budget').value, '512', 'native’s default response
 assert.equal(field('media').checked, false, 'media and fonts are skipped by default');
 assert.equal(panel.querySelector('label[for="session-panel-request-budget"]').textContent, 'Request content budget');
 assert.equal(field('request-budget').getAttribute('aria-describedby'), 'session-panel-request-budget-detail');
-assert.deepEqual([...panel.querySelectorAll('input[type="checkbox"]')].map(box => box.id), ['session-panel-media'],
+assert.deepEqual([...panel.querySelectorAll('.session-panel-limits input[type="checkbox"]')].map(box => box.id), ['session-panel-media'],
   'the media choice is the only checkbox');
 assert(!/keychain/i.test(text()), 'the limits name no Keychain choice');
 // Metadata keeps no content, so it shows and sends none of the limits.
@@ -285,6 +292,113 @@ push({panel: 'failed', mode: 'content', modes,
   failure: {title: 'Live session unavailable', message: 'Brave stopped.', afterStartup: false}});
 assert(!text().includes('Same limits'), 'a session the panel did not start names no limits');
 
+// The session options: native's values beside their defaults, the browser
+// profile and Advanced options, a dependency kept in step, and every option
+// sent with Start. The profile folder is native text.
+const optionValues = {fresh_profile: false, invocation_digests: true, request_stacks: true, promise_stacks: false,
+  wasm_dispatch: true, ignore_debugger_statements: true, document_start: true, canvas_images: true,
+  browser_internal: false, extension_traffic: false};
+const options = (changes = {}) => Object.fromEntries(Object.entries(optionValues)
+  .map(([key, value]) => [key, {value: changes[key] ?? value, default: value}]));
+const option = key => panel.querySelector(`#session-panel-option-${key.replaceAll('_', '-')}`);
+const toggle = key => { option(key).checked = !option(key).checked; option(key).dispatchEvent(new window.Event('change')); };
+const folder = `~/Library/Application Support/Origin Trace/research-profiles/default ${hostile}`;
+const optionsChoice = () => choose({state: 'empty', generation: 10, limit: 8, items: []},
+  {options: options({browser_internal: true}), researchProfile: folder});
+push({panel: 'hidden'});
+answer = () => ({ok: true});
+push(optionsChoice());
+for (const phrase of ['Browser profile', 'Fresh profile', 'Start signed out, with a new, empty profile that only this session uses.',
+  'Sessions share the research profile, so sign-ins and site data carry over. Each session’s evidence still stays in its own folder.',
+  'Advanced options', '1 changed']) {
+  assert(text().includes(phrase), `the session options say: ${phrase}`);
+}
+assert.equal(panel.querySelector('.session-panel-path')?.textContent, folder, 'the profile folder is shown as text');
+assert.equal(panel.querySelectorAll('img').length, 0);
+assert.equal(window.__rebInjected, undefined);
+assert.equal(option('request_stacks'), null, 'Advanced options starts collapsed');
+assert.equal(panel.querySelector('#session-panel-advanced').getAttribute('aria-expanded'), 'false');
+panel.querySelector('#session-panel-advanced').click();
+const disclosure = panel.querySelector('#session-panel-advanced');
+assert.equal(disclosure.getAttribute('aria-expanded'), 'true');
+assert.equal(disclosure.getAttribute('aria-controls'), 'session-panel-advanced-options');
+assert(panel.querySelector('#session-panel-advanced-options'));
+assert(!/REB_/.test(text()), 'the options name no environment variable');
+assert.deepEqual([...panel.querySelectorAll('#session-panel-advanced-options input')].map(box => [box.id, box.checked]), [
+  ['session-panel-option-request-stacks', true], ['session-panel-option-promise-stacks', false],
+  ['session-panel-option-wasm-dispatch', true], ['session-panel-option-ignore-debugger-statements', true],
+  ['session-panel-option-document-start', true], ['session-panel-option-canvas-images', true],
+  ['session-panel-option-browser-internal', true], ['session-panel-option-extension-traffic', false]],
+  'native’s values, a saved choice included, in a fixed order');
+// Promise stacks need request stacks: turning one on turns on the other, and
+// turning request stacks off takes promise stacks with it.
+toggle('promise_stacks');
+assert.equal(option('request_stacks').checked, true);
+toggle('request_stacks');
+assert.equal(option('promise_stacks').checked, false, 'request stacks off takes promise stacks with them');
+toggle('promise_stacks');
+assert.equal(option('request_stacks').checked, true, 'promise stacks turn request stacks back on');
+toggle('promise_stacks');
+toggle('request_stacks');
+toggle('extension_traffic');
+assert(text().includes('3 changed'), text());
+toggle('fresh_profile');
+assert(text().includes('The research profile is left as it is for later sessions.'));
+assert.equal(panel.querySelector('.session-panel-path'), null, 'a fresh profile names no shared folder');
+// Canvas images are Content capture: Metadata hides them and keeps the choice.
+radio('metadata').checked = true;
+radio('metadata').dispatchEvent(new window.Event('change'));
+assert.equal(option('canvas_images'), null, 'Metadata hides Canvas images');
+assert(option('request_stacks'), 'Advanced options stays open');
+buttonNamed('Start Session').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'start', mode: 'metadata'});
+const chosenOptions = {...optionValues, fresh_profile: true, request_stacks: false, browser_internal: true, extension_traffic: true};
+assert.deepEqual(startOptions.at(-1), chosenOptions, 'Start sends every option as chosen');
+// A native redraw keeps the selection; a new decision starts from native's.
+push(optionsChoice());
+assert.equal(option('fresh_profile').checked, true, 'a redraw keeps the options');
+assert(option('request_stacks'), 'a redraw keeps Advanced options open');
+push({panel: 'hidden'});
+push(optionsChoice());
+assert.equal(option('fresh_profile').checked, false);
+assert.equal(option('request_stacks'), null, 'a new decision collapses Advanced options');
+buttonNamed('Start Session').click();
+await settle();
+assert.deepEqual(startOptions.at(-1), {...optionValues, browser_internal: true}, 'native’s values when nothing changed');
+
+// A session that ended after it started, with its folder: Review Session opens
+// its evidence, Start Again repeats the choices. A close the researcher chose
+// is not drawn as a fault.
+const ended = `Brave was closed, so the live session ended. Its evidence stays in /tmp/sessions/42 ${hostile}.`;
+push({panel: 'failed', mode: 'content', modes, options: options(),
+  failure: {title: 'Live session ended', message: ended, afterStartup: true, reviewable: true, endedNormally: true}});
+assert.equal(panel.dataset.state, 'failed');
+assert.equal(panel.querySelector('#session-panel-title').textContent, 'Live session ended');
+assert.equal(panel.querySelector('#session-panel-failure').textContent, ended, 'the cause is shown as text');
+assert.equal(panel.querySelectorAll('img').length, 0);
+assert.equal(panel.querySelector('#session-panel-failure').dataset.tone, 'ended');
+assert.equal(panel.querySelector('.session-panel-head').dataset.tone, undefined, 'a chosen end has no error tone');
+assert(text().includes('Review Session opens its evidence in the offline workspace, in place of this ended workspace'));
+assert(text().includes('Start Again starts a new session with the same choices.'));
+assert.deepEqual([...panel.querySelectorAll('footer button')].map(button => button.textContent), ['Start Again', 'Review Session']);
+buttonNamed('Review Session').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'review'});
+buttonNamed('Start Again').click();
+await settle();
+assert.deepEqual(posted.at(-1), {op: 'retry'});
+// A fault after startup is reviewable too, and keeps the error tone.
+push({panel: 'failed', mode: 'content', modes, options: options(), failure: {title: 'Live session ended',
+  message: 'The event broker exited with status 1, so the live session closed.', afterStartup: true, reviewable: true, endedNormally: false}});
+assert.equal(panel.querySelector('#session-panel-failure').dataset.tone, undefined);
+assert.equal(panel.querySelector('.session-panel-head').dataset.tone, 'error');
+assert(buttonNamed('Review Session') && buttonNamed('Start Again'));
+// Without its folder, an ended session offers Retry and Continue Offline.
+push({panel: 'failed', mode: 'content', modes, options: options(), failure: {title: 'Live session ended',
+  message: 'The live capture coordinator stopped unexpectedly.', afterStartup: true, reviewable: false, endedNormally: false}});
+assert.deepEqual([...panel.querySelectorAll('footer button')].map(button => button.textContent), ['Continue Offline', 'Retry']);
+
 push({panel: 'hidden'});
 assert.equal(panel.hidden, true);
 assert.equal(panel.children.length, 0);
@@ -294,7 +408,7 @@ release();
 
 // Native owns the decision: every choice the page can send is checked there.
 const native = readFileSync(new URL('../apps/research-ui/macos/SessionPanel.swift', import.meta.url), 'utf8');
-for (const op of ['state', 'start', 'retry', 'offline', 'removeSite', 'clearSites']) {
+for (const op of ['state', 'start', 'retry', 'review', 'offline', 'removeSite', 'clearSites']) {
   assert(native.includes(`case "${op}"`) || native.includes(`"${op}"`), `native handles ${op}`);
 }
 // A start is accepted only through LivePanelStart.parse, whose rules (the mode,
@@ -303,8 +417,9 @@ for (const op of ['state', 'start', 'retry', 'offline', 'removeSite', 'clearSite
 assert(!/body\["keychain"\]/.test(native), 'native reads no Keychain value from the page');
 assert.match(native, /if let modeNote \{ value\["modeNote"\] = modeNote \}/, 'native publishes why the mode is preselected');
 const startCase = native.slice(native.indexOf('case "start":'), native.indexOf('case "retry":'));
-assert.match(startCase, /switch LivePanelStart\.parse\(body\)/, 'native parses a start with the shared rules');
-assert.match(startCase, /accept\(\.start\(start\.mode, start\.limits\)\)/, 'native starts with the parsed choice only');
+assert.match(startCase, /switch LivePanelStart\.parse\(start\)/, 'native parses the rest of a start with the shared rules');
+assert.match(startCase, /LiveSessionOptions\.parse\(start\.removeValue\(forKey: "options"\)\)/, 'native parses the options with their own rules');
+assert.match(startCase, /accept\(\.start\(start\.mode, start\.limits, chosen\)\)/, 'native starts with the parsed choice only');
 assert.doesNotMatch(startCase, /body\[/, 'the start case reads nothing from the page but through the parser');
 const coordinator = readFileSync(new URL('../apps/research-ui/macos/LiveSessionCoordinator.swift', import.meta.url), 'utf8');
 assert.match(coordinator, /isSubset\(of: \["op", "mode"\] \+ ContentLimits\.keys\)/, 'the parser refuses any other key');
@@ -327,3 +442,6 @@ console.log('PASS session panel: start choices with the alert’s wording, no Ke
   + 'Start with the page selection, a refused choice kept on screen, starting, unavailable and ended states with Retry and Continue Offline, '
   + 'Content limits only for Content with defaults, raised values, out-of-bounds refusals that send nothing, and the app, agent and launcher bounds in step '
   + '(offline DOM model; rendered layout, focus and the real bridge are in the rendered harness)');
+console.log('PASS session panel options: the profile choice with the research profile folder as text, Advanced options collapsed '
+  + 'with a changed count, native values and defaults, the promise-stack dependency, Canvas images only for Content, every option sent '
+  + 'with Start, and an ended session with Review Session and Start Again, neutral when the researcher ended it (offline DOM model)');

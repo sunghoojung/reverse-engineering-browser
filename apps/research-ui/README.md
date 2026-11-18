@@ -2782,13 +2782,14 @@ Flow workspace, through the API under [Workspace API](#workspace-api).
 
 ### Reading the graph
 
-The view reads top to bottom like a disassembler's CFG: tall and narrow, with
-a tall minimap.
-- **Realms:** each realm is a full-width band, and the bands are stacked in
-  call order. A realm that calls or posts into another sits above it, so an
-  iframe sits below its parent; an unrelated out-of-process frame comes after
-  the group it is not part of. A call between realms runs down across the band
-  boundary.
+Each realm reads top to bottom like a disassembler's CFG, and the realms are
+packed side by side, so a large session fills a wide pane rather than one
+tall column.
+- **Realms:** each realm is a band of its own width, and the bands are packed
+  into columns in call order, down a column and then on to the next. A realm
+  that calls or posts into another comes before it, so an iframe follows its
+  parent; an unrelated out-of-process frame comes after the group it is not
+  part of. A call between realms runs along the corridor beside its band.
 - **Band label:** each band has a faint tint of its own and names its realm
   in a top corner: the scripts' origin, the realm (execution context), the
   frame its stacks were recorded in and the process. The label takes the
@@ -2867,14 +2868,17 @@ theme, Dawn and the light app palette in the light one.
   runs with rounded corners, the same shape Triskel's waypoints take. Each edge
   is outlined against the canvas, and its width follows how many records
   walked it.
-- A call that skips rows runs straight down between the cards it passes. A
-  back edge inside a band runs up the band's right gutter.
-- A call into a later band drops straight down when no card is in its way,
-  turning once in the gap above the callee's band. Otherwise it runs along the
-  gap under the caller's row to the nearer side gutter, which is outside every
-  band's cards, down the gutter, and into the callee from the gap above its
-  band or above its row.
-- A call back up into an earlier band runs up the right gutter.
+- A call that skips rows runs down between the cards it passes, straight
+  where its neighbours leave room and with a jog where they do not. A back
+  edge inside a band runs up the band's right gutter.
+- Every horizontal run has a line of its own in its gap, so two edges never
+  share a line, touch or merge: where two edges meet, they cross. The lines
+  are ordered to avoid crossings, and a gap grows to fit them.
+- A call into another band runs along the gap under the caller's row to the
+  corridor beside its band, along the corridor, and into the callee along the
+  gap above its row. A call that passes a column runs over the columns on the
+  highway at the top. Each call between bands has its own corridor and
+  highway line.
 - No run crosses a card.
 
 **Key** in the status bar explains the edges, the row colours, the kinds, the
@@ -3072,18 +3076,34 @@ same engine report either way, on card sizes measured from their text.
   cycle between realms takes the best ranked one first, and a call back up
   into an earlier band is a back edge.
 - Inside each band, cycles are broken by a depth-first walk over the realm's
-  own calls, and layers are longest paths, with roots pulled down to their
-  first callee. A call from another realm never pushes a card down.
-- A band holds at most five cards per layer, more in a large band so it stays
-  near square; the rest move down, leaves first. A busy session grows tall,
-  not wide.
-- An edge longer than one layer gets a waypoint in every layer it passes, up to
-  200,000.
-- Each band and layer is ordered by its neighbours' mean position over
-  alternating sweeps, then placed by a weighted isotonic fit that keeps a single
-  chain of calls straight.
-- All bands share one width. Each band is shifted sideways inside it so the
-  calls between bands run as straight as the cards allow.
+  own calls. Cards are scheduled depth first from the heaviest roots, each
+  into the first layer under all its callers that has room, so a chain of
+  calls stays a column. A call from another realm never pushes a card down.
+- A layer holds about as many cards as makes the band near square, never
+  fewer than five; then a card with more callees than callers sinks toward
+  them, and one with more callers rises, while a layer has room, which
+  shortens the calls.
+- A call longer than one layer is one segment with a slot in every layer it
+  passes (Eiglsperger, Siebenhaller and Kaufmann), so ordering and placement
+  cost grows with cards and calls, not with how far the calls reach. Nothing
+  is capped.
+- Each band is ordered by barycentre sweeps, each followed by a transpose
+  pass that swaps side-by-side cards while that removes crossings. Crossings
+  are counted exactly after each sweep (Barth, Jünger and Mutzel), and the
+  order with the fewest is kept. On the benchmark sessions the sweeps remove
+  about a third of the first order's crossings, and the transpose 1 to 3% of
+  the rest.
+- A band's width is bounded at twice its widest layer (`slack`). A call is
+  placed as one node per layer it passes. Where the drawing with every call
+  straight passes the bound, joints are inserted on the chains of spacing
+  that put it there (jog insertion, as in VLSI layout compaction); a deep
+  band stops after a fixed amount of work per node (`jogWork`) and keeps the
+  rest of its width, rather than bending every call. Brandes and Köpf's four
+  alignments are then compacted under the bound and balanced, and each call
+  is joined into as few straight runs as its neighbours leave room for.
+- Bands are packed into columns in band order, toward a drawing 1.6 times as
+  wide as it is tall (`aspect`), each band centred in its column at its own
+  width.
 
 **Triskel:** when the backend serves `POST /api/graph-layout`, each realm of 2
 to 2,000 cards is then sent to
@@ -3101,7 +3121,8 @@ layered order and are stacked, aligned and routed between the same way. The
 status bar says `Triskel layout`, or how many realms it took, and hovering it
 gives each other realm's reason.
 
-Six thousand cards lay out in well under a second. The canvas is one bounded
+Ten thousand cards lay out in under half a second in Node, fifty thousand in
+about two and a half. The canvas is one bounded
 backing store, released with the minimap while the view is hidden, and only
 visible bands, cards and edges are drawn. Card text is cut to its card once
 per layout, not per frame, and a selection reads per-model path indexes and

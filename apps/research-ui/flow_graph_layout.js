@@ -541,50 +541,67 @@ const flowGraphLayout = (() => {
     return total;
   }
 
-  /** Crossings between two items' calls up and down when a is left of b,
-   * and when b is left of a. */
+  /** Crossings between two items' calls up and down when a is left of b
+   * (out[0]), and when b is left of a (out[1]). */
   function pairCrossings(I, a, b, out) {
     const {gx, upStart, upList, upper, downStart, downList, lower} = I;
     let ab = 0, ba = 0;
-    const side = (start, list, end) => {
-      for (let i = start[a]; i < start[a + 1]; i += 1) {
-        const x = gx[end[list[i]]];
-        for (let j = start[b]; j < start[b + 1]; j += 1) { const y = gx[end[list[j]]]; if (x > y) ab += 1; else if (x < y) ba += 1; }
-      }
-    };
-    side(upStart, upList, upper);
-    side(downStart, downList, lower);
+    for (let i = upStart[a]; i < upStart[a + 1]; i += 1) {
+      const x = gx[upper[upList[i]]];
+      for (let j = upStart[b]; j < upStart[b + 1]; j += 1) { const y = gx[upper[upList[j]]]; if (x > y) ab += 1; else if (x < y) ba += 1; }
+    }
+    for (let i = downStart[a]; i < downStart[a + 1]; i += 1) {
+      const x = gx[lower[downList[i]]];
+      for (let j = downStart[b]; j < downStart[b + 1]; j += 1) { const y = gx[lower[downList[j]]]; if (x > y) ab += 1; else if (x < y) ba += 1; }
+    }
     out[0] = ab; out[1] = ba;
   }
 
   /** Swaps side-by-side items that live in one layer while that removes
    * crossings with the layers above and below (the transpose step). Two
    * items are side by side when no other item of their layer, segments
-   * included, is between them. */
+   * included, is between them. Only those items move, and only with a
+   * neighbour, so each layer's row of them and which of its neighbouring
+   * pairs a passing segment separates are found once; a layer is looked at
+   * again only when it or a layer beside it changed. */
   function transpose(I, band, scratch) {
-    const {gx, first, last} = I, n = band.items.length, {L} = band, out = [0, 0];
-    const passing = scratch.fenA;
-    let swaps = 0;
+    const {gx, first, last} = I, n = band.items.length, {L} = band, out = scratch.pair, passing = scratch.fenA;
+    const rowStart = new Int32Array(L + 1), rows = [], blocked = [];
+    passing.fill(0, 0, n + 1);
+    for (let l = 0; l < L; l += 1) {
+      if (l > 0) for (const s of band.segLastAt[l - 1]) if (first[s] < last[s]) fenAdd(passing, n, gx[s], -1);
+      for (const s of band.segFirstAt[l]) if (first[s] < last[s]) fenAdd(passing, n, gx[s], 1);
+      const row = band.cardsAt[l].slice();
+      for (const s of band.segFirstAt[l]) if (first[s] === last[s]) row.push(s);
+      row.sort((a, b) => gx[a] - gx[b]);
+      rowStart[l] = rows.length;
+      for (let i = 0; i < row.length; i += 1) {
+        const a = gx[row[i]], b = i + 1 < row.length ? gx[row[i + 1]] : -1;
+        rows.push(row[i]); blocked.push(b - a > 1 && fenRange(passing, a + 1, b - 1) > 0 ? 1 : 0);
+      }
+    }
+    rowStart[L] = rows.length;
+    let dirty = new Uint8Array(L).fill(1), next = new Uint8Array(L), swaps = 0;
     for (let round = 0; round < 8; round += 1) {
       let improved = false;
-      passing.fill(0, 0, n + 1);
+      next.fill(0);
       for (let l = 0; l < L; l += 1) {
-        if (l > 0) for (const s of band.segLastAt[l - 1]) if (first[s] < last[s]) fenAdd(passing, n, gx[s], -1);
-        for (const s of band.segFirstAt[l]) if (first[s] < last[s]) fenAdd(passing, n, gx[s], 1);
-        const row = band.cardsAt[l].slice();
-        for (const s of band.segFirstAt[l]) if (first[s] === last[s]) row.push(s);
-        row.sort((a, b) => gx[a] - gx[b]);
-        for (let i = 0; i + 1 < row.length; i += 1) {
-          const a = row[i], b = row[i + 1];
-          if (gx[b] - gx[a] > 1 && fenRange(passing, gx[a] + 1, gx[b] - 1) > 0) continue;
+        if (!dirty[l]) continue;
+        for (let i = rowStart[l]; i + 1 < rowStart[l + 1]; i += 1) {
+          if (blocked[i]) continue;
+          const a = rows[i], b = rows[i + 1];
           pairCrossings(I, a, b, out);
           if (out[0] <= out[1]) continue;
           const t = gx[a]; gx[a] = gx[b]; gx[b] = t;
-          row[i] = b; row[i + 1] = a;
+          rows[i] = b; rows[i + 1] = a;
           improved = true; swaps += 1;
+          next[l] = 1;
+          if (l > 0) next[l - 1] = 1;
+          if (l + 1 < L) { next[l + 1] = 1; dirty[l + 1] = 1; }
         }
       }
       if (!improved) break;
+      [dirty, next] = [next, dirty];
     }
     return swaps;
   }
@@ -1412,7 +1429,7 @@ const flowGraphLayout = (() => {
     const t1 = now();
     const tree = treap(I.total), largest = I.bands.reduce((max, band) => Math.max(max, band.items.length), 0);
     const scratch = {pos: new Float64Array(I.total), measure: new Float64Array(I.total), slot: new Int32Array(I.total), next: new Int32Array(I.total), prev: new Int32Array(I.total),
-      fenA: new Int32Array(largest + 1), fenB: new Int32Array(largest + 1), keys: new Float64Array(1024)};
+      fenA: new Int32Array(largest + 1), fenB: new Int32Array(largest + 1), keys: new Float64Array(1024), pair: new Int32Array(2)};
     const stats = {cards: count, edges: from.length, segments: I.segments, crossings: 0, sweeps: 0, swaps: 0, jogs: 0, rounds: 0, stopped: 0, tracks: 0, broken: 0, ms: {}};
     for (const band of I.bands) {
       const result = orderBand(I, band, tree, scratch, graph.weight, m);

@@ -32,23 +32,45 @@ final class Harness {
   // xcodebuild starts the host in the background. Keyboard focus and pointer
   // delivery require the real active key window, so ask Launch Services to
   // reopen and activate this same instance, as a user switching to it would.
+  // macOS can drop a request: the first tests after xcodebuild started the
+  // host have failed to become active within ten seconds of one. A request is
+  // sent again every two seconds until the app is active, and a line says
+  // when that was needed.
   func activate() async throws {
-    if !NSApp.isActive {
-      let configuration = NSWorkspace.OpenConfiguration()
-      configuration.activates = true
-      configuration.addsToRecentItems = false
-      configuration.createsNewApplicationInstance = false
-      _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
-      NSApp.activate(ignoringOtherApps: true)
-    }
-    window.makeKeyAndOrderFront(nil)
-    window.makeFirstResponder(webView)
-    let deadline = Date().addingTimeInterval(10)
-    while !(NSApp.isActive && window.isKeyWindow) {
+    let started = Date()
+    let deadline = started.addingTimeInterval(45)
+    var asked = Date.distantPast
+    var requests = 0
+    var first = true
+    while true {
+      if !NSApp.isActive, Date().timeIntervalSince(asked) >= 2 {
+        asked = Date()
+        requests += 1
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        configuration.createsNewApplicationInstance = false
+        _ = try await NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration)
+        NSApp.activate(ignoringOtherApps: true)
+      }
+      if first || !window.isKeyWindow {
+        first = false
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(webView)
+      }
+      if NSApp.isActive && window.isKeyWindow { break }
       guard Date() < deadline else {
-        throw HarnessError("Origin Trace did not become the active key window (active=\(NSApp.isActive), key=\(window.isKeyWindow))")
+        // Another app that keeps taking the foreground, such as a second
+        // rendered run on this Mac, is named so the failure is not read as
+        // the product's.
+        let front = NSWorkspace.shared.frontmostApplication
+        let holder = front.map { "\($0.localizedName ?? "?") PID \($0.processIdentifier) at \($0.bundleURL?.path ?? "?")" } ?? "none"
+        throw HarnessError("Origin Trace did not become the active key window after \(requests) requests (active=\(NSApp.isActive), key=\(window.isKeyWindow), frontmost: \(holder))")
       }
       try await Task.sleep(nanoseconds: 100_000_000)
+    }
+    if requests > 1 {
+      print(String(format: "RENDERED_UI_ACTIVATION %d requests, %.1f s", requests, Date().timeIntervalSince(started)))
     }
     // AppKit activation precedes WebKit's asynchronous focus notification.
     // Sending input in that gap can lose a click or suppress :focus-visible.
@@ -70,7 +92,9 @@ final class Harness {
   func waitForInitialLoad() async throws {
     let deadline = Date().addingTimeInterval(30)
     while webView.isLoading || webView.url?.scheme != "http" {
-      guard Date() < deadline else { throw HarnessError("The packaged app did not load its loopback UI") }
+      guard Date() < deadline else {
+        throw HarnessError("The packaged app did not load its loopback UI (at \(webView.url?.absoluteString ?? "no page"), loading=\(webView.isLoading))")
+      }
       try await Task.sleep(nanoseconds: 100_000_000)
     }
   }
@@ -335,6 +359,37 @@ final class Harness {
 
   func screenshot(_ name: String) async throws {
     try await settle()
+    // Two frames can land inside an entrance animation: the start panel has
+    // been captured at a fifth of its opacity. The finite animations running
+    // now get two seconds to finish; infinite ones, such as a spinner, are
+    // left running. The wait is polled from here, so a page whose timers stop
+    // cannot hold the screenshot.
+    _ = try await webView.callAsyncJavaScript(
+      """
+      window.__rebScreenshotAnimations = document.getAnimations().filter(animation => animation.playState === 'running'
+        && Number.isFinite(animation.effect?.getComputedTiming().endTime));
+      return true;
+      """,
+      contentWorld: .page)
+    let deadline = Date().addingTimeInterval(2)
+    while true {
+      let running = try await webView.callAsyncJavaScript(
+        """
+        return window.__rebScreenshotAnimations.filter(animation => animation.playState === 'running').map(animation => {
+          const target = animation.effect?.target;
+          const node = target ? target.tagName.toLowerCase() + (target.id ? `#${target.id}` : '') + [...target.classList].map(name => `.${name}`).join('') : 'no target';
+          return `${animation.animationName ?? animation.transitionProperty ?? 'animation'} on ${node} at ${Math.round(animation.currentTime ?? -1)} of ${Math.round(animation.effect.getComputedTiming().endTime)} ms`;
+        });
+        """,
+        contentWorld: .page) as? [String] ?? []
+      if running.isEmpty { break }
+      guard Date() < deadline else {
+        print("RENDERED_UI_ANIMATION_RUNNING \(name): \(running.joined(separator: "; "))")
+        break
+      }
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    _ = try await webView.callAsyncJavaScript("delete window.__rebScreenshotAnimations; return true;", contentWorld: .page)
     let configuration = WKSnapshotConfiguration()
     configuration.afterScreenUpdates = true
     let image = try await webView.takeSnapshot(configuration: configuration)
@@ -389,6 +444,9 @@ struct Expectations: Decodable {
   let partialHost: String
   let hexBodyHost: String
   let hexBodyBytes: Int
+  let recordedSession: String
+  let sessionPreferences: String
+  let agentPreferences: String
 
   static func load() throws -> Expectations {
     let text = try Harness.required(ProcessInfo.processInfo.environment, "REB_RENDERED_UI_EXPECT")
@@ -2365,16 +2423,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await assertInert(ui, "\(size.name) pretty-printed source map")
       try await assertLayout(ui, "#screen-sources", "\(size.name) pretty-printed source map")
       try await ui.screenshot("sources-pretty-printed-\(size.name)")
-      // A file past the preview limit states it above the code. The record is marked rather than
-      // retained at 16 MiB, which would dominate this suite; the loader has its own check.
-      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = true; renderSources(); return true; })()")
-      try await ui.waitUntil("!document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice did not appear")
-      let limit = try await ui.value("document.querySelector('#source-limit-notice').innerText") as? String ?? ""
-      XCTAssertTrue(limit.contains("first 16 MiB"), "\(size.name): the notice states the limit: \(limit)")
-      try await assertLayout(ui, "#screen-sources", "\(size.name) source past the preview limit")
-      try await ui.screenshot("sources-limit-notice-\(size.name)")
-      _ = try await ui.value("(() => { state.artifacts.find(item => item.artifact_id === state.selectedArtifactId).contentTruncated = false; renderSources(); return true; })()")
-      try await ui.waitUntil("document.querySelector('#source-limit-notice').hidden", "\(size.name): the limit notice stayed after the record changed")
+      // Sources reads every byte of a file, so no preview limit is stated above the code.
+      let whole = try await ui.json("""
+        (() => { const source = state.artifacts.find(item => item.artifact_id === state.selectedArtifactId);
+          return {noticeHidden: document.querySelector('#source-limit-notice').hidden, truncated: Boolean(source?.contentTruncated)}; })()
+        """)
+      XCTAssertEqual(whole["noticeHidden"] as? Bool, true, "\(size.name): a whole source states no preview limit: \(whole)")
+      XCTAssertEqual(whole["truncated"] as? Bool, false, "\(size.name): the source is read whole: \(whole)")
       try await ui.click("#source-window-next")
       try await ui.waitUntil("document.querySelector('.source-line[data-line=\"1001\"]') && \(settled) && document.querySelectorAll('#source-code .syntax-string').length > 0",
         "\(size.name): the window after line 1,000 lost its colors")
@@ -2424,7 +2479,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
       var text = try await panelText(ui)
       XCTAssertTrue(text.contains("Tracking 2 functions"), "the panel counts the saved functions: \(text)")
       XCTAssertTrue(text.contains("window.hsw"), "the panel names each saved function")
-      XCTAssertTrue(text.contains("Content mode also records settled-value digests"), "Content mode names its digests")
+      XCTAssertTrue(text.contains("Content mode can also record digests of their results"), "Content mode names its digests")
+      let digests = try await ui.value("document.querySelector('#session-panel-option-invocation-digests')?.checked ?? null") as? Bool
+      XCTAssertEqual(digests, true, "the digests are a checkbox in the panel, on by default, not an environment variable")
+      XCTAssertFalse(text.contains("REB_"), "the panel names no environment variable: \(text)")
       XCTAssertTrue(text.contains("https://hcaptcha.test/glue.js"), "each site names its script")
       try await assertLayout(ui, "#session-panel", "start panel with saved functions")
       try await assertInert(ui, "start panel with saved functions")
@@ -2433,6 +2491,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
       text = try await panelText(ui)
       XCTAssertTrue(text.contains("Metadata mode records no settled-value digests"), "Metadata mode records no digests: \(text)")
+      let metadataDigests = try await ui.value("document.querySelector('#session-panel-option-invocation-digests') === null") as? Bool
+      XCTAssertEqual(metadataDigests, true, "Metadata offers no digests")
       try await ui.click("#session-panel button[aria-label=\"Remove window.hsw\"]")
       try await ui.waitUntil("document.querySelector('#session-panel').innerText.includes('Tracking 1 function')", "Remove updates the count")
       text = try await panelText(ui)
@@ -3296,6 +3356,58 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // Real-size sources in the packaged app: a 24 MB bundle and a 57 MB module
+  // (artifacts 950 and 951, present only when REB_RENDERED_UI_LARGE_SOURCES
+  // names their directory). Prints how long each view takes to show its first
+  // answer, and resident memory after it.
+  @MainActor
+  func test43LargeSourcesOpenWhole() async throws {
+    let ui = try await prepare(windowSizes[0])
+    try await show(ui, "sources")
+    // The catalog loads after the screen opens; decide only once it has.
+    try await ui.waitUntil("state.artifacts.length > 0", "the artifact catalog did not load")
+    guard try await ui.value("state.artifacts.some(artifact => artifact.artifact_id === '951')") as? Bool == true else {
+      throw XCTSkip("Set REB_RENDERED_UI_LARGE_SOURCES to a directory with bundle.js and module.wasm")
+    }
+    var timings: [String] = []
+    func timed(_ label: String, _ step: () async throws -> Void) async throws {
+      let start = Date()
+      try await step()
+      let seconds = Date().timeIntervalSince(start)
+      let rss = try memorySample(ui, label)
+      timings.append(String(format: "%@ %.2f s web=%d MiB backend=%d MiB", label, seconds, (rss["web"] ?? 0) / 1024, (rss["backend"] ?? 0) / 1024))
+    }
+    let artifact = { (id: String) in "state.artifacts.find(artifact => artifact.artifact_id === '\(id)')" }
+    try await timed("open 24 MB bundle") {
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"950\"]", containing: "bundle")
+      try await ui.waitUntil("\(artifact("950"))?.contentVerified === true && document.querySelectorAll('#source-code .source-line').length > 0",
+        timeout: 300, "the bundle did not open whole")
+    }
+    let bytes = try await ui.value("\(artifact("950")).byte_size") as? Int ?? 0
+    XCTAssertGreaterThan(bytes, 20 << 20, "the bundle is real-size: \(bytes) bytes")
+    try await ui.screenshot("large-sources-bundle")
+    try await timed("find every function in the bundle") {
+      _ = try await ui.value("(() => { const input = document.querySelector('#source-search'); input.value = 'function'; input.dispatchEvent(new Event('input', {bubbles: true})); return true; })()")
+      try await ui.waitUntil("/^[0-9,]+ of [0-9,]+ matches/.test(document.querySelector('#source-position').textContent) && !/[+]|finding/.test(document.querySelector('#source-position').textContent)",
+        timeout: 300, "Find did not count the whole bundle")
+    }
+    let found = try await ui.value("document.querySelector('#source-position').textContent") as? String ?? ""
+    try await ui.screenshot("large-sources-bundle-find")
+    try await timed("open 57 MB module as hex") {
+      try await ui.click("#source-tree [role=treeitem][data-artifact-id=\"951\"]", containing: "module")
+      try await ui.waitUntil("\(artifact("951"))?.contentVerified === true && document.querySelectorAll('#source-code .source-line').length > 0",
+        timeout: 300, "the module did not open whole")
+    }
+    try await ui.screenshot("large-sources-module-hex")
+    try await timed("first Inspect window of the module") {
+      try await ui.waitUntil("!document.querySelector('#source-wasm').hidden", "Inspect is offered for the module")
+      try await ui.click("#source-wasm")
+      try await ui.waitUntil("(state.sourceEditorView?.view?.wasm?.rows ?? []).length > 0", timeout: 300, "the first Inspect window did not load")
+    }
+    try await ui.screenshot("large-sources-module-inspect")
+    print("RENDERED_UI_LARGE_SOURCES find=\(found)\n" + timings.map { "RENDERED_UI_LARGE_SOURCES \($0)" }.joined(separator: "\n"))
+  }
+
   // One resident-size sample from `ps`: the app, its web content process, the
   // backend and the agent's tool server. Values are KiB.
   @MainActor
@@ -3327,6 +3439,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
   }
 
   @MainActor
+  // The level the app saved for its next run (AgentPreferences).
+  private func agentSavedLevel(_ expected: Expectations) throws -> String? {
+    let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: expected.agentPreferences))) as? [String: Any]
+    return saved?["permission"] as? String
+  }
+
   private func agentTurnOff(_ ui: Harness) async throws {
     try await ui.click("#agent-more")
     try await ui.waitUntil("!document.getElementById('agent-menu').hidden", "the agent menu did not open")
@@ -3374,8 +3492,27 @@ final class OriginTraceRenderedUITests: XCTestCase {
   @MainActor
   func test0AgentPanel() async throws {
     let ui = try Harness()
+    let expected = try Expectations.load()
     try await ui.waitForInitialLoad()
     let on = "['ready', 'running', 'stopped'].includes(document.getElementById('agent-dock').dataset.state)"
+    let levels = "[...document.querySelectorAll('input[name=\"agent-permission\"]')].map(radio => radio.value + (radio.checked ? '*' : '')).join(',')"
+    // The runner saved Full access as an earlier app run would
+    // (AgentPreferences), so the first consent of this run starts there.
+    try await ui.click("#agent-toggle")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-turn-on') === 1 && !document.getElementById('agent-turn-on').disabled", "the setup state did not show")
+    try await ui.click("#agent-turn-on")
+    try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
+    let savedLevel = try await ui.value(levels) as? String
+    XCTAssertEqual(savedLevel, "read-only,ask,auto,full*", "the level saved in an earlier app run is chosen")
+    try await agentConsentShowsLevel(ui, "Full access", "saved")
+    try await ui.screenshot("agent-consent-saved-full")
+    // Read only from here, saved as the level the next consent starts from.
+    try await ui.click("#agent-level-read-only")
+    try await ui.click("#agent-consent-accept")
+    try await ui.waitUntil("\(on) && __rebUiProbe.count('#agent-consent-accept') === 0", timeout: 20, "the agent did not turn on")
+    XCTAssertEqual(try agentSavedLevel(expected), "read-only", "the level turned on is saved")
+    try await agentTurnOff(ui)
+    try await ui.click("#agent-close")
     for size in windowSizes {
       try await ui.resize(width: size.width, height: size.height)
       try await ui.reload()
@@ -3406,23 +3543,25 @@ final class OriginTraceRenderedUITests: XCTestCase {
       XCTAssert(consent.contains("tool result"), "the disclosure names tool results: \(consent)")
       XCTAssert(consent.contains("URLs, hosts"), "the disclosure says results can include URLs and hosts: \(consent)")
       // Four levels, lowest first, with Read only chosen and no warning.
-      let levels = try await ui.value("[...document.querySelectorAll('input[name=\"agent-permission\"]')].map(radio => radio.value + (radio.checked ? '*' : '')).join(',')") as? String
-      XCTAssertEqual(levels, "read-only*,ask,auto,full", "four levels with Read only chosen")
+      let chosen = try await ui.value(levels) as? String
+      XCTAssertEqual(chosen, "read-only*,ask,auto,full", "four levels with the saved Read only chosen")
       let noWarning = try await ui.value("__rebUiProbe.count('#agent-permission-warning')") as? Int
       XCTAssertEqual(noWarning, 0, "Read only needs no warning")
       try await agentLayoutIsClean(ui, "consent")
       try await ui.screenshot("agent-consent-\(size.name)")
       // Auto-approve warns; Full access lists what more leaves the Mac and
-      // offers the separate sensitive capture box.
+      // says its sessions capture what the app's do, with no second choice.
       try await ui.click("#agent-level-auto")
-      try await ui.waitUntil("__rebUiProbe.count('#agent-permission-warning') === 1 && __rebUiProbe.count('#agent-sensitive') === 0", "the Auto-approve warning did not show")
+      try await ui.waitUntil("__rebUiProbe.count('#agent-permission-warning') === 1", "the Auto-approve warning did not show")
       try await agentConsentShowsLevel(ui, "Auto-approve actions", size.name)
       try await agentLayoutIsClean(ui, "consent auto")
       try await ui.screenshot("agent-consent-auto-\(size.name)")
       try await ui.click("#agent-level-full")
-      try await ui.waitUntil("__rebUiProbe.count('#agent-sensitive') === 1", "the Full access warning did not show")
+      try await ui.waitUntil("__rebUiProbe.text('#agent-permission-warning').includes('request content and Canvas images included')", "the Full access warning did not show")
       let fullWarning = try await ui.value("__rebUiProbe.text('#agent-permission-warning')") as? String ?? ""
-      for item in ["JavaScript and other source text", "Request and response bodies", "Also allow sensitive capture options"] {
+      let fullChoices = try await ui.value("document.querySelectorAll('#agent-permission-warning input').length") as? Int
+      XCTAssertEqual(fullChoices, 0, "Full access is the one consent: no second choice")
+      for item in ["JavaScript and other source text", "Request and response bodies", "They capture what yours do"] {
         XCTAssert(fullWarning.contains(item), "Full access names \(item): \(fullWarning)")
       }
       try await agentConsentShowsLevel(ui, "Full access", size.name)
@@ -3559,11 +3698,25 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.click("#agent-turn-on")
     try await ui.waitUntil("__rebUiProbe.count('#agent-consent-accept') === 1", "the consent step did not show")
     try await ui.click("#agent-level-full")
-    try await ui.waitUntil("__rebUiProbe.count('#agent-sensitive') === 1", "the Full access warning did not show")
+    try await ui.waitUntil("__rebUiProbe.text('#agent-permission-warning').includes('request content and Canvas images included')", "the Full access warning did not show")
     try await agentConsentShowsLevel(ui, "Full access", "default")
     try await ui.click("#agent-consent-accept")
     try await ui.waitUntil("\(on) && __rebUiProbe.text('#agent-permission') === 'Full access'", timeout: 20, "Full access did not turn on")
     XCTAssertNil(ui.window.attachedSheet, "consent is the only confirmation: no sheet opens")
+    // Full access is saved for the next app run like any level, and the dock
+    // button carries it, with the dock closed too.
+    XCTAssertEqual(try agentSavedLevel(expected), "full", "Full access is saved for the next app run")
+    let mode = (try FileManager.default.attributesOfItem(atPath: expected.agentPreferences)[.posixPermissions] as? NSNumber)?.intValue
+    XCTAssertEqual(mode, 0o600, "the saved agent choices are the researcher's alone")
+    let toggle = try await ui.json("({level: document.getElementById('agent-toggle').dataset.level ?? null, label: document.getElementById('agent-toggle').getAttribute('aria-label'), dot: getComputedStyle(document.getElementById('agent-toggle'), '::after').backgroundColor})")
+    XCTAssertEqual(toggle["level"] as? String, "full", "\(toggle)")
+    XCTAssertEqual(toggle["label"] as? String, "Agent, on at Full access", "\(toggle)")
+    XCTAssertNotEqual(toggle["dot"] as? String ?? "rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)", "the toggle shows the level dot: \(toggle)")
+    try await ui.click("#agent-close")
+    try await ui.waitUntil("document.getElementById('agent-dock').hidden", "the dock did not close")
+    try await ui.screenshot("agent-toggle-full-closed")
+    try await ui.click("#agent-toggle")
+    try await ui.waitUntil("!document.getElementById('agent-dock').hidden && \(on)", "the dock did not open again on")
     let fullTools = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => [status.engine.permission, status.tools.some(tool => tool.name === 'get_artifact_text')].join(','))") as? String
     XCTAssertEqual(fullTools, "full,true", "native runs Full access with the content reads")
     try await agentLayoutIsClean(ui, "full access")
@@ -3578,6 +3731,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
     try await ui.waitUntil("__rebUiProbe.text('#agent-permission') === 'Read only' && __rebUiProbe.text('#agent-log').includes('Permission lowered to Read only')", timeout: 15, "lowering did not apply")
     let lowered = try await ui.value("webkit.messageHandlers.rebAgent.postMessage({op: 'status'}).then(status => [status.engine.phase, status.engine.permission, status.tools.some(tool => tool.name === 'get_artifact_text')].join(','))") as? String
     XCTAssertEqual(lowered, "ready,read-only,false", "native lowered the level and kept the agent on")
+    XCTAssertEqual(try agentSavedLevel(expected), "read-only", "a lowered level is saved")
     try await ui.screenshot("agent-badge-lowered")
     try await agentTurnOff(ui)
     try await ui.click("#agent-close")
@@ -3846,6 +4000,213 @@ final class OriginTraceRenderedUITests: XCTestCase {
     }
   }
 
+  // The start panel's session options at both window sizes and in both
+  // themes: the browser profile with the research profile's folder, Advanced
+  // options by keyboard with a visible ring on each, a dependent option, the
+  // count of changed options, and the choices Start saves for the next app run
+  // and holds for this one. The named Brave does not exist, so nothing
+  // launches. The defaults are chosen again at the end, so later tests see
+  // the panel as a first run does.
+  @MainActor
+  func test43StartPanelSessionOptions() async throws {
+    let ui = try await prepare(windowSizes[0])
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let expected = try Expectations.load()
+    try await clearSavedSites(ui)
+    let focus = { try await ui.json("__rebUiProbe.focusState()") }
+    let checked = "Object.fromEntries([...document.querySelectorAll('#session-panel input[id^=\"session-panel-option-\"]')].map(box => [box.id.replace('session-panel-option-', ''), box.checked]))"
+    let advancedKeys = ["request-stacks", "promise-stacks", "wasm-dispatch", "ignore-debugger-statements", "document-start",
+                        "canvas-images", "browser-internal", "extension-traffic"]
+    let startFails = { (name: String) in
+      try await ui.click("#session-panel-start")
+      try await ui.waitUntil("document.querySelector('#session-panel')?.dataset.state === 'failed'", "\(name): Start did not report its failure")
+      try await ui.click("#session-panel-offline")
+      try await ui.waitUntil("document.querySelector('#session-panel').hidden", "\(name): Continue Offline did not close the panel")
+    }
+    do {
+      for size in windowSizes {
+        let name = size.name
+        try await ui.resize(width: size.width, height: size.height)
+        try await openStartPanel(ui)
+        try await ui.activate()
+        if try await ui.value("document.querySelector('#session-panel-mode-content').checked") as? Bool != true {
+          try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+        }
+        // The profile: shared by default, with its folder, never the Keychain.
+        let profile = try await ui.value("document.querySelector('#session-panel .session-panel-profile').innerText") as? String ?? ""
+        XCTAssertTrue(profile.contains("Fresh profile") && profile.contains("Sessions share the research profile")
+          && profile.contains("Library/Application Support/Origin Trace/research-profiles/default"), "\(name): \(profile)")
+        let collapsed = try await ui.json("({expanded: document.querySelector('#session-panel-advanced').getAttribute('aria-expanded'), options: \(checked)})")
+        XCTAssertEqual(collapsed["expanded"] as? String, "false", "\(name): Advanced options starts collapsed: \(collapsed)")
+        XCTAssertEqual((collapsed["options"] as? [String: Bool])?.keys.sorted(), ["fresh-profile"], "\(name): \(collapsed)")
+        try await assertStartPanelFits(ui, "\(name) start panel profile")
+
+        // Keyboard: the toggle opens the list, and every option is a stop
+        // with a visible ring, in the order shown.
+        _ = try await ui.value("(document.querySelector('#session-panel-advanced').focus(), true)")
+        try await ui.key(49, " ")
+        try await ui.waitUntil("document.querySelector('#session-panel-advanced').getAttribute('aria-expanded') === 'true'", "\(name): Space did not open Advanced options")
+        let opened = try await focus()
+        XCTAssertEqual(opened["id"] as? String, "session-panel-advanced", "\(name): focus stays on the toggle: \(opened)")
+        for key in advancedKeys {
+          try await ui.tab()
+          let stop = try await focus()
+          XCTAssertEqual(stop["id"] as? String, "session-panel-option-\(key)", "\(name): \(stop)")
+          XCTAssertEqual(stop["focusVisible"] as? Bool, true, "\(name): \(stop)")
+          XCTAssertEqual(stop["inViewport"] as? Bool, true, "\(name): the panel scrolls each option into view: \(stop)")
+          let ring = try await ui.value("""
+            (() => { const shown = getComputedStyle(document.activeElement);
+              return shown.outlineStyle !== 'none' && parseFloat(shown.outlineWidth) > 0; })()
+            """) as? Bool
+          XCTAssertEqual(ring, true, "\(name): a focus ring shows around \(key)")
+        }
+        try await ui.tab()
+        let after = try await focus()
+        XCTAssertEqual(after["id"] as? String, "session-panel-offline", "\(name): the actions follow the options: \(after)")
+        let defaults = try await ui.json(checked)
+        XCTAssertEqual(defaults as? [String: Bool], ["fresh-profile": false, "request-stacks": true, "promise-stacks": false, "wasm-dispatch": true,
+          "ignore-debugger-statements": true, "document-start": true, "canvas-images": true, "browser-internal": false, "extension-traffic": false],
+          "\(name): app sessions start with the defaults: \(defaults)")
+        let text = try await panelText(ui)
+        XCTAssertFalse(text.contains("REB_"), "\(name): the panel names no environment variable: \(text)")
+        _ = try await ui.reveal("#session-panel .session-panel-advanced", block: "start")
+        try await assertStartPanelFits(ui, "\(name) start panel advanced")
+        try await ui.screenshot("start-panel-advanced-\(name)")
+        try await lightScreenshot(ui, "start-panel-advanced", name, scope: "#session-panel")
+
+        // Metadata keeps no Canvas images, so it does not offer them.
+        try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
+        let metadata = try await ui.json(checked)
+        XCTAssertNil(metadata["canvas-images"], "\(name): Metadata offers no Canvas images: \(metadata)")
+        try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+        try await ui.click("#session-panel-advanced")
+        try await startFails(name)
+      }
+
+      // Choose: Promise stacks brings request stacks with it, and loses them
+      // with them; Wasm off, browser-internal traffic on, and Fresh profile.
+      try await openStartPanel(ui)
+      try await ui.click("#session-panel-advanced")
+      try await ui.click("#session-panel-option-request-stacks")
+      try await ui.click("#session-panel-option-promise-stacks")
+      var chosen = try await ui.json(checked)
+      XCTAssertEqual(chosen["request-stacks"] as? Bool, true, "Promise stacks turns request stacks on: \(chosen)")
+      try await ui.click("#session-panel-option-request-stacks")
+      chosen = try await ui.json(checked)
+      XCTAssertEqual(chosen["promise-stacks"] as? Bool, false, "request stacks off takes Promise stacks with them: \(chosen)")
+      for key in ["request-stacks", "promise-stacks", "wasm-dispatch", "browser-internal", "fresh-profile"] {
+        try await ui.click("#session-panel-option-\(key)")
+      }
+      let count = try await ui.value("document.querySelector('#session-panel-advanced').innerText") as? String ?? ""
+      XCTAssertTrue(count.contains("3 changed"), "the toggle counts the changed options: \(count)")
+      let fresh = try await panelText(ui)
+      XCTAssertTrue(fresh.contains("The research profile is left as it is"), "Fresh profile says what it leaves: \(fresh)")
+      try await assertStartPanelFits(ui, "start panel chosen options")
+      try await ui.screenshot("start-panel-options-chosen")
+      try await ui.click("#session-panel .session-panel-mode[data-mode='metadata']")
+      try await startFails("chosen")
+
+      // Saved for the next app run as chosen, except Fresh profile, which is
+      // for this run only: a later run's automatic session keeps the sign-ins.
+      let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: expected.sessionPreferences))) as? [String: Any]
+      XCTAssertEqual(saved?["version"] as? Int, 1, "\(String(describing: saved))")
+      XCTAssertEqual(saved?["mode"] as? String, "metadata", "\(String(describing: saved))")
+      XCTAssertEqual(saved?["options"] as? [String: Bool], ["request_stacks": true, "promise_stacks": true,
+        "wasm_dispatch": false, "ignore_debugger_statements": true, "canvas_images": true, "invocation_digests": true,
+        "document_start": true, "browser_internal": true, "extension_traffic": false], "the saved options: \(String(describing: saved))")
+      let mode = (try FileManager.default.attributesOfItem(atPath: expected.sessionPreferences)[.posixPermissions] as? NSNumber)?.intValue
+      XCTAssertEqual(mode, 0o600, "the saved choices are the researcher's alone")
+
+      // Held for this run: the panel opens with them.
+      try await openStartPanel(ui)
+      let held = try await ui.json("({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, options: \(checked), toggle: document.querySelector('#session-panel-advanced').innerText})")
+      XCTAssertEqual(held["mode"] as? String, "metadata", "\(held)")
+      XCTAssertEqual((held["options"] as? [String: Bool])?["fresh-profile"], true, "\(held)")
+      XCTAssertTrue((held["toggle"] as? String ?? "").contains("changed"), "\(held)")
+
+      // The defaults again, saved, for the tests that follow.
+      try await ui.click("#session-panel .session-panel-mode[data-mode='content']")
+      try await ui.click("#session-panel-advanced")
+      for key in ["promise-stacks", "wasm-dispatch", "browser-internal", "fresh-profile"] {
+        try await ui.click("#session-panel-option-\(key)")
+      }
+      try await startFails("defaults")
+      let restored = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: expected.sessionPreferences))) as? [String: Any]
+      XCTAssertEqual(restored?["mode"] as? String, "content", "\(String(describing: restored))")
+      XCTAssertEqual((restored?["options"] as? [String: Bool])?.filter { $0.value }.keys.sorted(),
+        ["canvas_images", "document_start", "ignore_debugger_statements", "invocation_digests", "request_stacks", "wasm_dispatch"],
+        "\(String(describing: restored))")
+    } catch {
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+  }
+
+  // Open Recent Session lists the ended sessions under the session root and
+  // opens one in the bundled workspace, which labels it as ended rather than
+  // capturing and shows its evidence. New Live Session leaves it.
+  @MainActor
+  func test44OpenRecentSession() async throws {
+    let ui = try await prepare(windowSizes[0])
+    let harnessURL = try XCTUnwrap(ui.webView.url)
+    let expected = try Expectations.load()
+    let applicationMenu = try XCTUnwrap(NSApp.mainMenu?.items.first?.submenu)
+    let open = try XCTUnwrap(applicationMenu.items.first { $0.title == "Open Session…" })
+    XCTAssertEqual(open.keyEquivalent, "o", "Open Session… is Command-O")
+    let recentItem = try XCTUnwrap(applicationMenu.items.first { $0.title == "Open Recent Session" })
+    let recent = try XCTUnwrap(recentItem.submenu)
+    recent.delegate?.menuNeedsUpdate?(recent)
+    let sessions = recent.items.filter { $0.representedObject is URL }
+    XCTAssertEqual(sessions.count, 1, "the one ended session is listed: \(recent.items.map(\.title))")
+    let session = try XCTUnwrap(sessions.first)
+    XCTAssertEqual((session.representedObject as? URL)?.standardizedFileURL.path,
+      URL(fileURLWithPath: expected.recordedSession).standardizedFileURL.path)
+    XCTAssertTrue(session.title.hasSuffix(")"), "the item names when it started and for how long: \(session.title)")
+    XCTAssertTrue(recent.items.contains { $0.title == "Show Session Folders in Finder" }, "\(recent.items.map(\.title))")
+    do {
+      for size in windowSizes {
+        try await ui.resize(width: size.width, height: size.height)
+        _ = try? await ui.webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+        let index = recent.index(of: session)
+        RunLoop.main.add(Timer(timeInterval: 0, repeats: false) { _ in recent.performActionForItem(at: index) }, forMode: .default)
+        let ready = "window.__rebOutgoingDocument === undefined && location.protocol === 'reb:' && document.readyState === 'complete' "
+          + "&& typeof state === 'object' && state.sessionEnded === true && state.requests.length > 0"
+        let deadline = Date().addingTimeInterval(30)
+        while (try? await ui.value(ready)) as? Bool != true {
+          // The harness page cannot answer the close guard; leave it.
+          if let sheet = ui.window.attachedSheet, let leave = button(sheet, "Open Session"), leave.isEnabled { leave.performClick(nil) }
+          guard Date() < deadline else { throw HarnessError("\(size.name): the ended session did not open") }
+          try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try await ui.settle()
+        // The narrow sidebar is a rail that shows the status as a dot, so the
+        // status is read from its text and its accessible name, not its layout.
+        let shell = try await ui.json("({mode: document.querySelector('#session-mode').textContent, kind: document.querySelector('#session-mode').dataset.kind, capture: document.querySelector('.capture-state').textContent, label: document.querySelector('.capture-state').getAttribute('aria-label'), panel: document.querySelector('#session-panel').hidden})")
+        XCTAssertEqual(shell["mode"] as? String, "Ended session", "\(size.name): \(shell)")
+        XCTAssertEqual(shell["kind"] as? String, "ended", "\(size.name): \(shell)")
+        XCTAssertTrue((shell["capture"] as? String ?? "").contains("Ended"), "\(size.name): not Capturing: \(shell)")
+        XCTAssertTrue((shell["label"] as? String ?? "").contains("Ended"), "\(size.name): the rail's status is named: \(shell)")
+        XCTAssertEqual(shell["panel"] as? Bool, true, "\(size.name): no start panel over the review: \(shell)")
+        try await show(ui, "traffic")
+        let rows = try await ui.value("document.querySelectorAll('#screen-traffic .request-row').length") as? Int ?? 0
+        XCTAssertGreaterThan(rows, 0, "\(size.name): the session's requests are shown")
+        try await assertLayout(ui, ".titlebar", "\(size.name) ended session titlebar")
+        try await ui.screenshot("ended-session-review-\(size.name)")
+      }
+      // New Live Session leaves the review for the configured workspace.
+      try await openStartPanel(ui)
+      let left = try await ui.value("state.sessionEnded") as? Bool
+      XCTAssertEqual(left, false, "New Live Session leaves the ended session")
+      try await ui.click("#session-panel-offline")
+      try await ui.waitUntil("document.querySelector('#session-panel').hidden", "Continue Offline did not close the panel")
+    } catch {
+      try? await returnToHarness(ui, harnessURL)
+      throw error
+    }
+    try await returnToHarness(ui, harnessURL)
+  }
+
   // The start panel through a whole decision at both window sizes. The harness
   // names a REB_BRAVE_BINARY that does not exist, so Start fails at once and
   // nothing launches. The panel must fit, reach every control by keyboard with
@@ -3871,7 +4232,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await openStartPanel(ui)
         try await ui.activate()
         let opened = try await ui.json(
-          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not(#session-panel-media)').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
+          "({mode: document.querySelector('#session-panel input[name=\"session-panel-mode\"]:checked')?.value, checkboxes: document.querySelectorAll('#session-panel input[type=checkbox]:not(#session-panel-media):not([id^=\"session-panel-option-\"])').length, keychain: /keychain/i.test(document.querySelector('#session-panel').innerText)})")
         XCTAssertEqual(opened["mode"] as? String, plan.from, "\(name): the panel opens with this run's last mode: \(opened)")
         XCTAssertEqual(opened["checkboxes"] as? Int, 0, "\(name): the panel has no Keychain checkbox: \(opened)")
         XCTAssertEqual(opened["keychain"] as? Bool, false, "\(name): the panel says nothing about the Keychain: \(opened)")
@@ -3882,7 +4243,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
         // Shift+Tab walks back through every control to the chosen mode.
         var stops: [String] = []
-        for _ in 0..<8 {
+        for _ in 0..<10 {
           try await ui.tab(shift: true)
           let stop = try await focus()
           stops.append(stop["id"] as? String ?? "\(stop["element"] ?? "?")")
@@ -3898,9 +4259,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if stops.last?.hasPrefix("session-panel-mode-") == true { break }
         }
         print("RENDERED_UI_START_PANEL_FOCUS \(name) \(stops)")
-        // Content's limits sit between the mode and the actions; Metadata has none.
+        // Content's limits sit between the mode and the session options;
+        // Metadata has none. Advanced options stays collapsed.
         let limits = ["session-panel-media", "session-panel-response-budget", "session-panel-request-budget"]
-        XCTAssertEqual(stops, ["session-panel-offline"] + (plan.from == "content" ? limits : []) + ["session-panel-mode-\(plan.from)"],
+        let options = ["session-panel-advanced", "session-panel-option-fresh-profile"]
+        XCTAssertEqual(stops, ["session-panel-offline"] + options + (plan.from == "content" ? limits : []) + ["session-panel-mode-\(plan.from)"],
           "\(name): the panel's controls in reverse order")
         try await ui.screenshot("start-panel-focus-\(name)")
         // Arrow keys choose within the mode group.
@@ -3908,7 +4271,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         let moved = try await ui.json(
           "({focus: document.activeElement?.id, text: document.querySelector('#session-panel').innerText})")
         XCTAssertEqual(moved["focus"] as? String, "session-panel-mode-\(plan.to)", "\(name): the arrow moved the choice: \(moved)")
-        for _ in 0..<(plan.to == "content" ? 5 : 2) { try await ui.tab() }
+        for _ in 0..<(plan.to == "content" ? 7 : 4) { try await ui.tab() }
         let start = try await focus()
         XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): Tab returns to Start Session: \(start)")
         try await ui.screenshot("start-panel-chosen-\(name)")
@@ -4019,7 +4382,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
         // Keyboard: each limit is a stop with a visible ring.
         _ = try await ui.value("(document.querySelector('#session-panel-start').focus(), true)")
-        for expectedStop in ["session-panel-offline", "session-panel-media", "session-panel-response-budget", "session-panel-request-budget"] {
+        for expectedStop in ["session-panel-offline", "session-panel-advanced", "session-panel-option-fresh-profile",
+                             "session-panel-media", "session-panel-response-budget", "session-panel-request-budget"] {
           try await ui.tab(shift: true)
           let stop = try await focus()
           XCTAssertEqual(stop["id"] as? String, expectedStop, "\(name): \(stop)")
@@ -4048,8 +4412,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
         try await assertLayout(ui, "#session-panel", "\(name) refused budget")
         try await ui.screenshot("start-panel-limit-refused-\(name)")
         // Native checks what the page sends, as the agent path checks its options.
+        // Each start names every session option, as the page's does, so the
+        // limits are what native refuses.
         let native = try await ui.json("""
-          (async () => { const ask = body => webkit.messageHandlers.rebSession.postMessage({op: 'start', ...body}).then(() => 'accepted', error => error.message);
+          (async () => { const post = message => webkit.messageHandlers.rebSession.postMessage(message);
+            const panel = await post({op: 'state'});
+            const options = Object.fromEntries(Object.entries(panel.options).map(([key, option]) => [key, option.value]));
+            const ask = body => post({op: 'start', options, ...body}).then(() => 'accepted', error => error.message);
             return {over: await ask({mode: 'content', request_content_budget_mib: 5000, response_body_budget_mib: 512, response_media: false}),
               fraction: await ask({mode: 'content', request_content_budget_mib: 256, response_body_budget_mib: 12.5, response_media: false}),
               metadata: await ask({mode: 'metadata', response_media: true}),
@@ -4076,8 +4445,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           try await ui.key(49, " ")
           let raised = try await ui.json(fields)
           XCTAssertEqual(raised["media"] as? Bool, true, "\(name): Space checks media and fonts: \(raised)")
-          try await ui.tab()
-          try await ui.tab()
+          // Fresh profile, Advanced options and Continue Offline come before Start.
+          for _ in 0..<4 { try await ui.tab() }
           let start = try await focus()
           XCTAssertEqual(start["id"] as? String, "session-panel-start", "\(name): \(start)")
           try await ui.key(36, "\r")

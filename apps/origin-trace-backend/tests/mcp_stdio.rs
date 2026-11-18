@@ -876,7 +876,7 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
             );
             direct["mcp_admission"] = json!({
                 "permission": null, "effects": false, "session_start": false,
-                "content_reads": false, "content_omitted": false, "sensitive_capture": false
+                "content_reads": false, "content_omitted": false
             });
         }
         if name == "wait_for_events" {
@@ -1942,8 +1942,9 @@ dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
-printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}}" > "$dir/stacks"
+printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}} ${{REB_NATIVE_PROMISE_STACKS-unset}}" > "$dir/stacks"
 printf '%s\n' "${{REB_REQUEST_CONTENT_BUDGET_MIB-unset}}" > "$dir/content-budget"
+printf '%s\n' "${{REB_RESEARCH_PROFILE_ROOT-unset}} ${{REB_FRESH_PROFILE-unset}} ${{REB_CAPTURE_DURATION_SECONDS-unset}} ${{REB_NATIVE_QUIET_MODE-unset}} ${{REB_CAPTURE_CANVAS_IMAGES-unset}} ${{REB_CAPTURE_BROWSER_INTERNAL-unset}} ${{REB_CAPTURE_EXTENSION_TRAFFIC-unset}}" > "$dir/session"
 labels=()
 if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
   cp "$REB_NATIVE_JS_INVOCATION_SITES" "$dir/sites"
@@ -1985,6 +1986,14 @@ backend=$!
 trap 'kill "$broker" 2>/dev/null || true; wait "$broker" 2>/dev/null || true; kill "$backend" 2>/dev/null; wait "$backend" 2>/dev/null; echo ended > "$dir/ended"; exit 0' TERM
 for _ in $(seq 1 400); do [[ -s "$dir/research-ui.endpoint" ]] && break; sleep 0.05; done
 echo "Origin Trace live session $(basename "$dir")"
+# A test that fails before it ends this session removes the root without
+# stopping it. The backend waits on this launcher, so stop it here instead of
+# leaving both running.
+while kill -0 "$backend" 2>/dev/null && [[ -d "$dir" ]]; do sleep 0.2; done
+if [[ ! -d "$dir" ]]; then
+  kill "$broker" "$backend" 2>/dev/null || true
+  exit 0
+fi
 wait "$backend"
 "#,
                 backend = env!("CARGO_BIN_EXE_origin-trace-backend")
@@ -2034,7 +2043,16 @@ wait "$backend"
             .env("REB_NATIVE_JS_INVOCATION_IF_SUPPORTED", "1")
             .env("REB_NATIVE_REQUEST_STACKS", "1")
             .env("REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED", "1")
+            .env("REB_NATIVE_PROMISE_STACKS", "1")
             .env("REB_REQUEST_CONTENT_BUDGET_MIB", "999")
+            .env("REB_CAPTURE_DURATION_SECONDS", "60")
+            .env(
+                "REB_RESEARCH_PROFILE_ROOT",
+                self.root.path().join("app-profiles"),
+            )
+            .env("REB_FRESH_PROFILE", "1")
+            .env("REB_CAPTURE_BROWSER_INTERNAL", "1")
+            .env("REB_CAPTURE_EXTENSION_TRAFFIC", "1")
             .env(
                 "REB_JS_INVOCATION_SITE_STORE",
                 self.root.path().join("app-sites.json"),
@@ -2087,9 +2105,12 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
         .unwrap();
     assert_eq!(start["annotations"]["openWorldHint"], true);
     assert_eq!(start["inputSchema"]["additionalProperties"], false);
-    // Sensitive capture is offered, behind its explicit confirmation.
+    // Sensitive capture is offered, and on by default as in the app.
     for option in ["canvas_images", "request_content", "js_invocation_digests"] {
         assert!(start["inputSchema"]["properties"].get(option).is_some());
+    }
+    for option in ["browser_internal", "extension_traffic", "fresh_profile"] {
+        assert_eq!(start["inputSchema"]["properties"][option]["default"], false);
     }
 
     let unbound = mcp.request("tools/call", json!({"name": "get_events"}));
@@ -2098,23 +2119,20 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
 
     let refused = mcp.request(
         "tools/call",
-        json!({"name": "start_live_session", "arguments": {"guest_adapter": "/tmp/recipe.json"}}),
+        json!({"name": "start_live_session", "arguments": {
+            "guest_adapter": "/tmp/recipe.json", "wasm_dispatch": false
+        }}),
     );
     assert_eq!(refused["result"]["isError"], true);
     assert!(tool_text(&refused).contains("requires wasm_dispatch"));
-    let sensitive = mcp.request(
-        "tools/call",
-        json!({"name": "start_live_session", "arguments": {"canvas_images": true}}),
-    );
-    assert_eq!(sensitive["result"]["isError"], true);
-    assert!(tool_text(&sensitive).contains("requires confirm_sensitive_capture"));
     let sessions = &fixture.sessions;
     assert!(!sessions.exists() || std::fs::read_dir(sessions).unwrap().next().is_none());
 
+    // Only a url: every capture switch takes the app's default.
     let started = mcp.request(
         "tools/call",
         json!({"name": "start_live_session", "arguments": {
-            "url": "https://example.test/page", "wasm_dispatch": true, "timeout_seconds": 30
+            "url": "https://example.test/page", "timeout_seconds": 30
         }}),
     );
     assert_eq!(
@@ -2128,7 +2146,26 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     assert_eq!(session["url_opened"], true);
     assert_eq!(session["capture_observed"], true);
     assert_eq!(session["canonical_endpoint"], false);
-    assert_eq!(session["options"]["wasm_dispatch"], true);
+    for (option, value) in [
+        ("wasm_dispatch", json!(true)),
+        ("wasm_call_indirect", json!(true)),
+        ("quiet", json!(true)),
+        ("request_content", json!(true)),
+        ("canvas_images", json!(true)),
+        ("request_stacks", json!(true)),
+        ("document_start", json!(true)),
+        ("js_invocation_digests", json!(false)),
+        ("browser_internal", json!(false)),
+        ("extension_traffic", json!(false)),
+        ("fresh_profile", json!(false)),
+        ("confirm_sensitive_capture", json!(true)),
+    ] {
+        assert_eq!(session["options"][option], value, "{option}");
+    }
+    assert!(
+        session["options"].get("duration_seconds").is_none(),
+        "the session runs until it is ended"
+    );
     assert!(session.get("session_dir").is_none());
     assert!(!tool_text(&started).contains(fixture.root.path().to_str().unwrap()));
     let profile = fixture.session("4242").join("profile");
@@ -2139,15 +2176,24 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
             .lines()
             .any(|line| line == "https://example.test/page")
     );
-    // Inherited switches reach nothing: no request content, document-start
-    // permission, invocation sites, digests or request stacks.
+    // The app's defaults, and nothing inherited: not the shell's invocation
+    // sites, digests, budget, duration, profile or browser-internal capture.
+    // The default request stacks are dropped by a Brave without the flag.
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("options")).unwrap(),
-        "1 4095 0 0 0 unset 0\n"
+        "1 4095 0 1 1 unset 0\n"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "0 unset\n"
+        "1 1 unset\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("session")).unwrap(),
+        format!(
+            "{} 0 unset 1 1 0 0\n",
+            fixture.agent_sessions().join("research-profiles").display()
+        ),
+        "the agent sessions' own profile, no time limit"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
@@ -2171,11 +2217,12 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
     assert_eq!(context["instance_id"], session["instance_id"]);
     assert_eq!(context["live_admission"], "ready");
+    assert_eq!(context["capture_options"]["request_content"], true);
+    assert_eq!(context["capture_options"]["request_stacks"], true);
+    assert_eq!(context["capture_options"]["document_start"], "permitted");
     assert_eq!(
-        context["capture_options"],
-        json!({"source":"launcher","request_content":false,"content_limits":null,"canvas_images":false,
-            "request_stacks":false,"document_start":"not_permitted",
-            "js_invocation":{"state":"not_armed","count":0,"digests":false}})
+        context["capture_options"]["js_invocation"],
+        json!({"state":"not_armed","count":0,"digests":false})
     );
     let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
     assert_eq!(summary["result"]["isError"], false);
@@ -2197,7 +2244,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
         Value::Null
     );
     fixture.wait_ended("4242");
-    // At capture expiry the broker removes its socket and exits. Under
+    // When the broker stops on its own it removes its socket and exits. Under
     // --require-live other tools are then refused, but ending must still work.
     std::fs::remove_file(&fixture.socket).unwrap();
     let broker = std::fs::read_to_string(fixture.session("4243").join("broker.pid")).unwrap();
@@ -2232,10 +2279,10 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
 }
 
 /// Request content, document-start permission, invocation sites and value
-/// digests reach an agent session only when its start names them, each
-/// exactly as named, and each is shown in the result, the launch log and the
-/// session context. The caller's environment sets all of them and still
-/// changes nothing.
+/// digests reach an agent session exactly as its start names them, false
+/// included, and each is shown in the result, the launch log and the session
+/// context. The caller's environment sets all of them and still changes
+/// nothing.
 #[cfg(unix)]
 #[test]
 fn agent_session_options_are_named_never_inherited() {
@@ -2269,16 +2316,8 @@ fn agent_session_options_are_named_never_inherited() {
     // Refusals send nothing and start nothing.
     for (arguments, needle) in [
         (
-            json!({"request_content": true}),
-            "requires confirm_sensitive_capture",
-        ),
-        (
-            json!({"js_invocation_digests": true, "confirm_sensitive_capture": true}),
+            json!({"js_invocation_digests": true}),
             "requires js_invocation_sites or js_invocation_saved_sites",
-        ),
-        (
-            json!({"js_invocation_saved_sites": true, "js_invocation_digests": true}),
-            "requires confirm_sensitive_capture",
         ),
         (
             json!({"js_invocation_saved_sites": true, "js_invocation_sites": agent_file}),
@@ -2294,9 +2333,10 @@ fn agent_session_options_are_named_never_inherited() {
             "saved set, which is empty",
         ),
         (
-            json!({"request_content_budget_mib": 64}),
+            json!({"request_content_budget_mib": 64, "request_content": false}),
             "requires request_content",
         ),
+        (json!({"duration_seconds": 59}), "duration_seconds"),
         (
             json!({"request_stacks": true, "category_mask": 256}),
             "request_stacks needs Network and Artifact",
@@ -2335,14 +2375,15 @@ fn agent_session_options_are_named_never_inherited() {
     };
 
     // Document-start permission, request content and a site file the agent
-    // wrote, armed from a private copy.
+    // wrote, armed from a private copy. Named false turns a default off.
     let started = call(
         &mut mcp,
         json!({"document_start": true, "request_content": true,
             "request_content_budget_mib": 64, "response_body_budget_mib": 1024,
             "response_media": true, "request_stacks": true,
-            "confirm_sensitive_capture": true, "js_invocation_sites": agent_file,
-            "timeout_seconds": 30}),
+            "js_invocation_sites": agent_file, "js_invocation_digests": false,
+            "canvas_images": false, "wasm_dispatch": false, "duration_seconds": 7200,
+            "fresh_profile": true, "browser_internal": true, "timeout_seconds": 30}),
     );
     assert_eq!(
         started["result"]["isError"],
@@ -2363,9 +2404,20 @@ fn agent_session_options_are_named_never_inherited() {
         ("js_invocation_saved_sites", json!(false)),
         ("js_invocation_digests", json!(false)),
         ("canvas_images", json!(false)),
+        ("duration_seconds", json!(7200)),
+        ("fresh_profile", json!(true)),
+        ("browser_internal", json!(true)),
+        ("extension_traffic", json!(false)),
     ] {
         assert_eq!(result["options"][option], value, "{option}");
     }
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("session")).unwrap(),
+        format!(
+            "{} 1 7200 1 0 1 0\n",
+            fixture.agent_sessions().join("research-profiles").display()
+        )
+    );
     let options = std::fs::read_to_string(fixture.session("4242").join("options")).unwrap();
     let fields = options.split_whitespace().collect::<Vec<_>>();
     assert_eq!(fields[..5], ["0", "4095", "0", "1", "1"]);
@@ -2383,7 +2435,7 @@ fn agent_session_options_are_named_never_inherited() {
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "1 unset\n",
+        "1 0 unset\n",
         "named stacks are strict"
     );
     assert_eq!(
@@ -2423,7 +2475,8 @@ fn agent_session_options_are_named_never_inherited() {
     let saved = call(
         &mut mcp,
         json!({"js_invocation_saved_sites": true, "js_invocation_digests": true,
-            "confirm_sensitive_capture": true, "timeout_seconds": 30}),
+            "request_content": false, "document_start": false, "request_stacks": false,
+            "wasm_dispatch": false, "timeout_seconds": 30}),
     );
     assert_eq!(saved["result"]["isError"], false, "{}", tool_text(&saved));
     assert_eq!(saved["result"]["structuredContent"]["session_id"], "4243");
@@ -2495,6 +2548,66 @@ fn session_start_cli_gates_the_request_content_budget() {
             .args(arguments)
             .env("REB_LIVE_SESSION_SCRIPT", "/nonexistent/launcher.sh")
             .env_remove("REB_LIVE_SESSION_ROOT")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{arguments:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(needle), "{arguments:?}: {stderr}");
+    }
+}
+
+/// The CLI's switches are the start tool's: unset takes the app's default,
+/// a bare flag or =true names it, =false turns a default off. A named
+/// sensitive switch needs the CLI's one confirmation.
+#[cfg(unix)]
+#[test]
+fn session_start_cli_switches_name_or_leave_their_defaults() {
+    for (arguments, needle) in [
+        (&["--canvas-images"][..], "--confirm-sensitive-capture"),
+        (
+            &["--request-content=true"][..],
+            "--confirm-sensitive-capture",
+        ),
+        (
+            &["--js-invocation-digests"][..],
+            "--confirm-sensitive-capture",
+        ),
+        (
+            &[
+                "--request-content=false",
+                "--request-content-budget-mib",
+                "64",
+            ][..],
+            "requires request_content",
+        ),
+        (
+            &["--request-stacks", "--category-mask", "256"][..],
+            "request_stacks needs Network and Artifact",
+        ),
+        (
+            &["--wasm-dispatch=false", "--guest-adapter", "/tmp/a.json"][..],
+            "requires wasm_dispatch",
+        ),
+        (&["--duration-seconds", "59"][..], "until it is ended"),
+        (&["--quiet=maybe"][..], "invalid value"),
+        // Left unset, the defaults pass these checks; the missing launcher is
+        // the first refusal.
+        (
+            &["--confirm-sensitive-capture", "--fresh-profile"][..],
+            "before capture was ready",
+        ),
+        (
+            &["--request-content=false", "--quiet=false"][..],
+            "before capture was ready",
+        ),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+            .args(["session", "start"])
+            .args(arguments)
+            .env("HOME", home.path())
+            .env("REB_LIVE_SESSION_SCRIPT", "/nonexistent/launcher.sh")
+            .env("REB_LIVE_SESSION_ROOT", home.path().join("sessions"))
             .output()
             .unwrap();
         assert!(!output.status.success(), "{arguments:?}");
@@ -2577,7 +2690,7 @@ fn permission_levels_list_their_tools_and_gate_content() {
         assert_eq!(admission["effects"], effects);
         assert_eq!(admission["content_reads"], content);
         assert_eq!(admission["content_omitted"], !content);
-        assert_eq!(admission["sensitive_capture"], false, "{level}");
+        assert!(admission.get("sensitive_capture").is_none(), "{level}");
         let read = mcp.request(
             "tools/call",
             json!({"name":"get_artifact_text","arguments":{"artifact_id":"5"}}),
@@ -2628,11 +2741,6 @@ fn permission_levels_list_their_tools_and_gate_content() {
             vec!["--allow-content", "--omit-content"],
             "cannot be used with",
         ),
-        (vec!["--allow-sensitive-capture"], "--permission"),
-        (
-            vec!["--permission", "auto", "--allow-sensitive-capture"],
-            "needs --permission full",
-        ),
         (vec!["--permission", "everything"], "possible values"),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
@@ -2652,38 +2760,34 @@ fn permission_levels_list_their_tools_and_gate_content() {
     assert!(String::from_utf8_lossy(&unbound.stderr).contains("only --permission full"));
 }
 
-/// Under `--permission full`, sensitive capture needs its own flag, and the
-/// refusal comes before anything launches.
+/// `--permission full` is the one consent: its sessions take the app's content
+/// defaults and accept sensitive options without a second flag or a per-start
+/// confirmation. The retired `--allow-sensitive-capture` is accepted and
+/// ignored, so an older configuration still starts.
 #[cfg(unix)]
 #[test]
-fn full_permission_starts_sensitive_capture_only_with_its_flag() {
+fn full_permission_starts_sessions_with_the_app_content_defaults() {
     let fixture = AgentFixture::new();
-    let sensitive = json!({"name": "start_live_session", "arguments": {
-        "request_content": true, "confirm_sensitive_capture": true
-    }});
+    let end = json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}});
     let mut mcp = fixture.mcp_with(&["--permission", "full"]);
-    let refused = mcp.request("tools/call", sensitive.clone());
-    assert_eq!(refused["result"]["isError"], true);
-    let text = tool_text(&refused);
-    assert!(
-        text.contains("does not allow sensitive capture options"),
-        "{text}"
+    let started = mcp.request(
+        "tools/call",
+        json!({"name": "start_live_session", "arguments": {"response_media": true}}),
     );
-    assert!(
-        text.contains("request_content, confirm_sensitive_capture"),
-        "{text}"
-    );
-    assert!(
-        !fixture.sessions.exists()
-            || std::fs::read_dir(&fixture.sessions)
-                .unwrap()
-                .next()
-                .is_none()
+    assert_eq!(started["result"]["isError"], false, "{started}");
+    let options = &started["result"]["structuredContent"]["options"];
+    assert_eq!(options["request_content"], true);
+    assert_eq!(options["canvas_images"], true);
+    assert_eq!(options["response_media"], true);
+    assert_eq!(options["confirm_sensitive_capture"], true);
+    assert_eq!(
+        mcp.request("tools/call", end.clone())["result"]["isError"],
+        false
     );
     let instructions = {
         let mut command = Command::new(env!("CARGO_BIN_EXE_reb-api"));
         command
-            .args(["mcp", "--permission", "full"])
+            .args(["mcp", "--permission", "full", "--allow-sensitive-capture"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -2706,30 +2810,20 @@ fn full_permission_starts_sensitive_capture_only_with_its_flag() {
             .to_owned()
     };
     assert!(instructions.contains("Permission for this connection: full."));
-    assert!(instructions.contains("are refused for this connection"));
+    assert!(instructions.contains("request content included"));
+    assert!(!instructions.contains("refused for this connection"));
     assert!(instructions.contains("get_artifact_text"));
-    // An ordinary start still works at full, and the flag admits the rest.
-    let started = mcp.request(
+    // A metadata-only session is still one option away.
+    let mut older = fixture.mcp_with(&["--permission", "full", "--allow-sensitive-capture"]);
+    let metadata = older.request(
         "tools/call",
-        json!({"name": "start_live_session", "arguments": {}}),
+        json!({"name": "start_live_session", "arguments": {"request_content": false}}),
     );
-    assert_eq!(started["result"]["isError"], false, "{started}");
-    let end = json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}});
-    assert_eq!(
-        mcp.request("tools/call", end.clone())["result"]["isError"],
-        false
-    );
-    let mut allowed = fixture.mcp_with(&["--permission", "full", "--allow-sensitive-capture"]);
-    let started = allowed.request("tools/call", sensitive);
-    assert_eq!(started["result"]["isError"], false, "{started}");
-    assert_eq!(
-        started["result"]["structuredContent"]["options"]["request_content"],
-        true
-    );
-    assert_eq!(
-        allowed.request("tools/call", end)["result"]["isError"],
-        false
-    );
+    assert_eq!(metadata["result"]["isError"], false, "{metadata}");
+    let options = &metadata["result"]["structuredContent"]["options"];
+    assert_eq!(options["request_content"], false);
+    assert_eq!(options["js_invocation_digests"], false);
+    assert_eq!(older.request("tools/call", end)["result"]["isError"], false);
 }
 
 /// A connection opened on a session that starts and ends its own session goes

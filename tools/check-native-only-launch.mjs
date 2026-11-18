@@ -271,6 +271,59 @@ console.log('PASS native JS invocation sites opt-in, VM-category gate, sensitive
   console.log('PASS native request and promise stacks opt-in, Network and Artifact gate, promise stacks dependency and js-flags merge');
 }
 
+// A session started as another ends waits for that session's Brave to close
+// instead of refusing the profile it still holds. The holder is a stand-in
+// whose command line names the profile, as a running Brave's does; the shell
+// starts it so the shell, not this check, reaps it when it exits.
+{
+  const holderCode = section('# Only one browser can hold a profile', '# The project V8 flags');
+  const quick = holderCode.replace('profile_release_wait_seconds=10', 'profile_release_wait_seconds=4');
+  assert.notEqual(quick, holderCode, 'The release wait is a named bound');
+  const profiles = await realpath(await mkdtemp(join(tmpdir(), 'reb-profile-holder-')));
+  try {
+    const run = async (kind, hold) => {
+      const profile = join(profiles, `${kind}-${hold}`);
+      await mkdir(profile);
+      const holder = hold === 'none' ? 'holder=""' :
+        `perl -e 'sleep shift' ${hold === 'closing' ? 1 : 30} "--user-data-dir=$1" & holder=$!; ln -s "test-host-$holder" "$1/SingletonLock"`;
+      return spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
+trap '[[ -z "$holder" ]] || kill "$holder" 2>/dev/null || true' EXIT
+profile_kind=${kind}; profile_path="$1"; ${holder}
+${quick}echo started`, 'holder', profile], {encoding:'utf8'});
+    };
+    const closing = await run('research', 'closing');
+    assert.equal(closing.status, 0, closing.stdout + closing.stderr);
+    assert.match(closing.stdout, /^Waiting for the Brave that holds .*research-closing \(PID \d+\) to close\.\nstarted\n$/);
+    const held = await run('research', 'held');
+    assert.equal(held.status, 2, held.stdout + held.stderr);
+    assert.match(held.stdout, /^Waiting for the Brave that holds .*\nThe browser profile .*research-held is in use by a running Brave \(PID \d+\), so this session could not open it\..*Fresh profile in New Live Session…/s);
+    for (const [kind, hold] of [['research', 'none'], ['fresh', 'held']]) {
+      const result = await run(kind, hold);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.equal(result.stdout, 'started\n', `${kind} ${hold}`);
+    }
+  } finally {
+    await rm(profiles, {recursive:true, force:true});
+  }
+  console.log('PASS held profile: a closing holder is waited out, a held one is refused, a fresh profile is never checked');
+}
+
+// An app session's summary says which start panel option turns a switch on;
+// make live's names the environment setting.
+{
+  const hintCode = section('# How the summary says to turn a switch on', 'echo "Origin Trace live session');
+  const hint = embedded => spawnSync(shell, ['-c', `set -eu; embedded_session=${embedded}; ${hintCode}
+printf '%s\\n' "$(switch_hint 'Extension traffic' REB_CAPTURE_EXTENSION_TRAFFIC=1)"`], {encoding:'utf8'}).stdout;
+  assert.equal(hint(1), 'turn on Extension traffic in New Live Session… Advanced options\n');
+  assert.equal(hint(0), 'set REB_CAPTURE_EXTENSION_TRAFFIC=1\n');
+  const summary = section('echo "Origin Trace live session', 'echo "Capture transport:');
+  for (const name of ['REB_CAPTURE_CANVAS_IMAGES', 'REB_CAPTURE_BROWSER_INTERNAL', 'REB_CAPTURE_EXTENSION_TRAFFIC', 'REB_CONSOLE_DOCUMENT_START']) {
+    assert.doesNotMatch(summary, new RegExp(`set ${name}=`), `${name} is named through switch_hint`);
+    assert.match(summary, new RegExp(`\\$\\(switch_hint '[^']+' ${name}=1\\)`), name);
+  }
+  console.log('PASS session summary hints name the start panel option in an app session and the environment setting for make live');
+}
+
 // V8 ignores an unknown --js-flags entry and every later one, so the real
 // launcher must refuse a Brave build whose loaded V8 lacks a requested flag
 // before any helper or browser starts. Synthetic bundles and recording helpers
@@ -374,6 +427,7 @@ exec ${quote(systemGrep)} "$@"
     '--reb-wasm-guest-capture': ['REB_NATIVE_WASM_GUEST_ADAPTER', 'unset REB_NATIVE_WASM_GUEST_ADAPTER'],
     '--reb-js-dispatch-capture': ['REB_NATIVE_JS_DISPATCH_SITES', 'unset REB_NATIVE_JS_DISPATCH_SITES'],
     '--reb-js-invocation-capture': ['REB_NATIVE_JS_INVOCATION_SITES', 'unset REB_NATIVE_JS_INVOCATION_SITES'],
+    '--reb-request-stacks': ['REB_NATIVE_REQUEST_STACKS=1', 'REB_NATIVE_REQUEST_STACKS=0'],
   };
   const prefix = 'REB_LIVE_SESSION_FAILURE: ';
   const optOuts = flags => flags.map(flag => settings[flag][1]).join(', ');
@@ -398,7 +452,7 @@ exec ${quote(systemGrep)} "$@"
     REB_LOCAL_ANALYST_STORE:at('analyst.json'), REB_ACTIVE_ENDPOINT_FILE:at('active.endpoint'),
     REB_CAPTURE_CATEGORY_MASK:'4095', REB_NATIVE_QUIET_MODE:'0', REB_NATIVE_WASM_DISPATCH:'0',
     REB_NATIVE_WASM_CALL_INDIRECT:'0', REB_NATIVE_WASM_GUEST_ADAPTER:'', REB_NATIVE_JS_DISPATCH_SITES:'',
-    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', ...requested});
+    REB_NATIVE_JS_INVOCATION_SITES:'', REB_NATIVE_JS_INVOCATION_DIGESTS:'0', REB_NATIVE_REQUEST_STACKS:'0', ...requested});
   const clearReceipts = () => Promise.all([receipts, scans, started, finished].map(file => rm(file, {force:true})));
   const launchWith = async (executable, requested, cwd) => {
     await clearReceipts();
@@ -470,6 +524,22 @@ exec ${quote(systemGrep)} "$@"
   assert.match(badSwitch.stderr, /REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1/);
   console.log('PASS saved invocation sites start without invocation capture on a Brave that lacks it; explicit sites and other flags stay strict');
 
+  // Request stacks default on, as in the app, when the mask holds Network and
+  // Artifact. The default looks for the flag once: a Brave without it starts
+  // without stacks, and one with it is then checked like any requested flag.
+  // A mask without Network never asks, and an explicit request stays strict.
+  const stackDefault = {...switches.packaged, REB_NATIVE_REQUEST_STACKS:''};
+  const withoutStacks = await launchWith(preInvocation.executable, stackDefault);
+  accepted(withoutStacks, [...packaged, '--reb-request-stacks'], preInvocation.framework);
+  const withStacks = await braveApp({framework: [...allNames, 'reb_request_stacks']});
+  const stacksOn = await launchWith(withStacks.executable, stackDefault);
+  accepted(stacksOn, [...packaged, '--reb-request-stacks', '--reb-request-stacks'], withStacks.framework);
+  accepted(await launchWith(preInvocation.executable, {...stackDefault, REB_CAPTURE_CATEGORY_MASK:'3839'}),
+    packaged, preInvocation.framework);
+  refused(await launchWith(preInvocation.executable, {...switches.packaged, REB_NATIVE_REQUEST_STACKS:'1'}),
+    undefinedCause(preInvocation.executable, preInvocation.framework, ['--reb-request-stacks']));
+  console.log('PASS request stacks default on where Brave defines them and drop with a launch line where it does not; an explicit request stays strict');
+
   // Request content capture is a Chromium switch, not a V8 flag. Invalid values
   // and masks without Network and Artifact refuse before any helper starts.
   const content = await braveApp({framework: allNames});
@@ -534,7 +604,7 @@ printf '%s\\n' "${'${brave_arguments[@]-}'}"`], {env:{...process.env, TEST_SOCKE
     ['0b11', null], ['12345678901', null], ['0x123456789', null], ['１２', null],
     ['0x１２', null], ['0xａ', null],
     [`a[$(touch ${injected})]`, null]];
-  const maskCode = section('# One category mask grammar', 'if [[ "${native_quiet_mode}"');
+  const maskCode = section('# One category mask grammar', '# A default turns on only when the mask holds');
   for (const [value, expected] of maskVectors) {
     const result = spawnSync(shell, ['-c', `set -eu; fail_live_session() { shift; printf '%s' "$*"; exit 2; }
 category_mask_setting="\${1:-4095}"; ${maskCode}printf '%s' "\${category_mask}"`, 'mask', value], {encoding:'utf8'});

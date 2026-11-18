@@ -346,7 +346,8 @@ clean:
 		fi; \
 	fi
 
-javascript-check: capture-completeness-check
+# check-block-graph-ui.mjs renders its controls in the pinned LinkeDOM model.
+javascript-check: capture-completeness-check $(UI_STARTUP_DEPS)
 	@command -v node >/dev/null 2>&1 || { echo "Node.js is not installed" >&2; exit 1; }
 	@set -e; for source in apps/research-ui/*.js apps/runtime-hook-demo/*.mjs tools/*.mjs tools/*.cjs; do node --check "$$source"; done
 	node tools/check-vm-request-linkage-ui.mjs

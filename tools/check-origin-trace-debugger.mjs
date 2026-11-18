@@ -89,7 +89,10 @@ assert.match(nativeAppSource,/\$0\.scheme == "reb" \? \$0 : nativeUIURL\(\$0\.ab
 assert.match(nativeAppSource,/self\.localApplicationURL = localApplicationURL/);
 assert.match(nativeAppSource,/URL\(string: "reb:\/\/app\/index\.html\?native=1"\)/);
 assert.equal((nativeAppSource.match(/webView\??\.load\(URLRequest\(url:/g)??[]).length,2,'Review every new native entry path');
-assert.equal((nativeAppSource.match(/\bload\((?:url|localApplicationURL|requestedUIURL \?\? localApplicationURL)\)/g)??[]).length,5,'Review every new native entry path');
+// Open Session and Review Session reload only the bundled workspace, after
+// pointing its stores at the recorded session folder.
+assert.match(nativeAppSource,/contentHandler\.open\(stores, backendArguments: self\.storedBackendArguments\(stores\)\)\s+self\.load\(localApplicationURL\)/);
+assert.equal((nativeAppSource.match(/\bload\((?:url|localApplicationURL|requestedUIURL \?\? localApplicationURL)\)/g)??[]).length,6,'Review every new native entry path');
 assert.match(nativeAppSource,/components\.percentEncodedQuery = \(retained \+ \["native=1"\]\)\.joined/);
 assert.match(nativeAppSource,/name\.removingPercentEncoding != "native"/);
 assert.match(nativeAppSource,/contains\("--check-native-ui-url"\) \{\s+checkNativeUIURLs\(\)\s+return/);
@@ -449,7 +452,7 @@ assert.match(panel.nodes.selection.textContent,/1024 \/ 1,024/);assert.equal(pan
 console.log('PASS package panel explicit actions, exact download bytes, native fallback, clipboard ownership, keyed refresh focus, eviction, caps, paging, Escape/navigation and stale selection (DOM fixture; not rendered QA)');
 
 const trafficSource = await readFile(join(root, "apps/research-ui/traffic_view.js"), "utf8");
-const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,trafficTargetParts,TRAFFIC_ROW_LIMIT})", {
+const trafficUI = runInNewContext(trafficSource + ";({trafficSortedRequests,trafficWindow,renderTrafficRows,renderTrafficDetails,trafficSearchRequests,trafficTableTypeLabel,trafficTargetParts,trafficTimeLabel,TRAFFIC_ROW_LIMIT})", {
   document: trafficDocument, URL, TextEncoder, TextDecoder, Uint8Array, queueMicrotask,
   navigator: {clipboard: {writeText: async () => {}}}, setTimeout: () => 0,
   createSourceTokenizer: () => ({}), sourceSyntaxTokens: text => [{type: "plain", text}],
@@ -469,6 +472,11 @@ for (const direction of [1, -1]) {
 }
 assert.equal(trafficUI.trafficSortedRequests([uiRequest("pending"), uiRequest("done", {time: 2})], "time", -1)[0].id, "done");
 assert.deepEqual(Array.from(trafficUI.trafficSortedRequests([uiRequest("native", {time: "12.300 ms"}), uiRequest("cdp", {time: 2})], "time"), request => request.id), ["cdp", "native"]);
+// A captured row's exact duration text gets the compact label a number gets,
+// so a request over a second fits the Time column.
+for (const [time, label] of [["1172.569 ms", "1.17 s"], ["3.705 ms", "3.7 ms"], ["349.031 ms", "349 ms"], [1172.569, "1.17 s"], ["pending", "—"]]) {
+  assert.equal(trafficUI.trafficTimeLabel(time), label, String(time));
+}
 // Supplied-package comparison is secondary, explicit, bounded and read-only.
 const comparisonResult = JSON.parse(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-equal-v1.json'),'utf8'));
 const comparisonChangedInput = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/comparison-changed-input-v1.json')));
@@ -2159,6 +2167,7 @@ function canvasAccounting(context) {
   assert.equal(context.elements.signalRenderCount.textContent,'50');
   assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 1-24 of 50, newest first');
   assert.deepEqual(pager().map(button=>[button.textContent,button.disabled]),[['Newer',true],['Older',false]]);
+  assert.match(context.elements.signalRenderList.querySelector('nav').textContent,/^NewerPage 1 of 3Older$/);
   assert.equal(context.elements.signalRenderList.querySelectorAll('img').length,24);assert.deepEqual(loaded(),Array.from({length:24},(_,i)=>50-i));
   pager()[1].focus();pager()[1].click();await canvasSettled(context);
   assert.equal(context.elements.signalRenderSummary.textContent,'Readbacks 25-48 of 50, newest first');
@@ -2234,7 +2243,7 @@ function canvasAccounting(context) {
     setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
     fetch:async()=>{reads++;if(reads>2)return new Response(canvasText);const pending=ownedDeferred();held.push(pending);return pending.promise;}});
   context.events(artifacts);context.render();assert.equal(reads,2);assert.equal(timers.size,0,'A preview read has no deadline');
-  assert.match(context.elements.signalRenderList.textContent,/Reading the retained Canvas preview · 0 bytes of /);
+  assert.match(context.elements.signalRenderList.textContent,/Reading the retained Canvas preview · 0\u00a0bytes of /);
   const stops=context.elements.signalRenderList.querySelectorAll('button').filter(button=>button.textContent==='Stop');assert.equal(stops.length,2);
   for(const stop of stops)stop.click();
   assert.equal(reads,2);assert.equal(context.state.canvasPreviewReads.size,2);

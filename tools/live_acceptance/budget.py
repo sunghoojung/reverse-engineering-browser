@@ -21,7 +21,10 @@ RESPONSES, RESPONSE_SIZE = 12, 128 * 1024
 BUDGET_CASE = "not_captured_session_budget"
 # The artifact queue holds at most 288 opens and the writer waits for the
 # receiver to accept each one, so on a loaded host some POST bodies are refused
-# before the budget runs out. That refusal is bounded and shown, not lost.
+# before the budget runs out, shown and counted, not lost. The page sends one
+# POST at a time; three runs at load 17 to 47 refused none. More refusals than
+# the queue holds means the receiver fell a whole queue behind: a regression.
+TRANSFER_REFUSED_LIMIT = 288
 TRANSFER_REFUSED = "not_captured_transfer_refused"
 
 INDEX = document("budgets", f"""<script>
@@ -122,6 +125,8 @@ def verify(run: Run) -> None:
         problems.append(f"{len(kept - stored)} captured bodies have no request_body artifact")
     shown = budget_shown(run, "request_body", problems)
     refused = states.count(TRANSFER_REFUSED)
+    if refused > TRANSFER_REFUSED_LIMIT:
+        problems.append(f"{refused} bodies {TRANSFER_REFUSED}, more than the {TRANSFER_REFUSED_LIMIT} the artifact queue holds")
     if refused:
         checks = summary_checks(run.api.summary(), "request_content_not_retained",
                                 category="request_body", reason=TRANSFER_REFUSED)

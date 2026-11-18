@@ -1406,13 +1406,15 @@ void NativeProbeSink::SetEmitters(const NativeRendererProbeEmitter emitter,
       wasm_budget_epoch <= std::numeric_limits<std::uint64_t>::max() - 2) {
     native_wasm_budget_epoch_.store(wasm_budget_epoch + 2, std::memory_order_relaxed);
   }
-  config_generation_.fetch_add(1, std::memory_order_release);
   // A filter in front of the runtime buffer callback, which still checks the
-  // whole configuration. A construction that misses the opening is one made
-  // before the session started.
+  // whole configuration. It opens before the release below, so a thread that
+  // acquires the new generation also sees it open: no construction after the
+  // session's first recorded event is skipped. Until that release the
+  // generation is odd and the callback rejects.
   runtime_buffer_gate_.store(
       active && (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) != 0 ? 1 : 0,
       std::memory_order_relaxed);
+  config_generation_.fetch_add(1, std::memory_order_release);
 }
 
 bool NativeProbeSink::CanAdmitEvent(const NativeProbeEvent& event,

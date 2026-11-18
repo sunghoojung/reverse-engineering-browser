@@ -268,14 +268,28 @@ site, and `omitted_site_count` names the classified sites that are not listed.
 
 ## Work bounds
 
-Classification work is bounded so a generated script or module cannot stall
-analysis. One meter per artifact covers all classifier work, JavaScript and
-Wasm, using conservative admission charges and explicit query charges for:
-parser admission, AST/scope indexing, selector queries, Wasm table parsing and type-matching slot scans, symbolic simulation
-per operator, `repeats` and slot-advance walks, buffer scans and every trace
-step. The meter also bounds the bytes the index and symbolic traces retain at
-once (128 MiB). A memo hit charges the lookup and the copy it returns, never
-the work it saved.
+Every site of an artifact of any size is classified. Each selector query has
+a fixed step budget, so a site's work is constant and classification stays
+linear in the sites found; there is no per-artifact work, memory or site
+budget. Producers before VM detector 1.11.0 stopped at one billion work units,
+128 MiB of retained index and trace memory, 4096 JavaScript sites, an 8 MiB
+JavaScript source and one million symbolic nodes per Wasm function.
+
+One meter per artifact still counts all classifier work, JavaScript and Wasm,
+with conservative admission charges and explicit query charges for: parser
+admission, AST/scope indexing, selector queries, Wasm table parsing and
+type-matching slot scans, symbolic simulation per operator, `repeats` and
+slot-advance walks, buffer scans and every trace step, and the bytes the index
+and symbolic traces retain. A caller may give it a budget; reaching one stops
+classification with a counted omission. A memo hit charges the lookup and the
+copy it returns, never the work it saved.
+
+Wasm classification holds one function's symbolic facts at a time. A first
+pass simulates each function and keeps a summary: its fetch summary, whether
+it only returns constants, its direct callees and its indirect call types.
+Table reachability and threaded chains are resolved from the summaries, then
+a second pass simulates each function with sites again and classifies them.
+Sites keep the module-wide order of dispatch strength, function and offset.
 
 Each walk that many sites share is done once. A boundary sweep indexes the
 innermost loop and a fixed 32-level ancestor index finds the closest loop
@@ -302,13 +316,16 @@ Each selector query also has a logical step budget of 4096 steps, replayed on
 memo hits so a site's result never depends on query order. It is a semantic
 bound, not a work charge.
 
-JavaScript accepts sources up to 8 MiB. Parser admission pre-charges 64 work
+JavaScript sources of any size are parsed whole, up to the 4 GiB Oxc
+addresses with 32-bit offsets. Parser admission pre-charges 64 work
 units per byte; pipe transfer adds two units per source byte and one per reply byte. The unmodified Oxc parser
 and semantic builder run by re-executing the calling binary (`current_exe`) in
 an internal worker mode. The CLI, backend, API executable and Cargo test harnesses
 share the same entry point; there is no sibling discovery or version-skew path. Its allocator checks every allocation, reallocation overlap and
-32 bytes of per-allocation overhead against 64 MiB + 80 times source bytes,
-bounded to 704 MiB. No worst-case arena is reserved. The arena, semantic vectors,
+32 bytes of per-allocation overhead against the machine ceiling: physical
+memory less a reserve for the rest of the system. A refusal says the machine
+cannot hold the parse, never that the source was judged too large. No
+worst-case arena is reserved. The arena, semantic vectors,
 classifier indexes and serialized reply all count; the measured peak returns to
 the artifact meter. On refusal the allocator writes fixed-size telemetry and
 exits the disposable worker before calling the system allocator. It never
@@ -320,17 +337,18 @@ failure. The CLI exits nonzero; the API returns HTTP 503 with
 `dependency_unavailable`, the counted reason, and a retry instruction. The next
 request retries unchanged inputs. A successful earlier document remains intact.
 The wall-clock deadline is only a hang backstop: five minutes plus one minute per
-started MiB, up to thirteen minutes. Deterministic work and allocation meters
-still own resource refusal. The worker starts with an empty environment (only
+started MiB, far past any real parse. The analysis is shared by every reader of
+one store, so no single request cancels it, and a parser that never returns
+must still end. The allocation ceiling still owns resource refusal. The worker starts with an empty environment (only
 test-entry flags in libtest), closes descriptors beyond its three pipes, and
 refuses startup if its network containment cannot be installed. macOS also denies
 file reads and writes after startup; Linux denies network socket operations.
 Source and compact results travel through bounded anonymous pipes, never disk.
-Only compact site/proof records survive under the separate 128 MiB retained cap.
-A parser reservation cannot consume that cap. Reserved 32 MiB recursive stacks
+Only compact site/proof records return to the caller. Reserved 32 MiB recursive stacks
 (64 MiB for deep syntax) are not charged as retained heap. Peak RSS includes
 resident stack pages, allocator slack, both processes and unchanged recovery;
-the measured 8 MiB target is approximately 1 GiB or less on a local workstation.
+an 18 MB bundle beside a 29 MB module with 840,000 dispatch sites classifies in
+about 9 s at 560 MB peak RSS on a local workstation.
 
 An iterative lexical guard refuses more than 8192 nested delimiters or operators
 in one expression. Delimiter scopes and sibling expression boundaries reset the

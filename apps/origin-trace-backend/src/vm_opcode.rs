@@ -4625,10 +4625,11 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         );
     }
 
-    /// Review regression: classifier work is bounded per region and per
-    /// artifact, and hitting the bound is a visible omission.
+    /// Every site is classified: the former 4096-site cap and artifact
+    /// budget are gone, and a work bound is only reached when a caller sets
+    /// one (`meter_exhaustion_stops_and_counts_every_site`).
     #[test]
-    fn javascript_classification_work_is_bounded_and_reported() {
+    fn javascript_classification_classifies_every_site() {
         let body = (0..8000)
             .map(|i| format!("var v{i}=1;t[v{i}](x);"))
             .collect::<String>();
@@ -4638,17 +4639,10 @@ if (!validate(document)) throw new Error('Backend workspace rejected by shipped 
         assert!(
             omissions
                 .iter()
-                .any(|omission| omission["reason"] == "classification-work-limit"),
+                .all(|omission| omission["reason"] != "classification-work-limit"),
             "{omissions:?}"
         );
-        let unclassified = omissions
-            .iter()
-            .filter_map(|omission| omission["omitted_records"].as_u64())
-            .sum::<u64>();
-        assert_eq!(
-            classification["site_count"].as_u64().unwrap() + unclassified,
-            8000
-        );
+        assert_eq!(classification["site_count"], 8000);
     }
 
     /// Fourth review: exhausting the artifact meter stops classification

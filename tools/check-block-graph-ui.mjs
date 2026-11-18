@@ -231,8 +231,9 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   assert(/:is\(#source-window, #source-search-status\) \{ display: none/.test(css), 'text-window rows are hidden while Graph is active');
   assert(/BLOCK_GRAPH_ROW_ZOOM/.test(view) && /drawScreenLabels/.test(view), 'below row zoom, cards keep screen-size labels');
   assert(!/--graph-edge-[a-z-]+: var\(--accent\)/.test(css) && /--graph-selection: var\(--accent\)/.test(css), 'the selection owns the accent; no edge kind is drawn in it');
-  const container = css.indexOf('@container (max-height: 280px)');
-  for (const base of ['.block-graph-minimap {', '.block-graph-minimap-canvas {', '.block-graph-hud {', '@media (max-width: 720px)'])
+  const container = css.indexOf('@container (max-width: 600px) or (max-height: 280px)');
+  assert(container > 0 && !/@media \(max-width/.test(css), 'the stage, not the window, decides the minimap size');
+  for (const base of ['.block-graph-minimap {', '.block-graph-minimap-canvas {', '.block-graph-hud {'])
     assert(container > css.indexOf(base), `the small-stage rules follow ${base}, so they win the cascade`);
   assert(/new Path2D\(\)/.test(view) && /drawOverview/.test(view), 'overview cards and edges are drawn one path per kind');
 }
@@ -607,6 +608,50 @@ globalThis.create = createBlockGraphView;`, context);
     assert(layout.x[block] >= shift.x && layout.x[block] + layout.w[block] <= shift.x + mini.left, `block ${block} opens left of the minimap: ${layout.x[block]}..${layout.x[block] + layout.w[block]} in ${shift.x}..${shift.x + mini.left}`);
   }
   frames = [];
+}
+{
+  // The minimap marks the viewport where one can find it. A screen of a
+  // chain thousands of screens tall gets an outline grown around its centre;
+  // at the chain's ends, and at Fit, the outline stays whole on the minimap.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="host"></div></body></html>');
+  const marks = [];
+  const recording = new Proxy({}, {get: (_, key) => key === 'measureText' ? () => ({width: 6.6}) : () => {}, set: () => true});
+  const outline = new Proxy({}, {get: (_, key) => key === 'strokeRect' ? (...box) => marks.push(box) : () => {}, set: () => true});
+  window.HTMLCanvasElement.prototype.getContext = function getContext() { return this.classList.contains('block-graph-minimap-canvas') ? outline : recording; };
+  const rect = {left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700}, mini = {left: 840, top: 580, width: 150, height: 110, right: 990, bottom: 690};
+  const frames = [];
+  const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}), Path2D: class { rect() {} moveTo() {} lineTo() {} arcTo() {} closePath() {} },
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; }, cancelAnimationFrame: () => {}, devicePixelRatio: 1, console, ResizeObserver: class { observe() {} disconnect() {} }};
+  runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph_layout.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
+globalThis.create = createBlockGraphView;`, context);
+  const host = document.querySelector('#host');
+  host.getBoundingClientRect = () => rect;
+  const view = context.create(host, {runner: {run: async () => null, skip() {}, cancel() {}}});
+  const none = {left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0};
+  for (const element of host.querySelectorAll('*')) element.getBoundingClientRect = () => (element.matches('.block-graph-stage, .block-graph-canvas') ? rect : element.matches('.block-graph-minimap') ? mini : none);
+  view.activate();
+  const count = 3000, edges = Array.from({length: count - 1}, (_, block) => [block, block + 1]);
+  const graph = fixture(count, edges, {title: 'func 0', status: 'decoded', instructions: count, omissions: [], evidence: 'declared',
+    rows: Array.from({length: count}, (_, index) => `${(index * 8).toString(16)} i32.const ${index}\n`).join('')});
+  const layout = {...lay(graph), engine: {name: 'layered'}};
+  view.setResult({graph, starts: layoutModule.rowStarts(graph.rows), layout});
+  const drawn = () => { marks.length = 0; while (frames.length) frames.shift()(); return marks.at(-1); };
+  const scale = Math.min(300 / layout.width, 220 / layout.height), oy = (220 - layout.height * scale) / 2;
+  assert(700 * scale < 1, 'one screen is under a minimap pixel tall');
+  const whole = ([x, y, w, h]) => x >= 1 && y >= 1 && x + w <= 299 + 1e-9 && y + h <= 219 + 1e-9 && w >= 16 && h >= 16;
+  let mark = drawn();
+  assert(mark && whole(mark) && mark[1] === 1 && mark[3] === 16, `the opening screen is marked whole at the top: ${mark}`);
+  view.select(1500); mark = drawn();
+  const middle = oy + (layout.y[1500] + layout.h[1500] / 2) * scale;
+  assert(whole(mark) && mark[3] === 16 && Math.abs(mark[1] + 8 - middle) < 0.5, `a screen midway is marked around its centre ${middle}: ${mark}`);
+  view.select(count - 1); mark = drawn();
+  assert(whole(mark) && mark[1] + mark[3] === 219, `the last screen is marked whole at the bottom: ${mark}`);
+  const canvas = host.querySelector('.block-graph-canvas');
+  canvas.dispatchEvent(Object.assign(new Event('keydown', {bubbles: true, cancelable: true}), {key: '0'})); mark = drawn();
+  const ox = (300 - layout.width * scale) / 2, holds = ([x, y, w, h]) => x <= ox && x + w >= ox + layout.width * scale && y <= Math.max(1, oy) && y + h >= Math.min(219, oy + layout.height * scale);
+  assert(whole(mark) && holds(mark), `the outline at Fit holds the whole drawing and stays on the minimap: ${mark}`);
 }
 {
   // The flow graph over a realm past the size Triskel runs on unasked: a call

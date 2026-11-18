@@ -2483,7 +2483,10 @@ entry block and the successors on its first screen centered in the part of the
 stage the minimap leaves clear (the entry alone when they are wider, the whole
 graph when it fits), and **Fit** or `0` shows all of it in the part the
 minimap and the status line leave clear, the overview cue included when the
-fit is below row zoom. Zoom goes out as far as Fit needs, at any size. Edges
+fit is below row zoom. The minimap is smaller on a stage under 600 px wide or
+280 px high, whatever the window's size, and its outline of the view never
+shrinks below about 8 px, so one screen of a long function is still marked.
+Zoom goes out as far as Fit needs, at any size. Edges
 are added to the drawing only where they cross the view, so a long dashed
 edge costs its visible length, and each dash keeps its place along the whole
 edge as the view pans. Below the zoom where

@@ -133,12 +133,8 @@
 #vm-static-workspace .vm-static-toolbar > button[aria-pressed="true"] { background: var(--vm-selected-bg); color: var(--vm-selected-fg); border-color: var(--vm-selected-line); }
 .source-line[data-graph-reveal="true"] { animation: block-graph-reveal 1.6s ease-out; }
 @keyframes block-graph-reveal { from { background: var(--accent-soft); } to { background: transparent; } }
-@media (max-width: 720px) {
-  .block-graph-minimap { width: 110px; height: 80px; }
-  .block-graph-minimap-canvas { width: 110px; height: 80px; }
-  .block-graph-hud { max-width: calc(100% - 150px); }
-}
-/* Small stages shrink, then drop, the minimap. These follow every base and
-   width rule so they win the cascade. */
-@container (max-height: 280px) { .block-graph-minimap, .block-graph-minimap-canvas { width: 110px; height: 80px; } .block-graph-hud { max-width: calc(100% - 150px); } }
+/* Small stages shrink, then drop, the minimap. The stage measures itself
+   because the sidebar and navigator decide how much of the window it gets.
+   These follow every base rule so they win the cascade. */
+@container (max-width: 600px) or (max-height: 280px) { .block-graph-minimap, .block-graph-minimap-canvas { width: 110px; height: 80px; } .block-graph-hud { max-width: calc(100% - 150px); } }
 @container (max-height: 140px) { .block-graph-minimap { display: none; } .block-graph-hud { max-width: calc(100% - 20px); } }

@@ -14,6 +14,10 @@ const BLOCK_GRAPH_OVERVIEW_ZOOM = 0.18;
 const BLOCK_GRAPH_CACHE_BYTES = 16 * 1024 * 1024;
 /* The backing store is the view's one allocation that scales with window size. */
 const BLOCK_GRAPH_CANVAS_BYTES = 32 * 1024 * 1024;
+/* The smallest viewport outline on the minimap, in its 300 by 220 backing
+ * pixels: about 8 CSS px at its full size, so a screen of a graph thousands
+ * of screens tall is still marked where one can see it. */
+const BLOCK_GRAPH_MINIMAP_MARK = 16;
 /* The flow graph's zoom range. The block graph zooms out as far as Fit needs. */
 const GRAPH_ZOOM = Object.freeze({min: 0.02, max: 2.5});
 /* Kinds whose label says what the stroke cannot (a case list, why a target is
@@ -610,10 +614,19 @@ function createBlockGraphView(root, options = {}) {
     }
     if (miniImage) miniCtx.putImageData(miniImage, 0, 0);
     miniCtx.strokeStyle = tokens.selection; miniCtx.lineWidth = 2;
-    // The viewport can be larger than the whole graph; keep its outline on the minimap.
-    const left = Math.max(1, ox + view.x * scale), top = Math.max(1, oy + view.y * scale);
-    const right = Math.min(w - 1, ox + (view.x + cssW / view.z) * scale), bottom = Math.min(h - 1, oy + (view.y + cssH / view.z) * scale);
-    miniCtx.strokeRect(left, top, Math.max(3, right - left), Math.max(3, bottom - top));
+    const [left, width] = minimapSpan(ox + view.x * scale, cssW / view.z * scale, w);
+    const [top, height] = minimapSpan(oy + view.y * scale, cssH / view.z * scale, h);
+    miniCtx.strokeRect(left, top, width, height);
+  }
+  /** One axis of the viewport outline on the minimap, in its pixels. A view
+   * of a sliver of a long graph is grown around its centre to a size one can
+   * find, and a view past an edge, or larger than the whole graph, stays on
+   * the minimap. */
+  function minimapSpan(start, size, limit) {
+    const grow = Math.max(0, BLOCK_GRAPH_MINIMAP_MARK - size);
+    const lo = Math.max(1, start - grow / 2), hi = Math.min(limit - 1, start - grow / 2 + size + grow);
+    if (hi - lo >= BLOCK_GRAPH_MINIMAP_MARK) return [lo, hi - lo];
+    return [lo === 1 ? 1 : limit - 1 - BLOCK_GRAPH_MINIMAP_MARK, BLOCK_GRAPH_MINIMAP_MARK];
   }
   function setState(kind, message = '', canRetry = false) {
     stateBox.hidden = kind === 'ready';

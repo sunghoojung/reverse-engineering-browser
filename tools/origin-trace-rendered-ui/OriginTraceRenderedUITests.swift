@@ -185,6 +185,17 @@ final class Harness {
     try await settle()
   }
 
+  // Opens another loopback UI in this window, such as the large Flow
+  // fixture's own backend, and waits for its document.
+  func load(_ url: URL) async throws {
+    _ = try await webView.callAsyncJavaScript("window.__rebOutgoingDocument = true; return true;", contentWorld: .page)
+    webView.load(URLRequest(url: url))
+    try await waitUntil(
+      "window.__rebOutgoingDocument === undefined && document.readyState === 'complete' && typeof state === 'object'",
+      timeout: 120, "the UI at \(url.absoluteString) did not load")
+    try await settle()
+  }
+
   // Reveal just this target and wait for scrolling to settle. A smaller display
   // can clamp the window, so nearby headings and rows need separate reveals.
   @discardableResult
@@ -2283,6 +2294,106 @@ final class OriginTraceRenderedUITests: XCTestCase {
         "metadata-only cookies state did not render")
       try await ui.click("#inspector-tab-general")
     }
+  }
+
+  // The Graph pane draws the session's stacks from paged answers and keeps
+  // its words whole: the heading's title, count and state, and the footer's
+  // stack count, are never cut. A card lights its stacks once they are read,
+  // V draws their lineage alone, Fit reaches the whole session, and Details
+  // lists every caller and callee. With REB_RENDERED_UI_FLOW_STORES the same
+  // pane also opens that large session from its own backend.
+  @MainActor
+  func test45FlowGraphPane() async throws {
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      try await show(ui, "backtrace")
+      try await flowGraphPane(ui, size.name, ready: 60)
+    }
+    guard let large = ProcessInfo.processInfo.environment["REB_RENDERED_UI_FLOW_URL"].flatMap(URL.init(string:)) else { return }
+    let ui = try await prepare(windowSizes[0])
+    let harnessPage = try XCTUnwrap(ui.webView.url)
+    try await ui.load(large)
+    try await ui.activate()
+    // A lag monitor from the first frame: the longest the page went without
+    // running a task while the pane read, folded and drew the session.
+    _ = try await ui.value("""
+      (() => { window.__rebFlowLag = {max: 0, started: performance.now()}; let last = performance.now();
+        const tick = () => { const now = performance.now(); window.__rebFlowLag.max = Math.max(window.__rebFlowLag.max, now - last); last = now; window.__rebFlowLag.timer = setTimeout(tick, 16); };
+        tick(); return true; })()
+      """)
+    try await show(ui, "backtrace")
+    try await flowGraphPane(ui, "large", ready: 1800)
+    let lag = try await ui.json("({max: Math.round(window.__rebFlowLag.max), seconds: Math.round(performance.now() - window.__rebFlowLag.started) / 1000})")
+    print("RENDERED_UI_FLOW large session: longest task gap \(lag["max"] ?? "?") ms over \(lag["seconds"] ?? "?") s")
+    try await ui.load(harnessPage)
+  }
+
+  @MainActor
+  private func flowGraphPane(_ ui: Harness, _ name: String, ready: TimeInterval) async throws {
+    // One pane at a time in a narrow window: the Graph is the first.
+    if try await ui.value("document.querySelector('#flow-pane-graph').dataset.shown !== 'true'") as? Bool == true {
+      try await ui.click("#flow-tab-graph")
+    }
+    let started = Date()
+    try await ui.waitUntil("document.querySelector('#flow-graph-host .flow-graph')?.dataset.state === 'ready'", timeout: ready,
+      "\(name): the Graph pane did not draw")
+    print(String(format: "RENDERED_UI_FLOW %@: drawn in %.1f s", name, Date().timeIntervalSince(started)))
+    // Every part of the heading shows its whole text, whatever the tools take.
+    let heading = try await ui.json("""
+      (() => { const graph = document.querySelector('#flow-graph-host .flow-graph'), parts = [...graph.querySelectorAll('.flow-graph-heading > *')];
+        const tools = graph.querySelector('.flow-graph-tools').getBoundingClientRect(), box = graph.querySelector('.flow-graph-heading').getBoundingClientRect();
+        return {cut: parts.filter(part => part.textContent && part.scrollWidth > part.clientWidth + 0.5).map(part => part.textContent),
+          text: parts.map(part => part.textContent).join(' '), overlap: !(tools.top >= box.bottom || tools.left >= box.right)}; })()
+      """)
+    XCTAssertEqual(heading["cut"] as? [String], [], "\(name): the heading is cut: \(heading)")
+    XCTAssertEqual(heading["overlap"] as? Bool, false, "\(name): the tools cover the heading: \(heading)")
+    XCTAssertTrue((heading["text"] as? String ?? "").contains("stack"), "\(name): the heading names the stacks: \(heading)")
+    // An empty timeline is a strip, never a dock of empty space.
+    let dock = try await ui.json("""
+      ({state: document.querySelector('#flow-timeline').dataset.state ?? '', height: document.querySelector('#flow-pane-timeline').getBoundingClientRect().height,
+        shown: document.querySelector('#flow-pane-timeline').dataset.shown})
+      """)
+    if ["idle", "empty"].contains(dock["state"] as? String ?? ""), dock["shown"] as? String == "true" {
+      XCTAssertLessThanOrEqual(dock["height"] as? Double ?? 999, 34, "\(name): an empty timeline keeps only its head: \(dock)")
+    }
+    // A card from the keyboard: its stacks are read on demand, and the
+    // footer's count stays whole however long the name.
+    _ = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-canvas').focus({focusVisible: true})")
+    try await ui.key(124, "\u{F703}", modifiers: [.function, .numericPad])
+    try await ui.waitUntil("/\\d+ stacks?$/.test(document.querySelector('#flow-graph-host .flow-graph-selection-count')?.textContent ?? '')", timeout: 60,
+      "\(name): the selected card's stacks were not read")
+    let footer = try await ui.json("""
+      (() => { const line = document.querySelector('#flow-graph-host .flow-graph-selection').getBoundingClientRect(),
+        count = document.querySelector('#flow-graph-host .flow-graph-selection-count').getBoundingClientRect();
+        return {inside: count.left >= line.left - 0.5 && count.right <= line.right + 0.5 && count.width > 0, title: document.querySelector('#flow-graph-host .flow-graph-selection').title}; })()
+      """)
+    XCTAssertEqual(footer["inside"] as? Bool, true, "\(name): the stack count is cut from the footer: \(footer)")
+    try await ui.screenshot("flow-graph-selected-\(name)")
+    // V draws the lit stacks alone, left to right, and V again returns.
+    try await ui.key(9, "v")
+    try await ui.waitUntil("document.querySelector('#flow-graph-host .flow-graph').hasAttribute('data-lineage') && document.querySelector('#flow-graph-host .flow-graph-engine').textContent.startsWith('Lineage')",
+      timeout: 60, "\(name): V did not draw the lineage")
+    try await ui.screenshot("flow-graph-lineage-\(name)")
+    try await ui.key(9, "v")
+    try await ui.waitUntil("!document.querySelector('#flow-graph-host .flow-graph').hasAttribute('data-lineage')", "\(name): V again did not return to the session")
+    // Details lists every caller and callee; nothing is counted as more.
+    try await ui.key(34, "i")
+    try await ui.waitUntil("!document.querySelector('#flow-graph-host .flow-graph-inspector').hidden", "\(name): I did not open Details")
+    let details = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-inspector').innerText") as? String ?? ""
+    XCTAssertNil(details.range(of: #"\b\d[\d,]* more\b"#, options: .regularExpression), "\(name): Details counts entries it does not list: \(details)")
+    try await assertLayout(ui, "#flow-graph-host .flow-graph-inspector", "\(name) Graph details")
+    try await ui.screenshot("flow-graph-details-\(name)")
+    _ = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-canvas').focus({focusVisible: true})")
+    try await ui.key(53, "\u{1B}")
+    try await ui.key(53, "\u{1B}")
+    // Fit shows the whole session: below the box zoom, one block per realm.
+    try await ui.key(29, "0")
+    try await ui.settle()
+    let zoom = try await ui.value("document.querySelector('#flow-graph-host .flow-graph-zoom').textContent") as? String ?? ""
+    print("RENDERED_UI_FLOW \(name): Fit at \(zoom)")
+    try await ui.screenshot("flow-graph-fit-\(name)")
+    try await lightScreenshot(ui, "flow-graph-fit", name, scope: "#flow-pane-graph")
+    try await assertInert(ui, "\(name) flow graph")
   }
 
   @MainActor

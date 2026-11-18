@@ -147,7 +147,9 @@ sink also emit `request_target` children (path and query, 116-byte prefix plus
 original length) for starts and redirects and hand longer targets and at most
 16 MiB of in-memory body bytes to `NativeArtifactCaptureSink::CaptureRequestContent`
 as sensitive `request_target` and `request_body` artifacts, copied and hashed
-off the UI sequence within a per-session byte budget. Brave patch
+off the UI sequence. No session byte budget applies; the receiver's disk
+reserve refuses what would fill the store's volume, and that refusal is its own
+state. Brave patch
 `0019-tee-native-request-bodies` hands bodies with file, blob or stream parts to
 `browser/native_request_body_reader.cc`, which reads them on a background
 sequence (a stream part through a forwarding tee getter) and records them when
@@ -266,8 +268,8 @@ or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
 do not enter the renderer event ring. Other response bodies need request
 content capture: `browser/native_response_body_capture.cc` takes them from the
 same tee, joins each to its loader completion, retains it as a sensitive
-`response_body` artifact deduplicated by SHA-256 within a per-session byte
-budget, and writes a `response_body` record (type 33) for every outcome, from
+`response_body` artifact deduplicated by SHA-256, and writes a
+`response_body` record (type 33) for every outcome, from
 `common/native_network_response_body.h`. See
 [Native network v3](../../../../../../protocol/native-network-v3.md) and
 [`SAFETY.md`](../../../../../../SAFETY.md).

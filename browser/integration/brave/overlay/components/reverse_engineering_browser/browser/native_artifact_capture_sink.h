@@ -62,7 +62,6 @@ struct NativeRequestContent final {
 enum class NativeRequestContentAdmission : std::uint8_t {
   kQueued,
   kUnavailable,
-  kSessionBudget,
   kRefused,
 };
 
@@ -100,7 +99,6 @@ class NativeArtifactCaptureSink final {
                   std::uint64_t session_id,
                   std::uint64_t category_mask,
                   std::uint64_t expires_at_monotonic_ns,
-                  std::uint64_t request_content_budget = kNativeRequestContentDefaultBudgetBytes,
                   const NativeResponseBodyPolicy& response_bodies = {}) noexcept;
 
   [[nodiscard]] mojo::ScopedDataPipeConsumerHandle MaybeCaptureResponse(
@@ -234,9 +232,11 @@ class NativeArtifactCaptureSink final {
     bool shared_block = false;
     std::function<void()> on_refused = {};
     // A request body still being read: no record exists yet to parent a loss
-    // to, so a report sets read_lost and OnRequestBodyRead records it.
+    // to, so a report sets read_lost and OnRequestBodyRead records it, naming
+    // a disk reserve refusal (read_status) as its own state.
     bool read_open = false;
     bool read_lost = false;
+    NativeArtifactReceiveStatus read_status = NativeArtifactReceiveStatus::kAccepted;
     // Physical dispatch observations that share this module artifact.
     std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations = {};
   };
@@ -341,10 +341,8 @@ class NativeArtifactCaptureSink final {
   void OnRequestBodyRead(std::uint64_t generation,
                          std::uint64_t request_id,
                          std::uint64_t frame_id,
-                         std::size_t allowance,
                          NativeRequestBodyRecorder record,
                          NativeRequestBodyReadResult result);
-  void RefundRequestContent(std::size_t bytes) noexcept;
   void OnTransferCompleted(std::uint64_t artifact_id, NativeArtifactReceiveStatus status) noexcept;
   void EmitResult(NativeProbeType type,
                   std::uint64_t artifact_id,
@@ -367,9 +365,6 @@ class NativeArtifactCaptureSink final {
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<std::uint64_t> next_artifact_id_{1};
   NativeArtifactMemoryPool memory_pool_{kNativeArtifactInFlightBytes};
-  std::uint64_t request_content_budget_ = 0;
-  std::uint64_t request_content_used_ = 0;
-  std::set<std::array<std::uint8_t, 32>> request_content_digests_;
   std::atomic<std::size_t> runtime_typed_array_count_{0};
   std::map<std::uint64_t, PendingContext> pending_;
   std::map<std::uint64_t, ResponseStream> response_streams_;

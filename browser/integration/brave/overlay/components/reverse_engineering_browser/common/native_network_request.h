@@ -54,11 +54,6 @@ inline constexpr std::size_t kNativeRequestBodyCaptureBytes = 16U * 1024U * 1024
 // Bounds the synchronous UI-thread digest. Larger in-memory bodies are marked
 // instead of hashed; their artifact digest is computed off the UI thread.
 inline constexpr std::size_t kNativeRequestBodyDigestBytes = 4U * 1024U * 1024U;
-// Unique body and full-target bytes per session (--reb-request-content-budget-bytes).
-inline constexpr std::uint64_t kNativeRequestContentDefaultBudgetBytes = 256ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t kNativeRequestContentMinBudgetBytes = 1ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t kNativeRequestContentMaxBudgetBytes =
-    4ULL * 1024ULL * 1024ULL * 1024ULL;
 
 enum class NativeRequestBodyKind : std::uint8_t {
   kNone = 0,
@@ -80,10 +75,13 @@ enum class NativeRequestBodyState : std::uint8_t {
   kNotCapturedArtifactUnavailable = 7,
   kNotCapturedTransferRefused = 8,
   kNotCapturedUrl = 9,
+  // Retired: older sessions' request content budget. Never emitted.
   kNotCapturedSessionBudget = 10,
   kNotCapturedCredentialForm = 11,
   // native-network-v3.md: a file, blob or stream part could not be read whole.
   kNotCapturedReadIncomplete = 12,
+  // native-network-v3.md: the receiver's disk reserve refused a read body.
+  kNotCapturedDiskReserve = 13,
 };
 
 inline constexpr std::uint8_t kNativeRequestBodyContentCapture = 1U << 0U;
@@ -121,6 +119,7 @@ enum class NativeRequestTargetRetention : std::uint8_t {
   kRetained = 1,
   kNotRetainedArtifactUnavailable = 2,
   kNotRetainedTransferRefused = 3,
+  // Retired: older sessions' request content budget. Never emitted.
   kNotRetainedSessionBudget = 4,
   kNotRetainedUrl = 5,
 };

@@ -285,13 +285,13 @@ void CheckBodyStates() {
        Summary(K::kBytes, S::kNotCapturedArtifactUnavailable, true, 10), 0},
       {"transfer refused", Summary(K::kBytes, S::kNotCapturedTransferRefused, true, 10), 0},
       {"unsupported URL", Summary(K::kBytes, S::kNotCapturedUrl, true, 10), 0},
-      {"session budget", Summary(K::kBytes, S::kNotCapturedSessionBudget, true, 10), 0},
+      {"older session budget", Summary(K::kBytes, S::kNotCapturedSessionBudget, true, 10), 0},
       {"credential form, metadata", Summary(K::kBytes, S::kNotCapturedCredentialForm, false, 40),
        0},
       {"credential form, content", Summary(K::kBytes, S::kNotCapturedCredentialForm, true, 40), 0},
       {"file body unavailable before read",
        Summary(K::kFile, S::kNotCapturedArtifactUnavailable, true, 0), 0},
-      {"stream body past budget before read",
+      {"stream body past an older budget before read",
        Summary(K::kChunkedDataPipe, S::kNotCapturedSessionBudget, true, 0), 0},
       {"multipart body refused before read",
        Summary(K::kMixed, S::kNotCapturedTransferRefused, true, 120), 0},
@@ -301,7 +301,9 @@ void CheckBodyStates() {
       {"read empty blob", Read(K::kDataPipe, S::kEmpty, 0), 0},
       {"read file past 16 MiB",
        Read(K::kFile, S::kCapturedTruncated, (16ULL << 20) + 9, 16ULL << 20), 906},
-      {"read stopped by the budget", Read(K::kDataPipe, S::kNotCapturedSessionBudget, 70000), 0},
+      {"read stopped by an older budget", Read(K::kDataPipe, S::kNotCapturedSessionBudget, 70000),
+       0},
+      {"read refused by the disk reserve", Read(K::kFile, S::kNotCapturedDiskReserve, 65536), 0},
       {"read refused by the pool", Read(K::kChunkedDataPipe, S::kNotCapturedTransferRefused, 12),
        0},
       {"read incomplete", Read(K::kFile, S::kNotCapturedReadIncomplete, 0), 0},
@@ -332,7 +334,11 @@ void CheckBodyStates() {
       {"reserved bytes", captured, 901, payload(28, std::byte{1})},
       {"unknown kind", captured, 901, payload(4, std::byte{7})},
       {"zero state", captured, 901, payload(5, std::byte{0})},
-      {"unknown state", captured, 901, payload(5, std::byte{13})},
+      {"unknown state", captured, 901, payload(5, std::byte{14})},
+      {"disk reserve without read flag",
+       Summary(K::kFile, S::kNotCapturedDiskReserve, true, 0),
+       0,
+       {}},
       {"unknown flag", captured, 901, payload(6, std::byte{0x80 | 0x13})},
       {"read flag on in-memory bytes", captured, 901, [](auto& s, auto&) { s.flags |= 0x40; }},
       {"read flag on an unknown element",
@@ -985,7 +991,7 @@ void CheckArtifacts() {
   std::filesystem::remove_all(root, ignored);
   {
     reb::ArtifactReceiver refusing(root / "refusing",
-                                   {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22});
+                                   {.max_artifact_bytes = 1U << 20});
     std::istringstream stream(Frame(header, url, mime, content));
     Check(refusing.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled,
           "default receiver refuses request bodies");
@@ -993,7 +999,7 @@ void CheckArtifacts() {
   {
     reb::ArtifactReceiver receiver(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
     std::istringstream stream(Frame(header, url, mime, content));
     Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
           "receiver started with --allow-sensitive keeps request bodies: " + receiver.LastError());
@@ -1009,7 +1015,7 @@ void CheckArtifacts() {
     // Reopening validates every retained manifest line again.
     reb::ArtifactReceiver reopened(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
     std::istringstream duplicate(Frame(header, url, mime, content));
     Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
           "reopened store accepted the request body manifest line and kept its identity");
@@ -1033,7 +1039,7 @@ void CheckArtifacts() {
     Check(!reb::IsValidArtifactHeader(other), "header block artifact keeps the request origin");
     reb::ArtifactReceiver receiver(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
     std::istringstream stream(Frame(block, url, "text/plain", text));
     Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
           "receiver keeps header blocks: " + receiver.LastError());
@@ -1041,7 +1047,7 @@ void CheckArtifacts() {
   {
     reb::ArtifactReceiver reopened(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
     std::istringstream duplicate(Frame(block, url, "text/plain", text));
     Check(reopened.ReceiveOne(duplicate) == reb::ArtifactReceiveStatus::kConflict,
           "reopened store accepted the header block manifest lines");
@@ -1063,7 +1069,7 @@ void CheckArtifacts() {
     Check(!reb::IsValidArtifactHeader(plain), "cookie list artifact must be sensitive");
     reb::ArtifactReceiver receiver(
         root / "allowed",
-        {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22, .allow_sensitive = true});
+        {.max_artifact_bytes = 1U << 20, .allow_sensitive = true});
     std::istringstream stream(
         Frame(list, url, "application/x-reb-cookie-list",
               std::string("RBCK\x01\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00", 16)));
@@ -1085,6 +1091,10 @@ static_assert(reb::kResponseBodyCaptureBytes == reb::kNativeResponseBodyCaptureB
 static_assert(reb::kResponseBodyPayloadVersion == reb::kNativeResponseBodyPayloadVersion);
 static_assert(static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedSessionBudget) ==
               static_cast<std::uint8_t>(reb::NativeResponseBodyState::kNotCapturedSessionBudget));
+static_assert(static_cast<std::uint8_t>(reb::ResponseBodyState::kNotCapturedDiskReserve) ==
+              static_cast<std::uint8_t>(reb::NativeResponseBodyState::kNotCapturedDiskReserve));
+static_assert(static_cast<std::uint8_t>(reb::RequestBodyState::kNotCapturedDiskReserve) ==
+              static_cast<std::uint8_t>(reb::NativeRequestBodyState::kNotCapturedDiskReserve));
 static_assert(static_cast<std::uint8_t>(reb::ResponseBodyState::kPartial) ==
               static_cast<std::uint8_t>(reb::NativeResponseBodyState::kPartial));
 static_assert(reb::kResponseBodyContentTypePresent == reb::kNativeResponseBodyContentTypePresent);
@@ -1214,7 +1224,8 @@ void CheckResponseBodies() {
       {"response type skipped", ResponseSummary(S::kNotCapturedType, 0), 0},
       {"response artifact unavailable", ResponseSummary(S::kNotCapturedArtifactUnavailable, 77), 0},
       {"response transfer refused", ResponseSummary(S::kNotCapturedTransferRefused, 0), 0},
-      {"response session budget", ResponseSummary(S::kNotCapturedSessionBudget, 4096), 0},
+      {"response older session budget", ResponseSummary(S::kNotCapturedSessionBudget, 4096), 0},
+      {"response disk reserve", ResponseSummary(S::kNotCapturedDiskReserve, 4096), 0},
       {"response partial with snapshots withheld", withheld, 919},
       {"response refused with snapshots withheld", withheld_end, 0},
   };
@@ -1256,7 +1267,7 @@ void CheckResponseBodies() {
        }},
       {"response reserved", captured, 911, byte(30, std::byte{1})},
       {"response state 0", captured, 911, byte(4, std::byte{0})},
-      {"response state 13", refused, 0, byte(4, std::byte{13})},
+      {"response state 14", refused, 0, byte(4, std::byte{14})},
       {"response captured without artifact", captured, 0, {}},
       {"response artifact without bytes", refused, 911, {}},
       {"response digest without bytes", refused, 0,

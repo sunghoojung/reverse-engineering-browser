@@ -220,7 +220,6 @@ struct NativeRequestContent final {
 enum class NativeRequestContentAdmission : std::uint8_t {
   kQueued,
   kUnavailable,
-  kSessionBudget,
   kRefused,
 };
 struct NativeRequestBodyReadOutcome final {
@@ -257,7 +256,7 @@ class NativeRequestBodyReader {
   }
 };
 // Records what the network sink hands to the artifact channel; the real
-// artifact sink, its budget and pool, and the receiver run in
+// artifact sink, its pool, and the receiver run in
 // tools/check-native-artifact-capture.py.
 class NativeArtifactCaptureSink {
  public:

@@ -34,15 +34,10 @@ inline constexpr std::uint64_t kNativeResponseBodyCaptureBytes = kNativeArtifact
 // each later one at least a 32nd of the body's age after the one before.
 inline constexpr std::uint64_t kNativeResponseBodySnapshotFirstNs = 1'000'000'000;
 inline constexpr std::uint64_t kNativeResponseBodySnapshotAgeDivisor = 32;
-// One body's snapshots copy at most an eighth of the session budget, and all of a
-// session's snapshots at most a quarter, so whole bodies keep three quarters.
-inline constexpr std::uint64_t kNativeResponseBodySnapshotBodyDivisor = 8;
-inline constexpr std::uint64_t kNativeResponseBodySnapshotSessionDivisor = 4;
-// Unique response bytes per session (--reb-response-body-budget-bytes).
-inline constexpr std::uint64_t kNativeResponseBodyDefaultBudgetBytes = 512ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t kNativeResponseBodyMinBudgetBytes = 1ULL * 1024ULL * 1024ULL;
-inline constexpr std::uint64_t kNativeResponseBodyMaxBudgetBytes =
-    16ULL * 1024ULL * 1024ULL * 1024ULL;
+// One body's snapshots copy at most four times the capture limit, 64 MiB: a
+// body never costs the disk more than that in copies on top of its own bytes.
+inline constexpr std::uint64_t kNativeResponseBodySnapshotBodyBytes =
+    4 * kNativeResponseBodyCaptureBytes;
 
 enum class NativeResponseBodyState : std::uint8_t {
   kCaptured = 1,
@@ -56,7 +51,10 @@ enum class NativeResponseBodyState : std::uint8_t {
   kNotCapturedType = 9,
   kNotCapturedArtifactUnavailable = 10,
   kNotCapturedTransferRefused = 11,
+  // Retired: older sessions' response body budget. Never emitted.
   kNotCapturedSessionBudget = 12,
+  // The receiver's disk reserve refused the body while it arrived.
+  kNotCapturedDiskReserve = 13,
 };
 
 enum class NativeResponseCoding : std::uint8_t {
@@ -78,8 +76,9 @@ inline constexpr std::uint8_t kNativeResponseBodyStillEncoded = 1U << 3U;
 inline constexpr std::uint8_t kNativeResponseBodyCodingsOmitted = 1U << 4U;
 inline constexpr std::uint8_t kNativeResponseBodyCompletionUnobserved = 1U << 5U;
 inline constexpr std::uint8_t kNativeResponseBodyContentTypePresent = 1U << 6U;
-// A snapshot the spacing allowed was withheld by a byte bound; every later
-// record of the body carries it ("Partial bodies" in native-network-v3.md).
+// A snapshot the spacing allowed was withheld by the body's snapshot allowance;
+// every later record of the body carries it ("Partial bodies" in
+// native-network-v3.md).
 inline constexpr std::uint8_t kNativeResponseBodySnapshotsWithheld = 1U << 7U;
 
 struct NativeResponseBodyPolicy final {
@@ -87,7 +86,6 @@ struct NativeResponseBodyPolicy final {
   bool enabled = false;
   // Element-loaded images, audio, video and fonts (--reb-capture-response-media).
   bool media = false;
-  std::uint64_t budget = kNativeResponseBodyDefaultBudgetBytes;
 };
 
 struct NativeResponseBodySummary final {

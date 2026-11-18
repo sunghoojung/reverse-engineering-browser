@@ -208,8 +208,6 @@ NativeRequestTargetRetention RetentionOf(const NativeRequestContentAdmission adm
       return NativeRequestTargetRetention::kRetained;
     case NativeRequestContentAdmission::kUnavailable:
       return NativeRequestTargetRetention::kNotRetainedArtifactUnavailable;
-    case NativeRequestContentAdmission::kSessionBudget:
-      return NativeRequestTargetRetention::kNotRetainedSessionBudget;
     case NativeRequestContentAdmission::kRefused:
       return NativeRequestTargetRetention::kNotRetainedTransferRefused;
   }
@@ -788,9 +786,6 @@ void NativeNetworkCaptureSink::EmitRequestBody(const NativeProbeEmitter emitter,
         case NativeRequestContentAdmission::kUnavailable:
           summary.state = NativeRequestBodyState::kNotCapturedArtifactUnavailable;
           break;
-        case NativeRequestContentAdmission::kSessionBudget:
-          summary.state = NativeRequestBodyState::kNotCapturedSessionBudget;
-          break;
         case NativeRequestContentAdmission::kRefused:
           summary.state = NativeRequestBodyState::kNotCapturedTransferRefused;
           break;
@@ -1017,9 +1012,6 @@ void NativeNetworkCaptureSink::TeeRequestBody(const std::uint64_t request_id,
       return;
     case NativeRequestContentAdmission::kUnavailable:
       EmitDeferredBody(emitter, body, NativeRequestBodyState::kNotCapturedArtifactUnavailable);
-      return;
-    case NativeRequestContentAdmission::kSessionBudget:
-      EmitDeferredBody(emitter, body, NativeRequestBodyState::kNotCapturedSessionBudget);
       return;
     case NativeRequestContentAdmission::kRefused:
       EmitDeferredBody(emitter, body, NativeRequestBodyState::kNotCapturedTransferRefused);

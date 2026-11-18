@@ -108,7 +108,7 @@ bool IsValidAck(const NativeArtifactAck& ack,
          std::ranges::all_of(ack.reserved1,
                              [](const std::byte value) { return value == std::byte{0}; }) &&
          ack.status >= NativeArtifactReceiveStatus::kAccepted &&
-         ack.status <= NativeArtifactReceiveStatus::kIoError;
+         ack.status <= NativeArtifactReceiveStatus::kDiskReserve;
 }
 
 // The receiver never writes unprompted, so a readable idle connection means it

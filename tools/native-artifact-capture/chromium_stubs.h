@@ -438,15 +438,10 @@ class NativeArtifactBodyTee {
   static inline std::map<int, Pending> pending;
 };
 // Scripted parts stand in for file reads, blob getters and the stream tee; the
-// real stream, budget allowance and sink outcome classification run.
+// real stream and sink outcome classification run.
 struct NativeRequestBodyReadResult final {
   NativeArtifactStream stream;
-  enum class End : std::uint8_t {
-    kComplete,
-    kIncomplete,
-    kBudget,
-    kRefused
-  } end = End::kIncomplete;
+  enum class End : std::uint8_t { kComplete, kIncomplete, kRefused } end = End::kIncomplete;
   std::uint64_t body_length = 0;
 };
 using NativeRequestBodyReadEnd = NativeRequestBodyReadResult::End;
@@ -474,19 +469,16 @@ class NativeRequestBodyReader {
     }
     return readable;
   }
-  static bool Start(network::ResourceRequestBody&,
-                    NativeArtifactStream stream,
-                    std::size_t allowance,
-                    Done done) {
+  static bool Start(network::ResourceRequestBody&, NativeArtifactStream stream, Done done) {
     if (refuse) {
       return false;
     }
-    reads.push_back({std::move(stream), allowance, std::move(done)});
+    reads.push_back({std::move(stream), std::move(done)});
     return true;
   }
-  // Feeds `bytes` as PartsReader does: aligned chunks, stopping at the
-  // allowance and at the 16 MiB cap, so the stream never sees a byte past the
-  // prefix. Ends the read with `end` and the parts' total length.
+  // Feeds `bytes` as PartsReader does: aligned chunks, stopping at the 16 MiB
+  // cap, so the stream never sees a byte past the prefix. Ends the read with
+  // `end` and the parts' total length.
   static void Finish(std::size_t index,
                      std::span<const std::uint8_t> bytes,
                      NativeRequestBodyReadEnd end,
@@ -496,22 +488,13 @@ class NativeRequestBodyReader {
     for (std::size_t offset = 0; offset < bytes.size() && read.stream.is_open() &&
                                  read.stream.kept() < kNativeArtifactMaxContentBytes;
          offset += kChunk) {
-      const auto chunk = bytes.subspan(offset, std::min(kChunk, bytes.size() - offset));
-      const auto keeps = std::min<std::uint64_t>(
-          chunk.size(), kNativeArtifactMaxContentBytes - read.stream.kept());
-      if (read.allowance < kNativeArtifactMaxContentBytes &&
-          read.stream.kept() + keeps > read.allowance) {
-        end = NativeRequestBodyReadEnd::kBudget;
-        break;
-      }
-      read.stream.Append(chunk);
+      read.stream.Append(bytes.subspan(offset, std::min(kChunk, bytes.size() - offset)));
     }
     std::move(read.done).Run(NativeRequestBodyReadResult{
         .stream = std::move(read.stream), .end = end, .body_length = body_length});
   }
   struct Read {
     NativeArtifactStream stream;
-    std::size_t allowance = 0;
     Done done;
   };
   static inline bool refuse = false;

@@ -61,15 +61,6 @@ void Reply(const scoped_refptr<base::SequencedTaskRunner>& reply,
                                                                  .body_length = body_length}));
 }
 
-// Whether `bytes` more may be kept within the read's budget allowance. The
-// 16 MiB artifact cap is the stream's own prefix limit, not a budget.
-bool WithinAllowance(const NativeArtifactStream& stream,
-                     const std::size_t allowance,
-                     const std::size_t bytes) {
-  const std::uint64_t kept = std::min<std::uint64_t>(bytes, kLimit - stream.kept());
-  return allowance >= kLimit || stream.kept() + kept <= allowance;
-}
-
 struct Part final {
   enum class Kind : std::uint8_t { kBytes, kFile, kDataPipe };
   Kind kind = Kind::kBytes;
@@ -88,13 +79,11 @@ class PartsReader final {
   PartsReader(scoped_refptr<network::ResourceRequestBody> body,
               std::vector<Part> parts,
               NativeArtifactStream stream,
-              const std::size_t allowance,
               scoped_refptr<base::SequencedTaskRunner> reply,
               Done done)
       : body_(std::move(body)),
         parts_(std::move(parts)),
         stream_(std::move(stream)),
-        allowance_(allowance),
         reply_(std::move(reply)),
         done_(std::move(done)) {}
 
@@ -122,10 +111,6 @@ class PartsReader final {
  private:
   // Offers bytes, retrying a full pool later. False when the read ended.
   bool Offer(std::span<const std::uint8_t> data, std::size_t& taken) {
-    if (!WithinAllowance(stream_, allowance_, data.size())) {
-      Finish(NativeRequestBodyReadEnd::kBudget);
-      return false;
-    }
     taken = stream_.Offer(data);
     if (!stream_.is_open()) {
       Finish(NativeRequestBodyReadEnd::kIncomplete);
@@ -346,7 +331,6 @@ class PartsReader final {
   scoped_refptr<network::ResourceRequestBody> body_;
   std::vector<Part> parts_;
   NativeArtifactStream stream_;
-  std::size_t allowance_ = 0;
   scoped_refptr<base::SequencedTaskRunner> reply_;
   Done done_;
   std::size_t index_ = 0;
@@ -382,12 +366,10 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
  public:
   ChunkedTee(mojo::PendingRemote<network::mojom::ChunkedDataPipeGetter> original,
              NativeArtifactStream stream,
-             const std::size_t allowance,
              scoped_refptr<base::SequencedTaskRunner> reply,
              Done done)
       : pending_original_(std::move(original)),
         stream_(std::move(stream)),
-        allowance_(allowance),
         reply_(std::move(reply)),
         done_(std::move(done)) {}
   ~ChunkedTee() override {
@@ -448,10 +430,6 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
     if (!done_) {
       return;
     }
-    if (!WithinAllowance(stream_, allowance_, chunk.size())) {
-      Finish(NativeRequestBodyReadEnd::kBudget);
-      return;
-    }
     // The upload cannot wait, so a full pool ends the read.
     stream_.Append(chunk);
     if (!stream_.is_open()) {
@@ -489,7 +467,6 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
   mojo::PendingRemote<network::mojom::ChunkedDataPipeGetter> pending_original_;
   mojo::Remote<network::mojom::ChunkedDataPipeGetter> original_;
   NativeArtifactStream stream_;
-  std::size_t allowance_ = 0;
   scoped_refptr<base::SequencedTaskRunner> reply_;
   Done done_;
   bool started_ = false;
@@ -549,7 +526,6 @@ bool NativeRequestBodyReader::MayReadFiles(const network::ResourceRequestBody& b
 
 bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
                                     NativeArtifactStream stream,
-                                    const std::size_t allowance,
                                     Done done) {
   if (!CanRead(body) || !base::SequencedTaskRunner::HasCurrentDefault()) {
     return false;
@@ -578,7 +554,7 @@ bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
               mojo::MakeSelfOwnedReceiver(std::move(impl), std::move(receiver));
             },
             std::make_unique<ChunkedTee>(chunked.ReleaseChunkedDataPipeGetter(), std::move(stream),
-                                         allowance, std::move(reply), std::move(done)),
+                                         std::move(reply), std::move(done)),
             std::move(receiver))));
     elements[0] =
         network::DataElement(network::DataElementChunkedDataPipe(std::move(tee), read_only_once));
@@ -604,13 +580,13 @@ bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
   return runner->PostTask(
       FROM_HERE, base::BindOnce(
                      [](scoped_refptr<network::ResourceRequestBody> body, std::vector<Part> parts,
-                        NativeArtifactStream stream, std::size_t allowance,
+                        NativeArtifactStream stream,
                         scoped_refptr<base::SequencedTaskRunner> reply, Done done) {
                        (new PartsReader(std::move(body), std::move(parts), std::move(stream),
-                                        allowance, std::move(reply), std::move(done)))
+                                        std::move(reply), std::move(done)))
                            ->Next();
                      },
-                     base::WrapRefCounted(&body), std::move(parts), std::move(stream), allowance,
+                     base::WrapRefCounted(&body), std::move(parts), std::move(stream),
                      std::move(reply), std::move(done)));
 }
 

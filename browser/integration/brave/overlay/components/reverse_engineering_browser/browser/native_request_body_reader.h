@@ -23,8 +23,6 @@ enum class NativeRequestBodyReadEnd : std::uint8_t {
   kComplete,
   // A part failed or changed, the upload was cancelled, or capture ended.
   kIncomplete,
-  // The kept bytes reached the allowance the session budget gave the read.
-  kBudget,
   // The in-flight pool stayed full.
   kRefused,
 };
@@ -57,7 +55,6 @@ class NativeRequestBodyReader final {
   // when no background sequence is available.
   [[nodiscard]] static bool Start(network::ResourceRequestBody& body,
                                   NativeArtifactStream stream,
-                                  std::size_t allowance,
                                   Done done);
 };
 

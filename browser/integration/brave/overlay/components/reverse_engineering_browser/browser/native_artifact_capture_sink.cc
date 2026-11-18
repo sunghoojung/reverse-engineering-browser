@@ -47,8 +47,6 @@ bool SameEventBytes(const NativeProbeEvent& left, const NativeProbeEvent& right)
 }
 
 constexpr std::size_t kMaxArtifactBytes = kNativeArtifactMaxContentBytes;
-// Bounds the dedupe set; past it, identical content is charged again.
-constexpr std::size_t kRequestContentDigestLimit = 16'384;
 constexpr std::size_t kRuntimeTypedArrayMinBytes = 32;
 constexpr std::size_t kRuntimeTypedArrayMaxSnapshots = 16;
 constexpr std::uint64_t kExpiryFlushLeadNs = 250'000'000;
@@ -97,6 +95,8 @@ std::string StatusName(const NativeArtifactReceiveStatus status) {
       return "conflict";
     case NativeArtifactReceiveStatus::kIoError:
       return "io_error";
+    case NativeArtifactReceiveStatus::kDiskReserve:
+      return "disk_reserve";
   }
   return "unknown";
 }
@@ -133,7 +133,6 @@ void NativeArtifactCaptureSink::SetEmitter(
     const std::uint64_t session_id,
     const std::uint64_t category_mask,
     const std::uint64_t expires_at_monotonic_ns,
-    const std::uint64_t request_content_budget,
     const NativeResponseBodyPolicy& response_bodies) noexcept {
   // The ending configuration's unresolved records become gaps while its
   // session can still record them.
@@ -168,9 +167,6 @@ void NativeArtifactCaptureSink::SetEmitter(
   wasm_execution_count_ = 0;
   runtime_typed_array_count_.store(0, std::memory_order_relaxed);
   allocating_scripts_.clear();
-  request_content_budget_ = emitter ? request_content_budget : 0;
-  request_content_used_ = 0;
-  request_content_digests_.clear();
   emitter_.store(emitter, std::memory_order_release);
   NativeResponseBodyCapture::Get().Configure(emitter, session_id, category_mask,
                                              expires_at_monotonic_ns, response_bodies);
@@ -383,10 +379,6 @@ NativeRequestContentAdmission NativeArtifactCaptureSink::CaptureRequestContent(
       content.mime_type.size() > kNativeArtifactMaxMimeTypeBytes) {
     return NativeRequestContentAdmission::kRefused;
   }
-  if (content.size >
-      request_content_budget_ - std::min(request_content_budget_, request_content_used_)) {
-    return NativeRequestContentAdmission::kSessionBudget;
-  }
   auto context = std::make_unique<CaptureContext>();
   context->header.kind = content.kind;
   context->header.flags |= kNativeArtifactFlagSensitive;
@@ -424,7 +416,6 @@ NativeRequestContentAdmission NativeArtifactCaptureSink::CaptureRequestContent(
     pending_.erase(id);
     return NativeRequestContentAdmission::kRefused;
   }
-  request_content_used_ += content.size;
   artifact_id = id;
   return NativeRequestContentAdmission::kQueued;
 }
@@ -463,7 +454,6 @@ void NativeArtifactCaptureSink::OnRequestContentCopied(std::unique_ptr<CaptureCo
     // The stream was refused or lost during the copy, and that report already
     // emitted the failure parented to this record.
     stream.Abort();
-    RefundRequestContent(size);
     return;
   }
   const char* failure = stream.state() == NativeArtifactStreamState::kMemoryLimit
@@ -472,24 +462,14 @@ void NativeArtifactCaptureSink::OnRequestContentCopied(std::unique_ptr<CaptureCo
                         : stream.kept() != size ? "request_content_changed"
                         : !IsEnabled()          ? "session_inactive"
                                                 : nullptr;
-  const std::array<std::uint8_t, 32> digest = stream.Digest();
-  // The receiver stores one blob per digest, so a repeat costs no budget.
-  const bool charged = !request_content_digests_.contains(digest);
   if (!failure && !stream.End()) {
     failure = "transfer_queue_full_or_disconnected";
   }
   if (failure) {
     stream.Abort();
     pending_.erase(artifact_id);
-    RefundRequestContent(size);
     EmitResult(NativeProbeType::kArtifactCaptureFailed, artifact_id, context->request_id,
                context->frame_id, failure, NativeProbeCategory::kArtifact, creator);
-    return;
-  }
-  if (!charged) {
-    RefundRequestContent(size);
-  } else if (request_content_digests_.size() < kRequestContentDigestLimit) {
-    request_content_digests_.insert(digest);
   }
 }
 
@@ -507,15 +487,6 @@ NativeRequestContentAdmission NativeArtifactCaptureSink::ReadRequestBody(
       mime_type.empty() || mime_type.size() > kNativeArtifactMaxMimeTypeBytes) {
     return NativeRequestContentAdmission::kRefused;
   }
-  const std::uint64_t remaining =
-      request_content_budget_ - std::min(request_content_budget_, request_content_used_);
-  if (remaining == 0) {
-    return NativeRequestContentAdmission::kSessionBudget;
-  }
-  // Charged now and settled when the read ends, so parallel reads cannot
-  // together pass the budget.
-  const auto allowance =
-      static_cast<std::size_t>(std::min<std::uint64_t>(remaining, kMaxArtifactBytes));
   NativeArtifactHeader header;
   header.kind = NativeArtifactKind::kRequestBody;
   header.flags = kNativeArtifactFlagSensitive;
@@ -538,20 +509,18 @@ NativeRequestContentAdmission NativeArtifactCaptureSink::ReadRequestBody(
                                                       .generation = generation,
                                                       .read_open = true});
   if (!NativeRequestBodyReader::Start(
-          *request.request_body, std::move(stream), allowance,
+          *request.request_body, std::move(stream),
           base::BindOnce(&NativeArtifactCaptureSink::OnRequestBodyRead, base::Unretained(this),
-                         generation, request_id, frame_id, allowance, std::move(record)))) {
+                         generation, request_id, frame_id, std::move(record)))) {
     pending_.erase(header.artifact_id);
     return NativeRequestContentAdmission::kRefused;
   }
-  request_content_used_ += allowance;
   return NativeRequestContentAdmission::kQueued;
 }
 
 void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation,
                                                   const std::uint64_t request_id,
                                                   const std::uint64_t frame_id,
-                                                  const std::size_t allowance,
                                                   NativeRequestBodyRecorder record,
                                                   NativeRequestBodyReadResult result) {
   if (generation != generation_.load(std::memory_order_acquire)) {
@@ -564,8 +533,9 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
   NativeRequestBodyReadOutcome outcome;
   outcome.body_length = std::max(result.body_length, stream.observed());
   const bool complete = result.end == NativeRequestBodyReadEnd::kComplete && stream.is_open();
-  if (result.end == NativeRequestBodyReadEnd::kBudget) {
-    outcome.state = NativeRequestBodyState::kNotCapturedSessionBudget;
+  if (lost && open != pending_.end() &&
+      open->second.read_status == NativeArtifactReceiveStatus::kDiskReserve) {
+    outcome.state = NativeRequestBodyState::kNotCapturedDiskReserve;
   } else if (lost || result.end == NativeRequestBodyReadEnd::kRefused ||
              stream.state() == NativeArtifactStreamState::kMemoryLimit ||
              stream.state() == NativeArtifactStreamState::kRefused) {
@@ -586,12 +556,6 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
     if (!truncated) {
       outcome.sha256 = stream.Digest();
     }
-  }
-  const std::array<std::uint8_t, 32> digest = stream.Digest();
-  const bool charged = outcome.artifact_id != 0 && !request_content_digests_.contains(digest);
-  RefundRequestContent(allowance - (charged ? static_cast<std::size_t>(stream.kept()) : 0));
-  if (charged && request_content_digests_.size() < kRequestContentDigestLimit) {
-    request_content_digests_.insert(digest);
   }
   const std::uint64_t artifact_id = outcome.artifact_id;
   if (artifact_id == 0) {
@@ -617,10 +581,6 @@ void NativeArtifactCaptureSink::OnRequestBodyRead(const std::uint64_t generation
   // The end frame is queued: from here a report is an ACK for this record.
   open->second.parent_event_id = creator;
   open->second.read_open = false;
-}
-
-void NativeArtifactCaptureSink::RefundRequestContent(const std::size_t bytes) noexcept {
-  request_content_used_ -= std::min<std::uint64_t>(request_content_used_, bytes);
 }
 
 void NativeArtifactCaptureSink::CaptureRuntimeTypedArray(const int renderer_process_id,
@@ -1655,7 +1615,7 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   // A refusal while a tee still runs ends that stream here.
   response_streams_.erase(artifact_id);
   if (status != NativeArtifactReceiveStatus::kAccepted &&
-      NativeResponseBodyCapture::Get().OnStreamRefused(artifact_id)) {
+      NativeResponseBodyCapture::Get().OnStreamRefused(artifact_id, status)) {
     return;
   }
   const auto found = pending_.find(artifact_id);
@@ -1665,6 +1625,7 @@ void NativeArtifactCaptureSink::OnTransferCompleted(
   if (found->second.read_open) {
     // No record exists yet; OnRequestBodyRead names the loss in it.
     found->second.read_lost = true;
+    found->second.read_status = status;
     return;
   }
   const PendingContext context = found->second;

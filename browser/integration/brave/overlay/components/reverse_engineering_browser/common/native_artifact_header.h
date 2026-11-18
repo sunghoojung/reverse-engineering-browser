@@ -93,6 +93,8 @@ enum class NativeArtifactReceiveStatus : std::uint32_t {
   kSensitiveCaptureDisabled = 4,
   kConflict = 5,
   kIoError = 6,
+  // The store's volume would keep less free space than the receiver's reserve.
+  kDiskReserve = 7,
 };
 
 struct NativeArtifactAck final {

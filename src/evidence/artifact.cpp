@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -694,8 +695,7 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
 ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
                                    ArtifactReceiverLimits limits)
     : store_directory_(std::move(store_directory)), limits_(limits) {
-  if (limits_.max_artifact_bytes == 0 || limits_.max_store_bytes == 0 ||
-      limits_.max_artifact_bytes > limits_.max_store_bytes || limits_.max_artifacts == 0 ||
+  if (limits_.max_artifact_bytes == 0 || limits_.max_artifacts == 0 ||
       limits_.max_manifest_bytes == 0) {
     throw std::invalid_argument("Artifact receiver limits are invalid");
   }
@@ -752,8 +752,8 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
     stored_bytes_ += static_cast<std::uint64_t>(metadata.st_size);
   }
   closedir(entries);
-  if (!valid_blobs || stored_bytes_ > limits_.max_store_bytes) {
-    throw std::runtime_error("Existing artifact blobs are unsafe or exceed the store limit");
+  if (!valid_blobs) {
+    throw std::runtime_error("Existing artifact blobs are unsafe");
   }
   struct stat metadata {};
   if (fstatat(directory, "manifest.jsonl", &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
@@ -893,10 +893,9 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveWhole(std::istream& stream,
     return RejectFrame(stream, metadata_size, 0, ArtifactReceiveStatus::kTooLarge,
                        "Too many open artifact streams");
   }
-  if (header.content_size > limits_.max_artifact_bytes ||
-      header.content_size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
+  if (header.content_size > limits_.max_artifact_bytes) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact exceeds a configured byte limit");
+                       "Artifact exceeds the configured artifact byte limit");
   }
   if ((header.flags & kArtifactFlagSensitive) != 0 && !limits_.allow_sensitive) {
     return RejectFrame(stream, metadata_size, header.content_size,
@@ -906,6 +905,11 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveWhole(std::istream& stream,
   if (artifact_ids_.contains(header.artifact_id) || streams_.contains(header.artifact_id)) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kConflict,
                        "Artifact identifier already exists");
+  }
+  // An open header declares no size; its data frames are checked as they come.
+  ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
+  if (const char* const why = DiskReserveRefusal(header.content_size, refusal)) {
+    return RejectFrame(stream, metadata_size, header.content_size, refusal, why);
   }
 
   std::string url(header.url_size, '\0');
@@ -1042,11 +1046,15 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
                                                      : End(frame.artifact_id, frame);
   }
   if (frame.data_size >
-          limits_.max_artifact_bytes - std::min(limits_.max_artifact_bytes, open.size) ||
-      frame.data_size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
+      limits_.max_artifact_bytes - std::min(limits_.max_artifact_bytes, open.size)) {
     DropStream(frame.artifact_id);
     return RejectFrame(stream, 0, frame.data_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact stream exceeds a configured byte limit");
+                       "Artifact stream exceeds the configured artifact byte limit");
+  }
+  ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
+  if (const char* const why = DiskReserveRefusal(frame.data_size, refusal)) {
+    DropStream(frame.artifact_id);
+    return RejectFrame(stream, 0, frame.data_size, refusal, why);
   }
   std::array<std::uint8_t, kMaxArtifactStreamChunkBytes> buffer{};
   stream.read(reinterpret_cast<char*>(buffer.data()),
@@ -1072,7 +1080,6 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
   }
   open.sha256.Update(buffer.data(), frame.data_size);
   open.size += frame.data_size;
-  streaming_bytes_ += frame.data_size;
   return ArtifactReceiveStatus::kAccepted;
 }
 
@@ -1085,10 +1092,14 @@ ArtifactReceiveStatus ArtifactReceiver::Checkpoint(Stream& open, const ArtifactS
   if (artifact_ids_.contains(snapshot_id) || streams_.contains(snapshot_id)) {
     return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");
   }
-  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts ||
-      open.size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
+  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts) {
     return Reject(ArtifactReceiveStatus::kTooLarge,
-                  "Artifact checkpoint exceeds a configured limit");
+                  "Artifact checkpoint exceeds the artifact count limit");
+  }
+  // The copy writes every byte the stream holds; the stream stays open.
+  ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
+  if (const char* const why = DiskReserveRefusal(open.size, refusal)) {
+    return Reject(refusal, why);
   }
   Sha256 prefix = open.sha256;
   const std::array<std::uint8_t, 32> digest = prefix.Final();
@@ -1155,7 +1166,6 @@ ArtifactReceiveStatus ArtifactReceiver::End(const std::uint64_t artifact_id,
   }
   const std::unique_ptr<Stream> ended = std::move(found->second);
   streams_.erase(found);
-  streaming_bytes_ -= ended->size;
   return Publish(header, ended->url, ended->mime_type, ended->temporary_name, digest);
 }
 
@@ -1166,7 +1176,6 @@ void ArtifactReceiver::DropStream(const std::uint64_t artifact_id) noexcept {
   }
   static_cast<void>(
       unlinkat(evidence_guard_.Directory(), found->second->temporary_name.c_str(), 0));
-  streaming_bytes_ -= found->second->size;
   streams_.erase(found);
 }
 
@@ -1291,6 +1300,30 @@ ArtifactReceiveStatus ArtifactReceiver::Publish(const ArtifactHeader& header,
   return ArtifactReceiveStatus::kAccepted;
 }
 
+const char* ArtifactReceiver::DiskReserveRefusal(const std::uint64_t bytes,
+                                                 ArtifactReceiveStatus& status) const noexcept {
+  // Read at every admission rather than cached: fstatvfs costs well under a
+  // microsecond, about 1% of hashing and writing one 64 KiB frame, and each
+  // reading also counts what other writers on the volume used since the last.
+  struct statvfs volume {};
+  if (fstatvfs(evidence_guard_.Directory(), &volume) != 0) {
+    status = ArtifactReceiveStatus::kIoError;
+    return "Unable to read the free space of the artifact store's volume";
+  }
+  // Blocks available to this user, so a root-only reserve never counts.
+  const std::uint64_t blocks = volume.f_bavail;
+  const std::uint64_t block_size = volume.f_frsize;
+  constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
+  const std::uint64_t available =
+      block_size != 0 && blocks > kMax / block_size ? kMax : blocks * block_size;
+  if (available >= limits_.disk_reserve_bytes &&
+      bytes <= available - limits_.disk_reserve_bytes) {
+    return nullptr;
+  }
+  status = ArtifactReceiveStatus::kDiskReserve;
+  return "Artifact would leave less free space on the store's volume than its reserve";
+}
+
 ArtifactReceiverStats ArtifactReceiver::Stats() const noexcept {
   return stats_;
 }
@@ -1345,6 +1378,9 @@ ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus statu
       break;
     case ArtifactReceiveStatus::kIoError:
       SaturatingAdd(stats_.io_errors, 1);
+      break;
+    case ArtifactReceiveStatus::kDiskReserve:
+      SaturatingAdd(stats_.disk_reserve, 1);
       break;
     case ArtifactReceiveStatus::kAccepted:
     case ArtifactReceiveStatus::kEndOfStream:

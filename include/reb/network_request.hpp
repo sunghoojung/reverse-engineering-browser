@@ -41,9 +41,12 @@ enum class RequestBodyState : std::uint8_t {
   kNotCapturedArtifactUnavailable = 7,
   kNotCapturedTransferRefused = 8,
   kNotCapturedUrl = 9,
+  // Older sessions only: the per-session request content budget was used.
   kNotCapturedSessionBudget = 10,
   kNotCapturedCredentialForm = 11,
   kNotCapturedReadIncomplete = 12,
+  // native-network-v3.md: the receiver's disk reserve refused a read body.
+  kNotCapturedDiskReserve = 13,
 };
 
 inline constexpr std::uint8_t kRequestBodyContentCapture = 1U << 0U;
@@ -61,6 +64,7 @@ enum class RequestTargetRetention : std::uint8_t {
   kRetained = 1,
   kNotRetainedArtifactUnavailable = 2,
   kNotRetainedTransferRefused = 3,
+  // Older sessions only: the per-session request content budget was used.
   kNotRetainedSessionBudget = 4,
   kNotRetainedUrl = 5,
 };
@@ -208,7 +212,7 @@ namespace request_detail {
   if (value.protocol_version != kRequestPayloadVersion || value.payload_size != 128 ||
       value.reserved0 != 0 || value.kind > static_cast<std::uint8_t>(RequestBodyKind::kUnknown) ||
       value.state < static_cast<std::uint8_t>(kNoBody) ||
-      value.state > static_cast<std::uint8_t>(kNotCapturedReadIncomplete) ||
+      value.state > static_cast<std::uint8_t>(kNotCapturedDiskReserve) ||
       (value.flags & ~kRequestBodyKnownFlags) != 0 ||
       value.content_type_length > kRequestContentTypeBytes || (type_present && type_omitted) ||
       type_present != (value.content_type_length != 0) ||
@@ -246,12 +250,15 @@ namespace request_detail {
       case kNotCapturedTransferRefused:
       case kNotCapturedSessionBudget:
       case kNotCapturedReadIncomplete:
+      case kNotCapturedDiskReserve:
         return !digest && !size_limit;
       default:
         return false;
     }
   }
-  if (state == kNotCapturedReadIncomplete) {
+  // Only a read learns of these before its record: an unread body's refusal
+  // follows its record as artifact_capture_failed.
+  if (state == kNotCapturedReadIncomplete || state == kNotCapturedDiskReserve) {
     return false;
   }
   if ((digest && (!bytes || size_limit || value.body_length > kRequestBodyDigestBytes)) ||
@@ -293,6 +300,7 @@ namespace request_detail {
       // A body with file, blob or stream parts is refused before any read.
       return content && ((bytes && value.body_length != 0) || readable);
     case kNotCapturedReadIncomplete:
+    case kNotCapturedDiskReserve:
       return false;
   }
   return false;

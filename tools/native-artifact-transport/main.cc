@@ -191,8 +191,10 @@ std::size_t CountOf(const std::string& text, const std::string& needle) {
 pid_t SpawnReceiver(const std::string& binary,
                     const std::string& root,
                     const std::string& socket_path,
-                    const std::string& log_path) {
-  const std::string store = root + "/artifacts";
+                    const std::string& log_path,
+                    const std::string& store_name = "artifacts",
+                    const std::vector<std::string>& extra = {}) {
+  const std::string store = root + "/" + store_name;
   const std::string token = root + "/token";
   std::vector<std::string> arguments = {binary,
                                         "--store",
@@ -204,9 +206,8 @@ pid_t SpawnReceiver(const std::string& binary,
                                         "--session-id",
                                         std::to_string(kSessionId),
                                         "--max-artifact-bytes",
-                                        "65536",
-                                        "--max-store-bytes",
-                                        "1048576"};
+                                        "65536"};
+  arguments.insert(arguments.end(), extra.begin(), extra.end());
   std::vector<char*> argv;
   for (std::string& argument : arguments) {
     argv.push_back(argument.data());
@@ -410,6 +411,47 @@ void CheckProductionReceiver(const std::string& receiver, const std::string& roo
   Require(g_channel_lost == 1 && Completions().empty(), "loss announced exactly once");
   std::cout << "PASS artifact writer: a vanished receiver reports queued transfers, retries within "
                "a bounded budget, announces the loss once and refuses later transfers\n";
+}
+
+// A receiver whose disk reserve exceeds the volume's free space refuses every
+// artifact with status 7. The writer reports that status, once per artifact,
+// on the same connection, as it does any other refusal.
+void CheckDiskReserve(const std::string& receiver, const std::string& root) {
+  const std::string socket_path = root + "/reserve.sock";
+  const std::string log_path = root + "/reserve.log";
+  // 1 EiB, more than any volume has free.
+  const pid_t pid = SpawnReceiver(receiver, root, socket_path, log_path, "reserve-artifacts",
+                                  {"--disk-reserve-bytes", "1152921504606846976"});
+  Require(CountOf(ReadFile(log_path), "disk reserve 1152921504606846976 bytes") == 1,
+          "the receiver names its disk reserve at start");
+  ConfigureArtifactSwitches(socket_path, root + "/token");
+  const int lost_before = g_channel_lost;
+  auto& client = reb::NativeArtifactSocketClient::Get();
+  Require(client.StartFromCommandLine(
+              kSessionId, &reb::NativeArtifactCaptureSink::TransferCompleted, &ChannelLost),
+          "start against a receiver past its disk reserve");
+  using Op = reb::NativeArtifactStreamOp;
+  Require(Enqueue(MakeTransfer(40, 12)) &&
+              StatusOf(40) == NativeArtifactReceiveStatus::kDiskReserve,
+          "a whole artifact past the reserve reports disk_reserve");
+  Require(Enqueue(OpenStream(41)) && Enqueue(StreamFrame(Op::kData, 41, 100)) &&
+              Enqueue(StreamFrame(Op::kEnd, 41, 0, 100)) && Enqueue(MakeTransfer(42, 4)) &&
+              StatusOf(42) == NativeArtifactReceiveStatus::kDiskReserve &&
+              StatusOf(41) == NativeArtifactReceiveStatus::kDiskReserve && !Reported(41),
+          "a stream past the reserve reports disk_reserve once and drops its later frames");
+  Require(client.state() == NativeArtifactChannelState::kConnected &&
+              g_channel_lost == lost_before &&
+              CountOf(ReadFile(log_path), "accepted authenticated connection") == 1,
+          "disk reserve refusals keep the channel and its connection");
+  Require(WaitFor([] { return g_pool.used() == 0; }), "refused transfers return their pool share");
+  StopArtifactClient();
+  StopReceiver(pid);
+  Require(CountOf(ReadFile(log_path), "disk_reserve=3 ") == 1 &&
+              CountOf(ReadFile(log_path), "accepted=0 ") == 1,
+          "the receiver counted every disk reserve refusal");
+  Require(g_channel_lost == lost_before, "a stopped client after refusals announces no loss");
+  std::cout << "PASS artifact writer: disk reserve refusals reported with status 7 on one "
+               "connection; a refused stream is reported once\n";
 }
 
 // An older receiver acknowledges a rejection before reading the body and
@@ -672,6 +714,7 @@ int main(const int argc, char** argv) {
   const std::string root = argv[2];
   WriteToken(root + "/token");
   CheckProductionReceiver(receiver, root);
+  CheckDiskReserve(receiver, root);
   CheckOlderReceiver(root);
   CheckStopWhileReconnecting(root);
   CheckRefusedSession(root);

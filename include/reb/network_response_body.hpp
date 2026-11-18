@@ -28,7 +28,10 @@ enum class ResponseBodyState : std::uint8_t {
   kNotCapturedType = 9,
   kNotCapturedArtifactUnavailable = 10,
   kNotCapturedTransferRefused = 11,
+  // Older sessions only: the per-session response body budget was used.
   kNotCapturedSessionBudget = 12,
+  // The receiver's disk reserve refused the body while it arrived.
+  kNotCapturedDiskReserve = 13,
 };
 
 inline constexpr std::uint8_t kResponseBodyShared = 1U << 0U;
@@ -39,7 +42,8 @@ inline constexpr std::uint8_t kResponseBodyCodingsOmitted = 1U << 4U;
 inline constexpr std::uint8_t kResponseBodyCompletionUnobserved = 1U << 5U;
 inline constexpr std::uint8_t kResponseBodyContentTypePresent = 1U << 6U;
 // Version 2: a snapshot the schedule's spacing allowed was withheld by a byte
-// bound (the body's allowance, the session's snapshot share or the budget).
+// bound: the body's snapshot allowance, or in older sessions the session's
+// snapshot share or response body budget.
 inline constexpr std::uint8_t kResponseBodySnapshotsWithheld = 1U << 7U;
 inline constexpr std::uint8_t kResponseBodyKnownFlags = 0x7FU;
 
@@ -113,7 +117,7 @@ static_assert(offsetof(ResponseBodyPayload, content_type) == 64);
   if (value.protocol_version == 0 || value.protocol_version > kResponseBodyPayloadVersion ||
       value.payload_size != 128 || value.reserved0 != 0 ||
       value.state < static_cast<std::uint8_t>(kCaptured) ||
-      value.state > static_cast<std::uint8_t>(kNotCapturedSessionBudget) ||
+      value.state > static_cast<std::uint8_t>(kNotCapturedDiskReserve) ||
       (value.flags & static_cast<std::uint8_t>(~known_flags)) != 0 ||
       value.content_type_length > kRequestContentTypeBytes ||
       type_present != (value.content_type_length != 0) ||
@@ -161,6 +165,7 @@ static_assert(offsetof(ResponseBodyPayload, content_type) == 64);
     case kNotCapturedArtifactUnavailable:
     case kNotCapturedTransferRefused:
     case kNotCapturedSessionBudget:
+    case kNotCapturedDiskReserve:
       return !retained;
   }
   return false;

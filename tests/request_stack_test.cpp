@@ -912,7 +912,7 @@ void CheckStackArtifacts() {
   std::filesystem::remove_all(root, ignored);
   {
     reb::ArtifactReceiver receiver(root,
-                                   {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22});
+                                   {.max_artifact_bytes = 1U << 20});
     std::string frame(reinterpret_cast<const char*>(&artifact), sizeof(artifact));
     std::istringstream stream(frame + url + mime + content);
     Check(receiver.ReceiveOne(stream) == reb::ArtifactReceiveStatus::kAccepted,
@@ -921,7 +921,7 @@ void CheckStackArtifacts() {
   {
     // Reopening validates the stack manifest line again.
     reb::ArtifactReceiver reopened(root,
-                                   {.max_artifact_bytes = 1U << 20, .max_store_bytes = 1U << 22});
+                                   {.max_artifact_bytes = 1U << 20});
     std::ifstream manifest(root / "manifest.jsonl");
     const std::string line{std::istreambuf_iterator<char>(manifest), {}};
     Check(

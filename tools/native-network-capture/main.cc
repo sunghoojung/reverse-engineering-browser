@@ -590,13 +590,31 @@ void RequestContent() {
   kind_case(network::DataElement(), Kind::kUnknown, false);
   kind_case(network::DataElement(network::DataElementFile{}), Kind::kMixed, true);
   assert(artifacts.Count(reb::NativeArtifactKind::kRequestBody) == calls);
+  // A read the disk reserve refused keeps the read flag and a lower-bound length.
+  request.request_body = std::make_shared<network::ResourceRequestBody>();
+  request.request_body->elements_mutable()->emplace_back(network::DataElementFile{});
+  events.clear();
+  artifacts.read_calls.clear();
+  start();
+  sink.TeeRequestBody(172, request);
+  {
+    reb::NativeRequestBodyReadOutcome outcome;
+    outcome.state = reb::NativeRequestBodyState::kNotCapturedDiskReserve;
+    outcome.body_length = 65536;
+    assert(std::move(artifacts.read_calls[0].record).Run(outcome) != 0);
+    const auto& record = Last(reb::NativeProbeType::kRequestBody);
+    const auto value = Body(record);
+    assert(AllValid() && record.header.artifact_id == 0 &&
+           value.state == static_cast<std::uint8_t>(State::kNotCapturedDiskReserve) &&
+           (value.flags & reb::kRequestBodyRead) != 0 &&
+           (value.flags & reb::kRequestBodyLengthPartial) != 0 &&
+           (value.flags & reb::kRequestBodyDigestPresent) == 0 && value.body_length == 65536);
+  }
   // A read the artifact sink refuses at the hook is recorded at once, unread.
   request.request_body = std::make_shared<network::ResourceRequestBody>();
   request.request_body->elements_mutable()->emplace_back(network::DataElementFile{});
   for (const auto& [admission, state] :
-       {std::pair{reb::NativeRequestContentAdmission::kSessionBudget,
-                  State::kNotCapturedSessionBudget},
-        std::pair{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused},
+       {std::pair{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused},
         std::pair{reb::NativeRequestContentAdmission::kUnavailable,
                   State::kNotCapturedArtifactUnavailable}}) {
     artifacts.read_admission = admission;
@@ -654,9 +672,6 @@ void RequestContent() {
   for (const auto& [admission, state, target_retention] :
        {std::tuple{reb::NativeRequestContentAdmission::kRefused, State::kNotCapturedTransferRefused,
                    reb::RequestTargetRetention::kNotRetainedTransferRefused},
-        std::tuple{reb::NativeRequestContentAdmission::kSessionBudget,
-                   State::kNotCapturedSessionBudget,
-                   reb::RequestTargetRetention::kNotRetainedSessionBudget},
         std::tuple{reb::NativeRequestContentAdmission::kUnavailable,
                    State::kNotCapturedArtifactUnavailable,
                    reb::RequestTargetRetention::kNotRetainedArtifactUnavailable}}) {
@@ -771,7 +786,7 @@ void RequestContent() {
   assert(events.empty());
   std::cout << "PASS native request content: metadata-only digest/type/length, content target and "
                "body handoff, truncation, digest bound, file/blob/stream/mixed kinds, credential "
-               "form, unavailable/refused/budget/URL outcomes for bodies and full targets, "
+               "form, unavailable/refused/URL/disk-reserve outcomes for bodies and full targets, "
                "redirect target, redirected and unavailable response bodies, tee parent and "
                "completion hand-off\n";
 }

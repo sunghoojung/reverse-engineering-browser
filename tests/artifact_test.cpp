@@ -1,4 +1,5 @@
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -20,6 +21,10 @@ namespace {
 // The test needs ordering, not durability, so every other call succeeds.
 ino_t g_failing_inode = 0;
 int g_failures_left = 0;
+// What fstatvfs reports for the store's volume, so the disk reserve paths run
+// against known free space: bytes available, or a failed read.
+std::uint64_t g_free_bytes = 1ULL << 40;
+bool g_free_space_fails = false;
 
 int failures = 0;
 
@@ -57,7 +62,6 @@ std::string Frame(const std::uint64_t artifact_id,
 reb::ArtifactReceiverLimits Limits() {
   reb::ArtifactReceiverLimits limits;
   limits.max_artifact_bytes = 1024;
-  limits.max_store_bytes = 1024 * 1024;
   limits.expected_session_id = 7;
   return limits;
 }
@@ -322,8 +326,8 @@ void CheckStreams() {
                ManifestLine(manifest, 31).empty() && ManifestLine(manifest, 32).empty(),
            "refused, mismatched and aborted streams publish nothing and leave no file");
 
-    // A stream counts against the store before it publishes; a closed
-    // connection abandons it.
+    // An open stream holds its file until it publishes; a closed connection
+    // abandons it.
     std::istringstream abandoned(Open(40) + Chunk(Op::kData, 40, std::string(512, 'z')));
     Expect(receiver.ReceiveOne(abandoned) == Status::kAccepted &&
                receiver.ReceiveOne(abandoned) == Status::kAccepted && part(40),
@@ -385,24 +389,47 @@ void CheckStreams() {
                Receive(full, Chunk(Op::kCheckpoint, 72, "", 73, 2)) == Status::kTooLarge,
            "a checkpoint past the artifact count limit is refused");
 
-    // Streaming bytes count against the store before they publish.
-    auto bounded = Limits();
-    bounded.max_artifact_bytes = 1024;
-    bounded.max_store_bytes = 1024;
-    reb::ArtifactReceiver tight(store / "streaming-bytes", bounded);
-    Expect(Receive(tight, Open(74)) == Status::kAccepted &&
-               Receive(tight, Chunk(Op::kData, 74, std::string(600, 'a'))) == Status::kAccepted,
-           "a stream holds 600 of the store's 1024 bytes");
-    Expect(Receive(tight, Chunk(Op::kCheckpoint, 74, "", 75, 600)) == Status::kTooLarge,
-           "a checkpoint needing bytes the open stream already holds is refused");
-    Expect(Receive(tight, Frame(76, std::string(500, 'b'))) == Status::kTooLarge,
-           "a whole frame cannot use bytes an open stream holds");
-    Expect(Receive(tight, Open(77)) == Status::kAccepted &&
-               Receive(tight, Chunk(Op::kData, 77, std::string(500, 'c'))) == Status::kTooLarge,
-           "a second stream cannot use bytes the first holds");
-    Expect(Receive(tight, Chunk(Op::kAbort, 74)) == Status::kAccepted &&
-               Receive(tight, Frame(76, std::string(500, 'b'))) == Status::kAccepted,
-           "an aborted stream returns its bytes");
+    // The store has no byte limit. Each admission reads its volume's free
+    // space and refuses what would leave less than the reserve.
+    constexpr std::uint64_t kFree = 1ULL << 20;
+    auto reserved = Limits();
+    reserved.disk_reserve_bytes = kFree - 1000;
+    g_free_bytes = kFree;
+    const std::filesystem::path reserve_store = store / "disk-reserve";
+    reb::ArtifactReceiver tight(reserve_store, reserved);
+    Expect(Receive(tight, Frame(74, std::string(1000, 'a'))) == Status::kAccepted,
+           "a whole frame that leaves exactly the reserve free is accepted");
+    Expect(Receive(tight, Frame(75, std::string(1001, 'b'))) == Status::kDiskReserve &&
+               tight.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
+               ContainsText(tight.LastError(), "reserve") &&
+               Lines(reserve_store / "manifest.jsonl") == 1,
+           "a whole frame past the reserve is refused at a frame boundary and not recorded");
+    Expect(Receive(tight, Open(76)) == Status::kAccepted &&
+               Receive(tight, Chunk(Op::kData, 76, std::string(600, 'c'))) == Status::kAccepted,
+           "a stream writes while its volume keeps the reserve");
+    g_free_bytes = kFree - 4096;
+    Expect(Receive(tight, Chunk(Op::kCheckpoint, 76, "", 77, 600)) == Status::kDiskReserve &&
+               tight.LastArtifactId() == 77 && tight.OpenStreams() == 1,
+           "a checkpoint copy past the reserve is refused and its stream stays open");
+    Expect(Receive(tight, Open(78)) == Status::kDiskReserve && tight.OpenStreams() == 1,
+           "a stream cannot open while its volume is below the reserve");
+    Expect(Receive(tight, Chunk(Op::kData, 76, "d")) == Status::kDiskReserve &&
+               tight.StreamPosition() == reb::ArtifactStreamPosition::kFrameBoundary &&
+               tight.OpenStreams() == 0 && !std::filesystem::exists(reserve_store / "artifact-76.part"),
+           "a data frame past the reserve drops its stream and its file");
+    g_free_bytes = kFree;
+    Expect(Receive(tight, Open(79)) == Status::kAccepted &&
+               Receive(tight, Chunk(Op::kData, 79, std::string(600, 'e'))) == Status::kAccepted &&
+               Receive(tight, Chunk(Op::kCheckpoint, 79, "", 80, 600)) == Status::kAccepted,
+           "once space returns, streams and checkpoints are accepted again");
+    g_free_space_fails = true;
+    Expect(Receive(tight, Frame(81, "f")) == Status::kIoError &&
+               ContainsText(tight.LastError(), "free space"),
+           "a volume whose free space cannot be read refuses as an I/O error");
+    g_free_space_fails = false;
+    Expect(tight.Stats().disk_reserve == 4 && tight.Stats().too_large == 0,
+           "each reserve refusal is counted as such, never as too large");
+    g_free_bytes = 1ULL << 40;
   }
   {
     // The open-stream cap: the 129th open is refused and the connection stays usable.
@@ -458,6 +485,26 @@ void CheckStreams() {
 }
 
 }  // namespace
+
+// glibc declares fstatvfs noexcept; Apple's SDK does not.
+#if defined(__GLIBC__)
+#define REB_TEST_LIBC_NOEXCEPT noexcept
+#else
+#define REB_TEST_LIBC_NOEXCEPT
+#endif
+
+extern "C" int fstatvfs(const int, struct statvfs* const volume) REB_TEST_LIBC_NOEXCEPT {
+  if (g_free_space_fails) {
+    errno = EIO;
+    return -1;
+  }
+  *volume = {};
+  volume->f_bsize = 4096;
+  volume->f_frsize = 4096;
+  volume->f_bavail = static_cast<fsblkcnt_t>(g_free_bytes / 4096);
+  volume->f_bfree = volume->f_bavail;
+  return 0;
+}
 
 extern "C" int fsync(const int descriptor) {
   struct stat metadata {};

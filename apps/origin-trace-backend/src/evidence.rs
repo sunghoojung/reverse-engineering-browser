@@ -857,10 +857,22 @@ pub(crate) mod frozen {
             }
         }
     }
-    fn entry_matches(directory: &File, name: &CString, stamp: Stamp) -> Result<()> {
+    impl Stamp {
+        /// The object rather than its contents. A directory's size and times
+        /// move whenever an entry is added or removed, as the backend's own
+        /// derived indexes are beside the stores; every file an export reads
+        /// is pinned and verified on its own.
+        fn same_object(&self, other: &Self) -> bool {
+            (self.dev, self.ino) == (other.dev, other.ino)
+        }
+    }
+    fn entry_stamp(directory: &File, name: &CString) -> Result<Stamp> {
         // Opening O_NONBLOCK before checking type cannot hang on a FIFO.
         let entry = open_at(directory, name, libc::O_RDONLY).map_err(|_| changed())?;
-        if Stamp::of(&entry.metadata().map_err(|_| changed())?) != stamp {
+        Ok(Stamp::of(&entry.metadata().map_err(|_| changed())?))
+    }
+    fn entry_matches(directory: &File, name: &CString, stamp: Stamp) -> Result<()> {
+        if entry_stamp(directory, name)? != stamp {
             return Err(changed());
         }
         Ok(())
@@ -930,14 +942,17 @@ pub(crate) mod frozen {
         }
         pub fn verify(&self) -> Result<()> {
             let metadata = self.file.metadata().map_err(|_| changed())?;
-            if !safe(&metadata, true) || Stamp::of(&metadata) != self.stamp {
+            if !safe(&metadata, true) || !Stamp::of(&metadata).same_object(&self.stamp) {
                 return Err(changed());
             }
-            entry_matches(&self.parent, &self.name, self.stamp)?;
+            if !entry_stamp(&self.parent, &self.name)?.same_object(&self.stamp) {
+                return Err(changed());
+            }
             // Detect replacement of the configured root or a configured symlink
             // as well as its anchored entry. No evidence is read through it.
             if let Some(path) = &self.configured
-                && Stamp::of(&std::fs::metadata(path).map_err(|_| changed())?) != self.stamp
+                && !Stamp::of(&std::fs::metadata(path).map_err(|_| changed())?)
+                    .same_object(&self.stamp)
             {
                 return Err(changed());
             }
@@ -1383,6 +1398,34 @@ mod frozen_tests {
                 fs::remove_dir_all(old).unwrap();
             }
         }
+    }
+    #[test]
+    fn frozen_reads_survive_a_derived_index_appearing_beside_the_store() {
+        let root = store();
+        let path = root.path().join("events.jsonl");
+        let (store, basename) = Store::event(&path, false).unwrap();
+        let mut file = store.root.file(&basename, false).unwrap();
+        let mut lines = 0;
+        file.lines(
+            1024,
+            128,
+            20,
+            Instant::now() + Duration::from_secs(5),
+            |_| {
+                // As the backend's index timers do, mid-read.
+                if lines == 0 {
+                    fs::write(root.path().join("events.jsonl.events-v1"), b"index").unwrap();
+                    fs::write(root.path().join("events.jsonl.events-v1-wal"), b"").unwrap();
+                    fs::remove_file(root.path().join("events.jsonl.events-v1-wal")).unwrap();
+                }
+                lines += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(lines, 2);
+        store.verify().unwrap();
+        file.verify().unwrap();
     }
     #[test]
     fn frozen_rows_hashes_and_deadlines_are_bounded() {

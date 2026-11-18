@@ -61,7 +61,7 @@
 use crate::error::{Code, Error, Result, check_cancelled};
 use crate::wasm_stack::{self, Callee, Clause, Control, Effect, Kind, ModuleTypes, Test};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use wasmparser::{
     BlockType, ElementItems, ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef,
 };
@@ -100,63 +100,6 @@ pub fn memory_budget() -> u64 {
     crate::js_worker_alloc::machine_ceiling() / 2
 }
 
-/// What a long analysis is doing, shared with a progress reader: the phase,
-/// and the units of it done out of its total (instructions, bodies or
-/// functions, as the phase names).
-#[derive(Default)]
-pub struct Progress {
-    pub phase: AtomicU8,
-    pub done: AtomicU64,
-    pub total: AtomicU64,
-}
-
-/// The phases [`Progress`] names, in the order a value-flow request meets them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
-pub enum Phase {
-    Read,
-    Simulate,
-    Control,
-    Index,
-    Summaries,
-    Slice,
-}
-
-impl Phase {
-    pub const ALL: [Phase; 6] = [
-        Self::Read,
-        Self::Simulate,
-        Self::Control,
-        Self::Index,
-        Self::Summaries,
-        Self::Slice,
-    ];
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Simulate => "simulate",
-            Self::Control => "control",
-            Self::Index => "index",
-            Self::Summaries => "summaries",
-            Self::Slice => "slice",
-        }
-    }
-}
-
-impl Progress {
-    /// Starts `phase` with `total` units, none done.
-    pub fn start(&self, phase: Phase, total: u64) {
-        self.phase.store(phase as u8, Ordering::Relaxed);
-        self.done.store(0, Ordering::Relaxed);
-        self.total.store(total, Ordering::Relaxed);
-    }
-    pub fn advance(&self, done: u64) {
-        self.done.store(done, Ordering::Relaxed);
-    }
-    pub fn phase(&self) -> Phase {
-        Phase::ALL[usize::from(self.phase.load(Ordering::Relaxed)).min(Phase::ALL.len() - 1)]
-    }
-}
 const MAX_IMPORT_NAME_BYTES: usize = 128;
 
 pub(crate) fn bad(error: wasmparser::BinaryReaderError) -> Error {
@@ -848,7 +791,6 @@ struct Sim<'m, 'a> {
     predicted: u64,
     ticks: u64,
     cancelled: &'m AtomicBool,
-    progress: Option<&'m Progress>,
     /// Set once the request is cancelled inside an instruction; the main loop
     /// then gives up the whole simulation.
     interrupted: bool,
@@ -962,17 +904,16 @@ pub fn simulate(
     body: &FunctionBody<'_>,
     cancelled: &AtomicBool,
 ) -> Result<Simulation> {
-    simulate_with(module, function, body, cancelled, Settings::default(), None)
+    simulate_with(module, function, body, cancelled, Settings::default())
 }
 
-/// [`simulate`] with explicit settings and an optional progress reader.
+/// [`simulate`] with explicit settings.
 pub fn simulate_with(
     module: &Module<'_>,
     function: u32,
     body: &FunctionBody<'_>,
     cancelled: &AtomicBool,
     settings: Settings,
-    progress: Option<&Progress>,
 ) -> Result<Simulation> {
     let type_index = module
         .types
@@ -1040,16 +981,12 @@ pub fn simulate_with(
         predicted: 0,
         ticks: 0,
         cancelled,
-        progress,
         interrupted: false,
         omissions: Vec::new(),
         underflow_noted: false,
     };
     let body_instructions = sim.prescan(function, body)?;
     let mut stopped_at = None;
-    if let Some(progress) = progress {
-        progress.start(Phase::Simulate, u64::from(body_instructions));
-    }
     sim.nodes.reserve(body_instructions as usize);
     sim.instructions.reserve(body_instructions as usize);
     sim.instruction_nodes.reserve(body_instructions as usize);
@@ -1061,9 +998,6 @@ pub fn simulate_with(
         while !reader.eof() {
             if sim.instructions.len() & 1023 == 0 {
                 check_cancelled(cancelled, WHAT)?;
-                if let Some(progress) = progress {
-                    progress.advance(sim.instructions.len() as u64);
-                }
             }
             let (op, offset) = reader.read_with_offset().map_err(bad)?;
             if ended {
@@ -1104,9 +1038,6 @@ pub fn simulate_with(
             }
         }
     }
-    if let Some(progress) = progress {
-        progress.advance(sim.instructions.len() as u64);
-    }
     let mut open_joins = HashSet::new();
     if let Some(stop) = stopped_at {
         for frame in sim.control.iter().filter(|frame| frame.kind == Kind::Loop) {
@@ -1127,9 +1058,6 @@ pub fn simulate_with(
         cells = sim.memory_cells();
     }
     if settings.control {
-        if let Some(progress) = progress {
-            progress.start(Phase::Control, 0);
-        }
         sim.control_edges(body)?;
     }
     if sim.interrupted {
@@ -1231,7 +1159,8 @@ impl Sim<'_, '_> {
             }
             let op = reader.read().map_err(bad)?;
             let effect = wasm_stack::effect(&op);
-            let target = |open: &Vec<Scanned>, depth: u32| open.len().checked_sub(depth as usize + 1);
+            let target =
+                |open: &Vec<Scanned>, depth: u32| open.len().checked_sub(depth as usize + 1);
             match effect {
                 Effect::Open {
                     kind, block_type, ..
@@ -2478,8 +2407,9 @@ impl Sim<'_, '_> {
         Ok(clauses)
     }
 
-    /// A call's arguments (and its callee operand) flow into one call node;
-    /// a tail call pushes nothing, since its results go to the caller.
+    /// A call's arguments (and its callee operand) flow into one call node.
+    /// A tail call returns the callee's results, so its node feeds a `return`
+    /// node at the same instruction instead of pushing them.
     fn call(
         &mut self,
         callee: Callee,
@@ -2496,7 +2426,6 @@ impl Sim<'_, '_> {
                 Callee::Ref { type_index } => format!("call_ref of non-function type {type_index}"),
             }));
         };
-        let pushed = if tail { 0 } else { results };
         let node = match callee {
             Callee::Function(function) => {
                 let args = self.pop_n(params, offset);
@@ -2505,7 +2434,9 @@ impl Sim<'_, '_> {
                 } else {
                     NodeKind::Call
                 };
-                self.consume(kind, index, function, pushed, &args, |_| EdgeKind::Argument)
+                self.consume(kind, index, function, results, &args, |_| {
+                    EdgeKind::Argument
+                })
             }
             Callee::Indirect { type_index, table } => {
                 // The table index is the last operand, after the arguments.
@@ -2515,7 +2446,7 @@ impl Sim<'_, '_> {
                     NodeKind::CallIndirect,
                     index,
                     type_index,
-                    pushed,
+                    results,
                     &args,
                     |operand| {
                         if operand == count {
@@ -2535,7 +2466,7 @@ impl Sim<'_, '_> {
                     NodeKind::CallRef,
                     index,
                     type_index,
-                    pushed,
+                    results,
                     &args,
                     |operand| {
                         if operand == count {
@@ -2548,6 +2479,12 @@ impl Sim<'_, '_> {
             }
         };
         self.nodes[node as usize].results = results as u16;
+        if tail {
+            let values: Vec<Value> = (0..results).map(|result| Value { node, result }).collect();
+            let height = self.stack.len().saturating_sub(results as usize);
+            self.stack.truncate(height);
+            self.returns(offset, index, &values);
+        }
         Ok(())
     }
 
@@ -2904,7 +2841,14 @@ impl Sim<'_, '_> {
             }
             for member in loads {
                 let load = self.accesses[member as usize].node;
-                self.edge(Value::of(node), load, 1, EdgeKind::MemoryMay, Via::None, NONE);
+                self.edge(
+                    Value::of(node),
+                    load,
+                    1,
+                    EdgeKind::MemoryMay,
+                    Via::None,
+                    NONE,
+                );
             }
         }
         cells
@@ -2929,7 +2873,10 @@ impl Sim<'_, '_> {
                 .map_or(simulated.saturating_sub(1), |next| next - 1)
         };
         let instruction_at = |sim: &Self, offset: u32| -> Option<u32> {
-            sim.instructions.binary_search(&offset).ok().map(|i| i as u32)
+            sim.instructions
+                .binary_search(&offset)
+                .ok()
+                .map(|i| i as u32)
         };
         let mut pairs: Vec<(u32, u32)> = Vec::new();
         for position in 0..self.edges.len() {

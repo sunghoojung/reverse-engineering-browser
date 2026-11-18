@@ -634,6 +634,20 @@ impl App {
                 .await?;
             return Ok(axum::Json(document).into_response());
         }
+        if path == "/api/wasm/call-sites" {
+            let request = wasm_value_flow::parse_sites_query(raw_query)?;
+            let id = request
+                .artifact_id
+                .clone()
+                .ok_or_else(|| Error::bad("artifact_id is required"))?;
+            let root = self.options.artifacts.clone();
+            let document = self
+                .cancellable(move |cancelled| {
+                    wasm_value_flow::call_sites(&root, &id, &request, cancelled)
+                })
+                .await?;
+            return Ok(axum::Json(document).into_response());
+        }
         let q = Query::new(raw_query);
         let mut etag = None;
         let value = match path {

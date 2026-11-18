@@ -15,7 +15,9 @@
 //! Seeds are deterministic; `REB_VALUE_FLOW_FUZZ_SEEDS` raises the count.
 use crate::{wasm_def_use::Module, wasm_graph::Artifact, wasm_value_flow};
 use serde_json::Value;
+use sha2::Digest;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::AtomicBool;
 
 const NLOC: usize = 5;
 const DEFAULT_SEEDS: u64 = 120;
@@ -329,12 +331,24 @@ enum Prod {
     Phi(usize, usize),
 }
 
+/// The base of an address key: a constant, or the producer a `local.get`,
+/// `local.tee` or add of a constant reads through to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Base {
+    Abs,
+    Prod(Prod),
+}
+
+/// An address key: base and 32-bit displacement, as wasm_def_use keys cells.
+type Key = (Base, u32);
+
 #[derive(Clone, Debug)]
 struct V {
     b: BTreeSet<Leaf>,
     f: BTreeSet<Leaf>,
     prod: Prod,
     cval: Option<i64>,
+    key: Key,
 }
 
 impl V {
@@ -344,14 +358,29 @@ impl V {
             f: BTreeSet::from([leaf]),
             prod,
             cval,
+            key: match cval {
+                Some(value) => (Base::Abs, value as u32),
+                None => (Base::Prod(prod), 0),
+            },
         }
     }
+    /// The same value seen through a `local.get` or `local.tee`: it keeps its
+    /// address key.
     fn renamed(&self, prod: Prod) -> Self {
         Self {
             b: self.b.clone(),
             f: self.f.clone(),
             prod,
             cval: None,
+            key: self.key,
+        }
+    }
+    /// A new definition of the value (a `local.set`, a join, a forwarded
+    /// read): a base of its own.
+    fn rebased(&self, prod: Prod) -> Self {
+        Self {
+            key: (Base::Prod(prod), 0),
+            ..self.renamed(prod)
         }
     }
 }
@@ -369,6 +398,11 @@ fn join(values: &[V], ident: Prod) -> V {
         f,
         prod: if same { values[0].prod } else { ident },
         cval: if same { values[0].cval } else { None },
+        key: if same {
+            values[0].key
+        } else {
+            (Base::Prod(ident), 0)
+        },
     }
 }
 
@@ -435,7 +469,10 @@ fn analyze(instrs: &[String]) -> Reference {
             .collect();
         let mut st: Vec<V> = Vec::new();
         let mut reach = true;
-        let mut store: Option<(i64, V)> = None;
+        let mut store: Option<(Key, V)> = None;
+        // The value of each `global.set` in this block, read by a `global.get`
+        // of the same global with no call or control transfer between.
+        let mut globals: HashMap<usize, V> = HashMap::new();
         let mut frames = vec![Frame {
             kind: "func",
             arity: 1,
@@ -472,6 +509,9 @@ fn analyze(instrs: &[String]) -> Reference {
                     | "i32.store"
             ) {
                 store = None;
+                if o != "i32.store" {
+                    globals.clear();
+                }
             }
             let mut branch = |frames: &mut Vec<Frame>,
                               depth: usize,
@@ -512,7 +552,7 @@ fn analyze(instrs: &[String]) -> Reference {
                             merged
                                 .iter()
                                 .enumerate()
-                                .map(|(n, v)| v.renamed(Prod::LoopPhi(index, n)))
+                                .map(|(n, v)| v.rebased(Prod::LoopPhi(index, n)))
                                 .collect(),
                         );
                     }
@@ -536,15 +576,30 @@ fn analyze(instrs: &[String]) -> Reference {
                 "local.set" | "local.tee" => {
                     let v = st.pop().unwrap();
                     rec.insert(i, vec![v.clone()]);
-                    locals[arg(i)] = v.renamed(Prod::Instr(i));
+                    // A tee is read through to its input; a set is a definition.
+                    locals[arg(i)] = if o == "local.tee" {
+                        v.renamed(Prod::Instr(i))
+                    } else {
+                        v.rebased(Prod::Instr(i))
+                    };
                     if o == "local.tee" {
                         st.push(v.renamed(Prod::Instr(i)));
                     }
                 }
-                "global.get" => st.push(V::leaf(("global", i), Prod::Instr(i), None)),
+                "global.get" => match globals.get(&arg(i)) {
+                    Some(value) => {
+                        let mut v = value.rebased(Prod::Instr(i));
+                        v.f.insert(("global", i));
+                        st.push(v);
+                    }
+                    None => st.push(V::leaf(("global", i), Prod::Instr(i), None)),
+                },
                 "global.set" | "drop" => {
                     let v = st.pop().unwrap();
                     rec.insert(i, vec![v.clone()]);
+                    if o == "global.set" {
+                        globals.insert(arg(i), v.clone());
+                    }
                     sinks.push((i, 0, v));
                 }
                 "i32.add" => {
@@ -553,6 +608,12 @@ fn analyze(instrs: &[String]) -> Reference {
                     let mut sum = join(&[a.clone(), b.clone()], Prod::Instr(i));
                     sum.prod = Prod::Instr(i);
                     sum.cval = None;
+                    // An add of a constant moves the other operand's key.
+                    sum.key = match (a.cval, b.cval) {
+                        (_, Some(c)) => (a.key.0, a.key.1.wrapping_add(c as u32)),
+                        (Some(c), None) => (b.key.0, b.key.1.wrapping_add(c as u32)),
+                        (None, None) => (Base::Prod(Prod::Instr(i)), 0),
+                    };
                     rec.insert(i, vec![a, b]);
                     st.push(sum);
                 }
@@ -570,22 +631,34 @@ fn analyze(instrs: &[String]) -> Reference {
                         f: fs,
                         prod: Prod::Instr(i),
                         cval: None,
+                        key: (Base::Prod(Prod::Instr(i)), 0),
                     });
                 }
                 "i32.load" => {
                     let a = st.pop().unwrap();
                     sinks.push((i, 0, a.clone()));
-                    let mut v = V::leaf(("load", i), Prod::Instr(i), None);
+                    // A load of the latest store's key in this block is that
+                    // store's value, not a source of its own; its address is
+                    // still followed.
+                    let forwarded = match &store {
+                        Some((key, value)) if *key == a.key => Some(value.clone()),
+                        _ => None,
+                    };
+                    // A forwarded load is still an instruction a forward
+                    // slice can start from: its own leaf joins the value's
+                    // forward origins but not its backward sources.
+                    let mut v = match &forwarded {
+                        Some(value) => {
+                            let mut v = value.rebased(Prod::Instr(i));
+                            v.f.insert(("load", i));
+                            v
+                        }
+                        None => V::leaf(("load", i), Prod::Instr(i), None),
+                    };
                     v.b.extend(a.b.iter().copied());
                     let mut inputs = vec![a.clone()];
-                    if let (Some((address, value)), Some(cval), Prod::Instr(producer)) =
-                        (&store, a.cval, a.prod)
-                        && op(producer) == "i32.const"
-                        && *address == cval
-                    {
-                        v.b.extend(value.b.iter().copied());
-                        v.f.extend(value.f.iter().copied());
-                        inputs.push(value.clone());
+                    if let Some(value) = forwarded {
+                        inputs.push(value);
                     }
                     rec.insert(i, inputs);
                     st.push(v);
@@ -595,11 +668,7 @@ fn analyze(instrs: &[String]) -> Reference {
                     let a = st.pop().unwrap();
                     sinks.push((i, 0, a.clone()));
                     sinks.push((i, 1, v.clone()));
-                    if let (Some(cval), Prod::Instr(producer)) = (a.cval, a.prod)
-                        && op(producer) == "i32.const"
-                    {
-                        store = Some((cval, v.clone()));
-                    }
+                    store = Some((a.key, v.clone()));
                     rec.insert(i, vec![a, v]);
                 }
                 "call" => {
@@ -639,7 +708,7 @@ fn analyze(instrs: &[String]) -> Reference {
                                 values.push(previous[n].clone());
                             }
                             locals[n] =
-                                join(&values, Prod::LoopPhi(i, n)).renamed(Prod::LoopPhi(i, n));
+                                join(&values, Prod::LoopPhi(i, n)).rebased(Prod::LoopPhi(i, n));
                         }
                     }
                 }
@@ -776,6 +845,12 @@ fn analyze(instrs: &[String]) -> Reference {
     panic!("reference did not reach a fixpoint");
 }
 
+/// Ends the reference models: exact flow and address operands. Possible flow
+/// through memory cells and control dependence are classes it does not have.
+fn exact_end(node: &Value) -> bool {
+    !matches!(node["class"].as_str(), Some("memory_may" | "control"))
+}
+
 fn leaf_of(node: &Value, index_of: &HashMap<u64, usize>) -> (String, usize) {
     let kind = node["kind"].as_str().unwrap();
     let at = |key: &str| node[key].as_u64().unwrap() as usize;
@@ -795,6 +870,95 @@ fn leaf_of(node: &Value, index_of: &HashMap<u64, usize>) -> (String, usize) {
             )
         }
         other => (other.into(), node["byte_offset"].as_u64().unwrap() as usize),
+    }
+}
+
+/// Prints the module of the seeds in `REB_VALUE_FLOW_FUZZ_DUMP` (comma
+/// separated), with instruction indices, to read a disagreement.
+#[test]
+#[ignore]
+fn dump_generated_module() {
+    for seed in std::env::var("REB_VALUE_FLOW_FUZZ_DUMP")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|seed| seed.trim().parse::<u64>().ok())
+    {
+        eprintln!("seed {seed}:");
+        for (index, line) in generate(seed).iter().enumerate() {
+            eprintln!("{index:4} {line}");
+        }
+    }
+}
+
+/// Prints the slice of one query on one generated module:
+/// `REB_VALUE_FLOW_FUZZ_SLICE=seed:instruction[:operand]:direction`.
+#[test]
+#[ignore]
+fn dump_slice_of_generated_module() {
+    let spec = std::env::var("REB_VALUE_FLOW_FUZZ_SLICE").unwrap_or_default();
+    let parts: Vec<&str> = spec.split(':').collect();
+    let (seed, instruction, direction) = (
+        parts[0].parse::<u64>().unwrap(),
+        parts[1].parse::<usize>().unwrap(),
+        *parts.last().unwrap(),
+    );
+    let operand = (parts.len() == 4).then(|| parts[2]);
+    let body = generate(seed);
+    let bytes = wat::parse_str(module_text(&body)).unwrap();
+    let module = Module::read(&bytes).unwrap();
+    let mut reader = module.bodies[1].get_operators_reader().unwrap();
+    let mut offsets = Vec::new();
+    while !reader.eof() {
+        offsets.push(reader.read_with_offset().unwrap().1 as u64);
+    }
+    let index_of: HashMap<u64, usize> = offsets.iter().enumerate().map(|(i, o)| (*o, i)).collect();
+    let mut query = format!(
+        "function=2&offset={}&direction={direction}&interprocedural=false&node_limit=100000&source_limit=100000&sink_limit=100000",
+        offsets[instruction]
+    );
+    if let Some(operand) = operand {
+        query.push_str(&format!("&operand={operand}"));
+    }
+    let artifact = Artifact {
+        bytes: bytes.clone(),
+        artifact_id: Value::from("1"),
+        sha256: Value::from(hex::encode(sha2::Sha256::digest(&bytes))),
+    };
+    let request = wasm_value_flow::parse_query(&query).unwrap();
+    let document =
+        wasm_value_flow::value_flow_of(&artifact, &request, &AtomicBool::new(false)).unwrap();
+    eprintln!(
+        "status {} omissions {}",
+        document["status"], document["omissions"]
+    );
+    for node in document["nodes"].as_array().unwrap() {
+        let at = index_of
+            .get(&node["byte_offset"].as_u64().unwrap())
+            .map_or("-".to_owned(), |i| i.to_string());
+        eprintln!(
+            "node {} at {at} {} {} class={} role={} parent={} edge={} through={} locals={} text={}",
+            node["id"],
+            node["kind"],
+            node["direction"],
+            node["class"],
+            node["role"],
+            node["parent"],
+            node["edge"]["kind"],
+            node["edge"]["through"]["kind"],
+            node["edge"]["locals"],
+            node["text"]
+        );
+    }
+    for list in ["sources", "sinks"] {
+        for item in document[list]["items"].as_array().unwrap() {
+            let at = index_of
+                .get(&item["byte_offset"].as_u64().unwrap())
+                .map_or("-".to_owned(), |i| i.to_string());
+            eprintln!(
+                "{list} {} at {at} {} class={}",
+                item["id"], item["kind"], item["class"]
+            );
+        }
     }
 }
 
@@ -838,13 +1002,15 @@ fn slices_match_a_flow_sensitive_reference_on_generated_modules() {
         let artifact = Artifact {
             bytes: bytes.clone(),
             artifact_id: Value::from("1"),
-            sha256: Value::from("0".repeat(64)),
+            sha256: Value::from(hex::encode(sha2::Sha256::digest(&bytes))),
         };
         let ask = |query: String| -> Result<Value, (u16, String)> {
             let request =
-                wasm_value_flow::parse_query(&format!("{query}&max_nodes=4096&max_depth=256"))
+                wasm_value_flow::parse_query(&format!(
+                    "{query}&interprocedural=false&node_limit=1&source_limit=100000000&sink_limit=100000000"
+                ))
                     .unwrap();
-            wasm_value_flow::value_flow_of(&artifact, &request)
+            wasm_value_flow::value_flow_of(&artifact, &request, &AtomicBool::new(false))
                 .map_err(|error| (error.status, error.message))
         };
         let expected = |set: &BTreeSet<Leaf>| -> BTreeSet<(String, usize)> {
@@ -864,29 +1030,24 @@ fn slices_match_a_flow_sensitive_reference_on_generated_modules() {
                     return;
                 }
             };
-            if document["truncated"]
-                .as_object()
-                .unwrap()
-                .values()
-                .any(|flag| flag == true)
-            {
+            if document["status"] != "computed" {
                 failures.push(format!(
-                    "seed {seed} {what}: truncated {}",
-                    document["truncated"]
+                    "seed {seed} {what}: status {} omissions {}",
+                    document["status"], document["omissions"]
                 ));
                 return;
             }
             let ids = if sinks {
-                &document["sinks"]
+                &document["sinks"]["items"]
             } else {
-                &document["sources"]
+                &document["sources"]["items"]
             };
             let got: BTreeSet<(String, usize)> = ids
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|id| {
-                    let node = &document["nodes"][id.as_u64().unwrap() as usize];
+                .filter(|node| exact_end(node))
+                .map(|node| {
                     if sinks {
                         let offset = node["byte_offset"].as_u64().unwrap();
                         (
@@ -949,12 +1110,12 @@ fn slices_match_a_flow_sensitive_reference_on_generated_modules() {
                     ));
                     if let (Ok(both), Ok(forward)) = (both, forward) {
                         let ends = |document: &Value, key: &str| -> BTreeSet<(String, u64)> {
-                            document[key]
+                            document[key]["items"]
                                 .as_array()
                                 .unwrap()
                                 .iter()
-                                .map(|id| {
-                                    let node = &document["nodes"][id.as_u64().unwrap() as usize];
+                                .filter(|node| exact_end(node))
+                                .map(|node| {
                                     (
                                         node["kind"].as_str().unwrap().to_owned(),
                                         node["byte_offset"].as_u64().unwrap(),

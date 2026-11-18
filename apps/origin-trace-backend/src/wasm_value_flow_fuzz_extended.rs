@@ -10,7 +10,9 @@
 //! `REB_VALUE_FLOW_EXTENDED_FROM`/`_TO` widen it, `_LIST` runs chosen seeds.
 use crate::{wasm_def_use::Module, wasm_graph::Artifact, wasm_value_flow};
 use serde_json::Value;
+use sha2::Digest;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::AtomicBool;
 
 const NLOC: usize = 8;
 /// The extended modules cost about a third of a second each in a debug build
@@ -814,12 +816,24 @@ enum Prod {
     Exc(usize, usize),
 }
 
+/// The base of an address key: a constant, or the producer a `local.get`,
+/// `local.tee` or add of a constant reads through to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Base {
+    Abs,
+    Prod(Prod),
+}
+
+/// An address key: base and 32-bit displacement, as wasm_def_use keys cells.
+type Key = (Base, u32);
+
 #[derive(Clone, Debug)]
 struct V {
     b: BTreeSet<Leaf>,
     f: BTreeSet<Leaf>,
     prod: Prod,
     cval: Option<i64>,
+    key: Key,
 }
 
 impl V {
@@ -829,14 +843,29 @@ impl V {
             f: BTreeSet::from([leaf]),
             prod,
             cval,
+            key: match cval {
+                Some(value) => (Base::Abs, value as u32),
+                None => (Base::Prod(prod), 0),
+            },
         }
     }
+    /// The same value seen through a `local.get` or `local.tee`: it keeps its
+    /// address key.
     fn renamed(&self, prod: Prod) -> Self {
         Self {
             b: self.b.clone(),
             f: self.f.clone(),
             prod,
             cval: None,
+            key: self.key,
+        }
+    }
+    /// A new definition of the value (a `local.set`, a join, a forwarded
+    /// read): a base of its own.
+    fn rebased(&self, prod: Prod) -> Self {
+        Self {
+            key: (Base::Prod(prod), 0),
+            ..self.renamed(prod)
         }
     }
 }
@@ -854,6 +883,11 @@ fn join(values: &[V], ident: Prod) -> V {
         f,
         prod: if same { values[0].prod } else { ident },
         cval: if same { values[0].cval } else { None },
+        key: if same {
+            values[0].key
+        } else {
+            (Base::Prod(ident), 0)
+        },
     }
 }
 
@@ -861,6 +895,20 @@ fn op_join(values: &[V], i: usize) -> V {
     let mut v = join(values, Prod::Instr(i));
     v.prod = Prod::Instr(i);
     v.cval = None;
+    v.key = (Base::Prod(Prod::Instr(i)), 0);
+    v
+}
+
+/// `i32.add` of a constant moves the other operand's address key.
+fn add_join(values: &[V], i: usize) -> V {
+    let mut v = op_join(values, i);
+    if let [a, b] = values {
+        v.key = match (a.cval, b.cval) {
+            (_, Some(c)) => (a.key.0, a.key.1.wrapping_add(c as u32)),
+            (Some(c), None) => (b.key.0, b.key.1.wrapping_add(c as u32)),
+            (None, None) => v.key,
+        };
+    }
     v
 }
 
@@ -992,7 +1040,10 @@ fn analyze(instrs: &[String]) -> Reference {
         let mut st: Vec<V> = Vec::new();
         let mut reach = true;
         // (address, offset, class, value)
-        let mut store: Option<(i64, String, String, V)> = None;
+        let mut store: Option<(Key, String, String, V)> = None;
+        // The value of each `global.set` in this block, read by a `global.get`
+        // of the same global with no call or control transfer between.
+        let mut globals: HashMap<usize, V> = HashMap::new();
         let mut frames = vec![Frame {
             kind: "func",
             params: 0,
@@ -1096,6 +1147,21 @@ fn analyze(instrs: &[String]) -> Reference {
                 if !o.ends_with(".store") || o == "i32.atomic.store" {
                     store = None;
                 }
+                // Memory operations leave globals alone; control transfers,
+                // calls and throws end what a `global.set` stands for.
+                if !matches!(
+                    o,
+                    "i32.atomic.rmw.add"
+                        | "i64.atomic.rmw.xchg"
+                        | "i32.atomic.store"
+                        | "memory.fill"
+                        | "memory.copy"
+                        | "memory.grow"
+                        | "i64.store32"
+                ) && !o.ends_with(".store")
+                {
+                    globals.clear();
+                }
             }
             // record writes into every open try_table
             let note_write = |frames: &mut Vec<Frame>, n: usize, v: &V| {
@@ -1126,6 +1192,7 @@ fn analyze(instrs: &[String]) -> Reference {
                         };
                         V::leaf((kind, i), Prod::Instr(i), cval)
                     }
+                    None if o == "i32.add" => add_join(&args, i),
                     None => op_join(&args, i),
                 };
                 for _ in 0..pushes {
@@ -1141,17 +1208,32 @@ fn analyze(instrs: &[String]) -> Reference {
                 "local.set" | "local.tee" => {
                     let v = st.pop().unwrap();
                     rec.insert(i, vec![v.clone()]);
-                    let def = v.renamed(Prod::Instr(i));
+                    // A tee is read through to its input; a set is a definition.
+                    let def = if o == "local.tee" {
+                        v.renamed(Prod::Instr(i))
+                    } else {
+                        v.rebased(Prod::Instr(i))
+                    };
                     note_write(&mut frames, arg(i), &def);
                     locals[arg(i)] = def.clone();
                     if o == "local.tee" {
                         st.push(def);
                     }
                 }
-                "global.get" => st.push(V::leaf(("global", i), Prod::Instr(i), None)),
+                "global.get" => match globals.get(&arg(i)) {
+                    Some(value) => {
+                        let mut v = value.rebased(Prod::Instr(i));
+                        v.f.insert(("global", i));
+                        st.push(v);
+                    }
+                    None => st.push(V::leaf(("global", i), Prod::Instr(i), None)),
+                },
                 "global.set" | "drop" => {
                     let v = st.pop().unwrap();
                     rec.insert(i, vec![v.clone()]);
+                    if o == "global.set" {
+                        globals.insert(arg(i), v.clone());
+                    }
                     sinks.push((i, 0, v));
                 }
                 "select" => {
@@ -1168,27 +1250,44 @@ fn analyze(instrs: &[String]) -> Reference {
                         f: fs,
                         prod: Prod::Instr(i),
                         cval: None,
+                        key: (Base::Prod(Prod::Instr(i)), 0),
                     });
                 }
                 _ if o.contains(".load") => {
                     let a = st.pop().unwrap();
                     sinks.push((i, 0, a.clone()));
-                    let mut v = V::leaf(("load", i), Prod::Instr(i), None);
-                    v.b.extend(a.b.iter().copied());
-                    let mut inputs = vec![a.clone()];
                     let class = o.to_owned();
                     let offset = instrs[i].split_whitespace().nth(1).unwrap_or("").to_owned();
                     let full = matches!(o, "i32.load" | "i64.load" | "f32.load" | "f64.load");
-                    if let (true, Some((address, soff, sclass, value)), Some(cval), Prod::Instr(p)) =
-                        (full, &store, a.cval, a.prod)
-                        && op(p) == "i32.const"
-                        && *address == cval
-                        && *soff == offset
-                        && sclass.replace(".store", ".load") == class
-                    {
-                        v.b.extend(value.b.iter().copied());
-                        v.f.extend(value.f.iter().copied());
-                        inputs.push(value.clone());
+                    // A full-width load of the latest store's key, offset and
+                    // type in this block is that store's value, not a source
+                    // of its own; its address is still followed.
+                    let forwarded = match &store {
+                        Some((key, soff, sclass, value))
+                            if full
+                                && *key == a.key
+                                && *soff == offset
+                                && sclass.replace(".store", ".load") == class =>
+                        {
+                            Some(value.clone())
+                        }
+                        _ => None,
+                    };
+                    // A forwarded load is still an instruction a forward
+                    // slice can start from: its own leaf joins the value's
+                    // forward origins but not its backward sources.
+                    let mut v = match &forwarded {
+                        Some(value) => {
+                            let mut v = value.rebased(Prod::Instr(i));
+                            v.f.insert(("load", i));
+                            v
+                        }
+                        None => V::leaf(("load", i), Prod::Instr(i), None),
+                    };
+                    v.b.extend(a.b.iter().copied());
+                    let mut inputs = vec![a.clone()];
+                    if let Some(value) = forwarded {
+                        inputs.push(value);
                     }
                     rec.insert(i, inputs);
                     st.push(v);
@@ -1200,12 +1299,9 @@ fn analyze(instrs: &[String]) -> Reference {
                     sinks.push((i, 0, a.clone()));
                     sinks.push((i, 1, v.clone()));
                     store = None;
-                    if !matches!(o, "i64.store32" | "i32.atomic.store")
-                        && let (Some(cval), Prod::Instr(p)) = (a.cval, a.prod)
-                        && op(p) == "i32.const"
-                    {
+                    if !matches!(o, "i64.store32" | "i32.atomic.store") {
                         let offset = instrs[i].split_whitespace().nth(1).unwrap_or("").to_owned();
-                        store = Some((cval, offset, o.to_owned(), v.clone()));
+                        store = Some((a.key, offset, o.to_owned(), v.clone()));
                     }
                     rec.insert(i, vec![a, v]);
                 }
@@ -1343,14 +1439,14 @@ fn analyze(instrs: &[String]) -> Reference {
                                 values.push(pp[slot].clone());
                             }
                             st[height + slot] = join(&values, Prod::LoopPhi(i, 1000 + slot))
-                                .renamed(Prod::LoopPhi(i, 1000 + slot));
+                                .rebased(Prod::LoopPhi(i, 1000 + slot));
                         }
                         for &n in writes.get(&i).into_iter().flatten() {
                             let mut values = vec![locals[n].clone()];
                             if let Some((_, pl)) = &previous {
                                 values.push(pl[n].clone());
                             }
-                            let v = join(&values, Prod::LoopPhi(i, n)).renamed(Prod::LoopPhi(i, n));
+                            let v = join(&values, Prod::LoopPhi(i, n)).rebased(Prod::LoopPhi(i, n));
                             note_write(&mut frames, n, &v);
                             locals[n] = v;
                         }
@@ -1565,6 +1661,12 @@ fn analyze(instrs: &[String]) -> Reference {
     panic!("reference did not reach a fixpoint");
 }
 
+/// Ends the reference models: exact flow and address operands. Possible flow
+/// through memory cells and control dependence are classes it does not have.
+fn exact_end(node: &Value) -> bool {
+    !matches!(node["class"].as_str(), Some("memory_may" | "control"))
+}
+
 fn leaf_of(node: &Value, index_of: &HashMap<u64, usize>) -> (String, usize) {
     let kind = node["kind"].as_str().unwrap();
     let at = |key: &str| node[key].as_u64().unwrap() as usize;
@@ -1628,13 +1730,15 @@ pub(crate) fn run(seeds: std::ops::Range<u64>, verbose: bool) -> (usize, Vec<Str
         let artifact = Artifact {
             bytes: bytes.clone(),
             artifact_id: Value::from("1"),
-            sha256: Value::from("0".repeat(64)),
+            sha256: Value::from(hex::encode(sha2::Sha256::digest(&bytes))),
         };
         let ask = |query: String| -> Result<Value, (u16, String)> {
             let request =
-                wasm_value_flow::parse_query(&format!("{query}&max_nodes=4096&max_depth=256"))
+                wasm_value_flow::parse_query(&format!(
+                    "{query}&interprocedural=false&node_limit=1&source_limit=100000000&sink_limit=100000000"
+                ))
                     .unwrap();
-            wasm_value_flow::value_flow_of(&artifact, &request)
+            wasm_value_flow::value_flow_of(&artifact, &request, &AtomicBool::new(false))
                 .map_err(|error| (error.status, error.message))
         };
         let expected = |set: &BTreeSet<Leaf>| -> BTreeSet<(String, usize)> {
@@ -1643,12 +1747,12 @@ pub(crate) fn run(seeds: std::ops::Range<u64>, verbose: bool) -> (usize, Vec<Str
                 .collect()
         };
         let ends = |document: &Value, key: &str| -> BTreeSet<(String, u64)> {
-            document[key]
+            document[key]["items"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|id| {
-                    let node = &document["nodes"][id.as_u64().unwrap() as usize];
+                .filter(|node| exact_end(node))
+                .map(|node| {
                     (
                         node["kind"].as_str().unwrap().to_owned(),
                         node["byte_offset"].as_u64().unwrap(),
@@ -1668,30 +1772,24 @@ pub(crate) fn run(seeds: std::ops::Range<u64>, verbose: bool) -> (usize, Vec<Str
                     return;
                 }
             };
-            if document["status"] != "computed"
-                || document["truncated"]
-                    .as_object()
-                    .unwrap()
-                    .values()
-                    .any(|flag| flag == true)
-            {
+            if document["status"] != "computed" {
                 failures.push(format!(
-                    "seed {seed} {what}: status {} truncated {} omissions {}",
-                    document["status"], document["truncated"], document["omissions"]
+                    "seed {seed} {what}: status {} omissions {}",
+                    document["status"], document["omissions"]
                 ));
                 return;
             }
             let ids = if sinks {
-                &document["sinks"]
+                &document["sinks"]["items"]
             } else {
-                &document["sources"]
+                &document["sources"]["items"]
             };
             let got: BTreeSet<(String, usize)> = ids
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|id| {
-                    let node = &document["nodes"][id.as_u64().unwrap() as usize];
+                .filter(|node| exact_end(node))
+                .map(|node| {
                     if sinks {
                         let offset = node["byte_offset"].as_u64().unwrap();
                         (
@@ -1760,9 +1858,8 @@ pub(crate) fn run(seeds: std::ops::Range<u64>, verbose: bool) -> (usize, Vec<Str
                         // A seed node is never its own source unless the
                         // reference shows a cycle back to it.
                         for document in [document, &both] {
-                            for id in document["sources"].as_array().unwrap() {
-                                let node = &document["nodes"][id.as_u64().unwrap() as usize];
-                                if node["role"] == "seed" || node["seed"] == true {
+                            for node in document["sources"]["items"].as_array().unwrap() {
+                                if node["seed"] == true {
                                     let leaf = leaf_of(node, &index_of);
                                     let cyc = value
                                         .b

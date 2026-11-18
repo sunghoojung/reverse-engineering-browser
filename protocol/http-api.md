@@ -46,12 +46,15 @@ apps/origin-trace-backend/target/debug/reb-api call get_artifact_content \
 Immutable JavaScript lexical facts are available as `get_source_facts`:
 `reb-api call get_source_facts --endpoint-file /tmp/reb-api-endpoint
 --param session_id=1 --param artifact_id=2`. Both identifiers must match the
-stored artifact; no live/URL/derived-source fallback is supported. The optional
-`region_start_byte`/`region_end_byte` pair narrows analysis to the innermost
-callable body containing that original byte range, so a bundle that reaches a
-whole-program budget can still produce facts for one callable. See
-[JavaScript source facts v1](javascript-source-facts-v1.md) for exact-byte ranges,
-limits, `coverage.analyzed_range`, and partial/unavailable coverage semantics.
+stored artifact; no live/URL/derived-source fallback is supported. The whole
+artifact is analyzed whatever its size, and the summary reports how many rows
+each table holds; `list_source_fact_rows` reads them in pages, filtered by
+binding, operation kind, declaration name or an ambiguous operation's
+candidates. The optional `region_start_byte`/`region_end_byte` pair narrows
+analysis to the innermost callable body containing that original byte range.
+See [JavaScript source facts v2](javascript-source-facts-v2.md) for exact-byte
+ranges, row pages, caching, `coverage.analyzed_range`, and partial/unavailable
+coverage semantics.
 
 `get_source_format` returns the same exact JavaScript artifact, or JavaScript or
 JSON body, laid out like Prettier, with only whitespace changed: `reb-api call
@@ -60,7 +63,7 @@ get_source_format --endpoint-file /tmp/reb-api-endpoint --param session_id=1
 a large layout; `anchors` map whole 1,000-line windows to original offsets. It
 runs the contained formatter worker, so it is listed only with
 `--allow-effects`, and MCP refuses a request or response body. See
-[Source format v1](source-format-v1.md).
+[Source format v2](source-format-v2.md).
 
 `spec` prints the complete embedded OpenAPI document for validators and client
 generators without contacting a server. `describe` is an operation-detail
@@ -172,8 +175,8 @@ from an older configuration is accepted and ignored. None of these flags is
 authorization.
 
 `x-reb-mcp.content_reads` names the operations whose purpose is captured
-content, `get_artifact_text`, `search_artifact_text` and
-`export_requests_har`, and the offline Wasm runs `run_wasm_function` and
+content, `get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`
+and `export_requests_har`, and the offline Wasm runs `run_wasm_function` and
 `get_wasm_runs`, since running captured code discloses what it computes. They are listed only
 with `--allow-content` (which `full` sets, and which conflicts with
 `--omit-content`), and a call without it is refused before any request. With
@@ -278,12 +281,15 @@ should send `application/json`.
 
 Conditional GET operations list `If-None-Match` and a bodyless 304 response.
 Artifact content uses `offset` and `limit` query arguments and always returns
-200 on success, including partial chunks. Advance using actual byte count and
-`X-Artifact-Total-Bytes`; `X-Artifact-Truncated` is the string `true` when bytes
-remain and `false` at the end. An offset equal to the total returns an empty
-chunk; a negative, malformed, or beyond-end offset returns 400.
-Artifact lookup or full-content verification can return a JSON 408 when its
-five-second manifest or thirty-second verification deadline expires.
+200 on success, including partial chunks. `limit` defaults to 2097152 and has
+no maximum: the whole file is SHA-256 verified for every range, so a reader of
+a whole artifact asks for it once (`limit` at least its byte size). Advance
+using actual byte count and `X-Artifact-Total-Bytes`; `X-Artifact-Truncated` is
+the string `true` when bytes remain and `false` at the end. An offset equal to
+the total returns an empty chunk; a negative, malformed, or beyond-end offset
+returns 400. Verification has no deadline; a request that goes away stops it
+(499). Artifact lookup can return a JSON 408 when its five-second manifest
+deadline expires.
 This is not HTTP Range/206 pagination. Unfiltered events and artifacts are a
 bounded recent tail. [Filtered reads](#filtered-and-paged-reads) add byte
 cursors for paging. Neither is a stable exhaustive export.
@@ -362,7 +368,7 @@ in the ETag. The v1 response shape, stored evidence and capture policy are uncha
 `get_wasm_functions` and `get_wasm_function_graph` project
 `GET /api/wasm/functions` and `GET /api/wasm/graph`. Both are read-only and
 bounded by byte budgets; a partial status names what was cut. See
-[WASM inspection](wasm-inspection-v1.md#function-index-and-block-graph). The
+[WASM inspection](wasm-inspection-v2.md#function-index-and-block-graph). The
 graph is declared static flow for one function at a time. Edge kinds are never
 inferred from execution, and `complete` is always false.
 
@@ -800,7 +806,8 @@ plus a `js-invocation-sites-v1.labels.json` sidecar with each label, source URL
 and session, which the browser never reads. Both are written atomically with
 user-only permissions. An empty set has no site file. The list and resolve
 routes are read-only; resolve runs the analysis worker, so like
-`get_source_facts` it is listed only with `--allow-effects`, as is the action
+`get_source_facts` and `list_source_fact_rows` it is listed only with
+`--allow-effects`, as is the action
 route.
 
 ## Error reasons and uncertain outcomes
@@ -929,7 +936,11 @@ The action routes are multiplexed, not invented REST resources:
   Replacement responses do not include an ETag; read the workspace to obtain
   its current conditional-GET validator.
 - Analyst execution requires the current saved JavaScript script and explicit
-  confirmation; sensitive selected artifact data needs additional confirmation.
+  confirmation. Protocol 2 names the selected artifact by `artifact_id` and
+  `sha256`; the host reads the whole stored artifact, verifies it, and refuses
+  non-source kinds (400) and a changed SHA-256 (409). A sensitive artifact
+  needs `confirmed_sensitive=true`. A run has no deadline; dropping the request
+  stops its helper process.
 
 Known behavior worth preserving in clients:
 
@@ -938,7 +949,7 @@ Known behavior worth preserving in clients:
   bounds; offsets and identifiers must be canonical unsigned decimals.
 - At the application handler, malformed JSON, non-object bodies, invalid body
   lengths and unsupported chunked bodies return JSON 400 errors. A body read
-  exceeding five seconds returns 408. Transport-level HTTP framing failures
+  exceeding five seconds, plus one second per declared 16 MiB, returns 408. Transport-level HTTP framing failures
   may be rejected before the application handler and have no JSON guarantee.
 - Unknown API paths return JSON 404; unsupported methods return JSON 405.
   Every application response includes `Cache-Control: no-store` and
@@ -995,8 +1006,10 @@ descriptions. Individual execution entries have these fields:
   JSON Schema 2020-12 `when` predicate over the entire request. `{}` means
   unconditional. For example, unsigned JWT creation needs
   `allow_unsigned_confirmed=true` when `algorithm` is `none`; selected-field
-  capture needs `confirmed=true` when `enabled` is true. Analyst execution also
-  needs `confirmed_sensitive=true` when the selected artifact is sensitive.
+  capture needs `confirmed=true` when `enabled` is true. Analyst execution
+  lists `confirmed_sensitive=true` whenever the run names a selected artifact,
+  because only the stored manifest says whether it is sensitive; the
+  `sensitive-selected-artifact` prerequisite names that dependency.
   Ordinary requiredness and boolean types remain in the request schema.
 - `notes` supplies the effect scope and caveats. `sources` gives repository
   `path` and Rust `symbol` pointers for auditing, without fragile line numbers.
@@ -1422,23 +1435,26 @@ Triskel's waypoints as a flat `x0, y0, x1, y1, ...` list from the source to the
 target. Values are rounded to 2 decimals and moved so the drawing, waypoints
 included, starts at `0, 0`; `width` and `height` are its extent. Separate
 weakly connected parts are laid out one at a time and packed in rows, largest
-first. Any other graph has `status` `too_large`, `failed` or `timeout` and a
-`reason`.
+first. Any other graph has `status` `failed` or `timeout` and a `reason`.
 
-The limits exist because Triskel's cost grows with about the square of the node
-count (measured on tree-like graphs with some back edges: 1,000 nodes 0.6 s,
-3,000 nodes 6.6 s, 8,000 nodes 85 s, and roughly three times that on a loaded
-machine):
+The route lays out any number of graphs of any size, with no request deadline.
+Triskel's cost grows faster than the node count, so the caller decides what to
+send. Measured on structured control flow graphs: 2,000 nodes about 1.5 s,
+4,000 about 3 s, 8,000 about 10 s, 16,000 about a minute and 32,000 about 4
+minutes, with at most 68 MiB of worker memory. On tree-like graphs with some
+back edges it is about the square of the node count: 1,000 nodes 0.6 s, 3,000
+nodes 6.6 s, 8,000 nodes 85 s. The UI sends a graph of up to 2,000 nodes and
+8,000 edges unasked and a larger one when the researcher asks.
 
-- A body holds at most 64 graphs and 8,000 nodes in all, within 8 MiB. Over
-  that, or with malformed JSON, an unknown member, a bad size or an index
-  outside its graph, the route returns 400 with an `error` and lays out
-  nothing.
-- A graph over 2,000 nodes or 8,000 edges is `too_large`; the others are still
-  laid out.
-- One request has 10 s. A graph has its own budget inside that, 1 s plus 8 µs
-  times its node count squared, so a graph Triskel never finishes costs only
-  its budget.
+- A body is at most 64 MiB, twice the 32 MiB structure budget of a Wasm
+  function's block graph, the largest graph the UI sends. Malformed JSON, an
+  unknown member, a bad size or an index outside its graph returns 400 with an
+  `error` and lays out nothing.
+- A client that closes the connection drops the request, which stops its
+  worker.
+- A graph has its own budget, 1 s plus 8 µs times the square of its node and
+  edge count together. It separates a slow layout from one Triskel never
+  finishes (see below), and it grows with the graph, so it limits no size.
 
 Triskel is third-party C++ fed graphs shaped by captured pages, and this
 revision can loop forever, crash or place nodes on top of each other on some
@@ -1448,8 +1464,7 @@ network access (on macOS no file access either) and a 2 GiB resident memory
 limit; at most two run at once and later requests wait for a slot. A graph
 whose budget passes is
 `timeout`; one that crashes the worker or reaches the memory limit is `failed`;
-either way a new worker continues with the graphs after it. When the request
-deadline passes, every graph without a result is `timeout`. A layout with
+either way a new worker continues with the graphs after it. A layout with
 overlapping nodes or an edge that does not reach its nodes is `failed`, so a
 `laid_out` result never has either. The worker adds a virtual root and, where a
 part has no node without out-edges, a virtual exit, both of size 0, which
@@ -1480,27 +1495,49 @@ unless the read passes `credential_values=1`, because they hold `Cookie`,
 same parameter. `reb-api mcp` never lets a model pass it and passes it only
 with `--allow-content` (`x-reb-mcp.credential_values`).
 
-`GET /api/artifacts/search` (`search_artifact_text`) finds a literal `q` of 1
-to 256 bytes on one line, as Sources Search does. There is no pattern
-language, and header blocks and cookie lists are searched only with
-`credential_values=1`. `match_case` (default false) folds ASCII letters only. `kind`,
-`artifact_id`, `session_id`, `navigation_id`, `frame_id`,
+`GET /api/artifacts/search` (`search_artifact_text`,
+`reb-artifact-search-v2`) finds `q` on one line in every selected artifact, as
+Sources Search does: literal text, or with `regex=true` a regular expression
+in the Rust `regex` syntax. That engine's matching time is linear in the text
+whatever the pattern, so captured text cannot make a search backtrack; `^`
+and `$` match at line breaks and an empty match is not counted. Without
+`match_case` (default false), letters fold by Unicode simple case folding, as
+Find in Sources folds them. Header blocks and cookie lists are searched only
+with `credential_values=1`.
+`kind`, `artifact_id`, `session_id`, `navigation_id`, `frame_id`,
 `execution_context_id`, `sha256` and `host` select artifacts as
-[`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first. Each
-match names its artifact, `byte_offset`, 1-based `line` and `column` (in
-characters), and up to 48 bytes of the same line in `before` and `after`. At
-most 100 matches come from one file, a file over 16 MiB is skipped, one call
-reads at most 64 MiB and stops after 10 seconds. `coverage` names every file
-not fully searched, with its reason, and `complete` says whether the whole
-scope was searched; `offset` skips matches and `next_offset` continues.
+[`get_artifacts` filters](#filtered-and-paged-reads) do, oldest first.
 
-`inspect_wasm` takes `row_offset` and `row_limit` (1 to 2048). With either,
-`rows` holds only that window, which also stops at 98,304 bytes of serialized
-rows, and `row_window` gives `offset`, `rows`, `total_rows` and
-`next_offset`. Without them the document is unchanged.
+Every selected artifact is read whole, whatever its size, verified against its
+manifest digest and searched on every core; nothing is skipped for size and
+there is no deadline. A request that goes away stops the search with 499.
+`total_matches` counts every match exactly, `matches` is one page of them
+from `offset` (`limit` 1 to 200, default 50) and `next_offset` continues.
+Each match names its artifact, `byte_offset` and `byte_length`, 1-based
+`line`, `column` (in characters) and `utf16_column` (in UTF-16 code units, as
+the editor counts), `utf16_length`, the match (its first 256 bytes when
+`match_complete` is false), and up to 48 bytes of the same line in `before`
+and `after`, with `clipped_before` and `clipped_after` saying whether the line
+continues. `files` gives each artifact on the page its exact match count and
+the offset of its first match. `coverage` names artifacts that could not be
+read or verified (`complete` is false then) and those whose bytes are not
+valid UTF-8. The count is kept per query and artifact set (eight searches), so
+a later page reads only the files whose matches it lists. v1 skipped files over
+16 MiB, read at most 64 MiB per call, stopped after 10 seconds and took at most
+100 matches from a file; v2 has none of those limits.
 
-Both text operations return captured content and change nothing. MCP lists
-them only with `--allow-content`, as described in
+`inspect_wasm` returns one window of a module of any size: `row_offset` (or
+`byte_offset`, which starts at the row for an original byte) and `row_limit`
+(1 to 2048, default 2048). The window also stops at 98,304 bytes of serialized
+rows, and `row_window` gives `offset`, `rows`, `total_rows` and `next_offset`.
+`search_wasm_inspection` (`GET /api/wasm/search`) finds a case-insensitive
+literal `q` in the text of every row, counts every match and pages them with
+`match_offset` and `match_limit` (1 to 1000). Both decode with no deadline; a
+request that goes away is answered 499. See
+[WASM Inspection v2](wasm-inspection-v2.md).
+
+The two artifact text operations and `search_wasm_inspection` return captured
+content and change nothing. MCP lists them only with `--allow-content`, as described in
 [permission levels and content reads](#permission-levels-and-content-reads).
 
 ## Artifact map

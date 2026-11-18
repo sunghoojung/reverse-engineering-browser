@@ -20,8 +20,7 @@ pub(crate) mod dispatch_shape;
 pub mod document;
 #[path = "vm_input.rs"]
 mod input;
-#[path = "vm_js_lexer.rs"]
-pub(crate) mod js_lexer;
+pub(crate) use reb_js_lexer as js_lexer;
 #[cfg(test)]
 #[path = "vm_review_inputs.rs"]
 pub(crate) mod review_inputs;

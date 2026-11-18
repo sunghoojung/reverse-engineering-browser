@@ -10,16 +10,14 @@ use oxc_syntax::precedence::{GetPrecedence, Precedence};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Parse,
-    Output,
     /// Re-lexing the output did not reproduce the original tokens.
     Fidelity,
 }
 
-pub(crate) fn format(source: &str, output_limit: usize) -> Result<String, Refusal> {
+pub(crate) fn format(source: &str) -> Result<String, Refusal> {
     // Sloppy scripts first: most captured bundles are classic scripts.
     for source_type in [SourceType::mjs().with_script(true), SourceType::mjs()] {
-        if let Some((text, tokens, comments)) = layout(source, source_type, output_limit) {
-            let text = text?;
+        if let Some((text, tokens, comments)) = layout(source, source_type) {
             verify(source, &text, source_type, &tokens, &comments)?;
             return Ok(text);
         }
@@ -27,10 +25,10 @@ pub(crate) fn format(source: &str, output_limit: usize) -> Result<String, Refusa
     Err(Refusal::Parse)
 }
 
-type Laid = (Result<String, Refusal>, Vec<Token>, Vec<(u32, u32)>);
+type Laid = (String, Vec<Token>, Vec<(u32, u32)>);
 
 /// Parses and prints; the parse arena is released before verification.
-fn layout(source: &str, source_type: SourceType, output_limit: usize) -> Option<Laid> {
+fn layout(source: &str, source_type: SourceType) -> Option<Laid> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type)
         .with_config(TokensParserConfig)
@@ -52,10 +50,7 @@ fn layout(source: &str, source_type: SourceType, output_limit: usize) -> Option<
         .collect();
     let mut layout = Layout::new(source, &tokens, &parsed.program.comments);
     layout.program(&parsed.program);
-    let text = layout
-        .doc
-        .print(source, output_limit)
-        .map_err(|_| Refusal::Output);
+    let text = layout.doc.print(source);
     drop(layout);
     Some((text, tokens, comments))
 }
@@ -1971,7 +1966,7 @@ mod tests {
     const TARGET: &str = include_str!("../../../tools/fixtures/source-format/minified.prettier.js");
 
     fn layout(source: &str) -> String {
-        let text = format(source, source.len() * 4 + 4096).unwrap();
+        let text = format(source).unwrap();
         assert!(whitespace_only(source, &text), "{text}");
         text
     }
@@ -2068,11 +2063,7 @@ mod tests {
     }
 
     #[test]
-    fn broken_syntax_and_output_growth_are_refused() {
-        assert_eq!(format("function(){", 1 << 20), Err(Refusal::Parse));
-        assert_eq!(
-            format("var a=function(){return 1}", 8),
-            Err(Refusal::Output)
-        );
+    fn broken_syntax_is_refused() {
+        assert_eq!(format("function(){"), Err(Refusal::Parse));
     }
 }

@@ -33,6 +33,11 @@ export function fakeDocument() {
       }
     }
     replaceChildren(...nodes) { for (const child of this.children) child.parentNode = null; this.children = []; this.append(...nodes); }
+    insertBefore(node, reference) {
+      if (!reference) { this.append(node); return node; }
+      node.remove?.(); node.parentNode = this; this.children.splice(this.children.indexOf(reference), 0, node); return node;
+    }
+    remove() { if (this.parentNode) { this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1); this.parentNode = null; } }
     setAttribute(name, value) { this.attributes[name] = String(value); }
     getAttribute(name) { return this.attributes[name] ?? null; }
     removeAttribute(name) { delete this.attributes[name]; }

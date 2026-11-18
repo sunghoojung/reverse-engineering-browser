@@ -7,13 +7,12 @@ use crate::{
     evidence, source_format_doc, source_format_js,
 };
 use serde_json::{Value, json};
-use std::{collections::VecDeque, path::Path, sync::Arc, time::Duration};
+use std::{collections::VecDeque, path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
 pub(crate) const WORKER_FLAG: &str = "--format-javascript-worker";
 pub(crate) const WORKER_TEST_VALUE: &str = "format";
 const MAGIC: &[u8; 8] = b"REBFMT01";
-const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const MAX_WINDOW_LINES: u64 = 10_000;
 const CACHE_ENTRIES: usize = 4;
 const CACHE_BYTES: usize = 96 * 1024 * 1024;
@@ -23,27 +22,13 @@ const ANCHOR_LINES: u64 = 1000;
 const JSON_OPEN: &str = "(";
 const JSON_CLOSE: &str = "\n)";
 
-/// Indentation and line breaks bound the growth of whitespace-only output.
-fn output_limit(source_bytes: usize) -> usize {
-    source_bytes.saturating_mul(4) + (1 << 20)
-}
-/// Measured peaks are 80 to 100 bytes per source byte, mostly the Oxc arena.
-fn heap_limit(source_bytes: usize) -> u64 {
-    (64 << 20) + source_bytes as u64 * 128
-}
-fn deadline(source_bytes: usize) -> Duration {
-    Duration::from_secs(30 + 15 * source_bytes.div_ceil(1 << 20) as u64)
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum Status {
     Formatted = 0,
     Parse = 1,
-    Output = 2,
     Fidelity = 3,
     Memory = 4,
-    Nesting = 5,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -107,10 +92,8 @@ impl Status {
         match self {
             Status::Formatted => "formatted",
             Status::Parse => "parse-failed",
-            Status::Output => "output-limit",
             Status::Fidelity => "fidelity-check-failed",
             Status::Memory => "memory-limit",
-            Status::Nesting => "nesting-limit",
         }
     }
     fn detail(self) -> &'static str {
@@ -119,12 +102,12 @@ impl Status {
             Status::Parse => {
                 "The source does not parse as a JavaScript script or module, so no layout was derived."
             }
-            Status::Output => "The formatted text would exceed four times the source size.",
             Status::Fidelity => {
                 "The layout did not reproduce the original tokens and was discarded."
             }
-            Status::Memory => "The contained formatter reached its memory ceiling.",
-            Status::Nesting => "The source nests deeper than the parser admission limit.",
+            Status::Memory => {
+                "Formatting this source needs more memory than this machine can give the contained formatter."
+            }
         }
     }
 }
@@ -168,7 +151,7 @@ pub(crate) fn load(
             ));
         }
     };
-    let bytes = evidence::content(root, &artifact, MAX_SOURCE_BYTES)?;
+    let bytes = evidence::read(root, &artifact)?;
     let source =
         String::from_utf8(bytes).map_err(|_| Error::bad("Artifact is not valid UTF-8 text"))?;
     Ok((source, evidence::public_artifact(&artifact), language))
@@ -237,7 +220,7 @@ fn document(
     cached: bool,
 ) -> Result<Value> {
     let mut result = json!({
-        "schema": "source-format-v1",
+        "schema": "source-format-v2",
         "source": identity,
         "language": language.name(),
         "engine": ENGINE,
@@ -245,8 +228,6 @@ fn document(
         "mapping": "whitespace-only",
         "cached": cached,
         "limits": {
-            "max_source_bytes": MAX_SOURCE_BYTES,
-            "max_output_ratio": 4,
             "max_window_lines": MAX_WINDOW_LINES
         }
     });
@@ -335,7 +316,14 @@ async fn contained(source: String, language: Language) -> Result<Outcome> {
         Language::JavaScript => source.clone(),
         Language::Json => format!("{JSON_OPEN}{source}{JSON_CLOSE}"),
     };
-    let heap = heap_limit(program.len());
+    // Oxc addresses source with 32-bit offsets; that is the parser's own
+    // representation, not a size this service chose.
+    if program.len() > u32::MAX as usize {
+        return Err(Error::bad(
+            "The source is larger than the 4 GiB that Oxc can address",
+        ));
+    }
+    let heap = crate::js_worker_alloc::machine_ceiling();
     let mut input = Vec::with_capacity(24 + program.len());
     input.extend_from_slice(MAGIC);
     input.extend_from_slice(&heap.to_le_bytes());
@@ -348,13 +336,10 @@ async fn contained(source: String, language: Language) -> Result<Outcome> {
             Error::new(503, "The JavaScript formatter worker could not start")
                 .with_code(Code::DependencyUnavailable)
         })?;
-    let output = crate::worker::run(
-        &mut command,
-        &input,
-        output_limit(source.len()) + 64,
-        deadline(source.len()),
-    )
-    .await?;
+    // No deadline or output cap: a large bundle formats for as long as it
+    // takes, and a request that goes away drops this future, which kills the
+    // worker. The reply is whitespace-only output, checked below.
+    let output = crate::worker::run(&mut command, &input, None, None).await?;
     drop(input);
     let bytes = reply(&output.bytes);
     if bytes.starts_with(crate::js_worker_alloc::REFUSED) && output.exit_code == Some(75) {
@@ -376,7 +361,7 @@ async fn contained(source: String, language: Language) -> Result<Outcome> {
                         None => return Ok(Outcome::Unavailable(Status::Fidelity)),
                     },
                 };
-                if text.len() > output_limit(source.len()) || !whitespace_only(&source, &text) {
+                if !whitespace_only(&source, &text) {
                     return Err(invalid());
                 }
                 Ok(Outcome::Formatted(laid(&source, text)))
@@ -385,9 +370,7 @@ async fn contained(source: String, language: Language) -> Result<Outcome> {
             .map_err(|error| Error::new(500, error.to_string()))?
         }
         1 => Ok(Outcome::Unavailable(Status::Parse)),
-        2 => Ok(Outcome::Unavailable(Status::Output)),
         3 => Ok(Outcome::Unavailable(Status::Fidelity)),
-        5 => Ok(Outcome::Unavailable(Status::Nesting)),
         _ => Err(invalid()),
     }
 }
@@ -442,8 +425,8 @@ pub(crate) fn worker_main() -> std::io::Result<()> {
     let heap = u64::from_le_bytes(header[8..16].try_into().unwrap());
     let length = u64::from_le_bytes(header[16..24].try_into().unwrap());
     if &header[..8] != MAGIC
-        || length > (MAX_SOURCE_BYTES + JSON_OPEN.len() + JSON_CLOSE.len()) as u64
-        || heap > heap_limit(length as usize)
+        || length > u64::from(u32::MAX)
+        || heap > crate::js_worker_alloc::machine_ceiling()
     {
         return Err(std::io::Error::other("Invalid JavaScript formatter limits"));
     }
@@ -455,18 +438,13 @@ pub(crate) fn worker_main() -> std::io::Result<()> {
             "Incomplete JavaScript formatter source",
         ));
     }
-    // The classifier's nesting admission also sizes the parser and layout stack.
-    let result = crate::vm::dispatch_shape::javascript::syntax_stack(&source).map(|stack| {
-        stacker::grow(stack, || {
-            source_format_js::format(&source, output_limit(source.len()))
-        })
-    });
+    // The classifier's nesting measurement also sizes the parser and layout stack.
+    let stack = crate::vm::dispatch_shape::javascript::syntax_stack(&source);
+    let result = stacker::grow(stack, || source_format_js::format(&source));
     let (status, text) = match result {
-        None => (Status::Nesting, String::new()),
-        Some(Ok(text)) => (Status::Formatted, text),
-        Some(Err(source_format_js::Refusal::Parse)) => (Status::Parse, String::new()),
-        Some(Err(source_format_js::Refusal::Output)) => (Status::Output, String::new()),
-        Some(Err(source_format_js::Refusal::Fidelity)) => (Status::Fidelity, String::new()),
+        Ok(text) => (Status::Formatted, text),
+        Err(source_format_js::Refusal::Parse) => (Status::Parse, String::new()),
+        Err(source_format_js::Refusal::Fidelity) => (Status::Fidelity, String::new()),
     };
     let peak = crate::js_worker_alloc::peak();
     let mut output = std::io::stdout().lock();
@@ -575,8 +553,8 @@ mod tests {
         assert_eq!(broken["status"], "unavailable");
         assert_eq!(broken["reason"], "parse-failed");
         assert!(broken["text"].is_null());
-        // Deep nesting formats on a grown stack or is refused, never a crash.
-        for depth in [2_000, 9_000] {
+        // Deep nesting formats on a stack grown to its measured depth.
+        for depth in [2_000, 9_000, 100_000] {
             let source = format!("x={}1{};", "[".repeat(depth), "]".repeat(depth));
             let deep = service
                 .format(
@@ -587,17 +565,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let expected = if depth < 8192 {
-                "formatted"
-            } else {
-                "unavailable"
-            };
-            assert_eq!(deep["status"], expected, "{depth}");
+            assert_eq!(deep["status"], "formatted", "{depth}");
         }
     }
 
     #[tokio::test]
-    async fn long_call_and_index_chains_are_laid_out_or_refused_as_nesting() {
+    async fn long_call_and_index_chains_are_laid_out_at_any_depth() {
         let service = SourceFormat::default();
         let identity = |key: &str| json!({"artifact_id": "1", "sha256": key});
         let format = async |key: &str, source: String| {
@@ -606,31 +579,23 @@ mod tests {
                 .await
                 .unwrap()
         };
-        for (name, source, status) in [
-            ("calls", format!("f{};", "()".repeat(8_000)), "formatted"),
-            ("indexes", format!("f{};", "[0]".repeat(8_000)), "formatted"),
-            ("mixed", format!("f{};", "()[0]".repeat(4_000)), "formatted"),
-            (
-                "deep calls",
-                format!("f{};", "()".repeat(200_000)),
-                "unavailable",
-            ),
-            (
-                "deep indexes",
-                format!("f{};", "[0]".repeat(200_000)),
-                "unavailable",
-            ),
+        for (name, source) in [
+            ("calls", format!("f{};", "()".repeat(8_000))),
+            ("indexes", format!("f{};", "[0]".repeat(8_000))),
+            ("mixed", format!("f{};", "()[0]".repeat(4_000))),
+            ("deep calls", format!("f{};", "()".repeat(200_000))),
+            ("deep indexes", format!("f{};", "[0]".repeat(200_000))),
             (
                 "deep tagged templates",
                 format!("f{};", "``".repeat(200_000)),
-                "unavailable",
             ),
         ] {
             let result = format(name, source).await;
-            assert_eq!(result["status"], status, "{name}: {result}");
-            if status == "unavailable" {
-                assert_eq!(result["reason"], "nesting-limit", "{name}");
-            }
+            assert_eq!(
+                result["status"], "formatted",
+                "{name}: {}",
+                result["reason"]
+            );
         }
     }
 }

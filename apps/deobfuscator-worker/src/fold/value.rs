@@ -14,8 +14,9 @@ struct Cost {
     depth: usize,
 }
 
-// Monotonic allocation/work allowance shared by the complete Folder. Dropping
+// Monotonic allocation/work allowance for one top-level evaluation. Dropping
 // a value does not refund it. Reservations happen before owned copies or growth.
+#[derive(Clone)]
 pub(super) struct ValueBudget {
     bytes: usize,
     nodes: usize,

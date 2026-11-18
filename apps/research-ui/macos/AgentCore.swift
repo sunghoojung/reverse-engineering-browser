@@ -261,7 +261,7 @@ let agentPermissionPromptAuto = """
   """
 
 let agentPermissionPromptFull = """
-  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly, request and response bodies, cookie values or credential headers such as Authorization, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for a literal, get_source_format by start_line and line_count, and inspect_wasm with row_offset and row_limit. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Your sessions capture what the researcher's do in the app, request content and Canvas images included; set an option false when the question does not need what it keeps. The researcher sees every call and its result and can stop you at any time.
+  Permission: Full access. Tool results include captured content: when you read source, bytecode, disassembly, request and response bodies, cookie values or credential headers such as Authorization, that content goes to the model provider. Read large content in pages: get_artifact_text by offset (utf-8, hex or base64), search_artifact_text for text or, with regex true, a regular expression in every retained file, get_source_format by start_line and line_count, inspect_wasm with row_offset or byte_offset and row_limit, and search_wasm_inspection for a literal in its rows. Tools that act run without asking, and you can start, drive and end your own live capture sessions with start_live_session and session_action. Start one only for the target the researcher named, open only URLs inside it, and end it when you are done. Your sessions capture what the researcher's do in the app, request content and Canvas images included; set an option false when the question does not need what it keeps. The researcher sees every call and its result and can stop you at any time.
   """
 
 func agentSystemPrompt(_ level: AgentPermission) -> String {
@@ -301,8 +301,8 @@ enum AgentToolGate {
   // content read: a run's outcome, fuel, import calls and timing disclose
   // values the code computed.
   static let fullOnly: Set<String> = [
-    "get_artifact_text", "search_artifact_text", "export_requests_har", "run_wasm_function", "get_wasm_runs",
-    "start_live_session", "session_action",
+    "get_artifact_text", "search_artifact_text", "search_wasm_inspection", "export_requests_har", "run_wasm_function",
+    "get_wasm_runs", "start_live_session", "session_action",
   ]
   // Whether a tool the server listed is offered to the model at this level.
   static func lists(_ name: String, readOnly: Bool, level: AgentPermission) -> Bool {

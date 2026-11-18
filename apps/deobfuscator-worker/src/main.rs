@@ -6,16 +6,26 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 mod fold;
 mod invocation_site;
-mod preflight;
 mod proxy;
 mod request_field;
 mod source_facts;
+mod syntax_tree;
 use serde::{Deserialize, Serialize};
 
-const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_REQUEST_BYTES: usize = MAX_SOURCE_BYTES * 6 + 64 * 1024;
-const MAX_TRANSFORMATIONS: usize = 4096;
-const MAX_DERIVED_BYTES: usize = MAX_SOURCE_BYTES + 512 * 1024;
+/// Native stack for one request's recursive Oxc passes: a fixed base plus a
+/// reserve per nesting level that `reb_js_lexer::nesting` measures without
+/// recursing. The stack is mapped, not committed, so only the depth a pass
+/// reaches costs memory. No source is refused for its size or depth; the
+/// per-level reserve covers the parser, the folder and the facts visitors in
+/// an unoptimized build, where frames are largest.
+const PARSER_STACK: usize = 32 << 20;
+const STACK_PER_LEVEL: usize = 16 << 10;
+
+fn stack_for(source: &str) -> usize {
+    reb_js_lexer::nesting(source)
+        .saturating_mul(STACK_PER_LEVEL)
+        .saturating_add(PARSER_STACK)
+}
 
 /// One JSON-line request. Deobfuscation and its function lookup predate the
 /// `operation` tag and keep their untagged form, told apart by the lookup's
@@ -62,7 +72,7 @@ struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     error_kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    function_location: Option<preflight::FunctionLocation>,
+    function_location: Option<syntax_tree::FunctionLocation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,9 +97,8 @@ struct Transformation {
     replacement: String,
 }
 
-/// Every refusal names its kind: `invalid-request`, `source-limit`,
-/// `preflight-limit` (a Tree-sitter depth, node, heap or time budget),
-/// `syntax` (either parser rejected the source) or `derived-validation`.
+/// Every refusal names its kind: `invalid-request`, `syntax` (the parser that
+/// answers the operation rejected the source) or `derived-validation`.
 fn error_response(kind: &'static str, message: impl Into<String>) -> Response {
     Response {
         schema: "reb-deobfuscator-worker-v1",
@@ -111,26 +120,16 @@ fn error_response(kind: &'static str, message: impl Into<String>) -> Response {
     }
 }
 
-fn preflight_refusal(message: &'static str, source_bytes: usize) -> Response {
-    let kind = if message == preflight::MALFORMED {
-        "syntax"
-    } else {
-        "preflight-limit"
-    };
-    let mut response = error_response(kind, message);
+fn syntax_refusal(message: &'static str, source_bytes: usize) -> Response {
+    let mut response = error_response("syntax", message);
     response.source_bytes = source_bytes;
     response
 }
 
-// Validate the whole candidate before publishing any rewrite receipts. The
-// heap-backed preflight bounds recursive Oxc parsing of generated text too.
+// Validate the whole candidate before publishing any rewrite receipts. Rewrites
+// replace expressions with literals, so the candidate nests no deeper than the
+// source whose stack this already runs on.
 fn validate_derived(source: &str, source_type: SourceType) -> Result<(), &'static str> {
-    if source.len() > MAX_DERIVED_BYTES {
-        return Err("derived output exceeds its byte limit; original source is preserved");
-    }
-    preflight::check(source).map_err(
-        |_| "derived output failed bounded syntax preflight; original source is preserved",
-    )?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
@@ -158,16 +157,10 @@ fn validate_response(mut response: Response, original: &str, source_type: Source
 
 fn locate(request: FunctionLookup) -> Response {
     let source_bytes = request.source.len();
-    if source_bytes > MAX_SOURCE_BYTES {
-        return error_response(
-            "source-limit",
-            "source exceeds the deobfuscation byte limit",
-        );
-    }
     let offset = request.function_at_byte as usize;
     match match request.candidate_end_byte {
-        Some(end) => preflight::candidate_function_at(&request.source, offset, end as usize),
-        None => preflight::function_at(&request.source, offset),
+        Some(end) => syntax_tree::candidate_function_at(&request.source, offset, end as usize),
+        None => syntax_tree::function_at(&request.source, offset),
     } {
         Ok(function_location) => Response {
             schema: "reb-deobfuscator-worker-v1",
@@ -183,23 +176,12 @@ fn locate(request: FunctionLookup) -> Response {
             error_kind: None,
             function_location,
         },
-        Err(message) => preflight_refusal(message, source_bytes),
+        Err(message) => syntax_refusal(message, source_bytes),
     }
 }
 
 fn analyze(request: Request) -> Response {
     let source_bytes = request.source.len();
-    if source_bytes > MAX_SOURCE_BYTES {
-        return error_response(
-            "source-limit",
-            "source exceeds the deobfuscation byte limit",
-        );
-    }
-    if let Err(message) = preflight::check(&request.source) {
-        let mut response = preflight_refusal(message, source_bytes);
-        response.derived_source = request.source;
-        return response;
-    }
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, &request.source, SourceType::unambiguous()).parse();
     let syntax_errors = parsed
@@ -264,8 +246,8 @@ fn analyze(request: Request) -> Response {
         } else {
             vec![]
         },
-        // Tree-sitter admitted the source and Oxc rejected it: `parsed` stays
-        // true because a parse ran, but the source is not valid JavaScript.
+        // Oxc rejected the source: `parsed` stays true because a parse ran,
+        // but the source is not valid JavaScript.
         error_kind: (!parsed_ok).then_some("syntax"),
         function_location: None,
     };
@@ -311,89 +293,71 @@ fn operation(line: &[u8]) -> Result<Operation, Rejected> {
     }
 }
 
-// Read at most limit bytes, then drain the remainder of an oversized record.
-// Keeping framing after rejection allows the next request to succeed.
-fn read_request(reader: &mut impl BufRead, limit: usize) -> io::Result<Option<Vec<u8>>> {
+/// Reads one newline-terminated record, or the unterminated last one. A
+/// record is as long as the source it carries.
+fn read_request(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
-    let mut oversized = false;
-    loop {
-        let chunk = reader.fill_buf()?;
-        if chunk.is_empty() {
-            return if oversized {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "request exceeds the byte limit",
-                ))
-            } else if bytes.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(bytes))
-            };
-        }
-        let end = chunk.iter().position(|byte| *byte == b'\n');
-        let count = end.unwrap_or(chunk.len());
-        if !oversized {
-            if count > limit.saturating_sub(bytes.len()) {
-                oversized = true;
-                bytes.clear();
-            } else {
-                bytes.extend_from_slice(&chunk[..count]);
-            }
-        }
-        reader.consume(count + usize::from(end.is_some()));
-        if end.is_some() {
-            return if oversized {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "request exceeds the byte limit",
-                ))
-            } else {
-                Ok(Some(bytes))
-            };
-        }
+    if reader.read_until(b'\n', &mut bytes)? == 0 {
+        return Ok(None);
     }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    Ok(Some(bytes))
+}
+
+/// Writes one response line straight from its value: a whole-bundle report
+/// is never copied into an intermediate JSON tree first.
+fn reply(writer: &mut impl Write, response: &impl Serialize) -> io::Result<()> {
+    serde_json::to_writer(&mut *writer, response)?;
+    writeln!(writer)?;
+    writer.flush()
 }
 
 fn serve(reader: &mut impl BufRead, writer: &mut impl Write) -> io::Result<()> {
     loop {
-        let response = match read_request(reader, MAX_REQUEST_BYTES) {
-            Ok(None) => return Ok(()),
-            Ok(Some(line)) => match operation(&line) {
-                Ok(Operation::Deobfuscate(request)) => serde_json::to_value(analyze(request))?,
-                Ok(Operation::FunctionLookup(request)) => serde_json::to_value(locate(request))?,
-                Ok(Operation::SourceFacts(request)) => source_facts::analyze(request),
-                Ok(Operation::InvocationSite(request)) => {
-                    serde_json::to_value(invocation_site::analyze(request))?
-                }
-                Ok(Operation::RequestField(request)) => {
-                    serde_json::to_value(request_field::extract(request))?
-                }
-                Err(Rejected::Request(message)) => {
-                    serde_json::to_value(error_response("invalid-request", message))?
-                }
-                Err(Rejected::SourceFacts) => {
-                    source_facts::invalid("invalid source facts request", 0)
-                }
-                Err(Rejected::InvocationSite) => serde_json::to_value(invocation_site::invalid(
-                    "invalid invocation site request",
-                    0,
-                ))?,
-                Err(Rejected::RequestField) => {
-                    serde_json::to_value(request_field::extract(request_field::Request {
-                        operation: String::new(),
-                        body: String::new(),
-                        pointer: String::new(),
-                    }))?
-                }
-            },
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                serde_json::to_value(error_response("source-limit", error.to_string()))?
-            }
-            Err(error) => return Err(error),
+        let Some(line) = read_request(reader)? else {
+            return Ok(());
         };
-        serde_json::to_writer(&mut *writer, &response)?;
-        writeln!(writer)?;
-        writer.flush()?;
+        match operation(&line) {
+            Ok(Operation::Deobfuscate(request)) => {
+                let stack = stack_for(&request.source);
+                reply(writer, &stacker::grow(stack, || analyze(request)))?
+            }
+            Ok(Operation::FunctionLookup(request)) => reply(writer, &locate(request))?,
+            Ok(Operation::SourceFacts(request)) => {
+                let stack = stack_for(&request.source);
+                reply(
+                    writer,
+                    &stacker::grow(stack, || source_facts::analyze(request)),
+                )?
+            }
+            Ok(Operation::InvocationSite(request)) => {
+                reply(writer, &invocation_site::analyze(request))?
+            }
+            Ok(Operation::RequestField(request)) => {
+                reply(writer, &request_field::extract(request))?
+            }
+            Err(Rejected::Request(message)) => {
+                reply(writer, &error_response("invalid-request", message))?
+            }
+            Err(Rejected::SourceFacts) => reply(
+                writer,
+                &source_facts::invalid("invalid source facts request", 0),
+            )?,
+            Err(Rejected::InvocationSite) => reply(
+                writer,
+                &invocation_site::invalid("invalid invocation site request", 0),
+            )?,
+            Err(Rejected::RequestField) => reply(
+                writer,
+                &request_field::extract(request_field::Request {
+                    operation: String::new(),
+                    body: String::new(),
+                    pointer: String::new(),
+                }),
+            )?,
+        }
     }
 }
 
@@ -456,19 +420,14 @@ mod tests {
                 .message
                 .contains("original source is preserved")
         );
+        // Deep candidates are validated on the stack their nesting needs.
+        let deep = format!("{}0;", "!".repeat(10_000));
         assert!(
-            validate_derived(
-                &"x".repeat(MAX_DERIVED_BYTES + 1),
+            stacker::grow(stack_for(&deep), || validate_derived(
+                &deep,
                 SourceType::unambiguous()
-            )
-            .is_err()
-        );
-        assert!(
-            validate_derived(
-                &format!("{}0;", "!".repeat(10_000)),
-                SourceType::unambiguous()
-            )
-            .is_err()
+            ))
+            .is_ok()
         );
     }
 
@@ -610,32 +569,96 @@ mod tests {
     }
 
     #[test]
-    fn direct_intrinsic_resource_boundaries_preserve_the_original_call() {
+    fn direct_intrinsics_fold_at_any_part_or_argument_count() {
         let split = format!(
-            "const result={:?}.split(\"|\")[0];",
-            format!("{}a", "a|".repeat(256))
+            "const result={:?}.split(\"|\")[4096];",
+            format!("{}b", "a|".repeat(4096))
         );
         let response = analyze(Request {
-            source: split.clone(),
+            source: split,
             assume_intrinsics: true,
         });
         assert!(response.ok);
-        assert!(response.transformations_truncated);
-        assert_eq!(response.derived_source, split);
-        for source in [
-            format!(
+        assert!(!response.transformations_truncated);
+        assert_eq!(response.derived_source, "const result=(\"b\");");
+        let response = analyze(Request {
+            source: format!(
                 "const result=String.fromCharCode({});",
-                vec!["65"; 257].join(",")
+                vec!["65"; 4096].join(",")
             ),
-            format!("const result={:?}.charAt(0);", "a".repeat(16 * 1024 + 1)),
-        ] {
+            assume_intrinsics: true,
+        });
+        assert!(response.ok);
+        assert_eq!(
+            response.derived_source,
+            format!("const result=(\"{}\");", "A".repeat(4096))
+        );
+    }
+
+    /// Escaped string keys stay names. Visiting one as a value once produced
+    /// `{("A"):1}`, which failed validation and discarded every rewrite of a
+    /// real 6 MB bundle.
+    #[test]
+    fn escaped_string_keys_are_names_not_values() {
+        let source = r#"const o={"\x41":1+1};class C{"\x42"(){return 2+2}}const {"\x43":c}=o;"#;
+        let response = analyze(Request {
+            source: source.to_string(),
+            assume_intrinsics: false,
+        });
+        assert!(response.ok, "{:?}", response.syntax_errors);
+        assert_eq!(
+            response.derived_source,
+            r#"const o={"\x41":(2)};class C{"\x42"(){return (4)}}const {"\x43":c}=o;"#
+        );
+    }
+
+    /// A decoder loop runs until it completes or its expression's step
+    /// allowance is spent, and a table is read past its first 256 entries.
+    #[test]
+    fn long_decoder_loops_and_large_tables_fold() {
+        let response = analyze(Request {
+            source: "const decode=function(n){var out=0;for(var i=0;i<n;i++){out+=1;}return out;};const result=decode(5000);".to_string(),
+            assume_intrinsics: false,
+        });
+        assert!(response.ok);
+        assert!(!response.transformations_truncated);
+        assert!(
+            response.derived_source.ends_with("const result=(5000);"),
+            "{}",
+            response.derived_source
+        );
+        for count in [3, 300] {
+            let entries: Vec<String> = (0..count).map(|index| format!("\"e{index}\"")).collect();
+            let last = count - 1;
             let response = analyze(Request {
-                source: source.clone(),
-                assume_intrinsics: true,
+                source: format!(
+                    "function f(){{const t=[{}];return t[{last}];}}",
+                    entries.join(",")
+                ),
+                assume_intrinsics: false,
             });
             assert!(response.ok);
-            assert_eq!(response.derived_source, source);
+            assert!(
+                response
+                    .derived_source
+                    .ends_with(&format!("return (\"e{last}\");}}")),
+                "{count}: {}",
+                response.derived_source
+            );
         }
+    }
+
+    /// A folded value is inlined as a literal, so one is never larger than
+    /// MAX_VALUE_BYTES. The expression that would make one stays as written.
+    #[test]
+    fn a_value_past_the_inline_size_preserves_the_original_call() {
+        let source = format!("const result={:?}.charAt(0);", "a".repeat(16 * 1024 + 1));
+        let response = analyze(Request {
+            source: source.clone(),
+            assume_intrinsics: true,
+        });
+        assert!(response.ok);
+        assert_eq!(response.derived_source, source);
     }
 
     #[test]
@@ -662,22 +685,30 @@ mod tests {
         });
 
         assert!(!response.ok);
-        assert!(!response.parsed);
+        // A parse ran and found the error.
+        assert!(response.parsed);
         assert!(!response.syntax_errors.is_empty());
         assert_eq!(response.derived_source, "const broken = ;");
         assert!(response.transformations.is_empty());
     }
 
+    /// No byte cap: a source past the old 4 MiB bound is folded throughout,
+    /// including its last statement.
     #[test]
-    fn rejects_oversized_sources_before_parsing() {
-        let response = analyze(Request {
-            assume_intrinsics: false,
-            source: "x".repeat(MAX_SOURCE_BYTES + 1),
+    fn folds_sources_past_the_old_byte_cap_to_their_end() {
+        let mut source = "var a=1+2;".repeat(512 * 1024);
+        source.push_str("var z=40+2;");
+        assert!(source.len() > 4 * 1024 * 1024);
+        let response = stacker::grow(stack_for(&source), || {
+            analyze(Request {
+                assume_intrinsics: false,
+                source: source.clone(),
+            })
         });
-
-        assert!(!response.ok);
-        assert!(!response.parsed);
-        assert!(response.syntax_errors[0].message.contains("byte limit"));
+        assert!(response.ok);
+        assert!(!response.transformations_truncated);
+        assert_eq!(response.transformations.len(), 512 * 1024 + 1);
+        assert!(response.derived_source.ends_with("var z=(42);"));
     }
 }
 
@@ -716,18 +747,8 @@ mod framing_tests {
     #[test]
     fn every_refusal_names_its_kind() {
         for (request, kind, parsed) in [
-            (json!({"source":"const broken = ;"}), "syntax", false),
+            (json!({"source":"const broken = ;"}), "syntax", true),
             (json!({"source":"return 1;"}), "syntax", true),
-            (
-                json!({"source":format!("{}0;", "!".repeat(10_000))}),
-                "preflight-limit",
-                false,
-            ),
-            (
-                json!({"source":"x".repeat(MAX_SOURCE_BYTES + 1)}),
-                "source-limit",
-                false,
-            ),
             (
                 json!({"source":"const broken = ;","function_at_byte":0}),
                 "syntax",
@@ -740,26 +761,20 @@ mod framing_tests {
             assert_eq!(response["parsed"], parsed, "{kind}");
         }
         assert!(respond(json!({"source":"1+2"})).get("error_kind").is_none());
+        // Nesting is measured and given its stack, never refused.
+        let deep = respond(json!({"source":format!("{}0;", "!".repeat(10_000))}));
+        assert_eq!(deep["ok"], true);
     }
 
     #[test]
-    fn drains_oversize_and_preserves_next_record() {
-        let mut reader = BufReader::with_capacity(3, Cursor::new(b"123456789\nok\n"));
-        assert_eq!(
-            read_request(&mut reader, 4).unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(read_request(&mut reader, 4).unwrap(), Some(b"ok".to_vec()));
-        assert!(read_request(&mut reader, 4).unwrap().is_none());
-    }
-
-    #[test]
-    fn bounds_unterminated_records_and_accepts_exact_limit() {
-        assert!(read_request(&mut Cursor::new(b"12345"), 4).is_err());
-        assert_eq!(
-            read_request(&mut Cursor::new(b"1234"), 4).unwrap(),
-            Some(b"1234".to_vec())
-        );
+    fn records_of_any_length_keep_their_framing() {
+        let long = "x".repeat(1 << 20);
+        let input = format!("{long}\nok\nlast");
+        let mut reader = BufReader::with_capacity(3, Cursor::new(input.into_bytes()));
+        assert_eq!(read_request(&mut reader).unwrap(), Some(long.into_bytes()));
+        assert_eq!(read_request(&mut reader).unwrap(), Some(b"ok".to_vec()));
+        assert_eq!(read_request(&mut reader).unwrap(), Some(b"last".to_vec()));
+        assert!(read_request(&mut reader).unwrap().is_none());
     }
 
     #[test]
@@ -815,16 +830,17 @@ mod framing_tests {
             .map(|s| serde_json::from_slice(s).unwrap())
             .collect();
         assert_eq!(responses.len(), 4);
-        for (response, error) in responses[..2].iter().zip(["malformed", "depth"]) {
-            assert_eq!(response["ok"], false);
-            assert_eq!(response["parsed"], false);
-            assert!(
-                response["syntax_errors"][0]["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains(error)
-            );
-        }
+        assert_eq!(responses[0]["ok"], false);
+        assert_eq!(responses[0]["parsed"], false);
+        assert!(
+            responses[0]["syntax_errors"][0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("malformed")
+        );
+        // A deep source is parsed; an offset past its end names no function.
+        assert_eq!(responses[1]["ok"], true);
+        assert!(responses[1]["function_location"].is_null());
         assert_eq!(responses[2]["ok"], true);
         assert_eq!(responses[2]["function_location"]["kind"], "arrow_function");
         assert_eq!(responses[2]["function_location"]["body_start"], 16);

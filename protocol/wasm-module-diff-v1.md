@@ -14,7 +14,7 @@ Rust provider. The CLI prints the document or `{error, status}`.
 
 The provider verifies each module's complete size and SHA-256 against the
 manifest before decoding, using the same `wasmparser` decoder as
-[WASM inspection](wasm-inspection-v1.md). It never executes either module,
+[WASM inspection](wasm-inspection-v2.md). It never executes either module,
 invokes an import, fetches anything, writes analysis files, or modifies capture.
 Original bytes are never changed: every derived row maps back to a body range
 in its module, and the module's SHA-256.
@@ -220,7 +220,7 @@ Statuses, in page order:
 | `added` | Only in B. |
 | `removed` | Only in A. |
 | `ambiguous` | A member of a tie; no pair was chosen. |
-| `unclassified` | Unmatched when a limit or the deadline stopped the comparison, so it may not really be added, removed or tied. |
+| `unclassified` | Unmatched when the score cap stopped the comparison, so it may not really be added, removed or tied. |
 | `renumbered` | Matched; the bytes differ, but the normalized hashes and the address maps are equal, and every call site and `ref.func` names the matched function on the other side. |
 | `identical` | Matched; the body bytes, the normalized hashes and the address maps are equal, and every call site and `ref.func` names the matched function on the other side, or an import's names and signature are equal. The normalized hash makes the signature, each global's type and each named type's signature part of the check. Two globals of the same type are still not told apart, and the address map compares positions, not stored bytes. |
 
@@ -234,11 +234,9 @@ Continue from `row_window.next_offset`, which is null at the end; a page can
 hold fewer rows than `row_limit`. `row_window` also gives `offset`, `rows` and
 `total_rows`. `requested_statuses` echoes the filter, or null.
 
-Only a complete report pages reliably. A partial report is not kept, so each
-page is a new comparison that can stop at a different point, and since rows
-are ordered by status a later page can repeat or skip rows of an earlier one.
-Every partial report says so in `omissions`; retry for a complete report
-before paging.
+Every report pages reliably. The comparison is deterministic, and the
+backend keeps each report it builds, so every page of one pair is cut from the
+same report, complete or not.
 
 The report holds no instruction text, constant value, data byte or custom
 section content, so it is structure at every permission level. Function,
@@ -246,36 +244,31 @@ import and export names are returned as in `get_wasm_functions`.
 
 ## Bounds and errors
 
-- Maximum module input: 64 MiB each, the block graph's limit.
-- Maximum functions per module: 262,144, imports included. A larger module is
-  compared on that prefix and named in `omissions`; imports past it are
-  counted, not kept.
+- Modules of any size, with any number of functions, are compared whole.
+  `limits` no longer reports `max_module_bytes`, `max_functions` or
+  `deadline_ms`; version 1 readers ignore the absent keys.
 - A body over 7,654,321 bytes or a function with more than 50,000 locals is
   rejected as malformed, since web engines reject both.
 - Similarity scores: 4,000,000 in all, across propagation and the structural
   pass, and at most 64 per function in the structural pass.
-- One four-second deadline covers the request, below the native helper's
-  five-second process limit. It counts from when the request arrived, before
-  it waited for a reader, so reading and verifying both modules count too. It
-  is checked every 4,096 section entries while parsing, before each body,
-  every 4,096 instructions inside one, before each exact pass, at each
-  propagation step and before each structural candidate set. A parse it
-  stops says the module's function count is unknown. Global and local
-  first-use numbering use tables indexed by number, so no body costs more
-  than linear work between two checks.
-- When a limit or the deadline stops a step:
+- No deadline. Cancellation is checked every 4,096 section entries while
+  parsing, before each body, every 4,096 instructions inside one, before each
+  exact pass, at each propagation step and before each structural candidate
+  set; a request that goes away stops the work and is answered 499
+  `cancelled`, and nothing of it is kept. Global and local first-use numbering
+  use tables indexed by number, so no body costs more than linear work between
+  two checks.
+- When the score cap stops a step:
   - `status` is `partial`;
   - `omissions` names the step and why it stopped, and how many of each
     module's functions were fingerprinted;
   - every function left unmatched is `unclassified` instead of `added`,
     `removed` or `ambiguous`;
   - matches made before the stop stand.
-- The loopback backend keeps the two most recent complete reports in memory,
-  keyed by the store and both artifact IDs and SHA-256 digests, so paging a
-  pair does not repeat the comparison. A partial report is not kept, so a
-  retry makes a fresh attempt. The native `reb://` route starts a new helper process for each
-  page and filter, so each of its pages repeats the comparison inside the
-  same bound.
+- The backend keeps the two most recent reports in memory, keyed by the store
+  and both artifact IDs and SHA-256 digests, so paging a pair does not repeat
+  the comparison. The native `reb://` route forwards to the bundled backend,
+  so it shares that cache.
 
 Errors use the shared `Error` body:
 

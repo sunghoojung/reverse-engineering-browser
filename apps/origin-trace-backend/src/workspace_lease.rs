@@ -213,7 +213,8 @@ mod unix {
             };
             regular_owned(&file, "Workspace store")?;
             let mut bytes = Vec::new();
-            file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+            file.take((maximum as u64).saturating_add(1))
+                .read_to_end(&mut bytes)?;
             if bytes.len() > maximum {
                 return Err(Error::bad("Store exceeds its byte limit"));
             }

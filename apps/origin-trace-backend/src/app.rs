@@ -38,7 +38,7 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const UI_ASSETS: [&str; 83] = [
+const UI_ASSETS: [&str; 84] = [
     "index.html",
     "block_graph.css",
     "block_graph.js",
@@ -59,6 +59,7 @@ const UI_ASSETS: [&str; 83] = [
     "entropy_map.js",
     "wasm_identification.css",
     "wasm_identification.js",
+    "wasm_inspection.js",
     "agent_panel.css",
     "agent_panel.js",
     "session_panel.css",
@@ -123,9 +124,9 @@ const UI_ASSETS: [&str; 83] = [
     "debugger_sidebar.js",
     "debugger_sidebar.css",
 ];
-/// Flags a blocking read (cross-references or an artifact map) as abandoned
+/// Flags blocking work (cross-references, an artifact map or a facts admission) as abandoned
 /// when its request future is dropped.
-struct CancelOnDrop(Arc<AtomicBool>);
+pub(crate) struct CancelOnDrop(pub(crate) Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -175,6 +176,7 @@ pub struct App {
     decoder: Decoder,
     analyst: Analyst,
     deobfuscator: Deobfuscator,
+    source_facts: source_facts::SourceFacts,
     source_format: source_format::SourceFormat,
     /// Process-lifetime identity for `/api/health` and `X-REB-Expected-Instance`.
     instance_id: String,
@@ -271,6 +273,7 @@ impl App {
                 "OriginTraceDeobfuscator",
                 "apps/deobfuscator-worker/target/debug/reb-deobfuscator-worker",
             )),
+            source_facts: source_facts::SourceFacts::default(),
             source_format: source_format::SourceFormat::default(),
             instance_id: format!(
                 "{}:{}",
@@ -425,6 +428,17 @@ impl App {
         .await
         .map_err(|e| Error::new(500, e.to_string()))?
     }
+    /// Blocking analysis with no deadline: it runs until it is done or its
+    /// request goes away, when dropping this future sets the flag `work`
+    /// polls, so an abandoned analysis gives its reader permit back.
+    async fn cancellable<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&AtomicBool) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelOnDrop(cancelled.clone());
+        self.blocking(move || work(&cancelled)).await
+    }
     async fn vm_documents(&self) -> Result<(Arc<vm::Analysis>, Result<Value>)> {
         let signature = format!(
             "{}:{}:{}",
@@ -545,15 +559,17 @@ impl App {
             if q.one("function")?.is_some() {
                 return Err(Error::bad("The WASM function list takes only artifact_id"));
             }
-            self.blocking(move || wasm_graph::function_index_named(&root, &id, Some(&names())))
-                .await?
+            self.cancellable(move |cancelled| {
+                wasm_graph::function_index_named(&root, &id, Some(&names()), cancelled)
+            })
+            .await?
         } else {
             let function = q
                 .required("function")?
                 .parse::<u32>()
                 .map_err(|_| Error::bad("A WASM function index is an unsigned 32-bit integer"))?;
-            self.blocking(move || {
-                wasm_graph::function_graph_named(&root, &id, function, Some(&names()))
+            self.cancellable(move |cancelled| {
+                wasm_graph::function_graph_named(&root, &id, function, Some(&names()), cancelled)
             })
             .await?
         };
@@ -587,7 +603,7 @@ impl App {
         let root = self.options.artifacts.clone();
         let names = self.names_reader();
         let document = self
-            .blocking(move || {
+            .cancellable(move |cancelled| {
                 wasm_pseudocode::pseudocode_named(
                     &root,
                     &id,
@@ -595,6 +611,7 @@ impl App {
                     offset,
                     limit,
                     Some(&names()),
+                    cancelled,
                 )
             })
             .await?;
@@ -603,8 +620,6 @@ impl App {
     /// Two artifact IDs and an optional page. A misspelled parameter fails
     /// instead of returning an unfiltered table the caller reads as filtered.
     async fn wasm_diff_route(&self, raw_query: &str) -> Result<Response> {
-        // The deadline counts from arrival, including the wait for a reader.
-        let started = std::time::Instant::now();
         let q = Query::new(raw_query);
         if q.0.keys().any(|key| {
             ![
@@ -628,7 +643,7 @@ impl App {
         let page = wasm_diff::Page::new(offset, limit, q.one("status")?)?;
         let root = self.options.artifacts.clone();
         let document = self
-            .blocking(move || wasm_diff::diff(&root, &a, &b, &page, started))
+            .cancellable(move |cancelled| wasm_diff::diff(&root, &a, &b, &page, cancelled))
             .await?;
         Ok(axum::Json(document).into_response())
     }
@@ -680,7 +695,9 @@ impl App {
                 .ok_or_else(|| Error::bad("artifact_id is required"))?;
             let root = self.options.artifacts.clone();
             let document = self
-                .blocking(move || wasm_value_flow::value_flow(&root, &id, &request))
+                .cancellable(move |cancelled| {
+                    wasm_value_flow::value_flow(&root, &id, &request, cancelled)
+                })
                 .await?;
             return Ok(axum::Json(document).into_response());
         }
@@ -778,10 +795,17 @@ impl App {
                 // A misspelled filter must fail rather than return a
                 // whole-module document the caller will read as scoped.
                 if q.0.keys().any(|key| {
-                    !["artifact_id", "sections", "row_offset", "row_limit"].contains(&key.as_str())
+                    ![
+                        "artifact_id",
+                        "sections",
+                        "row_offset",
+                        "row_limit",
+                        "byte_offset",
+                    ]
+                    .contains(&key.as_str())
                 }) {
                     return Err(Error::bad(
-                        "WASM inspection takes artifact_id with optional sections, row_offset and row_limit",
+                        "WASM inspection takes artifact_id with optional sections, row_offset or byte_offset, and row_limit",
                     ));
                 }
                 let id = q.required("artifact_id")?.to_owned();
@@ -789,26 +813,67 @@ impl App {
                     .one("sections")?
                     .map(wasm::requested_sections)
                     .transpose()?;
-                let window = if q.any(&["row_offset", "row_limit"]) {
-                    let offset = q.number("row_offset", Some("0"), 32, false)? as usize;
-                    let default = wasm::WINDOW_MAX_ROWS.to_string();
-                    let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
-                    if limit > wasm::WINDOW_MAX_ROWS {
-                        return Err(Error::bad("row_limit is at most 2048"));
+                let start = match (q.any(&["row_offset"]), q.any(&["byte_offset"])) {
+                    (true, true) => {
+                        return Err(Error::bad("row_offset and byte_offset are exclusive"));
                     }
-                    Some((offset, limit))
-                } else {
-                    None
+                    (_, true) => {
+                        wasm::Start::Byte(q.number("byte_offset", None, 64, false)? as usize)
+                    }
+                    _ => wasm::Start::Row(q.number("row_offset", Some("0"), 64, false)?),
                 };
+                let default = wasm::WINDOW_MAX_ROWS.to_string();
+                let limit = q.number("row_limit", Some(&default), 32, true)? as usize;
+                if limit > wasm::WINDOW_MAX_ROWS {
+                    return Err(Error::bad("row_limit is at most 2048"));
+                }
                 let root = self.options.artifacts.clone();
                 let names = self.names_reader();
-                self.blocking(move || {
-                    let mut document = wasm::load(&root, &id, sections.as_ref())?;
-                    if let Some((offset, limit)) = window {
-                        wasm::window(&mut document, offset, limit)?;
-                    }
+                self.cancellable(move |cancelled| {
+                    let mut document =
+                        wasm::load(&root, &id, sections.as_ref(), start, limit, cancelled)?;
                     crate::wasm_names::annotate_inspection(&mut document, &names());
                     Ok(document)
+                })
+                .await?
+            }
+            "/api/wasm/search" => {
+                q.only(
+                    &[
+                        "artifact_id",
+                        "q",
+                        "sections",
+                        "match_offset",
+                        "match_limit",
+                    ],
+                    &[],
+                )?;
+                let id = q.required("artifact_id")?.to_owned();
+                let query = q
+                    .one("q")?
+                    .ok_or_else(|| Error::bad("q is required"))?
+                    .to_owned();
+                let sections = q
+                    .one("sections")?
+                    .map(wasm::requested_sections)
+                    .transpose()?;
+                let offset = q.number("match_offset", Some("0"), 64, false)?;
+                let default = wasm::MATCH_PAGE.to_string();
+                let limit = q.number("match_limit", Some(&default), 32, true)? as usize;
+                if limit > wasm::MATCH_PAGE {
+                    return Err(Error::bad("match_limit is at most 1000"));
+                }
+                let root = self.options.artifacts.clone();
+                self.cancellable(move |cancelled| {
+                    wasm::search(
+                        &root,
+                        &id,
+                        sections.as_ref(),
+                        &query,
+                        offset,
+                        limit,
+                        cancelled,
+                    )
                 })
                 .await?
             }
@@ -829,8 +894,10 @@ impl App {
                     return Err(Error::bad("row_limit is at most 1024"));
                 }
                 let root = self.options.artifacts.clone();
-                self.blocking(move || wasm_identification::load(&root, &id, offset, limit))
-                    .await?
+                self.cancellable(move |cancelled| {
+                    wasm_identification::load(&root, &id, offset, limit, cancelled)
+                })
+                .await?
             }
             "/api/artifact-map" => {
                 if q.0.keys().any(|key| key != "artifact_id") {
@@ -896,59 +963,76 @@ impl App {
             "/api/local-analyst/runner" => self.analyst.state(),
             "/api/source-facts" => {
                 // Never infer identity from a URL, live script, or selected UI row.
-                if q.0.keys().any(|key| {
-                    ![
-                        "session_id",
-                        "artifact_id",
-                        "region_start_byte",
-                        "region_end_byte",
-                    ]
-                    .contains(&key.as_str())
-                }) {
+                if q.0.keys().any(|key| !FACTS_KEYS.contains(&key.as_str())) {
                     return Err(Error::bad(
                         "Source facts require session_id and artifact_id with an optional region",
                     ));
                 }
-                q.number("session_id", None, 64, false)?;
-                q.number("artifact_id", None, 64, false)?;
-                // A region narrows analysis of the same verified bytes. Half a
-                // range is a caller mistake, not a default to invent. Offsets
-                // admit the contract's full unsigned 64-bit form; one past the
-                // artifact is refused by the byte-range check below.
-                let offset = |key| {
-                    q.number(key, None, 64, false)
-                        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
-                };
-                let region = match (q.one("region_start_byte")?, q.one("region_end_byte")?) {
-                    (None, None) => None,
-                    (Some(_), Some(_)) => {
-                        Some((offset("region_start_byte")?, offset("region_end_byte")?))
-                    }
-                    _ => {
-                        return Err(Error::bad(
-                            "A source facts region requires region_start_byte and region_end_byte",
-                        ));
-                    }
-                };
-                let session = q.required("session_id")?.to_owned();
-                let id = q.required("artifact_id")?.to_owned();
-                let root = self.options.artifacts.clone();
-                let (source, identity) = self
-                    .blocking(move || source_facts::load(&root, &session, &id))
-                    .await?;
-                if let Some((start, end)) = region
-                    && (start > end
-                        || end > source.len()
-                        || !source.is_char_boundary(start)
-                        || !source.is_char_boundary(end))
+                let (report, cached, identity) = self.facts_report(&q).await?;
+                report.summary(identity, cached)
+            }
+            "/api/source-facts/rows" => {
+                let keys = [
+                    "table",
+                    "offset",
+                    "limit",
+                    "binding_id",
+                    "kind",
+                    "name",
+                    "candidates_of",
+                ];
+                if q.0
+                    .keys()
+                    .any(|key| !FACTS_KEYS.contains(&key.as_str()) && !keys.contains(&key.as_str()))
                 {
                     return Err(Error::bad(
-                        "A source facts region must be an original byte range in this artifact",
+                        "Source fact rows take the source facts parameters with table, offset, limit and one optional filter",
                     ));
                 }
-                let mut result = self.deobfuscator.source_facts(&source, region).await?;
-                result["source"] = identity;
-                result
+                let table = source_facts::TABLES
+                    .iter()
+                    .position(|(name, _)| Some(*name) == q.one("table").ok().flatten())
+                    .ok_or_else(|| {
+                        Error::bad(
+                            "table must be scopes, bindings, callables, regions, operations or frontiers",
+                        )
+                    })?;
+                let optional = |key: &str| -> Result<Option<usize>> {
+                    q.one(key)?
+                        .map(|_| q.number(key, None, 32, false).map(|n| n as usize))
+                        .transpose()
+                };
+                let page = source_facts::Page {
+                    table,
+                    offset: q.number("offset", Some("0"), 32, false)? as usize,
+                    limit: q.limit(100, source_facts::PAGE_ROWS)?,
+                    binding: optional("binding_id")?,
+                    kind: q.one("kind")?.map(str::to_owned),
+                    name: q
+                        .one("name")?
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned),
+                    candidates_of: optional("candidates_of")?,
+                };
+                let operations = table
+                    == source_facts::TABLES
+                        .iter()
+                        .position(|t| t.0 == "operations")
+                        .unwrap();
+                let bindings = table
+                    == source_facts::TABLES
+                        .iter()
+                        .position(|t| t.0 == "bindings")
+                        .unwrap();
+                if (page.binding.is_some() || page.kind.is_some()) && !operations
+                    || (page.name.is_some() || page.candidates_of.is_some()) && !bindings
+                {
+                    return Err(Error::bad(
+                        "binding_id and kind filter operations; name and candidates_of filter bindings",
+                    ));
+                }
+                let (report, _, identity) = self.facts_report(&q).await?;
+                report.page(identity, &page)?
             }
             "/api/source-format" => {
                 q.only(
@@ -1081,7 +1165,7 @@ impl App {
                 }
                 let root = self.options.artifacts.clone();
                 let bytes = self
-                    .blocking(move || evidence::content(&root, &record, 4 * 1024 * 1024))
+                    .blocking(move || evidence::read(&root, &record))
                     .await?;
                 let source = String::from_utf8(bytes)
                     .map_err(|_| Error::bad("Artifact is not valid UTF-8 JavaScript"))?;
@@ -1800,24 +1884,32 @@ impl App {
             "/api/artifacts/search" => {
                 q.only(
                     &artifact_query::ARTIFACT_QUERY_KEYS[..8],
-                    &["q", "match_case", "offset", "limit", "credential_values"],
+                    &[
+                        "q",
+                        "regex",
+                        "match_case",
+                        "offset",
+                        "limit",
+                        "credential_values",
+                    ],
                 )?;
-                let query = artifact_text::SearchRequest::query(q.required("q")?)?;
-                let match_case = match q.one("match_case")? {
-                    None | Some("false") => false,
-                    Some("true") => true,
-                    Some(_) => return Err(Error::bad("match_case must be true or false")),
+                let text = artifact_text::SearchRequest::query(q.required("q")?)?;
+                let flag = |name: &str| match q.one(name)? {
+                    None | Some("false") => Ok(false),
+                    Some("true") => Ok(true),
+                    Some(_) => Err(Error::bad(format!("{name} must be true or false"))),
                 };
                 let request = artifact_text::SearchRequest {
-                    query,
-                    match_case,
+                    text,
+                    regex: flag("regex")?,
+                    match_case: flag("match_case")?,
                     filter: artifact_query::ArtifactFilter::parse(&q)?,
-                    offset: q.number("offset", Some("0"), 32, false)? as usize,
+                    offset: q.number("offset", Some("0"), 64, false)?,
                     limit: q.limit(50, artifact_text::SEARCH_MAX_LIMIT)?,
                     credentials: q.credentials()?,
                 };
                 let root = self.options.artifacts.clone();
-                self.blocking(move || artifact_text::search(&root, &request))
+                self.cancellable(move |cancelled| artifact_text::search(&root, &request, cancelled))
                     .await?
             }
             _ if path.starts_with("/api/artifacts/") && path.ends_with("/text") => {
@@ -1843,10 +1935,16 @@ impl App {
                 if offset > total {
                     return Err(Error::bad("Artifact content offset exceeds byte size"));
                 }
-                let limit = q.limit(2097152, 2097152)?;
+                // Any range in one response: the file is hashed whole for
+                // every range, so a reader of the whole artifact asks once.
+                let limit = q.limit(2097152, i64::MAX as usize)?;
                 let root = self.options.artifacts.clone();
                 let bytes = self
-                    .blocking(move || evidence::verified_range(&root, &artifact, offset, limit))
+                    .cancellable(move |cancelled| {
+                        evidence::verified_range_cancellable(
+                            &root, &artifact, offset, limit, cancelled,
+                        )
+                    })
                     .await?;
                 let end = offset.saturating_add(bytes.len());
                 let mut response = bytes_response(bytes, "application/octet-stream");
@@ -2194,9 +2292,7 @@ impl App {
         let root = self.options.artifacts.clone();
         let record = artifact.clone();
         let raw = self
-            .blocking(move || {
-                evidence::content(&root, &record, js_invocation_sites::MAX_SOURCE_BYTES)
-            })
+            .blocking(move || evidence::read(&root, &record))
             .await?;
         let request = js_invocation_sites::worker_request(&raw, target)?;
         let response = self.deobfuscator.invocation_site(request).await?;
@@ -2243,12 +2339,7 @@ impl App {
                                 if let Some(known) = digests.lock().ok()?.get(&sha) {
                                     return Some(known.clone());
                                 }
-                                let raw = evidence::content(
-                                    &root,
-                                    artifact,
-                                    js_invocation_sites::MAX_SOURCE_BYTES,
-                                )
-                                .ok()?;
+                                let raw = evidence::read(&root, artifact).ok()?;
                                 let digest = js_invocation_sites::text_digest(&raw)?;
                                 let mut cache = digests.lock().ok()?;
                                 if cache.len() >= TEXT_DIGESTS {
@@ -2314,6 +2405,43 @@ impl App {
         result["set"] = self.invocation_site_set().await?;
         Ok(result)
     }
+    /// The admitted facts report a source facts query names, from the cache
+    /// when these exact bytes and region were analyzed before.
+    async fn facts_report(&self, q: &Query) -> Result<(Arc<source_facts::Report>, bool, Value)> {
+        q.number("session_id", None, 64, false)?;
+        q.number("artifact_id", None, 64, false)?;
+        // A region narrows analysis of the same verified bytes. Half a range
+        // is a caller mistake, not a default to invent. Offsets admit the
+        // contract's full unsigned 64-bit form; one past the artifact is
+        // refused by the byte-range check before analysis.
+        let offset = |key| {
+            q.number(key, None, 64, false)
+                .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
+        };
+        let region = match (q.one("region_start_byte")?, q.one("region_end_byte")?) {
+            (None, None) => None,
+            (Some(_), Some(_)) => Some((offset("region_start_byte")?, offset("region_end_byte")?)),
+            _ => {
+                return Err(Error::bad(
+                    "A source facts region requires region_start_byte and region_end_byte",
+                ));
+            }
+        };
+        let session = q.required("session_id")?.to_owned();
+        let id = q.required("artifact_id")?.to_owned();
+        let root = self.options.artifacts.clone();
+        // Every page re-reads and verifies the artifact; only the analysis of
+        // bytes with this SHA-256 is reused.
+        let (source, identity) = self
+            .blocking(move || source_facts::load(&root, &session, &id))
+            .await?;
+        let sha256 = identity["sha256"].as_str().unwrap_or_default().to_owned();
+        let (report, cached) = self
+            .source_facts
+            .report(&self.deobfuscator, source, &sha256, region)
+            .await?;
+        Ok((report, cached, identity))
+    }
     async fn find_artifact(&self, id: &str) -> Result<Value> {
         if validation::canonical(&json!(id), 64, false, "Artifact ID").is_err() {
             return Err(Error::new(404, "Artifact not found"));
@@ -2345,7 +2473,31 @@ impl App {
                 "run_local_analyst_script" => {
                     let store = self.workspace.clone();
                     let workspace = self.blocking(move || store.load()).await?;
-                    self.analyst.run(value, &workspace).await
+                    let run = crate::analyst::Run::new(value, &workspace)?;
+                    // The script reads the stored, SHA-256 verified bytes of
+                    // the artifact the page selected, whatever their size.
+                    let selected = match run.selected() {
+                        Some(id) => {
+                            let artifact = self.find_artifact(id).await?;
+                            run.admit(&artifact)?;
+                            let root = self.options.artifacts.clone();
+                            let record = artifact.clone();
+                            let bytes = self
+                                .cancellable(move |cancelled| {
+                                    evidence::verified_range_cancellable(
+                                        &root,
+                                        &record,
+                                        0,
+                                        usize::MAX,
+                                        cancelled,
+                                    )
+                                })
+                                .await?;
+                            Some((artifact, bytes))
+                        }
+                        None => None,
+                    };
+                    self.analyst.run(run, selected).await
                 }
                 "set_wasm_function_name" => {
                     let store = self.workspace.clone();
@@ -2602,7 +2754,11 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             } else {
                 None
             };
-            let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(body, maximum))
+            // The deadline only stops a stalled client from holding admission.
+            // It grows by a second per declared 16 MiB, so a large body on a
+            // busy machine is never refused for its size.
+            let deadline = Duration::from_secs(5 + (length >> 24) as u64);
+            let bytes = tokio::time::timeout(deadline, to_bytes(body, maximum))
                 .await
                 .map_err(|_| {
                     Error::new(408, "The request body deadline was exceeded")
@@ -2898,6 +3054,13 @@ impl Query {
         })
     }
 }
+/// The parameters that name a source facts report.
+const FACTS_KEYS: [&str; 4] = [
+    "session_id",
+    "artifact_id",
+    "region_start_byte",
+    "region_end_byte",
+];
 fn analysis_input_signature(path: &Path) -> String {
     // Evidence can be restored or atomically replaced with the same length and
     // mtime. Unix identity includes change time and a content hash so a
@@ -3050,9 +3213,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wasm_diff_deadline_counts_from_arrival_not_from_the_reader_permit() {
-        // A request that waits for a reader past the deadline gets a partial
-        // answer as soon as it runs: the deadline counts from arrival.
+    async fn wasm_diff_waits_for_a_reader_without_a_deadline_and_stops_when_abandoned() {
+        // A comparison has no deadline: one that waited for a reader still
+        // answers in full, and one abandoned while it waits never runs and
+        // keeps no reader.
         let root = tempfile::tempdir().unwrap();
         let artifacts = root.path().join("artifacts");
         std::fs::create_dir_all(artifacts.join("blobs")).unwrap();
@@ -3081,23 +3245,34 @@ mod tests {
         options.api_collection = root.path().join("collection.json");
         options.local_analyst = root.path().join("analyst.json");
         let app = App::new(options, 0).await;
-        let held = app.io.clone().acquire_many_owned(4).await.unwrap();
-        let request = {
+        let permits = app.io.available_permits();
+        let held = app
+            .io
+            .clone()
+            .acquire_many_owned(permits as u32)
+            .await
+            .unwrap();
+        let spawn = || {
             let app = app.clone();
             tokio::spawn(async move {
                 app.wasm_diff_route("artifact_id=1&compare_artifact_id=2")
                     .await
             })
         };
-        tokio::time::sleep(wasm_diff::DEADLINE + Duration::from_millis(200)).await;
+        let abandoned = spawn();
+        let request = spawn();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        abandoned.abort();
+        assert!(abandoned.await.unwrap_err().is_cancelled());
         drop(held);
         let response = request.await.unwrap().unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["status"], "partial", "{}", body["omissions"]);
-        assert!(body["omissions"].to_string().contains("deadline"));
+        assert_eq!(body["status"], "complete", "{}", body["omissions"]);
+        assert!(body["limits"].get("deadline_ms").is_none());
+        assert_eq!(app.io.available_permits(), permits);
         app.stop().await;
     }
 

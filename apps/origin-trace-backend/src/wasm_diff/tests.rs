@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 fn report(a: &str, b: &str) -> Report {
     report_with(a, b, Limits::DEFAULT)
@@ -12,7 +13,7 @@ fn report_with(a: &str, b: &str, limits: Limits) -> Report {
         json!({"artifact_id":"1"}),
         json!({"artifact_id":"2"}),
         limits,
-        Instant::now(),
+        &AtomicBool::new(false),
     )
     .unwrap()
 }
@@ -589,7 +590,15 @@ fn a_tight_comparison_cap_narrows_the_window_instead_of_stopping() {
         ..Limits::DEFAULT
     };
     let (a, b) = (similar(2000, 1), similar(2000, 2));
-    let report = compare_with(&a, &b, json!({}), json!({}), limits, Instant::now()).unwrap();
+    let report = compare_with(
+        &a,
+        &b,
+        json!({}),
+        json!({}),
+        limits,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     assert!(report.complete, "{:?}", report.omissions);
     assert!(report.rows.iter().all(|row| row.status != UNCLASSIFIED));
     assert!(report.summary["comparisons"].as_u64().unwrap() <= 16_000);
@@ -621,7 +630,7 @@ fn every_step_the_budget_stops_leaves_honest_unclassified_rows() {
             json!({}),
             json!({}),
             stop_in(step),
-            Instant::now(),
+            &AtomicBool::new(false),
         )
         .unwrap()
     };
@@ -665,14 +674,10 @@ fn every_step_the_budget_stops_leaves_honest_unclassified_rows() {
 }
 
 #[test]
-fn the_deadline_bounds_adversarial_inputs() {
-    // Each of these took well over the deadline before the deadline was
+fn cancellation_stops_adversarial_inputs_promptly() {
+    // Each of these once ran for many seconds before cancellation was
     // checked inside bodies and global numbering was made linear.
-    let deadline = Duration::from_millis(250);
-    let limits = Limits {
-        deadline,
-        ..Limits::DEFAULT
-    };
+    let after = Duration::from_millis(250);
     for (label, a, b) in [
         (
             "globals",
@@ -682,24 +687,32 @@ fn the_deadline_bounds_adversarial_inputs() {
         ("bodies", big_bodies(2, 1), big_bodies(2, 2)),
         ("similar", similar(60_000, 1), similar(60_000, 2)),
     ] {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(after);
+            flag.store(true, Ordering::Relaxed);
+        });
         let started = Instant::now();
-        let report = compare_with(&a, &b, json!({}), json!({}), limits, Instant::now()).unwrap();
+        let result = compare_with(&a, &b, json!({}), json!({}), Limits::DEFAULT, &cancelled);
         let elapsed = started.elapsed();
-        assert!(
-            elapsed < deadline + Duration::from_millis(2500),
-            "{label} took {elapsed:?}"
-        );
-        // A fast machine may finish an input; a stopped one must say so.
-        assert!(
-            report.complete || report.omissions.iter().any(|o| o.contains("deadline")),
-            "{label}: {:?}",
-            report.omissions
-        );
+        cancel.join().unwrap();
+        // A fast machine may finish an input; a cancelled one says so.
+        match result {
+            Ok(report) => assert!(report.complete, "{label}: {:?}", report.omissions),
+            Err(error) => {
+                assert_eq!(error.status, 499, "{label}: {}", error.message);
+                assert!(
+                    elapsed < after + Duration::from_millis(2500),
+                    "{label} took {elapsed:?}"
+                );
+            }
+        }
     }
 }
 
 #[test]
-fn the_deadline_is_checked_inside_one_long_body() {
+fn the_budget_is_checked_inside_one_long_body() {
     // The first check, before the body, passes; the next one falls inside
     // it, after CHECK_EVERY instructions, and stops it there.
     let bytes = big_bodies(1, 1);
@@ -707,8 +720,15 @@ fn the_deadline_is_checked_inside_one_long_body() {
         stop_after_checks: Some(2),
         ..Limits::DEFAULT
     };
-    let report =
-        compare_with(&bytes, &bytes, json!({}), json!({}), limits, Instant::now()).unwrap();
+    let report = compare_with(
+        &bytes,
+        &bytes,
+        json!({}),
+        json!({}),
+        limits,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     assert!(
         report
             .omissions
@@ -857,14 +877,6 @@ fn a_default_page_of_long_names_fits_the_mcp_inline_limit_pretty_printed() {
     assert_eq!(page["row_window"]["next_offset"], json!(kept));
 }
 
-/// No time limit: these tests are about matching rules, not the deadline.
-fn untimed() -> Limits {
-    Limits {
-        deadline: Duration::from_secs(600),
-        ..Limits::DEFAULT
-    }
-}
-
 #[test]
 fn a_twin_outside_the_window_contests_a_single_best_candidate() {
     // A0 has one best candidate inside its window, B0. B64, another twin, is
@@ -878,7 +890,7 @@ fn a_twin_outside_the_window_contests_a_single_best_candidate() {
         "(func nop nop nop nop)".repeat(63),
         twin(3)
     );
-    let report = report_with(&a, &b, untimed());
+    let report = report_with(&a, &b, Limits::DEFAULT);
     let found = rows(&report);
     assert!(
         !found.contains(&row("added", None, None, Some(64))),
@@ -929,7 +941,7 @@ fn repeated_call_sites_spend_the_comparison_cap_once() {
     };
     let limits = Limits {
         max_comparisons: 200_000,
-        ..untimed()
+        ..Limits::DEFAULT
     };
     let report = report_with(&module(1), &module(2), limits);
     assert!(report.complete, "{:?}", report.omissions);
@@ -950,7 +962,7 @@ const CONTESTED_B: &str = r#"(module
 
 #[test]
 fn contested_propagation_is_a_tie_and_the_same_every_run() {
-    let first = rows(&report_with(CONTESTED_A, CONTESTED_B, untimed()));
+    let first = rows(&report_with(CONTESTED_A, CONTESTED_B, Limits::DEFAULT));
     for expected in [
         row("ambiguous", Some("call_graph"), Some(0), None),
         row("ambiguous", Some("call_graph"), None, Some(0)),
@@ -960,7 +972,7 @@ fn contested_propagation_is_a_tie_and_the_same_every_run() {
     }
     for _ in 0..60 {
         assert_eq!(
-            rows(&report_with(CONTESTED_A, CONTESTED_B, untimed())),
+            rows(&report_with(CONTESTED_A, CONTESTED_B, Limits::DEFAULT)),
             first
         );
     }
@@ -1013,7 +1025,7 @@ fn section_parsing_polls_the_budget() {
         json!({}),
         json!({}),
         limits,
-        Instant::now(),
+        &AtomicBool::new(false),
     )
     .unwrap();
     assert!(!report.complete);
@@ -1029,32 +1041,13 @@ fn section_parsing_polls_the_budget() {
 }
 
 #[test]
-fn imports_past_the_function_limit_are_counted_not_kept() {
+fn every_function_of_a_module_is_analyzed() {
     let module = many_imports(100);
-    let limits = Limits {
-        max_functions: 10,
-        ..Limits::DEFAULT
-    };
-    let report = compare_with(
-        &module,
-        &module,
-        json!({}),
-        json!({}),
-        limits,
-        Instant::now(),
-    )
-    .unwrap();
+    let report = compare(&module, &module, json!({}), json!({})).unwrap();
     assert_eq!(report.a["imported_functions"], 100);
-    assert_eq!(report.a["analyzed_functions"], 10);
-    assert_eq!(report.a_sides.len(), 10);
-    assert!(
-        report
-            .omissions
-            .iter()
-            .any(|o| o.contains("10 of its 100 functions")),
-        "{:?}",
-        report.omissions
-    );
+    assert_eq!(report.a["analyzed_functions"], 100);
+    assert_eq!(report.a_sides.len(), 100);
+    assert!(report.complete, "{:?}", report.omissions);
 }
 
 /// Two callees of one shape under an exported root that changed, so its
@@ -1135,37 +1128,15 @@ fn fixture_store() -> tempfile::TempDir {
 }
 
 #[test]
-fn a_partial_report_is_not_cached_for_the_retry() {
+fn a_cancelled_comparison_is_not_cached_for_the_retry() {
     let store = fixture_store();
     let page = Page::new(0, 200, None).unwrap();
-    let stopped = diff_with(
-        store.path(),
-        "1",
-        "2",
-        &page,
-        stop_in(FINGERPRINTING),
-        Instant::now(),
-    )
-    .unwrap();
-    assert_eq!(stopped["status"], "partial");
-    let retried = diff(store.path(), "1", "2", &page, Instant::now()).unwrap();
+    let cancelled = diff(store.path(), "1", "2", &page, &AtomicBool::new(true)).unwrap_err();
+    assert_eq!(cancelled.status, 499, "{}", cancelled.message);
+    let retried = diff(store.path(), "1", "2", &page, &AtomicBool::new(false)).unwrap();
     assert_eq!(retried["status"], "complete", "{:?}", retried["omissions"]);
-}
-
-#[test]
-fn the_deadline_counts_from_when_the_request_arrived() {
-    // A request that already waited past the deadline for a reader gets a
-    // partial answer at once, not four more seconds of work.
-    let store = fixture_store();
-    let page = Page::new(0, 200, None).unwrap();
-    let arrived = Instant::now() - DEADLINE - Duration::from_millis(1);
-    let late = diff(store.path(), "1", "2", &page, arrived).unwrap();
-    assert_eq!(late["status"], "partial");
-    assert!(
-        late["omissions"].to_string().contains("deadline"),
-        "{}",
-        late["omissions"]
-    );
+    assert!(retried["limits"].get("deadline_ms").is_none());
+    assert!(retried["limits"].get("max_module_bytes").is_none());
 }
 
 #[test]
@@ -1185,7 +1156,7 @@ fn rendered_pages_match_the_openapi_schema() {
         meta("1"),
         meta("2"),
         stop_in(STRUCTURAL),
-        Instant::now(),
+        &AtomicBool::new(false),
     )
     .unwrap();
     for (label, report) in [
@@ -1228,7 +1199,7 @@ fn a_twin_another_a_function_scored_still_contests() {
         "(func nop nop nop nop)".repeat(63),
         twin(3)
     );
-    let report = report_with(&a, &b, untimed());
+    let report = report_with(&a, &b, Limits::DEFAULT);
     let found = rows(&report);
     assert!(
         !found.contains(&row("added", None, None, Some(64))),
@@ -1258,7 +1229,7 @@ fn thunks_renumbered_by_an_insertion_pair_through_their_callees() {
         (func i32.const 2 drop nop)
         (func call 1)
         (func call 2))"#;
-    let found = rows(&report_with(a, b, untimed()));
+    let found = rows(&report_with(a, b, Limits::DEFAULT));
     for expected in [
         row("renumbered", Some("call_graph"), Some(2), Some(3)),
         row("renumbered", Some("call_graph"), Some(3), Some(4)),
@@ -1280,7 +1251,7 @@ fn readers_of_moved_data_pair_by_the_offset_they_read() {
     let b = r#"(module (memory 1) (data (i32.const 4112) "abcdefghijklmnopqrstuvwxyz0123456789")
         (func i32.const 4112 i32.load drop)
         (func i32.const 4128 i32.load drop))"#;
-    let found = rows(&report_with(a, b, untimed()));
+    let found = rows(&report_with(a, b, Limits::DEFAULT));
     assert_eq!(
         found,
         vec![
@@ -1308,37 +1279,16 @@ fn several_structural_ties_come_out_the_same_every_run() {
         text + ")"
     };
     let (a, b) = (module(0), module(1));
-    let first = report_with(&a, &b, untimed());
+    let first = report_with(&a, &b, Limits::DEFAULT);
     assert_eq!(first.groups.len(), 6, "{:?}", first.groups);
     for _ in 0..30 {
-        let again = report_with(&a, &b, untimed());
+        let again = report_with(&a, &b, Limits::DEFAULT);
         assert_eq!(rows(&again), rows(&first));
         assert_eq!(
             again.rows.iter().map(|r| r.group).collect::<Vec<_>>(),
             first.rows.iter().map(|r| r.group).collect::<Vec<_>>()
         );
     }
-}
-
-#[test]
-fn a_partial_report_says_its_pages_are_not_reliable() {
-    let builds = fixture_builds();
-    let stopped = compare_with(
-        &builds[0],
-        &builds[1],
-        json!({}),
-        json!({}),
-        stop_in(STRUCTURAL),
-        Instant::now(),
-    )
-    .unwrap();
-    assert!(
-        stopped.omissions.iter().any(|o| o == PARTIAL_PAGES),
-        "{:?}",
-        stopped.omissions
-    );
-    let whole = compare(&builds[0], &builds[1], json!({}), json!({})).unwrap();
-    assert!(!whole.omissions.iter().any(|o| o == PARTIAL_PAGES));
 }
 
 #[test]
@@ -1366,7 +1316,7 @@ fn equal_bytes_that_mean_something_else_are_changed_not_identical() {
         (func (export "t") call 1))"#;
     let b = r#"(module (func i32.const 2 drop nop) (func i32.const 1 drop)
         (func (export "t") call 1))"#;
-    let found = rows(&report_with(a, b, untimed()));
+    let found = rows(&report_with(a, b, Limits::DEFAULT));
     assert!(
         found.contains(&row("changed", Some("normalized"), Some(2), Some(2))),
         "{found:?}"
@@ -1378,7 +1328,7 @@ fn equal_bytes_that_mean_something_else_are_changed_not_identical() {
     let b = r#"(module (memory 1) (data (i32.const 4112) "abcdefghijklmnopqrstuvwxyz0123456789")
         (func i32.const 4112 i32.load drop))"#;
     assert_eq!(
-        rows(&report_with(a, b, untimed())),
+        rows(&report_with(a, b, Limits::DEFAULT)),
         vec![row("changed", Some("normalized"), Some(0), Some(0))]
     );
 }

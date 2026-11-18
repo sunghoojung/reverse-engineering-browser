@@ -114,7 +114,7 @@ enum StoredEvidenceBackendChecks {
       precondition(call(request(path)).status == 200, path)
     }
     let layout = call(request("/api/source-format?session_id=1&artifact_id=1"))
-    precondition(layout.status == 200 && layout.json["schema"] as? String == "source-format-v1"
+    precondition(layout.status == 200 && layout.json["schema"] as? String == "source-format-v2"
       && layout.json["status"] as? String == "formatted", "\(layout)")
     // The HAR save streams the backend's answer to a file; an error answer writes nothing.
     guard let firstRow = (index.json["requests"] as? [[String: Any]])?.first?["id"] as? String else {
@@ -140,6 +140,20 @@ enum StoredEvidenceBackendChecks {
     precondition(missingRow?.status == 404 && missingRow?.message.contains("missing-row") == true, "\(String(describing: missingRow))")
     let after = try Data(contentsOf: har)
     precondition(after == before, "an error answer leaves the saved file as it was")
+    // Analyses of an artifact are forwarded too, and the packaged backend runs
+    // its sibling worker for them.
+    let facts = call(request("/api/source-facts?session_id=1&artifact_id=1"))
+    precondition(facts.status == 200 && facts.json["schema"] as? String == "reb-javascript-source-facts-v2", "\(facts)")
+    let bindings = call(request("/api/source-facts/rows?session_id=1&artifact_id=1&table=bindings"))
+    precondition(bindings.status == 200 && bindings.json["schema"] as? String == "reb-javascript-source-fact-rows-v2"
+      && (bindings.json["total"] as? Int ?? 0) > 0, "\(bindings)")
+    let cleanup = call(request("/api/deobfuscation?artifact_id=1&mode=derived"))
+    precondition(cleanup.status == 200 && cleanup.json["engine"] as? String == "rust-oxc"
+      && cleanup.json["representation"] != nil, "\(cleanup)")
+    let map = call(request("/api/artifact-map?artifact_id=1"))
+    precondition(map.status == 200 && map.json["schema"] as? String == "artifact-map-v1", "\(map)")
+    let notWasm = call(request("/api/wasm?artifact_id=1"))
+    precondition(notWasm.status == 400, "the Rust provider refuses a JavaScript artifact as Wasm: \(notWasm)")
     let debugger = call(request("/api/native-debugger"))
     precondition(debugger.status == 200 && debugger.json["availability"] as? String == "unsupported", "\(debugger)")
     let action = call(request("/api/native-debugger/actions", method: "POST",
@@ -152,9 +166,25 @@ enum StoredEvidenceBackendChecks {
     precondition(call(request("/api/requests?limit=1")).status == 200, "the next read starts it again")
     backend.stop()
 
+    // Forwards start in order on one queue. One cancelled while an earlier one
+    // starts the backend never reaches it, and still replies exactly once.
+    let starting = DispatchSemaphore(value: 0), cancelled = DispatchSemaphore(value: 0)
+    var startingStatus = 0, cancelledStatus = 0, cancelledReplies = 0
+    backend.forward(request("/api/requests?limit=1")) { _, status, _, _ in startingStatus = status; starting.signal() }
+    backend.forward(request("/api/deobfuscation?artifact_id=1&mode=derived")) { _, status, _, _ in
+      cancelledStatus = status
+      cancelledReplies += 1
+      cancelled.signal()
+    }.cancel()
+    precondition(starting.wait(timeout: .now() + 60) == .success && startingStatus == 200, "the first forward is answered")
+    precondition(cancelled.wait(timeout: .now() + 60) == .success && cancelledStatus == 499, "a cancelled forward is not sent")
+    Thread.sleep(forTimeInterval: 0.2)
+    precondition(cancelledReplies == 1, "a cancelled forward replies once")
+    backend.stop()
+
     let missing = StoredEvidenceBackend(executableURL: root.appendingPathComponent("missing"), arguments: stores)
     let refused = call(request("/api/requests"), on: missing)
     precondition(refused.status == 503 && refused.json["code"] as? String == "dependency_unavailable", "\(refused)")
-    print("PASS stored-evidence reb:// reads of the request index, the event poll with the app's broker state, filtered events, headers, cookies, HAR exports and saves, stacks, source format and debugger state come from the bundled backend, which stops and restarts on demand")
+    print("PASS stored-evidence reb:// reads of the request index, the event poll with the app's broker state, filtered events, headers, cookies, HAR exports and saves, stacks, source format, Facts, static cleanup, artifact map, Wasm inspection and debugger state come from the bundled backend, which stops and restarts on demand and never sends a cancelled forward")
   }
 }

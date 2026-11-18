@@ -23,7 +23,7 @@ local tools automatically. `make deob-benchmark` builds the Rust worker and runs
 the bounded semantic corpus with timing, memory, transformation, and
 changed-source coverage evidence.
 
-`make lint` checks formatting and Clippy warnings for both Rust manifests.
+`make lint` checks formatting and Clippy warnings for all three Rust manifests.
 The deobfuscation worker includes all targets so its regression-test code is
 checked along with the production executable.
 
@@ -48,7 +48,8 @@ temporary directory, checks that a repeat build does no work, and verifies that
 an artifact header change invalidates its consumer without rebuilding the event
 demo. On macOS it also verifies that an `Info.plist` edit invalidates the
 demo. `make check` includes this regression check, the deobfuscation semantic
-benchmark, and the backend and deobfuscator worker's Rust test suites. It also
+benchmark, and the Rust test suites of the backend, the deobfuscator worker and
+the shared `reb-js-lexer` crate. It also
 runs the source-facts HTTP/CLI integration test against the built Rust/Oxc worker;
 `CARGO_TARGET_DIR` is honored when locating that helper.
 

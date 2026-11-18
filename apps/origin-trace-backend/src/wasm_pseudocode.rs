@@ -27,7 +27,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt::Write as _,
     path::Path,
-    time::{Duration, Instant},
+    sync::atomic::{AtomicBool, Ordering},
 };
 use wasmparser::{
     BlockType, ExternalKind, FuncValidatorAllocations, FunctionBody, KnownCustom, MemArg, Name,
@@ -59,16 +59,15 @@ pub const MAX_LINE_LIMIT: usize = 2000;
 /// compact and its pretty-printed JSON; a window is cut until the whole
 /// document fits 120 KiB in both, leaving room for the tool envelope.
 const WINDOW_BYTES: usize = 120 * 1024;
-const DEADLINE: Duration = Duration::from_secs(3);
 /// The lift's size budgets; `BUDGET` in production, smaller in tests.
 #[derive(Clone, Copy)]
 struct Budget {
     instructions: usize,
     lines: usize,
     text_bytes: usize,
-    /// Treat the deadline as passed once this much ordering work is done.
-    /// Tests use it to check where the deadline is looked at without
-    /// depending on the machine's speed; production leaves it unset.
+    /// Treat the request as cancelled once this much ordering work is done.
+    /// Tests use it to check where cancellation is looked at without
+    /// depending on timing; production leaves it unset.
     work: Option<u64>,
 }
 const BUDGET: Budget = Budget {
@@ -77,7 +76,7 @@ const BUDGET: Budget = Budget {
     text_bytes: MAX_TEXT_BYTES,
     work: None,
 };
-/// Stack entries visited between deadline checks.
+/// Stack entries visited between cancellation checks.
 const WORK_CHECK: u64 = 1 << 16;
 
 const LINE_KINDS: [&str; 7] = [
@@ -381,7 +380,7 @@ struct Lifter<'m> {
     run: Option<(usize, u32)>,
     ended: bool,
     /// Pending-stack entries visited while ordering effects. A deep operand
-    /// stack makes each statement cost its height, so the deadline is
+    /// stack makes each statement cost its height, so cancellation is
     /// checked by this work as well as by instruction count.
     work: u64,
     /// Catching frames open in this function; see `Effects::conflicts`.
@@ -394,8 +393,8 @@ struct Lifter<'m> {
 
 /// What the lift of one function produced, before windowing.
 struct Lift {
-    /// Pending-stack entries visited while ordering effects; the deadline
-    /// tests read it.
+    /// Pending-stack entries visited while ordering effects; the
+    /// cancellation tests read it.
     #[cfg_attr(not(test), allow(dead_code))]
     work: u64,
     lines: Vec<Line>,
@@ -413,7 +412,8 @@ struct Lift {
     max_depth: u32,
     truncated_instructions: bool,
     truncated_lines: bool,
-    truncated_deadline: bool,
+    /// The request went away before the lift finished; nothing reads it.
+    cancelled: bool,
     omissions: Vec<String>,
 }
 
@@ -1896,7 +1896,7 @@ impl<'m> Lifter<'m> {
             max_depth: self.max_depth,
             truncated_instructions: stopped == Some("instructions"),
             truncated_lines: stopped == Some("lines"),
-            truncated_deadline: stopped == Some("deadline"),
+            cancelled: stopped == Some("cancelled"),
             work: self.work,
             omissions: self.omissions,
         }
@@ -2039,7 +2039,7 @@ fn lift(
     body: &FunctionBody<'_>,
     type_index: u32,
     function: u32,
-    deadline: Instant,
+    cancelled: &AtomicBool,
     budget: Budget,
 ) -> Result<(Lift, u32)> {
     let signature = scan.module.func_type(type_index);
@@ -2126,14 +2126,13 @@ fn lift(
         if checkpoint {
             next_check = lifter.work + WORK_CHECK;
         }
+        // No deadline: a large function lifts for as long as it takes, and
+        // the request that asked for it stops it by going away.
         if checkpoint
-            && (Instant::now() > deadline || budget.work.is_some_and(|work| lifter.work > work))
+            && (cancelled.load(Ordering::Relaxed)
+                || budget.work.is_some_and(|work| lifter.work > work))
         {
-            stopped = Some("deadline");
-            message = Some(format!(
-                "Lift deadline reached at byte {}; later instructions are not lifted.",
-                reader.original_position()
-            ));
+            stopped = Some("cancelled");
             break;
         }
         let (op, offset) = reader.read_with_offset().map_err(bad)?;
@@ -2224,7 +2223,15 @@ pub fn pseudocode(
     line_offset: usize,
     line_limit: usize,
 ) -> Result<String> {
-    pseudocode_named(root, id, function, line_offset, line_limit, None)
+    pseudocode_named(
+        root,
+        id,
+        function,
+        line_offset,
+        line_limit,
+        None,
+        &AtomicBool::new(false),
+    )
 }
 
 /// [`pseudocode`] with researcher names joined, as the loopback route does
@@ -2239,6 +2246,7 @@ pub fn pseudocode_named(
     line_offset: usize,
     line_limit: usize,
     analyst: Option<&crate::wasm_names::Names>,
+    cancelled: &AtomicBool,
 ) -> Result<String> {
     if line_limit == 0 || line_limit > MAX_LINE_LIMIT {
         return Err(Error::bad(format!(
@@ -2246,7 +2254,6 @@ pub fn pseudocode_named(
         )));
     }
     let artifact = wasm_graph::artifact(root, id)?;
-    let deadline = Instant::now() + DEADLINE;
     let scan = scan(&artifact.bytes, function)?;
     let imported = scan.module.imported_functions();
     let (Some(body), Some(type_index)) = (scan.body.clone(), scan.type_index) else {
@@ -2264,7 +2271,10 @@ pub fn pseudocode_named(
     // Module validation already refused any body past the 7,654,321-byte
     // limit web engines enforce, in this function or another one.
     let range = body.range();
-    let (lift, locals) = lift(&scan, &body, type_index, function, deadline, BUDGET)?;
+    let (lift, locals) = lift(&scan, &body, type_index, function, cancelled, BUDGET)?;
+    if lift.cancelled {
+        return Err(Error::cancelled("WASM readable view"));
+    }
     if line_offset > lift.lines.len() {
         return Err(Error::bad("line_offset exceeds the line count"));
     }
@@ -2280,7 +2290,7 @@ pub fn pseudocode_named(
     }
     let unowned = owners.iter().filter(|count| **count == 0).count();
     let repeated = owners.iter().filter(|count| **count > 1).count();
-    let stopped = lift.truncated_instructions || lift.truncated_lines || lift.truncated_deadline;
+    let stopped = lift.truncated_instructions || lift.truncated_lines;
     let complete = !stopped && unowned == 0 && repeated == 0;
     let lifted: usize = owners.iter().filter(|count| **count > 0).count();
     let fallback_count: u32 = lift.fallbacks.iter().sum();
@@ -2321,7 +2331,6 @@ pub fn pseudocode_named(
         ));
     }
     let limits = json!({
-        "max_input_bytes": wasm_graph::MAX_BYTES,
         "max_body_bytes": wasm_graph::MAX_BODY_BYTES,
         "max_instructions": MAX_INSTRUCTIONS,
         "max_lines": MAX_LINES,
@@ -2332,7 +2341,6 @@ pub fn pseudocode_named(
         "window_bytes": WINDOW_BYTES,
         "max_frames_listed": MAX_FRAMES_LISTED,
         "max_line_ranges": MAX_LINE_RANGES,
-        "deadline_ms": DEADLINE.as_millis() as u64,
     });
     let available = line_limit.min(lift.lines.len() - line_offset);
     let mut count = available;
@@ -2396,7 +2404,8 @@ pub fn pseudocode_named(
         document["truncation"] = json!({
             "instructions": lift.truncated_instructions,
             "lines": lift.truncated_lines,
-            "deadline": lift.truncated_deadline,
+            // The lift has no deadline; v1 keeps the member, always false.
+            "deadline": false,
             "clipped_lines": lift.clipped_lines,
             "window_bytes": count < available,
             "frames": frames_truncated,
@@ -2568,7 +2577,7 @@ mod tests {
     fn internal(
         bytes: &[u8],
         function: u32,
-        deadline: Instant,
+        cancelled: &AtomicBool,
         budget: Budget,
     ) -> (Lift, usize, usize) {
         let scanned = scan(bytes, function).unwrap();
@@ -2578,7 +2587,7 @@ mod tests {
             &body,
             scanned.type_index.unwrap(),
             function,
-            deadline,
+            cancelled,
             budget,
         )
         .unwrap();
@@ -2589,7 +2598,7 @@ mod tests {
         (lift, locals.original_position(), body.range().end)
     }
     fn assert_bytes_owned_once(bytes: &[u8], function: u32) {
-        let (lift, start, end) = internal(bytes, function, Instant::now() + DEADLINE, BUDGET);
+        let (lift, start, end) = internal(bytes, function, &AtomicBool::new(false), BUDGET);
         let mut owners = vec![0u32; end - start];
         for line in &lift.lines {
             for &instruction in &line.owned {
@@ -3070,7 +3079,7 @@ mod tests {
             lines: 20,
             ..BUDGET
         };
-        let (lift, _, _) = internal(&bytes, 0, Instant::now() + DEADLINE, budget);
+        let (lift, _, _) = internal(&bytes, 0, &AtomicBool::new(false), budget);
         assert!(lift.lines.len() <= 20, "{} lines", lift.lines.len());
         assert!(lift.truncated_lines);
         assert!(
@@ -3081,12 +3090,12 @@ mod tests {
     }
 
     #[test]
-    fn the_deadline_holds_on_a_deep_operand_stack() {
+    fn cancellation_holds_on_a_deep_operand_stack() {
         // Each statement orders itself against every pending value, so on a
         // 100,000-deep stack one statement visits 100,000 of them. Looked at
-        // only every 1,024 instructions, a passed deadline would let 512
+        // only every 1,024 instructions, a cancelled request would let 512
         // statements, 51 million visits, run past it; it is also looked at
-        // every WORK_CHECK visits. The deadline here is work, not time, so
+        // every WORK_CHECK visits. Cancellation here is work, not time, so
         // the bound holds on a loaded machine.
         let mut wat = String::from("(module (func (param i32) (local i32)");
         for _ in 0..100_000 {
@@ -3104,19 +3113,11 @@ mod tests {
             work: Some(1_000_000),
             ..BUDGET
         };
-        let (lift, _, _) = internal(
-            &bytes,
-            0,
-            Instant::now() + Duration::from_secs(3600),
-            budget,
-        );
-        assert!(
-            lift.truncated_deadline,
-            "the lift finished before its deadline"
-        );
+        let (lift, _, _) = internal(&bytes, 0, &AtomicBool::new(false), budget);
+        assert!(lift.cancelled, "the lift finished before it was cancelled");
         assert!(
             lift.work <= 1_000_000 + 65_536 + 2 * 100_001,
-            "{} visits past a 1,000,000-visit deadline",
+            "{} visits past cancellation at 1,000,000 visits",
             lift.work - 1_000_000
         );
     }
@@ -3358,9 +3359,16 @@ mod tests {
         let mut pages = 0;
         let mut seen = 0;
         loop {
-            let text =
-                pseudocode_named(directory.path(), "7", function, offset, line_limit, analyst)
-                    .unwrap();
+            let text = pseudocode_named(
+                directory.path(),
+                "7",
+                function,
+                offset,
+                line_limit,
+                analyst,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
             let document: Value = serde_json::from_str(&text).unwrap();
             let pretty = serde_json::to_string_pretty(&document).unwrap();
             assert!(
@@ -3578,7 +3586,7 @@ mod tests {
     /// branches (if, br, br_if, br_table, return) keep their byte order, and
     /// no access to a local moves across a write to that local.
     fn assert_effect_order(bytes: &[u8], function: u32) {
-        let (lift, _, _) = internal(bytes, function, Instant::now() + DEADLINE, BUDGET);
+        let (lift, _, _) = internal(bytes, function, &AtomicBool::new(false), BUDGET);
         let scanned = scan(bytes, function).unwrap();
         let body = scanned.body.clone().unwrap();
         let mut reader = body.get_operators_reader().unwrap();

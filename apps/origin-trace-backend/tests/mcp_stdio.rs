@@ -774,6 +774,7 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
         json!([
             "get_artifact_text",
             "search_artifact_text",
+            "search_wasm_inspection",
             "run_wasm_function",
             "get_wasm_runs",
             "export_requests_har"

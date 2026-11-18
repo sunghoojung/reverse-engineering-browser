@@ -19,7 +19,6 @@ use std::{
 
 pub const SITE_LIMIT: usize = 8;
 pub const FILE_LIMIT: usize = 4096;
-pub const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 const LABELS_LIMIT: usize = 128 * 1024;
 const LABEL_CHARS: usize = 128;
 const URL_BYTES: usize = 8192;
@@ -609,8 +608,9 @@ impl Target {
             }
             (None, Some(offset)) => offset
                 .as_u64()
+                // A site names its offset in 32 bits, as the browser's record does.
+                .filter(|n| *n < u64::from(u32::MAX))
                 .and_then(|n| usize::try_from(n).ok())
-                .filter(|n| *n < MAX_SOURCE_BYTES)
                 .map(Self::Offset)
                 .ok_or_else(|| {
                     Error::bad("byte_offset must be a UTF-8 byte offset in the artifact")

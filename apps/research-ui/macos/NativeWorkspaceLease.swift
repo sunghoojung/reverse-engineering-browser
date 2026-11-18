@@ -17,9 +17,10 @@ final class NativeWorkspaceLease {
   private var ownsLock = false
   private let filename: String
   private let label: String
-  private let maximumBytes: Int
+  /// nil for a store with no byte limit, such as the Analyst library.
+  private let maximumBytes: Int?
 
-  init(at url: URL, label: String, maximumBytes: Int) throws {
+  init(at url: URL, label: String, maximumBytes: Int?) throws {
     self.filename = url.lastPathComponent
     self.label = label
     self.maximumBytes = maximumBytes
@@ -27,7 +28,8 @@ final class NativeWorkspaceLease {
     guard url.isFileURL, !url.hasDirectoryPath, !filename.isEmpty,
       filename != ".", filename != "..", !filename.contains("/"),
       !filename.utf8.contains(0), !foldedFilename.hasSuffix(Self.lockSuffix),
-      !foldedFilename.hasPrefix(".reb-workspace-"), maximumBytes > 0, maximumBytes < Int.max
+      !foldedFilename.hasPrefix(".reb-workspace-"),
+      maximumBytes.map({ $0 > 0 && $0 < Int.max }) ?? true
     else {
       throw LocalHTTPError(status: 500, message: "\(label) store has an invalid or reserved filename")
     }
@@ -137,15 +139,17 @@ final class NativeWorkspaceLease {
     var metadata = stat()
     guard fstat(descriptor, &metadata) == 0,
       (metadata.st_mode & S_IFMT) == S_IFREG, metadata.st_uid == geteuid(),
-      metadata.st_nlink == 1, metadata.st_size >= 0, metadata.st_size <= Int64(maximumBytes)
+      metadata.st_nlink == 1, metadata.st_size >= 0,
+      maximumBytes.map({ metadata.st_size <= Int64($0) }) ?? true
     else {
       throw failure("store must be a bounded, user-owned regular file with one link")
     }
+    let limit = maximumBytes ?? Int.max - 1
     var data = Data()
     data.reserveCapacity(Int(metadata.st_size))
     var buffer = [UInt8](repeating: 0, count: 16 * 1_024)
-    while data.count <= maximumBytes {
-      let requested = min(buffer.count, maximumBytes + 1 - data.count)
+    while data.count <= limit {
+      let requested = min(buffer.count, limit + 1 - data.count)
       let count = Darwin.read(descriptor, &buffer, requested)
       if count < 0 {
         if errno == EINTR { continue }
@@ -154,12 +158,12 @@ final class NativeWorkspaceLease {
       if count == 0 { break }
       data.append(buffer, count: count)
     }
-    guard data.count <= maximumBytes else { throw failure("store exceeds its byte limit") }
+    guard data.count <= limit else { throw failure("store exceeds its byte limit") }
     return data
   }
 
   func write(_ data: Data) throws {
-    guard data.count <= maximumBytes else {
+    guard maximumBytes.map({ data.count <= $0 }) ?? true else {
       throw LocalHTTPError(status: 400, message: "\(label) store exceeds its byte limit")
     }
     var temporaryName = ""

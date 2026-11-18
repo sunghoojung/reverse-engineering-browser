@@ -28,6 +28,7 @@ DOCS_PREFIXES = (
 RUST_PREFIXES = (
     "apps/origin-trace-backend/",
     "apps/deobfuscator-worker/",
+    "apps/js-lexer/",
 )
 # Edits to the skipper itself must not be able to classify a product change
 # as documentation. The workflow also forces the full gate when these move.

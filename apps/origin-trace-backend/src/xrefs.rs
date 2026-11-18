@@ -15,7 +15,7 @@ use crate::{
     error::{Error, Result},
     event_window, evidence,
     store_scan::{Reader, Stopped, Stores, complete_end, field_pattern, same_session},
-    vm_opcode, wasm,
+    vm_opcode,
 };
 use regex::bytes::Regex;
 use serde_json::{Value, json};
@@ -973,7 +973,7 @@ fn artifact_plan(
         }
     };
     let (wasm, wasm_note) = if info.kind == "wasm" {
-        match evidence::content(&stores.artifacts, record, wasm::MAX_BYTES) {
+        match evidence::read(&stores.artifacts, record) {
             Ok(bytes) => match inspect_module(&bytes, byte_offset) {
                 Some(module) => (Some(module), None),
                 None => (
@@ -983,10 +983,7 @@ fn artifact_plan(
             },
             Err(_) => (
                 None,
-                Some(
-                    "The retained module bytes are unavailable or over the inspection limit."
-                        .to_owned(),
-                ),
+                Some("The retained module bytes are unavailable.".to_owned()),
             ),
         }
     } else {
@@ -1665,7 +1662,7 @@ fn static_rows(plan: &Plan, stores: &Stores, sinks: &mut [Sink; 2], needle: &str
         sinks[1].push(&row, Direction::Out, needle);
     }
     if let Some(module) = wasm
-        && let Ok(bytes) = evidence::content(&stores.artifacts, record, wasm::MAX_BYTES)
+        && let Ok(bytes) = evidence::read(&stores.artifacts, record)
     {
         emit_wasm_static(
             module,

@@ -17,10 +17,6 @@ use std::{
     sync::LazyLock,
 };
 
-pub const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_PACK_BYTES: usize = 65536;
-
 struct StrictJson(Value);
 impl<'de> Deserialize<'de> for StrictJson {
     fn deserialize<D: serde::Deserializer<'de>>(
@@ -30,7 +26,7 @@ impl<'de> Deserialize<'de> for StrictJson {
         impl<'de> Visitor<'de> for JsonVisitor {
             type Value = Value;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("bounded inert JSON")
+                f.write_str("inert integer JSON")
             }
             fn visit_unit<E: de::Error>(self) -> std::result::Result<Value, E> {
                 Ok(Value::Null)
@@ -45,9 +41,6 @@ impl<'de> Deserialize<'de> for StrictJson {
                 Ok(json!(value))
             }
             fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Value, E> {
-                if value.len() > 8192 {
-                    return Err(E::custom("JSON string exceeds bound"));
-                }
                 Ok(json!(value))
             }
             fn visit_seq<A: SeqAccess<'de>>(
@@ -66,8 +59,8 @@ impl<'de> Deserialize<'de> for StrictJson {
             ) -> std::result::Result<Value, A::Error> {
                 let mut values = Map::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if key.len() > 8192 || values.contains_key(&key) {
-                        return Err(de::Error::custom("Duplicate or oversized JSON key"));
+                    if values.contains_key(&key) {
+                        return Err(de::Error::custom("Duplicate JSON key"));
                     }
                     let StrictJson(value) = map.next_value()?;
                     values.insert(key, value);
@@ -79,41 +72,14 @@ impl<'de> Deserialize<'de> for StrictJson {
     }
 }
 
+/// Documents of any size and string length parse. serde_json's 128-level
+/// recursion limit is the only structural bound: it keeps parsing, schema
+/// validation, canonical encoding and drop off the end of the stack, and no
+/// versioned VM document nests anywhere near it.
 pub fn parse(bytes: &[u8]) -> Result<Value> {
-    if bytes.len() > MAX_INPUT_BYTES {
-        return Err(Error::bad("VM document exceeds 16 MiB"));
-    }
-    let (mut depth, mut tokens, mut quoted, mut escaped) = (0usize, 0usize, false, false);
-    for byte in bytes {
-        if quoted {
-            if !escaped && *byte == b'"' {
-                quoted = false;
-            }
-            escaped = !escaped && *byte == b'\\';
-        } else {
-            match byte {
-                b'"' => {
-                    quoted = true;
-                    tokens += 1;
-                }
-                b'{' | b'[' => {
-                    depth += 1;
-                    tokens += 1;
-                }
-                b'}' | b']' => {
-                    depth = depth.saturating_sub(1);
-                }
-                b',' | b':' => tokens += 1,
-                _ => (),
-            }
-            if depth > 32 || tokens > 500000 {
-                return Err(Error::bad("VM document structure exceeds bounds"));
-            }
-        }
-    }
     let StrictJson(value) = serde_json::from_slice(bytes).map_err(|_| {
         Error::bad(
-            "Invalid VM JSON: duplicate keys, noninteger numbers and malformed text are refused",
+            "Invalid VM JSON: duplicate keys, noninteger numbers, nesting past 128 levels and malformed text are refused",
         )
     })?;
     if !value.is_object() {
@@ -122,7 +88,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value> {
     Ok(value)
 }
 
-/// Bounded HTTP adapter for the exact offline library operations. No files or code run.
+/// HTTP adapter for the exact offline library operations. No files or code run.
 pub fn request(bytes: &[u8], comparison: bool) -> Result<Value> {
     let request = parse(bytes)?;
     let expected: &[&str] = if comparison {
@@ -156,7 +122,7 @@ pub fn request(bytes: &[u8], comparison: bool) -> Result<Value> {
 }
 
 pub fn read(path: &Path) -> Result<Value> {
-    let bytes = durable::read_private(path, MAX_INPUT_BYTES)?
+    let bytes = durable::read_private(path, usize::MAX)?
         .ok_or_else(|| Error::bad("VM document does not exist"))?;
     parse(&bytes)
 }
@@ -188,9 +154,10 @@ static ANALYSIS_SCHEMA: LazyLock<jsonschema::Validator> = LazyLock::new(|| {
 });
 
 fn validate_pack(pack: &Value) -> Result<()> {
-    // Public Rust callers receive the same integer/depth/string limits as CLI readers.
+    // Public Rust callers receive the same integer, duplicate-key and nesting
+    // rules as CLI readers. The schema bounds a pack's shape.
     parse(&serde_json::to_vec(pack)?)?;
-    if vm::canonical(pack)?.len() > MAX_PACK_BYTES || !PACK_SCHEMA.is_valid(pack) {
+    if !PACK_SCHEMA.is_valid(pack) {
         return Err(Error::bad("Invalid declarative VM analysis pack"));
     }
     let known = vm::current_rule_definitions()
@@ -246,11 +213,6 @@ fn verify_document(document: &Value, schema: &jsonschema::Validator) -> Result<(
 
 fn finish(mut report: Value) -> Result<Value> {
     report["document_digest"] = json!(vm::digest(&report)?);
-    if vm::canonical(&report)?.len() > MAX_OUTPUT_BYTES {
-        return Err(Error::bad(
-            "VM report exceeds 32 MiB; no partial report was produced",
-        ));
-    }
     Ok(report)
 }
 
@@ -632,11 +594,6 @@ pub fn compare(
 
 pub fn write_report(path: &Path, report: &Value) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(report)?;
-    if bytes.len() > MAX_OUTPUT_BYTES {
-        return Err(Error::bad(
-            "VM report exceeds 32 MiB; no output was written",
-        ));
-    }
     durable::write_private_noclobber(path, &bytes)
 }
 
@@ -701,7 +658,6 @@ mod tests {
         extra["execute"] = json!(true);
         assert!(request(&serde_json::to_vec(&extra).unwrap(), true).is_err());
         assert!(request(br#"{"pack":{},"pack":{},"analysis":{}}"#, false).is_err());
-        assert!(request(&vec![b' '; MAX_INPUT_BYTES + 1], false).is_err());
         let mut oversized = body.clone();
         oversized["pack"]["rules"] =
             json!([{"rule_id":"antibot.test","weight":1,"label":"x".repeat(65537)}]);
@@ -712,6 +668,12 @@ mod tests {
         let apply_body = json!({"pack":defaults,"analysis":generic});
         assert_eq!(
             request(&serde_json::to_vec(&apply_body).unwrap(), false).unwrap(),
+            apply(&defaults, &generic).unwrap()
+        );
+        let mut padded = serde_json::to_vec(&apply_body).unwrap();
+        padded.resize(padded.len() + (17 << 20), b' ');
+        assert_eq!(
+            request(&padded, false).unwrap(),
             apply(&defaults, &generic).unwrap()
         );
     }
@@ -919,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_pack_is_strict_bounded_data_and_unicode_digest_matches_canonical_form() {
+    fn vm_pack_is_strict_data_and_unicode_digest_matches_canonical_form() {
         let pack = fixture("pack.json");
         for (key, value) in [
             ("code", json!("eval('source')")),
@@ -961,11 +923,14 @@ mod tests {
         ] {
             assert!(parse(bytes).is_err());
         }
-        assert!(
-            parse(format!("{{\"x\":{}0{}}}", "[".repeat(33), "]".repeat(33)).as_bytes()).is_err()
-        );
-        assert!(parse(&vec![b' '; MAX_INPUT_BYTES + 1]).is_err());
-        assert!(parse(format!("{{\"x\":\"{}\"}}", "x".repeat(8193)).as_bytes()).is_err());
+        let nested =
+            |depth: usize| format!("{{\"x\":{}0{}}}", "[".repeat(depth), "]".repeat(depth));
+        assert!(parse(nested(64).as_bytes()).is_ok());
+        assert!(parse(nested(100_000).as_bytes()).is_err());
+        // No size or string-length bound: 17 MiB in one string and one key.
+        let long = "x".repeat(17 << 20);
+        let document = parse(format!("{{\"{long}\":\"{long}\"}}").as_bytes()).unwrap();
+        assert_eq!(document[long.as_str()].as_str().unwrap().len(), 17 << 20);
         let mut left = fixture("build-a.workspace.json");
         left["workspaces"][0]["handlers"][0]["label"] = json!("연구 🧪");
         seal(&mut left);

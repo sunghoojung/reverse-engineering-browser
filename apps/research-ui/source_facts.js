@@ -137,10 +137,11 @@ function sourceFactsOperationSummary(operation, target) {
   return `${relationship} · region #${operation.region_id} · local order ${operation.order}${['call', 'construct'].includes(operation.kind) ? ' · runtime call target unknown' : ''}`;
 }
 
-async function sourceFactsReadBytes(response, maximum = Infinity, signal) {
+async function sourceFactsReadBytes(response, maximum = Infinity, signal, onBytes = null) {
   // Own bytes immediately in one buffer that grows with the response: keeping
   // chunk views would retain every producer's backing store. Content-Length is
   // not trusted. A finite maximum is a length the caller already knows exactly.
+  // `onBytes` hears the count read so far after each chunk.
   if (!response.body?.getReader) throw new Error('Response streaming is unavailable.');
   const reader = response.body.getReader();
   let cancelled = false;
@@ -170,6 +171,7 @@ async function sourceFactsReadBytes(response, maximum = Infinity, signal) {
       }
       bytes.set(value, size);
       size += value.byteLength;
+      onBytes?.(size);
       // Count empty chunks too, and let cancellation tasks run even when a
       // fragmented producer keeps read() promises immediately fulfilled.
       if (++chunks % 256 === 0) {
@@ -285,24 +287,19 @@ function createSourceFactsController({getSource, onChange, onNavigate, protocol,
         Object.assign(model, {report, view: sourceFactsDefaultView(), page: null, pageStatus: 'idle', pageError: ''});
       } else {
         if (!model.original) {
-          // Reuse the verified 2 MiB chunk route; do not navigate against the
-          // editor's possibly lossy preview.
-          const bytes = new Uint8Array(source.byte_size);
-          const chunkLimit = 2 * 1024 * 1024;
-          for (let offset = 0; offset < Math.max(1, source.byte_size); offset += chunkLimit) {
-            const response = await fetcher(`/api/artifacts/${encodeURIComponent(source.artifact_id)}/content?offset=${offset}&limit=${chunkLimit}`, {cache: 'no-store', signal: controller.signal});
-            if (!response.ok) throw new Error(`Original source returned HTTP ${response.status}.`);
-            const length = Math.min(chunkLimit, source.byte_size - offset);
-            if (response.headers.get('X-Artifact-Total-Bytes') !== String(source.byte_size) ||
-                response.headers.get('X-Artifact-Offset') !== String(offset) ||
-                response.headers.get('X-Artifact-Truncated') !== String(offset + length < source.byte_size)) {
-              throw new Error('Original source chunk identity is inconsistent; byte navigation is unavailable.');
-            }
-            const chunk = await sourceFactsReadBytes(response, length, controller.signal);
-            if (chunk.length !== length) throw new Error('Original source is incomplete; byte navigation is unavailable.');
-            if (!current()) return;
-            bytes.set(chunk, offset);
+          // Read the whole artifact in one verified request, since the
+          // backend hashes the whole file for every range; do not navigate
+          // against the editor's possibly lossy preview.
+          const response = await fetcher(`/api/artifacts/${encodeURIComponent(source.artifact_id)}/content?limit=${Math.max(1, source.byte_size)}`, {cache: 'no-store', signal: controller.signal});
+          if (!response.ok) throw new Error(`Original source returned HTTP ${response.status}.`);
+          if (response.headers.get('X-Artifact-Total-Bytes') !== String(source.byte_size) ||
+              response.headers.get('X-Artifact-Offset') !== '0' ||
+              response.headers.get('X-Artifact-Truncated') !== 'false') {
+            throw new Error('Original source identity is inconsistent; byte navigation is unavailable.');
           }
+          const bytes = await sourceFactsReadBytes(response, source.byte_size, controller.signal);
+          if (bytes.length !== source.byte_size) throw new Error('Original source is incomplete; byte navigation is unavailable.');
+          if (!current()) return;
           if (!cryptoApi?.subtle) throw new Error('SHA-256 verification is unavailable; original byte navigation is disabled.');
           const digest = await cryptoApi.subtle.digest('SHA-256', bytes);
           // WebCrypto cannot be aborted: a digest that settles after its

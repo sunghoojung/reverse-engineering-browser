@@ -1927,7 +1927,8 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let requestedOffset = query.first(where: { $0.name == "offset" })?.value.flatMap(Int.init) ?? 0
     let requestedLimit = query.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 2 * 1024 * 1024
     let offset = max(0, requestedOffset)
-    let limit = min(max(requestedLimit, 1), 2 * 1024 * 1024)
+    // Any range, as the Rust backend serves it: Sources reads a whole artifact in one request.
+    let limit = max(requestedLimit, 1)
     guard offset <= byteSize else {
       throw NSError(
         domain: "OriginTrace",
@@ -1938,7 +1939,7 @@ private final class LocalContentHandler: NSObject, WKURLSchemeHandler {
     let handle = try FileHandle(forReadingFrom: contentURL)
     defer { try? handle.close() }
     try handle.seek(toOffset: UInt64(offset))
-    let data = try handle.read(upToCount: limit) ?? Data()
+    let data = try handle.read(upToCount: min(limit, byteSize - offset)) ?? Data()
     return (
       data,
       [

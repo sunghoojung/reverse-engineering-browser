@@ -1776,10 +1776,16 @@ impl App {
                 if offset > total {
                     return Err(Error::bad("Artifact content offset exceeds byte size"));
                 }
-                let limit = q.limit(2097152, 2097152)?;
+                // Any range in one response: the file is hashed whole for
+                // every range, so a reader of the whole artifact asks once.
+                let limit = q.limit(2097152, i64::MAX as usize)?;
                 let root = self.options.artifacts.clone();
                 let bytes = self
-                    .blocking(move || evidence::verified_range(&root, &artifact, offset, limit))
+                    .cancellable(move |cancelled| {
+                        evidence::verified_range_cancellable(
+                            &root, &artifact, offset, limit, cancelled,
+                        )
+                    })
                     .await?;
                 let end = offset.saturating_add(bytes.len());
                 let mut response = bytes_response(bytes, "application/octet-stream");

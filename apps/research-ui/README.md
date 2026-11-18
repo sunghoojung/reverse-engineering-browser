@@ -2219,7 +2219,7 @@ lexer state where it starts. The page shown stays while the next is read, and
 Find searches the complete evidence text and opens the page that shows each
 match. While the first page is read the original stays on screen. If
 the source does not parse, the backend is unavailable, or the text is derived,
-truncated or another language, the in-page formatter is used: the status bar
+lossy or another language, the in-page formatter is used: the status bar
 names the whitespace layout and the row above the code says why. It runs in a Web Worker (on the page, after one task, where
 workers are unavailable). It can format either the original evidence or the
 active deobfuscated representation, so an unchanged deobfuscation result does
@@ -2227,8 +2227,7 @@ not leave a minified bundle on one line. Pretty printing changes only display
 whitespace, keeps source-line mappings back to the captured bytes, and never
 rewrites stored evidence. Both layouts map back through one sync point per
 4 Ki formatted units rather than a segment per change. The in-page formatter
-streams its tokens, accepts the 16 MiB artifact cap and stops when its output
-exceeds three times that.
+streams its tokens over text of any size.
 **Details > Static cleanup** shows analysis, assumptions, omissions, and retry actions. The native app ships a Rust/Oxc worker for static AST rewriting
 over captured artifacts of any size. It needs no Python runtime. Building the app
 requires a current stable Rust toolchain (`rustup toolchain install stable`).
@@ -2342,8 +2341,8 @@ adds capture, or persists an index. Shadowed declarations retain distinct IDs an
 remain candidates. Neither is proof of initialized values, dataflow or runtime
 call targets; region-local order is conditional on entry and normal completion.
 
-An **Original bytes** link loads the complete original artifact through the
-existing verified 2 MiB chunk endpoint, checks its SHA-256,
+An **Original bytes** link loads the complete original artifact in one
+request to the content route, checks its SHA-256,
 and strictly decodes UTF-8 while retaining a byte-order mark. It then switches
 the existing editor to original source and reveals the selected half-open byte
 range. The start-line span is highlighted when browser highlights are available;
@@ -2547,7 +2546,7 @@ pane, tab or layout never changes the selection.
   module's name section. Empty, it says how to fill it. **Sources** opens the
   module in Sources at the function's first byte (its body's start), revealed
   the way the entropy map reveals a byte once the module's bytes are held; a
-  byte the hex view does not hold says so in the status bar. The function's
+  byte past the end of the module says so in the status bar. The function's
   blocks are read only while the CFG pane is shown. A card picked in the graph
   waits 150 ms first, so moving across cards reads only the card it stops on;
   a function already loading is not read twice, and the last four functions
@@ -3127,8 +3126,10 @@ entropy on a 0 to 8 bits per byte scale. **Kind** colors it by the dominant
 recorded fact: Wasm section or data segment, string, VM instruction coverage, or
 undecoded tail. Hover, or move the focused cell with the arrow keys, to read the
 byte range, kind and entropy. A click or Enter opens that byte in Hex or the
-Inspect disassembly, and a text script opens at its line. Bytes past what the
-existing view holds stay in the map and say so.
+Inspect disassembly, and a text script opens at its line. Every byte of the
+artifact opens. The map is computed however long that takes: while it runs it
+shows the elapsed seconds and **Cancel**, and a cancelled or failed map offers
+**Retry**.
 
 A window is marked high-entropy only by the 7.0 bits per byte test stated beside
 the map. That mark says nothing about compression or encryption. Windows are
@@ -3276,18 +3277,26 @@ successful analysis for the same identity. URLs are display/search hints, not
 proof of ownership.
 
 Artifact catalog refreshes preserve an exact pending preview owner. Changing
-its session, hash or descriptor retires that read. Preview failures and deadlines
-show **Retry source**; they do not silently retry during refresh. Preview bodies
-reuse the Facts bounded streaming reader in 2 MiB pages: a text preview reads
-the whole artifact up to the 16 MiB artifact cap, and a larger one keeps its first
-16 MiB, and a notice above the code states the limit in the pretty-printed and
-Original views. Binary previews read 2 MiB, and an analyzer
-envelope 33 MiB, with at most 65,536 chunks per page. Analyzer deadlines are ten
-seconds; a preview has five seconds plus five per page, including SHA-256 work. Cancellation
-retires ownership without waiting for a stalled producer's cleanup. Full artifact
-previews verify SHA-256 when WebCrypto is available; partial or lossy text is
-visibly a preview. Exact byte navigation still belongs to the existing Facts
-verified-original reader.
+its session, hash or descriptor retires that read. Preview failures show
+**Retry source**; they do not silently retry during refresh. A preview reads the
+whole artifact, whatever its size, in one request to the content route (the
+backend hashes the whole file for every range, so one request is the cheapest
+way to read it all), streamed through the Facts reader. While it reads, the
+editor says how many bytes have arrived and then that SHA-256 is being checked,
+with **Cancel**; there is no deadline. A cancelled read keeps the stored
+artifact and offers **Retry source**. Cancellation retires ownership without
+waiting for a stalled producer's cleanup. Full artifact previews verify SHA-256
+when WebCrypto is available; text that is not valid UTF-8 shows with
+replacement characters and is visibly a lossy preview. Exact byte navigation
+still belongs to the Facts verified-original reader.
+
+Find in Sources searches the whole document, text or hex, 64 Ki UTF-16 units
+at a time in 12 ms slices between frames, so typing stays responsive in a file
+of any size. It keeps one match count per chunk (memory proportional to the
+document, not to its matches), shows `N of M+ matches · finding X%` while it
+runs and the exact count when it ends, and re-finds a match by rescanning its
+one chunk. A match on a page that is not mounted opens that page. Changing the
+query, the file or closing it cancels the search.
 
 The editor retains at most eight preview owners and 32 Mi UTF-16 units of
 preview text across captured files. The selected owner is pinned; older preview
@@ -3298,14 +3307,16 @@ Tab, navigator, Quick Open and retry handlers retain descriptors only; obsolete
 empty/retry controls are removed when the editor becomes ready. Hidden UI
 closures cannot keep evicted preview or analysis payloads alive. This never
 deletes captured evidence. Canvas thumbnails and the existing bounded
-Facts/WASM inspectors retain their separate ownership contracts. WASM Hex formats
-every retained byte whose text fits in 8 Mi UTF-16 units, about 1.6 MiB of
-module bytes. A longer module keeps a labeled prefix, and Find covers that prefix.
+Facts/WASM inspectors retain their separate ownership contracts. Hex (Wasm
+modules and guest bytecode) shows every retained byte: the editor keeps the
+verified bytes and formats 1,000 rows at a time as it moves, with addresses
+wide enough for the whole module, and the status bar names the byte under the
+caret. Inspect's byte links and the entropy map open the row of any byte.
 
 Deob retains at most eight documents, 16 MiB of original/derived UTF-16 text and
 250,000 map segments and 32 MiB of serialized response data in total. In-page
 formatting retains at most eight layouts and 64 Mi UTF-16 units of input and
-output text; Oxc layouts at most four (16 pages each in Sources, or one body of at most 4 MiB) and 64 Mi units. The newest layout is kept
+output text; Oxc layouts at most four (16 pages each in Sources, or one whole body) and 64 Mi units. The newest layout is kept
 even when it alone exceeds its budget. These are explicit text/entry
 budgets, not JavaScript heap or process-RSS guarantees. The editor DOM and Facts'
 independently verified original also use memory; no duplicate history of source

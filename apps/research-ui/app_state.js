@@ -108,6 +108,9 @@
         sourceWasmFind: null,
         // A line asked for on another page, scrolled to once it mounts.
         sourcePagedReveal: null,
+        // The Find counting over the selected document, and the hex page shown last.
+        sourceFind: null,
+        sourceHexPage: null,
         // Ticks the elapsed seconds of a first Inspect page while it is read.
         wasmInspectionTicker: null,
         sourceDeobfuscated: false,

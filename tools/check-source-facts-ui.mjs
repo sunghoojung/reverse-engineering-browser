@@ -435,7 +435,7 @@ async function checkController(ui, {bytes, artifact, server, snowOffset}) {
   failing.resolve(new Response('{', {status:502})); await failingPage;
   assert.equal(controller.model.pageError, 'Source fact rows returned HTTP 502.');
   const navigation = controller.navigate({start:snowOffset, end:snowOffset + 3}), chunk = await next();
-  assert.equal(chunk.url, '/api/artifacts/7/content?offset=0&limit=2097152');
+  assert.equal(chunk.url, `/api/artifacts/7/content?limit=${bytes.length}`, 'The whole original is read in one verified request');
   chunk.resolve(original()); await navigation;
   assert.equal(navigations.length, 1); assert.equal(navigations[0][2].column, 7);
   assert.equal(controller.original(artifact), '﻿const 雪 = "😀";\n雪++;');

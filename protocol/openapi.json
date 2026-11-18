@@ -3877,7 +3877,7 @@
       "get": {
         "operationId": "get_artifact_content",
         "summary": "get artifact content",
-        "description": "Bounded raw byte chunk, HTTP 200 even for partial content. Use query offsets, not HTTP Range. Invalid artifact identifiers map to 404; invalid numeric query values or manifest/content mismatch map to 500.",
+        "description": "Raw byte range, HTTP 200 even for partial content. Use query offsets, not HTTP Range. The whole file is SHA-256 verified for every range, so a reader of a whole artifact asks for it in one request. Invalid artifact identifiers map to 404; invalid numeric query values or manifest/content mismatch map to 500.",
         "tags": [
           "artifacts"
         ],
@@ -3986,7 +3986,7 @@
             }
           },
           "408": {
-            "description": "Artifact manifest lookup exceeded its five-second deadline, or full artifact verification exceeded its thirty-second deadline.",
+            "description": "Artifact manifest lookup exceeded its five-second deadline.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3995,6 +3995,16 @@
               }
             },
             "x-source": "apps/origin-trace-backend/src/evidence.rs"
+          },
+          "499": {
+            "description": "The request went away and its verified read stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         },
         "x-source": "apps/origin-trace-backend/src/app.rs",
@@ -4023,7 +4033,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Clamped to 1..2097152 bytes. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
+            "description": "Bytes to return from offset, at least 1 (smaller values are raised to 1). Any larger value returns the rest of the artifact; 2097152 when omitted. Noninteger, out-of-range signed integer, blank, or duplicate values return 400.",
             "schema": {
               "type": "integer",
               "default": 2097152

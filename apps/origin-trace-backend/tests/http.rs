@@ -754,22 +754,18 @@ fn openapi_references_and_native_only_operations_are_consistent() {
             .keys()
             .any(|path| path.starts_with("/api/debugger"))
     );
-    // Source-backed fixtures for the disk-read deadlines in evidence.rs. The
-    // HTTP suite does not deliberately stall artifact I/O for thirty seconds.
+    // A source-backed fixture for the manifest lookup deadline in evidence.rs.
+    // The HTTP suite does not deliberately stall artifact I/O for five seconds.
     let deadline_schema = &spec["paths"]["/api/artifacts/{artifact_id}/content"]["get"]["responses"]
         ["408"]["content"]["application/json"]["schema"];
     assert_eq!(deadline_schema["$ref"], "#/components/schemas/Error");
-    for message in [
-        "Artifact manifest read exceeded its deadline",
-        "Artifact verification exceeded its deadline",
-    ] {
-        assert_schema(
-            &spec,
-            deadline_schema,
-            &json!({"error":message,"code":"unspecified","details":{}}),
-            message,
-        );
-    }
+    let message = "Artifact manifest read exceeded its deadline";
+    assert_schema(
+        &spec,
+        deadline_schema,
+        &json!({"error":message,"code":"unspecified","details":{}}),
+        message,
+    );
 }
 #[test]
 fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaults() {
@@ -2721,6 +2717,29 @@ async fn verified_range_from_large_artifact_and_corruption_rejection() {
         assert_contract_response(response, "get", "/api/artifacts/{artifact_id}/content", 200)
             .await,
         &bytes[..16]
+    );
+    // The whole 20 MiB artifact in one verified response.
+    let response = server
+        .get(&format!("/api/artifacts/1/content?limit={}", bytes.len()))
+        .await;
+    assert_eq!(response.headers()["x-artifact-truncated"], "false");
+    assert_eq!(
+        response.headers()["x-artifact-total-bytes"],
+        bytes.len().to_string()
+    );
+    assert!(
+        assert_contract_response(response, "get", "/api/artifacts/{artifact_id}/content", 200)
+            .await
+            == bytes
+    );
+    let response = server
+        .get("/api/artifacts/1/content?offset=16777216&limit=9223372036854775807")
+        .await;
+    assert_eq!(
+        assert_contract_response(response, "get", "/api/artifacts/{artifact_id}/content", 200)
+            .await
+            .len(),
+        bytes.len() - 16777216
     );
     let response = server
         .get(&format!("/api/artifacts/1/content?offset={}", bytes.len()))

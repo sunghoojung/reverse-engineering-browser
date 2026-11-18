@@ -1174,7 +1174,7 @@ function sourceProductionFunction(name) {
 const ownershipFunctionNames = ['sourceIdentity', 'isSourceArtifact', 'sourceIsCurrent', 'sourceReference', 'sourceLimitText',
   'retireSourceAnalysis', 'releaseSourcePreview', 'canvasGalleryVisible', 'releaseCanvasPreview', 'retireCanvasPreviews', 'syncCanvasPreviews', 'pumpCanvasPreviews', 'retryCanvasPreview', 'boundSourcePreviews', 'boundSourceAnalysis',
   'capturedSources', 'selectedSource', 'deobfuscationKey', 'validateSourceAnalysis', 'loadDeobfuscation',
-  'sourceDisplayView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'refreshArtifacts',
+  'sourceDisplayView', 'sourceHexView', 'sourceViewLabel', 'sourceDerivedView', 'loadArtifactContent', 'renderSourceLoading', 'cancelSourcePreview', 'refreshArtifacts', 'applyDocumentSearch', 'sourceFindFor', 'markSourceMatch',
   'closeSource',
   'sourceDisplayName', 'sourceKindLabel', 'sourceIcon', 'renderSourceWindowControls', 'revealSourceColumn', 'moveSourceWindow', 'revealPagedLine', 'renderWasmInspectionPending', 'syncSourceDisplayControls', 'renderSourceTabs', 'retrySourcePreview', 'renderSourceContent', 'renderSourceLanguage', 'recolorSourceWindow',
   'sourceArtifactIdentityMatches', 'selectArtifact', 'sourceRepresentation', 'sourceWantedLine', 'sourceOriginalHighlighter', 'sourceFormattedView', 'sourceFormatWanted', 'sourcePositionText', 'syncFloat32Panel', 'textElement', 'deobfuscationRow', 'deobfuscationOwner', 'cancelDeobfuscation', 'retryDeobfuscation', 'retireDeobfuscationReveal',
@@ -1390,34 +1390,43 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   const loaded=artifacts.filter(value=>value.content!==undefined), characters=loaded.reduce((sum,value)=>sum+value.content.length,0);
   assert(loaded.length<=8 && characters<=32*1024*1024); assert.equal(artifacts[0].content,undefined);
   state.selectedArtifactId='1';await api.loadArtifactContent(artifacts[0]);assert.equal(artifacts[0].content,text);
-  const binary=new Uint8Array(2097152);const wasm={...await ownedArtifact('99'),kind:'wasm',mime_type:'application/wasm',byte_size:binary.length,sha256:await ownershipHash(binary)};
-  const hex=ownedContext({state:{artifacts:[wasm],selectedArtifactId:'99'},fetch:async()=>new Response(binary)});
+  // A module keeps its verified bytes, every one of them; Hex formats a page of rows at a time.
+  const binary=new Uint8Array(24*1024*1024+5).map((_,index)=>index*7);const wasm={...await ownedArtifact('99'),kind:'wasm',mime_type:'application/wasm',byte_size:binary.length,sha256:await ownershipHash(binary)};
+  const hexUrls=[],hex=ownedContext({state:{artifacts:[wasm],selectedArtifactId:'99'},fetch:async url=>{hexUrls.push(url);return new Response(binary);}});
   await hex.api.loadArtifactContent(wasm);
-  assert(wasm.contentTruncated);
-  assert(wasm.wasmHexBytes < binary.length && wasm.wasmHexBytes % 16 === 0);
-  assert(wasm.content.length <= 8 * 1024 * 1024);
-  assert.equal(wasm.contentTruncated,true);assert(!wasm.content.includes('preview limited'),'A viewer limit never enters the retained text');
-  assert(wasm.content.split('\n').length > 20003);
-  sourceOwnershipReceipt.push({test:'preview_byte_budget_and_bounded_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:wasm.content.split('\n').length});
+  assert.deepEqual(hexUrls,[`/api/artifacts/99/content?limit=${binary.length}`],'One verified request reads the whole module');
+  assert.equal(wasm.contentVerified,true);assert.equal(wasm.contentTruncated,false);assert.equal(wasm.content,undefined);
+  assert.equal(wasm.hexBytes.length,binary.length);assert.equal(wasm.hexBytes[binary.length-1],binary[binary.length-1]);
+  hex.state.sourceWindow={identity:hex.api.sourceIdentity(wasm),representation:hex.api.sourceRepresentation(wasm),line:1572864,column:0};
+  const lastPage=hex.api.sourceDisplayView(wasm);
+  assert.deepEqual([lastPage.page.lineBase,lastPage.page.lineCount],[1572000,1572865]);
+  const lastRow=binary.subarray(binary.length-5),printable=[...lastRow].map(byte=>byte>=32&&byte<127?String.fromCharCode(byte):'.').join('');
+  assert.equal(lastPage.content.split('\n').at(-1),`${(binary.length-5).toString(16).padStart(8,'0')}  ${[...lastRow].map(byte=>byte.toString(16).padStart(2,'0')).join(' ').padEnd(47,' ')}  |${printable}|`);
+  assert.equal(hex.api.sourceDisplayView(wasm).page,lastPage.page,'A render of the same rows reuses the page');
+  assert.match(hex.api.sourceViewLabel(wasm),/Original evidence preview/);assert.equal(hex.api.sourceLimitText(wasm,lastPage),'');
+  // Released with its bytes.
+  hex.api.releaseSourcePreview(wasm);assert.equal(wasm.hexBytes,undefined);assert.equal(hex.state.sourceHexPage,null);
+  sourceOwnershipReceipt.push({test:'preview_byte_budget_and_whole_paged_hex',status:'passed',retainedPreviews:loaded.length,retainedUTF16TextBytes:characters*2,hexRows:lastPage.page.lineCount});
 }
 {
-  // A 12 MiB one-line bundle loads whole and verified in 2 MiB pages, then opens
-  // pretty-printed; past the 16 MiB cap the first 16 MiB show with a limit notice.
-  const page=2097152,line='var a=1;'.repeat(12*1024*1024/8),big=await ownedArtifact('12',line),bytes=new TextEncoder().encode(line);
-  const over={...await ownedArtifact('17','x'),byte_size:16*1024*1024+1},urls=[];
-  const serve=(body,total)=>async url=>{urls.push(url);const offset=Number(/offset=(\d+)/.exec(url)?.[1]??0);
-    return new Response(body.subarray(offset,offset+page),{headers:{'X-Artifact-Total-Bytes':String(total)}});};
+  // A 12 MiB one-line bundle loads whole and verified in one request, then
+  // opens pretty-printed. Past the former 16 MiB cap every byte loads too.
+  const line='var a=1;'.repeat(12*1024*1024/8),big=await ownedArtifact('12',line),bytes=new TextEncoder().encode(line);
+  const overText='a'.repeat(40*1024*1024+1),over=await ownedArtifact('17',overText),urls=[];
+  const serve=(body,total)=>async url=>{urls.push(url);const offset=Number(/offset=(\d+)/.exec(url)?.[1]??0),limit=Number(/limit=(\d+)/.exec(url)?.[1]??2097152);
+    return new Response(body.subarray(offset,offset+limit),{headers:{'X-Artifact-Total-Bytes':String(total)}});};
   const ctx=ownedContext({state:{artifacts:[big],selectedArtifactId:'12',sourceFormatChoices:new Map()},fetch:serve(bytes,bytes.length)});
   await ctx.api.loadArtifactContent(big);
   assert.equal(big.content,line);assert.equal(big.contentVerified,true);assert.equal(big.contentTruncated,false);assert.equal(big.contentLongLine,true);
-  assert.deepEqual([urls[0],urls.at(-1),urls.length],['/api/artifacts/12/content?limit=2097152',`/api/artifacts/12/content?offset=${5*page}&limit=2097152`,6]);
+  assert.deepEqual(urls,[`/api/artifacts/12/content?limit=${bytes.length}`]);
+  assert.equal(big.loadedBytes,bytes.length);
   assert.equal(ctx.state.sourceFormatted,true,'A minified bundle opens pretty-printed');
   ctx.state.sourceFormatChoices.set(ctx.api.sourceIdentity(big),false);assert.equal(ctx.api.sourceFormatWanted(big),false,'The researcher choice is remembered for the artifact');
-  const overCtx=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},fetch:serve(new Uint8Array(over.byte_size).fill(0x61),over.byte_size)});
+  const overCtx=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},fetch:serve(new TextEncoder().encode(overText),overText.length)});
   await overCtx.api.loadArtifactContent(over);
-  assert.equal(over.loadError,null);assert.equal(over.contentTruncated,true);assert.equal(over.sourceTextLength,16*1024*1024);
-  assert.equal(over.content.length,16*1024*1024,'The retained prefix gains no text');assert(!over.content.includes('preview limited'));
-  sourceOwnershipReceipt.push({test:'paged_preview_to_cap_and_limit_notice',status:'passed',pages:urls.length});
+  assert.equal(over.loadError,null);assert.equal(over.contentTruncated,false);assert.equal(over.contentVerified,true);
+  assert.equal(over.content,overText,'Every byte of a 40 MiB text is shown');
+  sourceOwnershipReceipt.push({test:'whole_preview_in_one_verified_request',status:'passed',requests:urls.length});
 }
 {
   const artifact=await ownedArtifact('1');artifact.content='const a = 1;';let reads=0;
@@ -1436,11 +1445,13 @@ const ownedDeferred = () => {let resolve; const promise = new Promise(done=>{res
   const {api}=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'1'},
     setTimeout(callback,delay){const id=++sequence;timers.set(id,{callback,delay});return id;},clearTimeout(id){timers.delete(id);},
     fetch:async(url,options)=>{reads++;signal=options.signal;return reads===1?held.promise:new Response('const a = 1;');}});
-  const old=api.loadArtifactContent(artifact);const timer=[...timers.values()][0];assert.equal(timer.delay,10000);timer.callback();
-  assert(signal.aborted);assert.equal(artifact.loading,false);assert.match(artifact.loadError,/timed out/);
+  // Reading has no deadline: Cancel stops it, and Retry reads again.
+  const old=api.loadArtifactContent(artifact);assert.equal(timers.size,0,'No read deadline is armed');
+  api.cancelSourcePreview(artifact);
+  assert(signal.aborted);assert.equal(artifact.loading,false);assert.match(artifact.loadError,/Reading was cancelled/);
   await api.loadArtifactContent(artifact,{retry:true});assert.equal(artifact.content,'const a = 1;');
   held.resolve(new Response('old wrong content'));await old;assert.equal(artifact.content,'const a = 1;');assert.equal(timers.size,0);
-  sourceOwnershipReceipt.push({test:'preview_deadline_late_headers_explicit_retry',status:'passed'});
+  sourceOwnershipReceipt.push({test:'preview_cancel_late_headers_explicit_retry',status:'passed'});
 }
 {
   const artifact=await ownedArtifact('1');artifact.content='const a = 1;';
@@ -1523,16 +1534,15 @@ function sourceReviewDOM() {
   return {document,elements};
 }
 {
-  // What the reader sees: a notice beside the code that states the limit, in every text view.
-  const over={...await ownedArtifact('17','x'),byte_size:16*1024*1024+1,content:'x'.repeat(16),contentTruncated:true};
+  // Every view shows the whole file, so none states a viewer limit beside the code.
+  const over={...await ownedArtifact('17','x'),byte_size:16*1024*1024+1,content:'x'.repeat(16)};
   const {document:shownDocument,elements:shownElements}=sourceReviewDOM();
   shownElements.sourceLimitNotice=shownDocument.createElement('p');shownElements.sourceLimitNotice.hidden=true;
   const shown=ownedContext({state:{artifacts:[over],selectedArtifactId:'17'},document:shownDocument,elements:shownElements});
   const noticeFor=view=>{shown.api.syncSourceDisplayControls(over,view);return shownElements.sourceLimitNotice;};
-  for(const view of [{},{formatted:{}},{formatPending:true}]){assert.equal(noticeFor(view).hidden,false);assert.equal(noticeFor(view).textContent,'Preview limited to the first 16 MiB of this 16,777,217-byte file. Later bytes are not shown or searched; the original bytes are unchanged.');}
-  for(const view of [{wasm:{row:()=>null}},{derived:{}}])assert.equal(noticeFor(view).hidden,true,'A view that is not the retained prefix states no limit');
-  over.contentTruncated=false;assert.equal(noticeFor({}).hidden,true,'A whole file states no limit');
-  sourceOwnershipReceipt.push({test:'over_cap_notice_is_rendered_beside_the_code',status:'passed'});
+  for(const view of [{},{formatted:{}},{formatPending:true},{wasm:{row:()=>null}},{derived:{}},{hex:{}}])assert.equal(noticeFor(view).hidden,true,'A whole file states no limit');
+  assert.equal(shownElements.sourceViewKind.textContent,'Original','No view is labeled truncated');
+  sourceOwnershipReceipt.push({test:'whole_files_state_no_viewer_limit',status:'passed'});
 }
 {
   const original='\ufeff'+Array.from({length:20001},(_,line)=>line===20000?'const lateNeedle="😀";':`// row ${line}`).join('\r\n');
@@ -1546,8 +1556,8 @@ function sourceReviewDOM() {
   assert.equal(elements.sourceCode.querySelector('[data-local-line="20000"]').querySelector('.source-text').textContent,'const lateNeedle="😀";');
   assert(elements.sourceCode.children.length<=1000);
   elements.sourceSearch.value='no-match';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/complete retained text/);
-  artifact.contentTruncated=true;ctx.api.renderSourceContent(ctx.api.selectedSource());assert.match(elements.sourcePosition.textContent,/coverage is incomplete/);
-  artifact.contentTruncated=false;artifact.contentLossy=true;ctx.api.renderSourceContent(ctx.api.selectedSource());assert.match(elements.sourceSearchStatus.textContent,/Lossy/);
+  artifact.contentLossy=true;ctx.api.renderSourceContent(ctx.api.selectedSource());assert.match(elements.sourcePosition.textContent,/coverage is incomplete/);
+  assert.match(elements.sourceSearchStatus.textContent,/Lossy/);
   artifact.contentLossy=false;artifact.content=original+'\n[Viewer preview limited to the first 2 MiB; original bytes are unchanged]';artifact.contentTruncated=true;
   ctx.api.renderSourceContent(ctx.api.selectedSource());elements.sourceSearch.value='Viewer preview';ctx.api.applySourceSearch();assert.match(elements.sourcePosition.textContent,/0 matches/);
   assert.equal(ctx.state.sourceEditorView.content,original,'Presentation notices never enter Find or mappings');
@@ -1597,7 +1607,7 @@ function sourceReviewDOM() {
   const sourceFormatClient={page:(source,value,line)=>{const block=Math.min(anchors.length-1,Math.floor(line/1000));asked.push(block);
     if(!loaded.has(block))return {pending:true,previous:pages.get(shown)??null};shown=block;if(!pages.has(block))pages.set(block,pageOf(block));return pages.get(block);},forget(){}};
   ctx=ownedContext({state:{artifacts:[artifact],selectedArtifactId:'paged',sourceFormatted:true,sourceOriginalHighlighter:null,sourcePagedFind:null},document,elements,
-    sourceOccurrenceRange:()=>null,sourceFormatClient,functions:['applySourceSearch','applyPagedSourceSearch','markSourceMatch','moveSourceCaretInMountedPage'],productionExports:['sourceWhitespaceMap'],renderSources(){}});
+    sourceOccurrenceRange:()=>null,sourceFormatClient,functions:['applySourceSearch','moveSourceCaretInMountedPage'],productionExports:['sourceWhitespaceMap'],renderSources(){}});
   ctx.api.renderSourceContent(ctx.api.selectedSource());
   const editor=()=>ctx.state.sourceEditorView;
   assert.equal(editor().index.lineCount,laid.length);assert.equal(elements.sourceCode.children.length,1000,'one page is mounted');
@@ -1929,7 +1939,7 @@ async function sourceHistoryFixture(kind = 'artifact') {
 for(const kind of ['artifact']) {
   const fixture=await sourceHistoryFixture(kind),{api,held,reads,elements,document,text,flush}=fixture;
   assert(api.history.back());await flush();assert.equal(reads.length,1,'Shared Back deduplicates the selected preview read');
-  assert.match(elements.sourceCodeEmpty.textContent,/Loading/);
+  assert.match(elements.sourceCodeEmpty.textContent,/Reading the immutable artifact bytes/);
   held.resolve(new Response(text));
   await fixture.settle();
   assert.equal(elements.sourceCodeWrap.scrollTop,713,`${kind}: Back restores vertical scroll after preview completion`);

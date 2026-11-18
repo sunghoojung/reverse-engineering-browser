@@ -4,7 +4,6 @@
  * one ImageData, and uses no DOM per cell. Everything is released when the map
  * closes, the selection changes or the session changes. Captured-derived text
  * is inserted as text only. */
-const ENTROPY_MAP_TIMEOUT_MS = 90000;
 const ENTROPY_MAP_MAX_SIDE = 128;
 const ENTROPY_MAP_GROUPS = ['code', 'data', 'string', 'structure', 'custom', 'undecoded', 'unknown'];
 const ENTROPY_MAP_GROUP_LABELS = {code: 'code', data: 'data', string: 'string', structure: 'structure', custom: 'custom', undecoded: 'undecoded', unknown: 'unknown'};
@@ -108,7 +107,7 @@ function entropyMapHexColor(value) {
 function revealSourceByteOffset(source, offset, leaveMap) {
   if (!source || sourceIdentity(selectedSource()) !== sourceIdentity(source)) return 'This artifact is no longer selected.';
   const label = `Byte ${entropyMapHex(offset)}`;
-  if (source.content === undefined) return `${label} cannot be shown yet: the artifact view has not loaded.`;
+  if (!sourcePreviewLoaded(source)) return `${label} cannot be shown yet: the artifact view has not loaded.`;
   if (sourceHexArtifact(source)) {
     if (state.sourceWasm && source.kind === 'wasm' && wasmInspection.state(source)?.status === 'ready') {
       // Inspect holds one page, so the backend finds the byte's row.
@@ -119,8 +118,7 @@ function revealSourceByteOffset(source, offset, leaveMap) {
       });
       return '';
     }
-    const limit = source.wasmHexBytes ?? 0;
-    if (offset >= limit) return `${label} is past the first ${entropyMapBytes(limit)} the hex view holds. The map covers the whole artifact.`;
+    if (offset >= source.byte_size) return `${label} is past the end of the artifact.`;
     state.sourceWasm = false;
     leaveMap();
     renderSources();
@@ -134,7 +132,7 @@ function revealSourceByteOffset(source, offset, leaveMap) {
   if (source.contentLossy) return `${label} cannot be placed: the text view replaced invalid UTF-8.`;
   const text = source.content.slice(0, source.sourceTextLength ?? source.content.length);
   const position = entropyMapTextPosition(text, offset);
-  if (!position) return `${label} is past the ${entropyMapBytes(Math.min(source.byte_size, 2097152))} of text Sources holds. The map covers the whole artifact.`;
+  if (!position) return `${label} is past the end of the artifact's text.`;
   leaveMap();
   renderSources();
   revealOriginalLine(source, position.line, position.column);
@@ -144,7 +142,7 @@ function revealSourceByteOffset(source, offset, leaveMap) {
 const ENTROPY_MAP_VIEW_KIND = 'Whole-artifact map · original bytes';
 
 function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource, identityOf, reveal}) {
-  let open = false, built = null, generation = 0, controller = null, timer = 0, mode = 'entropy';
+  let open = false, built = null, generation = 0, controller = null, timer = 0, started = 0, mode = 'entropy';
   let openIdentity = null, map = null, status = 'idle', message = '', themeObserver = null;
   let hover = -1, cursor = -1, lut = null, focusWhenReady = false, codeViewKind = null;
 
@@ -180,7 +178,10 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     const retry = element('button', 'map-retry', 'Retry');
     retry.type = 'button';
     retry.addEventListener('click', load);
-    statePanel.append(stateText, retry);
+    const cancel = element('button', 'map-retry', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', stop);
+    statePanel.append(stateText, retry, cancel);
 
     const body = element('div', 'map-body');
     const main = element('div', 'map-main');
@@ -241,7 +242,7 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     canvas.addEventListener('blur', () => { focusCell.hidden = true; showPopover(hover); });
     canvas.addEventListener('keydown', keydown);
 
-    built = {stats, modeButtons, statePanel, stateText, retry, body, canvas, hoverCell, focusCell, popover, area, marker, tick, threshold,
+    built = {stats, modeButtons, statePanel, stateText, retry, cancel, body, canvas, hoverCell, focusCell, popover, area, marker, tick, threshold,
       statusDot, statusWord, kindLegend, ramp, facts, noticeLine, rangesHead, ranges, notes, announce};
     return built;
   }
@@ -501,12 +502,13 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
   }
 
   function renderStatus() {
-    const {statePanel: panel, stateText, retry, body, stats, modeButtons} = built;
+    const {statePanel: panel, stateText, retry, cancel, body, stats, modeButtons} = built;
     const ready = status === 'ready';
     panel.hidden = ready;
     body.hidden = !ready;
-    stateText.textContent = message;
-    retry.hidden = status !== 'error' && status !== 'disconnected';
+    stateText.textContent = status === 'loading' ? `${message} ${Math.floor((Date.now() - started) / 1000)} s` : message;
+    retry.hidden = !['error', 'disconnected', 'cancelled'].includes(status);
+    cancel.hidden = status !== 'loading';
     panel.dataset.kind = status;
     modeButtons.forEach(control => { control.disabled = !ready; });
     stats.textContent = ready ? `Hilbert ${map.side}×${map.side} · ${entropyMapBytes(map.doc.grid.window_bytes)} per cell · ${entropyMapBytes(map.byteLength)}` : '';
@@ -515,8 +517,20 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
   function cancelPending() {
     controller?.abort();
     controller = null;
-    if (timer) clearTimeout(timer);
+    if (timer) clearInterval(timer);
     timer = 0;
+  }
+
+  // Stops the read on the backend; Retry maps the artifact again.
+  function stop() {
+    if (status !== 'loading') return;
+    const focused = built?.statePanel.contains(document.activeElement);
+    generation += 1;
+    cancelPending();
+    status = 'cancelled';
+    message = 'Map cancelled. The stored artifact is unchanged.';
+    renderStatus();
+    if (focused) built.retry.focus();
   }
 
   function releaseMap() {
@@ -551,10 +565,12 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
     releaseMap();
     status = 'loading';
     message = 'Reading the whole artifact and verifying its hash.';
+    // No deadline: the elapsed seconds say it is still reading, and Cancel stops it.
+    started = Date.now();
     renderStatus();
     const abort = new AbortController();
     controller = abort;
-    timer = setTimeout(() => abort.abort(), ENTROPY_MAP_TIMEOUT_MS);
+    timer = setInterval(() => { if (current === generation && status === 'loading') renderStatus(); }, 1000);
     try {
       const response = await fetch(`/api/artifact-map?artifact_id=${encodeURIComponent(source.artifact_id)}`, {cache: 'no-store', signal: abort.signal});
       const report = await response.json().catch(() => null);
@@ -588,13 +604,11 @@ function createEntropyMap({button, root, codeWrap, viewKind, toolbar, getSource,
       if (focusWhenReady) built.canvas.focus({preventScroll: true});
     } catch (error) {
       if (current !== generation) return;
-      const aborted = error?.name === 'AbortError';
-      status = aborted || error instanceof TypeError ? 'disconnected' : 'error';
-      message = aborted ? 'The map did not finish in time. The stored artifact is unchanged.'
-        : error instanceof TypeError ? 'The evidence store is unavailable. The stored artifact is unchanged.' : String(error?.message ?? error).slice(0, 400);
+      status = error instanceof TypeError ? 'disconnected' : 'error';
+      message = error instanceof TypeError ? 'The evidence store is unavailable. The stored artifact is unchanged.' : String(error?.message ?? error).slice(0, 400);
       renderStatus();
     } finally {
-      if (current === generation) { controller = null; if (timer) clearTimeout(timer); timer = 0; }
+      if (current === generation) { controller = null; if (timer) clearInterval(timer); timer = 0; }
     }
   }
 

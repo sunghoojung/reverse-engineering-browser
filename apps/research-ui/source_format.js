@@ -1,7 +1,7 @@
 // Client for get_source_format and the in-page layout. Both change only whitespace, so one map walks either back to its input.
 
 // Cache sizes only: a layout of any size is requested, and an evicted one is fetched again.
-const SOURCE_FORMAT_LIMITS = Object.freeze({entries: 4, characters: 64 * 1024 * 1024, wholeBytes: 4 * 1024 * 1024, pageLines: 1000, pages: 16});
+const SOURCE_FORMAT_LIMITS = Object.freeze({entries: 4, characters: 64 * 1024 * 1024, pageLines: 1000, pages: 16});
 const SOURCE_FORMAT_REASONS = Object.freeze({
   'parse-failed': 'Oxc could not parse this file', 'fidelity-check-failed': 'the Oxc layout failed its token check',
   'memory-limit': 'this file needs more memory than this machine can give Oxc'
@@ -17,7 +17,7 @@ function sourceLayoutTask(task) {
   }
 }
 
-// Layouts run in a dedicated worker so a 16 MiB bundle cannot block the UI.
+// Layouts run in a dedicated worker so a large bundle cannot block the UI.
 // Without a worker, or after it fails, they run on the page after one task.
 function createSourceLayoutWorker({spawn = typeof Worker === 'function' ? () => new Worker('source_format.js') : null,
   defer = callback => setTimeout(callback, 0)} = {}) {
@@ -174,7 +174,6 @@ function createSourceFormatClient({request = (...args) => fetch(...args), onChan
     // The whole layout of a body. null: not eligible. {pending}: wait. {fallback, notice}: use the in-page layout.
     view(source, original) {
       if (!sourceFormatEligible(source) || original !== source.content) return null;
-      if (Number(source.byte_size) > SOURCE_FORMAT_LIMITS.wholeBytes) return {fallback: true, notice: 'Oxc lays out bodies up to 4 MiB here'};
       const name = key(source, 'whole');
       let entry = entries.get(name);
       if (!entry) {

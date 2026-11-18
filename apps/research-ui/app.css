@@ -2708,7 +2708,7 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   grid-template-columns: 74px minmax(max-content, 1fr);
 }
 
-.wasm-inspection-error, .wasm-inspection-pending {
+.wasm-inspection-error, .wasm-inspection-pending, .source-loading {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2718,8 +2718,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.wasm-inspection-error p, .wasm-inspection-pending p { margin: 0; }
-.wasm-inspection-pending p { font-variant-numeric: tabular-nums; }
+.wasm-inspection-error p, .wasm-inspection-pending p, .source-loading p { margin: 0; }
+.wasm-inspection-pending p, .source-loading p { font-variant-numeric: tabular-nums; }
 
 /* Console inspection stays in the transcript; tools are revealed on demand. */
 .native-console-head select { width: min(40%, 330px); }

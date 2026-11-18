@@ -274,12 +274,15 @@ should send `application/json`.
 
 Conditional GET operations list `If-None-Match` and a bodyless 304 response.
 Artifact content uses `offset` and `limit` query arguments and always returns
-200 on success, including partial chunks. Advance using actual byte count and
-`X-Artifact-Total-Bytes`; `X-Artifact-Truncated` is the string `true` when bytes
-remain and `false` at the end. An offset equal to the total returns an empty
-chunk; a negative, malformed, or beyond-end offset returns 400.
-Artifact lookup or full-content verification can return a JSON 408 when its
-five-second manifest or thirty-second verification deadline expires.
+200 on success, including partial chunks. `limit` defaults to 2097152 and has
+no maximum: the whole file is SHA-256 verified for every range, so a reader of
+a whole artifact asks for it once (`limit` at least its byte size). Advance
+using actual byte count and `X-Artifact-Total-Bytes`; `X-Artifact-Truncated` is
+the string `true` when bytes remain and `false` at the end. An offset equal to
+the total returns an empty chunk; a negative, malformed, or beyond-end offset
+returns 400. Verification has no deadline; a request that goes away stops it
+(499). Artifact lookup can return a JSON 408 when its five-second manifest
+deadline expires.
 This is not HTTP Range/206 pagination. Unfiltered events and artifacts are a
 bounded recent tail. [Filtered reads](#filtered-and-paged-reads) add byte
 cursors for paging. Neither is a stable exhaustive export.

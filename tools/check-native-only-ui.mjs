@@ -319,7 +319,7 @@ assert.equal(runInContext("sourceHexArtifact({kind: 'bytecode_buffer'}) && sourc
 assert.equal(runInContext("sourceSyntaxLabel(sourceSyntaxLanguage({kind: 'bytecode_buffer', mime_type: 'application/octet-stream', url: 'fixture://guest'}))", context), 'Guest bytecode hex');
 assert.equal(runInContext("formatWasmHex(new Uint8Array([0, 0x42, 0, 0, 0x3c, 0xff]))", context), '00000000  00 42 00 00 3c ff' + ' '.repeat(32) + '|.B..<.|');
 const app = sources.find(([file]) => file === 'app.js')[1];
-assert(/const content = sourceHexArtifact\(artifact\)\s*\?\s*formatWasmHex/.test(app), 'the artifact loader formats every hex artifact kind');
+assert(/if \(sourceHexArtifact\(artifact\)\) \{[^}]*artifact\.hexBytes = buffer;/.test(app), 'the artifact loader keeps the bytes of every hex artifact kind for paged hex');
 for (const [file, source] of sources.filter(([file]) => ['evidence_package.js', 'investigation_navigation.js', 'investigation_notebook.js'].includes(file))) {
   assert(/['"]bytecode_buffer['"]/.test(source), `${file} must offer the Sources hex view for guest bytecode`);
 }

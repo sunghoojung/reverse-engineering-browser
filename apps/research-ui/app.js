@@ -7143,7 +7143,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function sourceReference(source) {
         // Navigator/tab/Quick Open handlers must not keep an evicted document
         // alive through a hidden DOM closure. Keep descriptors, never payloads.
-        return Object.fromEntries(Object.entries(source).filter(([key]) => !['content', 'deobfuscation', 'controller'].includes(key)));
+        return Object.fromEntries(Object.entries(source).filter(([key]) => !['content', 'hexBytes', 'deobfuscation', 'controller'].includes(key)));
       }
 
       function retireSourceAnalysis(except = null) {
@@ -7165,8 +7165,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const preview = owner ?? state.artifacts.find(value => sourceIdentity(value) === identity);
         if (preview) {
           preview.controller?.abort();
-          for (const field of ['content', 'sourceTextLength', 'contentTruncated', 'contentLongLine', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
+          for (const field of ['content', 'hexBytes', 'loadedBytes', 'sourceTextLength', 'contentTruncated', 'contentLongLine', 'loading', 'loadError', 'controller', 'previewUsed', 'contentVerified', 'contentLossy']) delete preview[field];
         }
+        if (state.sourceFind?.identity === identity) {cancelSourceFind(state.sourceFind.search); state.sourceFind = null;}
+        if (state.sourceHexPage && sourceIdentity(state.sourceHexPage.source) === identity) state.sourceHexPage = null;
         for (const cache of [state.deobfuscationRequests, state.deobfuscationCache, state.sourceFormatCache]) {
           for (const [key, value] of cache ?? []) {
             if (!key.startsWith(`${identity}|`)) continue;
@@ -7181,16 +7183,19 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function boundSourcePreviews(protectedSource = null) {
         const protectedIdentity = sourceIdentity(selectedSource() ?? protectedSource);
         const entries = (state.artifacts ?? []).filter(isSourceArtifact).map(source => ({source, preview: source}))
-          .filter(({preview}) => preview && (preview.loading || preview.content !== undefined));
+          .filter(({preview}) => preview && (preview.loading || sourcePreviewLoaded(preview)));
         entries.sort((a, b) => (a.preview.previewUsed ?? 0) - (b.preview.previewUsed ?? 0));
-        let characters = entries.reduce((sum, {preview}) => sum + (preview.content?.length ?? 0), 0);
+        // Text in UTF-16 units; the bytes a hex view formats count as half a unit each.
+        const units = preview => (preview.content?.length ?? 0) + (preview.hexBytes?.byteLength ?? 0) / 2;
+        let characters = entries.reduce((sum, {preview}) => sum + units(preview), 0);
         let documents = entries.length;
         // Metadata/open tabs remain. Reopening an evicted preview reloads it.
-        // Other previews hold at most 32 Mi UTF-16 units across eight owners.
+        // The selected preview stays whatever its size; the others hold at most
+        // 32 Mi UTF-16 units (64 MiB) across eight owners.
         for (const {source, preview} of entries) {
           if (documents <= 8 && characters <= 32 * 1024 * 1024) break;
           if (sourceIdentity(source) === protectedIdentity) continue;
-          characters -= preview.content?.length ?? 0; documents -= 1;
+          characters -= units(preview); documents -= 1;
           releaseSourcePreview(source);
         }
       }
@@ -7480,10 +7485,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return;
         }
         const coverage = editor.view.searchCoverage ?? 'Retained source text';
-        const incomplete = Boolean(editor.view.searchIncomplete || !editor.index.complete);
         if (!query) {
           state.sourceSearchIndex = 0;
           state.sourceWasmFind = null;
+          cancelSourceFind(state.sourceFind?.search);
+          state.sourceFind = null;
           elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', false));
           elements.sourcePosition.textContent = sourcePositionText(editor, editor.window.line, editor.window.column);
           status(`${coverage}. Find is a case-insensitive, single-line literal; no source is fetched.`);
@@ -7493,47 +7499,111 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           applyWasmInspectionSearch(editor, source, query, reset, direction, reveal, status);
           return;
         }
-        if (editor.view.formatted?.paged) {
-          applyPagedSourceSearch(editor, source, query, reset, direction, reveal, status);
+        applyDocumentSearch(editor, source, query, reset, direction, reveal, status, coverage);
+      }
+
+      // One Find runs over the selected document at a time; another query or
+      // document stops it. Its count repaints about every 100 ms while it runs
+      // and once at the end, and a Find typed before its first match was counted
+      // moves to that match when it arrives.
+      function sourceFindFor(identity, searched, kind, query) {
+        const current = state.sourceFind;
+        if (current?.identity === identity && current.searched === searched && current.kind === kind && current.query === query) return current;
+        cancelSourceFind(current?.search);
+        const find = {identity, searched, kind, query, reveal: false, painted: 0};
+        const document = kind === 'hex' ? sourceFindHexDocument(searched) : sourceFindTextDocument(searched);
+        find.search = startSourceFind(document, query, {onProgress: search => {
+          if (state.sourceFind !== find) return;
+          if (state.sourceEditorView?.identity !== identity || sourceIdentity(selectedSource()) !== identity || elements.sourceSearch.value !== query) {
+            cancelSourceFind(search);
+            state.sourceFind = null;
+            return;
+          }
+          if (search.status === 'running' && Date.now() - find.painted < 100) return;
+          find.painted = Date.now();
+          const reveal = find.reveal && search.total > 0;
+          if (reveal) find.reveal = false;
+          applySourceSearch(false, 0, {reveal});
+        }});
+        state.sourceFind = find;
+        return find;
+      }
+
+      // Find in the text shown, in the evidence behind a paged layout, or in
+      // every hex row: an exact count over the whole document, kept in the
+      // background (source_syntax.js), with each match placed on the page that
+      // shows it. Another page is mounted for a match that is not on this one.
+      function applyDocumentSearch(editor, source, query, reset, direction, reveal, status, coverage) {
+        const view = editor.view, layout = view.formatted?.paged ? view.formatted : null, hex = view.hex ?? null;
+        const searched = hex ? hex.bytes : layout ? view.active : editor.index.text;
+        const find = sourceFindFor(editor.identity, searched, hex ? 'hex' : 'text', query), {search} = find;
+        if (search.error) {elements.sourcePosition.textContent = search.error; status(coverage); return;}
+        const originalIndex = layout ? editor.originalIndex ??= sourceDocumentIndex(view.active) : null;
+        const layoutEnd = layout ? layout.anchors[layout.block + 1] ?? view.active.length : 0;
+        const inverse = layout ? editor.layoutInverse ??= sourceWhitespaceInverse(layout.sourceInput, layout.text) : null;
+        // The displayed {line, column, length} of a match, or null when another page shows it.
+        const place = match => {
+          if (hex) {
+            const line = Math.floor(match.offset / hex.rowUnits);
+            return sourceDocumentLine(editor.index, line) ? {line, column: match.offset % hex.rowUnits, length: match.length} : null;
+          }
+          if (!layout) return {...sourceDocumentPosition(editor.index, match.offset), length: match.length};
+          if (match.offset < layout.base || match.offset >= layoutEnd) return null;
+          const start = inverse(match.offset - layout.base), last = inverse(match.offset + match.length - 1 - layout.base);
+          const at = start === null ? null : sourceDocumentPosition(editor.index, start);
+          return at && {...at, length: Math.max(1, (last ?? start) + 1 - start)};
+        };
+        const pageLine = match => hex ? Math.floor(match.offset / hex.rowUnits) : sourceFormatBlock(layout.anchors, match.offset) * layout.stride;
+        const markRows = () => {
+          let lines;
+          if (layout) lines = new Set(sourceFindBetween(search, layout.base, layoutEnd).map(place).filter(Boolean).map(at => at.line));
+          else {
+            const rows = editor.window.rows;
+            const marks = sourceFindMarks(search, rows.map(row => hex ? [row.line * hex.rowUnits, (row.line + 1) * hex.rowUnits - 1] : [row.offset, row.offset + row.fullLength]));
+            lines = new Set(rows.filter((row, index) => marks[index]).map(row => row.line));
+          }
+          elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', lines.has(Number(row.dataset.localLine))));
+        };
+        const running = search.status === 'running';
+        const progress = running ? ` · finding ${Math.floor(100 * search.scanned / search.document.chunks)}%` : '';
+        status(coverage);
+        if (!search.total) {
+          state.sourceSearchIndex = 0;
+          if (reveal) find.reveal = true;
+          markRows();
+          elements.sourcePosition.textContent = running ? `No matches yet${progress}`
+            : view.searchIncomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
           return;
         }
-        if (editor.search?.query !== query) editor.search = {query, ...sourceDocumentMatches(editor.index, query, 1000)};
-        const {matches, truncated, error} = editor.search;
-        if (error) {elements.sourcePosition.textContent = error; status(coverage); return;}
-        const matchingLines = new Set(matches.map(match => match.line));
-        const highlightRows = () => elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row =>
-          row.classList.toggle('search-match', matchingLines.has(Number(row.dataset.localLine))));
-        if (!matches.length) {
-          state.sourceSearchIndex = 0; highlightRows();
-          elements.sourcePosition.textContent = incomplete ? '0 matches in the searched display; source coverage is incomplete.' : '0 matches in complete retained text.';
-          status(`${coverage}.${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
+        // Until the count is done, Next stops at the last match counted.
+        const moved = reset ? 0 : state.sourceSearchIndex + direction;
+        state.sourceSearchIndex = running ? Math.max(0, Math.min(search.total - 1, moved)) : (moved + search.total) % search.total;
+        const rank = state.sourceSearchIndex, match = sourceFindMatch(search, rank);
+        const count = `${(rank + 1).toLocaleString()} of ${search.total.toLocaleString()}${running ? '+' : ''} matches`;
+        const at = place(match);
+        if (!at) {
+          if (reveal) {
+            // Typing stays in Find. A page read earlier mounts at once, and
+            // that render resumes this search, which places and marks the match.
+            state.sourcePagedFind = {identity: editor.identity, query, index: rank};
+            moveSourceWindow(pageLine(match), 0, {focus: false});
+            if (!state.sourcePagedFind) return;
+          }
+          const original = originalIndex ? sourceDocumentPosition(originalIndex, match.offset) : null;
+          elements.sourcePosition.textContent = `${count} · ${original ? `original ${original.line + 1}:${original.column + 1} · reading its part of the layout…` : `row ${(pageLine(match) + 1).toLocaleString()}`}${progress}`;
+          markRows();
           return;
         }
-        state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
-        const match = matches[state.sourceSearchIndex];
-        if (reveal && !moveSourceCaretInMountedPage(editor, match.line, match.column, match.length)) {
+        if (reveal && !moveSourceCaretInMountedPage(editor, at.line, at.column, at.length)) {
           // Mount only the matched line/column window. Never enter the full
           // Sources route, which can start explicitly selected analysis.
-          renderSourceContent(source, editor.view, {line: match.line, column: match.column, search: false});
+          renderSourceContent(source, editor.view, {line: at.line, column: at.column, search: false});
           editor = state.sourceEditorView;
         }
-        highlightRows();
-        const row = elements.sourceCode.querySelector(`[data-local-line="${match.line}"]`);
-        const line = match.line;
-        const column = match.column;
-        elements.sourcePosition.textContent = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches · ${sourcePositionText(editor, line, column)}`;
-        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}${editor.index.complete ? '' : ' Search stopped at the 64 Mi UTF-16-unit bound.'}`);
-        if (!row) return;
-        const localColumn = match.column - Number(row.dataset.columnStart ?? 0);
-        if (localColumn < 0 || localColumn + match.length > row.querySelector('.source-text').textContent.length) return;
-        const range = sourceOccurrenceRange(row.querySelector('.source-text'), {...match, column: localColumn});
-        if (!range) return;
-        if (globalThis.Highlight && globalThis.CSS?.highlights) CSS.highlights.set('source-search-match', new Highlight(range));
-        if (!reveal) return;
-        const rect = range.getBoundingClientRect();
-        const viewport = elements.sourceCodeWrap.getBoundingClientRect();
-        elements.sourceCodeWrap.scrollLeft += rect.left - viewport.left - Math.min(120, viewport.width / 4);
-        elements.sourceCodeWrap.scrollTop += rect.top - viewport.top - viewport.height / 2;
+        markRows();
+        elements.sourcePosition.textContent = `${count} · ${sourcePositionText(editor, at.line, at.column)}${progress}`;
+        if (!markSourceMatch(at.line, at.column, at.length) || !reveal) return;
+        revealSourceColumn(elements.sourceCode.querySelector(`[data-line="${at.line + 1}"]`), at.column);
       }
 
       // Inspect holds one page of rows, so Find counts every row's matches on
@@ -7606,56 +7676,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         revealSourceColumn(elements.sourceCode.querySelector(`[data-line="${match.row + 1}"]`), column);
       }
 
-      // A paged layout holds one page, so Find searches the evidence and maps each match to its page.
-      function applyPagedSourceSearch(editor, source, query, reset, direction, reveal, status) {
-        const page = editor.view.formatted, original = editor.view.active;
-        const coverage = 'Complete retained source text; matches are found in the evidence and shown in the layout';
-        const originalIndex = editor.originalIndex ??= sourceDocumentIndex(original);
-        if (editor.search?.query !== query) editor.search = {query, ...sourceDocumentMatches(originalIndex, query, 1000)};
-        const {matches, truncated, error} = editor.search;
-        if (error) {elements.sourcePosition.textContent = error; status(coverage); return;}
-        const pageEnd = page.anchors[page.block + 1] ?? original.length;
-        const inverse = sourceWhitespaceInverse(page.sourceInput, page.text);
-        const shown = match => {
-          if (match.offset < page.base || match.offset >= pageEnd) return null;
-          const start = inverse(match.offset - page.base), last = inverse(match.offset + match.length - 1 - page.base);
-          const at = start === null ? null : sourceDocumentPosition(editor.index, start);
-          return at && {...at, length: Math.max(1, (last ?? start) + 1 - start)};
-        };
-        const placed = matches.map(shown);
-        const lines = new Set(placed.filter(Boolean).map(at => at.line));
-        elements.sourceCode.querySelectorAll('.source-line[data-line]').forEach(row => row.classList.toggle('search-match', lines.has(Number(row.dataset.localLine))));
-        if (!matches.length) {
-          state.sourceSearchIndex = 0;
-          elements.sourcePosition.textContent = '0 matches in complete retained text.';
-          status(coverage);
-          return;
-        }
-        state.sourceSearchIndex = reset ? 0 : (state.sourceSearchIndex + direction + matches.length) % matches.length;
-        const match = matches[state.sourceSearchIndex], count = `${state.sourceSearchIndex + 1} of ${matches.length}${truncated ? '+' : ''} matches`;
-        status(`${coverage}.${truncated ? ' First 1,000 matches; refine Find for later matches.' : ''}`);
-        const at = placed[state.sourceSearchIndex];
-        if (!at) {
-          if (reveal) {
-            // Typing stays in Find. A page read earlier mounts at once, and
-            // that render resumes this search, which places and marks the match.
-            state.sourcePagedFind = {identity: editor.identity, query, index: state.sourceSearchIndex};
-            moveSourceWindow(sourceFormatBlock(page.anchors, match.offset) * page.stride, 0, {focus: false});
-            if (!state.sourcePagedFind) return;
-          }
-          elements.sourcePosition.textContent = `${count} · original ${match.line + 1}:${match.column + 1} · reading its part of the layout…`;
-          return;
-        }
-        if (reveal && !moveSourceCaretInMountedPage(editor, at.line, at.column, at.length)) {
-          renderSourceContent(source, editor.view, {line: at.line, column: at.column, search: false});
-          editor = state.sourceEditorView;
-        }
-        elements.sourcePosition.textContent = `${count} · ${sourcePositionText(editor, at.line, at.column)}`;
-        if (!markSourceMatch(at.line, at.column, at.length) || !reveal) return;
-        const row = elements.sourceCode.querySelector(`[data-line="${at.line + 1}"]`);
-        revealSourceColumn(row, at.column);
-      }
-
       function revealSourceColumn(row, column, focus = false) {
         if (!row) return;
         if (focus) {row.tabIndex = -1; row.focus({preventScroll: true});}
@@ -7680,7 +7700,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.sourceWindowNext.hidden = !editor || editor.window.end === editor.index.lineCount;
         if (!editor) {elements.sourceWindow.hidden = true; return;}
         const {window: window, index} = editor;
-        const total = `${index.lineCount}${index.complete ? '' : '+'}`;
+        const total = String(index.lineCount);
         const loading = editor.view.pageLoadingLine ?? null;
         elements.sourceWindowLabel.textContent = loading === null ? `Lines ${window.start + 1}–${window.end} of ${total}`
           : `Lines ${window.start + 1}–${window.end} of ${total} · reading line ${loading + 1}…`;
@@ -7762,6 +7782,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // A layout prints every token as captured, so a caret after its line's last
       // visible character, or on an empty line, sits just after the previous one.
       function sourcePositionText(editor, line, column) {
+        if (editor.view.hex) {
+          const byte = sourceHexColumnByte(editor.view.hex, line, column);
+          return `Line ${line + 1}, Column ${column + 1}${byte === null ? '' : ` · byte 0x${byte.toString(16)}`}`;
+        }
         const start = sourceDocumentOffset(editor.index, line), map = editor.mappingContext?.position;
         let original = start === null || !map ? null : map(start + column, start + (sourceDocumentLine(editor.index, line)?.length ?? 0));
         if (!original && start !== null && map && editor.view.formatted?.map && !editor.view.derived) {
@@ -7824,6 +7848,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               searchIncomplete: wasmInspection.state(source)?.summary?.status === 'partial'};
           }
         }
+        if (source.hexBytes !== undefined) {
+          // Every byte, as rows formatted one 1,000-row page at a time.
+          const page = sourceHexView(source, sourceWantedLine(source));
+          return {content: page.text, lineMap: null, hex: page, page, pageLoadingLine: null,
+            searchCoverage: 'Every byte of the verified artifact, as its hex rows', searchIncomplete: false};
+        }
         const verifiedOriginal = sourceFactsPanel.original(source);
         const preview = source.content ?? '';
         const original = verifiedOriginal ?? (Number.isSafeInteger(source.sourceTextLength) ? preview.slice(0, source.sourceTextLength) : preview);
@@ -7847,13 +7877,21 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           content: formatted?.text ?? active,
           mapOriginal: derived ? source.deobfuscation.original_source : original,
           sourceVersion: derived ? source.deobfuscation.sourceWindowVersion : null,
-          searchIncomplete: verifiedOriginal === undefined && !derived && Boolean(source.contentTruncated || source.contentLossy),
+          searchIncomplete: verifiedOriginal === undefined && !derived && Boolean(source.contentLossy),
           searchCoverage: derived ? 'Complete retained derived text; transformation coverage is separate'
             : verifiedOriginal !== undefined ? 'Complete hash-verified original text'
               : source.contentLossy ? 'Lossy retained display only; absence in original bytes is unproven'
-                : source.contentTruncated ? 'Retained prefix only; the rest of the source was not searched'
-                  : 'Complete retained source text'
+                : 'Complete retained source text'
         };
+      }
+
+      // The hex page shown last, reused while the editor stays on its rows.
+      function sourceHexView(source, line) {
+        const shown = state.sourceHexPage;
+        if (shown?.source === source && shown.page.bytes === source.hexBytes && line >= shown.page.lineBase && line < shown.page.lineBase + SOURCE_HEX_PAGE_ROWS) return shown.page;
+        const page = sourceHexPage(source.hexBytes, line);
+        state.sourceHexPage = {source, page};
+        return page;
       }
 
       function retrySourcePreview(source) {
@@ -7884,10 +7922,10 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           elements.sourceLanguage.textContent = 'Detecting syntax';
           elements.sourceCode.hidden = true;
           elements.sourceCodeEmpty.hidden = false;
-          elements.sourceCodeEmpty.textContent = 'Loading immutable artifact bytes…';
+          renderSourceLoading(source);
           return;
         }
-        if ((source.loadError || source.content === undefined) && sourceFactsPanel.original(source) === undefined) {
+        if ((source.loadError || !sourcePreviewLoaded(source)) && sourceFactsPanel.original(source) === undefined) {
           resetEditor();
           elements.sourceLanguage.textContent = 'Unavailable';
           elements.sourceCode.hidden = true;
@@ -7987,17 +8025,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           if (view.wasm) {
             const offset = view.wasm.row(index)?.byte_offset;
             gutter.textContent = offset == null ? '' : offset.toString(16).padStart(6, '0');
-            const hexLimit = source.wasmHexBytes ?? wasmHexByteLimit();
-            gutter.disabled = offset == null || offset >= hexLimit;
+            gutter.disabled = offset == null;
             gutter.setAttribute('aria-label', offset == null ? 'Inspection notice' : `Show original bytes at offset ${offset}`);
-            gutter.title = offset == null ? '' : offset >= hexLimit ? `Byte offset ${offset} is beyond the ${hexLimit} hex bytes formatted in Sources` : `Original byte offset ${offset} (0x${offset.toString(16)})`;
+            gutter.title = offset == null ? '' : `Original byte offset ${offset} (0x${offset.toString(16)})`;
             gutter.addEventListener('click', () => {
               if (offset == null) return;
+              // Hex shows the byte once its bytes are read, as the Map places one.
               state.sourceWasm = false;
+              state.sourceReveal = {identity: sourceIdentity(source), byte: offset};
               renderSources();
-              moveSourceWindow(Math.floor(offset / 16));
-              const hexRow = elements.sourceCode.querySelector(`[data-local-line="${Math.floor(offset / 16)}"]`);
-              if (hexRow) { hexRow.tabIndex = -1; hexRow.focus({preventScroll: true}); hexRow.scrollIntoView({block: 'center'}); }
             });
           }
           const text = document.createElement('span');
@@ -8072,7 +8108,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (typeof wasmDiffPanel !== 'undefined' && wasmDiffPanel) wasmDiffPanel.sync(source);
         sourceFactsPanel.sync(source);
         syncInvestigationRange(source);
-        const view = source?.content !== undefined ? sourceDisplayView(source) : null;
+        const view = sourcePreviewLoaded(source) ? sourceDisplayView(source) : null;
         renderSourcePane();
         elements.sourceTree.setAttribute('aria-labelledby', `source-tab-${state.sourceCollection}`);
         renderSourceHealth();
@@ -8090,13 +8126,13 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (!investigationPassiveSource && state.sourceDeobfuscated && source?.kind === 'javascript' && !document.querySelector('#screen-sources').hidden) loadDeobfuscation(source);
         renderDeobfuscationReport(source);
         const reveal = state.sourceReveal;
-        if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source) && reveal.byte !== undefined) {
+        if (reveal && sourcePreviewLoaded(source) && reveal.identity === sourceIdentity(source) && reveal.byte !== undefined) {
           // A module byte (the Flow CFG's function start), placed as the entropy
           // map places one; why it cannot be shown is said in the status bar.
           state.sourceReveal = null;
           const problem = revealSourceByteOffset(source, reveal.byte, () => { if (typeof entropyMap !== 'undefined') entropyMap.close(); });
           if (problem) elements.sourcePosition.textContent = problem;
-        } else if (reveal && source?.content !== undefined && reveal.identity === sourceIdentity(source)) {
+        } else if (reveal && sourcePreviewLoaded(source) && reveal.identity === sourceIdentity(source)) {
           state.sourceReveal = null;
           revealOriginalLine(source, reveal.line, reveal.column);
           if (reveal.length && markSourceMatch(reveal.line, reveal.column, reveal.length)) {
@@ -8121,20 +8157,15 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         });
       }
 
-      // The viewer's own limit, stated beside the code so it is never mistaken for captured text.
-      // Inspect states what was decoded there instead, outside the listing, so
-      // every line of the listing is one row.
+      // What Inspect decoded, stated beside the code so it is never mistaken for
+      // captured text, and outside the listing, so every line of the listing is
+      // one row. Other views show every byte and need no notice.
       function sourceLimitText(source, view) {
-        if (view?.wasm) {
-          const inspection = wasmInspection.state(source), summary = inspection?.summary;
-          if (!summary) return '';
-          const counts = `${summary.status === 'partial' ? 'Partial' : 'Decoded'} · ${summary.sections.toLocaleString()} sections · ${summary.imported_functions.toLocaleString()} imported · ${summary.defined_functions.toLocaleString()} defined · ${summary.instructions.toLocaleString()} instructions · ${inspection.totalRows.toLocaleString()} rows`;
-          return [`Static inspection; the module is never executed. ${counts}.`, ...summary.omissions, inspection.pageError ? `A page failed to load: ${inspection.pageError}` : ''].filter(Boolean).join(' ');
-        }
-        if (!source?.contentTruncated || source.content === undefined || view?.derived || sourceFactsPanel.original(source) !== undefined) return '';
-        const hex = sourceHexArtifact(source);
-        const shown = hex ? `${source.wasmHexBytes.toLocaleString()} bytes` : `${SOURCE_PREVIEW_BYTES / 1048576} MiB`;
-        return `${hex ? 'Hex preview' : 'Preview'} limited to the first ${shown} of this ${source.byte_size.toLocaleString()}-byte file. Later bytes are not shown or searched; the original bytes are unchanged.`;
+        if (!view?.wasm) return '';
+        const inspection = wasmInspection.state(source), summary = inspection?.summary;
+        if (!summary) return '';
+        const counts = `${summary.status === 'partial' ? 'Partial' : 'Decoded'} · ${summary.sections.toLocaleString()} sections · ${summary.imported_functions.toLocaleString()} imported · ${summary.defined_functions.toLocaleString()} defined · ${summary.instructions.toLocaleString()} instructions · ${inspection.totalRows.toLocaleString()} rows`;
+        return [`Static inspection; the module is never executed. ${counts}.`, ...summary.omissions, inspection.pageError ? `A page failed to load: ${inspection.pageError}` : ''].filter(Boolean).join(' ');
       }
 
       function syncSourceDisplayControls(source, view) {
@@ -8146,8 +8177,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         if (elements.sourceLimitNotice) {elements.sourceLimitNotice.textContent = limit; elements.sourceLimitNotice.hidden = !limit;}
         // The status bar names the evidence state; the full provenance is its tooltip.
         const label = sourceViewLabel(source, view);
-        elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || source?.content === undefined ? label
-          : `${state.sourceDeobfuscated && sourceDerivedView(source) ? 'Derived' : 'Original'}${source.contentTruncated ? ' · truncated' : ''}${source.contentLossy ? ' · lossy' : ''}`;
+        elements.sourceViewKind.textContent = (state.sourceWasm && source?.kind === 'wasm') || !sourcePreviewLoaded(source) ? label
+          : `${state.sourceDeobfuscated && sourceDerivedView(source) ? 'Derived' : 'Original'}${source.contentLossy ? ' · lossy' : ''}`;
         elements.sourceViewKind.title = label;
         elements.sourceWasm.hidden = source?.kind !== 'wasm' || source?.source_type !== 'artifact';
         elements.sourceWasm.setAttribute('aria-pressed', String(state.sourceWasm));
@@ -8177,17 +8208,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       function sourceViewLabel(source, view = null) {
-        if (source && source.content === undefined && source.loadError) return 'Preview unavailable';
-        if (source && source.content === undefined && source.loading) return 'Preview loading';
+        if (source && !sourcePreviewLoaded(source) && source.loadError) return 'Preview unavailable';
+        if (source && !sourcePreviewLoaded(source) && source.loading) return 'Preview loading';
         if (state.sourceWasm && source?.kind === 'wasm' && source.source_type === 'artifact') {
           const inspection = wasmInspection.state(source);
           return inspection?.status === 'ready' ? `${inspection.summary.status === 'partial' ? 'Partial' : 'Static'} inspection · original byte offsets`
             : inspection?.status === 'error' ? 'Inspection failed · original bytes preserved' : inspection?.status === 'cancelled' ? 'Inspection cancelled · original bytes preserved'
               : inspection?.status === 'loading' ? 'Inspection pending' : 'Inspection preview released';
         }
-        view ??= source?.content !== undefined ? sourceDisplayView(source) : null;
+        view ??= sourcePreviewLoaded(source) ? sourceDisplayView(source) : null;
         const original = sourceFactsPanel.original(source) !== undefined ? 'Verified original evidence'
-          : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}${source?.contentTruncated ? ' · truncated' : ''}`;
+          : `Original evidence preview${source?.contentLossy ? ' · lossy UTF-8 display' : ''}`;
         if (view?.formatError) return `${original} · ${view.formatError}`;
         if (view?.formatPending) return `${original} · formatting…`;
         if (view?.formatNotice && !state.sourceDeobfuscated) return `Pretty printed ${original.toLowerCase()} · whitespace layout · ${view.formatNotice}`;
@@ -8746,33 +8777,77 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
       }
 
+      // Bytes read so far and Cancel. Reading has no deadline. A progress
+      // update (create: false) rewrites only the line of a panel already shown,
+      // so focus stays on Cancel and no other view's panel is replaced.
+      function renderSourceLoading(source, {create = true} = {}) {
+        const identity = sourceIdentity(source), read = source.loadedBytes ?? 0;
+        const text = read < source.byte_size ? `Reading the immutable artifact bytes… ${formatByteSize(read)} of ${formatByteSize(source.byte_size)}`
+          : `Verifying ${formatByteSize(source.byte_size)} against the recorded SHA-256…`;
+        const shown = elements.sourceCodeEmpty?.querySelector(':scope > .source-loading');
+        if (shown?.dataset.identity === identity) {shown.querySelector('p').textContent = text; return;}
+        if (!create) return;
+        const panel = document.createElement('div');
+        panel.className = 'source-loading';
+        panel.dataset.identity = identity;
+        panel.setAttribute('role', 'status');
+        const cancel = textElement('button', 'secondary-button', 'Cancel');
+        cancel.type = 'button';
+        cancel.addEventListener('click', cancelSourcePreview.bind(null, sourceReference(source)));
+        panel.append(textElement('p', '', text), cancel);
+        elements.sourceCodeEmpty.replaceChildren(panel);
+      }
+
+      // Stops a read; Retry source reads the bytes again.
+      function cancelSourcePreview(source) {
+        const identity = sourceIdentity(source);
+        const artifact = state.artifacts.find(value => sourceIdentity(value) === identity);
+        if (!artifact?.loading || !artifact.controller) return;
+        const focused = Boolean(elements.sourceCodeEmpty?.contains(document.activeElement));
+        artifact.controller.abort();
+        delete artifact.controller;
+        artifact.loading = false;
+        artifact.loadError = 'Reading was cancelled. The stored artifact is unchanged.';
+        if (sourceIdentity(selectedSource()) !== identity) return;
+        renderSources();
+        if (focused) elements.sourceCodeEmpty.querySelector('button')?.focus();
+      }
+
       async function loadArtifactContent(artifact, {retry = false, canvasOwner = null} = {}) {
         if (artifact?.kind === 'canvas_data_url' && (!canvasOwner ||
             state.canvasPreviewOwners?.get(sourceIdentity(artifact)) !== canvasOwner || !canvasGalleryVisible() || state.artifactReceiverError)) return;
         // Request content, header blocks, cookie lists and stacks are read only by their Traffic views.
         if (['request_body', 'request_target', 'request_headers', 'response_headers', 'cookie_list', 'stack'].includes(artifact?.kind)) return;
-        if (!sourceIsCurrent(artifact) || artifact.content !== undefined || artifact.loading || (artifact.loadError && !retry)) return;
+        if (!sourceIsCurrent(artifact) || sourcePreviewLoaded(artifact) || artifact.loading || (artifact.loadError && !retry)) return;
         const identity = sourceIdentity(artifact);
         const controller = new AbortController();
-        // Text previews read the whole artifact, up to its 16 MiB cap, in 2 MiB pages.
-        const previewBytes = sourceHexArtifact(artifact) || canvasOwner ? 2097152 : SOURCE_PREVIEW_BYTES;
-        const pages = Math.max(1, Math.ceil(Math.min(artifact.byte_size, previewBytes) / 2097152));
-        artifact.loading = true; artifact.loadError = null; artifact.controller = controller;
+        // Sources reads every byte in one verified request (the backend hashes
+        // the whole file for any range). A canvas preview reads its first 2 MiB.
+        const wanted = canvasOwner ? Math.min(artifact.byte_size, 2097152) : artifact.byte_size;
+        artifact.loading = true; artifact.loadError = null; artifact.controller = controller; artifact.loadedBytes = 0;
         artifact.previewUsed = state.sourcePreviewSequence = (state.sourcePreviewSequence ?? 0) + 1;
         if (!canvasOwner) boundSourcePreviews(artifact);
         const current = () => sourceIsCurrent(artifact) && state.artifacts.includes(artifact) && artifact.controller === controller && !controller.signal.aborted &&
           (!canvasOwner || (state.canvasPreviewOwners?.get(identity) === canvasOwner && canvasGalleryVisible() && !state.artifactReceiverError));
-        const timeout = setTimeout(() => {
+        let painted = 0;
+        const progress = bytes => {
+          artifact.loadedBytes = bytes;
+          if (canvasOwner || (bytes < wanted && Date.now() - painted < 100) || !current()) return;
+          painted = Date.now();
+          renderSourceLoading(artifact, {create: false});
+        };
+        // Only a gallery thumbnail still gives up on a read, so one stalled
+        // read cannot hold a gallery read credit.
+        const timeout = canvasOwner ? setTimeout(() => {
           if (artifact.controller !== controller) return;
           artifact.loading = false; artifact.loadError = 'Artifact loading timed out. Retry explicitly.';
           delete artifact.controller; controller.abort();
-          if (canvasOwner && canvasGalleryVisible()) renderFingerprintActivity();
-          else if (sourceIdentity(selectedSource()) === identity) renderSources();
-        }, 5000 + 5000 * pages);
+          if (canvasGalleryVisible()) renderFingerprintActivity();
+        }, 10000) : 0;
         if (!canvasOwner) renderSources();
         let responseCancellation = null;
         try {
-          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=2097152`, {cache: 'no-store', signal: controller.signal});
+          const response = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?limit=${Math.max(1, wanted)}`, {cache: 'no-store', signal: controller.signal});
           if (!current()) { responseCancellation = response.body?.cancel().catch(() => {}); return; }
           if (!response.ok) { responseCancellation = response.body?.cancel().catch(() => {}); throw new Error(`Artifact store returned ${response.status}`); }
           // Sources may retire without waiting for a producer's cleanup. Canvas
@@ -8785,60 +8860,38 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
               return responseCancellation;
             }};
           }}} : response;
-          let buffer = await sourceFactsReadBytes(ownedResponse, 2097152, controller.signal);
+          const buffer = await sourceFactsReadBytes(ownedResponse, wanted, controller.signal, progress);
           if (!current()) return;
-          if (buffer.length !== Math.min(artifact.byte_size, 2097152)) throw new Error('The artifact preview byte size changed.');
+          if (buffer.length !== wanted) throw new Error('The artifact byte size changed.');
           const total = response.headers.get('X-Artifact-Total-Bytes');
           if (total !== null && Number(total) !== artifact.byte_size) throw new Error('The artifact total byte size changed.');
-          if (pages > 1) {
-            const whole = new Uint8Array(Math.min(artifact.byte_size, previewBytes));
-            whole.set(buffer);
-            for (let offset = buffer.length; offset < whole.length; offset += 2097152) {
-              const page = await fetch(`/api/artifacts/${encodeURIComponent(artifact.artifact_id)}/content?offset=${offset}&limit=2097152`, {cache: 'no-store', signal: controller.signal});
-              if (!current() || !page.ok) {
-                responseCancellation = page.body?.cancel().catch(() => {});
-                if (!current()) return;
-                throw new Error(`Artifact store returned ${page.status}`);
-              }
-              const bytes = await sourceFactsReadBytes(page, 2097152, controller.signal);
-              if (!current()) return;
-              const pageTotal = page.headers.get('X-Artifact-Total-Bytes');
-              if (bytes.length !== Math.min(2097152, whole.length - offset) || (pageTotal !== null && Number(pageTotal) !== artifact.byte_size)) {
-                throw new Error('The artifact preview byte size changed.');
-              }
-              whole.set(bytes, offset);
-            }
-            buffer = whole;
-          }
-          if (artifact.byte_size <= previewBytes && globalThis.crypto?.subtle) {
+          if (wanted === artifact.byte_size && globalThis.crypto?.subtle) {
             const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buffer)), byte => byte.toString(16).padStart(2, '0')).join('');
             if (!current()) return;
             if (hash !== artifact.sha256) throw new Error('The artifact bytes do not match the selected SHA-256.');
             artifact.contentVerified = true;
           }
-          if (!sourceHexArtifact(artifact)) {
-            try {new TextDecoder('utf-8', {fatal: true}).decode(buffer); artifact.contentLossy = false;}
-            catch {artifact.contentLossy = true;}
+          artifact.contentTruncated = artifact.byte_size > buffer.length;
+          if (sourceHexArtifact(artifact)) {
+            // Hex is only a view: its rows are formatted a page at a time from
+            // these bytes. The immutable blob is untouched.
+            artifact.hexBytes = buffer;
+          } else {
+            let content;
+            try {content = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(buffer); artifact.contentLossy = false;}
+            catch {content = new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer); artifact.contentLossy = true;}
+            if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
+              throw new Error('The retained bytes do not pass the bounded image data URL validator.');
+            }
+            if (canvasOwner) {
+              const inspection = inspectCanvasPng(content);
+              if (inspection.reason) canvasOwner.imageError = inspection.reason;
+              else canvasOwner.imageInfo = inspection;
+            }
+            artifact.sourceTextLength = content.length;
+            artifact.contentLongLine = !canvasOwner && sourceHasLongLine(content);
+            artifact.content = content;
           }
-          // Hex is only a view. Format every byte whose rows fit in the editor
-          // index (about 1.6 MiB). The immutable blob is untouched.
-          const hexBytes = sourceHexArtifact(artifact) ? Math.min(buffer.length, wasmHexByteLimit()) : buffer.length;
-          const content = sourceHexArtifact(artifact)
-            ? formatWasmHex(buffer.subarray(0, hexBytes))
-            : new TextDecoder('utf-8', {fatal: false, ignoreBOM: true}).decode(buffer);
-          if (canvasOwner && (artifact.contentLossy || !canvasDataUrlPattern.test(content))) {
-            throw new Error('The retained bytes do not pass the bounded image data URL validator.');
-          }
-          if (canvasOwner) {
-            const inspection = inspectCanvasPng(content);
-            if (inspection.reason) canvasOwner.imageError = inspection.reason;
-            else canvasOwner.imageInfo = inspection;
-          }
-          artifact.sourceTextLength = content.length;
-          artifact.contentLongLine = !sourceHexArtifact(artifact) && !canvasOwner && sourceHasLongLine(content);
-          artifact.content = content;
-          artifact.wasmHexBytes = sourceHexArtifact(artifact) ? hexBytes : undefined;
-          artifact.contentTruncated = artifact.byte_size > buffer.length || (sourceHexArtifact(artifact) && buffer.length > hexBytes);
           if (!canvasOwner) boundSourcePreviews();
           if (!canvasOwner && !state.sourceFormatted && sourceIdentity(selectedSource()) === identity) state.sourceFormatted = sourceFormatWanted(artifact);
         } catch (error) {

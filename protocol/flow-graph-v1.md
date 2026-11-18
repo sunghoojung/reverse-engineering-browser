@@ -97,7 +97,12 @@ was not retained, a walk that stopped at 256 frames (segment flag bit 0, or an
 `async_task_stack` with flag bit 0), an await chain past 32 frames (record bit
 2), a chain past 32 segments (record bit 4) or a recorded cut (record bit 3), and
 a frame past the node budget. The node where the chain stops carries
-`chain_cut`. `entries` counts a node only when it is a known first frame.
+`chain_cut`. A segment in state 7 `no_script` (the browser, the parser or a
+native callback queued the task) or state 8 `origin_rejected` ends the chain
+without a cut: its task's first frame is a known entry, and the node lists the
+reason and task kind in `chain_ends`. After a frameless microtask hop the
+frames that registered the reaction are unknown, so that end is a cut.
+`entries` counts a node only when it is a known first frame.
 
 ## Answer
 

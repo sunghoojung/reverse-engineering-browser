@@ -513,6 +513,9 @@ struct Node {
     /// Tasks the function scheduled, from `async_task_stack` records.
     schedules: BTreeMap<&'static str, u64>,
     chain_cut: bool,
+    /// Why chains end here uncut, by reason and task kind: no script
+    /// scheduled the task, or its message origin was rejected.
+    chain_ends: BTreeMap<(&'static str, &'static str), u64>,
     hits: u64,
     entries: u64,
     leaves: u64,
@@ -532,6 +535,13 @@ impl Node {
         }
         if self.chain_cut {
             value["chain_cut"] = json!(true);
+        }
+        if !self.chain_ends.is_empty() {
+            value["chain_ends"] = self
+                .chain_ends
+                .iter()
+                .map(|((reason, task), count)| json!({"reason": reason, "task": task, "count": count}))
+                .collect();
         }
         value
     }
@@ -757,6 +767,7 @@ impl<'a> Builder<'a> {
             detail,
             schedules: BTreeMap::new(),
             chain_cut: false,
+            chain_ends: BTreeMap::new(),
             hits: 0,
             entries: 0,
             leaves: 0,
@@ -1133,6 +1144,21 @@ impl<'a> Builder<'a> {
                     target = outer;
                 }
                 _ if segment.kind == 9 => via.push(task),
+                _ if segment.ends_chain() => {
+                    // No script scheduled this task (the browser, the parser
+                    // or a native callback queued it), or its message origin
+                    // was rejected: the chain ends with that reason, uncut.
+                    // After a frameless microtask hop the frames that
+                    // registered the reaction are unknown, so it is a cut.
+                    if via.is_empty() {
+                        let reason = request_stack::segment_state(segment.state);
+                        *self.nodes[to].chain_ends.entry((reason, task)).or_default() +=
+                            visit.weight;
+                    } else {
+                        cut = true;
+                    }
+                    break;
+                }
                 _ => {
                     cut = true;
                     break;
@@ -2550,6 +2576,93 @@ mod tests {
                 .iter()
                 .any(|node| node["name"] == "onPage"),
             "the page's script 7 is not the worker's"
+        );
+    }
+
+    /// A version 3 request stack of the document main thread, with its
+    /// artifact, for each chain of task segments.
+    fn document_request(f: &mut Fixture, request: u64, frames: &[Vec<u8>], segments: &[Vec<u8>]) {
+        use crate::request_stack::tests::scoped_artifact;
+        let artifact = scoped_artifact(41, 1, 0, frames, segments, 0);
+        f.artifact("stack", "reb-stack:r", &artifact);
+        let mut record = request_record(
+            &Sha256::digest(&artifact),
+            &frames[0],
+            frames.len() as u32,
+            segments.len() as u16,
+            0,
+        );
+        record[0] = 3;
+        record[80] = 1;
+        f.text_event("request_initiated", 41, request, "GET t.test");
+        f.event("request_initiator_stack", 41, request, 7, &record);
+    }
+
+    /// A click the browser dispatched (an event segment in state 7
+    /// `no_script`) and a message whose origin was rejected (state 8) end
+    /// their chains with that reason: the handler is a known task entry and
+    /// is not cut. A frameless microtask hop before the end leaves the
+    /// frames that registered the reaction unknown, which is a cut.
+    #[test]
+    fn tasks_no_script_scheduled_end_the_chain_without_a_cut() {
+        let mut f = Fixture::new();
+        let text = "function onClick() {\n  send();\n}\nfunction send() {\n  fetch('/x');\n}\nfunction onMessage() {\n  send();\n}\nfunction onReaction() {\n  send();\n}\n";
+        let at = |needle: &str| text.find(needle).unwrap() as u32;
+        let start = |name: &str| at(&format!("function {name}(")) + 9 + name.len() as u32;
+        f.artifact("javascript", "https://t.test/app.js", text.as_bytes());
+        f.event(
+            "script_identity",
+            41,
+            0,
+            7,
+            &identity_bytes(1, 2, 10, (0, 0), 99, text.as_bytes()),
+        );
+        let send = frame(1, 0, 10, at("fetch"), start("send"));
+        let caller = |name: &str| {
+            let call = text[start(name) as usize..].find("send();").unwrap() as u32 + start(name);
+            frame(1, 0, 10, call, start(name))
+        };
+        let empty = [0u8; 32];
+        document_request(
+            &mut f,
+            1,
+            &[send.clone(), caller("onClick")],
+            &[segment(8, 7, 0, &empty)],
+        );
+        document_request(
+            &mut f,
+            2,
+            &[send.clone(), caller("onMessage")],
+            &[segment(10, 8, 0, &empty)],
+        );
+        document_request(
+            &mut f,
+            3,
+            &[send.clone(), caller("onReaction")],
+            &[segment(9, 6, 0, &empty), segment(8, 7, 0, &empty)],
+        );
+        let g = graph(&f);
+        assert_eq!(g["coverage"]["malformed_records"], 0, "{}", g["coverage"]);
+        let click = node(&g, "onClick");
+        assert_eq!(
+            (click["entries"].as_u64(), click.get("chain_cut")),
+            (Some(1), None),
+            "{click}"
+        );
+        assert_eq!(
+            click["chain_ends"],
+            json!([{"reason": "no_script", "task": "event", "count": 1}])
+        );
+        let message = node(&g, "onMessage");
+        assert_eq!(message.get("chain_cut"), None);
+        assert_eq!(
+            message["chain_ends"],
+            json!([{"reason": "origin_rejected", "task": "message_port", "count": 1}])
+        );
+        let reaction = node(&g, "onReaction");
+        assert_eq!(
+            (reaction["chain_cut"].as_bool(), reaction.get("chain_ends")),
+            (Some(true), None)
         );
     }
 

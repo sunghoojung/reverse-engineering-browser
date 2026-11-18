@@ -11492,6 +11492,34 @@
                 "chain_cut": {
                   "type": "boolean"
                 },
+                "chain_ends": {
+                  "type": "array",
+                  "description": "Task chains that end at this node without a cut, by reason and task kind: no_script (no script scheduled the task; the browser, the parser or a native callback queued it) or origin_rejected (a message whose task origin was rejected). count sums the occurrences of the stacks that end here.",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "reason",
+                      "task",
+                      "count"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "reason": {
+                        "enum": [
+                          "no_script",
+                          "origin_rejected"
+                        ]
+                      },
+                      "task": {
+                        "type": "string"
+                      },
+                      "count": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    }
+                  }
+                },
                 "schedules": {
                   "type": "object",
                   "additionalProperties": {

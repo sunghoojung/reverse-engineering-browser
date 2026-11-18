@@ -25,6 +25,8 @@ const FLOW_GRAPH_OPS = Object.freeze({call: 'call', await: 'await', omitted: 'om
 /* Why a frame is unresolved: the request stack reasons (request_stack.js,
  * loaded first) and the flow graph's read budgets. */
 const FLOW_GRAPH_REASONS = Object.freeze({...REQUEST_STACK_REASONS, source_budget: 'source read budget reached', source_deadline: 'read deadline reached before this source'});
+/* Why a task chain ends at a node without a cut (flow-graph-v1 `chain_ends`). */
+const FLOW_GRAPH_CHAIN_ENDS = Object.freeze({no_script: 'no script scheduled it', origin_rejected: 'its message origin was rejected'});
 /* Record types that carry a walked stack; the others only label or resolve one. */
 const FLOW_GRAPH_STACK_RECORDS = ['request_initiator_stack', 'navigation_initiator_stack', 'async_task_stack'];
 const FLOW_GRAPH_LIMITS = 'Observed stacks only. A call that never reached a recorded request, navigation, task or cookie write is not drawn.';
@@ -115,6 +117,11 @@ function flowGraphNodeDetail(node) {
   if (node.kind === 'wasm') return `func ${node.function_index} · ${requestStackFile(node.url)}`;
   const file = flowGraphNodeFile(node, true);
   return node.line ? `${file}:${node.line}:${node.column}` : file;
+}
+
+/** Why task chains end at a node without a cut, with the task kinds. */
+function flowGraphChainEnds(node) {
+  return (node.chain_ends ?? []).map(end => `${FLOW_GRAPH_CHAIN_ENDS[end.reason] ?? end.reason} (${REQUEST_STACK_TASKS[end.task] ?? end.task} ×${end.count.toLocaleString()})`).join(', ');
 }
 
 /** The full location a researcher copies: URL, line and column. */
@@ -1670,6 +1677,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
     if (node.entries) fact('Task entry', `${node.entries.toLocaleString()} ${node.entries === 1 ? 'time' : 'times'}`);
     if (node.leaves) fact('Innermost', `${node.leaves.toLocaleString()} ${node.leaves === 1 ? 'time' : 'times'}`);
     if (node.schedules) fact('Scheduled', Object.entries(node.schedules).map(([task, count]) => `${REQUEST_STACK_TASKS[task] ?? task} ×${count}`).join(', '));
+    if (node.chain_ends) fact('Chain starts', flowGraphChainEnds(node));
     if (node.status !== 'resolved') fact('Unresolved', FLOW_GRAPH_REASONS[node.reason] ?? node.reason);
     inspector.append(facts);
     if (node.chain_cut) inspector.append(make('p', 'flow-inspector-note', 'Earlier async callers were not recorded: a scheduling stack in its task chain was not retained, or a microtask hop names no recorded task.'));
@@ -1769,6 +1777,7 @@ function createFlowGraphPanel({host, open = () => {}, available = () => true, on
       if (node.entries) facts.push(['task entry', node.entries.toLocaleString(), 'count']);
       if (node.status !== 'resolved') facts.push(['unresolved', FLOW_GRAPH_REASONS[node.reason] ?? node.reason ?? '', '']);
       if (node.chain_cut) facts.push(['callers', 'earlier async callers not recorded', '']);
+      if (node.chain_ends) facts.push(['chain starts', flowGraphChainEnds(node), '']);
     } else if (hover.row >= 0 && cards[hover.node]?.rows[hover.row]?.sink) {
       const row = cards[hover.node].rows[hover.row], sink = row.sink, context = model.contexts[sink.context]?.label;
       heading = flowGraphNodeName(sink); kind = sink.kind;

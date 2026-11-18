@@ -1371,6 +1371,7 @@ mod tests {
     }
 
     /// A `request_headers` (or `response_headers`) record of request 17 + n.
+    #[allow(clippy::too_many_arguments)] // one per field of the record under test
     fn header(
         sequence: u64,
         parent: u64,

@@ -1387,7 +1387,7 @@ mod tests {
                 .iter()
                 .any(|edge| edge.2 == "table_default" && edge.3.as_deref() == Some("default"))
         );
-        assert_eq!(document["instruction_count"].as_u64().unwrap() > 900, true);
+        assert!(document["instruction_count"].as_u64().unwrap() > 900);
     }
 
     use std::collections::BTreeSet;

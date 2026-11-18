@@ -691,7 +691,7 @@ fn compare_float32_returns_no_bytes_of_a_sensitive_artifact_through_mcp() {
     let mut mcp = Mcp::start(&server.url, false);
     let secret = b"SYNTHETIC-SECRET-BYTES-0123456!!";
     assert_eq!(secret.len() % 4, 0);
-    let words: Vec<String> = secret.chunks(4).map(|word| hex::encode(word)).collect();
+    let words: Vec<String> = secret.chunks(4).map(hex::encode).collect();
     let readable = retained_artifact(&server, "1", "bytecode_buffer", secret);
     let answer = mcp.request(
         "tools/call",

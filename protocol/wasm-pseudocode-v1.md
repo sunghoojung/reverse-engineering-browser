@@ -222,9 +222,9 @@ partial; they are counted and `omissions` says how many there are.
   function called on a line in the window.
 - `window`: `line_offset`, `line_limit`, `lines` returned and
   `next_line_offset`, null at the end.
-- `truncation`: `instructions` and `lines` (a limit stopped the lift),
-  `deadline` (always `false`: the lift has no deadline, and the member stays so
-  version 1 readers still parse it), `clipped_lines` (lines whose text was cut at 2,048 bytes and marked
+- `truncation`: `instructions`, `lines` and `deadline`, always `false`: the
+  lift has no size budget or deadline, and the members stay so version 1
+  readers still parse them; `clipped_lines` (lines whose text was cut at 2,048 bytes and marked
   `[text limited]`), `window_bytes` (the window stopped early to fit),
   `frames`, and `merged_ranges` (lines whose ranges were merged into a
   covering span).
@@ -246,16 +246,16 @@ ranges, and the callee table. Callee names are module names, which
 | --- | --- | --- |
 | Input | None | A module of any size is read whole. |
 | Function body | 7,654,321 bytes | Web engines reject a longer body, so it cannot have run. Module validation enforces it for every body, so one oversized function makes every function of its module return 422. |
-| Instructions lifted | 250,000 | Keeps one request's offsets and lines in tens of megabytes. |
-| Lines | 300,000, and 24 MiB of line text | The same, for line storage. Checked before each instruction and before each `br_table` case line, so one table with many targets cannot overshoot. |
+| Instructions and lines lifted | None | Every instruction of a valid body is lifted; the body limit above already bounds it. A 7.2 MB body of 3.6 million instructions lifts to 900,003 lines in about 1 s at 260 MB peak RSS. Earlier revisions stopped at 250,000 instructions, 300,000 lines or 24 MiB of line text, and `truncation.instructions` and `truncation.lines` are now always false. |
 | Line text | 2,048 bytes | One line stays readable; `clipped_lines` counts cuts. |
 | Expression depth and text | 12 levels, 200 bytes | Deeper operands become temporaries. |
 | Window | 1 to 2,000 lines (default 400), cut until the whole document is at most 120 KiB both compact and pretty-printed | `reb-api mcp` inlines a result only when both forms are at most 131,072 bytes; the cut is measured on the serialized document, callees and frames included, and `truncation.window_bytes` says it happened. |
 | Time | No deadline | Cancellation is checked every 1,024 instructions and every 65,536 pending values visited while ordering effects, so a request that goes away stops the lift soon, even on a deep operand stack, and is answered 499 `cancelled`. |
 
-A limit stops the lift at a named byte, sets the matching `truncation` field
-and `status: partial`, and names the byte in `omissions`; later instructions
-are not lifted. The lift is recomputed for each window. An imported or
+The two most recent lifts are kept by module SHA-256 and function index, so
+each later window of a function reads the kept lift: the 3.6 million
+instruction body above takes 0.63 s for its first window and 0.04 s for each
+later one over HTTP. A lift that fails or is cancelled is not kept. An imported or
 undefined function returns 404. A module whose sections do not validate, or
 a requested function whose body does not validate with wasmparser's
 validator (every feature enabled), returns 422 with a named error rather

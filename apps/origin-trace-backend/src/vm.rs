@@ -183,6 +183,125 @@ pub(crate) fn mask(source: &str) -> String {
     // Every blanked range starts and ends at an ASCII delimiter.
     String::from_utf8(bytes).expect("UTF-8 literal masking")
 }
+/// The closing byte for each of `openings`, ascending offsets of `open` in
+/// `text`, found in one pass. Scanning forward from each opening separately
+/// costs the distance to its close every time, quadratic in a long text of
+/// openings. Only the brackets of the given kind count; memory is one entry
+/// per nested wanted opening.
+pub(crate) fn closings(
+    text: &[u8],
+    (open, close): (u8, u8),
+    openings: &[usize],
+) -> Vec<Option<usize>> {
+    let mut found = vec![None; openings.len()];
+    let mut wanted = openings.iter().copied().enumerate().peekable();
+    // (index into `openings`, the depth just inside that opening)
+    let mut inside = Vec::<(usize, usize)>::new();
+    let mut depth = 0usize;
+    for (offset, &byte) in text.iter().enumerate() {
+        if byte == open {
+            depth += 1;
+            if wanted.peek().is_some_and(|(_, at)| *at == offset) {
+                inside.push((wanted.next().unwrap().0, depth));
+            }
+        } else if byte == close {
+            if inside.last().is_some_and(|(_, level)| *level == depth) {
+                found[inside.pop().unwrap().0] = Some(offset);
+            }
+            depth = depth.saturating_sub(1);
+        }
+    }
+    found
+}
+/// One function region's own text: its masked bytes with each nested
+/// region's body collapsed to a single space. A byte is then scanned only by
+/// the innermost region that holds it, so the pass over every region is
+/// linear in the source however deeply its functions nest. Patterns cannot
+/// match inside a collapsed body, which was all blanks before, and an
+/// identifier never spans one, so matches are those of the blanked region.
+struct OwnText {
+    text: String,
+    /// (offset in `text`, offset in the region) where each piece begins.
+    pieces: Vec<(usize, usize)>,
+    /// Each nested region in `text`: just after its `{`, and its `}`.
+    nested: Vec<(usize, usize)>,
+}
+impl OwnText {
+    fn new(masked: &str, (start, end): (usize, usize), nested: &[(usize, usize)]) -> Self {
+        let bytes = masked.as_bytes();
+        let mut text = Vec::with_capacity(end - start);
+        let mut pieces = vec![(0, 0)];
+        let mut positions = Vec::with_capacity(nested.len());
+        let mut at = start;
+        for &(a, b) in nested {
+            text.extend_from_slice(&bytes[at..a]);
+            let inside = text.len();
+            if b > a {
+                pieces.push((inside, a - start));
+                text.push(b' ');
+            }
+            pieces.push((text.len(), b - start));
+            positions.push((inside, text.len()));
+            at = b;
+        }
+        text.extend_from_slice(&bytes[at..end]);
+        Self {
+            // Every cut is next to an ASCII brace.
+            text: String::from_utf8(text).expect("masked nested source"),
+            pieces,
+            nested: positions,
+        }
+    }
+    /// The region offset of the `text` offset `at`.
+    fn region_offset(&self, at: usize) -> usize {
+        let (text, region) = self.pieces[self.pieces.partition_point(|(text, _)| *text <= at) - 1];
+        region + (at - text)
+    }
+}
+/// The names a body, with every body nested in it, dispatches through an
+/// indexed call (`t[i](`) and calls by name. Names borrow the masked source.
+#[derive(Default)]
+struct Calls<'a> {
+    dispatched: BTreeSet<&'a str>,
+    called: BTreeSet<&'a str>,
+}
+impl<'a> Calls<'a> {
+    fn own(masked: &'a str, start: usize, own: &OwnText) -> Self {
+        static INDEXED_CALL: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(").unwrap()
+        });
+        static CALLED_NAME: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\(").unwrap());
+        let names = |pattern: &Regex| {
+            pattern
+                .captures_iter(&own.text)
+                .map(|captures| {
+                    let name = captures.get(1).unwrap();
+                    let at = start + own.region_offset(name.start());
+                    &masked[at..at + name.len()]
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        Self {
+            dispatched: names(&INDEXED_CALL),
+            called: names(&CALLED_NAME),
+        }
+    }
+    /// Adds a nested body's names, moving the smaller set into the larger so
+    /// a name is moved at most a logarithmic number of times.
+    fn absorb(&mut self, other: Self) {
+        for (mine, theirs) in [
+            (&mut self.dispatched, other.dispatched),
+            (&mut self.called, other.called),
+        ] {
+            let mut theirs = theirs;
+            if theirs.len() > mine.len() {
+                std::mem::swap(mine, &mut theirs);
+            }
+            mine.extend(theirs);
+        }
+    }
+}
 fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
     static SIGNATURE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
@@ -219,16 +338,11 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         direct.into_iter().chain(aliased).min()
     };
     let masked = mask(source);
-    let mut openings = BTreeSet::new();
+    let mut openings = SIGNATURE
+        .find_iter(&masked)
+        .map(|m| m.end() - 1)
+        .collect::<BTreeSet<_>>();
     let mut omissions = Vec::new();
-    for m in SIGNATURE.find_iter(&masked) {
-        if openings.len() >= 4096 {
-            omissions
-                .push(json!({"reason":"javascript-function-region-limit","observed_records":4096}));
-            break;
-        }
-        openings.insert(m.end() - 1);
-    }
     let mut stack = Vec::new();
     let mut regions = vec![(0, source.len())];
     for (i, c) in masked.bytes().enumerate() {
@@ -259,42 +373,36 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         }
         parents.push(*region);
     }
-    let mut order = regions.clone();
-    order.sort_by_key(|r| {
-        if *r == (0, source.len()) {
-            0
-        } else {
-            r.1 - r.0 + 1
-        }
-    });
-    let mut work = 0;
+    // Innermost first: a nested region is strictly smaller than its parent,
+    // so the names it calls are known before its parent needs them. The best
+    // region is a strict maximum of (score, families, earliest start), so the
+    // order never changes which one is reported.
+    regions.sort_by_key(|(start, end)| end - start);
+    let mut calls = HashMap::<(usize, usize), Calls>::new();
     let mut best = Vec::new();
     let mut best_rank = (0, 0, usize::MAX);
-    for (start, end) in order {
-        if work + end - start > 64 * 1024 * 1024 {
-            omissions.push(json!({"reason":"javascript-region-work-limit","observed_bytes":work,"total_bytes":work+end-start}));
-            break;
-        }
-        work += end - start;
-        // Keep byte coordinates while excluding masked comments and quoted
-        // text. Original source remains available for bytecode extraction.
-        let mut bytes = masked.as_bytes()[start..end].to_vec();
-        for (a, b) in children.get(&(start, end)).into_iter().flatten() {
-            bytes[a - start..b - start].fill(b' ');
-        }
-        let region = String::from_utf8(bytes).expect("masked nested source");
+    for (start, end) in regions {
+        // Byte coordinates exclude masked comments and quoted text. Original
+        // source remains available for bytecode extraction.
+        let nested = children.remove(&(start, end)).unwrap_or_default();
+        let own = OwnText::new(&masked, (start, end), &nested);
+        let nested_calls = nested
+            .iter()
+            .map(|region| calls.remove(region).unwrap_or_default())
+            .collect::<Vec<_>>();
+        let span = |a: usize, b: usize| (own.region_offset(a), own.region_offset(b));
         let mut observations = Vec::new();
-        let nested = children.get(&(start, end)).map_or(&[][..], Vec::as_slice);
-        if let Some(a) = LOOP.find(&region)
-            && let Some(b) = dispatch(&region)
+        if let Some(a) = LOOP.find(&own.text)
+            && let Some(b) = dispatch(&own.text)
         {
+            let (a, b) = span(a.start().min(b.0), a.end().max(b.1));
             observations.push(observation(
                 "js.dispatch-loop",
-                a.start().min(b.0),
-                a.end().max(b.1),
+                a,
+                b,
                 "A loop and a switch, an indexed callable, or a called alias of an indexed read occur in the same function region.",
             ));
-        } else if let Some((a, b)) = threaded_cycle(&masked, &region, start, nested) {
+        } else if let Some((a, b)) = threaded_cycle(&own, &nested_calls) {
             observations.push(observation(
                 "js.dispatch-loop",
                 a,
@@ -304,27 +412,21 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
         }
         for (id, detail, patterns) in JS_RULES.iter() {
             let mut first = None::<(usize, usize)>;
-            let mut count = 0;
-            let mut truncated = false;
+            let mut count = 0usize;
             for pattern in patterns {
-                for m in pattern.find_iter(&region) {
-                    if count >= 32 {
-                        truncated = true;
-                        break;
-                    }
+                for m in pattern.find_iter(&own.text) {
                     count += 1;
                     if first.is_none_or(|f| m.start() < f.0) {
                         first = Some((m.start(), m.end()));
                     }
                 }
-                if truncated {
-                    break;
-                }
             }
             if let Some((a, b)) = first {
+                let (a, b) = span(a, b);
                 let mut o = observation(id, a, b, detail);
                 o["match_count"] = json!(count);
-                o["matches_truncated"] = json!(truncated);
+                // Every match is counted since producer 1.11.0.
+                o["matches_truncated"] = json!(false);
                 observations.push(o);
             }
         }
@@ -341,6 +443,13 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
             best = observations;
             best_rank = (score, families, start);
         }
+        if (start, end) != (0, source.len()) {
+            let mut region_calls = Calls::own(&masked, start, &own);
+            for nested in nested_calls {
+                region_calls.absorb(nested);
+            }
+            calls.insert((start, end), region_calls);
+        }
     }
     Ok((best, omissions))
 }
@@ -348,92 +457,86 @@ fn js(source: &str) -> Result<(Vec<Value>, Vec<Value>)> {
 /// table again (`ops = [function(s){ return ops[code[pc++]](s); }]`),
 /// directly or through a named function of the region they call (a shared
 /// `next()`), threads each handler to the next: a dispatch cycle without a
-/// syntactic loop. Returns the literal's span in region coordinates. Each
-/// child body is scanned once, so the work is linear in the region.
-fn threaded_cycle(
-    masked: &str,
-    region: &str,
-    start: usize,
-    children: &[(usize, usize)],
-) -> Option<(usize, usize)> {
+/// syntactic loop. Returns the literal's span in region coordinates.
+/// `nested` holds the names each nested body calls, in `own.nested` order.
+/// Every literal is checked; its brackets are matched in one pass and only
+/// the bodies inside it are visited, so the work is linear in the region.
+fn threaded_cycle(own: &OwnText, nested: &[Calls]) -> Option<(usize, usize)> {
     static TABLE_LITERAL: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\b([A-Za-z_$][\w$]*)\s*=\s*[\[{]").unwrap());
-    static INDEXED_CALL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\[(?:[^\[\]]+|\[[^\[\]]*\])+\]\s*\(").unwrap()
-    });
-    static CALLED_NAME: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\b([A-Za-z_$][\w$]*)\s*\(").unwrap());
     // The name a child function is declared or bound to, just before its body.
     static NAMED: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?:\bfunction\s+([A-Za-z_$][\w$]*)\s*\([^()]*\)|\b([A-Za-z_$][\w$]*)\s*=\s*(?:function\b[^(){}]*\([^()]*\)|\([^()]*\)\s*=>))\s*$").unwrap()
     });
+    let region = own.text.as_str();
     if !TABLE_LITERAL.is_match(region) {
         return None;
     }
     let bytes = region.as_bytes();
-    let bodies = children
+    let names = own
+        .nested
         .iter()
-        .map(|&(a, b)| {
-            let text = &masked[a..b];
-            let dispatched = INDEXED_CALL
-                .captures_iter(text)
-                .map(|captures| captures.get(1).unwrap().as_str())
-                .collect::<BTreeSet<_>>();
-            let called = CALLED_NAME
-                .captures_iter(text)
-                .map(|captures| captures.get(1).unwrap().as_str())
-                .collect::<BTreeSet<_>>();
-            let header = &region[..(a - start).saturating_sub(1)];
+        .map(|&(inside, _)| {
+            let header = &region[..inside.saturating_sub(1)];
             let window = header.len().saturating_sub(1100);
-            let name = (0..=window)
+            (0..=window)
                 .rev()
                 .find(|at| header.is_char_boundary(*at))
                 .and_then(|at| NAMED.captures(&header[at..]))
                 .and_then(|captures| captures.get(1).or_else(|| captures.get(2)))
-                .map(|name| name.as_str());
-            (a - start, b - start, name, dispatched, called)
+                .map(|name| name.as_str())
         })
         .collect::<Vec<_>>();
-    let helpers = bodies
+    let helpers = names
         .iter()
-        .filter_map(|(_, _, name, dispatched, _)| Some((name.as_ref()?, dispatched)))
+        .zip(nested)
+        .filter_map(|(name, calls)| Some((name.as_ref()?, &calls.dispatched)))
         .filter(|(_, dispatched)| !dispatched.is_empty())
         .collect::<BTreeMap<_, _>>();
-    for captures in TABLE_LITERAL.captures_iter(region).take(32) {
-        let table = captures.get(1).unwrap();
-        if region[..table.start()].trim_end().ends_with('.') {
+    let literals = TABLE_LITERAL
+        .captures_iter(region)
+        .filter_map(|captures| {
+            let table = captures.get(1).unwrap();
+            (!region[..table.start()].trim_end().ends_with('.')).then(|| {
+                let whole = captures.get(0).unwrap();
+                (table.as_str(), whole.start(), whole.end() - 1)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut closing = HashMap::new();
+    for pair in [(b'[', b']'), (b'{', b'}')] {
+        let openings = literals
+            .iter()
+            .map(|&(_, _, opening)| opening)
+            .filter(|&opening| bytes[opening] == pair.0)
+            .collect::<Vec<_>>();
+        closing.extend(
+            openings
+                .iter()
+                .copied()
+                .zip(closings(bytes, pair, &openings)),
+        );
+    }
+    for (table, start, opening) in literals {
+        let Some(Some(closing)) = closing.get(&opening).copied() else {
             continue;
-        }
-        let opening = captures.get(0).unwrap().end() - 1;
-        let (open, close) = if bytes[opening] == b'[' {
-            (b'[', b']')
-        } else {
-            (b'{', b'}')
         };
-        let mut depth = 0usize;
-        let Some(closing) = (opening..bytes.len()).find(|&at| {
-            if bytes[at] == open {
-                depth += 1;
-            } else if bytes[at] == close {
-                depth -= 1;
-            }
-            depth == 0
-        }) else {
-            continue;
-        };
-        let table = table.as_str();
-        let threads = bodies.iter().any(|(a, b, _, dispatched, called)| {
-            opening < *a
-                && *b < closing
-                && (dispatched.contains(table)
-                    || called.iter().any(|name| {
-                        helpers
-                            .get(name)
-                            .is_some_and(|dispatched| dispatched.contains(table))
-                    }))
-        });
+        let first = own.nested.partition_point(|&(inside, _)| inside <= opening);
+        let threads = own.nested[first..]
+            .iter()
+            .zip(&nested[first..])
+            .take_while(|((inside, _), _)| *inside < closing)
+            .any(|((_, close), calls)| {
+                *close < closing
+                    && (calls.dispatched.contains(table)
+                        || calls.called.iter().any(|name| {
+                            helpers
+                                .get(name)
+                                .is_some_and(|dispatched| dispatched.contains(table))
+                        }))
+            });
         if threads {
-            return Some((captures.get(0).unwrap().start(), closing + 1));
+            return Some((own.region_offset(start), own.region_offset(closing) + 1));
         }
     }
     None
@@ -526,13 +629,8 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
     let mut seen = BTreeSet::new();
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(bad)?;
-        if let Some((id, range)) = payload.as_section() {
+        if let Some((id, _)) = payload.as_section() {
             sections += 1;
-            if sections > 128 || range.len() > 2 * 1024 * 1024 {
-                return Err(Error::bad(
-                    "WebAssembly section count or byte limit exceeded",
-                ));
-            }
             if id != 0 && !seen.insert(id) {
                 return Err(Error::bad(
                     "WebAssembly contains a duplicate structural section",
@@ -554,9 +652,6 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
             }
             Payload::FunctionSection(reader) => {
                 defined = reader.count();
-                if defined > 100000 {
-                    return Err(Error::bad("WebAssembly function count exceeded"));
-                }
                 for entry in reader {
                     let _ = entry.map_err(bad)?;
                 }
@@ -610,11 +705,11 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                 let mut reader = body.get_operators_reader().map_err(bad)?;
                 let mut decoded = Vec::new();
                 let mut control = Vec::new();
+                // Open loops, kept as a count: counting the control stack for
+                // every instruction is quadratic in a deeply nested body.
+                let mut loop_depth = 0usize;
                 let mut ended = false;
                 while !reader.eof() {
-                    if instructions_count >= 1000000 {
-                        return Err(Error::bad("WebAssembly instruction limit exceeded"));
-                    }
                     instructions_count += 1;
                     let start = reader.original_position();
                     let op = reader.read().map_err(bad)?;
@@ -628,10 +723,6 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         | Operator::GlobalSet { global_index } => Some((true, *global_index)),
                         _ => None,
                     };
-                    let loop_depth = control
-                        .iter()
-                        .filter(|block| **block == wasm_control::BlockKind::Loop)
-                        .count();
                     let (arm_count, unique_targets, table_index) = match &op {
                         Operator::BrTable { targets } => {
                             let mut labels = BTreeSet::new();
@@ -661,7 +752,10 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                         table_index,
                     });
                     match wasm_control::control(&op) {
-                        wasm_control::Control::Open(block) => control.push(block),
+                        wasm_control::Control::Open(block) => {
+                            loop_depth += usize::from(block == wasm_control::BlockKind::Loop);
+                            control.push(block);
+                        }
                         wasm_control::Control::Arm(block) if control.last() != Some(&block) => {
                             return Err(Error::bad(if block == wasm_control::BlockKind::If {
                                 "WebAssembly else without matching if"
@@ -670,7 +764,9 @@ fn wasm(bytes: &[u8]) -> Result<(Vec<Value>, Value)> {
                             }));
                         }
                         wasm_control::Control::Close { delegate } => match control.pop() {
-                            Some(block) if !delegate || block == wasm_control::BlockKind::Try => (),
+                            Some(block) if !delegate || block == wasm_control::BlockKind::Try => {
+                                loop_depth -= usize::from(block == wasm_control::BlockKind::Loop);
+                            }
                             Some(_) | None if delegate => {
                                 return Err(Error::bad(
                                     "WebAssembly delegate without matching try",
@@ -1379,7 +1475,7 @@ fn build_documents(root: &Path, event_store: &Path) -> Result<Documents> {
         .map(Value::to_string);
         let mut fresh = None;
         if !contents.contains_key(&key) {
-            let analyzed = match evidence::content(root, &artifact, 16 * 1024 * 1024) {
+            let analyzed = match evidence::content(root, &artifact, usize::MAX) {
                 Err(e) => Some(Analyzed {
                     source: None,
                     outcome: Err((
@@ -1819,12 +1915,25 @@ mod profile_tests {
             .unwrap()
             .remove("javascript_likely_vm_requires_handlers");
         // The pinned digest is the version 2 profile that preceded both,
-        // which still had the record and graph limits producer 1.11.0 removed.
+        // which still had the record, graph and input limits producer 1.11.0
+        // removed.
         historical["javascript_scoring_version"] = json!(2);
         let limits = historical["limits"].as_object_mut().unwrap();
-        limits.insert("max_artifact_records".into(), json!(10000));
-        limits.insert("max_event_records".into(), json!(100000));
-        limits.insert("max_graph_edges".into(), json!(1024));
+        for (name, value) in [
+            ("max_artifact_bytes", 16777216),
+            ("max_artifact_records", 10000),
+            ("max_event_records", 100000),
+            ("max_graph_edges", 1024),
+            ("max_js_function_regions", 4096),
+            ("max_js_matches_per_rule", 32),
+            ("max_js_region_work_bytes", 67108864),
+            ("max_wasm_functions", 100000),
+            ("max_wasm_instructions", 1000000),
+            ("max_wasm_sections", 128),
+            ("max_wasm_section_bytes", 2097152),
+        ] {
+            limits.insert(name.into(), json!(value));
+        }
         assert_eq!(
             digest(&historical).unwrap(),
             "61900fb0d5f5e7b8db28d67086c4e2648aca6a604c1fd2ef509941e95c974824"

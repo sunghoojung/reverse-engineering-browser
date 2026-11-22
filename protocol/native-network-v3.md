@@ -2379,6 +2379,9 @@ an artifact with this record as creator; bit 2 source longer than 16 MiB, not
 hashed; bit 3 source unavailable; bit 4 not retained: Artifact category off,
 content capture off, or the source budget is spent. Exactly one of bit 1, bit 2, bit 3, bit 4 or none
 (a Wasm module, never re-sent) holds. A digest is present unless bit 2 or 3.
+The backend accepts a digest of any length and reads the source it matches
+whole, so a frame anywhere in a retained source resolves; only the renderer's
+16 MiB hashing limit leaves a longer source's frames without a digest to join.
 
 JavaScript sources are retained only in content capture
 (`--reb-capture-request-content`), so a Metadata only session keeps frames,

@@ -10,6 +10,7 @@ use crate::{
     durable,
     error::{Code, Error, Result},
 };
+use reb_js_lexer::invocation_site::{self, Index, Query};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -636,23 +637,44 @@ fn identifier(value: &str) -> bool {
         && chars.all(|c| c == '$' || c == '_' || c.is_alphanumeric())
 }
 
-/// The worker request for `target`, with offsets in the BOM-free text.
-pub fn worker_request(raw: &[u8], target: &Target) -> Result<Value> {
+/// The BOM-free script text the worker indexes.
+pub fn indexed_text(raw: &[u8]) -> Result<&str> {
+    script_text(raw)
+        .map(|(text, _)| text)
+        .ok_or_else(|| Error::bad("Artifact is not valid UTF-8 JavaScript"))
+}
+
+/// The answer to `target` from the index of the artifact's script text, in
+/// the worker's `reb-invocation-site-worker-v1` shape, with offsets in the
+/// BOM-free text. `index` is the worker's refusal when it could not index
+/// the text. The answer is checked by [`validate_worker`] like any reply.
+pub fn answer(
+    raw: &[u8],
+    target: &Target,
+    index: &std::result::Result<Index, String>,
+) -> Result<Value> {
     let (text, bom) =
         script_text(raw).ok_or_else(|| Error::bad("Artifact is not valid UTF-8 JavaScript"))?;
-    let mut request = json!({"operation": "invocation_site", "source": text});
-    match target {
-        Target::Name(name) => request["name"] = json!(name),
-        Target::Offset(offset) => {
-            if *offset < bom || *offset >= raw.len() || !text.is_char_boundary(offset - bom) {
-                return Err(Error::bad(
-                    "byte_offset must name a character of the script text in this artifact",
-                ));
-            }
-            request["byte_offset"] = json!(offset - bom);
-        }
+    if let Target::Offset(offset) = target
+        && (*offset < bom || *offset >= raw.len() || !text.is_char_boundary(offset - bom))
+    {
+        return Err(Error::bad(
+            "byte_offset must name a character of the script text in this artifact",
+        ));
     }
-    Ok(request)
+    let response = match index {
+        Err(message) => invocation_site::invalid(message, text.len()),
+        Ok(index) => match target {
+            Target::Name(name) => {
+                let name = invocation_site::parse_name(name).ok_or_else(|| {
+                    Error::bad("name must be 1 to 8 dot-separated JavaScript identifiers")
+                })?;
+                index.answer(Query::Name(&name))
+            }
+            Target::Offset(offset) => index.answer(Query::Offset((offset - bom) as u32)),
+        },
+    };
+    Ok(serde_json::to_value(response)?)
 }
 
 fn invalid_worker() -> Error {
@@ -1136,7 +1158,7 @@ mod tests {
 
     fn worker(source: &str, target: &Target) -> Value {
         let raw = source.as_bytes();
-        let request = worker_request(raw, target).unwrap();
+        let request = json!({"source": indexed_text(raw).unwrap()});
         // The fixture stands in for the worker with what it would return.
         let anchor = source
             .find("(aGh")
@@ -1228,8 +1250,9 @@ mod tests {
                 .status,
             502
         );
-        assert!(worker_request(raw, &Target::Offset(1)).is_err());
-        assert!(worker_request(raw, &Target::Offset(raw.len())).is_err());
+        let empty = Ok(Index::default());
+        assert!(answer(raw, &Target::Offset(1), &empty).is_err());
+        assert!(answer(raw, &Target::Offset(raw.len()), &empty).is_err());
         assert!(Target::from_fields(Some(&json!("1a")), None).is_err());
         assert!(Target::from_fields(Some(&json!("a")), Some(&json!(1))).is_err());
     }

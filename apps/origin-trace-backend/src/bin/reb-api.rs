@@ -473,6 +473,9 @@ fn read_only_eligible(spec: &Value, definition: &Value) -> bool {
         && ["state_dependent_effects", "uncertainties", "confirmations"]
             .iter()
             .all(|field| execution[field].as_array().is_some_and(Vec::is_empty))
+        && execution["state_dependent_confirmations"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
 }
 
 fn discovery(spec: &Value, ops: &BTreeMap<String, Operation>) -> Value {
@@ -1703,6 +1706,10 @@ mod tests {
             (
                 "confirmations",
                 json!([{"field":"confirmed","value":true,"when":{}}]),
+            ),
+            (
+                "state_dependent_confirmations",
+                json!([{"field":"confirmed","value":true,"when":"a stored record is sensitive"}]),
             ),
             ("new_guard", json!(true)),
         ] {

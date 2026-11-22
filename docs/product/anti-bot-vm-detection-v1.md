@@ -273,6 +273,16 @@ a syntactic loop. A region whose table re-enters itself this way can
 therefore rise from `candidate` to `likely-vm` when recovery finds handlers.
 Version 2 documents remain valid.
 
+Producer `1.11.0` analyzes an artifact of any size. It reads every byte,
+scores every function region and counts every rule match, so
+`matches_truncated` is always false. A Wasm module is no longer refused for
+its section, function or instruction count. The scan stays linear: each
+region is scored over its own text, with nested regions collapsed, and the
+calls a threaded cycle needs are collected once per region and merged into
+its parent. The removed `max_artifact_bytes`, `max_js_*` and `max_wasm_*`
+limits are absent from its profile, so its profile digest differs; earlier
+documents that carry them remain valid.
+
 The generic JavaScript signal families include:
 
 - a persistent loop with switch, function-array, object-map, or indirect

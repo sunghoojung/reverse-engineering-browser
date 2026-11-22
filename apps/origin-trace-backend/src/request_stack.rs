@@ -27,7 +27,14 @@ const FRAME: usize = 16;
 const SEGMENT: usize = 48;
 pub(crate) const MAX_ARTIFACT: usize =
     SCOPED_HEADER + FRAME * (SYNC_LIMIT + ASYNC_LIMIT) as usize + SEGMENT * TASK_LIMIT as usize;
+/// The renderer hashes a script's source for its identity record only up to
+/// this length; a longer source's identity sets retention bit 0x04 and names
+/// no digest. A digest of any length is accepted, and a matched source is
+/// read whole.
 pub(crate) const MAX_SOURCE: usize = 16 * 1024 * 1024;
+/// Source bytes one answer keeps across its rows. Past it the cache starts
+/// over, so a source of any size is still read once for consecutive rows.
+const CACHED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const IDENTITY_SCAN: usize = 4096;
 /// Version 1 records captured no task-attributed callers.
 const ASYNC_NOT_SHOWN_V1: [&str; 4] = [
@@ -603,7 +610,7 @@ pub fn decode_identity(payload: &[u8]) -> Option<(u64, u32, Identity)> {
     let digested = match retention {
         0x08 => length == 0 && digest.iter().all(|b| *b == 0),
         0x04 => length > MAX_SOURCE as u64 && digest.iter().all(|b| *b == 0),
-        _ => length != 0 && length <= MAX_SOURCE as u64 && digest.iter().any(|b| *b != 0),
+        _ => length != 0 && digest.iter().any(|b| *b != 0),
     };
     (shape && digested).then(|| {
         (
@@ -797,7 +804,7 @@ fn load_source(
             a["kind"] == kind && a["sha256"] == sha.as_str()
         })
     })?;
-    let bytes = read(artifact, MAX_SOURCE).map_err(|_| "source_artifact_unreadable")?;
+    let bytes = read(artifact, usize::MAX).map_err(|_| "source_artifact_unreadable")?;
     let mut source = Source {
         artifact_id: artifact["artifact_id"].clone(),
         url: artifact["url"].clone(),
@@ -1229,9 +1236,10 @@ impl InitiatorFrames {
             }
             let bytes = evidence::content(artifacts_root, artifact, limit)?;
             let mut kept = sources.borrow_mut();
-            if kept.values().map(Vec::len).sum::<usize>() + bytes.len() <= 4 * MAX_SOURCE {
-                kept.insert(key, bytes.clone());
+            if kept.values().map(Vec::len).sum::<usize>() + bytes.len() > CACHED_SOURCE_BYTES {
+                kept.clear();
             }
+            kept.insert(key, bytes.clone());
             Ok(bytes)
         };
         let mut fresh = 0;
@@ -2465,6 +2473,35 @@ pub(crate) mod tests {
             "script_identity_missing"
         );
         assert_eq!(frames.0.len(), 1);
+    }
+
+    /// A source past the 16 MiB the renderer hashes today, from a producer
+    /// that hashes it, resolves a frame beyond 16 MiB from the whole source.
+    #[test]
+    fn a_hashed_source_of_any_size_resolves_its_frames() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("blobs")).unwrap();
+        let padding = format!("{}\n", "/".repeat(MAX_SOURCE + 1024));
+        let source = format!("{padding}function load() {{\n  fetch('/x');\n}}\n");
+        let hash = hex::encode(Sha256::digest(&source));
+        std::fs::write(root.path().join(format!("blobs/{hash}.bin")), &source).unwrap();
+        let mut script = artifact("21", "javascript", source.as_bytes());
+        script["byte_size"] = json!(source.len());
+        script["content_path"] = json!(format!("blobs/{hash}.bin"));
+        let at = source.find("fetch").unwrap() as u32;
+        let start = source.find("() {").unwrap() as u32;
+        let identity = identity_bytes(1, 0x02, 7, (0, 0), 99, source.as_bytes());
+        let mut document = json!({"requests": [{"initiator_frame": {"session_id": "9",
+            "process_id": 41, "frame": hex::encode(frame(1, 0, 7, at, start)),
+            "identity": hex::encode(identity)}}]});
+        let mut frames = InitiatorFrames::default();
+        assert!(frames.resolve_with(&mut document, root.path(), |_| vec![script.clone()]));
+        let resolved = &document["requests"][0]["initiator_frame"];
+        assert_eq!(
+            (&resolved["status"], &resolved["line"], &resolved["column"]),
+            (&json!("resolved"), &json!(3), &json!(3))
+        );
+        assert_eq!(resolved["function_name"], "load");
     }
 
     /// A store where one request and its renderer records are followed by

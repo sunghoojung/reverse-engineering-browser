@@ -1,6 +1,6 @@
 use crate::{
     config::Options,
-    error::{Code, Error, Phase, Reason, Result},
+    error::{Code, Confirmation, Error, Phase, Reason, Result},
     validation, worker, workspace,
 };
 use serde_json::{Value, json};
@@ -24,12 +24,15 @@ pub struct Run {
     confirmed_sensitive: bool,
 }
 impl Run {
-    pub fn new(value: &Value, workspace: &Value) -> Result<Self> {
+    /// Takes the request whole, so its evidence snapshot moves into the run
+    /// instead of being copied.
+    pub fn new(value: Value, workspace: &Value) -> Result<Self> {
+        let confirmed_sensitive = value["confirmed_sensitive"] == true;
         let (request, selected) = normalize(value, workspace)?;
         Ok(Self {
             request,
             selected,
-            confirmed_sensitive: value["confirmed_sensitive"] == true,
+            confirmed_sensitive,
         })
     }
     /// The selected artifact's ID, when the run includes one.
@@ -57,10 +60,15 @@ impl Run {
                 "The selected artifact changed; select it again before running",
             ));
         }
+        // Only the stored record says whether the artifact is sensitive, so
+        // the contract cannot ask for this confirmation before a run names
+        // one. The refusal names the field, before any byte is read.
         if artifact["sensitive"] == true && !self.confirmed_sensitive {
-            return Err(Error::bad(
-                "Confirm inclusion of sensitive selected artifact bytes before running",
-            ));
+            return Err(Error::new(
+                400,
+                "The selected artifact is sensitive; confirm inclusion of its bytes with confirmed_sensitive before running",
+            )
+            .with_reason(Reason::confirmation(Confirmation::ConfirmedSensitive)));
         }
         Ok(())
     }
@@ -268,42 +276,59 @@ impl Analyst {
         }
         let started = Instant::now();
         // Runner input v2: one JSON line, then the selected artifact's bytes.
-        let mut encoded = serde_json::to_vec(&request)?;
-        encoded.reserve_exact(1 + bytes.len());
-        encoded.push(b'\n');
-        encoded.extend_from_slice(&bytes);
-        drop(bytes);
-        let result =
-            worker::run_cancel(&mut command, &encoded, None, None, Some(&mut receiver)).await;
+        // The line is encoded while the runner reads it and the request is
+        // freed once it is, and the bytes are freed once written, so neither
+        // the evidence snapshot nor the artifact is held while the script
+        // runs, and the snapshot is never held both parsed and encoded.
+        let identity = json!({"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"]});
+        let (mut writer, line) = worker::ChunkWriter::new();
+        let encoder = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            serde_json::to_writer(&mut writer, &request)?;
+            writer.write_all(b"\n")?;
+            writer.flush()
+        });
+        let result = worker::run_cancel(
+            &mut command,
+            vec![line, worker::Input::Owned(bytes)],
+            None,
+            None,
+            Some(&mut receiver),
+        )
+        .await;
+        // The runner stopping early fails the encoder; a result is only
+        // trusted when its whole input was written.
+        let encoded = matches!(encoder.await, Ok(Ok(())));
         // The run is over once its worker returns; a later cancel finds no
         // active run instead of reporting a request nothing will observe.
         drop(active);
         match result {
             Err(e) if e.reason.code == Code::Cancelled => Ok(failure(
-                &request,
+                &identity,
                 "cancelled",
                 "Analyst script cancelled",
                 started.elapsed().as_millis() as u64,
             )),
             Err(e) => Err(e),
+            Ok(_) if !encoded => Err(Error::new(500, "Analyst runner input was not written")),
             Ok(output) => {
                 let mut result: Value = serde_json::from_slice(&output.bytes).map_err(|_| {
                     Error::protocol(if output.stderr.is_empty() {
                         "Analyst runner returned malformed output".into()
                     } else {
-                        validation::truncate(String::from_utf8_lossy(&output.stderr).trim(), 512)
+                        String::from_utf8_lossy(&output.stderr).trim().to_owned()
                     })
                 })?;
-                validate_result(&result, &request)?;
+                validate_result(&result, &identity)?;
                 annotate_failure(&mut result);
                 Ok(result)
             }
         }
     }
 }
-fn normalize(value: &Value, workspace: &Value) -> Result<(Value, Option<(String, String)>)> {
+fn normalize(mut value: Value, workspace: &Value) -> Result<(Value, Option<(String, String)>)> {
     validation::fields(
-        value,
+        &value,
         &[
             "action",
             "protocol_version",
@@ -353,7 +378,7 @@ fn normalize(value: &Value, workspace: &Value) -> Result<(Value, Option<(String,
     if source.trim().is_empty() || source.chars().any(|c| c < ' ' && !"\t\n\r".contains(c)) {
         return Err(Error::bad("Analyst source is empty or contains controls"));
     }
-    let variables = workspace::variables(&value["variables"], 128, 16384, true)?;
+    let variables = workspace::variables(&value["variables"], &workspace::ANALYST_SCOPE, true)?;
     let evidence = &value["evidence"];
     validation::fields(
         evidence,
@@ -410,7 +435,6 @@ fn normalize(value: &Value, workspace: &Value) -> Result<(Value, Option<(String,
         }
         Some((id.to_owned(), sha256.to_owned()))
     };
-    let request = json!({"protocol_version":2,"run_id":run,"script_id":script,"library_generation":generation,"source":source,"variables":variables,"evidence":evidence});
     if workspace["generation"] != generation {
         return Err(Error::conflict(
             "Analyst workspace changed; refresh before running the saved script",
@@ -432,7 +456,17 @@ fn normalize(value: &Value, workspace: &Value) -> Result<(Value, Option<(String,
             "Only the current saved JavaScript analyst script can execute",
         ));
     }
-    Ok((request, reference))
+    // Built by moving the source and snapshot in: `json!` would serialize
+    // them, a deep copy of the whole snapshot.
+    let mut request = serde_json::Map::new();
+    request.insert("protocol_version".into(), json!(2));
+    request.insert("run_id".into(), json!(run));
+    request.insert("script_id".into(), json!(script));
+    request.insert("library_generation".into(), json!(generation));
+    request.insert("source".into(), value["source"].take());
+    request.insert("variables".into(), variables);
+    request.insert("evidence".into(), value["evidence"].take());
+    Ok((Value::Object(request), reference))
 }
 fn validate_result(value: &Value, request: &Value) -> Result<()> {
     validation::fields(
@@ -472,7 +506,7 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
     for (key, max) in [
         ("result_type", 64),
         ("result_text", usize::MAX),
-        ("error", 512),
+        ("error", usize::MAX),
     ] {
         validation::text(&value[key], key, max, true, true)
             .map_err(|e| Error::protocol(e.message))?;
@@ -499,7 +533,7 @@ fn validate_result(value: &Value, request: &Value) -> Result<()> {
     Ok(())
 }
 fn failure(request: &Value, outcome: &str, message: &str, duration: u64) -> Value {
-    let mut result = json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration,"error":validation::truncate(message,512)});
+    let mut result = json!({"protocol_version":1,"run_id":request["run_id"],"script_id":request["script_id"],"library_generation":request["library_generation"],"ok":false,"outcome":outcome,"result_type":"error","result_text":"","result_truncated":false,"logs":[],"logs_truncated":false,"duration_ms":duration,"error":message});
     annotate_failure(&mut result);
     result
 }

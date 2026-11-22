@@ -71,11 +71,13 @@
     const bytes = await evidencePackageReadBytes(response,outputLimit,signal);
     return JSON.parse(new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(bytes));
   }
-  function createController({fetcher = fetch, onChange = () => {}, deadline = 20000} = {}) {
+  // No deadline: a comparison shows its elapsed seconds until it finishes or
+  // Cancel retires it, which also stops the local service's work.
+  function createController({fetcher = fetch, onChange = () => {}} = {}) {
     let revision = 0, active = null, disposed = false;
     const model = {files:[null,null], result:null, busy:false, message:'Choose two local metadata packages, then compare.'};
     const publish = () => { if (!disposed) onChange(model); };
-    const retire = () => { revision++; active?.abort.abort(); active?.cancel(); clearTimeout(active?.timer); active = null; model.busy = false; };
+    const retire = () => { revision++; active?.abort.abort(); active?.cancel(); clearInterval(active?.timer); active = null; model.busy = false; };
     const select = (side,file) => {
       if (disposed || ![0,1].includes(side)) return;
       retire(); model.result = null; model.files[side] = file ?? null;
@@ -91,8 +93,9 @@
       let cancel; const cancellation = new Promise(resolve => { cancel = () => resolve(null); });
       active = {abort,cancel,timer:null};
       model.busy = true; model.message = 'Comparing declared metadata locally…';
-      let timer;
-      const timeout = new Promise((_,reject) => { timer = setTimeout(() => { abort.abort(); reject(new ComparisonFailure('deadline')); },deadline); active.timer = timer; });
+      const started = Date.now();
+      const timer = setInterval(() => { if (!current()) return; model.message = `Comparing declared metadata locally… ${Math.floor((Date.now()-started)/1000)} s`; publish(); },1000);
+      timer?.unref?.(); active.timer = timer;
       publish();
       try {
         const work = async () => {
@@ -117,15 +120,15 @@
           if (!validResult(result,offset,ids[0],ids[1])) throw new Error('The local service returned an incompatible comparison.');
           return result;
         };
-        const result = await Promise.race([work(),timeout,cancellation]);
+        const result = await Promise.race([work(),cancellation]);
         if (!current() || !result) return false;
         model.result = result; model.message = 'Declared metadata compared. Capture, behavior and timing equivalence remain unknown.'; return true;
       } catch (error) {
-        const reason = error instanceof ComparisonFailure ? ({busy:'The local comparison service is busy or unavailable. Retry only when you choose.',deadline:'The bounded comparison timed out. No new result was applied.',rejected:'The comparison request was rejected. Review both metadata packages and their limits.'})[error.kind] : null;
+        const reason = error instanceof ComparisonFailure ? ({busy:'The local comparison service is busy or unavailable. Retry only when you choose.',deadline:'The request did not reach the local service in time. No new result was applied.',rejected:'The comparison request was rejected. Review both metadata packages and their limits.'})[error.kind] : null;
         if (owned === revision && !disposed) model.message = (reason || 'Comparison unavailable or incompatible. Check the selected files and local service.') + ' The previous result is retained.';
         return false;
       } finally {
-        clearTimeout(timer); abort.abort();
+        clearInterval(timer); abort.abort();
         if (owned === revision && !disposed) { active = null; model.busy = false; publish(); }
       }
     }

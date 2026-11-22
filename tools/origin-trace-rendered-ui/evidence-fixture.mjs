@@ -959,7 +959,10 @@ export async function debuggerObservations(template, artifactsRoot, {records = N
 function namedBudgetGaps(template, events) {
   const processId = 4242;
   assert(!events.some(event => event.session_id === template.session_id && event.process_id === processId), 'budget gap stream must be its own');
-  const time = events.reduce((latest, event) => BigInt(event.monotonic_time_ns) > latest ? BigInt(event.monotonic_time_ns) : latest, 0n);
+  // Only the template's session: the Wasm golden store holds a uint64-max
+  // boundary record in its own session, and a time past it is malformed.
+  const time = events.filter(event => event.session_id === template.session_id)
+    .reduce((latest, event) => BigInt(event.monotonic_time_ns) > latest ? BigInt(event.monotonic_time_ns) : latest, 0n);
   return NAMED_GAP_REASONS.map((reason, index) => ({...template, process_id: processId, thread_id: processId,
     sequence_number: String(index + 1), monotonic_time_ns: String(time + BigInt(index + 1)), artifact_id: '0',
     parent_event_id: '0', request_id: '0', type: 'gap', payload_size: Buffer.byteLength(reason), payload: hex(reason)}));

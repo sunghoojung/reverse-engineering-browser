@@ -96,9 +96,11 @@
 .debugger-row-main[data-missing="true"] { color: var(--muted); }
 
 /* Threads: one line per thread, its name first, its identifiers and its
-   activity at the right. */
+   activity at the right. The name takes only the space left, so a long URL
+   is cut before its identifiers are. */
 .debugger-threads { display: grid; gap: 8px; min-width: 0; }
 .debugger-threads .debugger-list-row { display: flex; align-items: center; gap: 8px; }
+.debugger-threads .debugger-row-main { flex-basis: 0; }
 .debugger-thread-tag { flex: none; padding: 0 4px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font: 500 10px/14px var(--sans); }
 .debugger-thread-ids { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 11px/16px var(--mono); font-variant-numeric: tabular-nums; }
 .debugger-thread-badge { flex: none; min-width: 16px; color: var(--muted); font: 500 11px/16px var(--sans); text-align: right; font-variant-numeric: tabular-nums; }

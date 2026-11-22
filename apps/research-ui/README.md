@@ -272,7 +272,8 @@ text. Each section is a collapsible pane:
   exact frame when there is one) and workers that started requests. A row
   gives the thread's origin or name, its identifiers (`F` frame, `P` renderer
   process, `ctx` execution context, `doc` Console document) and its activity:
-  its record count, its request count, or **armed** or **Console**. Its
+  its record count, its request count, or **armed** or **Console**. A long
+  origin is cut before the identifiers are. Its
   tooltip, and the fields below the list for the selected thread, give its
   kind, origin, frame, process and state in full. One line below says the
   Console's state and, while the event index catches up, how much of the store

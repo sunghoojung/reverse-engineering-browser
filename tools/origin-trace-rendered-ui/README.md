@@ -125,7 +125,8 @@ throw sites the records name. One listener's event type is markup and must
 stay text. At both window sizes the sections must be Threads, Watch rules,
 Observations and Pausing, Pausing must state the availability the backend
 reports with no pausing control, only rows near the view may mount, Threads
-must show at least six whole one-line rows, both lists must end on a whole
+must show at least six whole one-line rows with no row's identifiers cut,
+both lists must end on a whole
 row, every record must read its time as `+M:SS.mmm` and its identifiers as
 `P F #` (and `R`), the kind menu must name each kind's count, a scrolled pane
 must keep the section's title over its list, Tab from

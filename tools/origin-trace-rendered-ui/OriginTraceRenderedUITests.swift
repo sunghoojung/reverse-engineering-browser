@@ -1625,7 +1625,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
 
       // Threads reads as whole one-line rows at either size: several show
       // before the list scrolls, none is cut by its top, and each row's name,
-      // identifiers and count sit side by side inside it. Both lists end on a
+      // identifiers and count sit side by side inside it, with a long name cut
+      // before its identifiers are. Both lists end on a
       // whole row, never a sliced one. Scrolling the pane keeps the section's
       // title over the list, never a headless list.
       let layout = try await ui.json("""
@@ -1649,7 +1650,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           const over = document.elementFromPoint(stuck.left + 40, stuck.top + stuck.height / 2)?.closest('summary') === summary;
           const scrolled = pane.scrollTop;
           pane.scrollTop = 0;
-          return {height: list.clientHeight, whole: whole.length, rows: rows.length, threadsFit: rows.every(fits), threadsApart: rows.every(apart),
+          const idsWhole = rows.every(row => { const ids = row.querySelector('.debugger-thread-ids'); return !ids || ids.scrollWidth <= ids.clientWidth + 0.5; });
+          return {height: list.clientHeight, whole: whole.length, rows: rows.length, threadsFit: rows.every(fits), threadsApart: rows.every(apart), idsWhole,
             recordsFit: records.every(fits), headsApart: records.every(row => apart(row.querySelector('.debugger-row-head'))),
             metaApart: records.every(row => apart(row.querySelector('.debugger-row-meta'))),
             times: meta.every(item => /^[+-]\\d+:\\d\\d\\.\\d{3}$/.test(item.time)), ids: meta.every(item => /^P\\d+ F\\d+ #\\d+( R\\d+)?$/.test(item.ids)),
@@ -1659,7 +1661,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
         """)
       print("RENDERED_UI_DEBUGGER_LAYOUT \(size.name) \(layout)")
       XCTAssertGreaterThanOrEqual(layout["whole"] as? Int ?? 0, 6, "\(size.name): the Threads list shows at least six whole rows: \(layout)")
-      for key in ["threadsFit", "threadsApart", "recordsFit", "headsApart", "metaApart", "times", "ids", "stuck", "over"] {
+      for key in ["threadsFit", "threadsApart", "idsWhole", "recordsFit", "headsApart", "metaApart", "times", "ids", "stuck", "over"] {
         XCTAssertEqual(layout[key] as? Bool, true, "\(size.name): \(key): \(layout)")
       }
       for key in ["threadsEnd", "recordsEnd"] {

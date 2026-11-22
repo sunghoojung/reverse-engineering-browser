@@ -233,8 +233,11 @@ zoom and fitted whole with `0`, where the graph's canvas must hold only its
 background under the overview cue and the minimap. It prints a `RENDERED_UI_GRAPH` line per shape
 and size: the time from the native click on Graph to the frame after the first
 drawing, which spans decode, transfer, layout and draw, and, while Shift+Arrow
-pans once a frame at each zoom, the median, 95th percentile and slowest frame
-interval and the time each frame spends drawing the graph. A median interval
+pans once a frame at each zoom (right, down, left and up in turn, so every
+frame draws a new view clear of a pan limit), the median, 95th percentile and
+slowest frame interval and the time each frame spends drawing the graph. Then
+Shift+Arrow pushes the fitted view far past the bottom right, where the canvas
+must still draw the graph, not only its background. A median interval
 fails over 50 ms, or over twice the slower median of the 25-block exceptions
 shape at that size where that is longer (a `RENDERED_UI_GRAPH_BOUND` line per
 size). A display without a GPU, as on a CI host, holds even that shape to

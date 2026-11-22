@@ -2544,7 +2544,10 @@ minimap and the status line leave clear, the overview cue included when the
 fit is below row zoom. The minimap is smaller on a stage under 600 px wide or
 280 px high, whatever the window's size, and its outline of the view never
 shrinks below about 8 px, so one screen of a long function is still marked.
-Zoom goes out as far as Fit needs, at any size. Edges
+Zoom goes out as far as Fit needs, at any size. A drag, a scroll, Shift+Arrow,
+a minimap click, a zoom or a resized pane stops where half the stage on each
+axis still shows the drawing, or all of a drawing smaller than that, so any
+edge of the graph pans as far as the middle and the stage never goes blank. Edges
 are added to the drawing only where they cross the view, so a long dashed
 edge costs its visible length, and each dash keeps its place along the whole
 edge as the view pans. Below the zoom where

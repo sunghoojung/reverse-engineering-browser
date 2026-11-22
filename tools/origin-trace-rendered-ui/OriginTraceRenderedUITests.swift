@@ -3019,7 +3019,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
   // display without a GPU, as on a CI host, holds even that shape to 30-50 ms
   // a frame while its draw takes 1 ms, so the floor is the machine's, not the
   // graph's. A single long frame does not fail, since a hidden or sleeping
-  // display stops frames whatever the page does.
+  // display stops frames whatever the page does. Then Shift+Arrow pushes the
+  // fitted view far past the bottom right, where it must stop on the drawing.
   @MainActor
   func test25bBlockGraphShapes() async throws {
     let shapes = [("341", "ladder"), ("342", "dispatch256"), ("343", "loops"), ("344", "exceptions"), ("345", "large")]
@@ -3084,14 +3085,16 @@ final class OriginTraceRenderedUITests: XCTestCase {
             try await ui.screenshot("block-graph-\(name)-fit-\(size.name)")
           }
           // Shift+Arrow is dispatched once a frame, after this callback asks
-          // for the next one, so the graph draws each pan first in the next frame.
+          // for the next one, so the graph draws each pan first in the next
+          // frame. It steps right, down, left and up in turn, so every frame
+          // draws a new view and none reaches the edge a pan stops at.
           let result = try await ui.json("""
             (async () => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
               const press = key => canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
               const zoom = document.querySelector('#source-graph-host .block-graph-zoom').textContent, intervals = [], draws = [];
               await new Promise(done => { let last = 0, count = 0;
                 const tick = now => { if (last) { intervals.push(now - last); draws.push(performance.now() - now); } last = now;
-                  if (count++ === 90) { done(); return; } press(count % 2 ? 'ArrowRight' : 'ArrowDown'); requestAnimationFrame(tick); };
+                  if (count++ === 90) { done(); return; } press(['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'][count % 4]); requestAnimationFrame(tick); };
                 requestAnimationFrame(tick); });
               const stats = list => { list.sort((a, b) => a - b); return {p50: Math.round(list[list.length >> 1]), p95: Math.round(list[Math.floor(list.length * 0.95)]), max: Math.round(list[list.length - 1])}; };
               return {zoom, interval: stats(intervals), draw: stats(draws)}; })()
@@ -3100,6 +3103,20 @@ final class OriginTraceRenderedUITests: XCTestCase {
           medians.append(("\(context) \(view)", (result["interval"] as? [String: Any])?["p50"] as? Double ?? .infinity, result))
         }
         print("RENDERED_UI_GRAPH \(size.name) \(name) firstPaintMs=\(Int(paint)) stats=\(String(reflecting: stats)) frames=\(frames)")
+        // Fitted whole, Shift+Arrow far past the bottom right stops on the
+        // drawing: the canvas holds more than its background.
+        _ = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas');
+            for (const key of ['ArrowRight', 'ArrowDown']) for (let i = 0; i < 400; i += 1) canvas.dispatchEvent(new KeyboardEvent('keydown', {key, shiftKey: true, bubbles: true, cancelable: true}));
+            return true; })()
+          """)
+        try await ui.settle()
+        let colors = try await ui.value("""
+          (() => { const canvas = document.querySelector('#source-graph-host .block-graph-canvas'), data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data, seen = new Set();
+            for (let i = 0; i < data.length && seen.size < 2; i += 4) seen.add((data[i] << 16) | (data[i + 1] << 8) | data[i + 2]);
+            return seen.size; })()
+          """) as? Int ?? 0
+        XCTAssertGreaterThan(colors, 1, "\(context): a pan far past the drawing left the canvas blank")
         if name == "dispatch256" { try await assertEdgeKey(ui, context) }
         try await ui.click("#source-graph")
       }

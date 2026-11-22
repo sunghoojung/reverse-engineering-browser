@@ -12,7 +12,7 @@ const {parseHTML} = createRequire(new URL('ui-startup-deps/', import.meta.url))(
 // The layout worker loads the Triskel client with importScripts; here it is a global first.
 runInThisContext(await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8'));
 const layoutModule = require('../apps/research-ui/block_graph_layout.js');
-const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView} = require('../apps/research-ui/block_graph.js');
+const {BLOCK_GRAPH_KIND: KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView, blockGraphBoundView} = require('../apps/research-ui/block_graph.js');
 const vmStatic = require('../apps/research-ui/vm_static.js');
 const {vmStaticOwnedExample} = require('../apps/research-ui/vm_static_view.js');
 const semantics = require('../apps/research-ui/vm_semantics.js');
@@ -247,6 +247,13 @@ assert.throws(() => layoutModule.wasmGraph({schema: 'other'}), /invalid document
   assert.equal(blockGraphRowInView(2, 72, 240, 24), 48, 'a row above the view scrolls to the top');
   assert.equal(blockGraphRowInView(5, 0, 100, 24), 44, 'a list four rows tall shows the sixth row whole at its bottom');
   assert.equal(blockGraphRowInView(1, 0, 0, 24), 24, 'an unmeasured list is one row tall');
+}
+{
+  // A view stays on its drawing: half the stage of a large one on each axis,
+  // all of a small one, and a view already on it does not move.
+  assert.deepEqual(blockGraphBoundView({x: 5000, y: -5000, z: 1}, 2000, 3000, 1000, 600), {x: 1500, y: -300, z: 1}, 'a large drawing keeps half the stage');
+  assert.deepEqual(blockGraphBoundView({x: 400, y: -900, z: 0.5}, 300, 200, 1000, 600), {x: 0, y: -900, z: 0.5}, 'a small one stays whole, anywhere on the stage');
+  assert.deepEqual(blockGraphBoundView({x: 100, y: 200, z: 2}, 2000, 3000, 1000, 600), {x: 100, y: 200, z: 2}, 'a view on the drawing is kept');
 }
 {
   // Failures say why, and offer Retry only where trying again can help.
@@ -509,6 +516,50 @@ globalThis.create = createBlockGraphView;`, context);
   assert.match(host.querySelector('.block-graph-selection').textContent, /^loc_8 .*edge \u2190 loc_18/, 'a stub\'s row goes to the block it reaches');
   click(...exitRow(1));
   assert.match(host.querySelector('.block-graph-selection').textContent, /^loc_8 .*edge \u2192 unresolved/, 'an unresolved row focuses its edge');
+  frames = [];
+}
+{
+  // However far Shift+Arrow, a drag or a scroll pushes the view past an edge,
+  // it stops on the drawing, so the stage never goes blank. Each frame's view
+  // is read back from the transform it draws the graph at.
+  const {document, window, Event} = parseHTML('<!doctype html><html><body><div id="host"></div></body></html>');
+  const transforms = [];
+  const recording = new Proxy({}, {get: (_, key) => key === 'measureText' ? () => ({width: 6.6}) : key === 'setTransform' ? (...a) => transforms.push(a) : () => {}, set: () => true});
+  window.HTMLCanvasElement.prototype.getContext = () => recording;
+  const rect = {left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700};
+  let frames = [];
+  const context = {document, window, Event, location: {protocol: 'http:'}, performance, getComputedStyle: () => ({getPropertyValue: () => ''}), Path2D: class { rect() {} moveTo() {} lineTo() {} arcTo() {} closePath() {} },
+    requestAnimationFrame: fn => { frames.push(fn); return frames.length; }, cancelAnimationFrame: () => {}, devicePixelRatio: 1, console, ResizeObserver: class { observe() {} disconnect() {} }};
+  runInNewContext(`${await readFile(new URL('../apps/research-ui/graph_layout_client.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph_layout.js', import.meta.url), 'utf8')}
+${await readFile(new URL('../apps/research-ui/block_graph.js', import.meta.url), 'utf8')}
+globalThis.create = createBlockGraphView;`, context);
+  const host = document.querySelector('#host');
+  host.getBoundingClientRect = () => rect;
+  const view = context.create(host, {runner: {run: async () => null, skip() {}, cancel() {}}});
+  for (const element of host.querySelectorAll('*')) element.getBoundingClientRect = () => (element.matches('.block-graph-stage, .block-graph-canvas') ? rect : {left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0});
+  view.activate();
+  // A chain far taller than the stage and narrower than half of it.
+  const graph = fixture(60, Array.from({length: 59}, (_, index) => [index, index + 1]), {title: 'func 0', status: 'decoded', instructions: 60, omissions: [], evidence: 'declared'});
+  const layout = {...lay(graph), engine: {name: 'layered'}};
+  assert(layout.height > 2 * rect.height && layout.width < rect.width / 2, `a tall, narrow chain: ${layout.width}x${layout.height}`);
+  view.setResult({graph, starts: layoutModule.rowStarts(graph.rows), layout});
+  const canvas = host.querySelector('.block-graph-canvas');
+  canvas.focus = () => {};
+  // draw() clears at the identity, then sets the view's transform; 0 - keeps
+  // a zero offset +0 for the strict comparisons.
+  const drawn = () => { transforms.length = 0; while (frames.length) frames.shift()(); const [z, , , , e, f] = transforms[1]; return {x: 0 - e / z, y: 0 - f / z, z}; };
+  const opened = drawn();
+  assert.equal(opened.z, 1, 'the chain opens at actual size');
+  const shift = (key, times) => { for (let i = 0; i < times; i += 1) canvas.dispatchEvent(Object.assign(new Event('keydown', {bubbles: true, cancelable: true}), {key, shiftKey: true, altKey: false, ctrlKey: false, metaKey: false})); return drawn(); };
+  assert.deepEqual(shift('ArrowRight', 200), {...opened, x: 0}, 'Shift+Right stops with the narrow chain whole at the left edge');
+  assert.deepEqual(shift('ArrowDown', 500), {x: 0, y: layout.height - rect.height / 2, z: 1}, 'Shift+Down stops with half the stage still showing its end');
+  canvas.dispatchEvent(Object.assign(new Event('pointerdown'), {clientX: 500, clientY: 350, pointerId: 1}));
+  canvas.dispatchEvent(Object.assign(new Event('pointermove'), {clientX: 50500, clientY: 50350, pointerId: 1}));
+  canvas.dispatchEvent(Object.assign(new Event('pointerup'), {clientX: 50500, clientY: 50350, pointerId: 1}));
+  assert.deepEqual(drawn(), {x: layout.width - rect.width, y: -rect.height / 2, z: 1}, 'a drag past the top left stops with the chain whole at the right edge and its start mid-stage');
+  canvas.dispatchEvent(Object.assign(new Event('wheel', {cancelable: true}), {deltaX: 1e6, deltaY: 1e6, ctrlKey: false, metaKey: false}));
+  assert.deepEqual(drawn(), {x: 0, y: layout.height - rect.height / 2, z: 1}, 'so does a scroll past the bottom right');
   frames = [];
 }
 {

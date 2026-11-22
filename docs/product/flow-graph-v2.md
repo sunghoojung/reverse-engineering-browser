@@ -176,7 +176,7 @@ hsw#13  ▶ start ── sync ── promise job ── wasm run ▸ br_table ×
 - Overlapping calls stay separate, which time windows cannot do.
 
 **Weaknesses.**
-- It covers only armed functions: 8 sites, 256 calls, 64 per site.
+- It covers only armed functions, up to 256 sites with every call recorded.
 - It depends on invocation capture, which no rebuilt Brave has run yet.
 - It is not a picture of the session.
 
@@ -234,10 +234,9 @@ asking without `layers` gets the v1 answer.
 
 ## Bounds that stay
 
-- Every native stream keeps its budget: 16 `br_table` and 16 `call_indirect`
-  records per configuration, 256 tracked calls, and 1,024 stacks per
-  configuration. A layer never makes a budget look larger than it was; it
-  shows the stream's own gap.
+- Every native stream keeps its own bounds and gaps. The renderer no longer
+  caps stacks, tracked calls or Wasm samples per configuration; a layer
+  never hides a stream's gap or a sample policy the capture chose.
 - Nothing in this design changes capture, adds a probe or reads values that
   capture does not already retain. [SAFETY.md](../../SAFETY.md) applies
   unchanged.

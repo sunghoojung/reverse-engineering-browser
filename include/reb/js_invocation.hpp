@@ -13,10 +13,17 @@ namespace reb {
 // script text as UTF-16LE, source_length and the UTF-16 anchor_offset of the
 // function's V8 start position. See protocol/native-js-invocation-v1.md. No
 // argument, receiver, return or exception content is part of any record here.
-inline constexpr std::size_t kJsInvocationSiteLimit = 8;
-inline constexpr std::size_t kJsInvocationSampleBudget = 256;
-inline constexpr std::size_t kJsInvocationSiteSampleBudget = 64;
-inline constexpr std::size_t kJsInvocationRequestBudget = 256;
+//
+// Payload version 2 records every call of up to 256 sites, each with a u32
+// ordinal. Version 1, written by earlier builds, armed at most 8 sites and
+// recorded at most 64 calls per site, 256 per configuration and 256 requests;
+// it stays readable.
+inline constexpr std::uint16_t kJsInvocationPayloadVersion = 2;
+inline constexpr std::size_t kJsInvocationSiteLimit = 256;
+inline constexpr std::size_t kJsInvocationV1SiteLimit = 8;
+inline constexpr std::size_t kJsInvocationV1SampleBudget = 256;
+inline constexpr std::size_t kJsInvocationV1SiteSampleBudget = 64;
+inline constexpr std::size_t kJsInvocationV1RequestBudget = 256;
 inline constexpr std::size_t kJsInvocationArgumentLimit = 8;
 // Encoded bytes a settle digest may cover.
 inline constexpr std::uint32_t kJsInvocationDigestByteLimit = 1U << 20U;
@@ -135,6 +142,11 @@ inline bool ValidLowBits(std::uint8_t kind, std::uint32_t low32) noexcept {
     return low32 <= 1;
   return low32 == 0;
 }
+// A version 1 slot is below its 8-site limit; every version 2 slot fits.
+inline bool ValidSlot(std::uint16_t version, std::uint8_t slot) noexcept {
+  return version == kJsInvocationPayloadVersion ||
+         (version == 1 && slot < kJsInvocationV1SiteLimit);
+}
 }  // namespace js_invocation_detail
 
 [[nodiscard]] constexpr bool IsValidJsInvocationContext(std::uint8_t state,
@@ -145,7 +157,7 @@ inline bool ValidLowBits(std::uint8_t kind, std::uint32_t low32) noexcept {
 }
 
 struct JsInvocationStartPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t site_slot = 0;
   std::uint8_t flags = 0;
@@ -155,8 +167,11 @@ struct JsInvocationStartPayload final {
   std::uint32_t source_length = 0;
   std::uint32_t invocation_id = 0;
   std::uint32_t parent_invocation_id = 0;
-  std::uint16_t site_sample_index = 0;
-  std::uint16_t sample_index = 0;
+  // Version 2: this call's ordinal among the site's calls in its
+  // configuration, from 0. A missing ordinal is a dropped record. Version 1
+  // held the per-site index in the low 16 bits and the per-configuration
+  // index in the high 16 bits.
+  std::uint32_t site_ordinal = 0;
   std::array<std::uint8_t, kJsInvocationArgumentLimit> argument_kinds{};
   std::array<std::uint32_t, kJsInvocationArgumentLimit> argument_low32{};
   std::array<std::byte, 32> source_sha256{};
@@ -174,8 +189,7 @@ static_assert(offsetof(JsInvocationStartPayload, anchor_offset) == 12);
 static_assert(offsetof(JsInvocationStartPayload, source_length) == 16);
 static_assert(offsetof(JsInvocationStartPayload, invocation_id) == 20);
 static_assert(offsetof(JsInvocationStartPayload, parent_invocation_id) == 24);
-static_assert(offsetof(JsInvocationStartPayload, site_sample_index) == 28);
-static_assert(offsetof(JsInvocationStartPayload, sample_index) == 30);
+static_assert(offsetof(JsInvocationStartPayload, site_ordinal) == 28);
 static_assert(offsetof(JsInvocationStartPayload, argument_kinds) == 32);
 static_assert(offsetof(JsInvocationStartPayload, argument_low32) == 40);
 static_assert(offsetof(JsInvocationStartPayload, source_sha256) == 72);
@@ -197,8 +211,7 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
   Put(out, 16, value.source_length, 4);
   Put(out, 20, value.invocation_id, 4);
   Put(out, 24, value.parent_invocation_id, 4);
-  Put(out, 28, value.site_sample_index, 2);
-  Put(out, 30, value.sample_index, 2);
+  Put(out, 28, value.site_ordinal, 4);
   for (std::size_t i = 0; i < kJsInvocationArgumentLimit; ++i) {
     Put(out, 32 + i, value.argument_kinds[i], 1);
     Put(out, 40 + 4 * i, value.argument_low32[i], 4);
@@ -224,8 +237,7 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
   value.source_length = static_cast<std::uint32_t>(Get(bytes, 16, 4));
   value.invocation_id = static_cast<std::uint32_t>(Get(bytes, 20, 4));
   value.parent_invocation_id = static_cast<std::uint32_t>(Get(bytes, 24, 4));
-  value.site_sample_index = static_cast<std::uint16_t>(Get(bytes, 28, 2));
-  value.sample_index = static_cast<std::uint16_t>(Get(bytes, 30, 2));
+  value.site_ordinal = static_cast<std::uint32_t>(Get(bytes, 28, 4));
   for (std::size_t i = 0; i < kJsInvocationArgumentLimit; ++i) {
     value.argument_kinds[i] = static_cast<std::uint8_t>(Get(bytes, 32 + i, 1));
     value.argument_low32[i] = static_cast<std::uint32_t>(Get(bytes, 40 + 4 * i, 4));
@@ -238,12 +250,15 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
 
 [[nodiscard]] inline bool IsValidJsInvocationStartPayload(
     const JsInvocationStartPayload& value) noexcept {
-  if (value.protocol_version != 1 || value.payload_size != 128 ||
-      value.site_slot >= kJsInvocationSiteLimit ||
-      (value.flags & ~kJsInvocationStartKnownFlags) != 0 || value.script_id == 0 ||
-      value.source_length == 0 || value.anchor_offset >= value.source_length ||
-      value.invocation_id == 0 || value.site_sample_index >= kJsInvocationSiteSampleBudget ||
-      value.sample_index >= kJsInvocationSampleBudget || value.document_id == 0)
+  if (!js_invocation_detail::ValidSlot(value.protocol_version, value.site_slot) ||
+      value.payload_size != 128 || (value.flags & ~kJsInvocationStartKnownFlags) != 0 ||
+      value.script_id == 0 || value.source_length == 0 ||
+      value.anchor_offset >= value.source_length || value.invocation_id == 0 ||
+      value.document_id == 0)
+    return false;
+  if (value.protocol_version == 1 &&
+      ((value.site_ordinal & 0xFFFFU) >= kJsInvocationV1SiteSampleBudget ||
+       (value.site_ordinal >> 16U) >= kJsInvocationV1SampleBudget))
     return false;
   // A parent is an earlier allocation; an unknown parent records none.
   if (value.parent_invocation_id != 0 && (value.parent_invocation_id >= value.invocation_id ||
@@ -274,7 +289,7 @@ static_assert(offsetof(JsInvocationStartPayload, reserved) == 112);
 }
 
 struct JsInvocationSettlePayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t site_slot = 0;
   std::uint8_t outcome = 0;
@@ -371,8 +386,8 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
       value.outcome == static_cast<std::uint8_t>(JsInvocationOutcome::kFulfilled);
   const bool rejected = value.outcome == static_cast<std::uint8_t>(JsInvocationOutcome::kRejected);
   const auto via = static_cast<JsInvocationSettleVia>(value.via);
-  if (value.protocol_version != 1 || value.payload_size != 128 ||
-      value.site_slot >= kJsInvocationSiteLimit || (!fulfilled && !rejected) ||
+  if (!js_invocation_detail::ValidSlot(value.protocol_version, value.site_slot) ||
+      value.payload_size != 128 || (!fulfilled && !rejected) ||
       !js_invocation_detail::ValidKind(value.value_kind) || value.invocation_id == 0 ||
       value.document_id == 0 || value.reserved0 != 0 ||
       (value.flags & ~kJsInvocationLossyUtf8) != 0)
@@ -430,13 +445,14 @@ static_assert(offsetof(JsInvocationSettlePayload, reserved) == 72);
 }
 
 struct JsInvocationRequestPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t state = 0;
   std::array<std::byte, 3> reserved0{};
   std::uint32_t invocation_id = 0;
-  std::uint16_t sample_index = 0;
-  std::uint16_t reserved1 = 0;
+  // Version 2: this request's ordinal in its configuration, from 0. Version 1
+  // held a u16 index below 256 and two zero bytes.
+  std::uint32_t ordinal = 0;
   std::array<std::byte, 112> reserved{};
 };
 static_assert(sizeof(JsInvocationRequestPayload) == 128);
@@ -444,7 +460,7 @@ static_assert(std::is_standard_layout_v<JsInvocationRequestPayload>);
 static_assert(std::is_trivially_copyable_v<JsInvocationRequestPayload>);
 static_assert(offsetof(JsInvocationRequestPayload, state) == 4);
 static_assert(offsetof(JsInvocationRequestPayload, invocation_id) == 8);
-static_assert(offsetof(JsInvocationRequestPayload, sample_index) == 12);
+static_assert(offsetof(JsInvocationRequestPayload, ordinal) == 12);
 static_assert(offsetof(JsInvocationRequestPayload, reserved) == 16);
 
 [[nodiscard]] inline std::array<std::byte, 128> EncodeJsInvocationRequestPayload(
@@ -456,8 +472,7 @@ static_assert(offsetof(JsInvocationRequestPayload, reserved) == 16);
   Put(out, 4, value.state, 1);
   std::copy(value.reserved0.begin(), value.reserved0.end(), out.begin() + 5);
   Put(out, 8, value.invocation_id, 4);
-  Put(out, 12, value.sample_index, 2);
-  Put(out, 14, value.reserved1, 2);
+  Put(out, 12, value.ordinal, 4);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 16);
   return out;
 }
@@ -473,8 +488,7 @@ static_assert(offsetof(JsInvocationRequestPayload, reserved) == 16);
   value.state = static_cast<std::uint8_t>(Get(bytes, 4, 1));
   std::copy(bytes.begin() + 5, bytes.begin() + 8, value.reserved0.begin());
   value.invocation_id = static_cast<std::uint32_t>(Get(bytes, 8, 4));
-  value.sample_index = static_cast<std::uint16_t>(Get(bytes, 12, 2));
-  value.reserved1 = static_cast<std::uint16_t>(Get(bytes, 14, 2));
+  value.ordinal = static_cast<std::uint32_t>(Get(bytes, 12, 4));
   std::copy(bytes.begin() + 16, bytes.end(), value.reserved.begin());
   return true;
 }
@@ -485,9 +499,11 @@ static_assert(offsetof(JsInvocationRequestPayload, reserved) == 16);
     const JsInvocationRequestPayload& value) noexcept {
   const bool inside = value.state == static_cast<std::uint8_t>(JsInvocationContextState::kInside);
   const bool unknown = value.state == static_cast<std::uint8_t>(JsInvocationContextState::kUnknown);
-  return value.protocol_version == 1 && value.payload_size == 128 && (inside || unknown) &&
+  const bool version =
+      value.protocol_version == kJsInvocationPayloadVersion ||
+      (value.protocol_version == 1 && value.ordinal < kJsInvocationV1RequestBudget);
+  return version && value.payload_size == 128 && (inside || unknown) &&
          IsValidJsInvocationContext(value.state, value.invocation_id) &&
-         value.sample_index < kJsInvocationRequestBudget && value.reserved1 == 0 &&
          js_invocation_detail::AllZero(value.reserved0) &&
          js_invocation_detail::AllZero(value.reserved);
 }

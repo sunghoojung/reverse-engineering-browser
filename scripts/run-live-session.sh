@@ -76,6 +76,10 @@ native_js_invocation_digests="${REB_NATIVE_JS_INVOCATION_DIGESTS:-}"
 # The packaged app sets this for the saved sites it arms in every capture: a
 # Brave without invocation capture then starts without them instead of failing.
 readonly native_js_invocation_if_supported="${REB_NATIVE_JS_INVOCATION_IF_SUPPORTED:-0}"
+# The packaged app and agent sessions set this so the capture follows the saved
+# set: the backend rewrites the site file as a slot table and Brave applies each
+# revision to its running renderers (protocol/native-js-invocation-v1.md#revisions).
+readonly native_js_invocation_live="${REB_NATIVE_JS_INVOCATION_LIVE:-0}"
 readonly console_document_start="${REB_CONSOLE_DOCUMENT_START:-1}"
 capture_canvas_images="${REB_CAPTURE_CANVAS_IMAGES:-}"
 # Raw request paths, queries and bounded request bodies (native-network-v2.md).
@@ -205,8 +209,10 @@ validate_wasm_count() {
   if [[ -z "${text}" ]]; then
     return 0
   fi
-  if [[ ! "${text}" =~ ^[0-9]+$ ]] || (( ${#text} > 2 || 10#${text} < 1 || 10#${text} > 16 )); then
-    fail_live_session 2 "${name} must be from 1 to 16."
+  # One window holds 1024 full samples per stream, so a per-function or
+  # per-site allowance past that cannot change what is kept.
+  if [[ ! "${text}" =~ ^[0-9]+$ ]] || (( ${#text} > 4 || 10#${text} < 1 || 10#${text} > 1024 )); then
+    fail_live_session 2 "${name} must be from 1 to 1024."
   fi
 }
 validate_wasm_function_list() {
@@ -277,8 +283,8 @@ if [[ -n "${native_js_dispatch_sites}" ]]; then
     fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must name a readable absolute regular file."
   fi
   js_sites_bytes="$(wc -c < "${native_js_dispatch_sites}")"
-  if (( js_sites_bytes == 0 || js_sites_bytes > 4096 )); then
-    fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must contain between 1 and 4096 bytes."
+  if (( js_sites_bytes == 0 || js_sites_bytes > 131072 )); then
+    fail_live_session 2 "REB_NATIVE_JS_DISPATCH_SITES must contain between 1 and 131072 bytes."
   fi
 fi
 if [[ -n "${native_js_invocation_sites}" ]]; then
@@ -290,8 +296,8 @@ if [[ -n "${native_js_invocation_sites}" ]]; then
     fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must name a readable absolute regular file."
   fi
   invocation_sites_bytes="$(wc -c < "${native_js_invocation_sites}")"
-  if (( invocation_sites_bytes == 0 || invocation_sites_bytes > 4096 )); then
-    fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must contain between 1 and 4096 bytes."
+  if (( invocation_sites_bytes == 0 || invocation_sites_bytes > 131072 )); then
+    fail_live_session 2 "REB_NATIVE_JS_INVOCATION_SITES must contain between 1 and 131072 bytes."
   fi
 fi
 if [[ "${native_js_invocation_digests}" != 0 && "${native_js_invocation_digests}" != 1 ]]; then
@@ -299,6 +305,12 @@ if [[ "${native_js_invocation_digests}" != 0 && "${native_js_invocation_digests}
 fi
 if [[ "${native_js_invocation_if_supported}" != 0 && "${native_js_invocation_if_supported}" != 1 ]]; then
   fail_live_session 2 "REB_NATIVE_JS_INVOCATION_IF_SUPPORTED must be 0 or 1."
+fi
+if [[ "${native_js_invocation_live}" != 0 && "${native_js_invocation_live}" != 1 ]]; then
+  fail_live_session 2 "REB_NATIVE_JS_INVOCATION_LIVE must be 0 or 1."
+fi
+if [[ "${native_js_invocation_live}" == 1 && -z "${native_js_invocation_sites}" ]]; then
+  fail_live_session 2 "REB_NATIVE_JS_INVOCATION_LIVE=1 requires REB_NATIVE_JS_INVOCATION_SITES."
 fi
 # Settled-value digests are a sensitive capture path: they exist only for an
 # armed invocation session and are labeled when the session starts.
@@ -370,6 +382,8 @@ chmod 700 "${session_directory}" "${artifact_store_path}" "${profile_path}" "${n
 readonly wasm_budget_reset_file="${session_directory}/wasm-sample-budget-reset"
 printf '0\n' > "${wasm_budget_reset_file}"
 chmod 600 "${wasm_budget_reset_file}"
+# The backend advances this after each slot table it writes; Brave polls it.
+readonly js_invocation_generation_file="${session_directory}/js-invocation-sites-generation"
 if [[ -n "${brave_cache_root}" && "${profile_kind}" == fresh ]]; then
   readonly brave_cache_profile="${brave_cache_root}/${session_id}/brave-profile"
   mkdir -p "${brave_cache_profile}"
@@ -508,8 +522,9 @@ if [[ -n "${native_guest_adapter}" ]]; then
   add_native_js_flag --reb-wasm-guest-capture \
     REB_NATIVE_WASM_GUEST_ADAPTER "unset REB_NATIVE_WASM_GUEST_ADAPTER"
 fi
-# JavaScript dispatch capture turns off code caching, streaming and the
-# compilation cache browser-wide, so it is added only with a site file.
+# JavaScript dispatch capture keeps every bytecode compile on the main thread
+# and sends the scripts its sites name through a cache-free compile path, so it
+# is added only with a site file.
 if [[ -n "${native_js_dispatch_sites:-}" ]]; then
   add_native_js_flag --reb-js-dispatch-capture \
     REB_NATIVE_JS_DISPATCH_SITES "unset REB_NATIVE_JS_DISPATCH_SITES"
@@ -631,24 +646,52 @@ require_brave_v8_flags() {
 # app saved are asked for only if this Brave defines the flag: one built before
 # invocation capture starts without them and says so, instead of refusing the
 # whole session below. Explicit sites keep the strict check.
+#
+# A live session follows revisions only in a Brave whose invocation flag help
+# says its armed sites are revisable; an older one keeps the startup sites. The
+# app's empty slot table, a version 2 file such a Brave refuses, then arms
+# nothing, and the saved set applies from the next capture instead.
 js_invocation_session_state=""
+js_invocation_live=0
 if [[ -n "${native_js_invocation_sites:-}" ]]; then
   js_invocation_session_state=armed
-  if [[ "${native_js_invocation_if_supported:-0}" == 1 ]] &&
+  if [[ "${native_js_invocation_if_supported:-0}" == 1 || "${native_js_invocation_live:-0}" == 1 ]] &&
      invocation_image="$(locate_brave_v8_image "${brave_binary}")"; then
     trap 'stop_brave_v8_scans; exit 143' TERM
     trap 'stop_brave_v8_scans; exit 130' INT
     LC_ALL=C grep -a -q -F -e reb_js_invocation_capture "${invocation_image}" &
+    invocation_scan_pid=$!
+    revision_scan_pid=""
+    if [[ "${native_js_invocation_live:-0}" == 1 ]]; then
+      LC_ALL=C grep -a -q -F -e 'armed sites revisable while running' "${invocation_image}" &
+      revision_scan_pid=$!
+    fi
     invocation_scan_status=0
-    wait "$!" || invocation_scan_status=$?
+    wait "${invocation_scan_pid}" || invocation_scan_status=$?
+    revision_scan_status=1
+    if [[ -n "${revision_scan_pid}" ]]; then
+      revision_scan_status=0
+      wait "${revision_scan_pid}" || revision_scan_status=$?
+    fi
     trap - TERM INT
     # 1 is an absent name; an unreadable image is left to the check below.
-    if (( invocation_scan_status == 1 )); then
+    if (( invocation_scan_status == 1 )) && [[ "${native_js_invocation_if_supported:-0}" == 1 ]]; then
       js_invocation_session_state=browser_unsupported
+    elif (( revision_scan_status == 0 )); then
+      js_invocation_live=1
     fi
   fi
+  if [[ "${js_invocation_live}" == 0 &&
+        "$(cat "${native_js_invocation_sites}")" == '{"sites":[],"version":2}' ]]; then
+    js_invocation_session_state=""
+  fi
 fi
-readonly js_invocation_session_state
+readonly js_invocation_session_state js_invocation_live
+# Brave rereads the site file each time the backend advances this generation.
+if [[ "${js_invocation_live}" == 1 ]]; then
+  printf '0\n' > "${js_invocation_generation_file}"
+  chmod 600 "${js_invocation_generation_file}"
+fi
 # Request initiator stacks (protocol/native-network-v3.md). The packaged
 # app's default drops the flag from a Brave that predates it instead of
 # refusing the session; an explicit request keeps the strict check.
@@ -665,12 +708,26 @@ if [[ "${native_request_stacks:-0}" == 1 ]]; then
   fi
 fi
 readonly request_stacks_state
+# Promise registration stacks (protocol/native-network-v3.md, Promise
+# registrations). They ride on request stacks, and with the packaged app's
+# request stacks a Brave that predates the flag drops them the same way.
+promise_stacks_state=off
+if [[ "${request_stacks_state}" == on && "${native_promise_stacks:-0}" == 1 ]]; then
+  promise_stacks_state=on
+  if [[ "${native_request_stacks_if_supported:-0}" == 1 ]] &&
+     stack_image="$(locate_brave_v8_image "${brave_binary}")"; then
+    stack_scan_status=0
+    LC_ALL=C grep -a -q -F -e reb_promise_stacks "${stack_image}" || stack_scan_status=$?
+    if (( stack_scan_status == 1 )); then
+      promise_stacks_state=browser_unsupported
+    fi
+  fi
+fi
+readonly promise_stacks_state
 if [[ "${request_stacks_state}" == on ]]; then
   add_native_js_flag --reb-request-stacks \
     REB_NATIVE_REQUEST_STACKS=1 REB_NATIVE_REQUEST_STACKS=0
-  # Promise registration stacks; off by default for their cost
-  # (protocol/native-network-v3.md, Promise registrations).
-  if [[ "${native_promise_stacks:-0}" == 1 ]]; then
+  if [[ "${promise_stacks_state}" == on ]]; then
     add_native_js_flag --reb-promise-stacks \
       REB_NATIVE_PROMISE_STACKS=1 REB_NATIVE_PROMISE_STACKS=0
   fi
@@ -902,12 +959,43 @@ fi
 if [[ "${request_stacks_state}" == on ]]; then
   ui_arguments+=(--session-request-stacks)
 fi
+# The Wasm sampling policy, as the VM view shows it beside its reset control.
+if [[ "${native_wasm_dispatch}" == 1 ]]; then
+  ui_arguments+=(--session-wasm-dispatch)
+fi
+if [[ "${native_wasm_call_indirect}" == 1 ]]; then
+  ui_arguments+=(--session-wasm-call-indirect)
+fi
+if [[ "${native_wasm_dispatch}" == 1 || "${native_wasm_call_indirect}" == 1 ]]; then
+  if [[ -n "${native_wasm_samples_per_function}" ]]; then
+    ui_arguments+=(--session-wasm-samples-per-function "$((10#${native_wasm_samples_per_function}))")
+  fi
+  if [[ -n "${native_wasm_samples_per_indirect_site}" ]]; then
+    ui_arguments+=(--session-wasm-samples-per-indirect-site
+      "$((10#${native_wasm_samples_per_indirect_site}))")
+  fi
+  # The lists were validated above as unique comma-separated indexes.
+  if [[ -n "${native_wasm_function_allow}" ]]; then
+    IFS=',' read -r -a wasm_allow_indexes <<<"${native_wasm_function_allow}"
+    ui_arguments+=(--session-wasm-function-allow-count "${#wasm_allow_indexes[@]}")
+  fi
+  if [[ -n "${native_wasm_function_deny}" ]]; then
+    IFS=',' read -r -a wasm_deny_indexes <<<"${native_wasm_function_deny}"
+    ui_arguments+=(--session-wasm-function-deny-count "${#wasm_deny_indexes[@]}")
+  fi
+  if [[ -n "${native_wasm_module_allowlist}" ]]; then
+    ui_arguments+=(--session-wasm-module-allowlist)
+  fi
+fi
 # The session header says which functions this capture tracks, or why not.
 if [[ -n "${js_invocation_session_state}" ]]; then
   ui_arguments+=(--js-invocation-session-sites "${native_js_invocation_sites}"
     --js-invocation-session-state "${js_invocation_session_state}")
   if [[ "${js_invocation_session_state}" == armed && "${native_js_invocation_digests}" == 1 ]]; then
     ui_arguments+=(--js-invocation-session-digests)
+  fi
+  if [[ "${js_invocation_session_state}" == armed && "${js_invocation_live}" == 1 ]]; then
+    ui_arguments+=(--js-invocation-session-generation "${js_invocation_generation_file}")
   fi
 fi
 "${research_ui_server}" \
@@ -1001,6 +1089,9 @@ if [[ "${js_invocation_session_state:-}" == armed ]]; then
   brave_arguments+=("--reb-js-invocation-sites=${native_js_invocation_sites}")
   if [[ "${native_js_invocation_digests:-0}" == 1 ]]; then
     brave_arguments+=(--reb-js-invocation-digests)
+  fi
+  if [[ "${js_invocation_live:-0}" == 1 ]]; then
+    brave_arguments+=("--reb-js-invocation-sites-generation=${js_invocation_generation_file}")
   fi
 fi
 if [[ "${capture_canvas_images}" == 1 ]]; then
@@ -1140,8 +1231,17 @@ fi
 if [[ "${request_stacks_state}" == browser_unsupported ]]; then
   echo "Request call stacks: unavailable; this Brave does not define --reb-request-stacks"
 fi
-echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0) request_stacks=$([[ "${request_stacks_state}" == on ]] && echo 1 || echo 0) promise_stacks=$([[ "${request_stacks_state}" == on && "${native_promise_stacks}" == 1 ]] && echo 1 || echo 0)"
+if [[ "${promise_stacks_state}" == browser_unsupported ]]; then
+  echo "Promise registration stacks: unavailable; this Brave does not define --reb-promise-stacks"
+fi
+echo "Native switches: quiet=${native_quiet_mode} wasm_br_table=${native_wasm_dispatch} wasm_call_indirect=${native_wasm_call_indirect} wasm_guest=$([[ -n "${native_guest_adapter}" ]] && echo 1 || echo 0) js_dispatch=$([[ -n "${native_js_dispatch_sites}" ]] && echo 1 || echo 0) js_invocation=$([[ "${js_invocation_session_state}" == armed ]] && echo 1 || echo 0) js_invocation_live=${js_invocation_live} request_stacks=$([[ "${request_stacks_state}" == on ]] && echo 1 || echo 0) promise_stacks=$([[ "${promise_stacks_state}" == on ]] && echo 1 || echo 0)"
 echo "Wasm sample budgets: per_function=${native_wasm_samples_per_function:-unset} per_indirect_site=${native_wasm_samples_per_indirect_site:-unset} function_allow=${native_wasm_function_allow:-unset} function_deny=${native_wasm_function_deny:-unset} module_allowlist=$([[ -n "${native_wasm_module_allowlist:-}" ]] && echo 1 || echo 0) reset_file=${wasm_budget_reset_file:-unset}"
+if [[ "${native_js_invocation_live}" == 1 && "${js_invocation_live}" == 0 &&
+      "${js_invocation_session_state}" != browser_unsupported ]]; then
+  echo "JavaScript invocation tracking: Brave at ${brave_binary} cannot revise armed sites while it runs, so saved functions apply from the next capture"
+elif [[ "${js_invocation_live}" == 1 ]]; then
+  echo "JavaScript invocation tracking: follows the saved functions; generation_file=${js_invocation_generation_file}"
+fi
 if [[ "${js_invocation_session_state}" == browser_unsupported ]]; then
   echo "JavaScript invocation tracking: unavailable; Brave at ${brave_binary} does not define --reb-js-invocation-capture, so this session started without the saved invocation sites and records no invocation evidence"
 elif [[ "${js_invocation_session_state}" == armed && "${native_js_invocation_digests}" == 1 ]]; then

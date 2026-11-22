@@ -10,10 +10,10 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
-#include <span>
 #include <string>
 #include <vector>
 
+#include "base/memory/read_only_shared_memory_region.h"
 #include "base/no_destructor.h"
 #include "base/unguessable_token.h"
 #include "base/values.h"
@@ -21,13 +21,17 @@
 #include "brave/components/reverse_engineering_browser/common/native_console_document_start.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 
+namespace content {
+class RenderFrameHost;
+}  // namespace content
+
 namespace reb {
 
 class NativeConsoleDocumentStartHost;
 
 // Browser UI thread only. Owns the armed document-start script set for the
-// console session, pushes it to every renderer process, and keeps the bounded
-// ring of page-JavaScript observations those scripts reported.
+// console session, pushes it to every renderer process, and keeps the
+// byte-bounded output of page-JavaScript observations those scripts reported.
 //
 // The set is session state, not document state: it is never pinned to a
 // selected document, and ending or expiring the session clears it.
@@ -57,14 +61,16 @@ class NativeConsoleDocumentStartRegistry final {
   // become inert as soon as each renderer applies the empty set.
   void Clear();
 
-  // Registry, counters and a bounded non-draining output page after `after`.
+  // Registry, counters and a non-draining output page after `after`: every
+  // retained record that fits one reply.
   [[nodiscard]] base::DictValue State(std::uint64_t after) const;
 
-  void Observe(int render_process_id,
+  // `owner` is the eligible document the sending process named, or null when
+  // the record did not resolve to one.
+  void Observe(content::RenderFrameHost* owner,
                std::uint64_t generation,
                std::uint64_t script_id,
                std::uint64_t frame_id,
-               const base::UnguessableToken& document,
                std::uint32_t record,
                bool truncated,
                const std::string& text);
@@ -74,22 +80,46 @@ class NativeConsoleDocumentStartRegistry final {
   NativeConsoleDocumentStartRegistry();
   ~NativeConsoleDocumentStartRegistry();
 
+  // The source itself lives only in `set_`; the browser keeps what State
+  // reports about it.
   struct Armed {
-    NativeConsoleDocumentStartScript script;
+    std::uint64_t script_id = 0;
+    std::uint16_t frame_flags = 0;
+    std::string origin;
+    std::string path;
+    std::size_t source_bytes = 0;
+    std::uint64_t digest = 0;
     std::uint32_t records = 0;
     std::uint32_t injected_documents = 0;
     std::uint32_t refused = 0;
   };
 
-  [[nodiscard]] std::size_t Encode(std::span<std::uint8_t> out) const;
+  // A compact record, so retention is bounded by reported text rather than by
+  // the size of a dictionary per record.
+  struct Output {
+    std::uint64_t sequence = 0;
+    std::uint64_t script_id = 0;
+    std::uint64_t document_id = 0;
+    std::uint64_t frame_id = 0;
+    double time = 0;
+    std::uint32_t record = 0;
+    bool top_frame = false;
+    bool truncated = false;
+    std::string text;
+  };
+
+  // Stops an injection of the current set that is still running anywhere,
+  // before the set is replaced or cleared.
+  void StopRunning();
   void Push();
 
   std::vector<std::unique_ptr<NativeConsoleDocumentStartHost>> hosts_;
-  // Live renderer processes refused at the host limit. They never receive a
-  // set, so readiness counts them while one is armed.
-  std::vector<int> refused_;
   std::vector<Armed> scripts_;
-  std::deque<base::DictValue> output_;
+  // The encoded set every renderer maps read-only. Invalid while none is armed.
+  base::ReadOnlySharedMemoryRegion set_;
+  std::size_t listing_bytes_ = 0;
+  std::deque<Output> output_;
+  std::size_t retained_bytes_ = 0;
   std::uint64_t generation_ = 0;
   std::uint64_t next_script_id_ = 1;
   std::uint64_t next_sequence_ = 1;

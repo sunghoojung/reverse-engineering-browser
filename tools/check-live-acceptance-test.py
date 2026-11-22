@@ -32,7 +32,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 from live_acceptance import (baseline, bodies, cookies, debugger, driver, headers, limits, metadata,
-                             nostacks, reserve, stacks, tabs, volume)
+                             nostacks, reserve, stacks, tabs, volume, wasm)
 from live_acceptance.evidence import Api, ApiError, Session, decode_request_body, decode_request_target, parse_header_block
 from live_acceptance.fixture import POLL_SECONDS, payload, sha256
 from live_acceptance.pages import line_of, locate
@@ -107,7 +107,7 @@ class FixtureRoutes(unittest.TestCase):
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
         for name in ("baseline", "stacks", "headers", "cookies", "bodies", "limits", "debugger", "tabs", "volume",
-                     "reserve"):
+                     "reserve", "wasm"):
             self.assertIn(f"/{name}/index.html".encode(), body)
 
     def test_header_hops_redirect_twice_with_repeated_headers(self):
@@ -293,17 +293,20 @@ class FixtureRoutes(unittest.TestCase):
     def test_wasm_modules_validate_and_run(self):
         from live_acceptance.binary import wasm_dispatch, wasm_import_caller
         script = """
-const [dispatch, caller] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
+const [dispatch, caller, paced] = process.argv.slice(1).map(hex => Buffer.from(hex, 'hex'));
 const {pick} = new WebAssembly.Instance(new WebAssembly.Module(dispatch)).exports;
 let stack = '';
 const imports = {env: {f: () => { stack = new Error().stack; }}};
 new WebAssembly.Instance(new WebAssembly.Module(caller), imports).exports.run();
-console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack}));
+const {run} = new WebAssembly.Instance(new WebAssembly.Module(paced)).exports;
+console.log(JSON.stringify({picks: [0, 1, 2, 3].map(pick), stack, runs: [0, 1, 39, 40, 41].map(run)}));
 """
-        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex()],
+        out = subprocess.run([NODE, "-e", script, wasm_dispatch().hex(), wasm_import_caller().hex(), wasm.MODULE.hex()],
                              capture_output=True, text=True, check=True).stdout
         result = json.loads(out)
         self.assertEqual(result["picks"], baseline.PICKS)
+        # Selector 0 takes the br_table's first arm in every function; any other its default.
+        self.assertEqual(result["runs"], [1, 2, 2, 2, 2])
         self.assertRegex(result["stack"], r"reb_inner[\s\S]*reb_run")
 
 
@@ -999,14 +1002,76 @@ class Evidence(unittest.TestCase):
             "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src", "blocked_host": "localhost"}}},
         }
         debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+        self.keep(debugger.STATE)
         debugger.verify(self.run_)
         self.assertEqual(set(self.statuses().values()), {"PASS"}, self.report.lines)
-        self.assertEqual(len(self.report.lines), 3)
+        self.assertEqual(len(self.report.lines), 6)
         self.report.lines.clear()
         debugger.STATE = debugger.State()
         debugger.STATE.error = "get_native_console never listed the page"
         debugger.verify(self.run_)
         self.assertEqual(self.statuses(), {"arm a watch": "FAIL"})
+
+    def keep(self, state):
+        """Kept-rule evidence that matches the kept page."""
+        state.kept_reply = {"origin": self.fx.origin, "frame": "top"}
+        state.kept_state = {"session_id": "5", "target_id": "22", "origin": self.fx.origin, "frame": "top",
+                            "rules": {"requests": [{"url_contains": "/api/kept"}], "events": ["click"]}}
+        state.kept_records = [
+            ("request_watch_match", frame(0, "/debugger/kept.html?n=1",
+                                          line_of(debugger.KEPT_PAGE, "fetch('/api/kept"))["resolution"]),
+            ("listener_dispatch", frame(0, "/debugger/kept.html?n=1",
+                                        line_of(debugger.KEPT_PAGE, "function onKeptClick"))["resolution"])]
+        state.cleared_state = None
+        state.after_clear = []
+
+    def test_debugger_kept_rules_fail_on_each_difference(self):
+        page = debugger.index_page(self.fx.cross_site_origin)
+        cases = {
+            "keep the rules for later documents of the origin": [
+                lambda s: setattr(s, "kept_reply", None),
+                lambda s: setattr(s, "kept_reply", {"origin": self.fx.origin, "frame": "child"}),
+                lambda s: s.kept_state["rules"].update(dom=[{"element": 1}]),
+                lambda s: setattr(s, "kept_error", "watch with keep was not armed")],
+            "kept rules arm a new tab's document before its own scripts": [
+                lambda s: s.kept_records.pop(0),
+                lambda s: s.kept_records.append(("request_watch_match", frame(
+                    0, "/debugger/kept-child.html", line_of(debugger.KEPT_CHILD, "fetch('/api/kept"))["resolution"])),
+                lambda s: s.kept_records.append(("listener_dispatch", {"status": "unresolved",
+                                                                       "reason": "source_artifact_missing"})),
+                lambda s: s.kept_records.append(s.kept_records[0][:1] + ({**s.kept_records[0][1], "line": 1},))],
+            "unwatch forgets the kept rules": [
+                lambda s: setattr(s, "cleared_state", {"origin": self.fx.origin, "frame": "top"}),
+                lambda s: setattr(s, "cleared_state", "not read"),
+                lambda s: s.after_clear.append({"type": "listener_dispatch"})],
+        }
+        for case, changes in cases.items():
+            for change in changes:
+                self.report.lines.clear()
+                debugger.STATE = debugger.State()
+                debugger.STATE.observed = {
+                    "request_watch_match": {"debugger_observation": {"status": "decoded"}},
+                    "listener_dispatch": {"debugger_observation": {"detail": {"event_type": "click"}, "site": {
+                        "resolution": {"status": "resolved", "line": line_of(page, "function onWatchedClick")}}}},
+                    "csp_violation": {"debugger_observation": {"detail": {"directive": "img-src",
+                                                                          "blocked_host": "localhost"}}},
+                }
+                debugger.STATE.stack = {"frames": [frame(0, "/debugger/index.html", line_of(page, "fetch('/api/x"))]}
+                self.keep(debugger.STATE)
+                change(debugger.STATE)
+                debugger.verify(self.run_)
+                failed = {name for name, status in self.statuses().items() if status != "PASS"}
+                self.assertEqual(failed, {case}, self.report.lines)
+
+    def test_kept_pages_trigger_their_rules_from_the_first_script(self):
+        for name, text in (("/debugger/kept.html", debugger.KEPT_PAGE),
+                           ("/debugger/kept-child.html", debugger.KEPT_CHILD)):
+            status, _, body = self.get(name)
+            self.assertEqual((status, body.decode()), (200, text))
+            first = text.index("<script>\n")
+            self.assertLess(first, text.index(".click();"))
+            self.assertLess(first, text.index("fetch('/api/kept"))
+        self.assertIn('<iframe src="/debugger/kept-child.html">', debugger.KEPT_PAGE)
 
     def test_debugger_settle_waits_only_for_a_pending_source(self):
         waiting = {"frames": [{"resolution": {"status": "unresolved", "reason": "source_artifact_missing"}}]}
@@ -1020,6 +1085,67 @@ class Evidence(unittest.TestCase):
         self.assertIs(debugger.settle(lambda: waiting, debugger.top_frame, 0, 0), waiting)
         site = {"debugger_observation": {"site": {"resolution": {"status": "resolved", "line": 7}}}}
         self.assertEqual(debugger.listener_site(site), {"status": "resolved", "line": 7})
+
+    WASM_SAMPLING = {"version": 1, "streams": ["br_table", "call_indirect"], "window_ms": 1000,
+                     "records_per_window": 1024, "samples_per_function": None, "samples_per_indirect_site": None,
+                     "function_allow_count": 0, "function_deny_count": 0, "module_allowlist": False,
+                     "reset": "available"}
+
+    def wasm_evidence(self, records=3000, indirect=200, seconds=3.4, function=None, gap=True, generation=3):
+        """A paced capture of the hot loop: records spread over the loop, every function, one ordinal."""
+        module = self.backend.artifact("wasm_module", wasm.MODULE)
+        other = self.backend.artifact("wasm_module", b"another module")
+        self.get("/__beacon?m=wasm:hot", method="POST", body=json.dumps({"ok": True, "value": 900000}).encode())
+        self.backend.context = {"capture_options": {"wasm_sampling": dict(self.WASM_SAMPLING)}}
+
+        def observation(kind, artifact, index, count, function_index):
+            time = 10**9 + index * int(seconds * wasm.SECOND_NS) // max(count, 1)
+            return {"type": kind, "artifact_id": artifact, "process_id": 7, "monotonic_time_ns": str(time),
+                    "wasm_observation": {"status": "decoded", "function_index": function_index, "sample_index": index}}
+        events = [observation("wasm_dispatch_observation", module, index, records,
+                              index % wasm.FUNCTIONS if function is None else function) for index in range(records)]
+        events += [observation("wasm_indirect_observation", module, index, indirect, wasm.RUN_INDEX)
+                   for index in range(indirect)]
+        # Another page's module never counts toward this loop.
+        events.append(observation("wasm_dispatch_observation", other, 0, 1, 0))
+        events.append({"type": "wasm_dispatch_overflow", "artifact_id": "0", "process_id": 7})
+        self.backend.events = events
+        if gap:
+            self.backend.summary["checks"] = [{"code": "named_gap", "category": "vm", "count": "9",
+                                               "reason": "native_wasm_dispatch_budget_incomplete"}]
+        wasm.STATE = wasm.State()
+        wasm.STATE.reset = {"ok": True, "action": "reset_wasm_sample_budgets", "generation": generation}
+
+    def test_wasm_pacing_passes_on_a_paced_capture(self):
+        self.wasm_evidence()
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses(), {"session context wasm_sampling": "PASS", "br_table paced per window": "PASS",
+                                           "call_indirect paced per window": "PASS",
+                                           "paced remainder is named": "PASS",
+                                           "reset_wasm_sample_budgets mid-loop": "PASS"}, self.report.lines)
+
+    def test_wasm_pacing_fails_on_each_difference(self):
+        cases = [
+            ("a 16-record cap", {"records": 16, "indirect": 16},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("a session-wide stop after one second", {"seconds": 0.9},
+             {"br_table paced per window", "call_indirect paced per window"}),
+            ("one function past its allowance", {"function": 3, "seconds": 2.5}, {"br_table paced per window"}),
+            ("a silent remainder", {"gap": False}, {"paced remainder is named"}),
+            ("a refused reset", {"generation": 0}, {"reset_wasm_sample_budgets mid-loop"}),
+        ]
+        for name, changes, failing in cases:
+            with self.subTest(name):
+                self.setUp()
+                self.wasm_evidence(**changes)
+                wasm.verify(self.run_)
+                self.assertEqual({case for case, status in self.statuses().items() if status == "FAIL"}, failing,
+                                 self.report.lines)
+        self.setUp()
+        self.wasm_evidence()
+        self.backend.context["capture_options"]["wasm_sampling"]["records_per_window"] = 16
+        wasm.verify(self.run_)
+        self.assertEqual(self.statuses()["session context wasm_sampling"], "FAIL")
 
     def test_report_never_passes_a_manual_or_skipped_case(self):
         report = Report("x")

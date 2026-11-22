@@ -93,8 +93,51 @@ pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> 
         },
         "js_invocation": {
             "state": invocation["state"],
+            "live": invocation["live"],
             "count": invocation["count"],
             "digests": invocation["digests"],
+        },
+        "wasm_sampling": wasm_sampling(options),
+    })
+}
+
+/// The browser's full Wasm records per stream per sample window
+/// (`kNativeWasmDispatchSampleBudget`).
+const WASM_RECORDS_PER_WINDOW: u32 = 1024;
+
+/// Version 1 of the session's Wasm sampling: the streams that record, the
+/// one-second window, and the policy the launcher passed, as counts. Null when
+/// neither stream records or the backend is not live. An allowance the
+/// launcher did not name is null: the browser's own default applies, which
+/// this backend does not know for every build. `reset` says whether
+/// `reset_wasm_sample_budgets` has a reset file to write.
+pub fn wasm_sampling(options: &crate::config::Options) -> Value {
+    if options.capture_mode() != crate::config::CaptureMode::Live
+        || !(options.session_wasm_dispatch || options.session_wasm_call_indirect)
+    {
+        return Value::Null;
+    }
+    let streams = [
+        (options.session_wasm_dispatch, "br_table"),
+        (options.session_wasm_call_indirect, "call_indirect"),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect::<Vec<_>>();
+    json!({
+        "version": 1,
+        "streams": streams,
+        "window_ms": 1000,
+        "records_per_window": WASM_RECORDS_PER_WINDOW,
+        "samples_per_function": options.session_wasm_samples_per_function,
+        "samples_per_indirect_site": options.session_wasm_samples_per_indirect_site,
+        "function_allow_count": options.session_wasm_function_allow_count.unwrap_or(0),
+        "function_deny_count": options.session_wasm_function_deny_count.unwrap_or(0),
+        "module_allowlist": options.session_wasm_module_allowlist,
+        "reset": if options.wasm_budget_reset_file.is_some() {
+            "available"
+        } else {
+            "unavailable"
         },
     })
 }
@@ -207,6 +250,64 @@ mod tests {
     fn record(id: usize) -> Value {
         json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"9","navigation_id":"0","frame_id":"0","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://user:secret_canary@owned.example/private_secret?token=secret_canary#secret_canary","mime_type":"application/wasm","byte_size":8,"sha256":"a".repeat(64),"sensitive":false,"content_path":format!("blobs/{}.bin", "a".repeat(64))})
     }
+    #[test]
+    fn wasm_sampling_labels_only_a_live_session_that_records_wasm() {
+        use clap::Parser;
+        let parse = |arguments: &[&str]| {
+            crate::config::Options::try_parse_from(
+                ["origin-trace-backend", "--socket", "/tmp/broker.sock"]
+                    .iter()
+                    .chain(arguments)
+                    .copied(),
+            )
+        };
+        let sampling = |arguments: &[&str]| wasm_sampling(&parse(arguments).unwrap());
+        assert!(sampling(&[]).is_null());
+        assert!(
+            wasm_sampling(
+                &crate::config::Options::try_parse_from(["origin-trace-backend"]).unwrap()
+            )
+            .is_null()
+        );
+        assert_eq!(
+            sampling(&["--session-wasm-dispatch"]),
+            json!({"version":1,"streams":["br_table"],"window_ms":1000,"records_per_window":1024,
+                "samples_per_function":null,"samples_per_indirect_site":null,
+                "function_allow_count":0,"function_deny_count":0,"module_allowlist":false,
+                "reset":"unavailable"})
+        );
+        assert_eq!(
+            sampling(&[
+                "--session-wasm-dispatch",
+                "--session-wasm-call-indirect",
+                "--session-wasm-samples-per-function",
+                "1024",
+                "--session-wasm-samples-per-indirect-site",
+                "2",
+                "--session-wasm-function-allow-count",
+                "3",
+                "--session-wasm-function-deny-count",
+                "32",
+                "--session-wasm-module-allowlist",
+                "--wasm-budget-reset-file",
+                "/tmp/reset",
+            ]),
+            json!({"version":1,"streams":["br_table","call_indirect"],"window_ms":1000,
+                "records_per_window":1024,"samples_per_function":1024,"samples_per_indirect_site":2,
+                "function_allow_count":3,"function_deny_count":32,"module_allowlist":true,
+                "reset":"available"})
+        );
+        for arguments in [
+            &["--session-wasm-samples-per-function", "0"][..],
+            &["--session-wasm-samples-per-function", "1025"],
+            &["--session-wasm-samples-per-indirect-site", "1025"],
+            &["--session-wasm-function-allow-count", "0"],
+            &["--session-wasm-function-deny-count", "33"],
+        ] {
+            assert!(parse(arguments).is_err(), "{arguments:?}");
+        }
+    }
+
     #[test]
     fn retired_debugger_fields_are_fixed_and_admission_stays_explicit() {
         let summary = retired_debugger("12:34");

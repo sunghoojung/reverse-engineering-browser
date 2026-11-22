@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     native.header.payload_size = 127;
     syntactically_valid = false;
   } else if (mode == "sample-index") {
-    payload.sample_index = 16;
+    payload.sample_index = 0xffffffffU;
     syntactically_valid = false;
   } else if (mode == "flags") {
     native.header.flags = 1;
@@ -159,7 +159,7 @@ int main(int argc, char** argv) {
       indirect.resolution = static_cast<std::uint32_t>(reb::NativeWasmIndirectResolution::kNull);
       syntactically_valid = false;
     } else if (kind == "sample-index") {
-      indirect.sample_index = 16;
+      indirect.sample_index = 0xffffffffU;
       syntactically_valid = false;
     } else
       return 2;

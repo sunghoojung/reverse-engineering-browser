@@ -33,7 +33,7 @@ readonly probe_objects=(
   "obj/brave/components/reverse_engineering_browser/renderer/native_console_agent.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_console_messages.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_console_runtime.o"
-  "obj/brave/components/reverse_engineering_browser/renderer/native_console_deadline.o"
+  "obj/brave/components/reverse_engineering_browser/renderer/native_console_execution.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_console_document_start.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_debugger_pause_agent.o"
   "obj/brave/components/reverse_engineering_browser/renderer/native_debugger_pause_session.o"

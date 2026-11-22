@@ -62,6 +62,8 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | `response_body` payload version 3 | every body whole, media and fonts kept, state 13 `not_captured_disk_reserve` | Response bodies |
 | `request_body` payload version 2 | every body read and hashed whole, flag bit 7 `credential_form`, state 13 `not_captured_disk_reserve` | Request body reads |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
+| Chromium patch 0065 | `record-whole-memory-cache-targets` | Request scope and tabs |
+| Mojo `NativeProbeHost.CaptureRendererTarget` | a renderer `request_target` child with its whole target | Request scope and tabs |
 | Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
 | `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
 | `response_headers` source 2 | `network`: what `OnRawResponse` reported, with `Set-Cookie` | Headers and cookies |
@@ -323,20 +325,28 @@ in the document's cached resources. Chromium patch `0040-record-memory-cache-reu
 handles each call after its detached and observer check:
 
 1. `NativeProbeSink::AdmitMemoryCacheReuse` checks the Network category,
-   expiry and the page, then charges the configuration's budget. A reuse in a
-   page that is not ordinary (`Page::IsOrdinary`, checked by
+   expiry and the page. A reuse in a page that is not ordinary
+   (`Page::IsOrdinary`, checked by
    `FetchContext::IsOrdinaryPageForNativeCapture`: an SVG image's own document,
    whose `IsolatedSVGDocumentHost` frame the browser never registers, or a
    page popup) belongs to no tab: it is counted as exclusion class 71 and
-   charges no budget. A reuse past the budget is counted as class 70. Either
-   way nothing else is done.
-2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner,
-   and bounded prefixes of its host and, in content sessions only, its target
+   nothing else is done. Every other reuse is recorded; nothing counts them.
+2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner
+   and its host: 121 bytes, one past what the record keeps, or in content
+   sessions the whole host up to one past an artifact URL's 8,192 bytes. In
+   content sessions only it also takes its target
    (`NativeRequestTargetRange` keeps the range inside the URL whatever the
-   parser left).
+   parser left): the whole path and query of an `http` or `https` URL up to
+   the 2 MiB the browser keeps for its own requests
+   (`NativeMemoryCacheTargetBytes`, Chromium patch
+   `0065-record-whole-memory-cache-targets`), else a 116-byte prefix, since a
+   `data:` URL can be megabytes long and has no origin to name an artifact.
 3. One `memory_cache_reuse` (type 52) record, a Traffic row of its own, and in
    content sessions a `request_target` child, as above, with `parent_event_id`
-   its sequence.
+   its sequence. A target that fits the 116-byte prefix is complete in the
+   ring. A longer `http(s)` target goes whole to the browser (below), which
+   keeps it as that child's `request_target` artifact exactly as for its own
+   requests.
 
 The record names no method: Blink adds only GET resources to the memory cache
 (`ShouldResourceBeAddedToMemoryCache`), and static data is GET too, so
@@ -412,16 +422,40 @@ zero. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
 Version 1 records, which name no source, stay valid.
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
-would be, unless the configuration opts in, and returns its budget charge.
-Each renderer configuration records at most 4,096 reuses. Every later one is
-counted, not recorded, in the queue's counter for exclusion class 70
-`memory_cache_reuse`, and every reuse in a page that is not ordinary in the one
-for class 71 `non_ordinary_page_reuse`, so a researcher can tell lost tab rows
-from reuses no tab owned. The browser reports each as a cumulative
-`capture_exclusion` of that renderer like the scheme counters. The count is tagged with the admitting configuration's generation,
-so a reuse still in flight from a replaced configuration neither charges nor
-resets the new one's budget, and one it admitted is not recorded into the new
-configuration.
+would be, unless the configuration opts in. Every reuse in a page that is not
+ordinary is counted, not recorded, in the queue's counter for exclusion class
+71 `non_ordinary_page_reuse`, so a researcher can tell reuses no tab owned. The
+browser reports it as a cumulative `capture_exclusion` of that renderer like
+the scheme counters. Earlier renderers recorded at most 4,096 reuses per
+configuration and counted the rest as class 70 `memory_cache_reuse`; the class
+and its queue counter stay so that evidence still reads, and current renderers
+never count it. A reuse admitted by a replaced configuration is not recorded
+into the new one.
+
+##### Whole targets
+
+A content-session reuse whose `http(s)` target passes the 116-byte prefix
+takes the next renderer sequence for its `request_target` child and sends the
+child, its origin (scheme, host and explicit port, never user info) and its
+whole target to the browser over Mojo
+(`NativeProbeHost.CaptureRendererTarget`) instead of the ring. The renderer
+pushed the parent to the ring first, so the host drains the ring before it
+reads the child: the parent, and any exclusion decision for its row, always
+come first. The host emits the child in the slot the renderer took, with the
+retention and artifact `EmitRequestTarget` gives a browser request's long
+target (retained as a sensitive `request_target` artifact of kind 9, capture
+origin 10, named by the origin and created by the child; or not retained for
+the session budget, an unavailable artifact path or a refused transfer). It
+checks the child against the renderer's own identity: session, process and
+nonzero sequence, a `request_target` version 2 child of a nonzero parent and
+request ID, complete as sent, whose length and prefix are those of the target,
+of 117 bytes to 2 MiB, and whose origin has its scheme and fits an artifact
+URL. A child that fails, or that arrives outside a content capture, leaves a
+`renderer_target_malformed` gap in its slot and keeps nothing; one naming
+another process or session is dropped. A child the renderer could not send
+(no host on its thread) stays in the ring as `not_retained_artifact_unavailable`
+with its prefix. A target with no origin or longer than 2 MiB stays in the ring
+as `not_retained_url`, as the browser decides for its own.
 
 ### Request owners and tabs
 
@@ -792,13 +826,15 @@ the row has one, else the newest nonzero loader kind of a browser
   then reports as lost), and each end reads one slot and emits at most two
   records and one gap.
 - Memory-cache reuse, inactive: one atomic load before the hook converts
-  anything. Active: one virtual page check and the admission (the category,
-  expiry and budget reads and one compare-and-swap of the budget word). Past
-  4,096, or in a page that is not ordinary, that is all, plus one counter
-  increment; nothing is converted or allocated. An admitted reuse then takes a
-  request ID and its owner, copies at most 121 host bytes and, with request
-  content only, a 116-byte target prefix, and emits one fixed-size record and
-  that target.
+  anything. Active: one virtual page check and the admission (the category
+  and expiry reads). In a page that is not ordinary that is all, plus one
+  counter increment; nothing is converted or allocated. An admitted reuse then
+  takes a request ID and its owner, copies at most 121 host bytes and emits
+  one fixed-size record. With request content it also copies its host and the
+  target Blink converts (at most 2 MiB of an http(s) path and query, else 116
+  bytes) and emits that target: inline, or for a long http(s) target one Mojo
+  message carrying the target to the browser, which copies it once more into
+  the artifact it queues. Nothing else per reuse is bounded or counted.
 - Tabs, inactive: the loaders' owner scope and the proxy's factory hook add at
   most one atomic load and allocate nothing. Active: one virtual
   call and a thread-local write per load, one registry insert per factory, and
@@ -824,8 +860,9 @@ the row has one, else the newest nonzero loader kind of a browser
 - `get_session_summary` lists `exclusions` by class and adds the info checks
   `browser_internal_excluded` and `no_tab_traffic_excluded` (classes 65, 66,
   68 and 69), `request_tabs` (with `extension_rows` and `unresolved_reasons`),
-  and the error check `network_tab_unresolved`. Class 70 is its own info check,
-  `memory_cache_reuse_not_recorded`; class 71 is listed in `exclusions` only,
+  and the error check `network_tab_unresolved`. Class 70, from earlier
+  renderers only, is its own info check, `memory_cache_reuse_not_recorded`;
+  class 71 is listed in `exclusions` only,
   since no tab lost a row. The backend keeps types 36 to 38, 50 and 52 in its
   network window.
 - Traffic has no Unattributed group. A row is in every tab its records or link
@@ -874,10 +911,18 @@ gap names, an earlier configuration, one completion on either side of the
 on one start slot, where any accepted mix of two starts fails (accepting every
 read, or ignoring the odd version, fails it); target ranges with empty and
 invalid components; and memory-cache reuses with their owner, host, status,
-size, target, static data, a 200-byte host, counted internal URLs that return
-their charge, a page that is not ordinary and its class 71 count, the 4,096 budget and its class 70
-count at no allocation, a new configuration's fresh budget, a reuse admitted
-by a replaced configuration, and the inactive path.
+size, target, static data, a 200-byte host, counted internal URLs, a page
+that is not ordinary and its class 71 count, 12,000 content reuses with
+300-byte paths each sent whole with their origin and prefix in the slot after
+their parent, long `data:`, over-2 MiB and prefix-only targets kept inline
+with their retention, 20,000 metadata reuses all recorded with no class 70
+count and admission at no allocation, a reuse admitted by a replaced
+configuration, and the inactive path. `make native-artifact-capture-check`
+drives the production `NativeProbeHost` through `CaptureRendererTarget`: the
+parent drained first, the child retained with its whole target as a sensitive
+`request_target` artifact under its origin, a forged prefix and a wrong
+scheme each leaving a `renderer_target_malformed` gap in its slot, another
+process's child dropped, and a child outside a content capture gapped.
 `tests/network_scope_test.cpp` also checks type 52 and classes 70 and 71 for parity and
 malformed records and keeps 68 and 69 valid, and `make network-scope-wire-check`
 drives the Traffic model through memory-cache rows, a service-worker failure, a
@@ -2121,14 +2166,16 @@ no values, no debugger.
   it a request start costs one atomic load and nothing is walked.
 - The renderer walks, for a request whose `request_initiated` record was
   admitted, on the document main thread and on each dedicated, shared and
-  service worker thread ([threads](#threads)), up to 32 workers with tables
-  per renderer. Worklets and the background loader thread have no tables and
+  service worker thread ([threads](#threads)), every worker with its own
+  tables. Worklets and the background loader thread have no tables and
   record `unsupported_thread`. A synchronous XHR's start is recorded and walked
   on its calling thread, not on the pool thread that sends it
   ([synchronous requests](#synchronous-requests)).
 - V8 flag `--reb-promise-stacks`, off by default everywhere including the
   packaged app, adds [promise registrations](#promise-registrations). The
   launcher adds it for `REB_NATIVE_PROMISE_STACKS=1` with request stacks on.
+  The app's start panel offers it as an option, and the launcher drops that
+  choice, with a launch log line, from a Brave that does not define the flag.
 
 ### `request_initiator_stack` (type 34)
 
@@ -2161,8 +2208,8 @@ frame and renderer `request_id`. Payload 128 bytes, little endian:
 | 2 `no_script` | No JavaScript or Wasm was on the stack: the parser, a preload, a worker's script or module loader, or a start the loader deferred |
 | 3 `unsupported_thread` | A thread with no tables: a worklet or the background loader thread. Version 1 and 2 producers also used it for workers. A synchronous request is walked on its calling thread ([synchronous requests](#synchronous-requests)) |
 | 4 `not_retained_artifact_unavailable` | Frames walked; Artifact category off or no artifact path |
-| 5 `not_retained_budget` | Frames walked; this thread already sent 1,024 stack artifacts in this configuration for requests, navigations, cookie writes and debugger observations, which share that thread's budget |
-| 6 `not_walked_thread_limit` | Version 3: nothing was walked, because 32 other workers in this renderer held stack tables ([threads](#threads)); the scope names the worker |
+| 5 `not_retained_budget` | Frames walked; this thread already sent 1,024 stack artifacts in this configuration. Written only by earlier producers, which capped each thread; current ones send every stack |
+| 6 `not_walked_thread_limit` | Version 3: nothing was walked, because 32 other workers in this renderer held stack tables. Written only by earlier producers, which gave tables to at most 32 workers; current ones give every worker its own. The scope names the worker |
 
 Flags: bit 0 the stack artifact was queued with this record; bit 1 frames were
 omitted; bit 2 the `await` chain reached 32 frames and may continue. Bit 3 in
@@ -2220,8 +2267,10 @@ the document main thread's. A worker's records carry its context ID as
 ### Threads
 
 Each thread with tables keeps its own frame buffer, digest, script, segment,
-task attribution and promise registration tables and its own budgets; only that
-thread's walks read or write them, so a walk takes no lock after its first.
+task attribution and promise registration tables; only that thread's walks
+read or write them, so a walk takes no lock after its first. Nothing counts
+the stacks a thread sends: every walked stack whose digest the thread does not
+remember is sent.
 
 - Naming. Blink names the document main thread's isolate at V8 initialization
   and each dedicated, shared and service worker's in
@@ -2232,7 +2281,7 @@ thread's walks read or write them, so a walk takes no lock after its first.
   The name is what `script_cookie` records carry (byte 6), so it exists without
   the provider too. Worklets, the background loader thread and the pool
   thread synchronous XHR uses are never named.
-- Tables. A named thread's tables (539,920 bytes) and Blink's buffer for V8's
+- Tables. A named thread's tables (361,712 bytes) and Blink's buffer for V8's
   frames (1,056 frames of 16 bytes, 16,896 bytes) are allocated by its first
   call that needs them while capture is active: a walk (a request start, a
   schedule or post with script running, a navigation, a cookie write, a
@@ -2241,27 +2290,27 @@ thread's walks read or write them, so a walk takes no lock after its first.
   whose `no_script` handle needs no tables (worker start schedules such tasks
   under `WorkerThread::lock_`). So a worker that does neither under an active
   configuration costs nothing. With `--reb-promise-stacks` the tables also
-  hold the 2,048-entry registration ring (114,688 bytes). Walks run from
+  hold the 2,048-entry registration ring (131,072 bytes). Walks run from
   script and receipts from message dispatch, after worker initialization and
   outside `WorkerThread::lock_`; the call that makes the tables takes the
   registry lock once to register them. Nothing else allocates.
-- Limit. At most 32 worker threads per renderer process have tables
-  (`kNativeStackThreadLimit`), so at most 17,818,112 bytes of worker tables
-  and buffers, or 21,488,128 with promise stacks; the document main thread is not counted. A worker that
-  walks while 32 others hold tables walks nothing: its requests record state
-  6 `not_walked_thread_limit` with its scope, its schedules and received
-  messages are not remembered, and one `request_stack_thread_limit` gap per
-  configuration counts the thread. Its place is taken by the first call that
-  makes tables after a worker's tables are freed.
+- Workers. Every worker that walks gets its own tables, however many a page
+  starts, so their memory grows with the workers (378,608 bytes each with
+  Blink's buffer, 509,680 with promise stacks), beside the several MiB each
+  worker's own isolate and global scope already take. Earlier producers gave
+  tables to at most 32 workers per renderer and recorded state 6 and a
+  `request_stack_thread_limit` gap for the rest.
 - Shutdown. `PerformShutdownOnWorkerThread` frees a worker's tables and Blink's
-  buffer and forgets its name and its place.
+  buffer and forgets its name.
 
 A browser refusal (`NativeStackArtifactRefused`) arrives on the transport's
 sequence for the record that created a stack artifact. Every refusal is either
 applied or covered, and a cover is counted; none is lost unseen. The order:
 
-1. Before `CaptureGeneratedArtifact` sends an artifact, the walk adds its
-   creator sequence, digest and budget to the thread's queued index and
+1. Before `CaptureGeneratedArtifact` sends an artifact, the walk stores its
+   digest with its creator sequence in the thread's digest table, and every
+   segment or registration naming that digest from then on, the creating one
+   and those that find it remembered, carries the same creator. It also
    stores one word, the creator sequence and the table's ordinal together,
    into the 8,192-slot owner ring with release. One word is one writer's
    pair, so two writers that claimed the same slot 8,192 claims apart replace
@@ -2271,8 +2320,7 @@ applied or covered, and a cover is counted; none is lost unseen. The order:
    step 1. Under the registry lock it goes to the table whose word holds its
    creator (read with acquire). When no word holds it (the slot was reused, or
    the pair did not fit), it goes to every table with a scope instead; each
-   looks the creator up in its own queued index, so only the owner acts on
-   it.
+   looks the creator up in its own entries, so only the owner acts on it.
 3. Each table's mailbox is a 256-entry single-producer, single-consumer ring
    that never overwrites: the producer reads the consumer's published tail with
    acquire and stores an entry only into a free slot (the entry as plain
@@ -2283,19 +2331,21 @@ applied or covered, and a cover is counted; none is lost unseen. The order:
 4. The owning thread drains at the start of its next walk: head with acquire,
    the entries below it copied, the tail published with release (only then
    can the producer reuse those slots), then the overflow flag exchanged.
-   Each found refusal refunds its budget, forgets its digest and, in one scan
-   of the segment and registration rings per drain however many arrived, stops
-   calling captured any segment or registration on that digest. An overflow
+   One scan of the digest table and the segment and registration rings finds
+   the digests the refused creators name and forgets them, and a second scan
+   of the rings stops calling captured any segment or registration on one of
+   those digests, however many refusals arrived. A segment copied from a
+   message carries no creator but is still found by its digest. An overflow
    instead forgets every digest, stops calling any remembered segment or
    registration captured, and counts a `request_stack_refusals_overflowed`
    gap.
 
-The queued index holds 4,096 entries, more than the three budgets' 3,072 that
-can be outstanding in one configuration (each refusal removes its entry and
-refunds its budget), so an entry is never displaced; it is cleared when the
-configuration changes, when an older configuration's refusals no longer
-matter. A refusal for a thread that has detached changes nothing: its
-segments are gone with it.
+Creators are renderer sequences, never reused in a process, and every entry is
+matched within its own configuration, so a late refusal from an older one
+matches nothing. When every entry naming a refused creator was already
+evicted, nothing the thread remembers claims that artifact, and the next
+identical stack is sent again anyway. A refusal for a thread that has
+detached changes nothing: its segments are gone with it.
 
 ### Stack artifact
 
@@ -2339,8 +2389,7 @@ synchronous ones in chain order; each async frame is one segment.
 Each thread remembers 256 digests it sent in the current configuration. A
 repeated stack sends no artifact. A digest that falls out of that table, or that
 the browser reports refused or lost (`NativeStackArtifactRefused`), is sent again,
-never dropped. Each thread sends at most 1,024 request stack artifacts per
-configuration; a refused attempt does not count.
+never dropped. No count limits what a thread sends.
 
 ### `script_identity` (type 35)
 
@@ -2369,16 +2418,16 @@ and Artifact gate.
 Flags: bit 0 `eval` or `new Function` script; bit 1 the source was queued as
 an artifact with this record as creator; bit 2 source longer than 16 MiB, not
 hashed; bit 3 source unavailable; bit 4 not retained: Artifact category off,
-content capture off, or the source budget is spent. Exactly one of bit 1, bit 2, bit 3, bit 4 or none
+content capture off, or no artifact URL (empty, or longer than the artifact
+header allows). Exactly one of bit 1, bit 2, bit 3, bit 4 or none
 (a Wasm module, never re-sent) holds. A digest is present unless bit 2 or 3.
 
 JavaScript sources are retained only in content capture
 (`--reb-capture-request-content`), so a Metadata only session keeps frames,
 script IDs, positions and digests but no script source; the browser refuses
 such an artifact from a renderer outside content capture. They are retained as
-kind 1 `javascript`, capture origin 13 `stack_script`, at most 64 MiB of
-source per renderer configuration, with
-the script URL, or the document URL for an inline script, as the artifact URL.
+kind 1 `javascript`, capture origin 13 `stack_script`, every script a stack
+names once per thread and configuration, with the script URL, or the document URL for an inline script, as the artifact URL.
 Wasm modules are not re-sent: the compile-time Wasm artifacts join by SHA-256.
 A network script the body tee retained also joins by SHA-256.
 
@@ -2433,10 +2482,11 @@ records.
   frame, and "Request initiator chain" from the request's initiator edges.
   `no_script` reads "Parser", or "Worker loader" for a worker; a worker stack
   says which worker kind started it, and `not_walked_thread_limit` says no
-  stack was walked because 32 other workers held tables. The Traffic table's
-  Initiator column reads "Worker script", "Worker loader" and "Worker, not
-  walked" for version 3 worker stacks. Budget notes name the thread's own
-  budget and which one: request stacks, scheduling stacks or promise
+  stack was walked because the recording browser held at most 32 workers'
+  tables. The Traffic table's Initiator column reads "Worker script", "Worker
+  loader" and "Worker, not walked" for version 3 worker stacks. A
+  `not_retained_budget` note says the recording browser capped stacks per
+  thread, and which kind: request stacks, scheduling stacks or promise
   registration stacks. Captured values are inserted as text.
 
 ### Hot path and bounds
@@ -2448,15 +2498,14 @@ records.
   SHA-256 of at most 18,480 bytes, one 320-byte record. First sightings add
   one artifact, and for each new script one record and one source copy.
   Draining routed refusals is two loads when none arrived; a drain that found
-  some does one scan of the 2,048-entry segment ring (and the registration
-  ring) however many it applies, plus a bounded index lookup per refusal.
-- Memory: 556,816 bytes per thread with tables (539,920 of tables, refusal
-  mailbox, queued index and recent posts, 16,896 of Blink's frame buffer), plus 114,688 for
+  some scans the 256-entry digest table and the 2,048-entry segment ring (and
+  the registration ring) twice however many it applies.
+- Memory: 378,608 bytes per thread with tables (361,712 of tables, refusal
+  mailbox and recent posts, 16,896 of Blink's frame buffer), plus 131,072 for
   the registration ring with `--reb-promise-stacks`. Allocated by the thread's
   first walk or message receipt while capture is active, never when it is
   named or by a schedule with no script, and freed when a
-  worker stops; at most 32 workers per renderer have them
-  ([threads](#threads)). The owner ring is 64 KiB of process-static storage,
+  worker stops ([threads](#threads)). The owner ring is 64 KiB of process-static storage,
   untouched until a stack artifact is queued.
 
 ### Validation
@@ -2466,7 +2515,8 @@ with the overlay, every state and version, stack scopes, the frame bounds and
 malformed records.
 `make native-probe-admission-check` drives the real renderer sink with a
 fixture provider: disabled, 150 and 5,000 frames, Wasm and `await` frames,
-repeated stacks, table eviction, budgets and script identity, and on a second
+repeated stacks, table eviction, 5,000 distinct stacks on one thread all sent,
+and script identity, and on a second
 thread a dedicated worker's own tables, scope, frame IDs and identities; that
 naming allocates nothing, a schedule or post with no script makes no tables,
 and a thread's first walk or message receipt makes them;
@@ -2605,9 +2655,8 @@ Its artifact is a version 3 (version 1 from earlier producers) stack artifact
 of the synchronous frames (total depth equal to recorded), kind 13, capture
 origin 12 `request_stack`, creator this record; scripts it names get
 `script_identity` children. Stacks share the thread's 256-digest table with
-request stacks, so a repeated scheduling site sends nothing; each thread sends
-at most 1,024 scheduling stacks and 1,024 registration stacks per
-configuration, and a refused attempt does not count.
+request stacks, so a repeated scheduling site sends nothing, and every new
+one is sent.
 
 #### Task segment
 
@@ -2618,7 +2667,7 @@ it.
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 1 | task kind: 1 to 9, and in version 3 also 10 to 12 |
-| 1 | 1 | state: 1 captured, 4 not retained (Artifact off, or the browser refused its artifact), 5 not retained (the thread's scheduling budget, or its registration budget for kind 9), 6 not recorded (kind 9 only), 7 `no_script` (version 3, not kind 9), 8 `origin_rejected` (version 3, kinds 10 to 12) |
+| 1 | 1 | state: 1 captured, 4 not retained (Artifact off, or the browser refused its artifact), 5 not retained (the thread's scheduling budget, or its registration budget for kind 9, written only by earlier producers), 6 not recorded (kind 9 only), 7 `no_script` (version 3, not kind 9), 8 `origin_rejected` (version 3, kinds 10 to 12) |
 | 2 | 1 | flags: bit 0 the walk stopped at its frame limit; bit 1, version 3 kind 9 in state 6 only, promise registration stacks were on but no registration was remembered |
 | 3 | 1 | version 3, kind 9 in state 1, 4 or 5: the registration (1 to 4, as in `async_task_stack`); else zero |
 | 4 | 4 | frames in its stack: 1 to 256, or 1 to 32 for a kind 9 registration; 0 in states 6, 7 and 8 |
@@ -2731,10 +2780,9 @@ inspector's delegate pointer. While capture is inactive the delegate's `active` 
 fails before V8 scans a frame or assigns an ID.
 
 Each registration in an active capture walks the innermost 32 frames, hashes
-at most 560 bytes and stores one 56-byte entry in the thread's 2,048-entry
+at most 560 bytes and stores one 64-byte entry in the thread's 2,048-entry
 registration ring keyed by the task ID; a new digest is sent once as an
-`async_task_stack` kind 9 record with its artifact, within the thread's
-registration budget. When a reaction runs, a request or schedule inside it
+`async_task_stack` kind 9 record with its artifact. When a reaction runs, a request or schedule inside it
 reads its entry: the chain's kind 9 segment then carries the registration and
 its stack (state 1, 4 or 5) instead of state 6. An entry is used only for its
 own task ID and configuration; a later registration in the same slot replaces
@@ -2747,7 +2795,8 @@ on each promise creation, `then` and reaction. In an active capture each user
 registration adds V8's own scan to the first user frame, which allocates a
 small vector per frame scanned as it does for DevTools, plus one walk of up to
 32 frames, one SHA-256 and one table entry, a few microseconds. The flag is
-therefore off by default, including in the packaged app. On each microtask
+therefore off by default, including in the packaged app, whose start panel
+can turn it on. On each microtask
 segment without a registration the Initiator tab says which applies: flag bit
 1 clear, promise registration stacks were off; set, they were on but the
 thread remembered no registration (a builtin registered it, capture was off
@@ -2821,8 +2870,8 @@ flag bit 1, else null). A microtask segment without its registration says
 whether promise registration stacks were off (and that
 `REB_NATIVE_PROMISE_STACKS=1` records them) or on with nothing remembered; an
 `origin_rejected` segment says its sender is not known; a `not_retained_budget`
-segment names its thread's scheduling budget, or its registration budget for
-a microtask.
+segment, from an earlier producer, names the recording browser's scheduling
+budget, or its registration budget for a microtask.
 
 ### Hot path and bounds
 
@@ -2864,7 +2913,8 @@ down before the page receives, a no-script post, cut and truncated ends
 carried apart, Network off) and promise registrations (flag off, tables made
 before the flag, the registration in the microtask segment and in the hop of
 a task scheduled in a reaction, dedupe, the 32-frame bound, an unknown
-reaction marked with promise stacks on, the budget and capture off, where an
+reaction marked with promise stacks on, 3,000 registrations all sent, and
+capture off, where an
 attached worker never makes its tables). The Mojo traits and `ShallowClone`
 bound are Chromium code no host harness compiles; the harness covers what the
 receiver does with their oversize marker. `make request-stack-wire-check` renders a worker stack with a
@@ -2908,5 +2958,4 @@ Still required before declaring this browser-ready:
    provenance, not a page script with the same ID; a `BroadcastChannel`
    message whose origin a test build corrupts reads `origin_rejected` with one
    `message_task_origin_rejected` gap; a page that starts 40 workers which
-   each `fetch` shows `Worker, not walked` for the workers past 32 and one
-   `request_stack_thread_limit` gap per such worker.
+   each `fetch` shows a worker stack for every one of them and no gap.

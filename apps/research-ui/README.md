@@ -258,8 +258,11 @@ read" and dims it, and the status line says why.
 
 The sections scroll as one pane. An open section's title stays at the top of
 the pane while its content scrolls under it, so a list is never seen without
-its title, and a list fades the edge that more rows lie past. Each section is
-a collapsible pane:
+its title. A list is as tall as its rows up to a cap that follows the
+window's height, and it ends on a whole row: the row edge nearest the cap, or
+its last row when the cap would cut only a few pixels. A thin shade marks the
+edge that more rows lie past, within the rows' padding, never over their
+text. Each section is a collapsible pane:
 
 - **Threads**, the Threads view, one line per thread in three groups: Console
   documents (top, child and out-of-process frames, as the Console listing

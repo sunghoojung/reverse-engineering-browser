@@ -45,7 +45,36 @@
     return ancestors;
   };
 
-  // The visible part of a node after every clipping ancestor is applied.
+  // Boxes stuck to the top edge of a scroll container (position: sticky)
+  // paint over what scrolls under them, so they hide it as the edge itself
+  // does. Each probe call finds a scroller's stuck boxes once.
+  let stuckCache = null;
+  const scrollerOf = node => {
+    for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY)) return parent;
+    }
+    return null;
+  };
+  const stuckBoxes = scroller => {
+    if (stuckCache?.has(scroller)) return stuckCache.get(scroller);
+    const edge = scroller.getBoundingClientRect().top + scroller.clientTop;
+    const stuck = [];
+    for (const node of scroller.querySelectorAll('*')) {
+      const style = getComputedStyle(node);
+      if (style.position !== 'sticky' || style.top === 'auto' || scrollerOf(node) !== scroller || !rendered(node)) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.top <= edge + parseFloat(style.top) + 1) stuck.push({node, rect});
+    }
+    stuckCache?.set(scroller, stuck);
+    return stuck;
+  };
+  const withStuckBoxes = probe => (...args) => {
+    stuckCache = new Map();
+    try { return probe(...args); } finally { stuckCache = null; }
+  };
+
+  // The visible part of a node after every clipping ancestor, and every box
+  // stuck over it in a scrolling one, is applied.
   const visibleRect = element => {
     let rect = element.getBoundingClientRect();
     let {left, top, right, bottom} = rect;
@@ -58,6 +87,12 @@
           right: box.left + node.clientLeft + node.clientWidth, bottom: box.top + node.clientTop + node.clientHeight};
         left = Math.max(left, clip.left); right = Math.min(right, clip.right);
         top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom);
+      }
+      if (/(auto|scroll)/.test(style.overflowY)) {
+        for (const stuck of stuckBoxes(node)) {
+          if (stuck.node.contains(element) || element.contains(stuck.node)) continue;
+          if (stuck.rect.left < right && stuck.rect.right > left) top = Math.max(top, stuck.rect.bottom);
+        }
       }
     }
     left = Math.max(left, 0); top = Math.max(top, 0);
@@ -193,6 +228,9 @@
     const issues = [];
     for (const element of root.querySelectorAll('*')) {
       if (!rendered(element) || element.children.length > 0 || !element.textContent.trim()) continue;
+      // A box of a pixel or less shows no text: it is kept for assistive readers.
+      const box = element.getBoundingClientRect();
+      if (box.width <= 1 && box.height <= 1) continue;
       const style = getComputedStyle(element);
       // A line clamp is an explicit, visible truncation with an ellipsis.
       const clamped = style.webkitLineClamp && style.webkitLineClamp !== 'none';
@@ -273,5 +311,6 @@
     return {shown: true, offenders: offenders.slice(0, 20)};
   }
 
-  window.__rebUiProbe = {layoutIssues, clippedText, scrollToEnd, focusState, center, inertness, scrollProbe, text, visibleText, count, exists, describe, box, dividerReach};
+  window.__rebUiProbe = {layoutIssues: withStuckBoxes(layoutIssues), clippedText, scrollToEnd, focusState, center, inertness, scrollProbe,
+    text, visibleText, count, exists, describe, box, dividerReach: withStuckBoxes(dividerReach)};
 })();

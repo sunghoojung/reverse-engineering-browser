@@ -35,13 +35,17 @@
 }
 
 /* Sections scroll as one pane; an open section's title stays at the top
-   while its content scrolls under it, so a list is never seen headless. */
-.debugger-sidebar-sections { min-height: 0; overflow: auto; overscroll-behavior: contain; scroll-padding-top: 32px; }
+   while its content scrolls under it, so a list is never seen headless. The
+   pane positions what is absolute inside it: otherwise such a box escapes to
+   the sidebar at its place deep in the list, the sidebar overflows, and a
+   reveal's scrollIntoView scrolls the Sources screen, which no one can scroll
+   back. */
+.debugger-sidebar-sections { position: relative; min-height: 0; overflow: auto; overscroll-behavior: contain; scroll-padding-top: 32px; }
 #screen-sources .debugger-section > summary { position: sticky; top: 0; z-index: 2; gap: 8px; background: var(--panel); }
 #screen-sources .debugger-section[open] > summary { box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--line-soft) 60%, transparent); }
 #screen-sources .debugger-section > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .debugger-section-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.debugger-section-count { flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 400 11px var(--sans); font-variant-numeric: tabular-nums; }
+.debugger-section-count { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 400 11px var(--sans); font-variant-numeric: tabular-nums; }
 .debugger-section[data-stale="true"] .debugger-section-count::after { content: " · last read"; }
 .debugger-section[data-stale="true"] .debugger-section-body { opacity: .72; }
 /* A section another file registers gets the titles' edge; the built-in ones
@@ -60,18 +64,20 @@
 
 /* Flags: a short state the researcher must see, its detail in the tooltip. */
 .debugger-flags { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 0 24px; }
-.debugger-flag { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-height: 20px; padding: 0 7px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--amber) 42%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--amber) 9%, transparent); color: var(--amber); font: 500 11px/18px var(--sans); overflow-wrap: anywhere; cursor: default; }
+.debugger-flag { position: relative; display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-height: 20px; padding: 0 7px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--amber) 42%, transparent); border-radius: 10px; background: color-mix(in srgb, var(--amber) 9%, transparent); color: var(--amber); font: 500 11px/18px var(--sans); overflow-wrap: anywhere; cursor: default; }
 .debugger-flag::before { content: ""; flex: none; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .debugger-flag[data-kind="gap"] { border-style: dashed; }
 
 /* Lists mount only the rows in view; rows are absolutely positioned. Each
-   list is sized to its rows up to its cap, so a short one leaves no band,
-   and its frame fades an edge that more rows lie past. */
+   list is sized to its rows up to its cap and stops on a whole row (the
+   script picks the row edge nearest the cap), so a short one leaves no band
+   and no row shows sliced. Its frame shades an edge that more rows lie past,
+   within the rows' padding, never over their text. */
 .debugger-list-frame { position: relative; min-width: 0; border-block: 1px solid var(--line-soft); background: var(--panel-2); }
-/* Inset by the list's 2 px focus outline, which stays whole over a fade. */
-.debugger-list-frame::before, .debugger-list-frame::after { content: ""; position: absolute; left: 2px; right: 2px; z-index: 1; height: 18px; pointer-events: none; opacity: 0; transition: opacity .12s; }
-.debugger-list-frame::before { top: 2px; background: linear-gradient(var(--panel-2), transparent); }
-.debugger-list-frame::after { bottom: 2px; background: linear-gradient(transparent, var(--panel-2)); }
+/* Inset by the list's 2 px focus outline, which stays whole under a shade. */
+.debugger-list-frame::before, .debugger-list-frame::after { content: ""; position: absolute; left: 2px; right: 2px; z-index: 1; height: 5px; pointer-events: none; opacity: 0; transition: opacity .12s; }
+.debugger-list-frame::before { top: 2px; background: linear-gradient(var(--shadow), transparent); }
+.debugger-list-frame::after { bottom: 2px; background: linear-gradient(transparent, var(--shadow)); }
 .debugger-list-frame:is([data-more="above"], [data-more="both"])::before, .debugger-list-frame:is([data-more="below"], [data-more="both"])::after { opacity: 1; }
 .debugger-list { position: relative; max-height: 240px; overflow: auto; overscroll-behavior: contain; }
 .debugger-list:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

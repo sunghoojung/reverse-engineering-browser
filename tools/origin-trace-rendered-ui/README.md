@@ -46,7 +46,10 @@ the DOM and computed layout and scrolls targets into view. It skips a row its
 scroller shows by under 2 px, where hit testing snaps onto the next row, but
 still checks a control whose own box is that small. It clips a box only by
 the ancestors that contain it, as CSS paints it, so a popover fixed to the
-window is not judged cut by the short table it opens from;
+window is not judged cut by the short table it opens from, and a box stuck to
+a scroller's top (`position: sticky`) hides what scrolls under it as the
+scroller's edge does. Text in a box of a pixel or less, kept for assistive
+readers, is not clipped text;
 [`check-rendered-ui-probes.mjs`](../check-rendered-ui-probes.mjs), part of
 `make lint`, checks these against modelled boxes.
 
@@ -121,7 +124,11 @@ retained compiled script (artifact 360) whose listener, timer and
 throw sites the records name. One listener's event type is markup and must
 stay text. At both window sizes the sections must be Threads, Watch rules,
 Observations and Pausing, Pausing must state the availability the backend
-reports with no pausing control, only rows near the view may mount, Tab from
+reports with no pausing control, only rows near the view may mount, Threads
+must show at least six whole one-line rows, both lists must end on a whole
+row, every record must read its time as `+M:SS.mmm` and its identifiers as
+`P F #` (and `R`), the kind menu must name each kind's count, a scrolled pane
+must keep the section's title over its list, Tab from
 the focused Threads pane must reach the list with a visible indicator, frame
 200 must scope the Sources tree and Observations, a listener record must be
 marked selected as soon as it is clicked, its **Open onTap @ handlers.js:2:71**
@@ -134,8 +141,13 @@ request (5100) must open its own Traffic row on the Initiator tab both by its
 failing, and then answering a malformed document, the status must say so
 while the last rows stay, marked stale, until a good read clears it. The
 record and both stale states are also photographed in the light theme. Escape must return to the toggle, or to
-**More** while a docked sidebar has moved the toggle into that menu, and a
-closed sidebar must make no read for 4.5 seconds. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
+**More** while a docked sidebar has moved the toggle into that menu, and
+closing must abort the read under way and start none: the test holds each read
+as a loaded backend would, so the thread click's read is in flight at the
+close, and it must end aborted, with no read started in the next 4.5 seconds.
+A read under way at the close is not a new read: its resource entry lands only
+when it ends, after the close, which once failed a count of all entries under
+load. `REB_RENDERED_UI_DEBUGGER_RECORDS` (8 to 20,000, default
 120) sets how many records the fixture writes; they also count as
 Fingerprinting activity. `test6RemovedFeaturesAreAbsent`
 reads Sources with the sidebar open, leaving out only the paused-state words

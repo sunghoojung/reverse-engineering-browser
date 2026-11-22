@@ -1,4 +1,4 @@
-;; Repository-owned value-flow fixture: every shape the wasm-value-flow-v1
+;; Repository-owned value-flow fixture: every shape the wasm-value-flow-v2
 ;; slice reports, with no third-party code. See README.md for what each
 ;; function exercises.
 (module

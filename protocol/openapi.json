@@ -27,6 +27,10 @@
     "default_tools": "read_only_eligible",
     "effects_flag": "--allow-effects",
     "inline_json_limit_bytes": 131072,
+    "page": {
+      "extension": "x-reb-mcp-page",
+      "description": "An operation that lists x-reb-mcp-page.parameters is paged: when its result exceeds inline_json_limit_bytes compact or pretty-printed, reb-api mcp halves each listed parameter (from the value given, or the parameter's schema default) and sends the request again, until the result fits or every parameter is 1; only then does the structural summary apply. The result's request or offset fields say which page was returned, and its next_* offsets continue it. The provider itself never cuts a document to fit a transport."
+    },
     "binary_inline": false,
     "oversized_json": "structural_summary",
     "summary_string_chars": 160,
@@ -4820,8 +4824,8 @@
     "/api/wasm/value-flow": {
       "get": {
         "operationId": "get_wasm_value_flow",
-        "summary": "Value flow for one WebAssembly operand or local",
-        "description": "Declared static value flow inside one defined function of a hash-verified core WASM artifact. Seed with offset (an instruction's original byte offset) and optionally operand (text order), or with local. backward lists what feeds the seed: params, locals, globals, constants, memory loads with their address slice, call and import call results; forward lists where it goes: stores (address or value side), call and call_indirect arguments, import calls (the JS crossing), br_table, br_if, if and select selectors, globals and returns. Joins at block, loop, if and try merges list every incoming edge. A load follows a store only for the same constant address in the same block with nothing between. interprocedural=true adds one step to direct call sites. Bounded by max_nodes and max_depth, with no deadline: a request that goes away stops the slice and is answered 499 cancelled; truncated and omissions say what was cut. text and expression are content (instruction text) and are omitted below Full access; kinds, offsets, indices and edges are structure. Never executes the module.",
+        "summary": "Complete value flow for one WebAssembly operand or local",
+        "description": "Declared static value flow inside a hash-verified core WASM artifact, complete for the seed: wasm-value-flow-v2. Seed with offset (an instruction's original byte offset) and optionally operand (text order), or with local. backward lists everything that feeds the seed, forward everything it reaches, each node with the edge to its parent toward the seed, so any node's path to the seed is in the document. Every node has a class: value (provably the value), address (computed the address of a memory read), memory_may (may be the value, through a memory cell), or control (decided which path ran; control=true follows these). Calls are entered: forward through an argument continues inside the callee and returns to this call over a summary edge for the results the parameter reaches; backward through a result enters the callee's returns and the arguments the result depends on; interprocedural=false keeps calls opaque. There is no node, depth, edge or byte cap and no deadline; the document is paged (node_offset and node_limit over nodes in walk order, source_* and sink_* over the complete source and sink lists with kind histograms, join_* over each join's incoming entries), and a request that goes away is answered 499. text and expression are content (instruction text) and are omitted below Full access; kinds, offsets, indices, classes and edges are structure. Never executes the module.",
         "tags": [
           "artifacts"
         ],
@@ -4839,7 +4843,7 @@
           {
             "name": "function",
             "in": "query",
-            "required": true,
+            "required": false,
             "description": "Function index, including imported function numbering. An imported or undefined index returns 404.",
             "schema": {
               "type": "integer",
@@ -4894,40 +4898,191 @@
             }
           },
           {
-            "name": "max_nodes",
+            "name": "control",
             "in": "query",
             "required": false,
-            "description": "Node cap, default 256. The slice records at most four edges and four join entries per node of this cap, and the response lists at most four edges per listed node.",
+            "description": "true also follows control edges backward: from a join to the decisions its incoming paths depend on, and from a decision to what decided it. Default false.",
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4096
-            }
-          },
-          {
-            "name": "max_depth",
-            "in": "query",
-            "required": false,
-            "description": "Edges followed from the seed, default 32.",
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 256
+              "type": "boolean",
+              "default": false
             }
           },
           {
             "name": "interprocedural",
             "in": "query",
             "required": false,
-            "description": "true adds one bounded step: params and returns to direct call sites, call arguments and results to the callee.",
+            "description": "true (default) enters the functions calls name, with summaries returning results to their call; false keeps calls opaque: arguments into them are sinks and results out of them are sources.",
             "schema": {
-              "type": "boolean"
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "node_offset",
+            "in": "query",
+            "required": false,
+            "description": "First node of the page, in walk order. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "node_limit",
+            "in": "query",
+            "required": false,
+            "description": "Nodes in the page, at least 1. Default 256. A page parameter: reb-api mcp halves it until the result fits the inline limit (x-reb-mcp-page).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 256
+            }
+          },
+          {
+            "name": "source_offset",
+            "in": "query",
+            "required": false,
+            "description": "First source of the page. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "source_limit",
+            "in": "query",
+            "required": false,
+            "description": "Sources in the page, at least 1. Default 100. A page parameter: reb-api mcp halves it until the result fits the inline limit (x-reb-mcp-page).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 100
+            }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "required": false,
+            "description": "Lists only sources of this node kind; the histogram still counts every kind.",
+            "schema": {
+              "enum": [
+                "param",
+                "local_init",
+                "phi",
+                "exception_value",
+                "unknown",
+                "const",
+                "local_get",
+                "local_set",
+                "local_tee",
+                "global_get",
+                "global_set",
+                "load",
+                "store",
+                "atomic",
+                "memory",
+                "table",
+                "call",
+                "import_call",
+                "call_indirect",
+                "call_ref",
+                "select",
+                "operation",
+                "branch",
+                "return",
+                "throw",
+                "drop",
+                "memory_cell"
+              ]
+            }
+          },
+          {
+            "name": "sink_offset",
+            "in": "query",
+            "required": false,
+            "description": "First sink of the page. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "sink_limit",
+            "in": "query",
+            "required": false,
+            "description": "Sinks in the page, at least 1. Default 100. A page parameter: reb-api mcp halves it until the result fits the inline limit (x-reb-mcp-page).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 100
+            }
+          },
+          {
+            "name": "sink_kind",
+            "in": "query",
+            "required": false,
+            "description": "Lists only sinks of this node kind; the histogram still counts every kind.",
+            "schema": {
+              "enum": [
+                "param",
+                "local_init",
+                "phi",
+                "exception_value",
+                "unknown",
+                "const",
+                "local_get",
+                "local_set",
+                "local_tee",
+                "global_get",
+                "global_set",
+                "load",
+                "store",
+                "atomic",
+                "memory",
+                "table",
+                "call",
+                "import_call",
+                "call_indirect",
+                "call_ref",
+                "select",
+                "operation",
+                "branch",
+                "return",
+                "throw",
+                "drop",
+                "memory_cell"
+              ]
+            }
+          },
+          {
+            "name": "join_offset",
+            "in": "query",
+            "required": false,
+            "description": "First incoming entry listed for each join of the page. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "join_limit",
+            "in": "query",
+            "required": false,
+            "description": "Incoming entries listed for each join of the page, at least 1. Default 64. A page parameter: reb-api mcp halves it until the result fits the inline limit (x-reb-mcp-page).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 64
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "Versioned value-flow slice.",
+            "description": "Complete, paged value-flow slice.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4937,7 +5092,7 @@
             }
           },
           "400": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, an oversized function, a seed at or after the point where simulation stopped, or an integrity or decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4947,7 +5102,7 @@
             }
           },
           "403": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, an oversized function, a seed at or after the point where simulation stopped, or an integrity or decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4957,7 +5112,7 @@
             }
           },
           "404": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, an oversized function, a seed at or after the point where simulation stopped, or an integrity or decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4967,7 +5122,7 @@
             }
           },
           "422": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, an oversized function, a seed at or after the point where simulation stopped, or an integrity or decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4977,7 +5132,7 @@
             }
           },
           "500": {
-            "description": "Invalid identifier or query, missing artifact, function or instruction, oversized function, a seed past the simulation's stop point, or integrity/decoding failure.",
+            "description": "Invalid identifier or query, missing artifact, function or instruction, an oversized function, a seed at or after the point where simulation stopped, or an integrity or decoding failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4997,6 +5152,14 @@
             }
           }
         },
+        "x-reb-mcp-page": {
+          "parameters": [
+            "node_limit",
+            "source_limit",
+            "sink_limit",
+            "join_limit"
+          ]
+        },
         "x-reb-execution": {
           "kind": "operation",
           "effects": [
@@ -5011,7 +5174,7 @@
             },
             {
               "id": "stored-wasm-artifact",
-              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification and size limits."
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification."
             },
             {
               "id": "defined-function",
@@ -5019,15 +5182,188 @@
             }
           ],
           "confirmations": [],
-          "notes": "Simulates one function body's operand stack and locals on request, one function at a time, with no retained whole-module structure. Declared static flow only; the module is never executed.",
+          "notes": "Simulates the seed's function body and the bodies of the functions its slice enters, on request, with no budget but the machine's memory; simulations, slices, summaries and the call index are cached by the module's SHA-256, which is recomputed from the bytes on every request. Declared static flow only; the module is never executed.",
           "sources": [
             {
               "path": "apps/origin-trace-backend/src/wasm_value_flow.rs",
               "symbol": "value_flow"
             },
             {
+              "path": "apps/origin-trace-backend/src/wasm_value_slice.rs",
+              "symbol": "Slice::compute"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/wasm_summaries.rs",
+              "symbol": "Reach::of"
+            },
+            {
               "path": "apps/origin-trace-backend/src/wasm_def_use.rs",
               "symbol": "simulate"
+            }
+          ]
+        },
+        "x-reb-execution-schema": {
+          "$ref": "#/components/schemas/RebExecutionMetadata"
+        }
+      }
+    },
+    "/api/wasm/call-sites": {
+      "get": {
+        "operationId": "get_wasm_call_sites",
+        "summary": "Direct call sites of one WebAssembly function",
+        "description": "Every direct call and return_call site of one function of a hash-verified core WASM artifact, from a per-module call index built once per module hash, paged by offset and limit with an exact count: wasm-call-sites-v1. indirect says what else can reach the function (an export, the start function, an element segment, a ref.func). Structure only. Never executes the module.",
+        "tags": [
+          "artifacts"
+        ],
+        "parameters": [
+          {
+            "name": "artifact_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "description": "Canonical nonzero unsigned 64-bit artifact ID"
+            }
+          },
+          {
+            "name": "function",
+            "in": "query",
+            "required": true,
+            "description": "Function index, including imported function numbering; an undeclared index returns 404.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "description": "First site of the page, by caller then offset. Default 0.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Sites in the page, at least 1. Default 100. A page parameter: reb-api mcp halves it until the result fits the inline limit (x-reb-mcp-page).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paged call sites.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasmCallSites"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid identifier or query, missing artifact or function, or an integrity or decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Invalid identifier or query, missing artifact or function, or an integrity or decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Invalid identifier or query, missing artifact or function, or an integrity or decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid identifier or query, missing artifact or function, or an integrity or decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Invalid identifier or query, missing artifact or function, or an integrity or decoding failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "499": {
+            "description": "The request went away and its scan stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-reb-mcp-page": {
+          "parameters": [
+            "limit"
+          ]
+        },
+        "x-reb-execution": {
+          "kind": "operation",
+          "effects": [
+            "analysis"
+          ],
+          "state_dependent_effects": [],
+          "uncertainties": [],
+          "prerequisites": [
+            {
+              "id": "local-request",
+              "condition": "Host must name the exact loopback listening port; cross-site Sec-Fetch-Site is rejected; an optional Origin must pass App::trusted."
+            },
+            {
+              "id": "stored-wasm-artifact",
+              "condition": "artifact_id must identify a captured WebAssembly artifact that passes content verification."
+            }
+          ],
+          "confirmations": [],
+          "notes": "Decodes every body of the module once, in parallel, keeping only the call sites; the index is cached by the module's SHA-256. Nothing is executed.",
+          "sources": [
+            {
+              "path": "apps/origin-trace-backend/src/wasm_value_flow.rs",
+              "symbol": "call_sites"
+            },
+            {
+              "path": "apps/origin-trace-backend/src/wasm_call_index.rs",
+              "symbol": "CallIndex::build"
             }
           ]
         },
@@ -25010,7 +25346,6 @@
       "WasmValueFlow": {
         "type": "object",
         "additionalProperties": false,
-        "description": "wasm-value-flow-v1 (protocol/wasm-value-flow-v1.md). text and expression are content; every other field is structure.",
         "required": [
           "schema",
           "artifact_id",
@@ -25030,22 +25365,30 @@
           "seed",
           "instructions_simulated",
           "simulation_stopped_at",
+          "simulation_bytes",
+          "cached",
+          "functions",
           "node_count",
-          "edge_count",
+          "transport_count",
+          "source_count",
+          "sink_count",
+          "join_count",
+          "boundary_count",
+          "node_offset",
+          "next_node_offset",
           "nodes",
-          "edges",
+          "path_nodes",
           "joins",
           "sources",
           "sinks",
-          "interprocedural",
-          "truncated",
+          "callers",
           "omissions",
           "limits",
           "notice"
         ],
         "properties": {
           "schema": {
-            "const": "wasm-value-flow-v1"
+            "const": "wasm-value-flow-v2"
           },
           "artifact_id": {
             "type": "string",
@@ -25104,9 +25447,18 @@
             "additionalProperties": false,
             "required": [
               "direction",
-              "max_nodes",
-              "max_depth",
-              "interprocedural"
+              "control",
+              "interprocedural",
+              "node_offset",
+              "node_limit",
+              "source_offset",
+              "source_limit",
+              "source_kind",
+              "sink_offset",
+              "sink_limit",
+              "sink_kind",
+              "join_offset",
+              "join_limit"
             ],
             "properties": {
               "direction": {
@@ -25116,18 +25468,55 @@
                   "both"
                 ]
               },
-              "max_nodes": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 4096
-              },
-              "max_depth": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 256
+              "control": {
+                "type": "boolean"
               },
               "interprocedural": {
                 "type": "boolean"
+              },
+              "node_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "node_limit": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "source_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "source_limit": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "source_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sink_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sink_limit": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sink_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "join_offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "join_limit": {
+                "type": "integer",
+                "minimum": 1
               }
             }
           },
@@ -25198,12 +25587,80 @@
             ],
             "minimum": 0
           },
+          "simulation_bytes": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "What the seed function's simulation holds."
+          },
+          "cached": {
+            "type": "boolean",
+            "description": "The slice was reused from an earlier request for the same seed of the same module."
+          },
+          "functions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "index",
+                "instructions_simulated",
+                "stopped_at"
+              ],
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "instructions_simulated": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "stopped_at": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                }
+              }
+            },
+            "description": "Every function the slice entered, the seed's first."
+          },
           "node_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Listed nodes of the complete slice."
+          },
+          "transport_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "local.get, local.set and local.tee nodes the value passed through, condensed into edges."
+          },
+          "source_count": {
             "type": "integer",
             "minimum": 0
           },
-          "edge_count": {
+          "sink_count": {
             "type": "integer",
+            "minimum": 0
+          },
+          "join_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "boundary_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "node_offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_node_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "minimum": 0
           },
           "nodes": {
@@ -25213,18 +25670,29 @@
               "additionalProperties": false,
               "required": [
                 "id",
+                "walk",
                 "kind",
                 "byte_offset",
-                "role",
+                "function",
                 "direction",
+                "class",
                 "depth",
-                "results",
-                "text",
+                "role",
+                "seed",
                 "source",
-                "sink"
+                "sink",
+                "boundary",
+                "results",
+                "parent",
+                "edge",
+                "text"
               ],
               "properties": {
                 "id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "walk": {
                   "type": "integer",
                   "minimum": 0
                 },
@@ -25255,51 +25723,11 @@
                     "branch",
                     "return",
                     "throw",
-                    "drop"
+                    "drop",
+                    "memory_cell"
                   ]
                 },
                 "byte_offset": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "source": {
-                  "type": "boolean",
-                  "description": "Where the value comes from: a leaf or memory source reached backward. A node can be a source and a sink."
-                },
-                "sink": {
-                  "type": "boolean",
-                  "description": "Where the value goes and stops flowing: reached forward over an edge it does not pass through."
-                },
-                "role": {
-                  "enum": [
-                    "seed",
-                    "source",
-                    "sink",
-                    "interior",
-                    "frontier"
-                  ]
-                },
-                "direction": {
-                  "enum": [
-                    "seed",
-                    "backward",
-                    "forward",
-                    "both"
-                  ]
-                },
-                "depth": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "results": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "local": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "global": {
                   "type": "integer",
                   "minimum": 0
                 },
@@ -25307,15 +25735,219 @@
                   "type": "integer",
                   "minimum": 0
                 },
-                "type": {
+                "direction": {
+                  "enum": [
+                    "seed",
+                    "backward",
+                    "forward"
+                  ]
+                },
+                "class": {
+                  "enum": [
+                    "value",
+                    "address",
+                    "memory_may",
+                    "control"
+                  ],
+                  "description": "The weakest edge on the node's path to the seed."
+                },
+                "depth": {
                   "type": "integer",
                   "minimum": 0
                 },
-                "table": {
+                "role": {
+                  "enum": [
+                    "seed",
+                    "source",
+                    "sink",
+                    "boundary",
+                    "interior"
+                  ]
+                },
+                "seed": {
+                  "type": "boolean"
+                },
+                "source": {
+                  "type": "boolean"
+                },
+                "sink": {
+                  "type": "boolean"
+                },
+                "boundary": {
+                  "type": "boolean",
+                  "description": "A callee's parameter reached backward or return reached forward: the summary edge at the call site carries the value across."
+                },
+                "results": {
                   "type": "integer",
                   "minimum": 0
                 },
-                "tag": {
+                "parent": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "edge": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "operand",
+                        "result",
+                        "locals",
+                        "through"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "operand",
+                            "local",
+                            "local_set",
+                            "global_set",
+                            "address",
+                            "stored_value",
+                            "forwarded_store",
+                            "argument",
+                            "callee_index",
+                            "callee_ref",
+                            "selector",
+                            "return",
+                            "drop",
+                            "merge",
+                            "forwarded_global",
+                            "memory_may",
+                            "control",
+                            "call_param",
+                            "call_result",
+                            "summary"
+                          ]
+                        },
+                        "operand": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "result": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "via": {
+                          "enum": [
+                            "entry",
+                            "fallthrough",
+                            "br",
+                            "br_if",
+                            "br_table",
+                            "br_on",
+                            "then_end",
+                            "if_false",
+                            "catch",
+                            "store",
+                            "global_set"
+                          ]
+                        },
+                        "via_offset": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "locals": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "description": "The locals the value passed through between this node and its parent, nearest first; those local.get, local.set and local.tee nodes are walked and counted but not listed."
+                        },
+                        "through": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "kind",
+                                "operand",
+                                "result"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "enum": [
+                                    "operand",
+                                    "local",
+                                    "local_set",
+                                    "global_set",
+                                    "address",
+                                    "stored_value",
+                                    "forwarded_store",
+                                    "argument",
+                                    "callee_index",
+                                    "callee_ref",
+                                    "selector",
+                                    "return",
+                                    "drop",
+                                    "merge",
+                                    "forwarded_global",
+                                    "memory_may",
+                                    "control",
+                                    "call_param",
+                                    "call_result",
+                                    "summary"
+                                  ]
+                                },
+                                "operand": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "result": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "via": {
+                                  "enum": [
+                                    "entry",
+                                    "fallthrough",
+                                    "br",
+                                    "br_if",
+                                    "br_table",
+                                    "br_on",
+                                    "then_end",
+                                    "if_false",
+                                    "catch",
+                                    "store",
+                                    "global_set"
+                                  ]
+                                },
+                                "via_offset": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              }
+                            }
+                          ],
+                          "description": "When locals were passed through: the edge that enters the parent (how it consumed or produced the value); kind is then this node's own edge."
+                        }
+                      },
+                      "description": "The edge from this node to its parent toward the seed."
+                    }
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "description": "Content: the instruction's mnemonic and immediates, or a synthetic label."
+                },
+                "expression": {
+                  "type": "string",
+                  "maxLength": 1024,
+                  "description": "Content: a bounded nested rendering of the value this node produces."
+                },
+                "local": {
                   "type": "integer",
                   "minimum": 0
                 },
@@ -25330,6 +25962,14 @@
                     "if",
                     "try"
                   ]
+                },
+                "global": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "callee": {
+                  "type": "integer",
+                  "minimum": 0
                 },
                 "import": {
                   "type": "object",
@@ -25349,6 +25989,333 @@
                     }
                   }
                 },
+                "type": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "table": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "tag": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cell": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "memory",
+                    "offset",
+                    "width"
+                  ],
+                  "properties": {
+                    "memory": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "address": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "base_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "displacement": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "description": "A memory cell's address key: a constant address, or the byte offset of the node whose value is the base plus a displacement; offset is the instruction's static offset."
+                }
+              }
+            },
+            "description": "One page of the slice in walk order: the seed first, then by distance, value class before address, memory may and control."
+          },
+          "path_nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "walk",
+                "kind",
+                "byte_offset",
+                "function",
+                "direction",
+                "class",
+                "depth",
+                "role",
+                "seed",
+                "source",
+                "sink",
+                "boundary",
+                "results",
+                "parent",
+                "edge",
+                "text"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "walk": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "kind": {
+                  "enum": [
+                    "param",
+                    "local_init",
+                    "phi",
+                    "exception_value",
+                    "unknown",
+                    "const",
+                    "local_get",
+                    "local_set",
+                    "local_tee",
+                    "global_get",
+                    "global_set",
+                    "load",
+                    "store",
+                    "atomic",
+                    "memory",
+                    "table",
+                    "call",
+                    "import_call",
+                    "call_indirect",
+                    "call_ref",
+                    "select",
+                    "operation",
+                    "branch",
+                    "return",
+                    "throw",
+                    "drop",
+                    "memory_cell"
+                  ]
+                },
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "function": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "direction": {
+                  "enum": [
+                    "seed",
+                    "backward",
+                    "forward"
+                  ]
+                },
+                "class": {
+                  "enum": [
+                    "value",
+                    "address",
+                    "memory_may",
+                    "control"
+                  ],
+                  "description": "The weakest edge on the node's path to the seed."
+                },
+                "depth": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "role": {
+                  "enum": [
+                    "seed",
+                    "source",
+                    "sink",
+                    "boundary",
+                    "interior"
+                  ]
+                },
+                "seed": {
+                  "type": "boolean"
+                },
+                "source": {
+                  "type": "boolean"
+                },
+                "sink": {
+                  "type": "boolean"
+                },
+                "boundary": {
+                  "type": "boolean",
+                  "description": "A callee's parameter reached backward or return reached forward: the summary edge at the call site carries the value across."
+                },
+                "results": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "parent": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "edge": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "operand",
+                        "result",
+                        "locals",
+                        "through"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "operand",
+                            "local",
+                            "local_set",
+                            "global_set",
+                            "address",
+                            "stored_value",
+                            "forwarded_store",
+                            "argument",
+                            "callee_index",
+                            "callee_ref",
+                            "selector",
+                            "return",
+                            "drop",
+                            "merge",
+                            "forwarded_global",
+                            "memory_may",
+                            "control",
+                            "call_param",
+                            "call_result",
+                            "summary"
+                          ]
+                        },
+                        "operand": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "result": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "via": {
+                          "enum": [
+                            "entry",
+                            "fallthrough",
+                            "br",
+                            "br_if",
+                            "br_table",
+                            "br_on",
+                            "then_end",
+                            "if_false",
+                            "catch",
+                            "store",
+                            "global_set"
+                          ]
+                        },
+                        "via_offset": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "locals": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "description": "The locals the value passed through between this node and its parent, nearest first; those local.get, local.set and local.tee nodes are walked and counted but not listed."
+                        },
+                        "through": {
+                          "oneOf": [
+                            {
+                              "type": "null"
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "kind",
+                                "operand",
+                                "result"
+                              ],
+                              "properties": {
+                                "kind": {
+                                  "enum": [
+                                    "operand",
+                                    "local",
+                                    "local_set",
+                                    "global_set",
+                                    "address",
+                                    "stored_value",
+                                    "forwarded_store",
+                                    "argument",
+                                    "callee_index",
+                                    "callee_ref",
+                                    "selector",
+                                    "return",
+                                    "drop",
+                                    "merge",
+                                    "forwarded_global",
+                                    "memory_may",
+                                    "control",
+                                    "call_param",
+                                    "call_result",
+                                    "summary"
+                                  ]
+                                },
+                                "operand": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "result": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                },
+                                "via": {
+                                  "enum": [
+                                    "entry",
+                                    "fallthrough",
+                                    "br",
+                                    "br_if",
+                                    "br_table",
+                                    "br_on",
+                                    "then_end",
+                                    "if_false",
+                                    "catch",
+                                    "store",
+                                    "global_set"
+                                  ]
+                                },
+                                "via_offset": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              }
+                            }
+                          ],
+                          "description": "When locals were passed through: the edge that enters the parent (how it consumed or produced the value); kind is then this node's own edge."
+                        }
+                      },
+                      "description": "The edge from this node to its parent toward the seed."
+                    }
+                  ]
+                },
                 "text": {
                   "type": "string",
                   "description": "Content: the instruction's mnemonic and immediates, or a synthetic label."
@@ -25357,77 +26324,100 @@
                   "type": "string",
                   "maxLength": 1024,
                   "description": "Content: a bounded nested rendering of the value this node produces."
-                }
-              }
-            }
-          },
-          "edges": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "from",
-                "to",
-                "kind",
-                "operand",
-                "result"
-              ],
-              "properties": {
-                "from": {
+                },
+                "local": {
                   "type": "integer",
                   "minimum": 0
                 },
-                "to": {
+                "slot": {
                   "type": "integer",
                   "minimum": 0
                 },
-                "kind": {
+                "join": {
                   "enum": [
-                    "operand",
-                    "local",
-                    "local_set",
-                    "global_set",
-                    "address",
-                    "stored_value",
-                    "forwarded_store",
-                    "argument",
-                    "callee_index",
-                    "callee_ref",
-                    "selector",
-                    "return",
-                    "drop",
-                    "merge"
+                    "block",
+                    "loop",
+                    "if",
+                    "try"
                   ]
                 },
-                "operand": {
+                "global": {
                   "type": "integer",
                   "minimum": 0
                 },
-                "result": {
+                "callee": {
                   "type": "integer",
                   "minimum": 0
                 },
-                "via": {
-                  "enum": [
-                    "entry",
-                    "fallthrough",
-                    "br",
-                    "br_if",
-                    "br_table",
-                    "br_on",
-                    "then_end",
-                    "if_false",
-                    "catch",
-                    "store"
-                  ]
+                "import": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "module",
+                    "name"
+                  ],
+                  "properties": {
+                    "module": {
+                      "type": "string",
+                      "maxLength": 512
+                    },
+                    "name": {
+                      "type": "string",
+                      "maxLength": 512
+                    }
+                  }
                 },
-                "via_offset": {
+                "type": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "table": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "tag": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "cell": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "memory",
+                    "offset",
+                    "width"
+                  ],
+                  "properties": {
+                    "memory": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "address": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "base_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "displacement": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  },
+                  "description": "A memory cell's address key: a constant address, or the byte offset of the node whose value is the base plus a displacement; offset is the instruction's static offset."
                 }
               }
-            }
+            },
+            "description": "Every listed ancestor of a page node that is not itself on the page, so each page node's path to the seed is in the document."
           },
           "joins": {
             "type": "array",
@@ -25438,7 +26428,10 @@
                 "node",
                 "join",
                 "byte_offset",
+                "function",
                 "incoming_count",
+                "incoming_offset",
+                "next_incoming_offset",
                 "incoming"
               ],
               "properties": {
@@ -25451,10 +26444,15 @@
                     "block",
                     "loop",
                     "if",
-                    "try"
+                    "try",
+                    "memory"
                   ]
                 },
                 "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "function": {
                   "type": "integer",
                   "minimum": 0
                 },
@@ -25466,14 +26464,20 @@
                   "type": "integer",
                   "minimum": 0
                 },
-                "incomplete": {
-                  "const": true,
-                  "description": "Present on a loop header join whose loop was still open where simulation stopped: back edges after the stop are missing."
-                },
                 "incoming_count": {
                   "type": "integer",
-                  "minimum": 0,
-                  "description": "Every incoming edge of the join; incoming lists at most max_join_entries of them."
+                  "minimum": 0
+                },
+                "incoming_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "next_incoming_offset": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
                 },
                 "incoming": {
                   "type": "array",
@@ -25522,7 +26526,8 @@
                           "branch",
                           "return",
                           "throw",
-                          "drop"
+                          "drop",
+                          "memory_cell"
                         ]
                       },
                       "from_offset": {
@@ -25530,6 +26535,10 @@
                         "minimum": 0
                       },
                       "via": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
                         "enum": [
                           "entry",
                           "fallthrough",
@@ -25541,68 +26550,192 @@
                           "if_false",
                           "catch",
                           "store",
+                          "global_set",
                           null
                         ]
                       },
                       "via_offset": {
-                        "type": "integer",
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
                         "minimum": 0
                       }
                     }
                   }
+                },
+                "incomplete": {
+                  "const": true,
+                  "description": "A loop header join whose loop was still open where simulation stopped: back edges after the stop are missing."
                 }
               }
-            }
+            },
+            "description": "The joins (phi and memory cell nodes) of the page, each with a page of its incoming entries."
           },
           "sources": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            }
-          },
-          "sinks": {
-            "type": "array",
-            "items": {
-              "type": "integer",
-              "minimum": 0
-            }
-          },
-          "interprocedural": {
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "requested",
-              "steps",
-              "direct_callers"
+              "count",
+              "filtered_count",
+              "kind",
+              "kinds",
+              "offset",
+              "limit",
+              "next_offset",
+              "items"
             ],
             "properties": {
-              "requested": {
-                "type": "boolean"
+              "count": {
+                "type": "integer",
+                "minimum": 0
               },
-              "steps": {
+              "filtered_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kinds": {
                 "type": "array",
-                "maxItems": 64,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
                     "kind",
-                    "node",
-                    "function",
-                    "byte_offset",
-                    "slot"
+                    "class",
+                    "count"
                   ],
                   "properties": {
                     "kind": {
                       "enum": [
-                        "caller_argument",
-                        "caller_result",
-                        "callee_param",
-                        "callee_return"
+                        "param",
+                        "local_init",
+                        "phi",
+                        "exception_value",
+                        "unknown",
+                        "const",
+                        "local_get",
+                        "local_set",
+                        "local_tee",
+                        "global_get",
+                        "global_set",
+                        "load",
+                        "store",
+                        "atomic",
+                        "memory",
+                        "table",
+                        "call",
+                        "import_call",
+                        "call_indirect",
+                        "call_ref",
+                        "select",
+                        "operation",
+                        "branch",
+                        "return",
+                        "throw",
+                        "drop",
+                        "memory_cell"
                       ]
                     },
-                    "node": {
+                    "class": {
+                      "enum": [
+                        "value",
+                        "address",
+                        "memory_may",
+                        "control"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    }
+                  }
+                }
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "walk",
+                    "kind",
+                    "class",
+                    "byte_offset",
+                    "function",
+                    "seed",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "walk": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "kind": {
+                      "enum": [
+                        "param",
+                        "local_init",
+                        "phi",
+                        "exception_value",
+                        "unknown",
+                        "const",
+                        "local_get",
+                        "local_set",
+                        "local_tee",
+                        "global_get",
+                        "global_set",
+                        "load",
+                        "store",
+                        "atomic",
+                        "memory",
+                        "table",
+                        "call",
+                        "import_call",
+                        "call_indirect",
+                        "call_ref",
+                        "select",
+                        "operation",
+                        "branch",
+                        "return",
+                        "throw",
+                        "drop",
+                        "memory_cell"
+                      ]
+                    },
+                    "class": {
+                      "enum": [
+                        "value",
+                        "address",
+                        "memory_may",
+                        "control"
+                      ]
+                    },
+                    "byte_offset": {
                       "type": "integer",
                       "minimum": 0
                     },
@@ -25610,85 +26743,412 @@
                       "type": "integer",
                       "minimum": 0
                     },
-                    "byte_offset": {
+                    "seed": {
+                      "type": "boolean"
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "Content: the instruction's mnemonic and immediates, or a synthetic label."
+                    },
+                    "local": {
                       "type": "integer",
                       "minimum": 0
                     },
                     "slot": {
-                      "type": [
-                        "integer",
-                        "null"
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "join": {
+                      "enum": [
+                        "block",
+                        "loop",
+                        "if",
+                        "try"
+                      ]
+                    },
+                    "global": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "callee": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "import": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "module",
+                        "name"
                       ],
+                      "properties": {
+                        "module": {
+                          "type": "string",
+                          "maxLength": 512
+                        },
+                        "name": {
+                          "type": "string",
+                          "maxLength": 512
+                        }
+                      }
+                    },
+                    "type": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "table": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "tag": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "cell": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "memory",
+                        "offset",
+                        "width"
+                      ],
+                      "properties": {
+                        "memory": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "address": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "base_offset": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "displacement": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "offset": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "width": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "A memory cell's address key: a constant address, or the byte offset of the node whose value is the base plus a displacement; offset is the instruction's static offset."
+                    }
+                  }
+                }
+              }
+            },
+            "description": "The complete list's count and kind histogram, with one page of its items."
+          },
+          "sinks": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "count",
+              "filtered_count",
+              "kind",
+              "kinds",
+              "offset",
+              "limit",
+              "next_offset",
+              "items"
+            ],
+            "properties": {
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "filtered_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kinds": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "class",
+                    "count"
+                  ],
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "param",
+                        "local_init",
+                        "phi",
+                        "exception_value",
+                        "unknown",
+                        "const",
+                        "local_get",
+                        "local_set",
+                        "local_tee",
+                        "global_get",
+                        "global_set",
+                        "load",
+                        "store",
+                        "atomic",
+                        "memory",
+                        "table",
+                        "call",
+                        "import_call",
+                        "call_indirect",
+                        "call_ref",
+                        "select",
+                        "operation",
+                        "branch",
+                        "return",
+                        "throw",
+                        "drop",
+                        "memory_cell"
+                      ]
+                    },
+                    "class": {
+                      "enum": [
+                        "value",
+                        "address",
+                        "memory_may",
+                        "control"
+                      ]
+                    },
+                    "count": {
+                      "type": "integer",
                       "minimum": 0
                     }
                   }
                 }
               },
-              "direct_callers": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "sites",
-                      "scan_complete",
-                      "also_reachable_indirectly"
-                    ],
-                    "properties": {
-                      "sites": {
-                        "type": "integer",
-                        "minimum": 0
-                      },
-                      "scan_complete": {
-                        "type": "boolean"
-                      },
-                      "also_reachable_indirectly": {
-                        "type": "boolean"
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "walk",
+                    "kind",
+                    "class",
+                    "byte_offset",
+                    "function",
+                    "seed",
+                    "text"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "walk": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "kind": {
+                      "enum": [
+                        "param",
+                        "local_init",
+                        "phi",
+                        "exception_value",
+                        "unknown",
+                        "const",
+                        "local_get",
+                        "local_set",
+                        "local_tee",
+                        "global_get",
+                        "global_set",
+                        "load",
+                        "store",
+                        "atomic",
+                        "memory",
+                        "table",
+                        "call",
+                        "import_call",
+                        "call_indirect",
+                        "call_ref",
+                        "select",
+                        "operation",
+                        "branch",
+                        "return",
+                        "throw",
+                        "drop",
+                        "memory_cell"
+                      ]
+                    },
+                    "class": {
+                      "enum": [
+                        "value",
+                        "address",
+                        "memory_may",
+                        "control"
+                      ]
+                    },
+                    "byte_offset": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "function": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "seed": {
+                      "type": "boolean"
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "Content: the instruction's mnemonic and immediates, or a synthetic label."
+                    },
+                    "local": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "slot": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "join": {
+                      "enum": [
+                        "block",
+                        "loop",
+                        "if",
+                        "try"
+                      ]
+                    },
+                    "global": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "callee": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "import": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "module",
+                        "name"
+                      ],
+                      "properties": {
+                        "module": {
+                          "type": "string",
+                          "maxLength": 512
+                        },
+                        "name": {
+                          "type": "string",
+                          "maxLength": 512
+                        }
                       }
+                    },
+                    "type": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "table": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "tag": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "cell": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "memory",
+                        "offset",
+                        "width"
+                      ],
+                      "properties": {
+                        "memory": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "address": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "base_offset": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "displacement": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "offset": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "width": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "description": "A memory cell's address key: a constant address, or the byte offset of the node whose value is the base plus a displacement; offset is the instruction's static offset."
                     }
                   }
-                ]
+                }
               }
-            }
+            },
+            "description": "The complete list's count and kind histogram, with one page of its items."
           },
-          "truncated": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "nodes",
-              "edges",
-              "depth",
-              "deadline",
-              "joins",
-              "simulation",
-              "bytes"
-            ],
-            "properties": {
-              "nodes": {
-                "type": "boolean"
+          "callers": {
+            "oneOf": [
+              {
+                "type": "null"
               },
-              "edges": {
-                "type": "boolean"
-              },
-              "depth": {
-                "type": "boolean"
-              },
-              "deadline": {
-                "type": "boolean"
-              },
-              "joins": {
-                "type": "boolean"
-              },
-              "simulation": {
-                "type": "boolean"
-              },
-              "bytes": {
-                "type": "boolean"
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "count",
+                  "indirect",
+                  "undecoded"
+                ],
+                "properties": {
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "indirect": {
+                    "type": "boolean"
+                  },
+                  "undecoded": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
               }
-            }
+            ],
+            "description": "Direct call sites of the seed's function from the call index, with interprocedural; get_wasm_call_sites pages them."
           },
           "omissions": {
             "type": "array",
@@ -25698,14 +27158,166 @@
           },
           "limits": {
             "type": "object",
-            "additionalProperties": {
-              "type": "integer"
+            "additionalProperties": false,
+            "required": [
+              "max_body_bytes",
+              "max_locals",
+              "simulation_memory_bytes",
+              "max_expression_bytes",
+              "max_text_bytes"
+            ],
+            "properties": {
+              "max_body_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_locals": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "simulation_memory_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_expression_bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_text_bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
             }
           },
           "notice": {
             "type": "string"
           }
-        }
+        },
+        "description": "wasm-value-flow-v2 (protocol/wasm-value-flow-v2.md). text and expression are content; every other field is structure."
+      },
+      "WasmCallSites": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema",
+          "artifact_id",
+          "sha256",
+          "byte_size",
+          "function_index",
+          "imported",
+          "count",
+          "offset",
+          "limit",
+          "next_offset",
+          "sites",
+          "indirect",
+          "undecoded",
+          "notice"
+        ],
+        "properties": {
+          "schema": {
+            "const": "wasm-call-sites-v1"
+          },
+          "artifact_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byte_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "function_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "imported": {
+            "type": "boolean"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "sites": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "caller",
+                "byte_offset",
+                "tail"
+              ],
+              "properties": {
+                "caller": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "byte_offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "tail": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "indirect": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "exported",
+              "start",
+              "element",
+              "referenced"
+            ],
+            "properties": {
+              "exported": {
+                "type": "boolean"
+              },
+              "start": {
+                "type": "boolean"
+              },
+              "element": {
+                "type": "boolean"
+              },
+              "referenced": {
+                "type": "boolean"
+              }
+            }
+          },
+          "undecoded": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Bodies that do not decode; their calls are not indexed."
+          },
+          "notice": {
+            "type": "string"
+          }
+        },
+        "description": "wasm-call-sites-v1 (protocol/wasm-value-flow-v2.md). Structure only."
       },
       "WasmTypedValue": {
         "type": "object",

@@ -2526,7 +2526,7 @@ pub(crate) fn worker_command_for(
     test_value: &'static str,
 ) -> std::io::Result<tokio::process::Command> {
     let current = std::env::current_exe()?;
-    let harness = is_test_harness(&current);
+    let harness = test_harness(&current);
     let mut command = tokio::process::Command::new(current);
     command.env_clear();
     #[cfg(test)]
@@ -2568,21 +2568,42 @@ pub(crate) fn worker_command_for(
     Ok(command)
 }
 
-/// Whether `executable` is a cargo test harness, which rejects the worker
-/// flags. Cargo names one `<target>-<16 hex digit hash>`, in `deps/` before
-/// cargo 1.100 and in `build/<package>/<hash>/out/` since; a built binary keeps
-/// its plain name, so the directory alone no longer tells them apart.
-fn is_test_harness(executable: &std::path::Path) -> bool {
+/// Whether `executable` is a libtest harness, which runs a worker through its
+/// ignored `__reb_javascript_worker` entry rather than a flag. Cargo names a
+/// harness `<crate>-<16 hex digit hash>` and never copies it out under a plain
+/// name, both in `deps/` and in the `build/<package>/<hash>/out/` layout of
+/// newer releases, so the name says so where the directory no longer does. A
+/// built program, the app's bundled copy included, has no hash in its name.
+fn test_harness(executable: &std::path::Path) -> bool {
     executable
-        .file_name()
+        .file_stem()
         .and_then(std::ffi::OsStr::to_str)
         .and_then(|name| name.rsplit_once('-'))
-        .is_some_and(|(_, hash)| {
-            hash.len() == 16
-                && hash
-                    .bytes()
-                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        })
+        .is_some_and(|(_, hash)| hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+#[cfg(test)]
+#[test]
+fn test_harnesses_are_known_by_name_in_either_cargo_layout() {
+    use std::path::Path;
+    for harness in [
+        "target/debug/deps/origin_trace_backend-109da3ca5bd348d7",
+        "target/debug/build/origin-trace-backend/b3094a8f315928ed/out/origin_trace_backend-b3094a8f315928ed",
+        "target/debug/deps/mcp_stdio-0123456789abcdef.exe",
+    ] {
+        assert!(test_harness(Path::new(harness)), "{harness}");
+    }
+    for program in [
+        "target/debug/origin-trace-backend",
+        "target/release/reb-api",
+        "target/debug/origin-trace-vm",
+        "build/Origin Trace.app/Contents/MacOS/OriginTraceBackend",
+        "target/debug/deps/origin_trace_backend-109da3ca5bd348",
+        "target/debug/deps/origin_trace_backend-109da3ca5bd348zz",
+    ] {
+        assert!(!test_harness(Path::new(program)), "{program}");
+    }
+    assert!(test_harness(&std::env::current_exe().unwrap()));
 }
 
 fn worker_deadline(source_bytes: usize) -> std::time::Duration {
@@ -2860,27 +2881,6 @@ fn worker_drops_inherited_environment_descriptors_and_network() {
             .iter()
             .any(|site| site.role() == Role::InterpreterCandidate)
     );
-}
-
-/// Cargo 1.100 moved test harnesses out of `deps/`. Either layout re-executes
-/// through libtest, and a built binary takes the worker flag.
-#[cfg(test)]
-#[test]
-fn worker_recognizes_a_test_harness_in_either_cargo_layout() {
-    use std::path::Path;
-    for harness in [
-        "target/debug/deps/origin_trace_backend-9184accb1627aafe",
-        "target/debug/build/origin-trace-backend/9184accb1627aafe/out/origin_trace_backend-9184accb1627aafe",
-    ] {
-        assert!(is_test_harness(Path::new(harness)), "{harness}");
-    }
-    for built in [
-        "target/debug/reb-api",
-        "target/release/origin-trace-backend",
-    ] {
-        assert!(!is_test_harness(Path::new(built)), "{built}");
-    }
-    assert!(is_test_harness(&std::env::current_exe().unwrap()));
 }
 
 /// A divisor's nesting stays in the stack estimate. Debug Oxc needs about

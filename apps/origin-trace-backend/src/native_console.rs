@@ -15,7 +15,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tempfile::TempDir;
 use tokio::{
@@ -25,23 +25,29 @@ use tokio::{
 };
 
 const MAGIC: u32 = 0x43424552;
-// Wire version 3 adds Stop (operation 5) and the stopped status (7).
-const VERSION: u16 = 3;
-// One command record carries at most 64 MiB, the browser's payload bound
-// (common/native_console_protocol.h); a runtime command counts its JSON.
-const SOURCE_LIMIT: usize = 64 * 1024 * 1024;
-const TEXT_LIMIT: usize = 8192;
-const TARGET_LIMIT: usize = 64;
-const TARGET_SIZE: usize = 920;
-// The renderer encodes one runtime reply in at most 64 KiB.
-const RUNTIME_LIMIT: usize = 65536;
-// A document-start set has no script count or source budget: its arm command
-// is one Console payload. Its reply lists the set and every retained record
-// that fits, within the same transport bound, and half of a reply may list the
-// set (common/native_console_document_start.h).
-const DOCUMENT_START_REPLY_LIMIT: usize = SOURCE_LIMIT;
-const DOCUMENT_START_LISTING_LIMIT: usize = DOCUMENT_START_REPLY_LIMIT / 2;
-const DOCUMENT_START_RULE_LIMIT: usize = 256;
+// Wire version 3 added Stop (operation 5) and the stopped status (7). Version
+// 4 drops every command, reply and listing bound and makes target records
+// variable length (common/native_console_protocol.h).
+const VERSION: u16 = 4;
+// The one bound left is the record format's own: a header names its payload
+// with 32 bits, so a command or a reply is at most this many bytes. Every
+// source, value, message and listing below it crosses whole.
+const RECORD_LIMIT: usize = u32::MAX as usize;
+// A target record's fixed part. Its origin, label and URL bytes follow it.
+const TARGET_HEADER: usize = 24;
+// A reply that drains a queue stops adding records past this many bytes and
+// says that more remain (kNativeConsolePageBytes). It is a page, not a limit.
+const PAGE_BYTES: usize = 8 * 1024 * 1024;
+// What the browser keeps of document-start output for a reader that stops
+// reading (kNativeConsoleDocumentStartRetainedBytes).
+const DOCUMENT_START_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+// A record being transferred must keep moving; however large, it fails only
+// when it stalls this long. Longer than the bridge's own two-second stall, so
+// the hop nearer the browser reports a stall first.
+const TRANSFER_STALL: Duration = Duration::from_secs(10);
+// Chromium refuses a URL longer than this (url::kMaxURLChars), so a Console
+// URL can be any URL the browser can open.
+const URL_LIMIT: usize = 2 * 1024 * 1024;
 
 // Own both process groups, including Chromium descendants. kill_on_drop alone
 // stops only the immediate process and can leave renderer/profile owners alive.
@@ -109,7 +115,6 @@ struct Session {
     directory: ConsoleDir,
     next_request: u64,
     poisoned: bool,
-    started: Instant,
     live: bool,
     live_target: Option<u64>,
     // The selected document that a listing or the browser reported gone. It
@@ -187,8 +192,6 @@ impl Session {
         let exited = |process: &mut OwnedProcess| !matches!(process.child.try_wait(), Ok(None));
         if self.poisoned {
             Some(LOST_EXCHANGE)
-        } else if self.started.elapsed() >= Duration::from_secs(3600) {
-            Some(LOST_EXPIRED)
         } else if exited(&mut self.bridge) || self.browser.as_mut().is_some_and(exited) {
             Some(LOST_EXITED)
         } else {
@@ -287,10 +290,11 @@ impl Session {
     async fn exchange(&mut self, operation: u16, target: u64, source: &str) -> Result<Value> {
         self.exchange_running(operation, target, source, None).await
     }
-    // Commands (operations 2 and 3) run in the page until they return, so they
-    // are awaited until the browser ends the session at its hour, and `running`
-    // registers them for `interrupt`. Listings and document-start operations
-    // are browser work with a short deadline.
+    // Commands (operations 2 and 3) run in the page until they return or are
+    // stopped, so their answer is awaited for as long, and `running` registers
+    // them for `interrupt`. Listings and document-start operations are browser
+    // work, so their answer must start within a short deadline. Either way a
+    // record of any size moves for as long as it keeps moving.
     async fn exchange_running(
         &mut self,
         operation: u16,
@@ -312,14 +316,9 @@ impl Session {
         header[8..16].copy_from_slice(&id.to_le_bytes());
         header[16..24].copy_from_slice(&target.to_le_bytes());
         header[24..28].copy_from_slice(&(source.len() as u32).to_le_bytes());
-        let timeout = if running.is_some() {
-            Duration::from_secs(3600).saturating_sub(self.started.elapsed())
-                + Duration::from_secs(10)
-        } else {
-            Duration::from_secs(if id == 1 { 35 } else { 6 })
-        };
+        let answer = (running.is_none()).then(|| Duration::from_secs(if id == 1 { 35 } else { 6 }));
         let (session_id, shared) = (self.id.clone(), self.input.clone());
-        let result = tokio::time::timeout(timeout, async {
+        let result = async {
             let mut input = shared.lock().await;
             if let Some((slot, state)) = running {
                 *slot.running.lock().unwrap() = Some(Running {
@@ -331,19 +330,23 @@ impl Session {
                 });
                 slot.registered.notify_waiters();
             }
-            input.write_all(&header).await?;
-            input.write_all(source.as_bytes()).await?;
-            input.flush().await?;
+            write_moving(&mut input, &header).await?;
+            write_moving(&mut input, source.as_bytes()).await?;
+            stalled(input.flush()).await??;
             drop(input);
             let mut response = [0u8; 32];
-            self.output.read_exact(&mut response).await?;
+            match answer {
+                Some(deadline) => tokio::time::timeout(deadline, self.output.read_exact(&mut response))
+                    .await
+                    .map_err(|_| timed_out())??,
+                None => self.output.read_exact(&mut response).await?,
+            };
             let parsed = ResponseHeader::parse(&response, id, operation)?;
-            let mut payload = vec![0; parsed.bytes];
-            self.output.read_exact(&mut payload).await?;
+            let payload = read_moving(&mut self.output, parsed.bytes).await?;
             let mut value = parsed.value(&payload, &self.id)?;
             if parsed.kind == 11 { value["request_id"] = json!(id.to_string()); }
             Ok(value)
-        }).await.map_err(|_| Error::new(408, "Native console timed out; execution may have occurred. Restart the session").with_reason(Reason::uncertain(Cause::Timeout)))?
+        }.await
           .map_err(|mut e: Error| {
               if e.status == 500 { e.message = "Native browser or console disconnected; rebuild Brave with native console support".to_owned(); }
               if e.reason.code != Code::CommandOutcomeUnknown {
@@ -364,6 +367,47 @@ impl Session {
         }
         Ok(result)
     }
+}
+
+fn timed_out() -> Error {
+    Error::new(
+        408,
+        "Native console timed out; execution may have occurred. Restart the session",
+    )
+    .with_reason(Reason::uncertain(Cause::Timeout))
+}
+
+// One step of a transfer, failed only when it makes no progress for
+// TRANSFER_STALL.
+async fn stalled<T>(step: impl std::future::Future<Output = T>) -> Result<T> {
+    tokio::time::timeout(TRANSFER_STALL, step)
+        .await
+        .map_err(|_| timed_out())
+}
+
+async fn write_moving(input: &mut ChildStdin, bytes: &[u8]) -> Result<()> {
+    for chunk in bytes.chunks(1 << 20) {
+        stalled(input.write_all(chunk)).await??;
+    }
+    Ok(())
+}
+
+// Reads a `bytes`-long payload. The buffer grows with the bytes that actually
+// arrived, so a header's length alone allocates nothing.
+async fn read_moving(output: &mut ChildStdout, bytes: usize) -> Result<Vec<u8>> {
+    let mut payload = Vec::new();
+    while payload.len() < bytes {
+        let mut filled = payload.len();
+        payload.resize(bytes.min((filled * 2).max(1 << 20)), 0);
+        while filled < payload.len() {
+            let count = stalled(output.read(&mut payload[filled..])).await??;
+            if count == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            filled += count;
+        }
+    }
+    Ok(payload)
 }
 
 struct ResponseHeader {
@@ -398,23 +442,17 @@ impl ResponseHeader {
             || (operation == 3 && parsed.status == 0 && parsed.kind != 11)
             || (operation == 4 && parsed.status == 0 && parsed.kind != 12)
             || flags > 3
-            // The capability bit is listing-only, so a command reply can never
-            // smuggle in a claim that this browser supports the experiment.
-            || (parsed.document_start && parsed.kind != 10)
+            // Both flags describe a listing, so a command reply can never
+            // smuggle in a claim that this browser supports the experiment,
+            // and nothing else is ever cut to fit a record.
+            || (flags != 0 && parsed.kind != 10)
+            // Each target's own lengths are checked as it is read; the count
+            // can only be as large as the fixed parts the payload has room for.
             || (parsed.kind == 10
                 && (operation != 1
                     || parsed.status != 0
-                    || parsed.count > TARGET_LIMIT
-                    || parsed.bytes != parsed.count * TARGET_SIZE))
-            || (parsed.kind != 10
-                && (parsed.count != 0
-                    || parsed.bytes
-                        > match parsed.kind {
-                            11 => RUNTIME_LIMIT,
-                            12 => DOCUMENT_START_REPLY_LIMIT,
-                            _ => TEXT_LIMIT,
-                        }
-                    || (operation == 1 && parsed.status == 0)))
+                    || parsed.count * TARGET_HEADER > parsed.bytes))
+            || (parsed.kind != 10 && (parsed.count != 0 || (operation == 1 && parsed.status == 0)))
         {
             return Err(Error::protocol(
                 "Native console returned a malformed record",
@@ -443,33 +481,38 @@ impl ResponseHeader {
     }
     fn value(&self, payload: &[u8], session: &str) -> Result<Value> {
         if self.kind == 10 {
+            // Each target is its fixed part followed by its whole origin, label
+            // and URL (NativeConsoleTarget), however long.
+            let malformed = || Error::protocol("Native target listing is malformed");
             let mut targets = Vec::with_capacity(self.count);
             let mut ids = std::collections::BTreeSet::new();
-            for record in payload.as_chunks::<TARGET_SIZE>().0 {
+            let mut offset = 0;
+            for _ in 0..self.count {
+                let record = payload
+                    .get(offset..offset + TARGET_HEADER)
+                    .ok_or_else(malformed)?;
                 let id = u64::from_le_bytes(record[..8].try_into().unwrap());
-                let size = u16::from_le_bytes(record[8..10].try_into().unwrap()) as usize;
-                let flags = u16::from_le_bytes(record[10..12].try_into().unwrap());
-                if id == 0
-                    || size > 256
-                    || flags > 3
-                    || record[916..920] != [0; 4]
-                    || record[12..16] != [0; 4]
-                    || !ids.insert(id)
-                {
-                    return Err(Error::protocol("Native target listing is malformed"));
+                let size =
+                    |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().unwrap()) as usize;
+                let (origin_size, label_size, url_size) = (size(8), size(12), size(16));
+                let flags = u16::from_le_bytes(record[20..22].try_into().unwrap());
+                if id == 0 || flags & !2 != 0 || record[22..24] != [0; 2] || !ids.insert(id) {
+                    return Err(malformed());
                 }
-                let origin = std::str::from_utf8(&record[16..16 + size])
-                    .map_err(|_| Error::protocol("Native origin is not UTF-8"))?;
-                let label_size = u16::from_le_bytes(record[272..274].try_into().unwrap()) as usize;
-                let url_size = u16::from_le_bytes(record[274..276].try_into().unwrap()) as usize;
-                if label_size > 128 || url_size > 512 {
-                    return Err(Error::protocol("Native context metadata is oversized"));
-                }
-                let label = std::str::from_utf8(&record[276..276 + label_size])
-                    .map_err(|_| Error::protocol("Native label is not UTF-8"))?;
-                let url = std::str::from_utf8(&record[404..404 + url_size])
-                    .map_err(|_| Error::protocol("Native URL is not UTF-8"))?;
-                targets.push(json!({"id":id.to_string(),"origin":origin,"label":label,"url":url,"main_frame":flags & 2 != 0,"truncated":flags & 1 != 0}));
+                offset += TARGET_HEADER;
+                let mut text = |size: usize, what: &str| -> Result<&str> {
+                    let bytes = payload.get(offset..offset + size).ok_or_else(malformed)?;
+                    offset += size;
+                    std::str::from_utf8(bytes)
+                        .map_err(|_| Error::protocol(format!("Native {what} is not UTF-8")))
+                };
+                let origin = text(origin_size, "origin")?;
+                let label = text(label_size, "label")?;
+                let url = text(url_size, "URL")?;
+                targets.push(json!({"id":id.to_string(),"origin":origin,"label":label,"url":url,"main_frame":flags & 2 != 0}));
+            }
+            if offset != payload.len() {
+                return Err(malformed());
             }
             annotate_frames(&mut targets);
             return Ok(
@@ -500,7 +543,7 @@ impl ResponseHeader {
                 return Err(Error::protocol("Invalid document-start envelope"));
             }
             let failed = document_start["status"] != json!("ok");
-            let mut result = json!({"contract_version":3,"session_id":session,"state":"ready","document_start":document_start});
+            let mut result = json!({"contract_version":4,"session_id":session,"state":"ready","document_start":document_start});
             if failed {
                 Reason::new(Code::ApplicationFailed).annotate(&mut result);
             }
@@ -531,7 +574,7 @@ impl ResponseHeader {
         let text = std::str::from_utf8(payload)
             .map_err(|_| Error::protocol("Native result is not UTF-8"))?;
         let mut result = json!({"contract_version":2,"session_id":session,"state":"ready","status":statuses[self.status as usize],
-            "type":types[self.kind as usize],"text":text,"truncated":self.truncated});
+            "type":types[self.kind as usize],"text":text});
         let reason = match self.status {
             1 => Some(Reason::new(Code::InvalidRequest)),
             2 => Some(Reason::new(Code::TargetUnavailable)),
@@ -815,14 +858,14 @@ impl Inner {
         let Some(session) = guard.as_mut() else {
             if self.document_start_unconfirmed.load(Ordering::Relaxed) {
                 return Ok(
-                    json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
+                    json!({"contract_version":4,"available":self.available(),"state":"idle","session_id":null,
                     "document_start":{"status":"unconfirmed","permitted":false,"scripts":[],
                         "message":DOCUMENT_START_UNCONFIRMED},
                     "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
                 );
             }
             return Ok(
-                json!({"contract_version":3,"available":self.available(),"state":"idle","session_id":null,
+                json!({"contract_version":4,"available":self.available(),"state":"idle","session_id":null,
                 "document_start":{"status":"idle","permitted":false,"scripts":[],
                     "message":"Connect the Console with document-start scripts enabled, then arm a rule."},
                 "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
@@ -833,7 +876,7 @@ impl Inner {
         } else {
             session.bridge.child.try_wait().ok().flatten().is_some()
         };
-        if session.poisoned || session.started.elapsed() >= Duration::from_secs(3600) || ended {
+        if session.poisoned || ended {
             // A live binding's armed set lives in the capture browser, which
             // keeps it while the connection is open and confirms nothing when
             // the connection ends, so neither case may read as gone.
@@ -848,7 +891,7 @@ impl Inner {
                 ("unconfirmed", DOCUMENT_START_LIVE_RETIRE)
             };
             return Ok(
-                json!({"contract_version":3,"available":self.available(),"state":"ready","session_id":session.id,
+                json!({"contract_version":4,"available":self.available(),"state":"ready","session_id":session.id,
                 "document_start":{"status":status,"permitted":false,"scripts":[],"message":message},
                 "limits":document_start_limits(),"unsupported":document_start_unsupported()}),
             );
@@ -1003,7 +1046,8 @@ impl Inner {
                     "Native console requires its bundled helper and a rebuilt custom Brave executable",
                 ).with_code(Code::DependencyUnavailable));
             }
-            let address = validation::text(&request["url"], "Console URL", 4096, false, false)?;
+            let address =
+                validation::text(&request["url"], "Console URL", URL_LIMIT, false, false)?;
             let url =
                 url::Url::parse(address).map_err(|_| Error::bad("Provide an HTTP or HTTPS URL"))?;
             if !["http", "https"].contains(&url.scheme())
@@ -1109,8 +1153,10 @@ impl Inner {
             vec!["action", "session_id", "target_id", "command"]
         } else if action == "evaluate" {
             vec!["action", "session_id", "target_id", "source"]
-        } else if action == "arm_document_start" {
+        } else if action == "arm_document_start" || action == "add_document_start" {
             vec!["action", "session_id", "scripts", "confirm_document_start"]
+        } else if action == "remove_document_start" {
+            vec!["action", "session_id", "script_ids"]
         } else if action == "clear_document_start" {
             vec!["action", "session_id"]
         } else {
@@ -1144,7 +1190,7 @@ impl Inner {
         let document_start_source;
         let (operation, target, source) = if action == "targets" {
             (1, 0, "")
-        } else if action == "arm_document_start" || action == "clear_document_start" {
+        } else if action.ends_with("_document_start") {
             if !session.document_start {
                 if action == "clear_document_start" {
                     // Nothing can be armed in a session that never permitted
@@ -1160,6 +1206,9 @@ impl Inner {
             }
             document_start_source = if action == "clear_document_start" {
                 r#"{"operation":"clear"}"#.to_owned()
+            } else if action == "remove_document_start" {
+                let ids = validate_script_ids(&request["script_ids"])?;
+                serde_json::to_string(&json!({"operation":"remove","script_ids":ids}))?
             } else {
                 if request["confirm_document_start"] != true {
                     return Err(Error::bad(
@@ -1168,11 +1217,16 @@ impl Inner {
                 }
                 let scripts = validate_document_start(&request["scripts"])?;
                 session.document_start_armed = true;
-                serde_json::to_string(&json!({"operation":"arm","scripts":scripts}))?
+                let operation = if action == "arm_document_start" {
+                    "arm"
+                } else {
+                    "add"
+                };
+                serde_json::to_string(&json!({"operation":operation,"scripts":scripts}))?
             };
-            if document_start_source.len() > SOURCE_LIMIT {
+            if document_start_source.len() > RECORD_LIMIT {
                 return Err(Error::bad(
-                    "Document-start command exceeds 64 MiB as JSON; arm fewer or smaller snippets",
+                    "Document-start command exceeds the 4 GiB a Console record can name as JSON; send its scripts in several add_document_start actions",
                 )
                 .with_code(Code::ResourceLimit));
             }
@@ -1180,8 +1234,11 @@ impl Inner {
         } else if action == "runtime" {
             validate_command(&request["command"])?;
             runtime_source = serde_json::to_string(&request["command"])?;
-            if runtime_source.len() > SOURCE_LIMIT {
-                return Err(Error::bad("Runtime command exceeds 64 MiB"));
+            if runtime_source.len() > RECORD_LIMIT {
+                return Err(Error::bad(
+                    "Runtime command exceeds the 4 GiB a Console record can name as JSON",
+                )
+                .with_code(Code::ResourceLimit));
             }
             (
                 3,
@@ -1190,7 +1247,7 @@ impl Inner {
             )
         } else {
             let source =
-                validation::text(&request["source"], "JavaScript", SOURCE_LIMIT, false, true)?;
+                validation::text(&request["source"], "JavaScript", RECORD_LIMIT, false, true)?;
             if source.is_empty() || source.contains('\0') {
                 return Err(Error::bad(
                     "JavaScript must be nonempty and contain no NUL bytes",
@@ -1487,7 +1544,6 @@ impl BridgeProcess {
             directory,
             next_request: 1,
             poisoned: false,
-            started: Instant::now(),
             live,
             live_target: None,
             stale_target: None,
@@ -1632,22 +1688,21 @@ fn document_start_unsupported() -> Value {
     ])
 }
 
-// Transport and retention bounds only. Nothing counts scripts, snippet bytes,
-// records per document or execution time: a snippet runs until it returns, and
-// clearing or replacing the set, or ending the session, stops it.
+// The record format's own bound, the page size reads use, and what the
+// browser keeps for a reader that stops reading. Nothing counts scripts,
+// snippet, rule or report bytes, records per document or execution time: a
+// snippet runs until it returns, and removing it, clearing or replacing the
+// set, or ending the session stops it.
 fn document_start_limits() -> Value {
     json!({
-        "command_bytes": SOURCE_LIMIT,
-        "rule_bytes": DOCUMENT_START_RULE_LIMIT,
-        "report_bytes": TEXT_LIMIT,
-        "retained_bytes": SOURCE_LIMIT,
-        "reply_bytes": DOCUMENT_START_REPLY_LIMIT,
-        "listing_bytes": DOCUMENT_START_LISTING_LIMIT,
+        "record_bytes": RECORD_LIMIT,
+        "page_bytes": PAGE_BYTES,
+        "retained_bytes": DOCUMENT_START_RETAINED_BYTES,
     })
 }
 
 fn document_start_unavailable(session: &str, message: &str) -> Value {
-    json!({"contract_version":3,"state":"ready","session_id":session,
+    json!({"contract_version":4,"state":"ready","session_id":session,
         "document_start":{"status":"unavailable","permitted":false,"scripts":[],
             "message":message}})
 }
@@ -1673,7 +1728,7 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
         let origin = validation::text(
             &script["origin"],
             "Document-start origin",
-            DOCUMENT_START_RULE_LIMIT,
+            RECORD_LIMIT,
             false,
             false,
         )?;
@@ -1694,7 +1749,7 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
             Some(value) => Some(validation::text(
                 value,
                 "Document-start path prefix",
-                DOCUMENT_START_RULE_LIMIT,
+                RECORD_LIMIT,
                 false,
                 false,
             )?),
@@ -1710,7 +1765,7 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
         let source = validation::text(
             &script["source"],
             "Document-start snippet",
-            SOURCE_LIMIT,
+            RECORD_LIMIT,
             false,
             true,
         )?;
@@ -1728,6 +1783,25 @@ fn validate_document_start(scripts: &Value) -> Result<Value> {
     Ok(Value::Array(normalized))
 }
 
+// The armed ids to remove, as the browser lists them: decimal strings, each
+// once.
+fn validate_script_ids(ids: &Value) -> Result<Value> {
+    let list = ids
+        .as_array()
+        .ok_or_else(|| Error::bad("script_ids must be an array of armed script ids"))?;
+    if list.is_empty() {
+        return Err(Error::bad("Name at least one armed script id to remove"));
+    }
+    let mut seen = BTreeSet::new();
+    for id in list {
+        let id = validation::canonical(id, 64, true, "Document-start script id")?;
+        if !seen.insert(id) {
+            return Err(Error::bad("Each script id is named once"));
+        }
+    }
+    Ok(ids.clone())
+}
+
 // The browser's rule, IsValidNativeConsoleDocumentStartOrigin in
 // common/native_console_document_start.h, ported line for line. Both test
 // suites run tools/fixtures/console-document-start/rule-origins.txt, so an
@@ -1741,7 +1815,7 @@ fn document_start_origin(origin: &str) -> bool {
     } else {
         return false;
     };
-    if host.is_empty() || host.len() > 255 {
+    if host.is_empty() {
         return false;
     }
     let port = if let Some(literal) = host.strip_prefix('[') {
@@ -1913,7 +1987,6 @@ fn canonical_host_name(host: &str) -> bool {
 // empty prefix is refused before this, so a rule never shows a prefix it lacks.
 fn document_start_path(path: &str) -> bool {
     path.starts_with('/')
-        && path.len() <= DOCUMENT_START_RULE_LIMIT
         && path
             .bytes()
             .all(|byte| (0x21..0x7f).contains(&byte) && byte != b'?' && byte != b'#')
@@ -1932,7 +2005,6 @@ const LIVE_UNAVAILABLE: &str = "Live capture console binding unavailable. Rebuil
 const LOST_EXCHANGE: &str =
     "a native exchange failed or timed out, and an ambiguous pipe is never reused";
 const LOST_HANDSHAKE: &str = "the capture browser did not answer its first document listing";
-const LOST_EXPIRED: &str = "its one-hour connection limit elapsed";
 const LOST_EXITED: &str = "its bridge process exited";
 const LOST_CLEANUP: &str = "live value cleanup was not confirmed";
 const LOST_DOCUMENT_START: &str =
@@ -1960,7 +2032,6 @@ fn stale_document(session: &str, target: u64) -> Value {
         "status": "stale_target",
         "type": "undefined",
         "text": stale_message(target),
-        "truncated": false,
     });
     Reason::new(Code::TargetUnavailable).annotate(&mut result);
     result
@@ -1984,7 +2055,6 @@ fn not_selected(session: &Session, target: u64) -> Value {
             "Selected document changed: document {target} is not the document this connection selected ({}). Live commands run only in the connect_live document; to use {target}, send stop, then connect_live with target_id {target}. Nothing was run.",
             session.live_target.map(|id| id.to_string()).unwrap_or_else(|| "none".into())
         ),
-        "truncated": false,
     });
     Reason::new(Code::TargetUnavailable).annotate(&mut result);
     result
@@ -2083,7 +2153,7 @@ fn validate_command(command: &Value) -> Result<()> {
         }
     }
     if operation == "evaluate" {
-        let source = validation::text(&command["source"], "JavaScript", SOURCE_LIMIT, false, true)?;
+        let source = validation::text(&command["source"], "JavaScript", RECORD_LIMIT, false, true)?;
         if source.is_empty() || source.contains('\0') {
             return Err(Error::bad("JavaScript must be nonempty without NUL"));
         }
@@ -2091,20 +2161,29 @@ fn validate_command(command: &Value) -> Result<()> {
     if fields.contains(&"handle") {
         validation::canonical(&command["handle"], 64, true, "Value handle")?;
     }
-    if operation == "inspect" && !command["offset"].as_u64().is_some_and(|n| n <= 65536) {
-        return Err(Error::bad("Property offset must be 0 to 65536"));
+    // Any member position an array or typed array can have, up to 2^53 - 1,
+    // which a JSON number holds exactly.
+    if operation == "inspect"
+        && !command["offset"]
+            .as_u64()
+            .is_some_and(|n| n <= 9_007_199_254_740_991)
+    {
+        return Err(Error::bad("Property offset must be 0 to 2^53 - 1"));
     }
     if operation == "complete" {
         let path = command["path"]
             .as_array()
             .ok_or_else(|| Error::bad("Completion path must be an array"))?;
-        if path.len() > 8 {
-            return Err(Error::bad("Completion path has more than 8 components"));
-        }
         for key in path {
-            validation::text(key, "Completion component", 128, false, false)?;
+            validation::text(key, "Completion component", RECORD_LIMIT, false, false)?;
         }
-        validation::text(&command["prefix"], "Completion prefix", 128, true, false)?;
+        validation::text(
+            &command["prefix"],
+            "Completion prefix",
+            RECORD_LIMIT,
+            true,
+            false,
+        )?;
     }
     Ok(())
 }
@@ -2160,7 +2239,7 @@ mod tests {
         ] {
             assert_eq!(frame_relation(child, top), relation, "{child} in {top}");
         }
-        let target = |id: &str, origin: &str, top: bool| json!({"id":id,"origin":origin,"label":"","url":"","main_frame":top,"truncated":false});
+        let target = |id: &str, origin: &str, top: bool| json!({"id":id,"origin":origin,"label":"","url":"","main_frame":top});
         let mut listing = vec![
             target("1", "http://localhost:8001", true),
             target("2", "http://localhost:8002", false),
@@ -2293,8 +2372,8 @@ mod tests {
             assert!(rule(refused.clone()).is_err(), "{refused}");
         }
         // No script count or snippet budget: an empty set is refused, but many
-        // scripts and a large snippet are armed, and only the 64 MiB command
-        // bound applies (checked where the command is serialized).
+        // scripts and a large snippet are armed, and only the 4 GiB a record
+        // names applies (checked where the command is serialized).
         let script = json!({"origin":"https://fixture.test","frame":"top","source":"report('x');"});
         assert!(validate_document_start(&json!([])).is_err());
         assert!(validate_document_start(&json!(script)).is_err());
@@ -2307,8 +2386,30 @@ mod tests {
                 .len(),
             1000
         );
-        let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(8 * 1024 * 1024)});
+        let long = json!({"origin":"https://fixture.test","frame":"top","source":"a".repeat(80 * 1024 * 1024)});
         assert!(validate_document_start(&json!([long, long])).is_ok());
+        // Neither an origin nor a path prefix has a length bound.
+        let host = format!("https://{}.test", "a".repeat(4096));
+        let prefix = format!("/{}", "p".repeat(1024 * 1024));
+        assert!(
+            validate_document_start(
+                &json!([{"origin":host,"frame":"top","path_prefix":prefix,"source":"report(1);"}])
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_script_ids(&json!(["1", "20"])).unwrap(),
+            json!(["1", "20"])
+        );
+        for refused in [
+            json!([]),
+            json!(["1", "1"]),
+            json!(["01"]),
+            json!([1]),
+            json!("1"),
+        ] {
+            assert!(validate_script_ids(&refused).is_err(), "{refused}");
+        }
         // The normalized command keeps exactly the declared rule.
         let armed = validate_document_start(&json!([{"origin":"http://127.0.0.1:8080","frame":"child","path_prefix":"/lab/","source":"report(1);"}])).unwrap();
         assert_eq!(
@@ -2363,15 +2464,14 @@ mod tests {
         ] {
             assert!(!document_start_path(path), "{path:?}");
         }
-        let long = format!("/{}", "a".repeat(DOCUMENT_START_RULE_LIMIT - 1));
+        let long = format!("/{}", "a".repeat(1024 * 1024));
         assert!(document_start_path(&long));
-        assert!(!document_start_path(&format!("{long}a")));
     }
 
     #[test]
     fn document_start_states_match_their_published_contract() {
         let armed = json!({
-            "contract_version": 3, "available": true, "state": "ready", "session_id": "12",
+            "contract_version": 4, "available": true, "state": "ready", "session_id": "12",
             "limits": document_start_limits(), "unsupported": document_start_unsupported(),
             "document_start": {
                 "status": "ok", "permitted": true, "generation": "2", "renderer_processes": 2,
@@ -2381,8 +2481,8 @@ mod tests {
                     "injected_documents": 1, "refused": 0}],
                 "output": {"records":[{"sequence":"3","record":"report","provenance":"console-document-start-script",
                     "script_id":"1","document_id":"7","frame_id":"99","top_frame":true,"time":1.0,
-                    "truncated":false,"text":"kinds=string:12"}],
-                    "next_sequence":"4","oldest_sequence":"1","retained":3,"retained_bytes":1120,
+                    "text":"kinds=string:12"}],
+                    "more":false,"next_sequence":"4","oldest_sequence":"1","retained":3,"retained_bytes":1120,
                     "dropped":0,"unattributed":0,"stale":0},
             },
         });
@@ -2479,7 +2579,7 @@ import json, pathlib, struct, sys, time
 root = pathlib.Path(sys.argv[1])
 request = struct.Struct('<IHHQQII')
 response = struct.Struct('<IHHQHHIII')
-target_record = struct.Struct('<QHHI256sHH128s512sI')
+target_header = struct.Struct('<QIIIHH')
 while True:
     header = sys.stdin.buffer.read(32)
     if not header:
@@ -2508,8 +2608,8 @@ while True:
         for item in documents:
             origin = b'https://same.test'
             label = b'Identical page'
-            url = item['url'].encode()[:512]
-            records.append(target_record.pack(item['id'],len(origin),2,0,origin,len(label),len(url),label,url,0))
+            url = item['url'].encode()
+            records.append(target_header.pack(item['id'],len(origin),len(label),len(url),2,0) + origin + label + url)
         payload, count, kind = b''.join(records), len(records), 10
         # The capture browser advertises the experiment only when launched with it.
         flags = 2 if (root / 'document-start').exists() else 0
@@ -2520,23 +2620,27 @@ while True:
         armed = root / 'armed.json'
         scripts = json.loads(armed.read_text()) if armed.exists() else []
         status = 'ok'
-        if command['operation'] == 'arm':
-            scripts = [{'script_id':str(index + 1),'rule':{'origin':script['origin'],'frame':script['frame']},
-                        'source_bytes':len(script['source']),'digest':'0123456789abcdef','records':0,
-                        'injected_documents':0,'refused':0} for index, script in enumerate(command['scripts'])]
+        if command['operation'] in ('arm', 'add'):
+            first = 1 + max([int(script['script_id']) for script in scripts], default=0)
+            added = [{'script_id':str(first + index),'rule':{'origin':script['origin'],'frame':script['frame']},
+                      'source_bytes':len(script['source']),'digest':'0123456789abcdef','records':0,
+                      'injected_documents':0,'refused':0} for index, script in enumerate(command['scripts'])]
+            scripts = added if command['operation'] == 'arm' else scripts + added
+        elif command['operation'] == 'remove':
+            scripts = [script for script in scripts if script['script_id'] not in command['script_ids']]
         elif command['operation'] == 'clear':
             if (root / 'clear-refused').exists():
                 status = 'error'
             else:
                 scripts = []
         armed.write_text(json.dumps(scripts))
-        payload, kind = json.dumps({'status':status,'contract_version':3,'permitted':True,'generation':'1',
+        payload, kind = json.dumps({'status':status,'contract_version':4,'permitted':True,'generation':'1',
             'scripts':scripts,'renderer_processes':1,'pending_renderer_processes':0}).encode(), 12
     elif '__renderer_gone__' in source:
         # The browser's per-command reply when the selected renderer's pipe drops.
         payload, kind, wire_status = b'Renderer disconnected', 0, 6
     else:
-        reply = {'status':'ok','value':{'type':'object','text':str(target),'handle':'7','truncated':False}}
+        reply = {'status':'ok','value':{'type':'object','text':str(target),'handle':'7'}}
         # The browser says what a confirmed watch keeps, from the document's own origin.
         command = json.loads(source) if operation == 3 else {}
         if command.get('operation') == 'watch' and command.get('keep'):
@@ -2565,7 +2669,6 @@ while True:
             directory: ConsoleDir::Live(tempfile::tempdir().unwrap()),
             next_request: 1,
             poisoned: false,
-            started: Instant::now(),
             live: true,
             live_target: None,
             stale_target: None,
@@ -2608,9 +2711,9 @@ while True:
             .into()
     }
     #[tokio::test]
-    async fn live_exact_ids_ignore_duplicate_urls_and_truncated_metadata() {
+    async fn live_exact_ids_ignore_duplicate_urls_and_keep_metadata_whole() {
         let (console, directory) = live_fixture().await;
-        let long_url = format!("https://same.test/{}", "a".repeat(600));
+        let long_url = format!("https://same.test/{}", "a".repeat(1024 * 1024));
         std::fs::write(
             directory.path().join("targets.json"),
             json!([
@@ -2621,7 +2724,9 @@ while True:
         )
         .unwrap();
         let state = console.state().await;
-        assert_eq!(state["targets"][0]["url"], state["targets"][1]["url"]);
+        assert_eq!(state["targets"][0]["url"], format!("{long_url}first"));
+        assert_eq!(state["targets"][1]["url"], format!("{long_url}second"));
+        assert_eq!(state["truncated"], false);
         assert_eq!(state["targets"][0]["id"], "11");
         assert_eq!(state["targets"][1]["id"], "22");
         let before = requests(&directory).len();
@@ -2950,6 +3055,67 @@ while True:
         identity
     }
     #[tokio::test]
+    async fn live_add_and_remove_change_the_armed_set_without_replacing_it() {
+        let (console, directory) = live_fixture().await;
+        let identity = arm_fixture(&console, &directory).await;
+        let ids = |result: &Value| {
+            result["document_start"]["scripts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|script| script["script_id"].clone())
+                .collect::<Vec<_>>()
+        };
+        let added = console
+            .action(&json!({"action":"add_document_start","session_id":identity,"confirm_document_start":true,
+                "scripts":[{"origin":"https://same.test","frame":"child","source":"report(2);"}]}))
+            .await
+            .unwrap();
+        crate::validation::schema("NativeConsoleDocumentStartResult", &added, 500).unwrap();
+        assert_eq!(ids(&added), [json!("1"), json!("2")]);
+        let sent = requests(&directory).pop().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(sent["source"].as_str().unwrap()).unwrap()["operation"],
+            "add"
+        );
+        // An add runs snippets as an arm does, so it needs the same
+        // confirmation, and a malformed removal sends nothing.
+        let before = requests(&directory).len();
+        let error = console
+            .action(&json!({"action":"add_document_start","session_id":identity,
+                "scripts":[{"origin":"https://same.test","frame":"top","source":"report(3);"}]}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 400);
+        for script_ids in [
+            json!([]),
+            json!(["1", "1"]),
+            json!(["01"]),
+            json!([1]),
+            json!("1"),
+        ] {
+            let error = console
+                .action(&json!({"action":"remove_document_start","session_id":identity,"script_ids":script_ids}))
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, 400, "{script_ids}");
+        }
+        assert_eq!(requests(&directory).len(), before);
+        let removed = console
+            .action(
+                &json!({"action":"remove_document_start","session_id":identity,"script_ids":["1"]}),
+            )
+            .await
+            .unwrap();
+        crate::validation::schema("NativeConsoleDocumentStartResult", &removed, 500).unwrap();
+        assert_eq!(ids(&removed), [json!("2")]);
+        assert_eq!(
+            requests(&directory).pop().unwrap()["source"],
+            r#"{"operation":"remove","script_ids":["1"]}"#
+        );
+        console.stop().await;
+    }
+    #[tokio::test]
     async fn live_stop_clears_armed_document_start_scripts_before_reporting_idle() {
         let (console, directory) = live_fixture().await;
         let identity = arm_fixture(&console, &directory).await;
@@ -3231,7 +3397,7 @@ while True:
         options.native_console_live_directory = Some(directory.path().into());
         let console = NativeConsole::new(&options);
         console.inner.handshake(session).await;
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         let state = console.state().await;
         assert!(
             started.elapsed() < Duration::from_millis(300),

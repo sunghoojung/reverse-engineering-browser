@@ -1406,22 +1406,16 @@ mod frozen_tests {
         let (store, basename) = Store::event(&path, false).unwrap();
         let mut file = store.root.file(&basename, false).unwrap();
         let mut lines = 0;
-        file.lines(
-            1024,
-            128,
-            20,
-            &AtomicBool::new(false),
-            |_| {
-                // As the backend's index timers do, mid-read.
-                if lines == 0 {
-                    fs::write(root.path().join("events.jsonl.events-v1"), b"index").unwrap();
-                    fs::write(root.path().join("events.jsonl.events-v1-wal"), b"").unwrap();
-                    fs::remove_file(root.path().join("events.jsonl.events-v1-wal")).unwrap();
-                }
-                lines += 1;
-                Ok(())
-            },
-        )
+        file.lines(1024, 128, 20, &AtomicBool::new(false), |_| {
+            // As the backend's index timers do, mid-read.
+            if lines == 0 {
+                fs::write(root.path().join("events.jsonl.events-v1"), b"index").unwrap();
+                fs::write(root.path().join("events.jsonl.events-v1-wal"), b"").unwrap();
+                fs::remove_file(root.path().join("events.jsonl.events-v1-wal")).unwrap();
+            }
+            lines += 1;
+            Ok(())
+        })
         .unwrap();
         assert_eq!(lines, 2);
         store.verify().unwrap();

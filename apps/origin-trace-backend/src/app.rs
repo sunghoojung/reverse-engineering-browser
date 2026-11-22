@@ -511,20 +511,20 @@ impl App {
         .await
         .map_err(|_| Error::new(500, "Package validator failed"))?
     }
-    async fn float32_operation(&self, bytes: Vec<u8>) -> Result<Vec<u8>> {
-        let permit = tokio::time::timeout(Duration::from_secs(1), self.io.clone().acquire_owned())
-            .await
-            .map_err(|_| {
-                Error::new(408, "Float32 admission deadline exceeded").with_code(Code::Timeout)
-            })?
-            .map_err(|_| {
-                Error::new(503, "Float32 diagnostics unavailable")
-                    .with_code(Code::DependencyUnavailable)
-            })?;
+    /// A comparison waits for a reader with no deadline and runs over every
+    /// sample, however many; a request that goes away sets the flag it
+    /// polls, so its reader comes back promptly.
+    async fn float32_operation(&self, request: float32::Request) -> Result<Vec<u8>> {
+        let permit = self.io.clone().acquire_owned().await.map_err(|_| {
+            Error::new(503, "Float32 diagnostics unavailable")
+                .with_code(Code::DependencyUnavailable)
+        })?;
         let root = self.options.artifacts.clone();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel = CancelOnDrop(cancelled.clone());
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            float32::compare_bytes(&root, &bytes)
+            float32::compare(&root, &request, &cancelled)
         })
         .await
         .map_err(|_| Error::new(500, "Float32 diagnostic task failed"))?
@@ -2907,9 +2907,9 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             } else {
                 None
             };
-            // A pack request, an analyst run's evidence snapshot and a
-            // decoder's input parse as they arrive, so the body is held once,
-            // as its parsed value.
+            // A pack request, an analyst run's evidence snapshot, a decoder's
+            // input and a Binary32 request parse as they arrive, so the body
+            // is held once, as its parsed value.
             if matches!(
                 path,
                 "/api/analysis/vm/packs/apply" | "/api/analysis/vm/packs/compare"
@@ -2922,6 +2922,13 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
                 })
                 .await
                 .map(|value| axum::Json(value).into_response());
+            }
+            if path == "/api/float32/compare" {
+                let request = streamed(body, length, float32::parse_reader).await?;
+                return app
+                    .float32_operation(request)
+                    .await
+                    .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
             if matches!(path, "/api/local-analyst/actions" | "/api/decoder/actions") {
                 let value = streamed(body, length, |reader| {
@@ -2955,12 +2962,6 @@ async fn handle(State(app): State<Arc<App>>, request: Request<Body>) -> Response
             } {
                 return app
                     .package_operation(Vec::from(bytes), operation, comparison_permit)
-                    .await
-                    .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
-            }
-            if path == "/api/float32/compare" {
-                return app
-                    .float32_operation(Vec::from(bytes))
                     .await
                     .map(|bytes| ([("content-type", "application/json")], bytes).into_response());
             }
@@ -3529,7 +3530,14 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn float32_admission_reasons_and_permit_release() {
+    async fn float32_waits_for_a_reader_and_gives_it_back() {
+        let request = || {
+            float32::parse_reader(
+                br#"{"protocol_version":1,"input":{"representation":"float32-le","channels":1,"frames":1,"source":{"kind":"bits","words":["3f800000"]}},"reference":null,"tolerances":{"absolute":0,"relative":0,"ulps":0},"detail":{"start":0,"limit":1}}"#
+                    .as_slice(),
+            )
+            .unwrap()
+        };
         for closed in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let mut options = Options::parse_from(["origin-trace-backend"]);
@@ -3539,26 +3547,36 @@ mod tests {
             let permit = app.io.clone().acquire_many_owned(4).await.unwrap();
             if closed {
                 app.io.close();
-            }
-            let error = app.float32_operation(b"{}".to_vec()).await.unwrap_err();
-            assert_eq!(error.status, if closed { 503 } else { 408 });
-            assert_eq!(
-                serde_json::to_value(&error).unwrap()["code"],
-                if closed {
-                    "dependency_unavailable"
-                } else {
-                    "timeout"
-                }
-            );
-            drop(permit);
-            if !closed {
+                let error = app.float32_operation(request()).await.unwrap_err();
+                assert_eq!(error.status, 503);
                 assert_eq!(
-                    app.float32_operation(b"{}".to_vec())
-                        .await
-                        .unwrap_err()
-                        .status,
-                    400
+                    serde_json::to_value(&error).unwrap()["code"],
+                    "dependency_unavailable"
                 );
+            } else {
+                // Past the second a busy reader pool once allowed, the
+                // comparison is still waiting, and runs once a reader frees.
+                let waiting = tokio::spawn({
+                    let app = app.clone();
+                    async move { app.float32_operation(request()).await }
+                });
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                assert!(!waiting.is_finished());
+                drop(permit);
+                let bytes = waiting.await.unwrap().unwrap();
+                let result: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(result["detail"]["rows"][0]["input"]["bits"], "3f800000");
+                assert_eq!(app.io.available_permits(), 4);
+                // A request that goes away leaves the queue with no permit held.
+                let held = app.io.clone().acquire_many_owned(4).await.unwrap();
+                let abandoned = tokio::spawn({
+                    let app = app.clone();
+                    async move { app.float32_operation(request()).await }
+                });
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                abandoned.abort();
+                assert!(abandoned.await.unwrap_err().is_cancelled());
+                drop(held);
                 assert_eq!(app.io.available_permits(), 4);
             }
             app.stop().await;

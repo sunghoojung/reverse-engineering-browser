@@ -8,7 +8,7 @@ import {join,resolve} from 'node:path';
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 export async function checkFloat32Model(root) {
   const ui=runInNewContext((await readFile(join(root,'apps/research-ui/evidence_package.js'),'utf8'))+'\n'+(await readFile(join(root,'apps/research-ui/float32_inspector.js'),'utf8'))+';({float32Bytes,float32ExpectedIdentity,isFloat32Report,createFloat32Controller,float32Unavailable})',
-    {TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,fetch});
+    {TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch});
   const fixture=JSON.parse(await readFile(join(root,'tools/fixtures/float32-v1.json'),'utf8')),request=fixture.request,report=fixture.result;
   const identities=await Promise.all([ui.float32ExpectedIdentity(request.input),ui.float32ExpectedIdentity(request.reference)]);
   assert(ui.isFloat32Report(report,request,identities));assert(ui.float32Unavailable('reb:'));assert.equal(ui.float32Unavailable('http:'),'');
@@ -32,15 +32,18 @@ export async function checkFloat32Model(root) {
   const old=asyncController.run(request);await until(()=>queue.length===1);const newer=asyncController.run(request);await until(()=>queue.length===2);queue[1](response());await newer;const current=asyncController.snapshot();queue[0](response());await old;await delay(2);assert.equal(asyncController.snapshot().report,current.report);assert.equal(asyncController.snapshot().revision,current.revision);
   const held=asyncController.run(request);await until(()=>queue.length===3);asyncController.cancel();await held;assert.equal(asyncController.snapshot().status,'cancelled');assert.equal(asyncController.snapshot().stale,true);queue[2](response());await delay(2);assert.equal(asyncController.snapshot().status,'cancelled');
   asyncController.clear();assert.equal(asyncController.snapshot().report,null);
-  const timeout=ui.createFloat32Controller({timeoutMs:15,fetcher:()=>new Promise(()=>{})});await timeout.run(request);assert.match(timeout.snapshot().message,/deadline/);assert.equal(timeout.snapshot().pending,false);
-  for(const fetcher of [async()=>new Response('failure',{status:503}),async()=>new Response('{broken'),async()=>new Response(new Uint8Array(524289)),async()=>new Response(JSON.stringify({...report,profile:'other'}))]) {
+  // No deadline: a comparison that takes seconds counts them until Cancel.
+  {let clock=0;const slow=ui.createFloat32Controller({now:()=>clock,tickMs:5,fetcher:()=>new Promise(()=>{})});const running=slow.run(request);await until(()=>slow.snapshot().pending);assert.match(slow.snapshot().message,/locally… 0 s\. Cancel stops the comparison\./);
+    clock=3400;await until(()=>/ 3 s\./.test(slow.snapshot().message));assert.equal(slow.snapshot().status,'loading');assert.equal(slow.snapshot().pending,true);
+    slow.cancel();await running;assert.equal(slow.snapshot().pending,false);assert.equal(slow.snapshot().status,'cancelled');const settled=slow.snapshot().message;await delay(20);assert.equal(slow.snapshot().message,settled,'the ticker stops with the run');}
+  for(const fetcher of [async()=>new Response('failure',{status:503}),async()=>new Response('{broken'),async()=>new Response(JSON.stringify({...report,profile:'other'}))]) {
     let fail=false;const c=ui.createFloat32Controller({fetcher:()=>fail?fetcher():response()});await c.run(request);const retained=c.snapshot().report;fail=true;await c.run(request);assert.equal(c.snapshot().status,'error');assert.equal(c.snapshot().report,retained);assert.equal(c.snapshot().stale,true);
   }
   await checkFloat32RevealModel();
   await checkFloat32ResponsiveOwnerModel(root);
   await checkFloat32HostLifecycle(root,fixture);
   await checkFloat32NativeBridge(root);
-  console.log('PASS Float32 exact identity, closed report shapes, finite/nonfinite display, stale/latest/cancel/deadline and bounded transport models (not rendered QA)');
+  console.log('PASS Float32 exact identity, closed report shapes, finite/nonfinite display, stale/latest/cancel, counted seconds with no deadline and streamed transport models (not rendered QA)');
 }
 
 // Keep Float32 on the shared driver's hit-tested, settled native wheel path.
@@ -195,7 +198,7 @@ async function checkFloat32HostLifecycle(root, fixture) {
     return new Response(JSON.stringify(result));
   };
   const document={activeElement:null,createElement:()=>new Node(),querySelector:selector=>selector==='#tools-panel-float32'?container:selector==='#screen-tools'?screen:{hidden:true}};
-  const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,location:{protocol:'http:'},document,
+  const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,location:{protocol:'http:'},document,
     Option:function(text,value){const option=new Node(value);option.textContent=text;return option;},state,isArtifactResponse:body=>body.valid!==false,
     canvasGalleryVisible:()=>false,retireCanvasPreviews(){},
     renderShellStatus(){},renderSourceHealth(){},renderSources(){},loadArtifactContent(){},nativeCanvasCaptureDisplayLimit:20,evidencePackagePanel:{sync(){}},evidenceWorkspace:{sync(){}},renderFingerprintActivity(){},
@@ -270,7 +273,7 @@ async function checkFloat32NativeBridge(root, backendURL=null) {
   const prefix=(await readFile(join(root,'apps/research-ui/evidence_package.js'),'utf8'))+'\n'+(await readFile(join(root,'apps/research-ui/float32_inspector.js'),'utf8'));
   for(const mode of ['offline','demo','fallback','live']) {
     const live=mode==='live';let calls=0;
-    const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,window:{},location:{protocol:live?'http:':'reb:'},document:{querySelector:()=>({disabled:!live})},
+    const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,window:{},location:{protocol:live?'http:':'reb:'},document:{querySelector:()=>({disabled:!live})},
       fetch:async(path,options)=>{calls++;assert.equal(path,'/api/float32/compare');assert.deepEqual(JSON.parse(options.body),request);return fetch(backendURL+path,options);},
       fakeController:{run:async supplied=>{calls++;assert.deepEqual(JSON.parse(JSON.stringify(supplied)),request);},snapshot:()=>({pending:false,status:'ready',stale:false,report})}};
     const controller=backendURL?'createFloat32Controller()':'fakeController';
@@ -280,7 +283,7 @@ async function checkFloat32NativeBridge(root, backendURL=null) {
   }
   if(!backendURL) {
     for(const state of [{pending:true,status:'ready',stale:false,report},{pending:false,status:'error',stale:false,report},{pending:false,status:'ready',stale:true,report}]) {
-      const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,fetch,window:{},location:{protocol:'http:'},document:{querySelector:()=>({disabled:false})},fakeController:{run:async()=>{},snapshot:()=>state}};
+      const env={TextEncoder,TextDecoder,Uint8Array,DataView,crypto,atob,btoa,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch,window:{},location:{protocol:'http:'},document:{querySelector:()=>({disabled:false})},fakeController:{run:async()=>{},snapshot:()=>state}};
       await assert.rejects(runInNewContext(prefix+';const float32Panel={controller:fakeController};(async()=>{'+block+'})()',env),/did not complete/);
     }
   }

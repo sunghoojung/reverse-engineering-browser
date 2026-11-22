@@ -1,11 +1,8 @@
 // Cold-path presentation only. Rust owns classification, comparison and metrics.
-const float32Maximum = 65536;
-const float32ResponseMaximum = 524288;
 const float32Policies = {zero:'numeric_equal_bits_distinct',nonfinite:'excluded_from_delta_ulp_tolerance',nan:'never_numeric_equal_payload_preserved',relative:'absolute_delta_over_maximum_magnitude_zero_is_zero',tolerance:'absolute_or_relative_or_ulp_finite_only',accumulation:'binary64_sequential_index_order',coverage:'complete_supplied_buffers_not_capture_completeness'};
-const float32Limits = {samples_per_input:65536,bytes_per_input:262144,detail_rows:256,request_bytes:2097152,response_bytes:524288,manifest_bytes:8388608,manifest_records:8192};
 const float32CountKeys = ['positive_zero','negative_zero','subnormal','normal','positive_infinity','negative_infinity','nan','finite_count'];
 function float32Keys(value, keys) {return value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value,key));}
-function float32Integer(n,max=float32Maximum) {return Number.isSafeInteger(n) && n >= 0 && n <= max;}
+function float32Integer(n,max=Number.MAX_SAFE_INTEGER) {return Number.isSafeInteger(n) && n >= 0 && n <= max;}
 function float32Same(a,b) {return JSON.stringify(a) === JSON.stringify(b);}
 function float32ConstantObject(value, expected) {return float32Keys(value,Object.keys(expected)) && Object.entries(expected).every(([key,v]) => value[key] === v);}
 function float32Unavailable(protocol) {return ['http:','https:'].includes(protocol) ? '' : 'Float32 diagnostics need the local live backend or browser development UI. Stored-evidence native mode is unavailable.';}
@@ -13,14 +10,13 @@ function float32Bytes(input) {
   let bytes;
   if (input.source.kind === 'bits') {
     const words=input.source.words;
-    if (!Array.isArray(words) || words.length>float32Maximum) throw new Error('Use at most 65,536 binary32 words.');
+    if (!Array.isArray(words)) throw new Error('Raw words must be a list.');
     bytes=new Uint8Array(words.length*4);const view=new DataView(bytes.buffer);
     words.forEach((word,index) => {if(!/^[0-9a-f]{8}$/.test(word))throw new Error('Each raw word must contain eight lowercase hexadecimal digits.');view.setUint32(index*4,Number.parseInt(word,16),input.representation==='float32-le');});
   } else if (input.source.kind === 'bytes') {
     const text=input.source.base64;
-    if(text.length>349528)throw new Error('Byte input exceeds 256 KiB.');
     let decoded;try{decoded=atob(text);}catch{throw new Error('Use canonical padded base64 bytes.');}
-    if(btoa(decoded)!==text || decoded.length>262144)throw new Error('Use canonical base64 of at most 256 KiB.');
+    if(btoa(decoded)!==text)throw new Error('Use canonical padded base64 bytes.');
     bytes=Uint8Array.from(decoded,char=>char.charCodeAt(0));
   } else return null;
   if(bytes.length !== input.channels*input.frames*4)throw new Error('Byte length must match the complete declared channels × frames × 4 layout.');
@@ -34,14 +30,14 @@ async function float32ExpectedIdentity(input) {
 function isFloat32Report(value,request,identities) {
   const count=n=>float32Integer(n), finite=n=>typeof n==='number' && Number.isFinite(n), positive=n=>finite(n)&&n>=0;
   const optional=(v,check)=>v===null||check(v), boolean=v=>typeof v==='boolean';
-  if(!float32Keys(value,['protocol_version','profile','input','reference','input_summary','reference_summary','comparison','tolerances','policies','detail','limits','source_ids']) || value.protocol_version!==1 || value.profile!=='binary32-finite-steps-v1' || !float32ConstantObject(value.policies,float32Policies) || !float32ConstantObject(value.limits,float32Limits) || !float32Same(value.source_ids,['rust-f32-representation','oracle-binary32-format']) || !float32ConstantObject(value.tolerances,request.tolerances))return false;
+  if(!float32Keys(value,['protocol_version','profile','input','reference','input_summary','reference_summary','comparison','tolerances','policies','detail','source_ids']) || value.protocol_version!==2 || value.profile!=='binary32-finite-steps-v1' || !float32ConstantObject(value.policies,float32Policies) || !float32Same(value.source_ids,['rust-f32-representation','oracle-binary32-format']) || !float32ConstantObject(value.tolerances,request.tolerances))return false;
   if(!float32ConstantObject(value.input,identities[0]) || (identities[1] ? !float32ConstantObject(value.reference,identities[1]):value.reference!==null))return false;
   const summary=(v,identity)=>float32Keys(v,[...float32CountKeys,'finite_sum_absolute']) && float32CountKeys.every(k=>count(v[k])) && positive(v.finite_sum_absolute) && float32CountKeys.slice(0,7).reduce((sum,k)=>sum+v[k],0)===identity.sample_count && v.finite_count===v.positive_zero+v.negative_zero+v.subnormal+v.normal;
   if(!summary(value.input_summary,value.input) || (value.reference ? !summary(value.reference_summary,value.reference):value.reference_summary!==null))return false;
   const sample=v=>float32Keys(v,['bits','class','sign_bit','value']) && /^[0-9a-f]{8}$/.test(v.bits) && ['zero','subnormal','normal','infinity','nan'].includes(v.class) && float32Integer(v.sign_bit,1) && (['nan','infinity'].includes(v.class) ? v.value===null:finite(v.value));
   const difference=v=>float32Keys(v,['bit_equal','numeric_equal','absolute_delta','relative_delta','ulp_distance','within_tolerance']) && boolean(v.bit_equal)&&boolean(v.numeric_equal)&&optional(v.absolute_delta,positive)&&optional(v.relative_delta,n=>positive(n)&&n<=2)&&optional(v.ulp_distance,n=>float32Integer(n,4294967295))&&optional(v.within_tolerance,boolean) && [v.relative_delta,v.ulp_distance,v.within_tolerance].every(n=>(n===null)===(v.absolute_delta===null));
   const detail=value.detail,total=Math.max(value.input.sample_count,value.reference?.sample_count??0),end=Math.min(total,request.detail.start+request.detail.limit);
-  if(!float32Keys(detail,['start','limit','total','returned','next_start','rows']) || detail.start!==request.detail.start || detail.limit!==request.detail.limit || detail.total!==total || detail.returned!==end-detail.start || detail.next_start!==(end<total?end:null) || !Array.isArray(detail.rows) || detail.rows.length!==detail.returned || detail.rows.length>256)return false;
+  if(!float32Keys(detail,['start','limit','total','returned','next_start','rows']) || detail.start!==request.detail.start || detail.limit!==request.detail.limit || detail.total!==total || detail.returned!==end-detail.start || detail.next_start!==(end<total?end:null) || !Array.isArray(detail.rows) || detail.rows.length!==detail.returned)return false;
   if(!detail.rows.every((row,offset)=>float32Keys(row,['index','byte_offset','input','reference','difference']) && row.index===detail.start+offset && row.byte_offset===row.index*4 && (row.index<value.input.sample_count?sample(row.input):row.input===null) && (row.index<(value.reference?.sample_count??0)?sample(row.reference):row.reference===null) && (row.input&&row.reference?difference(row.difference):row.difference===null)))return false;
   const c=value.comparison;
   if(!value.reference)return c===null;
@@ -54,7 +50,10 @@ function isFloat32Report(value,request,identities) {
   if(c.all_bits_equal!==(status==='complete'?c.bit_equal_pairs===pairs:null) || c.all_numeric_equal!==(status==='complete'?c.numeric_equal_pairs===pairs:null) || c.all_within_tolerance!==(status==='complete'&&c.finite_pairs===pairs?c.within_tolerance_pairs===pairs:null) || [...metrics,'maximum_ulp_distance'].some(k=>(c[k]===null)!==(c.finite_pairs===0)))return false;
   const buckets=['zero','one','two_to_four','five_to_sixteen','over_sixteen'];return float32Keys(c.ulp_histogram,buckets)&&buckets.every(k=>count(c.ulp_histogram[k]))&&buckets.reduce((sum,k)=>sum+c.ulp_histogram[k],0)===c.finite_pairs;
 }
-function createFloat32Controller({changed=()=>{},fetcher=fetch,timeoutMs=15000}={}) {
+// A comparison reads every sample however long that takes, until it is done
+// or Cancel ends it, which also stops the backend's read. Only the elapsed
+// seconds change while it runs.
+function createFloat32Controller({changed=()=>{},fetcher=fetch,now=()=>Date.now(),tickMs=1000}={}) {
   let revision=0,pending=null,last=null,status='idle',message='Select exact raw words, bytes or retained artifact identities. Nothing runs automatically.';
   const snapshot=()=>({revision,pending:pending!==null,report:last?.report??null,request:last?.request??null,stale:last!==null&&last.revision!==revision,status,message});
   const notify=()=>changed(snapshot());
@@ -65,18 +64,18 @@ function createFloat32Controller({changed=()=>{},fetcher=fetch,timeoutMs=15000}=
   const run=async input=>{
     cancel('Superseded by a new comparison.');
     const request=JSON.parse(JSON.stringify(input)),body=JSON.stringify(request);
-    if(new TextEncoder().encode(body).length>2097152)throw new Error('Request exceeds 2 MiB.');
     const owned=++revision,controller=new AbortController();let reject;
     const interrupted=new Promise((_,no)=>{reject=no;});
-    pending={controller,reject};status='loading';message='Comparing complete selected buffers locally…';notify();
-    const timer=setTimeout(()=>{if(owned===revision)cancel('Comparison deadline exceeded. Previous results remain visible.');},timeoutMs);
+    const started=now(),progress=()=>{status='loading';message=`Comparing complete selected buffers locally… ${Math.floor((now()-started)/1000)} s. Cancel stops the comparison.`;};
+    pending={controller,reject};progress();notify();
+    const ticker=setInterval(()=>{if(owned===revision&&pending){progress();notify();}},tickMs);
     try{
       const report=await Promise.race([(async()=>{
         const identities=await Promise.all([float32ExpectedIdentity(request.input),request.reference?float32ExpectedIdentity(request.reference):null]);
         if(controller.signal.aborted)throw new Error('Cancelled.');
         const response=await fetcher('/api/float32/compare',{method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body,signal:controller.signal});
-        const bytes=await evidencePackageReadBytes(response,float32ResponseMaximum,controller.signal);
-        if(!response.ok)throw new Error(({400:'Invalid layout, representation or request.',404:'Selected artifact is unavailable.',408:'The bounded operation timed out.',409:'Artifact identity changed. Review the selection.',413:'The input or complete manifest scan exceeds a resource limit.',422:'Artifact bytes failed complete integrity verification.'})[response.status]||`Local diagnostics returned HTTP ${response.status}.`);
+        const bytes=await evidencePackageReadBytes(response,Infinity,controller.signal);
+        if(!response.ok)throw new Error(({400:'Invalid layout, representation or request.',404:'Selected artifact is unavailable.',408:'The request body or the artifact lookup timed out. Run again to continue.',409:'Artifact identity changed. Review the selection.',422:'Artifact bytes failed complete integrity verification.'})[response.status]||`Local diagnostics returned HTTP ${response.status}.`);
         let value;try{value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}catch{throw new Error('Malformed float32 response.');}
         if(!isFloat32Report(value,request,identities))throw new Error('Float32 response does not match the exact selected inputs and contract.');
         return value;
@@ -84,7 +83,7 @@ function createFloat32Controller({changed=()=>{},fetcher=fetch,timeoutMs=15000}=
       if(owned!==revision)return;
       last={report,request,revision:owned};status='ready';message='Complete supplied buffers inspected. Capture completeness and environment identity are not established.';
     }catch(error){if(owned!==revision)return;status='error';message=error.message;}
-    finally{clearTimeout(timer);if(owned===revision){pending=null;notify();}}
+    finally{clearInterval(ticker);if(owned===revision){pending=null;notify();}}
   };
   return {snapshot,run,cancel,invalidate,clear,rejectInput};
 }
@@ -96,7 +95,7 @@ function mountFloat32Inspector(root,{getArtifacts=()=>[],protocol=location.proto
   function selected(side) {
     const kind=$(`[data-float32-kind="${side}"]`).value,representation=$(`[data-float32-endian="${side}"]`).value;
     const channels=Number($(`[data-float32-channels="${side}"]`).value),frames=Number($(`[data-float32-frames="${side}"]`).value);
-    if(!float32Integer(channels,64)||channels<1||!float32Integer(frames)||channels*frames>65536)throw new Error('Declare 1–64 channels and at most 65,536 total samples.');
+    if(!float32Integer(channels,4294967295)||channels<1||!float32Integer(frames)||!Number.isSafeInteger(channels*frames*4))throw new Error('Declare at least one channel and a whole number of frames.');
     let source;
     if(kind==='artifact') {
       const key=$(`[data-float32-artifact="${side}"]`).value;
@@ -115,7 +114,7 @@ function mountFloat32Inspector(root,{getArtifacts=()=>[],protocol=location.proto
     return {protocol_version:1,input:selected('input'),reference:$('#float32-reference-enabled').checked?selected('reference'):null,tolerances:{absolute,relative,ulps},detail:{start,limit:64}};
   }
   function refreshSources() {
-    const artifacts=getArtifacts().slice(0,2048).filter(row=>row.sensitive===false&&typeof row.session_id==='string'&&typeof row.artifact_id==='string'&&/^[0-9a-f]{64}$/.test(row.sha256)&&float32Integer(row.byte_size,262144)).slice(0,2048);
+    const artifacts=getArtifacts().slice(0,2048).filter(row=>row.sensitive===false&&typeof row.session_id==='string'&&typeof row.artifact_id==='string'&&/^[0-9a-f]{64}$/.test(row.sha256)&&float32Integer(row.byte_size)).slice(0,2048);
     const key=JSON.stringify(artifacts.map(row=>[row.session_id,row.artifact_id,row.sha256,row.byte_size]));if(key===lastArtifacts)return;lastArtifacts=key;
     let activeSelectionChanged=false;
     for(const side of ['input','reference']) {

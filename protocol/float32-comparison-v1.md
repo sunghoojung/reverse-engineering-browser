@@ -3,8 +3,9 @@
 `POST /api/float32/compare` (`reb-api call compare_float32`) inspects an explicit
 binary32 buffer and optionally compares a reference. The authoritative closed
 schemas are `Float32Request` and `Float32Result` in [OpenAPI](openapi.json).
-`reb-api describe compare_float32` includes errors, input/result schemas, resource
-bounds and advisory effects. This is in-process read-only analysis: no helper,
+`reb-api describe compare_float32` includes errors, input/result schemas and
+advisory effects. Requests are protocol version 1. Results are version 2, which
+dropped the `limits` object when every size bound below was removed. This is in-process read-only analysis: no helper,
 execution, browser control, capture, target/network request, persistence or upload.
 Tools → Float32 comparison uses this same operation. Stored-evidence native mode
 shows its actual backend prerequisite; it does not silently compute another result.
@@ -12,7 +13,7 @@ shows its actual backend prerequisite; it does not silently compute another resu
 ## Exact input and coverage
 
 Every input declares `representation` (`float32-le` or `float32-be`), `channels`
-(1–64), `frames` (0–65,536), and one closed `source`:
+(at least 1), `frames` (0 or more), and one closed `source`:
 
 - `bits`: `words`, an array of exactly eight lowercase hexadecimal digits per
   word, most-significant digit first. Example: `3f800000`. These are raw word
@@ -21,9 +22,10 @@ Every input declares `representation` (`float32-le` or `float32-be`), `channels`
 - `bytes`: `base64`, canonical padded RFC 4648 bytes, without whitespace.
 - `artifact`: exact `session_id`, `artifact_id`, expected lowercase `sha256` and
   expected `byte_length`. No path or URL is accepted. The existing manifest
-  validator must finish its complete bounded scan, including duplicate checks,
-  before selecting a record. A match found before scan exhaustion is insufficient.
-  The complete blob must then pass the existing length and SHA-256 verification.
+  validator must finish its complete scan, including duplicate checks, before
+  selecting a record. A match found before scan exhaustion is insufficient.
+  The blob's length is checked before it is read and its SHA-256 when one pass
+  over it ends; no result is returned unless both match.
   A record not marked `sensitive: false` is refused with 400 before its bytes are
   read: the result returns input words, so request and response bodies, request
   targets, header blocks, cookie lists and Canvas images never pass through it.
@@ -74,8 +76,8 @@ for negative zero because JSON consumers can normalize its numeric spelling.
 - Finite maximum deltas, maximum ULP, histogram and RMS use only finite pairs.
   RMS is square root of the sequential binary64 sum of squared binary64 deltas
   divided by finite-pair count. Per-input finite absolute sums use sequential
-  binary64 addition in ascending sample order. The bounds keep intermediates
-  finite. These are rounded binary64 diagnostics, not exact real arithmetic,
+  binary64 addition in ascending sample order. Binary64 intermediates stay
+  finite at any sample count a buffer can hold. These are rounded binary64 diagnostics, not exact real arithmetic,
   compensated sums or claims to reproduce a browser DSP reduction.
 
 The backend enables the existing `serde_json` `float_roundtrip` feature. Correctly
@@ -98,7 +100,8 @@ Matching prefixes never imply full equality. A complete same-layout comparison
 with NaNs may have all bits equal and all numeric unequal. The full tolerance
 verdict requires a nonempty, same-layout comparison with every pair finite.
 
-`detail.start` and `detail.limit` select a window over the larger sample count.
+`detail.start` and `detail.limit` select a page over the larger sample count;
+`limit` is the caller's page size, at least 1.
 Details include index, byte offset, either sample (null for a missing tail), and
 pair diagnostics (null without both samples). Aggregate metrics always cover all
 supplied samples; paging cannot hide a mismatch. `next_start`, `returned` and
@@ -106,31 +109,38 @@ supplied samples; paging cannot hide a mismatch. `next_start`, `returned` and
 missing tails are separately explicit. An empty detail window at `start=total`
 is allowed. A start beyond total is rejected.
 
-## Bounds and errors
+## Size, waiting and errors
 
-- 65,536 samples / 262,144 bytes per input; at most two inputs
-- 2 MiB request body; 256 detail rows; 512 KiB serialized result
+- No sample, byte, row, request or result size is refused. Supplied words or
+  bytes are held as the request holds them, and the request is parsed as it
+  arrives. An artifact is streamed once in 64 KiB blocks, so memory does not
+  grow with its size. Both sides are read in lockstep and only the requested
+  detail page is kept.
 - Artifact manifest: the artifact is found by ID through the backend's
   disk-backed manifest index (`manifest.jsonl.lookup-v1`), however long the
   manifest is, with the 8,192-byte record limit. A lookup waits at most five
   seconds for the index to reach the end of the manifest and returns `408`
   past that, keeping its progress for the next read.
-- Existing four-slot blocking-I/O admission pool; one-second admission deadline.
-  A dropped HTTP caller cannot release a running task's permit. Bounded work can
-  finish after caller cancellation; there are no mutations to undo.
+- A comparison waits for one of the four blocking-I/O readers with no deadline
+  and then reads every sample. A caller that goes away sets the flag the
+  comparison checks every 65,536 samples, so its reader comes back promptly.
+  There are no mutations to undo.
 - Existing loopback origin guards, one Content-Length, no Transfer-Encoding, and
-  five-second body deadline. Typed parsing rejects duplicate/unknown fields,
+  the request-body deadline. Typed parsing rejects duplicate/unknown fields,
   unsupported versions, malformed hex/base64, nonfinite/negative tolerances and
   impossible dimensions. Input strings and unknown member names are not echoed.
 - HTTP 400 invalid request, 403 origin rejected, 404 missing selected identity,
-  408 body/admission/manifest deadline, 409 stale expected identity, 413 explicit
-  resource exhaustion, 422 failed artifact integrity, 500 malformed store/internal
-  failure, 503 unavailable admission. No unsuccessful read yields partial equality.
+  408 body or manifest lookup deadline, 409 stale expected identity, 422 failed
+  artifact integrity, 499 the request went away, 500 malformed store/internal
+  failure, 503 the reader pool is unavailable. No unsuccessful read yields
+  partial equality.
 
-Tools preserves the last successful result and labels it stale on edits, failure,
-cancellation or deadline. It binds successful reports to exact input hashes,
-layout and tolerances, bounds streaming response bytes/chunks, and rejects stale
-arrivals. Analysis is explicit; switching away cancels response ownership.
+Tools preserves the last successful result and labels it stale on edits, failure
+or cancellation. While a comparison runs, its notice counts the seconds and
+**Cancel** stops it, in the backend too. It binds successful reports to exact
+input hashes, layout and tolerances, reads the streamed response whole, and
+rejects stale arrivals. Analysis is explicit; switching away cancels response
+ownership.
 
 ## Sources and original fixtures
 

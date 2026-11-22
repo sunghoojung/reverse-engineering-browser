@@ -9358,12 +9358,12 @@
       "post": {
         "operationId": "compare_float32",
         "summary": "Inspect or compare explicit binary32 buffers",
-        "description": "Version 1 read-only diagnostics. Inputs are exact hex word arrays, canonical base64 bytes, or ID-selected complete verified artifacts. Layout is explicitly interleaved float32-le or float32-be. Omitted/null reference inspects one input. Caller tolerances use absolute OR symmetric relative OR finite representable-step distance; they never establish behavioral equivalence. Full metrics cover all supplied samples; detail is a bounded window. NaN representations remain raw bits, signed zeros are numerically equal, and nonfinite values are excluded from deltas/ULP/tolerances. No native capture, browser/CPU attribution, arbitrary paths/URLs, network, helper, or persistence.",
+        "description": "Read-only diagnostics over complete buffers of any size; requests are version 1 and results version 2. Inputs are exact hex word arrays, canonical base64 bytes, or ID-selected complete verified artifacts. Layout is explicitly interleaved float32-le or float32-be. Omitted/null reference inspects one input. Caller tolerances use absolute OR symmetric relative OR finite representable-step distance; they never establish behavioral equivalence. Full metrics cover all supplied samples; detail is a page of the caller's chosen size. NaN representations remain raw bits, signed zeros are numerically equal, and nonfinite values are excluded from deltas/ULP/tolerances. No native capture, browser/CPU attribution, arbitrary paths/URLs, network, helper, or persistence.",
         "tags": [
           "float32"
         ],
         "x-source": "apps/origin-trace-backend/src/float32.rs",
-        "x-max-body-bytes": 2097152,
+        "x-max-body-bytes": 9007199254740991,
         "requestBody": {
           "required": true,
           "content": {
@@ -9376,7 +9376,7 @@
         },
         "responses": {
           "200": {
-            "description": "Complete bounded binary32 diagnostics. Inspect comparison status; empty or mismatched layouts do not yield full equality. Null finite metrics are unavailable, never nonfinite-to-JSON coercions.",
+            "description": "Complete binary32 diagnostics over every supplied sample. Inspect comparison status; empty or mismatched layouts do not yield full equality. Null finite metrics are unavailable, never nonfinite-to-JSON coercions.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9434,7 +9434,7 @@
             }
           },
           "408": {
-            "description": "The request-body, bounded I/O-admission or cooperative complete-manifest scan deadline expired.",
+            "description": "The request-body or artifact manifest lookup deadline expired.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9482,7 +9482,7 @@
             }
           },
           "503": {
-            "description": "The existing bounded diagnostic I/O admission pool is unavailable.",
+            "description": "The diagnostic I/O pool is unavailable.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9525,8 +9525,8 @@
               }
             }
           },
-          "413": {
-            "description": "Input or manifest resource limit exceeded; no partial equality result.",
+          "422": {
+            "description": "Complete artifact integrity check failed.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9535,8 +9535,8 @@
               }
             }
           },
-          "422": {
-            "description": "Complete artifact integrity check failed.",
+          "499": {
+            "description": "The request went away and the comparison stopped.",
             "content": {
               "application/json": {
                 "schema": {
@@ -38161,7 +38161,6 @@
               },
               "words": {
                 "type": "array",
-                "maxItems": 65536,
                 "items": {
                   "type": "string",
                   "pattern": "^[0-9a-f]{8}$"
@@ -38183,7 +38182,6 @@
               },
               "base64": {
                 "type": "string",
-                "maxLength": 349528,
                 "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
               }
             }
@@ -38216,7 +38214,7 @@
               "byte_length": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 262144
+                "maximum": 9007199254740991
               }
             }
           }
@@ -38242,12 +38240,12 @@
           "channels": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 64
+            "maximum": 4294967295
           },
           "frames": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "source": {
             "$ref": "#/components/schemas/Float32Source"
@@ -38514,12 +38512,12 @@
               "start": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 256
+                "maximum": 9007199254740991
               }
             }
           }
@@ -38551,12 +38549,12 @@
           "channels": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 64
+            "maximum": 4294967295
           },
           "frames": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "origin": {
             "type": "string",
@@ -38573,12 +38571,12 @@
           "byte_length": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 262144
+            "maximum": 9007199254740991
           },
           "sample_count": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "session_id": {
             "anyOf": [
@@ -38624,42 +38622,42 @@
           "positive_zero": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "negative_zero": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "subnormal": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "normal": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "positive_infinity": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "negative_infinity": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "nan": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "finite_count": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "finite_sum_absolute": {
             "type": "number",
@@ -38812,42 +38810,42 @@
           "compared_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "input_tail": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "reference_tail": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "bit_equal_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "numeric_equal_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "finite_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "excluded_nonfinite_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "within_tolerance_pairs": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 65536
+            "maximum": 9007199254740991
           },
           "raw_bytes_equal": {
             "type": "boolean"
@@ -38893,7 +38891,7 @@
               {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               {
                 "type": "null"
@@ -38959,27 +38957,27 @@
               "zero": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "one": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "two_to_four": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "five_to_sixteen": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "over_sixteen": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               }
             }
           }
@@ -38998,13 +38996,12 @@
           "comparison",
           "tolerances",
           "policies",
-          "limits",
           "detail",
           "source_ids"
         ],
         "properties": {
           "protocol_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           },
           "profile": {
@@ -39093,49 +39090,6 @@
               }
             }
           },
-          "limits": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "samples_per_input",
-              "bytes_per_input",
-              "detail_rows",
-              "request_bytes",
-              "response_bytes",
-              "manifest_bytes",
-              "manifest_records"
-            ],
-            "properties": {
-              "samples_per_input": {
-                "const": 65536,
-                "type": "integer"
-              },
-              "bytes_per_input": {
-                "const": 262144,
-                "type": "integer"
-              },
-              "detail_rows": {
-                "const": 256,
-                "type": "integer"
-              },
-              "request_bytes": {
-                "const": 2097152,
-                "type": "integer"
-              },
-              "response_bytes": {
-                "const": 524288,
-                "type": "integer"
-              },
-              "manifest_bytes": {
-                "const": 8388608,
-                "type": "integer"
-              },
-              "manifest_records": {
-                "const": 8192,
-                "type": "integer"
-              }
-            }
-          },
           "detail": {
             "type": "object",
             "additionalProperties": false,
@@ -39151,29 +39105,29 @@
               "start": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 256
+                "maximum": 9007199254740991
               },
               "total": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 65536
+                "maximum": 9007199254740991
               },
               "returned": {
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 256
+                "maximum": 9007199254740991
               },
               "next_start": {
                 "anyOf": [
                   {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 65536
+                    "maximum": 9007199254740991
                   },
                   {
                     "type": "null"
@@ -39182,7 +39136,6 @@
               },
               "rows": {
                 "type": "array",
-                "maxItems": 256,
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
@@ -39197,12 +39150,12 @@
                     "index": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 65535
+                      "maximum": 9007199254740991
                     },
                     "byte_offset": {
                       "type": "integer",
                       "minimum": 0,
-                      "maximum": 262140
+                      "maximum": 9007199254740991
                     },
                     "input": {
                       "anyOf": [

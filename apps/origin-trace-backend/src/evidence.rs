@@ -195,42 +195,25 @@ pub fn verified_range_cancellable(
     limit: usize,
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>> {
-    let root = root.canonicalize()?;
-    let path = root
-        .join(
-            artifact["content_path"]
-                .as_str()
-                .ok_or_else(|| Error::new(500, "Malformed artifact content path"))?,
-        )
-        .canonicalize()?;
-    if !path.starts_with(&root) {
-        return Err(Error::new(
-            500,
-            "Artifact content path escapes the artifact store",
-        ));
-    }
-    let mut file = regular_file(&path)?;
-    let expected = artifact["byte_size"]
-        .as_u64()
-        .ok_or_else(|| Error::new(500, "Artifact content byte size is invalid"))?;
-    if file.metadata()?.len() != expected {
-        return Err(Error::new(500, "Artifact content byte size is invalid")
-            .with_code(Code::ArtifactIntegrity));
-    }
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    let mut position = 0usize;
-    let wanted = usize::try_from(expected)
+    let mut reader = VerifiedReader::open(root, artifact)?;
+    let wanted = usize::try_from(reader.expected)
         .unwrap_or(usize::MAX)
         .saturating_sub(offset);
     let mut selected = Vec::with_capacity(limit.min(wanted));
+    let mut buffer = [0u8; 64 * 1024];
+    let mut position = 0usize;
     loop {
         check_cancelled(cancelled, "Artifact content")?;
-        let size = file.read(&mut buffer)?;
+        let size = reader.read(&mut buffer).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                Error::new(500, error.to_string()).with_code(Code::ArtifactIntegrity)
+            } else {
+                error.into()
+            }
+        })?;
         if size == 0 {
             break;
         }
-        hash.update(&buffer[..size]);
         let start = offset.saturating_sub(position).min(size);
         let end = offset
             .saturating_add(limit)
@@ -239,22 +222,80 @@ pub fn verified_range_cancellable(
         if end > start {
             selected.extend_from_slice(&buffer[start..end]);
         }
-        position = position
-            .checked_add(size)
-            .ok_or_else(|| Error::new(500, "Artifact byte size overflow"))?;
-        if position as u64 > expected {
-            return Err(Error::new(500, "Artifact changed during verification")
-                .with_code(Code::ArtifactIntegrity));
-        }
-    }
-    if position as u64 != expected
-        || file.metadata()?.len() != expected
-        || hex::encode(hash.finalize()) != artifact["sha256"].as_str().unwrap_or("")
-    {
-        return Err(Error::new(500, "Artifact content integrity is invalid")
-            .with_code(Code::ArtifactIntegrity));
+        position += size;
     }
     Ok(selected)
+}
+
+/// An artifact's bytes as a stream, hashed as they are read. The end of the
+/// stream is an `InvalidData` error unless exactly the recorded size and
+/// SHA-256 were read, so a caller that reads to the end has seen the
+/// recorded bytes and nothing else, whatever their size.
+pub struct VerifiedReader {
+    file: File,
+    hash: Sha256,
+    position: u64,
+    expected: u64,
+    sha256: String,
+    verified: bool,
+}
+impl VerifiedReader {
+    pub fn open(root: &Path, artifact: &Value) -> Result<Self> {
+        let root = root.canonicalize()?;
+        let path = root
+            .join(
+                artifact["content_path"]
+                    .as_str()
+                    .ok_or_else(|| Error::new(500, "Malformed artifact content path"))?,
+            )
+            .canonicalize()?;
+        if !path.starts_with(&root) {
+            return Err(Error::new(
+                500,
+                "Artifact content path escapes the artifact store",
+            ));
+        }
+        let file = regular_file(&path)?;
+        let expected = artifact["byte_size"]
+            .as_u64()
+            .ok_or_else(|| Error::new(500, "Artifact content byte size is invalid"))?;
+        if file.metadata()?.len() != expected {
+            return Err(Error::new(500, "Artifact content byte size is invalid")
+                .with_code(Code::ArtifactIntegrity));
+        }
+        Ok(Self {
+            file,
+            hash: Sha256::new(),
+            position: 0,
+            expected,
+            sha256: artifact["sha256"].as_str().unwrap_or("").to_owned(),
+            verified: false,
+        })
+    }
+}
+impl Read for VerifiedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let invalid = |message| std::io::Error::new(std::io::ErrorKind::InvalidData, message);
+        let size = self.file.read(buffer)?;
+        if size == 0 {
+            if !self.verified {
+                if self.position != self.expected
+                    || self.file.metadata()?.len() != self.expected
+                    || hex::encode(self.hash.finalize_reset()) != self.sha256
+                {
+                    return Err(invalid("Artifact content integrity is invalid"));
+                }
+                self.verified = true;
+            }
+            return Ok(0);
+        }
+        self.position += size as u64;
+        if self.position > self.expected {
+            return Err(invalid("Artifact changed during verification"));
+        }
+        self.hash.update(&buffer[..size]);
+        Ok(size)
+    }
 }
 
 pub fn resource_etag(path: &Path, signature: &str) -> String {

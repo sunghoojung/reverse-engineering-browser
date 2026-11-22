@@ -3523,6 +3523,8 @@ base64 bytes, or a selected retained artifact. Declare byte order, channels and
 frames; optionally enable a reference. Inspect / compare is explicit. Raw bits,
 signed zero, NaN/Infinity counts, input digests, finite deltas/ULP and caller
 tolerances remain distinct. Sample pages do not narrow full-buffer metrics.
+Buffers and artifacts of any size are compared whole: the notice counts the
+seconds a comparison runs, and **Cancel** stops it, in the backend too.
 Edits, cancellation and failures keep the last report visibly stale.
 
 This uses the local Rust backend, including live native sessions. Stored-evidence

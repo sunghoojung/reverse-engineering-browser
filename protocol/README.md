@@ -367,8 +367,8 @@ observations lived in the removed debugger actions, and its schema left
 [feature design](../docs/product/request-field-provenance-v1.md) remains a
 historical record.
 
-[Float32 Comparison v1](float32-comparison-v1.md) defines explicit bounded binary32
-inputs, exact bits, finite metrics and completeness policies.
+[Float32 Comparison v1](float32-comparison-v1.md) defines explicit binary32
+inputs of any size, exact bits, finite metrics and completeness policies.
 
 [Supplied Evidence Comparison v1](evidence-comparison-v1.md) defines the read-only
 comparison of two strictly validated metadata packages, exact scoped references,

@@ -10279,6 +10279,106 @@ async fn float32_verified_artifact_rejects_corruption_stale_identity_and_missing
     assert!(!String::from_utf8_lossy(&refused).contains("0000803f"));
 }
 
+#[tokio::test]
+async fn float32_compares_artifacts_of_any_size_in_one_pass() {
+    const ROUTE: &str = "/api/float32/compare";
+    let server = Server::start().await;
+    // Past the 65,536 samples and 256 KiB a side once held: 4 Mi samples and
+    // three more, 16 MiB per artifact, streamed rather than loaded.
+    let count = 4 * 1024 * 1024 + 3;
+    let mut input = Vec::with_capacity(count * 4);
+    for index in 0..count {
+        let bits = if index == 5 {
+            0x7fc0_0001
+        } else {
+            (index as f32).to_bits()
+        };
+        input.extend_from_slice(&bits.to_le_bytes());
+    }
+    let mut reference = input.clone();
+    let changed = count - 2;
+    let bits = u32::from_le_bytes(reference[changed * 4..changed * 4 + 4].try_into().unwrap());
+    reference[changed * 4..changed * 4 + 4].copy_from_slice(&(bits + 1).to_le_bytes());
+    let mut manifest = String::new();
+    let mut sources = Vec::new();
+    for (id, bytes) in [("7", &input), ("8", &reference)] {
+        let hash = hex::encode(Sha256::digest(bytes));
+        let artifact = json!({
+            "protocol_version":1,"artifact_id":id,"session_id":"11","navigation_id":"13",
+            "frame_id":"17","parent_artifact_id":"0","creator_event_id":"19",
+            "execution_context_id":"23","capture_origin":"unknown","kind":"bytecode_buffer",
+            "url":"https://example.test/samples.bin","mime_type":"application/octet-stream",
+            "byte_size":bytes.len(),"sha256":hash,"sensitive":false,
+            "content_path":format!("blobs/{hash}.bin")
+        });
+        server.file(&format!("artifacts/blobs/{hash}.bin"), bytes);
+        manifest.push_str(&format!("{artifact}\n"));
+        sources.push(json!({"kind":"artifact","session_id":"11","artifact_id":id,"sha256":hash,"byte_length":bytes.len()}));
+    }
+    server.file("artifacts/manifest.jsonl", manifest.as_bytes());
+    let side = |source: &Value| json!({"representation":"float32-le","channels":1,"frames":count,"source":source});
+    let request = json!({"protocol_version":1,"input":side(&sources[0]),"reference":side(&sources[1]),
+        "tolerances":{"absolute":0,"relative":0,"ulps":0},"detail":{"start":count - 3,"limit":3}});
+    let bytes =
+        assert_contract_response(server.action(ROUTE, request).await, "post", ROUTE, 200).await;
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    let comparison = &result["comparison"];
+    assert_eq!(result["protocol_version"], 2);
+    assert_eq!(comparison["status"], "complete");
+    assert_eq!(comparison["compared_pairs"], count);
+    assert_eq!(comparison["bit_equal_pairs"], count - 1);
+    assert_eq!(comparison["numeric_equal_pairs"], count - 2);
+    assert_eq!(comparison["first_bit_mismatch"], changed);
+    assert_eq!(comparison["maximum_ulp_distance"], 1);
+    assert_eq!(comparison["raw_bytes_equal"], false);
+    assert_eq!(result["input_summary"]["nan"], 1);
+    assert_eq!(result["input"]["sha256"], sources[0]["sha256"]);
+    let rows = result["detail"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[1]["index"], changed);
+    assert_eq!(rows[1]["difference"]["ulp_distance"], 1);
+    assert!(result["detail"]["next_start"].is_null());
+
+    // A request past the 2 MiB body once refused, through reb-api as well.
+    let words = (0..300_000u32)
+        .map(|n| format!("{:08x}", (n as f32).to_bits()))
+        .collect::<Vec<_>>();
+    let inline = json!({"protocol_version":1,"input":{"representation":"float32-le","channels":3,"frames":100_000,
+        "source":{"kind":"bits","words":words}},"reference":null,
+        "tolerances":{"absolute":0,"relative":0,"ulps":0},"detail":{"start":299_000,"limit":1000}});
+    let body = inline.to_string();
+    assert!(body.len() > 2 * 1024 * 1024);
+    let http: Value = serde_json::from_slice(
+        &assert_contract_response(server.action(ROUTE, inline).await, "post", ROUTE, 200).await,
+    )
+    .unwrap();
+    assert_eq!(http["input"]["sample_count"], 300_000);
+    assert_eq!(http["detail"]["returned"], 1000);
+    assert_eq!(http["detail"]["rows"][999]["input"]["value"], 299_999.0);
+    let path = server.root.path().join("float32-large.json");
+    std::fs::write(&path, body).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
+        .args([
+            "call",
+            "compare_float32",
+            "--base-url",
+            &server.url,
+            "--body-file",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        http
+    );
+}
+
 const EVIDENCE_COMPARISON_ROUTE: &str = "/api/evidence/packages/compare";
 fn comparison_body(left: &Value, right: &Value) -> Value {
     json!({"left":left,"right":right,"normalization_profile":"reb-declared-metadata-v1","facets":["events","artifacts","coverage","gaps","relationships","provenance","selection"]})

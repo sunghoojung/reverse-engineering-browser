@@ -409,6 +409,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }
 
       // One chip per gap class, each opening its scope, meaning and reasons.
+      // A gap line's dot and wash take the tone of its worst class, as the status bar's gap chip does.
+      function captureNoticeTone(classes) {
+        return classes.some(gapClass => gapClass.tone === 'loss') ? 'loss' : 'limit';
+      }
+
       function captureNoticeSpec(classes, limits = [], extra = []) {
         const loss = classes.some(gapClass => gapClass.tone === 'loss');
         return {lead: loss ? 'Incomplete capture' : classes.length || limits.length ? 'Capture limits' : '',
@@ -459,6 +464,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           return;
         }
         notice.dataset.kind = keys.length ? 'gap' : 'empty';
+        notice.dataset.tone = captureNoticeTone(classes);
         chips.renderNotice(notice, {...captureNoticeSpec(classes, limits, extra),
           dismiss: keys.length ? {name: 'Dismiss this notice; the status bar keeps the gap count',
             run: () => dismissCaptureNotice('traffic', keys, notice, elements.requestFilter)} : null});
@@ -497,6 +503,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       function setVmChipNotice(kind, text, classes, dismissible = false) {
         const notice = elements.vmNotice;
         notice.dataset.kind = kind;
+        notice.dataset.tone = captureNoticeTone(classes);
         const keys = classes.map(gapClass => gapClass.key);
         globalThis.RebEvidenceChips?.renderNotice(notice, {...captureNoticeSpec(classes), text,
           dismiss: dismissible && keys.length ? {name: 'Dismiss this notice; the status bar keeps the gap count',

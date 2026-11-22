@@ -1298,11 +1298,22 @@ final class OriginTraceRenderedUITests: XCTestCase {
   func test14NamedBudgetGapsStayInVmScope() async throws {
     let expected = try Expectations.load()
     let budgets = "\(expected.namedGapReasons.count) sampling budgets (vm)"
+    // The fixture also holds one network gap (service_worker_end_lost), so
+    // the status bar shows one mixed total and a row per class.
+    let total = "\(expected.namedGapReasons.count + 1) gaps"
     for size in windowSizes {
       let ui = try await prepare(size)
       try await show(ui, "traffic")
       let footer = try await ui.value("document.querySelector('#gap-status .ev-chip')?.textContent ?? ''") as? String ?? ""
-      XCTAssertEqual(footer, budgets, "\(size.name): the status bar names the vm budgets, not queue drops")
+      XCTAssertEqual(footer, total, "\(size.name): the status bar counts the vm budgets with the network loss, not queue drops")
+      // Every chip label shows whole, and the count keeps its space before "requests".
+      let bar = try await ui.json("""
+        ({summary: document.querySelector('#request-summary').innerText,
+          clipped: [...document.querySelectorAll('.statusbar .ev-chip-text')].filter(text => text.scrollWidth > text.clientWidth).map(text => text.textContent)})
+        """)
+      XCTAssertEqual(bar["clipped"] as? [String], [], "\(size.name): status bar chip labels are not cut off: \(bar)")
+      XCTAssertNotNil((bar["summary"] as? String)?.range(of: #"^[0-9,]+ requests?\b"#, options: .regularExpression),
+        "\(size.name): the request count reads as words: \(bar)")
       try await assertLayout(ui, ".statusbar", "\(size.name) status bar")
       try await ui.screenshot("status-bar-\(size.name)")
       // The gap chip opens from the keyboard, Tab enters its panel, and
@@ -1316,6 +1327,11 @@ final class OriginTraceRenderedUITests: XCTestCase {
         XCTAssertTrue(breakdown.contains(reason), "\(size.name): the gap breakdown names \(reason): \(breakdown)")
       }
       XCTAssertFalse(breakdown.contains("Queue drops"), "\(size.name): \(breakdown)")
+      let rows = try await ui.value("""
+        [...document.querySelectorAll('#gap-status .ev-panel-line')].map(line => line.textContent).join(' | ')
+        """) as? String ?? ""
+      XCTAssertEqual(rows, "Reported lost · network1 | Sampling budgets · vm\(expected.namedGapReasons.count)",
+        "\(size.name): one row per class, loss before limits")
       try await assertFullyVisible(ui, "#gap-status .ev-panel", "\(size.name) status gap breakdown")
       try await assertInert(ui, "\(size.name) status gap breakdown")
       try await ui.screenshot("status-gap-breakdown-\(size.name)")
@@ -1323,6 +1339,12 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await ui.tab()
       let inside = try await ui.value("document.querySelector('#gap-status .ev-panel').contains(document.activeElement)") as? Bool
       XCTAssertEqual(inside, true, "\(size.name): Tab moves from the chip into its panel")
+      // Tab lands on a reason chip, whose focus tooltip takes the first
+      // Escape; the second closes the panel and returns to the chip.
+      try await ui.key(53, "\u{1b}")
+      let layered = try await ui.json("({tip: document.querySelector('.ev-tip')?.hidden ?? true, expanded: document.querySelector('\(chip)').getAttribute('aria-expanded')})")
+      XCTAssertEqual(layered["tip"] as? Bool, true, "\(size.name): the first Escape hides the reason tooltip: \(layered)")
+      XCTAssertEqual(layered["expanded"] as? String, "true", "\(size.name): the first Escape leaves the panel open: \(layered)")
       try await ui.key(53, "\u{1b}")
       let closed = try await ui.json("({expanded: document.querySelector('\(chip)').getAttribute('aria-expanded'), focused: document.activeElement === document.querySelector('\(chip)')})")
       XCTAssertEqual(closed["expanded"] as? String, "false", "\(size.name): Escape closes the gap breakdown: \(closed)")
@@ -1330,6 +1352,10 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let traffic = try await ui.value("(notice => notice.hidden ? '' : notice.textContent)(document.querySelector('#network-notice'))") as? String ?? ""
       XCTAssertFalse(traffic.contains("queue"), "\(size.name): Traffic reports no queue loss: \(traffic)")
       XCTAssertFalse(traffic.contains("native_"), "\(size.name): vm reasons stay out of Traffic: \(traffic)")
+      // The network loss makes Traffic's line a loss line; its dot and wash say so.
+      let trafficLine = try await ui.json("(notice => ({lead: notice.querySelector('.ev-notice-lead')?.textContent, tone: notice.dataset.tone}))(document.querySelector('#network-notice'))")
+      XCTAssertEqual(trafficLine["lead"] as? String, "Incomplete capture", "\(size.name): \(trafficLine)")
+      XCTAssertEqual(trafficLine["tone"] as? String, "loss", "\(size.name): \(trafficLine)")
 
       try await show(ui, "signals")
       let signal = try await ui.json("({kind: document.querySelector('#signal-notice').dataset.kind, text: document.querySelector('#signal-notice').textContent})")
@@ -1339,11 +1365,13 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await show(ui, "vm")
       try await ui.waitUntil("!document.querySelector('#vm-notice').hidden", "VM capture limits did not render")
       let vm = try await ui.json("""
-        ({kind: document.querySelector('#vm-notice').dataset.kind, lead: document.querySelector('#vm-notice .ev-notice-lead')?.textContent,
+        ({kind: document.querySelector('#vm-notice').dataset.kind, tone: document.querySelector('#vm-notice').dataset.tone,
+          lead: document.querySelector('#vm-notice .ev-notice-lead')?.textContent,
           chips: [...document.querySelectorAll('#vm-notice .ev-notice-chips .ev-chip')].map(chip => chip.textContent)})
         """)
       XCTAssertEqual(vm["kind"] as? String, "gap", "\(size.name): budgets mark VM coverage incomplete: \(vm)")
       XCTAssertEqual(vm["lead"] as? String, "Capture limits", "\(size.name): budgets are limits, not loss: \(vm)")
+      XCTAssertEqual(vm["tone"] as? String, "limit", "\(size.name): \(vm)")
       XCTAssertEqual(vm["chips"] as? [String], [budgets], "\(size.name): one chip per class: \(vm)")
       try await assertFullyVisible(ui, "#vm-notice", "\(size.name) VM capture limits")
       try await assertInert(ui, "\(size.name) VM capture limits")
@@ -1364,7 +1392,7 @@ final class OriginTraceRenderedUITests: XCTestCase {
       try await Task.sleep(nanoseconds: 2_500_000_000)
       let dismissed = try await ui.json("({hidden: document.querySelector('#vm-notice').hidden, footer: document.querySelector('#gap-status .ev-chip')?.textContent})")
       XCTAssertEqual(dismissed["hidden"] as? Bool, true, "\(size.name): a dismissed notice stays dismissed: \(dismissed)")
-      XCTAssertEqual(dismissed["footer"] as? String, budgets, "\(size.name): \(dismissed)")
+      XCTAssertEqual(dismissed["footer"] as? String, total, "\(size.name): \(dismissed)")
     }
   }
 

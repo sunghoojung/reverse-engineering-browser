@@ -237,7 +237,8 @@ in Evidence**, which opens Evidence's Coverage & gaps. The Traffic and VM gap
 lines are notices of one chip per class plus their limits (`newest 5,000
 events` before the request index answers, `newest 64 MiB` before the event
 index catches up) and Traffic's `N failed` chip, which is the Failed filter.
-A dismissed line stays hidden for the session until a class it did not hold
+A line leads with **Incomplete capture** and the loss tone when any class is
+loss, and with **Capture limits** and the limit tone otherwise. A dismissed line stays hidden for the session until a class it did not hold
 appears; the status bar keeps every count meanwhile.
 `node tools/check-evidence-chips.mjs` (run by `make javascript-check`)
 exercises every block in a LinkeDOM document, and the rendered suite drives

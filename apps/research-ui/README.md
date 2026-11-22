@@ -789,7 +789,11 @@ still as text.
 The transcript is written to
 `~/Library/Application Support/Origin Trace/agent-transcripts/`, user-only, one
 file per session, and is separate from the evidence store. Earlier rows are
-shown when the agent is turned back on and are not resent to the model.
+shown when the agent is turned back on and are not resent to the model. The
+file keeps every row, whatever its size or the length of the conversation; a
+row that could not be written, or a torn line that cannot be read back, is a
+visible notice. A turn has no size cap of its own: what the model's context
+window cannot take, the provider refuses, and its error ends the turn.
 
 The web view keeps 6 MiB of transcript rows and mounts only rows near the
 viewport once there are many; older rows leave with a visible label and **Load

@@ -407,9 +407,6 @@ struct AgentProviderRoute: Equatable {
   static let returnedResponseHeaders: Set<String> = [
     "content-type", "request-id", "x-request-id", "retry-after", "retry-after-ms", "x-should-retry",
   ]
-  // The largest request a turn can make: 8 MiB of retained context, encoded.
-  static let bodyLimit = 32 * 1024 * 1024
-
   static func resolve(_ raw: String, method: String, standIn: URL?) -> AgentProviderRoute? {
     guard method.uppercased() == "POST", let components = URLComponents(string: raw),
       components.scheme == "https", components.user == nil, components.password == nil,
@@ -445,7 +442,8 @@ struct AgentProviderRoute: Equatable {
   }
 
   func request(headers: [String: String], body: Data, key: String?) throws -> URLRequest {
-    guard body.count <= Self.bodyLimit else { throw AgentFailure(message: "The model request is larger than 32 MiB.") }
+    // No size cap of its own: a request the provider cannot take, it refuses
+    // with a status the page reports.
     guard (try? JSONSerialization.jsonObject(with: body)) is [String: Any] else {
       throw AgentFailure(message: "The model request body is not a JSON object.")
     }
@@ -695,10 +693,9 @@ final class AgentMCPClient: @unchecked Sendable {
 
 // The local record of a conversation: one JSON row per line, user-only, outside
 // the evidence store. It is interpretation, so it never mixes with capture.
+// Every row is kept, however long the conversation runs or a row grows: the
+// panel reads it back a page at a time, so its size costs only disk.
 final class AgentTranscript {
-  // A row holds at most a 128 KiB tool result. 32 MiB keeps hundreds of the
-  // largest rows; older rows are cut and a gap row says so.
-  static let fileBudget = 32 * 1024 * 1024
   private let url: URL
   private var size: Int
 
@@ -714,51 +711,58 @@ final class AgentTranscript {
     size = (try? manager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
   }
 
-  func append(_ row: [String: Any]) {
-    guard var line = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]) else { return }
+  // Throws when the row did not reach the file, so the panel can say so.
+  func append(_ row: [String: Any]) throws {
+    var line = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
     line.append(0x0A)
-    if size + line.count > Self.fileBudget { compact() }
-    guard let handle = try? FileHandle(forWritingTo: url) else { return }
+    let handle = try FileHandle(forWritingTo: url)
     defer { try? handle.close() }
-    do {
-      try handle.seekToEnd()
-      try handle.write(contentsOf: line)
-      size += line.count
-    } catch {}
+    try handle.seekToEnd()
+    try handle.write(contentsOf: line)
+    size += line.count
   }
 
-  // Keeps the newest half whole, on a row boundary, behind a labeled gap row.
-  private func compact() {
-    guard let data = try? Data(contentsOf: url) else { return }
-    let keep = data.suffix(Self.fileBudget / 2)
-    guard let newline = keep.firstIndex(of: 0x0A) else { return }
-    var retained = (try? JSONSerialization.data(withJSONObject: [
-      "role": "notice", "text": "Older transcript rows were removed to keep this file within its size budget.",
-    ])) ?? Data()
-    retained.append(0x0A)
-    retained.append(keep[keep.index(after: newline)...])
-    guard (try? retained.write(to: url, options: .atomic)) != nil else { return }
-    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    size = retained.count
-  }
-
-  // Reads backwards from `before` in one bounded chunk, on row boundaries.
-  func page(before: Int?, chunk: Int = 1024 * 1024) -> (rows: [[String: Any]], before: Int?) {
-    guard let handle = try? FileHandle(forReadingFrom: url) else { return ([], nil) }
+  // Reads backwards from `before` in a chunk, on row boundaries. A row longer
+  // than the chunk is still read whole: the read steps back a chunk at a time
+  // to the newline before it, so every page moves `before` back. A line that is not a JSON object, as a torn
+  // write leaves, is counted rather than dropped without a word.
+  func page(before: Int?, chunk: Int = 1024 * 1024) -> (rows: [[String: Any]], before: Int?, unreadable: Int) {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return ([], nil, 0) }
     defer { try? handle.close() }
-    let end = min(before ?? size, size)
-    let start = max(0, end - chunk)
-    guard end > 0, (try? handle.seek(toOffset: UInt64(start))) != nil,
-      var data = try? handle.read(upToCount: end - start)
-    else { return ([], nil) }
-    var consumed = start
-    if start > 0 {
-      guard let newline = data.firstIndex(of: 0x0A) else { return ([], nil) }
-      consumed = start + data.distance(from: data.startIndex, to: newline) + 1
-      data = Data(data[data.index(after: newline)...])
+    func read(_ from: Int, _ to: Int) -> Data? {
+      guard (try? handle.seek(toOffset: UInt64(from))) != nil, let data = try? handle.read(upToCount: to - from),
+        data.count == to - from
+      else { return nil }
+      return data
     }
-    let rows = data.split(separator: 0x0A).compactMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
-    return (rows, consumed > 0 ? consumed : nil)
+    let end = min(before ?? size, size)
+    var start = max(0, end - chunk)
+    guard end > 0, var data = read(start, end) else { return ([], nil, 0) }
+    if start > 0 {
+      // The newline that ends the last row is not a boundary inside the chunk.
+      if let newline = data.dropLast().firstIndex(of: 0x0A) {
+        start += data.distance(from: data.startIndex, to: newline) + 1
+        data = Data(data[data.index(after: newline)...])
+      } else {
+        // One row fills the chunk and ends at `end`.
+        var cursor = start
+        start = 0
+        while cursor > 0 {
+          let back = max(0, cursor - chunk)
+          guard let piece = read(back, cursor) else { return ([], nil, 0) }
+          if let newline = piece.lastIndex(of: 0x0A) {
+            start = back + piece.distance(from: piece.startIndex, to: newline) + 1
+            break
+          }
+          cursor = back
+        }
+        guard let whole = read(start, end) else { return ([], nil, 0) }
+        data = whole
+      }
+    }
+    let lines = data.split(separator: 0x0A)
+    let rows = lines.compactMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+    return (rows, start > 0 ? start : nil, lines.count - rows.count)
   }
 
   func clear() {
@@ -1055,8 +1059,7 @@ final class AgentSession {
     }
   }
 
-  // Rows the panel shows, written as it shows them. 512 KiB fits the largest
-  // row: a 128 KiB tool result with its arguments, escaped.
+  // Rows the panel shows, written as it shows them, whatever their size.
   // Tools that read values out of a paused page. Their results are allowed
   // to reach the model at Full access, but they are not written to this
   // file: SAFETY.md says a paused value is ephemeral, and a transcript
@@ -1072,16 +1075,18 @@ final class AgentSession {
        row["result"] != nil {
       row["result"] = "(paused page values are not written to the transcript)"
     }
-    guard let data = try? JSONSerialization.data(withJSONObject: row), data.count <= 512 * 1024 else {
-      throw AgentFailure(message: "This transcript row is malformed or larger than 512 KiB.")
+    guard JSONSerialization.isValidJSONObject(row) else { throw AgentFailure(message: "This transcript row is malformed.") }
+    do {
+      try transcript?.append(row)
+    } catch {
+      throw AgentFailure(message: "This row could not be written to the local transcript: \(error.localizedDescription)")
     }
-    transcript?.append(row)
   }
 
   func loadTranscript(before: Int?) -> [String: Any] {
-    guard let transcript else { return ["rows": [], "before": NSNull()] }
+    guard let transcript else { return ["rows": [], "before": NSNull(), "unreadable": 0] }
     let page = transcript.page(before: before)
-    return ["rows": page.rows, "before": page.before as Any? ?? NSNull()]
+    return ["rows": page.rows, "before": page.before as Any? ?? NSNull(), "unreadable": page.unreadable]
   }
 
   func clearTranscript() { transcript?.clear() }

@@ -28,9 +28,8 @@ import Foundation
 // MARK: - A child in its own process group
 
 final class AgentChildProcess: @unchecked Sendable {
-  // A stream-json or ACP line carries one message: at most a 128 KiB tool
-  // result echoed back, or a turn of a few MiB. A longer line is refused.
-  static let lineLimit = 16 * 1024 * 1024
+  // A stream-json or ACP line carries one message, which can echo back a turn
+  // of any size, so lines are read whole whatever their length.
   let pid: pid_t
   private let inputFD: Int32
   private let lock = NSLock()
@@ -39,20 +38,18 @@ final class AgentChildProcess: @unchecked Sendable {
   private var finished = false
   private var inputClosed = false
   private var errorTail = Data()
-  private var overflowed = false
 
   init(
     executable: URL, arguments: [String], environment: [String: String], directory: URL,
-    lineLimit: Int = AgentChildProcess.lineLimit,
     onLine: @escaping @Sendable (Data) -> Void,
-    onExit: @escaping @Sendable (_ status: Int32, _ errors: String, _ overflowed: Bool) -> Void
+    onExit: @escaping @Sendable (_ status: Int32, _ errors: String) -> Void
   ) throws {
     let spawned = try Self.spawn(executable, arguments, environment, directory)
     pid = spawned.pid
     inputFD = spawned.input
     let output = spawned.output, errors = spawned.errors
     Thread.detachNewThread { [self] in
-      readLines(output, limit: lineLimit, onLine: onLine)
+      readLines(output, onLine: onLine)
       readerDone.signal()
     }
     Thread.detachNewThread { [self] in readErrors(errors) }
@@ -64,11 +61,10 @@ final class AgentChildProcess: @unchecked Sendable {
       lock.lock()
       finished = true
       let tail = String(decoding: errorTail, as: UTF8.self)
-      let overflow = overflowed
       lock.unlock()
       closeInput()
       let code = status & 0x7f == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
-      onExit(code, tail, overflow)
+      onExit(code, tail)
     }
   }
 
@@ -134,7 +130,7 @@ final class AgentChildProcess: @unchecked Sendable {
     return (pid, input[1], output[0], errors[0])
   }
 
-  private func readLines(_ fd: Int32, limit: Int, onLine: @Sendable (Data) -> Void) {
+  private func readLines(_ fd: Int32, onLine: @Sendable (Data) -> Void) {
     defer { close(fd) }
     var buffer = Data()
     var chunk = [UInt8](repeating: 0, count: 64 * 1024)
@@ -149,13 +145,6 @@ final class AgentChildProcess: @unchecked Sendable {
         start = buffer.index(after: newline)
       }
       buffer.removeSubrange(buffer.startIndex..<start)
-      if buffer.count > limit {
-        lock.lock()
-        overflowed = true
-        lock.unlock()
-        terminate()
-        return
-      }
     }
     if !buffer.isEmpty { onLine(buffer) }
   }
@@ -279,7 +268,7 @@ final class AgentChildProcess: @unchecked Sendable {
               process?.terminate()
             }
           },
-          onExit: { status, errors, _ in finish(status, errors) })
+          onExit: { status, errors in finish(status, errors) })
         collected.lock.lock()
         collected.process = process
         collected.lock.unlock()
@@ -493,7 +482,6 @@ class AgentCLIDriver {
 
   func send(turnId: String, text: String) async throws {
     guard turn == nil else { throw AgentFailure(message: "The agent is still answering. Stop it first.") }
-    guard text.utf8.count <= 2 * 1024 * 1024 else { throw AgentFailure(message: "This turn is larger than 2 MiB.") }
     let current = AgentCLITurn(id: turnId)
     turn = current
     idleWork?.cancel()
@@ -525,9 +513,9 @@ class AgentCLIDriver {
       onLine: { [weak self] line in
         DispatchQueue.main.async { MainActor.assumeIsolated { self?.receive(line, generation: current) } }
       },
-      onExit: { [weak self] status, errors, overflowed in
+      onExit: { [weak self] status, errors in
         DispatchQueue.main.async {
-          MainActor.assumeIsolated { self?.childExited(status, errors: errors, overflowed: overflowed, generation: current) }
+          MainActor.assumeIsolated { self?.childExited(status, errors: errors, generation: current) }
         }
       })
     process = child
@@ -562,15 +550,13 @@ class AgentCLIDriver {
     handle(object)
   }
 
-  private func childExited(_ status: Int32, errors: String, overflowed: Bool, generation: Int) {
+  private func childExited(_ status: Int32, errors: String, generation: Int) {
     guard generation == self.generation, process != nil else { return }
     process = nil
     idleWork?.cancel()
     cliStopped()
     let detail = agentRedactedError(errors.trimmingCharacters(in: .whitespacesAndNewlines).suffix(600).description)
-    let reason = overflowed
-      ? "The \(cliName) sent a line longer than 16 MiB, so it was stopped."
-      : "The \(cliName) stopped (status \(status))\(detail.isEmpty ? "." : ": \(detail)")"
+    let reason = "The \(cliName) stopped (status \(status))\(detail.isEmpty ? "." : ": \(detail)")"
     if turn != nil { endTurn(error: reason) } else { notice("\(reason) The next question starts it again.") }
     onStateChange()
   }

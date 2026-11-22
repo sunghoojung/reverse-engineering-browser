@@ -1942,7 +1942,6 @@ printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYS
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_LIVE-unset}}" > "$dir/live"
 printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}} ${{REB_NATIVE_PROMISE_STACKS-unset}}" > "$dir/stacks"
-printf '%s\n' "${{REB_REQUEST_CONTENT_BUDGET_MIB-unset}}" > "$dir/content-budget"
 printf '%s\n' "${{REB_RESEARCH_PROFILE_ROOT-unset}} ${{REB_FRESH_PROFILE-unset}} ${{REB_CAPTURE_DURATION_SECONDS-unset}} ${{REB_NATIVE_QUIET_MODE-unset}} ${{REB_CAPTURE_CANVAS_IMAGES-unset}} ${{REB_CAPTURE_BROWSER_INTERNAL-unset}} ${{REB_CAPTURE_EXTENSION_TRAFFIC-unset}}" > "$dir/session"
 labels=()
 if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
@@ -1955,13 +1954,8 @@ if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
     labels+=(--js-invocation-session-generation "$dir/generation")
   fi
 fi
-# The real launcher's labels: a content session's limits, with its defaults.
-if [[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]]; then
-  labels+=(--session-request-content
-    --session-request-content-budget-mib "${{REB_REQUEST_CONTENT_BUDGET_MIB:-256}}"
-    --session-response-body-budget-mib "${{REB_RESPONSE_BODY_BUDGET_MIB:-512}}"
-    --session-response-media "${{REB_CAPTURE_RESPONSE_MEDIA:-0}}")
-fi
+# The real launcher's labels.
+[[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]] && labels+=(--session-request-content)
 [[ "$REB_CONSOLE_DOCUMENT_START" == 1 ]] && labels+=(--session-document-start)
 [[ "${{REB_NATIVE_REQUEST_STACKS-0}}" == 1 ]] && labels+=(--session-request-stacks)
 ln -s "test-host-$$" "$dir/profile/SingletonLock"
@@ -2048,7 +2042,6 @@ wait "$backend"
             .env("REB_NATIVE_REQUEST_STACKS", "1")
             .env("REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED", "1")
             .env("REB_NATIVE_PROMISE_STACKS", "1")
-            .env("REB_REQUEST_CONTENT_BUDGET_MIB", "999")
             .env("REB_CAPTURE_DURATION_SECONDS", "60")
             .env(
                 "REB_RESEARCH_PROFILE_ROOT",
@@ -2187,7 +2180,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
             .any(|line| line == "https://example.test/page")
     );
     // The app's defaults, and nothing inherited: not the shell's invocation
-    // sites, digests, budget, duration, profile or browser-internal capture.
+    // sites, digests, duration, profile or browser-internal capture.
     // The default request stacks are dropped by a Brave without the flag,
     // and the shell's Promise stacks switch is replaced by the option's off.
     assert_eq!(
@@ -2205,10 +2198,6 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
             fixture.agent_sessions().join("research-profiles").display()
         ),
         "the agent sessions' own profile, no time limit"
-    );
-    assert_eq!(
-        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
-        "unset\n"
     );
     // Nor may it read or change the app's saved invocation sites.
     let store = std::fs::read_to_string(fixture.session("4242").join("site-store")).unwrap();
@@ -2339,9 +2328,16 @@ fn agent_session_options_are_named_never_inherited() {
             json!({"request_content": true, "confirm_sensitive_capture": true, "category_mask": 1024}),
             "Network and Artifact",
         ),
+        // The removed content budgets and media choice are unknown options.
         (
-            json!({"request_content_budget_mib": 64, "request_content": false}),
-            "requires request_content",
+            json!({"request_content": true, "confirm_sensitive_capture": true,
+                "request_content_budget_mib": 64}),
+            "Unknown argument: request_content_budget_mib",
+        ),
+        (
+            json!({"request_content": true, "confirm_sensitive_capture": true,
+                "response_media": true}),
+            "Unknown argument: response_media",
         ),
         (json!({"duration_seconds": 59}), "duration_seconds"),
         (
@@ -2386,8 +2382,7 @@ fn agent_session_options_are_named_never_inherited() {
     let started = call(
         &mut mcp,
         json!({"document_start": true, "request_content": true,
-            "request_content_budget_mib": 64, "response_body_budget_mib": 1024,
-            "response_media": true, "request_stacks": true, "promise_stacks": true,
+            "request_stacks": true, "promise_stacks": true,
             "js_invocation_sites": agent_file, "js_invocation_digests": false,
             "canvas_images": false, "wasm_dispatch": false, "duration_seconds": 7200,
             "fresh_profile": true, "browser_internal": true, "timeout_seconds": 30}),
@@ -2404,9 +2399,6 @@ fn agent_session_options_are_named_never_inherited() {
     for (option, value) in [
         ("document_start", json!(true)),
         ("request_content", json!(true)),
-        ("request_content_budget_mib", json!(64)),
-        ("response_body_budget_mib", json!(1024)),
-        ("response_media", json!(true)),
         ("request_stacks", json!(true)),
         ("promise_stacks", json!(true)),
         ("js_invocation_saved_sites", json!(false)),
@@ -2446,10 +2438,6 @@ fn agent_session_options_are_named_never_inherited() {
         "1 0 1\n",
         "named stacks are strict"
     );
-    assert_eq!(
-        std::fs::read_to_string(fixture.session("4242").join("content-budget")).unwrap(),
-        "64\n"
-    );
     let log = std::fs::read_to_string(launch_logs().last().unwrap()).unwrap();
     let first = log.lines().next().unwrap();
     let named: Value =
@@ -2462,8 +2450,6 @@ fn agent_session_options_are_named_never_inherited() {
     assert_eq!(
         context["capture_options"],
         json!({"source":"launcher","request_content":true,
-            "content_limits":{"version":1,"request_content_budget_mib":64,
-                "response_body_budget_mib":1024,"response_media":true},
             "canvas_images":false,"request_stacks":true,"document_start":"permitted",
             "js_invocation":{"state":"armed","live":false,"count":1,"digests":false},
             "wasm_sampling":null})
@@ -2506,10 +2492,6 @@ fn agent_session_options_are_named_never_inherited() {
     assert_eq!(
         std::fs::read_to_string(fixture.session("4243").join("sites")).unwrap(),
         site_file(&[120, 200])
-    );
-    assert_eq!(
-        std::fs::read_to_string(fixture.session("4243").join("content-budget")).unwrap(),
-        "unset\n"
     );
     let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
@@ -2562,7 +2544,6 @@ fn agent_session_options_are_named_never_inherited() {
         "not_permitted"
     );
     assert_eq!(context["capture_options"]["request_content"], false);
-    assert_eq!(context["capture_options"]["content_limits"], Value::Null);
     assert_eq!(context["capture_options"]["request_stacks"], false);
     let cleared = mcp.request(
         "tools/call",
@@ -2613,28 +2594,21 @@ fn agent_session_options_are_named_never_inherited() {
     fixture.wait_ended("4244");
 }
 
-/// The CLI keeps the start tool's gates: a request content budget needs
-/// request content, which needs the sensitive-capture confirmation.
+/// The CLI keeps the start tool's gate: request content needs the
+/// sensitive-capture confirmation, and the removed budget is no option.
 #[cfg(unix)]
 #[test]
-fn session_start_cli_gates_the_request_content_budget() {
+fn session_start_cli_gates_request_content() {
     for (arguments, needle) in [
-        (
-            &["--request-content-budget-mib", "64"][..],
-            "--request-content",
-        ),
-        (
-            &["--request-content", "--request-content-budget-mib", "64"][..],
-            "--confirm-sensitive-capture",
-        ),
+        (&["--request-content"][..], "--confirm-sensitive-capture"),
         (
             &[
                 "--request-content",
                 "--confirm-sensitive-capture",
                 "--request-content-budget-mib",
-                "4097",
+                "64",
             ][..],
-            "from 1 to 4096",
+            "--request-content-budget-mib",
         ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_reb-api"))
@@ -2666,13 +2640,19 @@ fn session_start_cli_switches_name_or_leave_their_defaults() {
             &["--js-invocation-digests"][..],
             "--confirm-sensitive-capture",
         ),
+        // The budgets and the media switch are gone, so no switch still
+        // requires request content.
         (
             &[
                 "--request-content=false",
-                "--request-content-budget-mib",
+                "--response-body-budget-mib",
                 "64",
             ][..],
-            "requires request_content",
+            "unexpected argument '--response-body-budget-mib'",
+        ),
+        (
+            &["--request-content=false", "--response-media"][..],
+            "unexpected argument '--response-media'",
         ),
         (
             &["--request-stacks", "--category-mask", "256"][..],
@@ -2866,13 +2846,12 @@ fn full_permission_starts_sessions_with_the_app_content_defaults() {
     let mut mcp = fixture.mcp_with(&["--permission", "full"]);
     let started = mcp.request(
         "tools/call",
-        json!({"name": "start_live_session", "arguments": {"response_media": true}}),
+        json!({"name": "start_live_session", "arguments": {"request_content": true, "canvas_images": true}}),
     );
     assert_eq!(started["result"]["isError"], false, "{started}");
     let options = &started["result"]["structuredContent"]["options"];
     assert_eq!(options["request_content"], true);
     assert_eq!(options["canvas_images"], true);
-    assert_eq!(options["response_media"], true);
     assert_eq!(options["confirm_sensitive_capture"], true);
     assert_eq!(
         mcp.request("tools/call", end.clone())["result"]["isError"],

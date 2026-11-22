@@ -53,19 +53,47 @@ bool CheckScriptCompiledValidation() {
   ok = ok && refused([](auto& p) { p.execution_context_id = 0; });
   ok = ok && refused([](auto& p) { p.kind = 6; });
   ok = ok && refused([](auto& p) { p.retention = 0; });
-  ok = ok && refused([](auto& p) { p.retention = 8; });
-  ok = ok && refused([](auto& p) { p.protocol_version = 2; });
+  ok = ok && refused([](auto& p) { p.retention = 9; });
+  ok = ok && refused([](auto& p) { p.protocol_version = 3; });
+  ok = ok && refused([](auto& p) { p.protocol_version = 0; });
   ok = ok && refused([](auto& p) { p.reserved[0] = std::byte{1}; });
   ok = ok && refused([](auto& p) { p.source_sha256 = {}; });
   ok = ok && refused([](auto& p) { p.source_length = 0; });
-  ok = ok && refused([](auto& p) { p.source_length = reb::kCompiledScriptMaxSourceBytes + 1; });
+  // Version 2 retired the source budget and the size limit.
+  using Retention = reb::CompiledScriptRetention;
+  ok = ok &&
+       refused([](auto& p) { p.retention = static_cast<std::uint8_t>(Retention::kBudgetSpent); });
+  ok = ok && refused([](auto& p) {
+         p.retention = static_cast<std::uint8_t>(Retention::kTooLarge);
+         p.source_length = reb::kCompiledScriptMaxSourceBytes + 1;
+         p.source_sha256 = {};
+       });
   // Only generated code has a creator, and a position needs a creator.
   ok = ok && refused([](auto& p) { p.kind = 1; });
   ok = ok && refused([](auto& p) { p.creator_script_id = 0; });
 
-  auto too_large = QueuedEvalPayload();
-  too_large.retention = static_cast<std::uint8_t>(reb::CompiledScriptRetention::kTooLarge);
-  too_large.source_length = reb::kCompiledScriptMaxSourceBytes + 1;
+  // Version 2 hashes a source of any length, and names one it did not send.
+  auto large = QueuedEvalPayload();
+  large.source_length = 1ULL << 30U;
+  ok = ok && accepted(large);
+  large.retention = static_cast<std::uint8_t>(Retention::kTransferBacklog);
+  ok = ok && accepted(large);
+  large.source_sha256 = {};
+  ok = ok && !accepted(large);
+
+  // Stored version 1 records keep their limit and budget, and know no backlog.
+  auto version1 = QueuedEvalPayload();
+  version1.protocol_version = 1;
+  ok = ok && accepted(version1);
+  version1.retention = static_cast<std::uint8_t>(Retention::kBudgetSpent);
+  ok = ok && accepted(version1);
+  version1.retention = static_cast<std::uint8_t>(Retention::kTransferBacklog);
+  ok = ok && !accepted(version1);
+  version1.retention = static_cast<std::uint8_t>(Retention::kQueued);
+  version1.source_length = reb::kCompiledScriptMaxSourceBytes + 1;
+  ok = ok && !accepted(version1);
+  auto too_large = version1;
+  too_large.retention = static_cast<std::uint8_t>(Retention::kTooLarge);
   too_large.source_sha256 = {};
   ok = ok && accepted(too_large);
   too_large.source_length = reb::kCompiledScriptMaxSourceBytes;

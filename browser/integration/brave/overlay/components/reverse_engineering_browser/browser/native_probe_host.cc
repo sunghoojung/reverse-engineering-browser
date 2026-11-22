@@ -15,6 +15,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include "base/functional/callback_helpers.h"
 #include "base/process/process_handle.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
@@ -853,7 +854,14 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
                                                std::uint64_t allocating_script_id,
                                                bool allocating_script_is_eval,
                                                mojo_base::BigBuffer allocating_script_source,
-                                               std::uint64_t allocating_script_session_id) {
+                                               std::uint64_t allocating_script_session_id,
+                                               const std::uint64_t credit_bytes) {
+  // Whatever happens to the content, the renderer gets its credit back once
+  // the browser no longer holds the buffer.
+  base::ScopedClosureRunner content_released(
+      credit_bytes != 0 ? base::BindOnce(&NativeProbeHost::SendReleaseArtifactCredit,
+                                         weak_factory_.GetWeakPtr(), credit_bytes)
+                        : base::OnceClosure());
   // Content does not pass through Drain, which refuses a renderer that became
   // browser-internal after admission (a spare given a WebUI page).
   if (browser_internal_ || IsBrowserInternal()) {
@@ -882,12 +890,19 @@ void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
   NativeArtifactCaptureSink::Get().CaptureGeneratedArtifact(
       static_cast<NativeArtifactKind>(kind),
       static_cast<NativeArtifactCaptureOrigin>(capture_origin), creator_event_id,
-      execution_context_id, frame_id, source_url, std::move(content), 0, std::move(on_refused));
+      execution_context_id, frame_id, source_url, std::move(content), 0, std::move(on_refused),
+      std::move(content_released));
 }
 
 void NativeProbeHost::SendNativeStackArtifactRefused(const std::uint64_t creator_event_id) {
   if (client_.is_bound()) {
     client_->NativeStackArtifactRefused(creator_event_id);
+  }
+}
+
+void NativeProbeHost::SendReleaseArtifactCredit(const std::uint64_t bytes) {
+  if (client_.is_bound()) {
+    client_->ReleaseArtifactCredit(bytes);
   }
 }
 

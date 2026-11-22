@@ -15,10 +15,15 @@ namespace reb {
 inline constexpr std::uint16_t kRequestPayloadVersion = 1;
 // Version 1 targets predate full-target retention and keep byte 9 zero.
 inline constexpr std::uint16_t kRequestTargetPayloadVersion = 2;
+// Version 2 bodies are read and hashed whole, with no size limit, session
+// budget or credential-form exception in content sessions. Version 1 records
+// of older sessions keep their own rules.
+inline constexpr std::uint16_t kRequestBodyPayloadVersion = 2;
 inline constexpr std::size_t kRequestTargetPrefixBytes = 116;
 inline constexpr std::size_t kRequestContentTypeBytes = 64;
+// Version 1 only: in-memory bodies past this were not hashed.
 inline constexpr std::uint64_t kRequestBodyDigestBytes = 4ULL * 1024ULL * 1024ULL;
-// The artifact cap: a read body keeps at most this prefix.
+// Version 1 only: a read body kept at most this prefix.
 inline constexpr std::uint64_t kRequestBodyReadBytes = 16ULL * 1024ULL * 1024ULL;
 
 enum class RequestBodyKind : std::uint8_t {
@@ -36,24 +41,34 @@ enum class RequestBodyState : std::uint8_t {
   kEmpty = 2,
   kMetadataOnly = 3,
   kCaptured = 4,
+  // Version 1 only: a body past the 16 MiB limit kept its prefix.
   kCapturedTruncated = 5,
   kNotCapturedBodyKind = 6,
   kNotCapturedArtifactUnavailable = 7,
   kNotCapturedTransferRefused = 8,
   kNotCapturedUrl = 9,
+  // Version 1 only: the per-session request content budget was used.
   kNotCapturedSessionBudget = 10,
+  // A Metadata only session's password form post. Version 1 content sessions
+  // used it too.
   kNotCapturedCredentialForm = 11,
   kNotCapturedReadIncomplete = 12,
+  // Version 2: the receiver's disk reserve refused a read body.
+  kNotCapturedDiskReserve = 13,
 };
 
 inline constexpr std::uint8_t kRequestBodyContentCapture = 1U << 0U;
 inline constexpr std::uint8_t kRequestBodyDigestPresent = 1U << 1U;
+// Version 1 only: the body was too large to hash.
 inline constexpr std::uint8_t kRequestBodyDigestSizeLimit = 1U << 2U;
 inline constexpr std::uint8_t kRequestBodyLengthPartial = 1U << 3U;
 inline constexpr std::uint8_t kRequestBodyContentTypePresent = 1U << 4U;
 inline constexpr std::uint8_t kRequestBodyContentTypeOmitted = 1U << 5U;
 // native-network-v3.md: the browser read the file, blob or stream parts.
 inline constexpr std::uint8_t kRequestBodyRead = 1U << 6U;
+// Version 2: Chromium marked the body as a password form post.
+inline constexpr std::uint8_t kRequestBodyCredentialForm = 1U << 7U;
+// The flags version 1 defines.
 inline constexpr std::uint8_t kRequestBodyKnownFlags = 0x7FU;
 
 enum class RequestTargetRetention : std::uint8_t {
@@ -61,6 +76,7 @@ enum class RequestTargetRetention : std::uint8_t {
   kRetained = 1,
   kNotRetainedArtifactUnavailable = 2,
   kNotRetainedTransferRefused = 3,
+  // Older sessions only: the per-session request content budget was used.
   kNotRetainedSessionBudget = 4,
   kNotRetainedUrl = 5,
 };
@@ -74,7 +90,7 @@ enum class RequestScheme : std::uint8_t {
 };
 
 struct RequestBodyPayload final {
-  std::uint16_t protocol_version = kRequestPayloadVersion;
+  std::uint16_t protocol_version = kRequestBodyPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t kind = 0;
   std::uint8_t state = 0;
@@ -191,10 +207,29 @@ namespace request_detail {
   return true;
 }
 
-// Payload rules from protocol/native-network-v2.md. has_artifact is whether the
-// envelope names a request-body artifact.
-[[nodiscard]] inline bool IsValidRequestBodyPayload(const RequestBodyPayload& value,
-                                                    const bool has_artifact) noexcept {
+namespace request_detail {
+// Fields both versions lay out the same way.
+[[nodiscard]] inline bool IsValidRequestBodyFields(const RequestBodyPayload& value) noexcept {
+  const bool type_present = (value.flags & kRequestBodyContentTypePresent) != 0;
+  const bool type_omitted = (value.flags & kRequestBodyContentTypeOmitted) != 0;
+  const std::span<const char> type(value.content_type);
+  return value.payload_size == 128 && value.reserved0 == 0 &&
+         value.kind <= static_cast<std::uint8_t>(RequestBodyKind::kUnknown) &&
+         value.state >= static_cast<std::uint8_t>(RequestBodyState::kNoBody) &&
+         value.state <= static_cast<std::uint8_t>(RequestBodyState::kNotCapturedDiskReserve) &&
+         value.content_type_length <= kRequestContentTypeBytes && !(type_present && type_omitted) &&
+         type_present == (value.content_type_length != 0) &&
+         AllZero(type.subspan(value.content_type_length)) &&
+         (!type_present || IsNormalizedContentType(std::string_view(value.content_type.data(),
+                                                                    value.content_type_length))) &&
+         value.captured_length <= value.body_length &&
+         (value.kind != static_cast<std::uint8_t>(RequestBodyKind::kMixed) ||
+          value.element_count >= 2);
+}
+
+// Version 1 rules from protocol/native-network-v2.md, kept for older sessions.
+[[nodiscard]] inline bool IsValidRequestBodyPayloadV1(const RequestBodyPayload& value,
+                                                      const bool has_artifact) noexcept {
   using enum RequestBodyState;
   const auto kind = static_cast<RequestBodyKind>(value.kind);
   const auto state = static_cast<RequestBodyState>(value.state);
@@ -202,20 +237,7 @@ namespace request_detail {
   const bool digest = (value.flags & kRequestBodyDigestPresent) != 0;
   const bool size_limit = (value.flags & kRequestBodyDigestSizeLimit) != 0;
   const bool partial = (value.flags & kRequestBodyLengthPartial) != 0;
-  const bool type_present = (value.flags & kRequestBodyContentTypePresent) != 0;
-  const bool type_omitted = (value.flags & kRequestBodyContentTypeOmitted) != 0;
-  const std::span<const char> type(value.content_type);
-  if (value.protocol_version != kRequestPayloadVersion || value.payload_size != 128 ||
-      value.reserved0 != 0 || value.kind > static_cast<std::uint8_t>(RequestBodyKind::kUnknown) ||
-      value.state < static_cast<std::uint8_t>(kNoBody) ||
-      value.state > static_cast<std::uint8_t>(kNotCapturedReadIncomplete) ||
-      (value.flags & ~kRequestBodyKnownFlags) != 0 ||
-      value.content_type_length > kRequestContentTypeBytes || (type_present && type_omitted) ||
-      type_present != (value.content_type_length != 0) ||
-      !request_detail::AllZero(type.subspan(value.content_type_length)) ||
-      (type_present && !IsNormalizedContentType(std::string_view(value.content_type.data(),
-                                                                 value.content_type_length))) ||
-      value.captured_length > value.body_length) {
+  if ((value.flags & ~kRequestBodyKnownFlags) != 0) {
     return false;
   }
   const bool bytes = kind == RequestBodyKind::kBytes;
@@ -251,7 +273,9 @@ namespace request_detail {
         return false;
     }
   }
-  if (state == kNotCapturedReadIncomplete) {
+  // Only a read learns of these before its record: an unread body's refusal
+  // follows its record as artifact_capture_failed.
+  if (state == kNotCapturedReadIncomplete || state == kNotCapturedDiskReserve) {
     return false;
   }
   if ((digest && (!bytes || size_limit || value.body_length > kRequestBodyDigestBytes)) ||
@@ -293,9 +317,105 @@ namespace request_detail {
       // A body with file, blob or stream parts is refused before any read.
       return content && ((bytes && value.body_length != 0) || readable);
     case kNotCapturedReadIncomplete:
+    case kNotCapturedDiskReserve:
       return false;
   }
   return false;
+}
+}  // namespace request_detail
+
+namespace request_detail {
+// Version 2 rules from protocol/native-network-v3.md.
+[[nodiscard]] inline bool IsValidRequestBodyPayloadV2(const RequestBodyPayload& value,
+                                                      const bool has_artifact) noexcept {
+  using enum RequestBodyState;
+  const auto kind = static_cast<RequestBodyKind>(value.kind);
+  const auto state = static_cast<RequestBodyState>(value.state);
+  const bool content = (value.flags & kRequestBodyContentCapture) != 0;
+  const bool digest = (value.flags & kRequestBodyDigestPresent) != 0;
+  const bool partial = (value.flags & kRequestBodyLengthPartial) != 0;
+  const bool credential = (value.flags & kRequestBodyCredentialForm) != 0;
+  const bool bytes = kind == RequestBodyKind::kBytes;
+  const bool none = kind == RequestBodyKind::kNone;
+  const bool unknown = kind == RequestBodyKind::kUnknown;
+  const bool zero_digest =
+      std::all_of(value.sha256.begin(), value.sha256.end(), [](std::uint8_t b) { return b == 0; });
+  const bool retained = state == kCaptured;
+  // Retired: nothing is truncated, budgeted or too large to hash.
+  if ((value.flags & kRequestBodyDigestSizeLimit) != 0 || state == kCapturedTruncated ||
+      state == kNotCapturedSessionBudget || digest == zero_digest || has_artifact != retained ||
+      (!retained && value.captured_length != 0) || none != (state == kNoBody) ||
+      (none && (credential || value.element_count != 0 || value.body_length != 0)) ||
+      (!none && value.element_count == 0) ||
+      (kind == RequestBodyKind::kChunkedDataPipe && value.element_count != 1)) {
+    return false;
+  }
+  if ((value.flags & kRequestBodyRead) != 0) {
+    // A read body: lengths and the digest are exact when it was read whole,
+    // and a read that stopped early counts what it read.
+    const bool exact = state == kEmpty || state == kCaptured || state == kMetadataOnly;
+    if (unknown || none || digest != exact || partial != (!exact && !bytes)) {
+      return false;
+    }
+    // A Metadata only session hashes in-memory bodies and keeps no bytes.
+    if (!content) {
+      return state == kMetadataOnly && bytes && !credential && value.body_length != 0;
+    }
+    switch (state) {
+      case kEmpty:
+        return value.body_length == 0;
+      case kCaptured:
+        return value.body_length != 0 && value.captured_length == value.body_length;
+      case kNotCapturedTransferRefused:
+      case kNotCapturedReadIncomplete:
+      case kNotCapturedDiskReserve:
+        return true;
+      default:
+        return false;
+    }
+  }
+  // Without a read only an empty in-memory body has a digest, and only a read
+  // learns of these.
+  if (digest != (state == kEmpty) || partial != (!none && !bytes) || state == kCaptured ||
+      state == kNotCapturedReadIncomplete || state == kNotCapturedDiskReserve ||
+      (!content && credential != (state == kNotCapturedCredentialForm))) {
+    return false;
+  }
+  switch (state) {
+    case kNoBody:
+      return true;
+    case kEmpty:
+      return bytes && value.body_length == 0;
+    case kMetadataOnly:
+      return !content && (!bytes || value.body_length != 0);
+    case kNotCapturedCredentialForm:
+      return !content;
+    case kNotCapturedBodyKind:
+      return content && !bytes;
+    case kNotCapturedArtifactUnavailable:
+    case kNotCapturedTransferRefused:
+    case kNotCapturedUrl:
+      return content && !unknown && (!bytes || value.body_length != 0);
+    default:
+      return false;
+  }
+}
+}  // namespace request_detail
+
+// has_artifact is whether the envelope names a request-body artifact.
+[[nodiscard]] inline bool IsValidRequestBodyPayload(const RequestBodyPayload& value,
+                                                    const bool has_artifact) noexcept {
+  if (!request_detail::IsValidRequestBodyFields(value)) {
+    return false;
+  }
+  switch (value.protocol_version) {
+    case kRequestPayloadVersion:
+      return request_detail::IsValidRequestBodyPayloadV1(value, has_artifact);
+    case kRequestBodyPayloadVersion:
+      return request_detail::IsValidRequestBodyPayloadV2(value, has_artifact);
+    default:
+      return false;
+  }
 }
 
 // has_artifact is whether the envelope names a full-target artifact.

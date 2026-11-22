@@ -650,7 +650,7 @@ assert.match(details.textContent, /host only; path and query not captured/);
   assert.match(bodyDetails.textContent, /truncated; the original path and query are 412 bytes\)/);
   trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412,
     fullTarget: {retention: "not_retained_session_budget"}}));
-  assert.match(bodyDetails.textContent, /412 bytes; the full target was not retained: this session had used its request content budget\. Raise Request content budget in New Live Session… for the next session\)/);
+  assert.match(bodyDetails.textContent, /412 bytes; the full target was not retained: the request content budget was used, a limit of the browser that recorded this session\. Current capture keeps every body and target whole\)/);
   trafficUI.renderTrafficDetails(bodyDetails, live(null, {urlTruncated: true, targetLength: 412, fullTarget: {retention: "retained"}}),
     "", {status: "ready", complete: true, url: "https://api.hcaptcha.test", text: "/checksiteconfig?v=1&full"});
   assert.match(bodyDetails.textContent, /https:\/\/api\.hcaptcha\.test\/checksiteconfig\?v=1&full/);

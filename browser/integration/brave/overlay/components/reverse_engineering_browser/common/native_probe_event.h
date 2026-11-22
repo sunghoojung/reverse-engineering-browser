@@ -115,7 +115,7 @@ enum class NativeProbeType : std::uint16_t {
   kAsyncTaskStack = 48,
   // Extension traffic recorded by opt-in; see protocol/native-network-v3.md.
   kRequestExtensionLink = 50,
-  // See protocol/native-compiled-scripts-v1.md.
+  // See protocol/native-compiled-scripts-v2.md.
   kScriptCompiled = 51,
   // A load Blink answered from a resource it held; see protocol/native-network-v3.md.
   kMemoryCacheReuse = 52,

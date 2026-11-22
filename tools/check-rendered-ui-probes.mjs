@@ -15,7 +15,8 @@ class Element {
     this.id = id;
     this.rect = rect;
     this.computed = {display: 'block', visibility: 'visible', opacity: '1', overflowX: 'visible',
-      overflowY: 'visible', textOverflow: 'clip', ...style};
+      overflowY: 'visible', textOverflow: 'clip', position: 'static', transform: 'none', perspective: 'none',
+      filter: 'none', backdropFilter: 'none', contain: 'none', willChange: 'auto', ...style};
     this.textContent = text;
     this.children = [];
     this.parentElement = null;
@@ -135,5 +136,22 @@ const pane = edge.children[1];
 pane.tagName = 'BUTTON';
 assert.deepEqual(reach(edge, [`#${pane.id}`]), ['button "Key" meets 40x2px'], 'A control edge inside the reach is under the divider');
 
+// A sentence fixed to the window above a short table's footer paints whole:
+// the table's overflow does not hold a fixed box. An absolute one is cut by
+// the positioned table, and a transformed table holds the fixed one too.
+const popover = (position, tableStyle = {}) => {
+  const table = new Element('div', {id: 'table', rect: box(0, 200, 400, 100),
+    style: {overflowX: 'hidden', overflowY: 'hidden', position: 'relative', ...tableStyle}});
+  const footer = new Element('div', {rect: box(0, 270, 400, 30), style: {overflowY: 'hidden'}});
+  const sentence = new Element('span', {id: 'sentence', rect: box(100, 160, 300, 74), style: {position}});
+  table.append(footer.append(sentence));
+  return probe(table).box('#sentence').visibleHeight;
+};
+assert.equal(popover('fixed'), 74, 'A fixed box is not clipped by an ancestor that does not contain it');
+assert.equal(popover('absolute'), 34, 'An absolute box is clipped by its positioned containing block only');
+assert.equal(popover('fixed', {transform: 'translateX(0px)'}), 34, 'A transformed ancestor clips a fixed box');
+assert.equal(popover('static'), 0, 'An in-flow box is clipped by every overflow ancestor');
+
 console.log('PASS rendered layout probe: a scrolled-out row sliver is skipped, a collapsed control and ' +
-  'overlapping rows still fail, and a divider reach clips at padding boxes (modelled boxes, not rendered QA)');
+  'overlapping rows still fail, a divider reach clips at padding boxes, and only containing ancestors ' +
+  'clip a positioned box (modelled boxes, not rendered QA)');

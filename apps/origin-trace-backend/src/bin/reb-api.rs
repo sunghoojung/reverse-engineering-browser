@@ -188,22 +188,13 @@ enum SessionCommand {
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
             requires_if("true", "confirm_sensitive_capture"))]
         canvas_images: Option<bool>,
-        /// Retain request paths, queries and bounded bodies, request and response
+        /// Retain request paths, queries and bodies, request and response
         /// headers including Cookie, Set-Cookie and Authorization, each request's
-        /// cookies, and response bodies (sensitive). Default: on with
-        /// --confirm-sensitive-capture.
+        /// cookies, and every response body, media and fonts included, whole
+        /// (sensitive). Default: on with --confirm-sensitive-capture.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true",
             requires_if("true", "confirm_sensitive_capture"))]
         request_content: Option<bool>,
-        /// MiB of unique request bodies and targets to retain, 1..4096 (default 256).
-        #[arg(long, requires = "request_content")]
-        request_content_budget_mib: Option<u32>,
-        /// MiB of unique response bodies to retain, 1..16384 (default 512).
-        #[arg(long, requires = "request_content")]
-        response_body_budget_mib: Option<u32>,
-        /// Also retain images, audio, video and fonts that page elements load.
-        #[arg(long, requires = "request_content")]
-        response_media: bool,
         /// Record the JavaScript and Wasm stack that started each renderer
         /// request. Default: on when --category-mask holds 256 and 1024, and
         /// dropped by a Brave without the flag; naming it is strict.
@@ -1325,9 +1316,6 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         localhost_only,
         canvas_images,
         request_content,
-        request_content_budget_mib,
-        response_body_budget_mib,
-        response_media,
         request_stacks,
         promise_stacks,
         document_start,
@@ -1356,9 +1344,6 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         category_mask,
         duration_seconds,
         localhost_only,
-        request_content_budget_mib,
-        response_body_budget_mib,
-        response_media,
         browser_internal,
         extension_traffic,
         fresh_profile,
@@ -1496,6 +1481,7 @@ mod tests {
             "get_wasm_pseudocode",
             "get_wasm_module_diff",
             "get_wasm_value_flow",
+            "get_wasm_call_sites",
             "validate_evidence_package",
             "export_evidence_package",
             "compare_evidence_packages",

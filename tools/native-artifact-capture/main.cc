@@ -37,7 +37,6 @@ static_assert(sizeof(reb::NativeArtifactStreamFrame) == sizeof(reb::ArtifactStre
               reb::kNativeArtifactStreamMagic == reb::kArtifactStreamMagic &&
               reb::kNativeArtifactStreamProtocolVersion == reb::kArtifactStreamProtocolVersion &&
               reb::kNativeArtifactStreamChunkBytes == reb::kMaxArtifactStreamChunkBytes &&
-              reb::kNativeArtifactMaxOpenStreams == reb::kMaxOpenArtifactStreams &&
               offsetof(reb::NativeArtifactStreamFrame, expected_sha256) ==
                   offsetof(reb::ArtifactStreamFrame, expected_sha256));
 
@@ -315,7 +314,7 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
     request.headers.SetHeader("Content-Type", "application/json;charset=UTF-8");
     request.request_body = BodyOf(body.content);
     network.RecordRequestStarted(body.request_id, 0, 0, 1, kFrame, 11, 12, request);
-    Check(base::ThreadPool::RunPending() == 1, "The body is copied off the UI sequence");
+    Check(base::ThreadPool::RunPending() == 1, "The body is read off the UI sequence");
     const auto started = LastOf(NativeProbeType::kRequestStarted);
     const auto target = LastOf(NativeProbeType::kRequestTarget);
     const auto record = LastOf(NativeProbeType::kRequestBody);
@@ -338,11 +337,11 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
     Check(transfer.header.expected_sha256 == digest, "The artifact carries its exact digest");
     Receive(receiver, artifact_id);
     CheckCapture(artifact_id, record.header.sequence_number, body.request_id);
-    const bool hashed = body.content.size() <= reb::kNativeRequestBodyDigestBytes;
-    Check((hashed ? payload.sha256 == digest : payload.sha256 == decltype(digest){}) &&
-              payload.body_length == body.content.size() &&
+    Check(payload.sha256 == digest && payload.body_length == body.content.size() &&
+              payload.captured_length == body.content.size() &&
+              (payload.flags & reb::kRequestBodyRead) != 0 &&
               payload.state == static_cast<std::uint8_t>(reb::RequestBodyState::kCaptured),
-          "Body record describes the whole body; past 4 MiB the artifact holds the digest");
+          "Body record describes the whole body and its digest, past 4 MiB too");
     // The provisional header block follows the body as its own sensitive
     // artifact; the second request's identical block names the first one.
     const NativeProbeEvent headers = LastOf(NativeProbeType::kRequestHeaders);
@@ -468,7 +467,7 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
   network::ResourceRequest graphql;
   graphql.url = GURL("https://api.hcaptcha.test/graphql?" + query);
   network.RecordRequestStarted(403, 0, 0, 1, kFrame, 11, 12, graphql);
-  Check(base::ThreadPool::RunPending() == 1, "The full target is copied off the UI sequence");
+  Check(base::ThreadPool::RunPending() == 0, "The full target is queued whole");
   const auto started = LastOf(NativeProbeType::kRequestStarted);
   const auto target = LastOf(NativeProbeType::kRequestTarget);
   reb::RequestTargetPayload decoded;
@@ -498,9 +497,9 @@ void RequestBodies(reb::ArtifactReceiver& receiver, const std::filesystem::path&
           << ",\"target_length\":" << full.size() << ",\"sha256\":\""
           << Hex(crypto::hash::Sha256(full)) << "\"}]\n";
   std::cout << "PASS request bodies: content-mode target/body/header children, sensitive "
-               "request_body and request_headers artifacts with full URL and off-thread digest "
-               "past 4 MiB, an 8 KB target retained whole, receiver ACK joined to each creator "
-               "record\n";
+               "request_body and request_headers artifacts with full URL, every body read and "
+               "hashed off the UI sequence, an 8 KB target retained whole, receiver ACK joined "
+               "to each creator record\n";
 }
 
 reb::RequestTargetPayload TargetPayload(const NativeProbeEvent& event) {
@@ -511,23 +510,48 @@ reb::RequestTargetPayload TargetPayload(const NativeProbeEvent& event) {
   return value;
 }
 
-// Byte budget, digest dedupe, the in-flight pool and the background copy, all
-// through the real network and artifact sinks.
-void RequestContentLimits() {
+// Writes every frame a stream queued so far, as the writer would while the
+// body is still being read, returning their pool shares, then runs the
+// resumes the freed pool posted.
+void DrainQueued() {
+  for (auto& [id, transfer] : NativeArtifactSocketClient::Get().transfers) {
+    static_cast<void>(id);
+    transfer->reservation.Reset();
+    for (auto& frame : transfer->frames) {
+      frame->reservation.Reset();
+    }
+  }
+  base::SequencedTaskRunner::RunPosted();
+}
+
+// No size limit or session byte budget, repeated bytes, the in-flight pool's
+// backpressure, the background read and the disk reserve, all through the
+// real network and artifact sinks.
+void RequestContentLimits(const std::filesystem::path& output) {
+  constexpr std::size_t kMiB = 1024U * 1024U;
   auto& network = reb::NativeNetworkCaptureSink::Get();
   auto& sink = NativeArtifactCaptureSink::Get();
   auto& transfers = NativeArtifactSocketClient::Get().transfers;
   std::uint64_t next_request = 600;
-  const auto configure = [&](std::uint64_t budget) {
+  const auto configure = [&] {
     Configure();
-    sink.SetEmitter(Emit, kSession, kMask, 200, budget);
+    sink.SetEmitter(Emit, kSession, kMask, 200);
     network.SetEmitter(Emit, kSession, kMask, 200, true);
     transfers.clear();
+    reb::NativeRequestBodyReader::reads.clear();
   };
-  // No request headers, so every transfer and pool share here is request content.
+  const auto bodies = [] {
+    return std::ranges::count_if(
+        events, [](const auto& e) { return e.header.type == NativeProbeType::kRequestBody; });
+  };
+  // No request headers, so every transfer and pool share here is request
+  // content. The read runs as the background sequence would, then the record.
   const auto post = [&](network::ResourceRequest request) {
     request.method = "POST";
+    const auto before = bodies();
     network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, request);
+    Check(bodies() == before, "An in-memory body's record waits for its read");
+    base::ThreadPool::RunPending();
     return LastOf(NativeProbeType::kRequestBody);
   };
   const auto state_of = [](const NativeProbeEvent& event) {
@@ -539,127 +563,175 @@ void RequestContentLimits() {
     request.request_body = BodyOf(content);
     return request;
   };
+  // The open header's URL and type hold their share until written.
+  const std::size_t metadata = std::string_view("https://api.fixture.test/collect").size() +
+                               std::string_view("application/octet-stream").size();
 
-  // 5,000 small distinct bodies all fit a 1 MiB budget; the next one does not.
-  configure(reb::kNativeRequestContentMinBudgetBytes);
+  // 5,000 small distinct bodies are all retained, each holding its bytes.
+  configure();
   for (int index = 0; index < 5000; ++index) {
     std::string content(200, 'b');
     const std::string number = std::to_string(index);
     std::copy(number.begin(), number.end(), content.begin());
     Check(state_of(post(with_body(std::move(content)))) == reb::RequestBodyState::kCaptured,
-          "Every small body is retained until the budget is used");
+          "Every small body is retained");
   }
-  Check(base::ThreadPool::RunPending() == 5000 && transfers.size() == 5000 &&
-            sink.in_flight_bytes() == 5000U * 200U,
-        "5,000 bodies are queued, each holding exactly its bytes");
-  Check(state_of(post(with_body(std::string(64 * 1024, 'x')))) ==
-                reb::RequestBodyState::kNotCapturedSessionBudget &&
-            base::ThreadPool::pending.empty(),
-        "The body past the budget is named, not copied");
+  Check(transfers.size() == 5000 && sink.in_flight_bytes() == 5000U * (200U + metadata),
+        "5,000 bodies are queued, each holding exactly its bytes and metadata");
+  transfers.clear();
 
-  // Identical bytes are charged once: the receiver keeps one blob per digest.
-  configure(reb::kNativeRequestContentMinBudgetBytes);
+  // Distinct bodies far past what an older session's 256 MiB budget allowed
+  // are still retained: nothing counts what a session already kept.
+  for (char fill = 'A'; fill < 'A' + 17; ++fill) {
+    const auto record = post(with_body(std::string(16 * kMiB, fill)));
+    Check(state_of(record) == reb::RequestBodyState::kCaptured && transfers.size() == 1 &&
+              transfers.begin()->second->content.size() == 16 * kMiB,
+          "A 16 MiB body past 256 MiB of earlier bodies is retained whole");
+    transfers.clear();
+  }
+
+  // Identical bytes are sent twice; the receiver keeps one blob per digest.
   const std::string repeated(400 * 1024, 'r');
   Check(state_of(post(with_body(repeated))) == reb::RequestBodyState::kCaptured &&
             state_of(post(with_body(repeated))) == reb::RequestBodyState::kCaptured,
-        "Both copies are admitted before their digests are known");
-  base::ThreadPool::RunPending();
-  Check(state_of(post(with_body(std::string(400 * 1024, 's')))) == reb::RequestBodyState::kCaptured,
-        "The repeat was refunded, so a distinct body still fits");
-  base::ThreadPool::RunPending();
-  Check(state_of(post(with_body(std::string(400 * 1024, 't')))) ==
-            reb::RequestBodyState::kNotCapturedSessionBudget,
-        "Distinct bytes past the budget are refused");
-  Check(transfers.size() == 3, "The repeat is still transferred and joined to its own record");
+        "Both copies are captured");
+  Check(transfers.size() == 2, "The repeat is still transferred and joined to its own record");
 
-  // A large body is copied whole up to 16 MiB; a larger one keeps that prefix.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
-  const std::string large(reb::kNativeArtifactMaxContentBytes + 5, 'L');
-  const auto truncated = post(with_body(large));
-  const auto truncated_payload = BodyPayload(truncated);
-  Check(truncated_payload.state ==
-                static_cast<std::uint8_t>(reb::RequestBodyState::kCapturedTruncated) &&
-            truncated_payload.captured_length == reb::kNativeArtifactMaxContentBytes,
-        "A body past 16 MiB keeps its first 16 MiB and its length");
-  Check(transfers.size() == 1 && !transfers.begin()->second->ended && sink.in_flight_bytes() == 0,
-        "Nothing is copied on the UI sequence; the opened stream holds nothing yet");
-  base::ThreadPool::RunPending();
-  const auto& copy = *transfers.at(truncated.header.artifact_id);
-  Check(copy.content.size() == reb::kNativeArtifactMaxContentBytes &&
-            copy.header.expected_sha256 == crypto::hash::Sha256(std::span(copy.content)),
-        "The prefix and its digest are exact");
-  // The pool is shared with response tees: a full pool fails the copy, joined
-  // to the record.
-  {
-    auto held = reb::NativeArtifactReservation::Acquire(
-        sink.memory_pool(), reb::kNativeArtifactInFlightBytes - sink.in_flight_bytes());
-    const auto starved = post(with_body("{}"));
-    base::ThreadPool::RunPending();
-    Check(Payload(events.back()) == "active_memory_limit" &&
-              events.back().header.parent_event_id == starved.header.sequence_number,
-          "A full in-flight pool fails the copy visibly");
+  // A password form post is captured like any other body, and says what it is.
+  network::ResourceRequest login = with_body("user=a&password=b");
+  login.request_body->set_contains_sensitive_info(true);
+  const auto login_record = post(login);
+  Check(state_of(login_record) == reb::RequestBodyState::kCaptured &&
+            (BodyPayload(login_record).flags & reb::kRequestBodyCredentialForm) != 0 &&
+            transfers.contains(login_record.header.artifact_id),
+        "A content session captures a password form post and flags it");
+
+  // A body larger than the whole in-flight pool is kept whole: the read takes
+  // what the pool has room for and waits for the writer, never truncating.
+  configure();
+  std::string large(70 * kMiB + 5, '\0');
+  for (std::size_t index = 0; index < large.size(); ++index) {
+    large[index] = static_cast<char>(index * 7U);
   }
+  network::ResourceRequest large_request = with_body(large);
+  large_request.method = "POST";
+  const auto before_large = bodies();
+  network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, large_request);
+  Check(base::ThreadPool::RunPending() == 1 && bodies() == before_large &&
+            reb::NativeRequestBodyReader::Waiting(0) &&
+            sink.in_flight_bytes() <= sink.memory_pool().stream_mark() + metadata,
+        "A body past the pool waits for room, holding at most the stream mark");
+  std::size_t drains = 0;
+  while (reb::NativeRequestBodyReader::Waiting(0)) {
+    DrainQueued();
+    ++drains;
+    Check(sink.in_flight_bytes() <= sink.memory_pool().stream_mark() + metadata,
+          "Every refill stays within the stream mark");
+  }
+  const auto large_record = LastOf(NativeProbeType::kRequestBody);
+  const auto large_payload = BodyPayload(large_record);
+  const auto& large_copy = *transfers.at(large_record.header.artifact_id);
+  Check(drains >= 2 &&
+            large_payload.state == static_cast<std::uint8_t>(reb::RequestBodyState::kCaptured) &&
+            large_payload.body_length == large.size() &&
+            large_payload.captured_length == large.size() &&
+            large_payload.sha256 == crypto::hash::Sha256(large) &&
+            std::string(large_copy.content.begin(), large_copy.content.end()) == large &&
+            large_copy.header.expected_sha256 == large_payload.sha256,
+        "A 70 MiB body is captured whole with its digest after waiting for the writer");
   transfers.clear();
   Check(sink.in_flight_bytes() == 0, "Dropped transfers return their share");
 
-  // The copy reads the body after the record: a body that changed is a failure
-  // joined to its record, never a short artifact.
-  auto changing = with_body("{\"a\":1}");
-  const auto record = post(changing);
-  changing.request_body->elements_mutable()->clear();
-  base::ThreadPool::RunPending();
-  Check(transfers.empty() && events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
-            Payload(events.back()) == "request_content_changed" &&
-            events.back().header.parent_event_id == record.header.sequence_number &&
-            events.back().header.artifact_id == record.header.artifact_id,
-        "A changed body is a visible failure");
-  base::ThreadPool::refuse = true;
-  Check(state_of(post(with_body("{}"))) == reb::RequestBodyState::kNotCapturedTransferRefused,
-        "A refused background task is named");
-  base::ThreadPool::refuse = false;
-  NativeArtifactSocketClient::Get().reject_next = true;
-  Check(state_of(post(with_body("{}"))) == reb::RequestBodyState::kNotCapturedTransferRefused,
-        "A refused open header is named");
-  const auto queued = post(with_body("{\"b\":2}"));
-  NativeArtifactSocketClient::Get().reject_next = true;
-  base::ThreadPool::RunPending();
-  Check(Payload(events.back()) == "transfer_queue_full_or_disconnected" &&
-            events.back().header.parent_event_id == queued.header.sequence_number,
-        "A full queue after the copy is a failure joined to the record");
-
-  // The copy path names the artifact in its record before the copy runs, so a
-  // stream lost in that window is one failure joined to the record, and the end
-  // frame the writer would drop is never sent.
-  configure(reb::kNativeRequestContentMinBudgetBytes);
-  const auto copying = post(with_body(std::string(reb::kNativeRequestContentMinBudgetBytes, 'c')));
-  const auto failures_of_copy = [] {
-    return std::ranges::count_if(events, [](const auto& e) {
-      return e.header.type == NativeProbeType::kArtifactCaptureFailed;
-    });
-  };
-  const auto copy_failures_before = failures_of_copy();
-  NativeArtifactCaptureSink::TransferCompleted(copying.header.artifact_id,
-                                               reb::NativeArtifactReceiveStatus::kIoError);
-  Check(failures_of_copy() == copy_failures_before + 1 &&
-            events.back().header.parent_event_id == copying.header.sequence_number &&
-            events.back().header.artifact_id == copying.header.artifact_id,
-        "A stream lost while its body is copied is a failure joined to the record");
-  const auto copy_events_before = events.size();
-  base::ThreadPool::RunPending();
-  Check(events.size() == copy_events_before && !transfers.contains(copying.header.artifact_id),
-        "The copy that follows a reported loss emits nothing more and ends nothing");
-  NativeArtifactCaptureSink::TransferCompleted(copying.header.artifact_id,
-                                               reb::NativeArtifactReceiveStatus::kAccepted);
-  Check(events.size() == copy_events_before, "The lost copy leaves no pending entry behind");
-  Check(state_of(post(with_body(std::string(reb::kNativeRequestContentMinBudgetBytes, 'g')))) ==
-            reb::RequestBodyState::kCaptured,
-        "The lost copy returned its budget share");
-  base::ThreadPool::RunPending();
+  // Response tees and reads share the pool: a pool held full by other streams
+  // makes the read wait, and it completes once that room is released.
+  {
+    auto held = reb::NativeArtifactReservation::Acquire(
+        sink.memory_pool(), sink.memory_pool().stream_mark(), reb::NativeArtifactPoolUse::kStream);
+    Check(held.is_valid(), "The test holds the whole stream share");
+    network::ResourceRequest starved = with_body("{\"starved\":1}");
+    starved.method = "POST";
+    const auto before_starved = bodies();
+    network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, starved);
+    base::ThreadPool::RunPending();
+    Check(bodies() == before_starved &&
+              reb::NativeRequestBodyReader::Waiting(reb::NativeRequestBodyReader::reads.size() - 1),
+          "A read the full pool cannot take waits, it is not refused");
+    held.Reset();
+    base::SequencedTaskRunner::RunPosted();
+    Check(bodies() == before_starved + 1 &&
+              state_of(LastOf(NativeProbeType::kRequestBody)) == reb::RequestBodyState::kCaptured,
+          "The waiting read completes once the pool has room");
+  }
   transfers.clear();
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+
+  NativeArtifactSocketClient::Get().reject_next = true;
+  network::ResourceRequest refused_open = with_body("{}");
+  refused_open.method = "POST";
+  network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, refused_open);
+  Check(state_of(LastOf(NativeProbeType::kRequestBody)) ==
+                reb::RequestBodyState::kNotCapturedTransferRefused &&
+            base::ThreadPool::pending.empty(),
+        "A refused open header is named at once");
+  reb::NativeRequestBodyReader::refuse = true;
+  network::ResourceRequest unstarted = with_body("{}");
+  unstarted.method = "POST";
+  network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, unstarted);
+  reb::NativeRequestBodyReader::refuse = false;
+  Check(state_of(LastOf(NativeProbeType::kRequestBody)) ==
+            reb::RequestBodyState::kNotCapturedTransferRefused,
+        "A read that cannot start is named at once");
+  // A data frame the writer refuses ends the read; the record names it.
+  network::ResourceRequest rejected = with_body("{\"b\":2}");
+  rejected.method = "POST";
+  network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, rejected);
+  NativeArtifactSocketClient::Get().reject_next = true;
+  base::ThreadPool::RunPending();
+  Check(state_of(LastOf(NativeProbeType::kRequestBody)) ==
+                reb::RequestBodyState::kNotCapturedTransferRefused &&
+            LastOf(NativeProbeType::kRequestBody).header.artifact_id == 0,
+        "A refused data frame is named in the record, never captured");
+
+  // A stream lost while its body is read is named in the record, and nothing
+  // more follows it.
+  configure();
+  network::ResourceRequest losing = with_body(std::string(kMiB, 'c'));
+  losing.method = "POST";
+  const auto before_loss = bodies();
+  network.RecordRequestStarted(next_request++, 0, 0, 1, kFrame, 11, 12, losing);
+  const std::uint64_t lost_stream = std::ranges::max(transfers | std::views::keys);
+  NativeArtifactCaptureSink::TransferCompleted(lost_stream,
+                                               reb::NativeArtifactReceiveStatus::kIoError);
+  Check(bodies() == before_loss, "A stream lost during its read waits for the read to end");
+  base::ThreadPool::RunPending();
+  const auto lost = LastOf(NativeProbeType::kRequestBody);
+  Check(state_of(lost) == reb::RequestBodyState::kNotCapturedTransferRefused &&
+            lost.header.artifact_id == 0 && !transfers.contains(lost_stream),
+        "A stream lost during its read is recorded refused");
+  const auto after_loss = events.size();
+  NativeArtifactCaptureSink::TransferCompleted(lost_stream,
+                                               reb::NativeArtifactReceiveStatus::kAccepted);
+  Check(events.size() == after_loss, "The lost read leaves no pending entry behind");
+  transfers.clear();
+
+  // The receiver's disk reserve refuses a read body after its record, named
+  // as its own reason, and the next body is still offered.
+  reb::ArtifactReceiver full(
+      output / "disk-reserve-request-receiver",
+      {.disk_reserve_bytes = std::numeric_limits<std::uint64_t>::max(), .allow_sensitive = true});
+  const auto reserved = post(with_body("{\"reserve\":1}"));
+  Receive(full, reserved.header.artifact_id, true, reb::ArtifactReceiveStatus::kDiskReserve);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
+            Payload(events.back()) == "disk_reserve" &&
+            events.back().header.parent_event_id == reserved.header.sequence_number &&
+            events.back().header.artifact_id == reserved.header.artifact_id,
+        "A body the disk reserve refused is a disk_reserve failure joined to its record");
+  Check(state_of(post(with_body("{\"reserve\":2}"))) == reb::RequestBodyState::kCaptured,
+        "A disk reserve refusal does not stop later bodies being offered");
+  transfers.clear();
+  configure();
 
   // Targets: the inline prefix is the whole target up to 116 bytes; past it the
-  // full target is retained, or the record names why not.
+  // full target is retained whole, or the record names why not.
   const auto get = [&](const std::string& url) {
     network::ResourceRequest request;
     request.url = GURL(url);
@@ -676,17 +748,12 @@ void RequestContentLimits() {
         "A 116-byte target is complete inline");
   const auto long_target = get("https://api.fixture.test" + exact + "?q");
   Check(retention(TargetPayload(long_target)) == reb::NativeRequestTargetRetention::kRetained &&
-            long_target.header.artifact_id != 0 && base::ThreadPool::RunPending() == 1,
-        "A 117-byte target is retained in full");
+            long_target.header.artifact_id != 0 && base::ThreadPool::pending.empty() &&
+            transfers.contains(long_target.header.artifact_id),
+        "A 117-byte target is retained in full, queued whole");
   Check(retention(TargetPayload(get("ftp://files.fixture.test" + exact + "?q"))) ==
             reb::NativeRequestTargetRetention::kNotRetainedUrl,
         "A scheme without an origin is named");
-  configure(reb::kNativeRequestContentMinBudgetBytes);
-  post(with_body(std::string(reb::kNativeRequestContentMinBudgetBytes - 64, 'f')));
-  Check(retention(TargetPayload(get("https://api.fixture.test" + exact + "?budget"))) ==
-            reb::NativeRequestTargetRetention::kNotRetainedSessionBudget,
-        "A target past the budget is named");
-  base::ThreadPool::RunPending();
   NativeArtifactSocketClient::Get().connected = false;
   Check(retention(TargetPayload(get("https://api.fixture.test" + exact + "?off"))) ==
             reb::NativeRequestTargetRetention::kNotRetainedArtifactUnavailable,
@@ -694,15 +761,16 @@ void RequestContentLimits() {
   NativeArtifactSocketClient::Get().connected = true;
   Configure();
   transfers.clear();
+  reb::NativeRequestBodyReader::reads.clear();
   Check(sink.in_flight_bytes() == 0 && base::ThreadPool::pending.empty(),
         "No request content is left in flight");
-  std::cout << "PASS request content: 5,000 bodies within a byte budget, digest dedupe, 16 MiB "
-               "prefix copied off the UI sequence, shared pool, changed and refused copies, "
-               "full targets and every retention state\n";
+  std::cout << "PASS request content: 5,000 bodies, 272 MiB with no session budget, repeats, a "
+               "70 MiB body kept whole through the pool's backpressure, a waiting read, refused "
+               "and lost reads, the disk reserve, full targets and every retention state\n";
 }
 
-// File, blob and stream bodies: the deferred record, truncation, the budget
-// allowance, incomplete reads, capture end, a missing hook and refusals.
+// File, blob and stream bodies: the deferred record, the pool's backpressure,
+// the disk reserve, incomplete reads, capture end, a missing hook and refusals.
 void ReadRequestBodies(const std::filesystem::path& output) {
   auto& network = reb::NativeNetworkCaptureSink::Get();
   auto& sink = NativeArtifactCaptureSink::Get();
@@ -710,9 +778,9 @@ void ReadRequestBodies(const std::filesystem::path& output) {
   auto& reads = reb::NativeRequestBodyReader::reads;
   using Read = reb::NativeRequestBodyReadEnd;
   std::uint64_t next_request = 950;
-  const auto configure = [&](std::uint64_t budget) {
+  const auto configure = [&] {
     Configure();
-    sink.SetEmitter(Emit, kSession, kMask, 200, budget);
+    sink.SetEmitter(Emit, kSession, kMask, 200);
     network.SetEmitter(Emit, kSession, kMask, 200, true);
     transfers.clear();
     reads.clear();
@@ -742,91 +810,128 @@ void ReadRequestBodies(const std::filesystem::path& output) {
     return static_cast<reb::RequestBodyState>(value.state);
   };
 
-  // Past 16 MiB the prefix is kept and the whole length recorded.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  // A read waits for the writer whenever the pool's stream share is full, so
+  // a body many times the pool is captured whole.
+  const auto drain = [&](const std::size_t index) {
+    while (reb::NativeRequestBodyReader::Waiting(index)) {
+      Check(sink.in_flight_bytes() <= sink.memory_pool().stream_mark() + 64,
+            "A waiting read holds at most the stream mark");
+      DrainQueued();
+    }
+  };
+  configure();
   auto blob = upload(network::DataElement(network::DataElementDataPipe{}));
   start(blob);
-  std::vector<std::uint8_t> large(reb::kNativeArtifactMaxContentBytes + 77);
+  std::vector<std::uint8_t> large(40U * 1024U * 1024U + 77);
   for (std::size_t index = 0; index < large.size(); ++index) {
     large[index] = static_cast<std::uint8_t>(index * 5U);
   }
+  const auto bodies_before_large = bodies();
   reb::NativeRequestBodyReader::Finish(0, large, Read::kComplete, large.size());
-  const auto truncated = record(LastOf(NativeProbeType::kRequestBody));
-  const auto& prefix = *transfers.at(LastOf(NativeProbeType::kRequestBody).header.artifact_id);
-  Check(state(truncated) == reb::RequestBodyState::kCapturedTruncated &&
-            truncated.body_length == large.size() &&
-            truncated.captured_length == reb::kNativeArtifactMaxContentBytes &&
-            (truncated.flags & reb::kRequestBodyDigestSizeLimit) != 0 &&
-            prefix.content.size() == reb::kNativeArtifactMaxContentBytes &&
-            prefix.header.expected_sha256 ==
-                crypto::hash::Sha256(std::span(large).first(reb::kNativeArtifactMaxContentBytes)),
-        "A read body past 16 MiB keeps its prefix, its exact length and the prefix digest");
+  Check(reb::NativeRequestBodyReader::Waiting(0) && bodies() == bodies_before_large,
+        "A 40 MiB read waits for the writer, its record after it");
+  drain(0);
+  const auto large_event = LastOf(NativeProbeType::kRequestBody);
+  const auto whole_large = record(large_event);
+  const auto& large_copy = *transfers.at(large_event.header.artifact_id);
+  Check(state(whole_large) == reb::RequestBodyState::kCaptured &&
+            whole_large.body_length == large.size() &&
+            whole_large.captured_length == large.size() &&
+            whole_large.sha256 == crypto::hash::Sha256(large) &&
+            (whole_large.flags & reb::kRequestBodyLengthPartial) == 0 &&
+            reb::IsValidRequestBodyPayload(whole_large, true) && large_copy.content == large &&
+            large_copy.header.expected_sha256 == whole_large.sha256,
+        "A 40 MiB read body is captured whole with its exact length and digest");
   transfers.clear();
 
-  // A body of exactly the cap, or one byte past it, read in aligned chunks: the
-  // reader stops at the cap either way, so only the length tells them apart.
-  const auto aligned = [&](const std::size_t length) {
-    configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  // Lengths on and off the 64 KiB frame boundary read the same way.
+  for (const std::size_t length :
+       {std::size_t{16} * 1024 * 1024, std::size_t{16} * 1024 * 1024 + 1}) {
+    configure();
     auto body = upload(network::DataElement(network::DataElementFile{}));
     start(body);
     reb::NativeRequestBodyReader::Finish(0, std::span(large).first(length), Read::kComplete,
                                          length);
-    return LastOf(NativeProbeType::kRequestBody);
-  };
-  const auto cap = reb::kNativeArtifactMaxContentBytes;
-  const NativeProbeEvent whole_event = aligned(cap);
-  const auto whole = record(whole_event);
-  Check(state(whole) == reb::RequestBodyState::kCaptured && whole.body_length == cap &&
-            whole.captured_length == cap && (whole.flags & reb::kRequestBodyDigestPresent) != 0 &&
-            reb::IsValidRequestBodyPayload(whole, whole_event.header.artifact_id != 0) &&
-            transfers.at(whole_event.header.artifact_id)->content.size() == cap,
-        "A body of exactly 16 MiB read in aligned chunks is captured whole, with its digest");
-  const NativeProbeEvent over_event = aligned(cap + 1);
-  const auto one_over = record(over_event);
-  Check(state(one_over) == reb::RequestBodyState::kCapturedTruncated &&
-            one_over.body_length == cap + 1 && one_over.captured_length == cap &&
-            (one_over.flags & reb::kRequestBodyDigestSizeLimit) != 0 &&
-            (one_over.flags & reb::kRequestBodyDigestPresent) == 0 &&
-            reb::IsValidRequestBodyPayload(one_over, over_event.header.artifact_id != 0) &&
-            transfers.at(over_event.header.artifact_id)->content.size() == cap,
-        "A body of 16 MiB + 1 read in aligned chunks records truncation the broker accepts");
-  transfers.clear();
+    drain(0);
+    const NativeProbeEvent event = LastOf(NativeProbeType::kRequestBody);
+    const auto value = record(event);
+    Check(state(value) == reb::RequestBodyState::kCaptured && value.body_length == length &&
+              value.captured_length == length &&
+              value.sha256 == crypto::hash::Sha256(std::span(large).first(length)) &&
+              reb::IsValidRequestBodyPayload(value, true) &&
+              transfers.at(event.header.artifact_id)->content.size() == length,
+          "A body on or off the frame boundary is captured whole, with its digest");
+    transfers.clear();
+  }
 
-  // The budget gives a read an allowance; past it the record names the budget.
-  configure(reb::kNativeRequestContentMinBudgetBytes);
+  // Parallel reads share the pool: the second waits for room the first frees,
+  // and both are kept whole.
+  configure();
+  const std::size_t half = 16U * 1024U * 1024U;
   auto stream = upload(network::DataElement(network::DataElementChunkedDataPipe{}));
   start(stream);
   auto second = upload(network::DataElement(network::DataElementFile{}));
   start(second);
-  Check(reads.size() == 1 && state(record(LastOf(NativeProbeType::kRequestBody))) ==
-                                 reb::RequestBodyState::kNotCapturedSessionBudget,
-        "A read holds the remaining budget while it runs; the next read is refused visibly");
-  const std::vector<std::uint8_t> over(reb::kNativeRequestContentMinBudgetBytes + 1, 's');
-  reb::NativeRequestBodyReader::Finish(0, over, Read::kComplete, over.size());
-  const auto budget = record(LastOf(NativeProbeType::kRequestBody));
-  Check(state(budget) == reb::RequestBodyState::kNotCapturedSessionBudget &&
-            (budget.flags & reb::kRequestBodyRead) != 0 &&
-            (budget.flags & reb::kRequestBodyLengthPartial) != 0 && transfers.empty() &&
-            LastOf(NativeProbeType::kRequestBody).header.artifact_id == 0,
-        "A read past its allowance is refused by the budget and its stream aborted");
-  start(second);
-  const std::vector<std::uint8_t> fits(1000, 'f');
-  reb::NativeRequestBodyReader::Finish(1, fits, Read::kComplete, fits.size());
-  Check(state(record(LastOf(NativeProbeType::kRequestBody))) == reb::RequestBodyState::kCaptured,
-        "The refused read returned its allowance");
+  Check(reads.size() == 2, "A second read starts while the first runs");
+  reb::NativeRequestBodyReader::Finish(0, std::span(large).first(half), Read::kComplete, half);
+  reb::NativeRequestBodyReader::Finish(1, std::span(large).subspan(1, half), Read::kComplete, half);
+  Check(!reb::NativeRequestBodyReader::Waiting(0) && reb::NativeRequestBodyReader::Waiting(1),
+        "The second read waits for room behind the first");
+  const auto first_read = record(LastOf(NativeProbeType::kRequestBody));
+  drain(1);
+  const auto second_read = record(LastOf(NativeProbeType::kRequestBody));
+  Check(state(first_read) == reb::RequestBodyState::kCaptured &&
+            state(second_read) == reb::RequestBodyState::kCaptured &&
+            first_read.captured_length == half && second_read.captured_length == half &&
+            second_read.sha256 == crypto::hash::Sha256(std::span(large).subspan(1, half)),
+        "Both parallel reads are captured whole");
+  transfers.clear();
 
-  // A pool that stays full refuses the read.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  // The disk reserve refusing a stream while it is read is named in the record
+  // as its own state, read flag set, never captured.
+  configure();
+  const std::vector<std::uint8_t> fits(1000, 'f');
+  start(second);
+  const std::uint64_t reserved_stream = std::ranges::max(transfers | std::views::keys);
+  NativeArtifactCaptureSink::TransferCompleted(reserved_stream,
+                                               reb::NativeArtifactReceiveStatus::kDiskReserve);
+  reb::NativeRequestBodyReader::Finish(0, fits, Read::kComplete, fits.size());
+  const auto reserved_event = LastOf(NativeProbeType::kRequestBody);
+  const auto reserved = record(reserved_event);
+  Check(state(reserved) == reb::RequestBodyState::kNotCapturedDiskReserve &&
+            reserved_event.header.artifact_id == 0 && reserved.captured_length == 0 &&
+            (reserved.flags & reb::kRequestBodyRead) != 0 &&
+            (reserved.flags & reb::kRequestBodyLengthPartial) != 0 &&
+            reb::IsValidRequestBodyPayload(reserved, false) &&
+            reb::IsValidEvent(std::bit_cast<reb::EventRecord>(reserved_event)) &&
+            !transfers.contains(reserved_stream),
+        "A read the disk reserve refused is recorded as not_captured_disk_reserve");
+
+  // A read the full pool cannot take waits, however long, and completes once
+  // the pool has room; nothing is refused for lack of memory.
+  configure();
   auto pooled = upload(network::DataElement(network::DataElementDataPipe{}));
   start(pooled);
-  reb::NativeRequestBodyReader::Finish(0, fits, Read::kRefused, fits.size());
-  Check(state(record(LastOf(NativeProbeType::kRequestBody))) ==
-                reb::RequestBodyState::kNotCapturedTransferRefused &&
-            transfers.empty(),
-        "A read the pool kept waiting is refused visibly");
+  {
+    // The open stream's metadata already holds part of the pool.
+    auto held = reb::NativeArtifactReservation::Acquire(
+        sink.memory_pool(), sink.memory_pool().stream_mark() - sink.in_flight_bytes(),
+        reb::NativeArtifactPoolUse::kStream);
+    Check(held.is_valid(), "The test holds the rest of the stream share");
+    const auto waiting_before = bodies();
+    reb::NativeRequestBodyReader::Finish(0, fits, Read::kComplete, fits.size());
+    base::SequencedTaskRunner::RunPosted();
+    Check(reb::NativeRequestBodyReader::Waiting(0) && bodies() == waiting_before,
+          "A read waits while the pool stays full");
+  }
+  base::SequencedTaskRunner::RunPosted();
+  Check(state(record(LastOf(NativeProbeType::kRequestBody))) == reb::RequestBodyState::kCaptured &&
+            !reb::NativeRequestBodyReader::Waiting(0),
+        "The waiting read completes once the pool has room");
+  transfers.clear();
 
   // A part that changed or failed is incomplete; nothing is published.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  configure();
   auto file = upload(network::DataElement(network::DataElementFile{}));
   start(file);
   reb::NativeRequestBodyReader::Finish(0, fits, Read::kIncomplete, fits.size());
@@ -857,7 +962,7 @@ void ReadRequestBodies(const std::filesystem::path& output) {
         "A read finishing after capture end emits nothing and publishes nothing");
 
   // Without the hook the body is recorded unread, never lost.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  configure();
   start(file, false);
   const auto unread_before = bodies();
   start(file, false);
@@ -869,7 +974,7 @@ void ReadRequestBodies(const std::filesystem::path& output) {
   Configure();
 
   // Refusals before any read keep the record immediate.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  configure();
   reb::NativeRequestBodyReader::refuse = true;
   start(file);
   reb::NativeRequestBodyReader::refuse = false;
@@ -946,7 +1051,7 @@ void ReadRequestBodies(const std::filesystem::path& output) {
 
   // A file part its renderer may not read is never opened, and the record says
   // the read did not complete.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  configure();
   reb::NativeRequestBodyReader::refuse_files = true;
   const auto reads_before_refusal = reads.size();
   start(file);
@@ -973,13 +1078,11 @@ void ReadRequestBodies(const std::filesystem::path& output) {
         "A chunked element beside another element is not read");
 
   // A receiver without --allow-sensitive refuses the stream after its record.
-  configure(reb::kNativeRequestContentDefaultBudgetBytes);
+  configure();
   start(file);
   reb::NativeRequestBodyReader::Finish(reads.size() - 1, fits, Read::kComplete, fits.size());
   const auto refused_record = LastOf(NativeProbeType::kRequestBody);
-  reb::ArtifactReceiver refusing(
-      output / "refusing-read-body-receiver",
-      {.max_artifact_bytes = 1024 * 1024, .max_store_bytes = 1024 * 1024});
+  reb::ArtifactReceiver refusing(output / "refusing-read-body-receiver", {});
   Receive(refusing, refused_record.header.artifact_id, true,
           reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled);
   Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
@@ -989,9 +1092,10 @@ void ReadRequestBodies(const std::filesystem::path& output) {
   transfers.clear();
   reads.clear();
   Check(sink.in_flight_bytes() == 0, "No read leaves a pool share behind");
-  std::cout << "PASS read request bodies: 16 MiB prefix with exact length, budget allowance and "
-               "refund, incomplete and empty reads, capture end, missing hook, refusals and "
-               "receiver refusal joined to the deferred record\n";
+  std::cout << "PASS read request bodies: a 40 MiB body whole through the pool, frame "
+               "boundaries, parallel reads sharing the pool, a waiting read, the disk reserve, "
+               "incomplete and empty reads, capture end, missing hook, refusals and receiver "
+               "refusal joined to the deferred record\n";
 }
 
 // Shared header blocks, the request tracking limit and pre-expiry flushing of
@@ -1004,7 +1108,7 @@ void HeaderAndExpiryEdges() {
   auto& reads = reb::NativeRequestBodyReader::reads;
   const auto configure = [&] {
     Configure();
-    sink.SetEmitter(Emit, kSession, kMask, 200, reb::kNativeRequestContentDefaultBudgetBytes);
+    sink.SetEmitter(Emit, kSession, kMask, 200);
     network.SetEmitter(Emit, kSession, kMask, 200, true);
     transfers.clear();
     reads.clear();
@@ -1160,19 +1264,32 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
   // Metadata-only configuration: no target record and no bytes leave the browser.
   const auto before = events.size();
   network.RecordRequestStarted(501, 0, 0, 1, kFrame, 11, 12, request);
-  Check(transfers.empty() && events.size() == before + 2 &&
+  Check(events.size() == before + 1, "The body's record waits for its digest");
+  Check(base::ThreadPool::RunPending() == 1 && transfers.empty() && events.size() == before + 2 &&
             BodyPayload(events.back()).state ==
-                static_cast<std::uint8_t>(reb::RequestBodyState::kMetadataOnly),
+                static_cast<std::uint8_t>(reb::RequestBodyState::kMetadataOnly) &&
+            BodyPayload(events.back()).sha256 == crypto::hash::Sha256(std::string("answers=1")) &&
+            (BodyPayload(events.back()).flags & reb::kRequestBodyRead) != 0,
         "Metadata-only session records digest, length and type but no body or target");
+  // A password form post keeps neither bytes nor a digest here.
+  network::ResourceRequest login = request;
+  login.request_body = BodyOf("password=secret");
+  login.request_body->set_contains_sensitive_info(true);
+  network.RecordRequestStarted(504, 0, 0, 1, kFrame, 11, 12, login);
+  const auto login_record = BodyPayload(LastOf(NativeProbeType::kRequestBody));
+  Check(base::ThreadPool::pending.empty() && transfers.empty() &&
+            login_record.state ==
+                static_cast<std::uint8_t>(reb::RequestBodyState::kNotCapturedCredentialForm) &&
+            login_record.sha256 == decltype(login_record.sha256){} &&
+            (login_record.flags & reb::kRequestBodyCredentialForm) != 0,
+        "A Metadata only session's password form post has no digest");
   // A receiver without --allow-sensitive refuses the bytes; the refusal is an event.
   network.SetEmitter(Emit, kSession, kMask, 200, true);
   network.RecordRequestStarted(502, 0, 0, 1, kFrame, 11, 12, request);
   base::ThreadPool::RunPending();
   const auto& record = LastOf(NativeProbeType::kRequestBody);
   const auto body_sequence = record.header.sequence_number;
-  reb::ArtifactReceiver refusing(
-      output / "refusing-request-body-receiver",
-      {.max_artifact_bytes = 1024 * 1024, .max_store_bytes = 1024 * 1024});
+  reb::ArtifactReceiver refusing(output / "refusing-request-body-receiver", {});
   Receive(refusing, record.header.artifact_id, true,
           reb::ArtifactReceiveStatus::kSensitiveCaptureDisabled);
   Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
@@ -1198,7 +1315,7 @@ void RequestBodyPolicy(const std::filesystem::path& output) {
   Configure();
   std::cout << "PASS request body policy: metadata-only, receiver sensitive refusal and missing "
                "artifact channel are explicit\n";
-  RequestContentLimits();
+  RequestContentLimits(output);
   ReadRequestBodies(output);
   HeaderAndExpiryEdges();
 }
@@ -1346,33 +1463,33 @@ void Drain(reb::ArtifactReceiver& receiver, const std::uint64_t id) {
   }
 }
 
-// The pool bounds bytes in flight, never bodies: a stream holds at most its
-// pending chunk plus frames the writer has not sent.
+// The pool bounds bytes in flight, never bodies: a stream holds at most the
+// frames the writer has not sent, and waits for room past the stream mark.
 void InFlightPool(NativeArtifactCaptureSink& sink,
                   NativeArtifactSocketClient& client,
                   const std::filesystem::path& output) {
   constexpr std::size_t kMiB = 1024U * 1024U;
   constexpr std::size_t kChunk = reb::kNativeArtifactStreamChunkBytes;
   const Request request{301, 0, 9};
-  reb::ArtifactReceiver receiver(
-      output / "in-flight-receiver",
-      {.max_artifact_bytes = reb::kNativeArtifactMaxContentBytes, .max_store_bytes = 64U * kMiB});
+  reb::ArtifactReceiver receiver(output / "in-flight-receiver", {});
   std::vector<int> parallel;
   for (int index = 0; index < 40; ++index) {
     parallel.push_back(Begin(request));
   }
-  Check(NativeArtifactBodyTee::pending.size() == 40 && sink.in_flight_bytes() == 0,
-        "40 parallel responses are open and hold nothing before their bytes");
+  // Until the writer sends its open header a stream holds only its URL and type.
+  const std::size_t metadata = sink.in_flight_bytes();
+  Check(NativeArtifactBodyTee::pending.size() == 40 && metadata <= 40 * 256,
+        "40 parallel responses are open and hold only their metadata before their bytes");
   for (const int pipe : parallel) {
     NativeArtifactBodyTee::Deliver(pipe, std::span(source).first(100));
   }
-  Check(sink.in_flight_bytes() == 40 * 100, "Each holds exactly the bytes it has");
+  Check(sink.in_flight_bytes() == metadata + 40 * 100, "Each holds exactly the bytes it has");
   std::vector<std::uint64_t> parallel_ids;
   for (const int pipe : parallel) {
     parallel_ids.push_back(Finish(pipe, true, std::span(source).subspan(100)));
   }
   Check(std::ranges::none_of(parallel_ids, [](std::uint64_t id) { return id == 0; }) &&
-            sink.in_flight_bytes() == 40 * source.size(),
+            sink.in_flight_bytes() == metadata + 40 * source.size(),
         "All 40 are streamed, each frame holding exactly its bytes until written");
   for (const auto id : parallel_ids) {
     Receive(receiver, id);
@@ -1387,6 +1504,7 @@ void InFlightPool(NativeArtifactCaptureSink& sink,
   }
   const int growing = Begin(request);
   const auto growing_id = client.transfers.rbegin()->first;
+  Drain(receiver, growing_id);
   std::size_t peak = 0;
   for (std::size_t offset = 0; offset < grown.size(); offset += kChunk) {
     NativeArtifactBodyTee::Deliver(
@@ -1402,39 +1520,105 @@ void InFlightPool(NativeArtifactCaptureSink& sink,
   Receive(receiver, grown_id);
   CheckCapture(grown_id, request.response, request.id);
 
-  // A declared length reserves nothing; a full pool refuses the next chunk.
-  network::mojom::URLResponseHead head;
-  head.content_length = static_cast<std::int64_t>(reb::kNativeArtifactMaxContentBytes);
-  const int declared = Begin(request, true, {}, head);
-  Check(sink.in_flight_bytes() == 0, "A declared 16 MiB body holds nothing yet");
+  // A full pool makes the tee wait, holding the source pipe, and the body
+  // continues once the writer frees room: nothing is refused for memory.
+  const auto open = [&](const int pipe) { return NativeArtifactBodyTee::pending.contains(pipe); };
   {
     auto held = reb::NativeArtifactReservation::Acquire(
-        sink.memory_pool(), reb::kNativeArtifactInFlightBytes - kChunk / 2);
-    const auto queued = client.transfers.size();
-    Check(Finish(declared, true, std::span(source)) != 0, "A small body still fits");
+        sink.memory_pool(), sink.memory_pool().stream_mark(), reb::NativeArtifactPoolUse::kStream);
+    Check(held.is_valid(), "The test holds the stream share");
     const int starved = Begin(request);
     const std::vector<std::uint8_t> quarter(256 * 1024, 'q');
-    Check(Finish(starved, true, quarter) == 0 && Payload(events.back()) == "active_memory_limit" &&
-              client.transfers.size() == queued,
-          "A body the pool cannot take is refused and aborted, not truncated");
+    Check(Finish(starved, true, quarter) == 0, "A body the full pool cannot take does not end");
+    base::SequencedTaskRunner::RunPosted();
+    Check(NativeArtifactBodyTee::Waiting(starved) == quarter.size(),
+          "A body the full pool cannot take waits in its source pipe");
+    held.Reset();
+    base::SequencedTaskRunner::RunPosted();
+    Check(!open(starved), "The waiting body completes once the pool has room");
+    const auto starved_id = client.transfers.rbegin()->first;
+    Check(client.transfers.at(starved_id)->ended &&
+              client.transfers.at(starved_id)->content == quarter,
+          "The waiting body is kept whole");
   }
   client.transfers.clear();
-  Check(sink.in_flight_bytes() == 0, "Refused and dropped streams return their share");
+  Check(sink.in_flight_bytes() == 0, "Written streams return their share");
+
+  // A declared length reserves nothing and bounds nothing.
+  network::mojom::URLResponseHead head;
+  head.content_length = std::int64_t{8} * 1024 * 1024 * 1024;
+  const int declared = Begin(request, true, {}, head);
+  Check(sink.in_flight_bytes() <= 256 && Finish(declared, true, std::span(source)) != 0,
+        "A declared 8 GiB body holds only its metadata until its bytes arrive");
+  client.transfers.clear();
+
+  // A body larger than the whole pool is kept whole: the tee feeds what the
+  // stream mark allows and waits for the writer between refills.
+  std::vector<std::uint8_t> huge(48 * kMiB + 3);
+  for (std::size_t index = 0; index < huge.size(); ++index) {
+    huge[index] = static_cast<std::uint8_t>(index * 13U);
+  }
+  const int big = Begin(request);
+  const auto big_id = client.transfers.rbegin()->first;
+  Check(Finish(big, true, huge) == 0 && open(big) &&
+            sink.in_flight_bytes() <= sink.memory_pool().stream_mark(),
+        "A 48 MiB body waits at the stream mark");
+  std::size_t refills = 0;
+  while (open(big)) {
+    DrainQueued();
+    Check(sink.in_flight_bytes() <= sink.memory_pool().stream_mark(),
+          "Every refill stays within the stream mark");
+    ++refills;
+  }
+  Check(refills >= 2 && client.transfers.at(big_id)->ended &&
+            client.transfers.at(big_id)->content == huge &&
+            client.transfers.at(big_id)->header.content_size == huge.size(),
+        "A 48 MiB response body is kept whole after waiting for the writer");
+  Receive(receiver, big_id);
+  CheckCapture(big_id, request.response, request.id);
+  client.transfers.clear();
+
+  // Content a renderer handed over whole and larger than one frame is pumped
+  // from its buffer, waiting for the writer the same way.
+  std::vector<std::uint8_t> script(20 * kMiB + 11);
+  for (std::size_t index = 0; index < script.size(); ++index) {
+    script[index] = static_cast<std::uint8_t>('a' + index % 26U);
+  }
+  std::uint64_t script_id = 0;
+  {
+    auto held = reb::NativeArtifactReservation::Acquire(sink.memory_pool(),
+                                                        sink.memory_pool().stream_mark() - kMiB,
+                                                        reb::NativeArtifactPoolUse::kStream);
+    script_id = sink.CaptureGeneratedArtifact(
+        reb::NativeArtifactKind::kJavaScript, reb::NativeArtifactCaptureOrigin::kDynamicJavaScript,
+        9, 1, kFrame, "fixture://large-script", mojo_base::BigBuffer(script));
+    Check(script_id != 0 && !client.transfers.at(script_id)->ended &&
+              client.transfers.at(script_id)->content.size() < script.size(),
+          "A 20 MiB generated script waits behind a full pool");
+  }
+  while (!client.transfers.at(script_id)->ended) {
+    DrainQueued();
+  }
+  Check(client.transfers.at(script_id)->content == script &&
+            client.transfers.at(script_id)->header.expected_sha256 ==
+                crypto::hash::Sha256(std::span<const std::uint8_t>(script)),
+        "The generated script is kept whole with its digest");
+  Receive(receiver, script_id);
+  Check(events.back().header.type == NativeProbeType::kArtifactCaptured &&
+            events.back().header.artifact_id == script_id,
+        "The pumped script is captured");
+  client.transfers.clear();
+
   const int stale = Begin(request);
   NativeArtifactBodyTee::Deliver(stale, source);
   Configure();
   Check(Finish(stale) == 0 && sink.in_flight_bytes() == 0 && client.transfers.empty(),
         "A stale stream is aborted and returns its share after reconfiguration");
-
-  const std::vector<std::uint8_t> oversized(reb::kNativeArtifactMaxContentBytes + 1, 'o');
-  Check(Finish(Begin(request), true, oversized) == 0 &&
-            Payload(events.back()) == "body_too_large" && client.transfers.empty(),
-        "A body past 16 MiB is refused as too large");
   client.transfers.clear();
   Check(sink.in_flight_bytes() == 0, "No share is left");
   std::cout << "PASS in-flight pool: 40 parallel streams, one chunk held per open body once "
-               "written, declared lengths reserve nothing, full-pool refusal, stale abort, size "
-               "bound\n";
+               "written, a waiting body, declared lengths bound nothing, a 48 MiB body and a "
+               "20 MiB generated script kept whole through backpressure, stale abort\n";
 }
 
 void Admission(const std::filesystem::path& output) {
@@ -1469,10 +1653,6 @@ void Admission(const std::filesystem::path& output) {
   head.mime_type = "image/png";
   no_admission("Unclassified response gate", [&] { Begin(request, true, unknown, head); });
   head.mime_type = "text/javascript";
-  head.content_length = static_cast<std::int64_t>(reb::kNativeArtifactMaxContentBytes) + 1;
-  no_admission("Declared size bound", [&] { Begin(request, true, {}, head); });
-  Check(Payload(events.back()) == "declared_size_limit", "Oversize failure is visible");
-  head.content_length = 0;
   unknown.url = GURL(std::string(reb::kNativeArtifactMaxUrlBytes + 1, 'x'));
   no_admission("URL metadata bound", [&] { Begin(request, true, unknown, head); });
   Check(Payload(events.back()) == "metadata_limit", "Metadata failure is visible");
@@ -1484,12 +1664,10 @@ void Admission(const std::filesystem::path& output) {
         "Incomplete body never enqueues");
   client.reject_next = true;
   no_admission("Queue rejection of the open header", [&] { Begin(request); });
-  Check(Payload(events.back()) == "transfer_queue_full_or_disconnected",
-        "Queue rejection is visible");
+  Check(Payload(events.back()) == "transfer_disconnected", "Queue rejection is visible");
   const int refused_data = Begin(request);
   client.reject_next = true;
-  Check(Finish(refused_data) == 0 &&
-            Payload(events.back()) == "transfer_queue_full_or_disconnected" &&
+  Check(Finish(refused_data) == 0 && Payload(events.back()) == "transfer_disconnected" &&
             client.transfers.empty(),
         "A refused data frame aborts its stream visibly");
   Check(sink.in_flight_bytes() == 0, "Failed and refused bodies return their pool share");
@@ -1518,13 +1696,15 @@ void Admission(const std::filesystem::path& output) {
                                       1) == 0,
         "Runtime snapshot minimum enforced");
 
-  // A real receiver rejects this otherwise admitted body by its configured size limit.
-  reb::ArtifactReceiver rejecting(output / "rejecting-receiver",
-                                  {.max_artifact_bytes = 1, .max_store_bytes = 1024});
+  // A real receiver refuses this otherwise admitted body to keep its disk
+  // reserve free.
+  reb::ArtifactReceiver rejecting(
+      output / "rejecting-receiver",
+      {.disk_reserve_bytes = std::numeric_limits<std::uint64_t>::max(), .allow_sensitive = true});
   const auto rejected = Finish(Begin(request));
-  Receive(rejecting, rejected, true, reb::ArtifactReceiveStatus::kTooLarge);
+  Receive(rejecting, rejected, true, reb::ArtifactReceiveStatus::kDiskReserve);
   Check(events.back().header.type == NativeProbeType::kArtifactCaptureFailed &&
-            Payload(events.back()) == "too_large",
+            Payload(events.back()) == "disk_reserve",
         "Real negative ACK yields failure, not exact success");
   const auto event_count = events.size();
   NativeArtifactCaptureSink::TransferCompleted(rejected,
@@ -1532,8 +1712,8 @@ void Admission(const std::filesystem::path& output) {
   Check(events.size() == event_count, "Duplicate/unknown ACK cannot upgrade a failed transfer");
   Check(NativeArtifactBodyTee::pending.empty() && client.transfers.empty(),
         "No pending adapter work");
-  std::cout << "PASS disabled/category/disconnected admission, metadata/size/memory bounds, "
-               "incomplete body, tee/queue failures, real receiver rejection and duplicate ACK\n";
+  std::cout << "PASS disabled/category/disconnected admission, metadata bound, incomplete "
+               "body, tee/queue failures, real disk reserve refusal and duplicate ACK\n";
 }
 void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
   record_corpus = false;
@@ -2221,10 +2401,7 @@ int main(int argc, char** argv) {
     ack_wire.open(output / "acks.bin", std::ios::binary);
     // Mirrors the production receiver replay, which runs with --allow-sensitive
     // so content-mode request bodies are retained.
-    reb::ArtifactReceiver receiver(output / "in-process-artifacts",
-                                   {.max_artifact_bytes = reb::kNativeArtifactMaxContentBytes,
-                                    .max_store_bytes = 256U * 1024U * 1024U,
-                                    .allow_sensitive = true});
+    reb::ArtifactReceiver receiver(output / "in-process-artifacts", {.allow_sensitive = true});
     Corpus(receiver, output);
     Lifecycle(receiver);
     Admission(output);
@@ -2240,6 +2417,7 @@ int main(int argc, char** argv) {
     NativeProbeHostWorkerTabLinks();
     NativeProbeHostStackRefusal();
     NativeProbeHostRendererTargets();
+    NativeProbeHostArtifactCredit();
     RequestBodyPolicy(output);
     ResponseBodyLimits(receiver, output);
     event_wire.flush();

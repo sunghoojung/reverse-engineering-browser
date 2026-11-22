@@ -629,7 +629,6 @@ enum OriginTraceDocumentBuilder {
   }
 
   private static let rollingBase: UInt64 = 0x100_0000_01b3
-  private static let searchByteLimit = 16 << 20
 
   private static func payloadBytes(_ event: [String: Any]) -> [UInt8]? {
     guard let text = event["payload"] as? String, text.count == 256 else { return nil }
@@ -745,24 +744,22 @@ enum OriginTraceDocumentBuilder {
 
   // body_contains in js_invocation.rs: the rolling hash selects candidate
   // windows of exactly the stated length, and SHA-256 alone confirms one.
-  private static func bodyContains(_ body: [UInt8], _ digest: InvocationDigest) -> Bool? {
+  // There is no byte bound: the whole body is searched.
+  private static func bodyContains(_ body: [UInt8], _ digest: InvocationDigest) -> Bool {
     let length = digest.byteLength
     guard length > 0, length <= body.count else { return false }
     var power: UInt64 = 1
     for _ in 1..<max(length, 1) { power = power &* rollingBase }
     var hash = body[0..<length].reduce(UInt64(0)) { $0 &* rollingBase &+ UInt64($1) }
-    var hashed = 0
     for start in 0...(body.count - length) {
       if start > 0 {
         hash = (hash &- UInt64(body[start - 1]) &* power) &* rollingBase
           &+ UInt64(body[start + length - 1])
       }
-      if hash == digest.rolling {
-        hashed += length
-        if hashed > searchByteLimit { return nil }
-        if Array(SHA256.hash(data: Data(body[start..<(start + length)]))) == digest.sha256 {
-          return true
-        }
+      if hash == digest.rolling,
+        Array(SHA256.hash(data: Data(body[start..<(start + length)]))) == digest.sha256
+      {
+        return true
       }
     }
     return false
@@ -785,14 +782,7 @@ enum OriginTraceDocumentBuilder {
         let sequence = UInt64(event["sequence_number"] as? String ?? ""), sequence < limit,
         let digest = invocationSettle(event)?.digest
       else { continue }
-      switch bodyContains(body, digest) {
-      case .some(true): found.append(event)
-      case .some(false): break
-      case .none:
-        return .refused(
-          "value_flow_unsearched",
-          "A retained returned value could not be searched in this request body within the bounded search, so no value-flow link is reported.")
-      }
+      if bodyContains(body, digest) { found.append(event) }
     }
     switch found.count {
     case 0: return .none

@@ -42,11 +42,6 @@ namespace reb {
 namespace {
 
 constexpr std::size_t kChunk = kNativeArtifactStreamChunkBytes;
-constexpr std::uint64_t kLimit = kNativeArtifactMaxContentBytes;
-// A full pool is retried on the reader's own sequence, about five seconds in
-// all, then the read is refused.
-constexpr base::TimeDelta kPoolRetry = base::Milliseconds(10);
-constexpr int kPoolRetries = 500;
 
 using Done = NativeRequestBodyReader::Done;
 
@@ -59,15 +54,6 @@ void Reply(const scoped_refptr<base::SequencedTaskRunner>& reply,
                                                                  .stream = std::move(stream),
                                                                  .end = end,
                                                                  .body_length = body_length}));
-}
-
-// Whether `bytes` more may be kept within the read's budget allowance. The
-// 16 MiB artifact cap is the stream's own prefix limit, not a budget.
-bool WithinAllowance(const NativeArtifactStream& stream,
-                     const std::size_t allowance,
-                     const std::size_t bytes) {
-  const std::uint64_t kept = std::min<std::uint64_t>(bytes, kLimit - stream.kept());
-  return allowance >= kLimit || stream.kept() + kept <= allowance;
 }
 
 struct Part final {
@@ -88,13 +74,11 @@ class PartsReader final {
   PartsReader(scoped_refptr<network::ResourceRequestBody> body,
               std::vector<Part> parts,
               NativeArtifactStream stream,
-              const std::size_t allowance,
               scoped_refptr<base::SequencedTaskRunner> reply,
               Done done)
       : body_(std::move(body)),
         parts_(std::move(parts)),
         stream_(std::move(stream)),
-        allowance_(allowance),
         reply_(std::move(reply)),
         done_(std::move(done)) {}
 
@@ -104,7 +88,6 @@ class PartsReader final {
       return;
     }
     position_ = 0;
-    retries_ = 0;
     counted_ = false;
     switch (parts_[index_].kind) {
       case Part::Kind::kBytes:
@@ -120,30 +103,19 @@ class PartsReader final {
   }
 
  private:
-  // Offers bytes, retrying a full pool later. False when the read ended.
-  bool Offer(std::span<const std::uint8_t> data, std::size_t& taken) {
-    if (!WithinAllowance(stream_, allowance_, data.size())) {
-      Finish(NativeRequestBodyReadEnd::kBudget);
-      return false;
-    }
+  // Offers bytes. When the pool is full, `step` runs again on this sequence
+  // once it has room, and the part's source holds the rest. False when the
+  // read ended.
+  bool Offer(std::span<const std::uint8_t> data, std::size_t& taken, void (PartsReader::*step)()) {
     taken = stream_.Offer(data);
     if (!stream_.is_open()) {
       Finish(NativeRequestBodyReadEnd::kIncomplete);
       return false;
     }
-    if (taken < data.size() && ++retries_ > kPoolRetries) {
-      Finish(NativeRequestBodyReadEnd::kRefused);
-      return false;
-    }
-    if (taken == data.size()) {
-      retries_ = 0;
+    if (taken < data.size()) {
+      stream_.WaitForSpace(base::BindOnce(step, weak_factory_.GetWeakPtr()));
     }
     return true;
-  }
-
-  void Retry(void (PartsReader::*step)()) {
-    base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
-        FROM_HERE, base::BindOnce(step, weak_factory_.GetWeakPtr()), kPoolRetry);
   }
 
   void ReadBytes() {
@@ -153,16 +125,15 @@ class PartsReader final {
       body_length_ += data.size();
       counted_ = true;
     }
-    while (position_ < data.size() && stream_.kept() < kLimit) {
+    while (position_ < data.size()) {
       const auto chunk =
           std::span(data).subspan(position_, std::min(kChunk, data.size() - position_));
       std::size_t taken = 0;
-      if (!Offer(chunk, taken)) {
+      if (!Offer(chunk, taken, &PartsReader::ReadBytes)) {
         return;
       }
       position_ += taken;
       if (taken < chunk.size()) {
-        Retry(&PartsReader::ReadBytes);
         return;
       }
     }
@@ -196,7 +167,7 @@ class PartsReader final {
   }
 
   void ReadFile() {
-    while (stream_.kept() < kLimit && (!buffered_.empty() || file_remaining_ > 0)) {
+    while (!buffered_.empty() || file_remaining_ > 0) {
       if (buffered_.empty()) {
         buffered_.resize(
             static_cast<std::size_t>(std::min<std::uint64_t>(kChunk, file_remaining_)));
@@ -212,12 +183,11 @@ class PartsReader final {
       }
       const auto chunk = std::span(buffered_).subspan(position_);
       std::size_t taken = 0;
-      if (!Offer(chunk, taken)) {
+      if (!Offer(chunk, taken, &PartsReader::ReadFile)) {
         return;
       }
       position_ += taken;
       if (taken < chunk.size()) {
-        Retry(&PartsReader::ReadFile);
         return;
       }
       buffered_.clear();
@@ -243,7 +213,6 @@ class PartsReader final {
     pipe_size_.reset();
     pipe_read_ = 0;
     pipe_done_ = false;
-    pipe_capped_ = false;
     getter_.set_disconnect_handler(
         base::BindOnce(&PartsReader::OnPipeGone, weak_factory_.GetWeakPtr()));
     getter_->Read(std::move(producer),
@@ -290,22 +259,15 @@ class PartsReader final {
       return;
     }
     std::size_t taken = 0;
-    if (!Offer(std::span(data.data(), data.size()), taken)) {
+    if (!Offer(std::span(data.data(), data.size()), taken, &PartsReader::ReadPipe)) {
       return;
     }
     pipe_->EndReadData(taken);
     pipe_read_ += taken;
-    // Past the prefix the declared size is all that is needed.
-    if (stream_.kept() >= kLimit) {
-      pipe_capped_ = true;
-      StopPipe();
-      return;
+    // A full pool re-arms the watcher from ReadPipe once it has room.
+    if (taken == data.size()) {
+      watcher_.ArmOrNotify();
     }
-    if (taken < data.size()) {
-      Retry(&PartsReader::ReadPipe);
-      return;
-    }
-    watcher_.ArmOrNotify();
   }
 
   void StopPipe() {
@@ -319,14 +281,13 @@ class PartsReader final {
     if (!pipe_done_ || !pipe_size_) {
       return;
     }
-    if (!pipe_capped_ && pipe_read_ != *pipe_size_) {
+    if (pipe_read_ != *pipe_size_) {
       Finish(NativeRequestBodyReadEnd::kIncomplete);
       return;
     }
     getter_.reset();
     pipe_read_ = 0;
     pipe_done_ = false;
-    pipe_capped_ = false;
     ++index_;
     Next();
   }
@@ -346,13 +307,11 @@ class PartsReader final {
   scoped_refptr<network::ResourceRequestBody> body_;
   std::vector<Part> parts_;
   NativeArtifactStream stream_;
-  std::size_t allowance_ = 0;
   scoped_refptr<base::SequencedTaskRunner> reply_;
   Done done_;
   std::size_t index_ = 0;
   std::size_t position_ = 0;
   bool counted_ = false;
-  int retries_ = 0;
   std::uint64_t body_length_ = 0;
   base::File file_;
   std::uint64_t file_offset_ = 0;
@@ -363,7 +322,6 @@ class PartsReader final {
   std::optional<std::uint64_t> pipe_size_;
   std::uint64_t pipe_read_ = 0;
   bool pipe_done_ = false;
-  bool pipe_capped_ = false;
   mojo::SimpleWatcher watcher_{FROM_HERE, mojo::SimpleWatcher::ArmingPolicy::MANUAL,
                                base::SequencedTaskRunner::GetCurrentDefault()};
   base::WeakPtrFactory<PartsReader> weak_factory_{this};
@@ -382,12 +340,10 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
  public:
   ChunkedTee(mojo::PendingRemote<network::mojom::ChunkedDataPipeGetter> original,
              NativeArtifactStream stream,
-             const std::size_t allowance,
              scoped_refptr<base::SequencedTaskRunner> reply,
              Done done)
       : pending_original_(std::move(original)),
         stream_(std::move(stream)),
-        allowance_(allowance),
         reply_(std::move(reply)),
         done_(std::move(done)) {}
   ~ChunkedTee() override {
@@ -425,7 +381,7 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
     static_cast<void>(NativeArtifactBodyTee::Forward(
         std::move(consumer), std::move(pipe),
         base::BindOnce(&ChunkedTee::OnEnd, weak_factory_.GetWeakPtr()),
-        base::BindRepeating(&ChunkedTee::OnData, weak_factory_.GetWeakPtr())));
+        base::BindRepeating(&ChunkedTee::ObserveData, weak_factory_.GetWeakPtr())));
   }
 
  private:
@@ -444,19 +400,29 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
     MaybeFinish();
   }
 
-  void OnData(const std::span<const std::uint8_t> chunk) {
+  // A WeakPtr cannot bind a method that returns a value, so the tee's observer
+  // checks it here: once the getter is gone, the rest of the upload passes
+  // unobserved.
+  static std::size_t ObserveData(const base::WeakPtr<ChunkedTee>& tee,
+                                 const std::span<const std::uint8_t> chunk,
+                                 base::OnceClosure resume) {
+    return tee ? tee->OnData(chunk, std::move(resume)) : chunk.size();
+  }
+
+  std::size_t OnData(const std::span<const std::uint8_t> chunk, base::OnceClosure resume) {
     if (!done_) {
-      return;
+      return chunk.size();
     }
-    if (!WithinAllowance(stream_, allowance_, chunk.size())) {
-      Finish(NativeRequestBodyReadEnd::kBudget);
-      return;
-    }
-    // The upload cannot wait, so a full pool ends the read.
-    stream_.Append(chunk);
+    // The upload waits for the pool, as a response body does.
+    const std::size_t taken = stream_.Offer(chunk);
     if (!stream_.is_open()) {
       Finish(NativeRequestBodyReadEnd::kIncomplete);
+      return chunk.size();
     }
+    if (taken < chunk.size()) {
+      stream_.WaitForSpace(std::move(resume));
+    }
+    return taken;
   }
 
   void OnEnd(const NativeArtifactBodyEnd end) {
@@ -489,7 +455,6 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
   mojo::PendingRemote<network::mojom::ChunkedDataPipeGetter> pending_original_;
   mojo::Remote<network::mojom::ChunkedDataPipeGetter> original_;
   NativeArtifactStream stream_;
-  std::size_t allowance_ = 0;
   scoped_refptr<base::SequencedTaskRunner> reply_;
   Done done_;
   bool started_ = false;
@@ -504,21 +469,18 @@ class ChunkedTee final : public network::mojom::ChunkedDataPipeGetter {
 }  // namespace
 
 bool NativeRequestBodyReader::CanRead(const network::ResourceRequestBody& body) noexcept {
-  bool readable = false;
   for (const network::DataElement& element : *body.elements()) {
     // Start tees only a lone stream; a compromised renderer can send others.
     if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
       return false;
     }
-    if (element.TryAs<network::DataElementFile>() ||
-        element.TryAs<network::DataElementDataPipe>() ||
-        element.TryAs<network::DataElementChunkedDataPipe>()) {
-      readable = true;
-    } else if (!element.TryAs<network::DataElementBytes>()) {
+    if (!element.TryAs<network::DataElementBytes>() && !element.TryAs<network::DataElementFile>() &&
+        !element.TryAs<network::DataElementDataPipe>() &&
+        !element.TryAs<network::DataElementChunkedDataPipe>()) {
       return false;
     }
   }
-  return readable;
+  return !body.elements()->empty();
 }
 
 bool NativeRequestBodyReader::MayReadFiles(const network::ResourceRequestBody& body,
@@ -549,7 +511,6 @@ bool NativeRequestBodyReader::MayReadFiles(const network::ResourceRequestBody& b
 
 bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
                                     NativeArtifactStream stream,
-                                    const std::size_t allowance,
                                     Done done) {
   if (!CanRead(body) || !base::SequencedTaskRunner::HasCurrentDefault()) {
     return false;
@@ -578,7 +539,7 @@ bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
               mojo::MakeSelfOwnedReceiver(std::move(impl), std::move(receiver));
             },
             std::make_unique<ChunkedTee>(chunked.ReleaseChunkedDataPipeGetter(), std::move(stream),
-                                         allowance, std::move(reply), std::move(done)),
+                                         std::move(reply), std::move(done)),
             std::move(receiver))));
     elements[0] =
         network::DataElement(network::DataElementChunkedDataPipe(std::move(tee), read_only_once));
@@ -604,13 +565,13 @@ bool NativeRequestBodyReader::Start(network::ResourceRequestBody& body,
   return runner->PostTask(
       FROM_HERE, base::BindOnce(
                      [](scoped_refptr<network::ResourceRequestBody> body, std::vector<Part> parts,
-                        NativeArtifactStream stream, std::size_t allowance,
-                        scoped_refptr<base::SequencedTaskRunner> reply, Done done) {
+                        NativeArtifactStream stream, scoped_refptr<base::SequencedTaskRunner> reply,
+                        Done done) {
                        (new PartsReader(std::move(body), std::move(parts), std::move(stream),
-                                        allowance, std::move(reply), std::move(done)))
+                                        std::move(reply), std::move(done)))
                            ->Next();
                      },
-                     base::WrapRefCounted(&body), std::move(parts), std::move(stream), allowance,
+                     base::WrapRefCounted(&body), std::move(parts), std::move(stream),
                      std::move(reply), std::move(done)));
 }
 

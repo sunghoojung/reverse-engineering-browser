@@ -635,6 +635,20 @@ impl App {
                 .await?;
             return Ok(axum::Json(document).into_response());
         }
+        if path == "/api/wasm/call-sites" {
+            let request = wasm_value_flow::parse_sites_query(raw_query)?;
+            let id = request
+                .artifact_id
+                .clone()
+                .ok_or_else(|| Error::bad("artifact_id is required"))?;
+            let root = self.options.artifacts.clone();
+            let document = self
+                .cancellable(move |cancelled| {
+                    wasm_value_flow::call_sites(&root, &id, &request, cancelled)
+                })
+                .await?;
+            return Ok(axum::Json(document).into_response());
+        }
         let q = Query::new(raw_query);
         let mut etag = None;
         let value = match path {
@@ -1304,7 +1318,6 @@ impl App {
                 let store = self.options.store.clone();
                 let artifacts = self.options.artifacts.clone();
                 let instance = self.instance_id.clone();
-                let content_limits = session_context::content_limits(&self.options);
                 let mut summary = self
                     .blocking(move || {
                         let mut summary = session_summary::build(
@@ -1317,7 +1330,6 @@ impl App {
                                 capture_stopped: state.2,
                                 artifact_receiver_configured: state.3,
                                 artifact_receiver_connected: state.4,
-                                content_limits,
                             },
                         )?;
                         session_summary::add_response_bodies(&mut summary, counts);
@@ -1363,7 +1375,7 @@ impl App {
                 if matches_etag(headers, etag.as_deref()) {
                     return Ok(not_modified(etag.as_deref().unwrap()));
                 }
-                self.blocking(move || {
+                self.cancellable(move |cancelled| {
                     origin_trace::build(
                         &evidence::recent(&options.store, 10000, 4096, "event")?,
                         &evidence::recent(&options.trace_store, 30000, 4096, "origin trace edge")?,
@@ -1373,6 +1385,7 @@ impl App {
                         process,
                         sequence.as_deref(),
                         Some(&options.artifacts),
+                        cancelled,
                     )
                 })
                 .await?

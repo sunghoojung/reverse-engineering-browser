@@ -1,4 +1,4 @@
-"""Small binary bodies the fixture serves: a PNG and two Wasm modules."""
+"""Small binary bodies the fixture serves: a PNG, a WAV and two Wasm modules."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ def png(width: int, height: int, seed: str) -> bytes:
     header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows))
             + chunk(b"IEND", b""))
+
+
+def wav(samples: int, seed: str, rate: int = 8000) -> bytes:
+    """Mono 8-bit PCM audio of these samples, which every media pipeline plays."""
+    data = payload(f"wav:{seed}", samples)
+    return (b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate, 1, 8)
+            + b"data" + struct.pack("<I", len(data)) + data)
 
 
 def _uleb(value: int) -> bytes:

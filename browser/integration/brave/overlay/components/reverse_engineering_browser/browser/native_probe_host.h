@@ -145,7 +145,8 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
                                 std::uint64_t allocating_script_id,
                                 bool allocating_script_is_eval,
                                 mojo_base::BigBuffer allocating_script_source,
-                                std::uint64_t allocating_script_session_id) override;
+                                std::uint64_t allocating_script_session_id,
+                                std::uint64_t credit_bytes) override;
 
   void Configure(std::uint64_t session_id,
                  std::uint64_t category_mask,
@@ -177,6 +178,7 @@ class NativeProbeHost final : public mojom::NativeProbeHost {
   // Reports the browser verdict for module bytes sent with the guest dispatch
   // whose sequence number is module_token, if that configuration is current.
   void SendNativeStackArtifactRefused(std::uint64_t creator_event_id);
+  void SendReleaseArtifactCredit(std::uint64_t bytes);
   void SendNativeGuestModuleStatus(std::uint64_t capture_epoch,
                                    std::uint64_t module_token,
                                    bool accepted);

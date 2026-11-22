@@ -64,8 +64,9 @@ class NativeResponseBodyCapture final {
   void OnCompleted(std::uint64_t request_id, std::uint64_t frame_id, int error_code) noexcept;
   void OnTransferCompleted(std::uint64_t artifact_id, bool accepted) noexcept;
   // The receiver refused, or the channel lost, a stream whose body is still
-  // open; it becomes not_captured_transfer_refused. False for any other ID.
-  bool OnStreamRefused(std::uint64_t artifact_id) noexcept;
+  // open; it becomes not_captured_disk_reserve when the receiver's disk reserve
+  // refused it, else not_captured_transfer_refused. False for any other ID.
+  bool OnStreamRefused(std::uint64_t artifact_id, NativeArtifactReceiveStatus status) noexcept;
   // Capture end: open bodies become partial records while the session can
   // still record them; finished bodies waiting for completion are retained.
   void Flush() noexcept;
@@ -84,12 +85,6 @@ class NativeResponseBodyCapture final {
     bool shared = false;
     std::optional<NativeResponseBodyState> refused;
   };
-  struct Queued final {
-    Digest digest{};
-    std::size_t size = 0;
-    // A partial snapshot, charged to the session's snapshot share too.
-    bool snapshot = false;
-  };
 
   struct Body final {
     std::uint64_t capture_id = 0;
@@ -102,14 +97,10 @@ class NativeResponseBodyCapture final {
     std::uint64_t started_ns = 0;
     std::uint64_t snapshot_ns = 0;
     std::uint64_t snapshot_size = 0;
-    // A delayed task will retry a snapshot the spacing or the per-body pace
-    // held back.
+    // A delayed task will retry a snapshot the spacing held back.
     bool snapshot_timer = false;
-    // Bytes every snapshot of this body copied, against its allowance.
+    // Bytes every snapshot of this body copied, against its snapshot bound.
     std::uint64_t copied = 0;
-    // The kept prefix reached the capture limit, so the stream was published
-    // then; every later record names that artifact.
-    std::optional<Retained> sealed;
     bool tee_done = false;
     bool completion_known = false;
     NativeArtifactBodyEnd end = NativeArtifactBodyEnd::kSourceClosed;
@@ -119,31 +110,28 @@ class NativeResponseBodyCapture final {
   NativeResponseBodyCapture();
   ~NativeResponseBodyCapture();
 
-  void OnData(Key key, std::uint64_t capture_id, std::span<const std::uint8_t> chunk);
+  // The tee's observer: takes what the pool has room for and waits for the rest.
+  std::size_t OnData(Key key,
+                     std::uint64_t capture_id,
+                     std::span<const std::uint8_t> chunk,
+                     base::OnceClosure resume);
   void OnEnd(Key key, std::uint64_t capture_id, NativeArtifactBodyEnd end);
   void OnCompletionTimeout(Key key, std::uint64_t capture_id);
   // Ends the stream and records the body; an open body becomes partial.
   void Finish(std::map<Key, Body>::iterator found);
   // Whether a snapshot of `size` kept bytes may be taken now.
-  // kPaced: only the per-body pace withholds it, which time alone relaxes.
-  enum class SnapshotGate : std::uint8_t { kUnchanged, kTooSoon, kPaced, kWithheld, kReady };
-  [[nodiscard]] SnapshotGate SnapshotDue(const Body& body,
-                                         std::uint64_t size,
-                                         std::uint64_t now) const noexcept;
+  enum class SnapshotGate : std::uint8_t { kUnchanged, kTooSoon, kWithheld, kReady };
+  [[nodiscard]] static SnapshotGate SnapshotDue(const Body& body,
+                                                std::uint64_t size,
+                                                std::uint64_t now) noexcept;
   // The earliest time the spacing allows the next snapshot.
   [[nodiscard]] static std::uint64_t NextSnapshotNs(const Body& body) noexcept;
-  // The earliest time the per-body pace allows a snapshot of `size` bytes.
-  [[nodiscard]] std::uint64_t PaceDueNs(const Body& body,
-                                        std::uint64_t size,
-                                        std::uint64_t now) const noexcept;
   // Takes the snapshot, waits for the spacing, or marks it withheld.
   void TrySnapshot(std::map<Key, Body>::iterator found, std::uint64_t now);
   void OnSnapshotTimer(Key key, std::uint64_t capture_id);
   void Snapshot(std::map<Key, Body>::iterator found);
-  void Seal(std::map<Key, Body>::iterator found);
   // Ends `stream` as an artifact, or names an earlier one with its digest.
   [[nodiscard]] Retained Retain(const NativeProbeHeader& parent, NativeArtifactStream& stream);
-  void Refund(std::uint64_t bytes) noexcept;
   // Records why the bytes were not retained, keeping the body's metadata.
   void Refuse(const NativeProbeHeader& parent,
               NativeResponseBodySummary summary,
@@ -157,18 +145,13 @@ class NativeResponseBodyCapture final {
   std::uint64_t session_id_ = 0;
   std::uint64_t expires_at_monotonic_ns_ = 0;
   std::uint64_t generation_ = 0;
-  bool media_ = false;
-  std::uint64_t budget_ = 0;
-  std::uint64_t used_ = 0;
-  // Bytes every partial snapshot of this configuration copied.
-  std::uint64_t snapshot_used_ = 0;
   NativeProbeHeader last_response_started_{};
   std::uint64_t next_capture_id_ = 1;
   std::map<Key, Body> bodies_;
-  // The artifact holding each retained digest; bounded, past it repeats are charged again.
+  // The artifact holding each retained digest; bounded, past it repeats are sent again.
   std::map<Digest, std::uint64_t> digests_;
-  // Queued artifacts awaiting their ACK: digest and charged bytes.
-  std::map<std::uint64_t, Queued> queued_;
+  // Queued artifacts awaiting their ACK, by digest, so a refused one is sent again.
+  std::map<std::uint64_t, Digest> queued_;
 };
 
 }  // namespace reb

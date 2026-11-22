@@ -487,28 +487,40 @@ def valid_script_identity(event: dict, payload: bytes) -> bool:
     return 0 < length <= 16 * 1024 * 1024 and any(digest)
 
 
+# Older sessions only: request body payload v1 and response body payloads v1
+# and v2 kept at most this prefix.
 RESPONSE_CAPTURE_BYTES = 16 * 1024 * 1024
 
 
-def valid_request_body(event: dict, payload: bytes) -> bool:
-    """Every state rule of the request_body payload, mirrored from the C++ core."""
-    if not valid_request_child(event, payload):
-        return False
+def request_body_fields_valid(payload: bytes) -> bool:
+    """Fields both request_body versions lay out the same way."""
     kind, state, flags, type_length = payload[4], payload[5], payload[6], payload[7]
     body_length = int.from_bytes(payload[8:16], "little")
     captured = int.from_bytes(payload[16:24], "little")
     elements = int.from_bytes(payload[24:28], "little")
-    digest, content_type = payload[32:64], payload[64:128]
-    content, has_digest, size_limit = bool(flags & 1), bool(flags & 2), bool(flags & 4)
-    partial, type_present, type_omitted = bool(flags & 8), bool(flags & 16), bool(flags & 32)
+    content_type = payload[64:128]
+    type_present, type_omitted = bool(flags & 16), bool(flags & 32)
     media = content_type[:type_length]
-    if (kind > 6 or not 1 <= state <= 12 or flags & ~0x7F or any(payload[28:32])
-            or type_length > 64 or (type_present and type_omitted)
-            or type_present != (type_length != 0) or any(content_type[type_length:])
-            or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
-                                  or media.endswith(b"/")
-                                  or any(b not in TOKEN_CHARACTERS and b != 0x2F for b in media)))
-            or captured > body_length):
+    return not (kind > 6 or not 1 <= state <= 13 or any(payload[28:32])
+                or type_length > 64 or (type_present and type_omitted)
+                or type_present != (type_length != 0) or any(content_type[type_length:])
+                or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
+                                      or media.endswith(b"/")
+                                      or any(b not in TOKEN_CHARACTERS and b != 0x2F
+                                             for b in media)))
+                or captured > body_length or (kind == 5 and elements < 2))
+
+
+def valid_request_body_v1(event: dict, payload: bytes) -> bool:
+    """Version 1 rules from native-network-v2.md, kept for older sessions."""
+    kind, state, flags = payload[4], payload[5], payload[6]
+    body_length = int.from_bytes(payload[8:16], "little")
+    captured = int.from_bytes(payload[16:24], "little")
+    elements = int.from_bytes(payload[24:28], "little")
+    digest = payload[32:64]
+    content, has_digest, size_limit = bool(flags & 1), bool(flags & 2), bool(flags & 4)
+    partial = bool(flags & 8)
+    if flags & ~0x7F:
         return False
     is_bytes, is_none = kind == 1, kind == 0
     readable = kind in (2, 3, 4, 5)
@@ -530,7 +542,7 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
             10: not has_digest and not size_limit,
             12: not has_digest and not size_limit,
         }.get(state, False)
-    if state == 12:
+    if state in (12, 13):
         return False
     if ((has_digest and (not is_bytes or size_limit or body_length > REQUEST_DIGEST_LIMIT))
             or (not has_digest and any(digest))
@@ -559,20 +571,77 @@ def valid_request_body(event: dict, payload: bytes) -> bool:
     }[state]
 
 
+def valid_request_body_v2(event: dict, payload: bytes) -> bool:
+    """Version 2 rules from native-network-v3.md: every body is read and hashed whole."""
+    kind, state, flags = payload[4], payload[5], payload[6]
+    body_length = int.from_bytes(payload[8:16], "little")
+    captured = int.from_bytes(payload[16:24], "little")
+    elements = int.from_bytes(payload[24:28], "little")
+    digest = payload[32:64]
+    content, has_digest, partial = bool(flags & 1), bool(flags & 2), bool(flags & 8)
+    credential = bool(flags & 0x80)
+    is_bytes, is_none, unknown = kind == 1, kind == 0, kind == 6
+    retained = state == 4
+    # Retired: nothing is truncated, budgeted or too large to hash.
+    if (flags & 4 or state in (5, 10) or has_digest != any(digest)
+            or (event["artifact_id"] != "0") != retained or (not retained and captured)
+            or is_none != (state == 1) or (is_none and (credential or elements or body_length))
+            or (not is_none and not elements) or (kind == 4 and elements != 1)):
+        return False
+    if flags & 64:
+        exact = state in (2, 3, 4)
+        if unknown or is_none or has_digest != exact or partial != (not exact and not is_bytes):
+            return False
+        if not content:
+            # A Metadata only session hashes in-memory bodies and keeps no bytes.
+            return state == 3 and is_bytes and not credential and body_length != 0
+        return {
+            2: body_length == 0,
+            4: body_length != 0 and captured == body_length,
+            8: True,
+            12: True,
+            13: True,
+        }.get(state, False)
+    if (has_digest != (state == 2) or partial != (not is_none and not is_bytes)
+            or state in (4, 12, 13) or (not content and credential != (state == 11))):
+        return False
+    return {
+        1: True,
+        2: is_bytes and body_length == 0,
+        3: not content and (not is_bytes or body_length != 0),
+        6: content and not is_bytes,
+        7: content and not unknown and (not is_bytes or body_length != 0),
+        8: content and not unknown and (not is_bytes or body_length != 0),
+        9: content and not unknown and (not is_bytes or body_length != 0),
+        11: not content,
+    }.get(state, False)
+
+
+def valid_request_body(event: dict, payload: bytes) -> bool:
+    """Every state rule of the request_body payload, mirrored from the C++ core."""
+    if not valid_request_child(event, payload, (1, 2)) or not request_body_fields_valid(payload):
+        return False
+    if payload[0] == 1:
+        return valid_request_body_v1(event, payload)
+    return valid_request_body_v2(event, payload)
+
+
 def valid_response_body(event: dict, payload: bytes) -> bool:
     """Every rule of the native-network-v3.md response_body record, mirrored from the C++ core."""
-    if not valid_request_child(event, payload, (1, 2)):
+    if not valid_request_child(event, payload, (1, 2, 3)):
         return False
     state, flags, type_length, coding_count = payload[4], payload[5], payload[6], payload[7]
-    # Version 2 adds bit 7, snapshots withheld by a byte bound.
-    known = 0xFF if payload[0] == 2 else 0x7F
+    # Version 2 adds bit 7, snapshots withheld by a byte bound. Version 3 keeps
+    # every body whole and every media type: states 2, 9 and 12 are older only.
+    known = 0x7F if payload[0] == 1 else 0xFF
+    limited = payload[0] < 3
     body_length = int.from_bytes(payload[8:16], "little")
     captured = int.from_bytes(payload[16:24], "little")
     codings, partial_index = payload[24:28], int.from_bytes(payload[28:30], "little")
     digest, content_type = payload[32:64], payload[64:128]
     media = content_type[:type_length]
     type_present = bool(flags & 0x40)
-    if (not 1 <= state <= 12 or flags & ~known or any(payload[30:32]) or type_length > 64
+    if (not 1 <= state <= 13 or flags & ~known or any(payload[30:32]) or type_length > 64
             or type_present != (type_length != 0) or any(content_type[type_length:])
             or (type_present and (media.count(b"/") != 1 or media.startswith(b"/")
                                   or media.endswith(b"/")
@@ -583,7 +652,7 @@ def valid_response_body(event: dict, payload: bytes) -> bool:
         if (coding == 0 or (coding > 7 and coding != 15)) if index < coding_count else coding:
             return False
     retained = captured != 0
-    whole = min(body_length, RESPONSE_CAPTURE_BYTES)
+    whole = min(body_length, RESPONSE_CAPTURE_BYTES) if limited else body_length
     if (captured > body_length or (event["artifact_id"] != "0") != retained
             or any(digest) != retained or (flags & 1 and not retained)
             or (partial_index != 0) != (state == 3)
@@ -591,17 +660,18 @@ def valid_response_body(event: dict, payload: bytes) -> bool:
         return False
     return {
         1: body_length != 0 and captured == body_length,
-        2: body_length > RESPONSE_CAPTURE_BYTES and captured == RESPONSE_CAPTURE_BYTES,
+        2: limited and body_length > RESPONSE_CAPTURE_BYTES and captured == RESPONSE_CAPTURE_BYTES,
         3: body_length != 0 and captured == whole,
         4: not retained or captured == whole,
         5: not retained or captured == whole,
         6: body_length == 0,
         7: body_length == 0,
         8: body_length == 0,
-        9: body_length == 0,
+        9: limited and body_length == 0,
         10: not retained,
         11: not retained,
-        12: not retained,
+        12: limited and not retained,
+        13: not limited and not retained,
     }[state]
 
 
@@ -862,7 +932,7 @@ def valid_script_compiled(event: dict, payload: bytes) -> bool:
         or not 1 <= event["process_id"] <= 0xFFFFFFFF
         or not 1 <= event["thread_id"] <= 0xFFFFFFFF
         or len(payload) != 128
-        or int.from_bytes(payload[0:2], "little") != 1
+        or int.from_bytes(payload[0:2], "little") not in (1, 2)
         or int.from_bytes(payload[2:4], "little") != 128
     ):
         return False
@@ -870,16 +940,20 @@ def valid_script_compiled(event: dict, payload: bytes) -> bool:
     creator, position = int.from_bytes(payload[20:24], "little"), int.from_bytes(payload[72:76], "little")
     length = int.from_bytes(payload[32:40], "little")
     digest_is_zero = not any(payload[40:72])
+    # Version 1 did not hash past 16 MiB and had a source budget (5) and a size
+    # limit (6); version 2 hashes every source and names a transfer backlog (8).
+    limited = payload[0] == 1
     limit = 16 * 1024 * 1024
+    known = range(1, 8) if limited else (1, 2, 3, 4, 7, 8)
     if retention == 6:
         source_valid = length > limit and digest_is_zero
     elif retention == 7:
         source_valid = digest_is_zero
     else:
-        source_valid = 1 <= length <= limit and not digest_is_zero
+        source_valid = length != 0 and not digest_is_zero and (not limited or length <= limit)
     return (
         1 <= kind <= 5
-        and 1 <= retention <= 7
+        and retention in known
         and source_valid
         and int.from_bytes(payload[8:12], "little") != 0
         and int.from_bytes(payload[24:32], "little") != 0

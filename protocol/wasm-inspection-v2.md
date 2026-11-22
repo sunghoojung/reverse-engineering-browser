@@ -216,4 +216,4 @@ time from the backend as the editor moves; Hex returns to original evidence.
 An offset button reveals the matching hex row. Find in Inspect searches every
 row on the backend and moves to each match's page. Inspection errors provide
 Retry inspection, and Hex remains available. A selected instruction row can be
-traced with Trace value, described in [WASM value flow](wasm-value-flow-v1.md).
+traced with Trace value, described in [WASM value flow](wasm-value-flow-v2.md).

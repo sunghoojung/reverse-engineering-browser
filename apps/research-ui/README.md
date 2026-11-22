@@ -1019,8 +1019,9 @@ the native app accepts a choice only from the document it loaded and only
 while that decision is open, checks it, and starts the session itself
 ([`SessionPanel.swift`](macos/SessionPanel.swift)). A Dock reopen while the
 panel shows a decision starts nothing behind it. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
-which retains request paths, queries and request bodies up to 16 MiB each, and
-retains Canvas images. While a live session has either turned on, the titlebar
+which retains request paths, queries and bodies, every response body whole
+with media and fonts, request and response headers, cookies, and Canvas
+images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
@@ -1037,43 +1038,26 @@ launcher gets `REB_CAPTURE_REQUEST_CONTENT=0`, `REB_CAPTURE_CANVAS_IMAGES=0`
 and `REB_NATIVE_JS_INVOCATION_DIGESTS=0` whatever the environment holds
 ([`LiveCaptureContent`](macos/LiveSessionCoordinator.swift)).
 
-With Content chosen, the panel also shows the session's **Content limits**:
-
-| Control | Range and default | What it means |
-| --- | --- | --- |
-| **Request content budget** | 1 to 4,096 MiB, default 256 | How much of the request bodies and full URLs the session keeps, counting identical content once |
-| **Response body budget** | 1 to 16,384 MiB, default 512 | How much of the response bodies the session keeps, counting identical bodies once |
-| **Capture media and fonts** | Off by default | Also keep the images, audio, video and fonts that pages load; they count against the response body budget |
-
-Past a budget the browser still lists each later body or URL and names it as
-not kept, never silently. The budgets stay on this Mac with the session, and
-the launcher grows the session's artifact store by both, so a raised budget can
-use that much more disk. A value outside its range, or not a whole number, is
-named at its field with the rule, and nothing starts. The native side checks a
-Content start again ([`ContentLimits`](macos/LiveSessionCoordinator.swift)) with
-the rules the agent path applies to `request_content_budget_mib`,
-`response_body_budget_mib` and `response_media`, and passes the values to the
-launcher as `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB`
-and `REB_CAPTURE_RESPONSE_MEDIA`, replacing any inherited value. The panel
-first shows those variables when the launcher would accept them, else the
-defaults; the limits it starts with hold for later Content sessions in the same
-app run, including Retry and a Dock reopen, as the mode does. Until the panel
-starts a Content session, the automatic launch takes the variables as they are.
-**Metadata only** keeps no content, so the panel shows none of the limits, and
-a session that keeps no request content, whatever started it, is given none of
-the three variables, inherited ones included, as the agent path removes them.
-The starting and failed panels name the limits the session runs with, and
-only for a session that keeps request content; the launch log's `Request content capture` and
-`Response body capture` lines record them, and `get_session_context` reports
-them as `capture_options.content_limits`, so a researcher or an agent can tell
-which budgets the session ran with.
+A Content session keeps every body whole: there is no size, count or budget
+to choose, so the panel offers no content limit, and images, audio, video and
+fonts are always kept. Content stays on this Mac with the session. With
+Content chosen the panel names the one bound: the artifact receiver keeps
+4 GiB of disk free by default, and names each body it could not store
+([disk reserve](../../services/artifact-receiver/README.md#disk-reserve)).
+`REB_ARTIFACT_DISK_RESERVE_MIB` in the app's environment sets another reserve;
+like the other session switches, the panel does not name it. Metadata only
+keeps no content and names no reserve. Besides the session options below, the
+native side accepts a start that names only the mode
+([`LivePanelStart`](macos/LiveSessionCoordinator.swift)), and refuses any other
+key, the removed `request_content_budget_mib`, `response_body_budget_mib` and
+`response_media` included, so a stale page starts nothing. The starting and
+failed panels name the mode.
 
 The start panel saves its capture mode and Advanced options for later app runs
 in `~/Library/Application Support/Origin Trace/live-session-preferences-v1.json`
 (user-only; `REB_LIVE_SESSION_PREFERENCES` names another path), and opens with
-them. The content limits are not saved, and neither is **Fresh profile**: it
-holds for the rest of that app run, and the next run's automatic session opens
-the research profile again. While any choice differs from its
+them. **Fresh profile** is not saved: it holds for the rest of that app run,
+and the next run's automatic session opens the research profile again. While any choice differs from its
 default, **Advanced options** says how many (for example **2 changed**).
 `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
@@ -1429,9 +1413,10 @@ Hex shows 256 KiB at a time with **Previous** and **Next**, paged to the end of
 the retained body, and Copy copies the window shown. Find counts every match of
 the whole text, its layout or every hex row in the background, as Sources does
 (`N of M+ · finding X%` until the exact count), marks only the rows on screen,
-and opens the hex window of a match. A body
-still arriving says how many bytes had arrived, when, and whether it was sealed
-at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Text that is
+and opens the hex window of a match. A body still arriving says how many bytes
+had arrived, when, and, in a session an older browser recorded, whether it was
+sealed at that browser's 16 MiB limit, and a body whose snapshot a byte bound
+withheld says so. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
@@ -1446,7 +1431,8 @@ still pending, and the rest
 A memory-cache reuse that names the request whose response it reused shows
 that request's retained bytes, labelled as the reused request's, with
 **Open the request it reused** and the source's state (complete, cut at
-16 MiB, a snapshot and when it was recorded, stopped, or not retained); a
+16 MiB by an older browser, a snapshot and when it was recorded, stopped, or
+not retained); a
 named row on another host or started after the reuse is not its source, and
 one not recorded says so. A service worker's answer lists the worker's own
 requests for the same URL made while it was open, from the request index, each
@@ -1734,34 +1720,33 @@ selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
 
-When a content session's budget runs out, the browser lists each later body or
-URL and names it as not kept. The footer then adds a line naming each used
-budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
-response bodies not kept · Raise it in New Live Session… for the next session.`
+A content session keeps every body whole. When the artifact receiver refuses a
+body to keep its free-disk reserve, the browser still lists it and names it as
+not kept, and the footer adds a line, for example `Disk reserve reached: 2,400
+bodies not stored, to keep the free-disk reserve. Free disk space to keep later
+bodies.` A session an older browser recorded may name that browser's content
+budgets instead, as `Older content budget: N bodies or URLs not kept by the
+browser that recorded this session. Current capture keeps every body whole.`
 
-- The counts are the whole session's, from `get_session_summary`'s budget
-  checks, like the `N / M requests` beside them. Traffic reads the summary once
-  in every session, a stored one included, so a budget met outside the loaded
-  rows still shows, and again at most every 30 s while it shows in a content
-  session or while a budget shows as used.
+- The counts are the whole session's, from `get_session_summary`'s
+  `request_content_not_retained` checks, like the `N / M requests` beside
+  them. Traffic reads the summary once in every session, a stored one
+  included, so a refusal outside the loaded rows still shows, and again at
+  most every 30 s while it shows in a content session or while a refusal
+  shows.
 - A count is exact only while nothing has arrived since the summary was read:
   it records the event poll's tag then, and in a live session a later change
   of that tag makes it `at least N` until the next read. So do a failed re-read
   (which keeps the last figure), a summary whose scan stopped at its 64 MiB
   bound, and the loaded rows before the first read answers.
-- The size is the session context's `capture_options.content_limits`
-  (`get_session_context`), read once after the first valid poll; a session that
-  is not live, or keeps no content, names the budget without a size. The bytes
-  kept are the unique bytes of that budget's artifacts, from the summary.
-- The Payload tab and the Request URL row name the request content budget the
-  same way, and the Response tab names **Response body budget** and **Capture
-  media and fonts**; each remedy applies to the next session.
+- The Payload and Response tabs and the Request URL row name the same reason
+  for one body; no line asks to raise a setting, since none exists.
 - In the short stacked layout (at most 1,100 by 650 px) with a request open, the
-  line becomes a one-line **Budgets used** button (or the one budget's name)
-  beside the footer's own, so the ledger keeps its rows. Return or Space opens
-  the whole sentence above the footer; Escape, focus leaving it, a press
-  anywhere else or closing the request closes it, so it never stays over the
-  rows unasked.
+  line becomes a one-line **Bodies not kept** button (or the one reason's
+  label) beside the footer's own, so the ledger keeps its rows. Return or
+  Space opens the whole sentence above the footer; Escape, focus leaving it, a
+  press anywhere else or closing the request closes it, so it never stays over
+  the rows unasked.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with
@@ -1812,7 +1797,7 @@ capture, fetch anything or change a row.
 | `source_tree.js` | The Sources navigator: frame, group, origin and folder model, hand-parsed non-special URLs, mounted-window rows, keyboard, type-ahead and filter; `app.js` supplies the catalog and the open path |
 | `debugger_sidebar.js`, `debugger_sidebar.css` | The Sources debugger sidebar: its section registry, the Threads view, Watch rules, Observations and Pausing, and their reads of `get_native_debugger` and `get_request_stack` |
 | `wasm_diff_view.js`, `wasm_diff_view.css` | Compare with: the module picker, status filters and paged function match table read from `/api/wasm/diff`, with jumps to Graph on either module |
-| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, one cancellable value-flow read, the slice list with offset links and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` over `wasm_def_use.rs` |
+| `value_flow_view.js`, `value_flow_view.css` | Trace value: the Inspect row it follows, cancellable paged value-flow reads, the seed-rooted tree of sources, sinks, paths and callers with offset links, a virtual row window and the role marks on Inspect rows; the analysis is `../origin-trace-backend/src/wasm_value_flow.rs` and `wasm_value_slice.rs` over `wasm_def_use.rs` |
 | `xrefs_view.js`, `xrefs_view.css` | The cross-references dock: selection following, the paged and virtualized list, and links to existing rows; the projection is [`/api/xrefs`](../../protocol/http-api.md#cross-references) in `../origin-trace-backend/src/xrefs.rs` |
 | `source_search.js` | Search all files: the paged, cancellable client of the backend's artifact search, coverage notes and the results panel; `app.js` supplies the catalog's text kinds, names and the open path |
 | `source_syntax.js` | Source names, display formatting, the inert hex view for Wasm and guest bytecode artifacts, and bounded tokenization without DOM or application state |
@@ -2631,37 +2616,54 @@ A byte budget cuts row text before structure and labels what it cut.
 
 In **Inspect**, select an instruction row (click it or Tab to its offset) and
 use the **Trace value** panel under the listing: pick **Whole instruction** or
-one operand, a direction, then **Trace value**. Instructions with a fixed
+one operand, a direction, whether to follow **Decisions** (control dependence)
+and whether to enter **Calls**, then **Trace value**. Instructions with a fixed
 stack effect (loads, stores, arithmetic, `select`, `local.set`) list their
 operands as soon as the row is chosen; calls and branches list theirs after
-the first trace, from its `operand_count`. The panel reads one
-[`wasm-value-flow-v1`](../../protocol/wasm-value-flow-v1.md) slice from
-`/api/wasm/value-flow` (or the `reb://` helper) with a 512-node cap and no
-deadline: while it runs the status counts elapsed seconds and **Trace value**
-becomes **Cancel**, which stops the request and its backend analysis. A
-superseded read is aborted, and the last slice stays when a read fails or is
-cancelled. Rows are ordered seed, backward, forward, then by distance, and show
-offset, role, kind and the instruction as inert text; a join row lists its
-incoming edges. Arrow keys, Home and End move through the rows; Enter or a click
-asks the backend for the Inspect row at that offset, moves to its page and
-focuses its gutter. The slice's mounted rows carry `data-value-flow`
-(seed, source, sink or step), reapplied as the listing remounts. **×** clears
-the trace; Hex or another module hides the panel and drops it. While the block
-graph is open the panel and its marks are hidden, since the graph owns that
-pane, and closing the graph brings the same trace back. Graph blocks are not a
-seed. Each row keeps the identifying part of its kind first (the import name,
-the local or the join kind), so it stays readable at the minimum window. A node
-that is both ends of the slice (a call whose result returns to its own
-argument around a loop) reads **source · sink**, and a loop join left open by
-a simulation stop says it is incomplete. The header always names the trace
-shown; choosing another row, or revealing one from the list, names that row on
-the button instead (**Trace 0x7e**) until it is traced. The panel's controls
-stay on one row at every width: in a narrow panel the field names and then the
-title give way, and the selects keep their accessible names. Beside the
-identification summary and its Details at the minimum window, the listing
-keeps six rows when there is room and otherwise what is left above the
-panel's header, down to two; with less room the Inspect area scrolls.
-`tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
+the first trace, from its `operand_count`, every one. The panel reads one
+[`wasm-value-flow-v2`](../../protocol/wasm-value-flow-v2.md) slice from
+`/api/wasm/value-flow` (or the `reb://` helper), complete and paged, with no
+node or depth cap and no deadline: while it runs the status counts elapsed
+seconds and **Trace value** becomes **Cancel**, which stops the request and
+its backend analysis. A superseded read is aborted, and the last slice stays
+when a read fails or is cancelled.
+
+The panel is a tree rooted at the seed. **Comes from** groups every source by
+kind with its exact count (and how many are an address, a possible value
+through memory, or a decision rather than the value), **Goes to** groups every
+sink the same way, and **Callers** lists the function's direct call sites from
+`/api/wasm/call-sites`. Sections with at most 200 ends open on their own;
+larger groups open on request and read their rows a page at a time as they
+scroll into view, so a slice of a million nodes draws the same window of rows
+as one of ten. The caret on an end row opens its path to the seed: each step
+names how the value reached the row above (the operand, the join and the
+branch that carried the value into it, the forwarded store, the memory cell,
+the call it crossed and the argument it returned through, the decision it
+depended on), the locals it passed through, and the node, with a join's
+incoming branches beside it. Rows show offset, role and class, kind (with the
+import name, local, global, callee or declaration, and the function when it is
+another) and the instruction as inert text. Arrow keys, Home and End move
+through the tree, drawn or not; Left and Right fold and open a row; Enter or a
+click asks the backend for the Inspect row at that offset, in this function or
+a callee, moves to its page and focuses its gutter. The slice's mounted rows
+carry `data-value-flow` (seed, source, sink or step), reapplied as the listing
+remounts. What the slice could not follow is listed in full in a details row
+under the status. **×** clears the trace; Hex or another module hides the
+panel and drops it. While the block graph is open the panel and its marks are
+hidden, since the graph owns that pane, and closing the graph brings the same
+trace back. Graph blocks are not a seed.
+
+Each row keeps the identifying part of its kind first (the import name, the
+local or the join kind), so it stays readable at the minimum window. The
+panel's controls stay on one row at every width: in a narrow panel the field
+names, then the check labels, then the title give way, and the controls keep
+their accessible names. Before a trace the panel is as tall as its header;
+with one it takes up to 45% of the split, and the divider between the listing
+and the panel (`pane_layout.js`, `value-flow`) resizes that share, as the
+graph's does. Beside the identification summary and its Details at the
+minimum window, the listing keeps six rows when there is room and otherwise
+what is left above the panel's header, down to two; with less room the Inspect
+area scrolls. `tools/check-value-flow-ui.mjs` checks the panel in a DOM model.
 
 ## Flow workspace
 

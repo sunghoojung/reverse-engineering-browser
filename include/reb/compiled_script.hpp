@@ -8,9 +8,12 @@
 
 #include "reb/event.hpp"
 
-// Wire contract: protocol/native-compiled-scripts-v1.md.
+// Wire contract: protocol/native-compiled-scripts-v2.md.
 namespace reb {
 
+// Version 2 hashes every source, with no source budget or size limit.
+inline constexpr std::uint16_t kCompiledScriptPayloadVersion = 2;
+// Version 1 only: a longer source was not hashed.
 inline constexpr std::uint64_t kCompiledScriptMaxSourceBytes = 16ULL * 1024ULL * 1024ULL;
 
 enum class CompiledScriptKind : std::uint8_t {
@@ -26,13 +29,18 @@ enum class CompiledScriptRetention : std::uint8_t {
   kDuplicate = 2,
   kNetworkFetched = 3,
   kNotPermitted = 4,
+  // Version 1 only: the renderer's 64 MiB source budget was spent.
   kBudgetSpent = 5,
+  // Version 1 only: over 16 MiB, so not hashed.
   kTooLarge = 6,
   kUnavailable = 7,
+  // Version 2: the renderer's 256 MiB of content waiting for the browser was
+  // in use, so the source was hashed and not sent.
+  kTransferBacklog = 8,
 };
 
 struct CompiledScriptPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kCompiledScriptPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t kind = 0;
   std::uint8_t retention = 0;
@@ -111,17 +119,24 @@ struct CompiledScriptPayload final {
       value.retention == static_cast<std::uint8_t>(CompiledScriptRetention::kUnavailable);
   const bool digest_is_zero =
       std::all_of(value.source_sha256.begin(), value.source_sha256.end(), zero);
-  const bool source_is_bounded =
-      value.source_length != 0 && value.source_length <= kCompiledScriptMaxSourceBytes;
-  return value.protocol_version == 1 && value.payload_size == 128 && value.kind >= 1 &&
-         value.kind <= 5 && value.retention >= 1 && value.retention <= 7 &&
+  const bool limited = value.protocol_version == 1;
+  const bool retention_known =
+      limited ? value.retention >= 1 && value.retention <= 7
+              : value.retention >= 1 && value.retention <= 8 &&
+                    value.retention !=
+                        static_cast<std::uint8_t>(CompiledScriptRetention::kBudgetSpent) &&
+                    !too_large;
+  const bool source_is_hashed = value.source_length != 0 && !digest_is_zero &&
+                                (!limited || value.source_length <= kCompiledScriptMaxSourceBytes);
+  return (value.protocol_version == 1 || value.protocol_version == kCompiledScriptPayloadVersion) &&
+         value.payload_size == 128 && value.kind >= 1 && value.kind <= 5 && retention_known &&
          value.reserved_after_retention == 0 && value.script_id != 0 &&
          value.execution_context_id != 0 &&
          (generated || (value.creator_script_id == 0 && value.creator_position == 0)) &&
          (value.creator_script_id != 0 || value.creator_position == 0) &&
          (too_large     ? value.source_length > kCompiledScriptMaxSourceBytes && digest_is_zero
           : unavailable ? digest_is_zero
-                        : source_is_bounded && !digest_is_zero) &&
+                        : source_is_hashed) &&
          std::all_of(value.reserved.begin(), value.reserved.end(), zero);
 }
 

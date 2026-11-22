@@ -23,6 +23,7 @@
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 #include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_body_tee.h"
@@ -46,7 +47,7 @@ class URLResponseHead;
 
 namespace reb {
 
-// The first `size` bytes of `body`'s in-memory elements, or of `text`.
+// The first `size` bytes of a request target's `text`.
 struct NativeRequestContent final {
   NativeArtifactKind kind = NativeArtifactKind::kUnknown;
   std::uint64_t request_id = 0;
@@ -55,14 +56,12 @@ struct NativeRequestContent final {
   std::string url;
   std::string mime_type;
   std::size_t size = 0;
-  scoped_refptr<network::ResourceRequestBody> body{};
   std::string text{};
 };
 
 enum class NativeRequestContentAdmission : std::uint8_t {
   kQueued,
   kUnavailable,
-  kSessionBudget,
   kRefused,
 };
 
@@ -96,7 +95,8 @@ struct NativeWasmModuleTransfer final {
 };
 
 // bodies go to NativeResponseBodyCapture in content sessions. It is enabled
-// only for an authorized artifact category and keeps every item bounded.
+// only for an authorized artifact category. No item has a size limit: the
+// in-flight pool bounds the bytes held, and a source that can wait does.
 class NativeArtifactCaptureSink final {
  public:
   static NativeArtifactCaptureSink& Get();
@@ -114,7 +114,6 @@ class NativeArtifactCaptureSink final {
                   std::uint64_t session_id,
                   std::uint64_t category_mask,
                   std::uint64_t expires_at_monotonic_ns,
-                  std::uint64_t request_content_budget = kNativeRequestContentDefaultBudgetBytes,
                   const NativeResponseBodyPolicy& response_bodies = {}) noexcept;
 
   [[nodiscard]] mojo::ScopedDataPipeConsumerHandle MaybeCaptureResponse(
@@ -174,6 +173,7 @@ class NativeArtifactCaptureSink final {
                                 mojo_base::BigBuffer content);
   // `on_refused`, if set, runs once when the artifact is refused or lost, so a
   // renderer that claimed it captured can stop claiming it for later repeats.
+  // `content_released` runs once `content` is dropped, on every path.
   std::uint64_t CaptureGeneratedArtifact(NativeArtifactKind kind,
                                          NativeArtifactCaptureOrigin capture_origin,
                                          std::uint64_t creator_event_id,
@@ -182,17 +182,18 @@ class NativeArtifactCaptureSink final {
                                          std::string_view source_url,
                                          mojo_base::BigBuffer content,
                                          std::uint64_t parent_artifact_id = 0,
-                                         std::function<void()> on_refused = {});
+                                         std::function<void()> on_refused = {},
+                                         base::ScopedClosureRunner content_released = {});
 
-  // UI sequence. Copies off it; every loss, from stream open on, is one event
-  // parented to the creator.
+  // UI sequence. Queues a request target whole; every loss after that is one
+  // event parented to the creator.
   [[nodiscard]] NativeRequestContentAdmission CaptureRequestContent(NativeRequestContent content,
                                                                     std::uint64_t& artifact_id);
-  // UI sequence. Reads a body with file, blob or stream parts through
-  // NativeRequestBodyReader and streams it as a request_body artifact. A
-  // stream part is forwarded through an observational tee, so `request` is
-  // changed only by that interposed getter. `record` runs once, here.
-  [[nodiscard]] NativeRequestContentAdmission ReadRequestBody(network::ResourceRequest& request,
+  // UI sequence. Reads a body through NativeRequestBodyReader off this
+  // sequence and streams it, whole, as a request_body artifact. A stream part
+  // is forwarded through an observational tee, so `body` is changed only by
+  // that interposed getter. `record` runs once, here.
+  [[nodiscard]] NativeRequestContentAdmission ReadRequestBody(network::ResourceRequestBody& body,
                                                               std::uint64_t request_id,
                                                               std::uint64_t frame_id,
                                                               std::string url,
@@ -228,16 +229,16 @@ class NativeArtifactCaptureSink final {
  private:
   friend class base::NoDestructor<NativeArtifactCaptureSink>;
 
-  struct CaptureContext final {
-    NativeArtifactHeader header;
-    std::uint64_t request_id = 0;
+  // A generated artifact larger than one frame, pumped from the renderer's
+  // buffer as the pool drains.
+  struct GeneratedStream final {
+    mojo_base::BigBuffer content;
+    // Declared after content: the renderer's credit returns once it is gone.
+    base::ScopedClosureRunner content_released;
+    std::size_t offset = 0;
     std::uint64_t frame_id = 0;
-    std::uint64_t generation = 0;
-  };
-
-  struct CopiedContent final {
+    NativeProbeCategory result_category = NativeProbeCategory::kArtifact;
     NativeArtifactStream stream;
-    std::size_t size = 0;
   };
   // A script or Wasm response streaming through the tee.
   struct ResponseStream final {
@@ -260,9 +261,11 @@ class NativeArtifactCaptureSink final {
     bool shared_block = false;
     std::function<void()> on_refused = {};
     // A request body still being read: no record exists yet to parent a loss
-    // to, so a report sets read_lost and OnRequestBodyRead records it.
+    // to, so a report sets read_lost and OnRequestBodyRead records it, naming
+    // a disk reserve refusal (read_status) as its own state.
     bool read_open = false;
     bool read_lost = false;
+    NativeArtifactReceiveStatus read_status = NativeArtifactReceiveStatus::kAccepted;
     // Physical dispatch observations that share this module artifact.
     std::vector<std::pair<NativeProbeEvent, std::function<bool()>>> wasm_observations = {};
   };
@@ -353,24 +356,22 @@ class NativeArtifactCaptureSink final {
                                                  mojo_base::BigBuffer content,
                                                  std::uint64_t parent_artifact_id,
                                                  bool native_wasm_runtime,
-                                                 std::function<void()> on_refused = {});
+                                                 std::function<void()> on_refused = {},
+                                                 base::ScopedClosureRunner content_released = {});
 
-  void OnBodyData(std::uint64_t artifact_id, std::span<const std::uint8_t> chunk);
+  // The tee's observer: takes what the pool has room for and waits for the rest.
+  std::size_t OnBodyData(std::uint64_t artifact_id,
+                         std::span<const std::uint8_t> chunk,
+                         base::OnceClosure resume);
+  void PumpGeneratedStream(std::uint64_t artifact_id, std::uint64_t generation);
   void OnBodyComplete(std::uint64_t artifact_id, NativeArtifactBodyEnd end);
   // Ends a response stream that failed, with the reason it carries.
   void FailResponseStream(std::uint64_t artifact_id, const char* reason);
-  static CopiedContent CopyRequestContent(scoped_refptr<network::ResourceRequestBody> body,
-                                          std::string text,
-                                          std::size_t size,
-                                          NativeArtifactStream stream);
-  void OnRequestContentCopied(std::unique_ptr<CaptureContext> context, CopiedContent copied);
   void OnRequestBodyRead(std::uint64_t generation,
                          std::uint64_t request_id,
                          std::uint64_t frame_id,
-                         std::size_t allowance,
                          NativeRequestBodyRecorder record,
                          NativeRequestBodyReadResult result);
-  void RefundRequestContent(std::size_t bytes) noexcept;
   void OnTransferCompleted(std::uint64_t artifact_id, NativeArtifactReceiveStatus status) noexcept;
   void EmitResult(NativeProbeType type,
                   std::uint64_t artifact_id,
@@ -392,13 +393,12 @@ class NativeArtifactCaptureSink final {
   std::atomic<std::uint64_t> category_mask_{0};
   std::atomic<std::uint64_t> expires_at_monotonic_ns_{0};
   std::atomic<std::uint64_t> next_artifact_id_{1};
-  NativeArtifactMemoryPool memory_pool_{kNativeArtifactInFlightBytes};
-  std::uint64_t request_content_budget_ = 0;
-  std::uint64_t request_content_used_ = 0;
-  std::set<std::array<std::uint8_t, 32>> request_content_digests_;
+  NativeArtifactMemoryPool memory_pool_{kNativeArtifactInFlightBytes,
+                                        &NativeArtifactStream::OnPoolSpace};
   std::atomic<std::size_t> runtime_typed_array_count_{0};
   std::map<std::uint64_t, PendingContext> pending_;
   std::map<std::uint64_t, ResponseStream> response_streams_;
+  std::map<std::uint64_t, GeneratedStream> generated_streams_;
   // One artifact per exact module and document for physical observations.
   // Value is the artifact ID and whether its transfer was already accepted.
   using WasmModuleKey = std::tuple<std::uint32_t,

@@ -160,8 +160,8 @@ const REQUEST_STACK_TASK_NOTES = Object.freeze({
   no_script: 'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here',
   origin_rejected: 'its task origin did not validate (forged, damaged or longer than 1,544 bytes), so the sender is not known; the chain ends here',
   not_retained_artifact_unavailable: 'frames not retained: the Artifact category was off',
-  not_retained_budget: 'frames not retained: the browser that recorded this capture sent at most 1,024 scheduling stacks per thread',
-  not_retained_budget_registration: 'frames not retained: the browser that recorded this capture sent at most 1,024 promise registration stacks per thread',
+  not_retained_budget: 'frames not retained: the browser that recorded this capture sent at most 1,024 scheduling stacks per thread; current builds send every one',
+  not_retained_budget_registration: 'frames not retained: the browser that recorded this capture sent at most 1,024 promise registration stacks per thread; current builds send every one',
   artifact_missing: 'frames artifact missing'
 });
 

@@ -169,9 +169,9 @@ assert.deepEqual([...tree.querySelectorAll('li')].map(item => item.textContent).
   'Microtask',
   'the call that registered it is not recorded: promise registration stacks were on, but this thread remembered no registration for it (a builtin such as Promise.all registered it, capture was off when it was registered, or 2,048 later registrations replaced it)',
   'setTimeout',
-  'frames not retained: the browser that recorded this capture sent at most 1,024 scheduling stacks per thread',
+  'frames not retained: the browser that recorded this capture sent at most 1,024 scheduling stacks per thread; current builds send every one',
   'Promise.then',
-  'frames not retained: the browser that recorded this capture sent at most 1,024 promise registration stacks per thread',
+  'frames not retained: the browser that recorded this capture sent at most 1,024 promise registration stacks per thread; current builds send every one',
   'BroadcastChannel.postMessage',
   'its task origin did not validate (forged, damaged or longer than 1,544 bytes), so the sender is not known; the chain ends here'
 ]);

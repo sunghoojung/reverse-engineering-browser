@@ -40,19 +40,26 @@ hooks record samples. This API must not synthesize them.
 - exports (`name`, `kind` `function` or `memory`, numeric `params` and `results`)
 - functions (`index`, `params`, `results`, `export` or null)
 
-`budget` is 16, the same cap as `kNativeWasmDispatchSampleBudget`.
-`dispatch_samples_used` and `dispatch_gaps` are that shared counter.
+`budget` is 1024, the full samples one one-second window keeps, the same as
+`kNativeWasmDispatchSampleBudget`. A function keeps at most 64 of them per
+window, the browser's default `samples_per_function`. The first record after
+the window's second starts the counts again, so a hot loop is paced, never
+stopped for the attachment. `dispatch_samples_used` and `dispatch_gaps` are
+that shared counter's totals for the attachment.
 `observations` keeps the newest 32 rows. The counters stay exact when an
 older row is dropped, and `observations_truncated` is then true. An
 observation is `page_script` or `live_call`, and exactly one of `sample` or
-`gap`. A sample has `reason: null` and `sample_index` 0 through 15. A gap has
-`reason: native_wasm_dispatch_budget_incomplete` and `sample_index: null`.
+`gap`. A sample has `reason: null` and a `sample_index` that is the
+attachment's ordinal, from 0 up to 4294967294, across windows. A gap has
+`sample_index: null` and `reason` `native_wasm_dispatch_budget_incomplete`
+(the window is full) or `native_wasm_dispatch_function_budget_incomplete`
+(that function's allowance is spent). A full window is checked first.
 A sample carries the instance, document token, document epoch, function
 index, and module byte offset of the real `br_table` opcode. The offset is at
 least 8 and the byte there is `0x0e`. `table_count` is that instruction's arm
 count immediate, not including the default label. Page script and a live call
-share one counter. The 17th observation is a gap and does not invent sample
-index 16.
+share one counter. A refused observation does not take an ordinal, so the next
+sample's index is the one after the last sample.
 
 This is the attached instance, not a heap scan of every Wasm object.
 

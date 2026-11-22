@@ -450,6 +450,23 @@ fonts included, so `capture_options` has no limits to report. The
 `content_limits` object that earlier backends added there named the removed
 per-session budgets and media choice; no backend reports it now.
 
+`wasm_sampling` is a second versioned addition: for a session that records
+Wasm `br_table` or `call_indirect` it is `{"version": 1, "streams",
+"window_ms", "records_per_window", "samples_per_function",
+"samples_per_indirect_site", "function_allow_count", "function_deny_count",
+"module_allowlist", "reset"}`. Each renderer keeps at most
+`records_per_window` (1024) full records per stream in each `window_ms`
+(1000) window, and the next window records again. An allowance the launcher
+did not name is null, and the browser's default then applies (64 per
+function). `reset` is `available` when `reset_wasm_sample_budgets` has a reset
+file to write. The launcher passes `--session-wasm-dispatch`,
+`--session-wasm-call-indirect`, `--session-wasm-samples-per-function`,
+`--session-wasm-samples-per-indirect-site`,
+`--session-wasm-function-allow-count`, `--session-wasm-function-deny-count`
+and `--session-wasm-module-allowlist`; they are labels only. Otherwise it is
+null, and a backend from before the addition omits it. The VM view shows it
+beside its sample-window reset control.
+
 CDP was removed. Version 1 keeps its debugger fields with fixed retirement
 values so existing clients still parse it: `debugger_state` is `unavailable`,
 `target` is null, `wasm_scripts` is empty, `generation`, `capture_epoch` and
@@ -483,8 +500,10 @@ backend belongs to. Both actions refuse with 409 `idle_backend` unless
   was recorded, for example because the configured browser is not a capture
   build. It never runs page JavaScript.
 - `{"action":"reset_wasm_sample_budgets"}` increments the session's Wasm
-  sample-budget reset file. The capture browser restarts both sample indexes
-  at 0 without closing the profile or replacing the capture configuration.
+  sample-budget reset file. The capture browser closes the current one-second
+  sample window of both streams at once, as if its second had passed, without
+  closing the profile or replacing the capture configuration. Sample indexes
+  keep counting.
   It needs recording capture, `--wasm-budget-reset-file`, and a live process
   holding the profile, and otherwise returns 409. The browser applies the new
   generation on its writer wake, about 250ms later. A rebuilt Brave is
@@ -531,20 +550,21 @@ returns 409 `dependency_unavailable` for these actions.
 `LiveSessionStart` options: `url`, `wasm_dispatch`, `wasm_call_indirect`,
 `guest_adapter`, `js_dispatch_sites`, `quiet`, `category_mask`,
 `duration_seconds`, `localhost_only`, `canvas_images`, `request_content`,
-`request_stacks`, `document_start`, `browser_internal`, `extension_traffic`,
-`fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
+`request_stacks`, `promise_stacks`, `document_start`, `browser_internal`,
+`extension_traffic`, `fresh_profile`, `js_invocation_sites`, `js_invocation_saved_sites`,
 `js_invocation_digests`, `confirm_sensitive_capture`,
 `publish_canonical_endpoint`, `brave_binary`, `timeout_seconds`,
 `wasm_samples_per_function`, `wasm_samples_per_indirect_site`,
 `wasm_function_allow`, `wasm_function_deny` and `wasm_module_allowlist`.
-The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect` and
-do not raise the 16-record cap. A switch left unset takes the Origin Trace
-app's default, and `false` turns it off: `wasm_dispatch` and
+The Wasm budget options require `wasm_dispatch` or `wasm_call_indirect`. They
+pace within the one-second window, which keeps at most 1024 full records per
+stream; without them a function keeps 64 per window. A switch left unset takes
+the Origin Trace app's default, and `false` turns it off: `wasm_dispatch` and
 `wasm_call_indirect` (mask bits 512 and 1024), `quiet`, `request_stacks`
 (bits 256 and 1024, and only where the browser has `--reb-request-stacks`) and
 `document_start` are on; with the consent, `request_content` (bits 256 and
 1024), `canvas_images` (bits 1 and 1024) and, with named sites and request
-content, `js_invocation_digests` are on; `browser_internal`,
+content, `js_invocation_digests` are on; `promise_stacks`, `browser_internal`,
 `extension_traffic` and `fresh_profile` are off. A switch whose bits the mask
 lacks stays off. `duration_seconds` left unset runs the session until it is
 ended. Sessions use one persistent agent research profile,
@@ -555,23 +575,25 @@ refused with a cause that names it. Defaults come from the start request
 alone; an inherited capture switch, site file,
 browser profile or embedded-session variable is ignored, so an inherited
 `REB_CAPTURE_REQUEST_CONTENT`, `REB_CONSOLE_DOCUMENT_START`,
-`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` or
-`REB_NATIVE_REQUEST_STACKS` never reaches an agent session.
+`REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS`,
+`REB_NATIVE_REQUEST_STACKS` or `REB_NATIVE_PROMISE_STACKS` never reaches an
+agent session.
 
 | Option | Launcher switch | Rule |
 | --- | --- | --- |
 | `request_content` | `REB_CAPTURE_REQUEST_CONTENT=1` | Sensitive: on by default with the consent (`confirm_sensitive_capture` for `reb-api session start`, session start through MCP) and category bits 256 and 1024. Keeps every request and response body whole, media and fonts included; the artifact receiver refuses only what would leave less free disk than its reserve. Off, request body length, type and digest are still recorded, but no path, query or body bytes. |
 | `request_stacks` | `REB_NATIVE_REQUEST_STACKS=1` | The stack that started each renderer request, read with `get_request_stack`. Needs category bits 256 and 1024. Left unset, it is on with `REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED=1`, so a Brave without `--reb-request-stacks` starts without it; named `true`, it is strict and such a Brave refuses the start. |
+| `promise_stacks` | `REB_NATIVE_PROMISE_STACKS=1` | Also records the stack that registered each Promise reaction a request is later made in, as the app's start panel offers. Needs `request_stacks` and follows its strictness: with the default request stacks a Brave without `--reb-promise-stacks` starts without them. |
 | `document_start` | `REB_CONSOLE_DOCUMENT_START=1` | Permits document-start Console scripts in this capture browser. Arms nothing: a rule still needs a live Console connection and a confirmed `arm_document_start`. |
 | `browser_internal` | `REB_CAPTURE_BROWSER_INTERNAL=1` | Records requests of browser pages such as `brave://settings` and DevTools, which are otherwise counted and not recorded. |
 | `extension_traffic` | `REB_CAPTURE_EXTENSION_TRAFFIC=1` | Records requests of extension workers, which are otherwise counted and not recorded. |
 | `fresh_profile` | `REB_FRESH_PROFILE=1` | A new, empty browser profile for this session, in its session folder, instead of the shared agent research profile. |
 | `js_invocation_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Absolute path of a `native-js-invocation-sites-v1` file. Checked, then armed from a private copy under the agent session directory. Needs category bit 512. |
-| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session. Never the app's set. Refused when empty. Not with `js_invocation_sites`. |
+| `js_invocation_saved_sites` | `REB_NATIVE_JS_INVOCATION_SITES` | Arms the agent sessions' own saved set, `~/.config/origin-trace/agent-sessions/js-invocation-sites-v1.json`, which `js_invocation_site_action` edits in an agent session, and follows it while the session runs: an empty set starts with nothing armed. Never the app's set. Not with `js_invocation_sites`. |
 | `js_invocation_digests` | `REB_NATIVE_JS_INVOCATION_DIGESTS=1` | Sensitive: needs named sites and the consent; on by default with both and request content. |
 | `canvas_images` | `REB_CAPTURE_CANVAS_IMAGES=1` | Sensitive: on by default with the consent and category bits 1 and 1024. |
-| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..16 retained samples of each function on each Wasm stream. Needs `wasm_dispatch` or `wasm_call_indirect`. |
-| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..16 retained `call_indirect` samples of each caller and module offset. |
+| `wasm_samples_per_function` | `REB_NATIVE_WASM_SAMPLES_PER_FUNCTION` | 1..1024 retained samples of each function on each Wasm stream per one-second window (default 64). Needs `wasm_dispatch` or `wasm_call_indirect`. |
+| `wasm_samples_per_indirect_site` | `REB_NATIVE_WASM_SAMPLES_PER_INDIRECT_SITE` | 1..1024 retained `call_indirect` samples of each caller and module offset per window. |
 | `wasm_function_allow` | `REB_NATIVE_WASM_FUNCTION_ALLOW` | Up to 32 function indexes. Other functions do not consume either sample index. Deny wins. |
 | `wasm_function_deny` | `REB_NATIVE_WASM_FUNCTION_DENY` | Up to 32 function indexes to exclude. |
 | `wasm_module_allowlist` | `REB_NATIVE_WASM_MODULE_ALLOWLIST` | Up to 8 SHA-256 digests, written to a private file. Other modules do not advance either sample index. |
@@ -647,7 +669,12 @@ state lasts until `stop` or the next `connect_live`. A command for any other
 `status: stale_target`, `code: target_unavailable` and text that names the next
 step, and nothing is sent to the browser. A second `connect_live` while one is
 open, a stale `session_id` and a stale `binding_id` are 409 refusals that say
-what to read or send next. Document-start rules for a child frame name that
+what to read or send next. A command runs until it returns, with no execution
+budget, and its request waits that long; a client that stops waiting leaves it
+running. Meanwhile `get_native_console` answers at once with `command`, other
+actions are 409 refusals, and `interrupt` (`session_id`) stops it: the command
+answers `status: stopped`, `code: cancelled`, and keeps the changes it already
+made. Document-start rules for a child frame name that
 frame's exact origin with `frame: child`; see
 [Native Console v3](native-console-v3.md).
 
@@ -678,7 +705,7 @@ check has a `code`, a `severity` of `info` or `warning`, and a plain message:
 | `named_gap` | A producer named why it stopped, with `category`, `reason` and `count`. A reason containing `budget` or `limit` means a sampling budget filled. A Wasm reason ending in `filtered` is a sample-policy exclusion: that execution was not sampled and did not take a slot. |
 | `browser_internal_excluded` | Capture counted `chrome:`, `devtools:` and other browser-internal requests, requests WebUI renderers sent (`webui_request`), or WebUI renderers, instead of recording them; `count` is the requests. Not a gap. |
 | `no_tab_traffic_excluded` | Capture counted extension-worker requests, DevTools loads, requests of service workers no page used in this browser, and browser-initiated prefetches with no page, instead of recording them; `count` is the requests. Not a gap. `REB_CAPTURE_EXTENSION_TRAFFIC=1` records the extension requests instead. |
-| `memory_cache_reuse_not_recorded` | Renderers counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
+| `memory_cache_reuse_not_recorded` | Renderers from an earlier build counted memory-cache reuses past their 4,096 records per capture configuration instead of recording them; `count` is the reuses. Not a gap. Current renderers record every reuse, so it appears only for such evidence. Reuses in pages that are not ordinary (an SVG image's own document or a page popup), which no tab owns, are the separate `non_ordinary_page_reuse` exclusion. |
 | `response_bodies_not_observed` | `count` responses never reached the browser proxy, so their bodies are not retained under their own request: the message counts those a service worker served, those reused from the memory cache and those answered in the renderer. Traffic links a reuse to the request whose response it reused, and a service worker answer to the worker's own fetch of the same URL, where those were retained. |
 | `response_snapshots_withheld` | `count` response bodies had a snapshot withheld while they arrived: one body's snapshots together copy at most four times what it kept plus 64 MiB, so their newest snapshot is older than the schedule would make it ([partial bodies](native-network-v3.md#partial-bodies)). Older sessions also withheld snapshots at their response body budget's shares. The body itself is retained whole when it ends. |
 | `network_tab_unresolved` | Severity `error`: `count` request rows have no tab, and the message counts them by reason. A capture bug; `request_tabs.unresolved_requests` names up to 16 by `process_id` and `request_id`, each with its `reason`. |
@@ -716,10 +743,15 @@ bodies. Identifiers and origins can still be sensitive. It has its own ETag.
 
 ## Saved JavaScript invocation sites
 
-The Origin Trace app keeps one saved set of at most 8
+The Origin Trace app keeps one saved set of at most 256
 [native JavaScript invocation sites](native-js-invocation-v1.md#site-file)
-and arms it in the next capture it starts. These routes name, save and list
-those sites; none of them changes the open page or a running capture.
+and arms it in every capture it starts. A capture whose `session.live` is
+true follows the set while it runs
+([revisions](native-js-invocation-v1.md#revisions)): a saved site arms at
+once and a removed one disarms. Otherwise a change applies from the next
+capture. These routes name, save and list those sites; none of them changes
+the open page, and a function the page compiled before its site was armed is
+tracked only after a reload.
 
 - `GET /api/js-invocation-sites/resolve` (`resolve_js_invocation_site`) takes
   an exact `session_id` and `artifact_id` and exactly one of `name` (a dotted
@@ -732,15 +764,18 @@ those sites; none of them changes the open page or a running capture.
 - `GET /api/js-invocation-sites` (`get_js_invocation_sites`) returns the saved
   set with each site's label, source URL and session, whether this session
   retained the saved script version (`retained.state`: `matches`,
-  `other_version` or `not_retained`), and what this session's launcher armed
-  (`session.state`: `not_armed`, `armed`, `browser_unsupported` or
-  `unreadable`, with `digests`).
+  `other_version` or `not_retained`) and whether this capture arms it now
+  (`armed_in_capture`), and what this capture arms (`session.state`:
+  `not_armed`, `armed`, `browser_unsupported` or `unreadable`, with `live`,
+  `digests`, its slot table in `sites` with each slot's `armed` flag,
+  `revision` and `revision_error`). Reading the set is also when a following
+  capture publishes a change made by another writer.
 - `POST /api/js-invocation-sites/actions` (`js_invocation_site_action`) takes
   `add` (the resolve inputs and an optional `label`), `remove`
   (`source_sha256` and `anchor_offset`) or `clear` with `confirm: true`. `add`
   resolves the artifact again on the server and never accepts a site from the
   caller. A refused resolution returns HTTP 200 with `added: false` and the
-  resolution; a duplicate `(source_sha256, anchor_offset)` or a ninth site is
+  resolution; a duplicate `(source_sha256, anchor_offset)` or a 257th site is
   a 409. Every action returns the updated set.
 
 A name matches only syntax that binds it: an assignment to that identifier or
@@ -1163,7 +1198,7 @@ include `js_invocation` beside the hex `payload`, decoded with the rules of
 
 | `kind` | Fields |
 | --- | --- |
-| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index`, `sample_index`, `document_id` |
+| `start` | `site_slot`, `invocation_id`, `parent_invocation_id` (0 for none), `parent_unknown`, `argument_count`, `script_id`, `anchor_offset` (UTF-16), `source_sha256`, `site_sample_index` (the call's ordinal among its site's calls; a version 1 record's budget index), `sample_index` (null for version 2), `document_id` |
 | `settle` | `site_slot`, `invocation_id`, `fulfilled`, `via` (`sync_return`, `sync_throw` or `promise`), `value_kind`, `value_length`, `digest_state` (`not_requested`, `present`, `not_digestible`, `too_large` or `unavailable`), `document_id` |
 | `request` | `inside`, `invocation_id` (0 exactly when `inside` is false), `request_id` |
 

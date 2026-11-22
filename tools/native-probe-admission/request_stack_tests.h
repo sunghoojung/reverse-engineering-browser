@@ -377,17 +377,18 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   assert(resent >= 300 - reb::kNativeRequestStackDigestTable &&
          reb::mojom::NativeProbeHost::artifacts == before_eviction + 300 + resent);
 
-  // 1,024 stack artifacts per configuration, then frames stay unretained.
-  for (std::uint32_t seed = 301; seed <= 1100; ++seed) {
+  // No per-configuration artifact budget: thousands of distinct stacks on
+  // one thread are each captured and sent.
+  const auto before_many = reb::mojom::NativeProbeHost::artifacts.load();
+  for (std::uint32_t seed = 301; seed <= 5300; ++seed) {
     scenario.seed = seed * 7;
     const auto value = StackPayload(Start(queue, static_cast<std::int32_t>(2000 + seed)).second);
     Drain(queue);
-    if (seed == 1100) {
-      assert(value.state == 5 && (value.flags & reb::kNativeRequestStackArtifactQueued) == 0);
-    }
+    assert(value.state == 1 && (value.flags & reb::kNativeRequestStackArtifactQueued) != 0);
   }
+  assert(reb::mojom::NativeProbeHost::artifacts == before_many + 5000);
 
-  // A new configuration forgets digests, scripts and budgets.
+  // A new configuration forgets digests and scripts.
   Configure(queue, 43);
   scenario.seed = 7;
   const auto fresh = StackPayload(Start(queue, 4000).second);
@@ -427,7 +428,7 @@ std::pair<NativeProbeEvent, NativeProbeEvent> Start(NativeProbeQueue& queue,
   scenario.scripts = 3;
   transport.Disable();
   std::cout << "PASS request stacks: disabled, depth bounds, Wasm, await, dedupe, "
-               "eviction, budgets and script identity\n";
+               "eviction, 5,000 distinct stacks with no budget and script identity\n";
 }
 
 reb::NativeAsyncTaskStackPayload TaskPayload(const NativeProbeEvent& event) {
@@ -615,8 +616,9 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
                "capture, and a later resend owns its own state\n";
 }
 
-// A refused attempt stored nothing, so refused retries cannot spend a budget.
-[[gnu::noinline]] void NativeRefusedStackBudgets() {
+// A refused attempt stored nothing: the next identical walk sends it again,
+// however often the browser refuses it.
+[[gnu::noinline]] void NativeRefusedStacksResend() {
   using reb::NativeAsyncTaskKind;
   NativeProbeQueue queue;
   Configure(queue, 68);
@@ -625,26 +627,28 @@ std::uint8_t Kind(const reb::NativeAsyncTaskKind kind) {
   scenario.scripts = 1;
   scenario.seed = 320;
   scenario.task_seed = 9200;
-  const auto attempts = reb::kNativeRequestStackArtifactBudget + 16;
-  for (std::uint32_t attempt = 0; attempt < attempts; ++attempt) {
+  const auto before = reb::mojom::NativeProbeHost::artifacts.load();
+  constexpr std::uint32_t kAttempts = 2048;
+  for (std::uint32_t attempt = 0; attempt < kAttempts; ++attempt) {
     const auto stack = Start(queue, 7000).second;
     const auto value = StackPayload(stack);
     assert(value.state == 1 && (value.flags & reb::kNativeRequestStackArtifactQueued) != 0);
     Drain(queue);
     transport.NativeStackArtifactRefused(stack.header.sequence_number);
   }
-  const auto task_attempts = reb::kNativeAsyncTaskArtifactBudget + 16;
-  for (std::uint32_t attempt = 0; attempt < task_attempts; ++attempt) {
+  for (std::uint32_t attempt = 0; attempt < kAttempts; ++attempt) {
     assert(NativeRequestStackWalk::RecordAsyncTask(NativeAsyncTaskKind::kSetTimeout) != 0);
-    // A task over its budget would record nothing here.
     const auto record = Pop(queue);
     assert(record.header.type == reb::NativeProbeType::kAsyncTaskStack);
     Drain(queue);
     transport.NativeStackArtifactRefused(record.header.sequence_number);
   }
+  // One artifact per attempt, plus the stack's script described once.
+  assert(reb::mojom::NativeProbeHost::artifacts >= before + 2 * kAttempts);
   scenario = {};
   transport.Disable();
-  std::cout << "PASS refused stack and async task artifacts return their budget slots\n";
+  std::cout << "PASS a refused stack or async task artifact is sent again by its next walk, "
+               "with no per-configuration budget\n";
 }
 
 // Scheduling-time segments linked through async task runs and task
@@ -1456,22 +1460,24 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
     NativeRequestStackWalk::PromiseReactionFinished(77);
     scenario.microtask = false;
     scenario.attribution = 0;
-    // 1,024 registration stacks per configuration, then not retained.
-    for (std::uint32_t i = 0; i < reb::kNativePromiseStackArtifactBudget + 4; ++i) {
+    // No per-configuration budget: thousands of distinct registration stacks
+    // are each sent, and the newest reads captured.
+    constexpr std::uint32_t kRegistrations = 3000;
+    const auto before_registrations = reb::mojom::NativeProbeHost::artifacts.load();
+    for (std::uint32_t i = 0; i < kRegistrations; ++i) {
       scenario.task_seed = 20000 + i;
       NativeRequestStackWalk::RecordPromiseRegistration(1000 + i, NativePromiseRegistration::kThen);
       Drain(queue);
     }
+    assert(reb::mojom::NativeProbeHost::artifacts == before_registrations + kRegistrations);
     scenario.microtask = true;
     scenario.attribution = 31;
-    NativeRequestStackWalk::PromiseReactionStarted(1000 + reb::kNativePromiseStackArtifactBudget +
-                                                   3);
+    NativeRequestStackWalk::PromiseReactionStarted(1000 + kRegistrations - 1);
     StackPayload(Start(queue, 7203).second);
     assert(GeneratedChain()[0].state ==
-           static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kNotRetainedBudget));
+           static_cast<std::uint8_t>(reb::NativeTaskSegmentState::kCaptured));
     Drain(queue);
-    NativeRequestStackWalk::PromiseReactionFinished(1000 + reb::kNativePromiseStackArtifactBudget +
-                                                    3);
+    NativeRequestStackWalk::PromiseReactionFinished(1000 + kRegistrations - 1);
     scenario.microtask = false;
     scenario.attribution = 0;
     NativeRequestStackWalk::DetachThread();
@@ -1493,7 +1499,7 @@ NativeRequestStackPayload HandlerStack(NativeProbeQueue& queue,
   scenario = {};
   std::cout << "PASS promise registrations: flag off, per-thread ring, registration stack in the "
                "microtask segment, hop for tasks scheduled in a reaction, dedupe, 32-frame "
-               "bound, unknown reaction, budget, capture off\n";
+               "bound, unknown reaction, 3,000 registrations with no budget, capture off\n";
 }
 
 // A request start inside a worker: its stack record, with any gaps that came
@@ -1517,10 +1523,10 @@ NativeProbeEvent StartCountingGaps(NativeProbeQueue& queue,
   }
 }
 
-// More workers than kNativeStackThreadLimit: the extra one walks nothing,
-// says so on every request and once per configuration as a gap, until a
-// worker's tables are freed. The main thread is not counted.
-[[gnu::noinline]] void NativeStackThreadLimit() {
+// No worker table limit: many more workers than the 32 tables a renderer
+// once allowed each walk their own stacks, with no gap, and each frees its
+// tables when it detaches. The main thread needs none of theirs.
+[[gnu::noinline]] void NativeStackManyWorkers() {
   using reb::NativeStackThread;
   NativeProbeQueue queue;
   Configure(queue, 74);
@@ -1528,75 +1534,40 @@ NativeProbeEvent StartCountingGaps(NativeProbeQueue& queue,
   scenario.depth = 2;
   scenario.scripts = 1;
   scenario.seed = 1100;
+  constexpr std::uint32_t kWorkers = 96;
+  const int made = fixture_frames_made;
   std::vector<std::unique_ptr<TestThread>> workers;
-  for (std::uint32_t i = 0; i < reb::kNativeStackThreadLimit; ++i) {
+  for (std::uint32_t i = 0; i < kWorkers; ++i) {
     workers.push_back(std::make_unique<TestThread>());
     workers.back()->Run([&, i] {
-      NativeRequestStackWalk::AttachThread(
-          WorkerScope(NativeStackThread::kDedicatedWorker, 0xA000 + i));
+      const auto scope = WorkerScope(NativeStackThread::kDedicatedWorker, 0xA000 + i);
+      NativeRequestStackWalk::AttachThread(scope);
       const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xA000 + i});
-      assert(StackPayload(Start(queue, static_cast<std::int32_t>(7300 + i)).second).state == 1);
+      std::map<std::string, int> gaps;
+      const auto payload =
+          StackPayload(StartCountingGaps(queue, static_cast<std::int32_t>(7300 + i), gaps));
+      assert(payload.state == 1 && reb::NativeStackScopeOf(payload.reserved1) == scope &&
+             gaps.empty());
+      Drain(queue);
+      // What it schedules is remembered too.
+      assert(NativeRequestStackWalk::RecordAsyncTask(reb::NativeAsyncTaskKind::kSetTimeout) != 0);
       Drain(queue);
     });
   }
-  // An attached worker that never walks holds no place.
-  TestThread idle;
-  idle.Run([&] {
-    NativeRequestStackWalk::AttachThread(WorkerScope(NativeStackThread::kSharedWorker, 0xB000));
-  });
-  const auto extra_scope = WorkerScope(NativeStackThread::kServiceWorker, 0xB001);
-  TestThread extra;
-  const int made = fixture_frames_made;
-  extra.Run([&] {
-    NativeRequestStackWalk::AttachThread(extra_scope);
-    std::map<std::string, int> gaps;
-    const auto limited = StartCountingGaps(queue, 7400, gaps);
-    auto payload = StackPayload(limited);
-    assert(payload.state ==
-               static_cast<std::uint8_t>(reb::NativeRequestStackState::kNotWalkedThreadLimit) &&
-           reb::NativeStackScopeOf(payload.reserved1) == extra_scope &&
-           limited.header.frame_id == 0xB001 && gaps["request_stack_thread_limit"] == 1 &&
-           gaps.size() == 1);
-    // Every request says so; the gap counts the thread once per configuration.
-    gaps.clear();
-    payload = StackPayload(StartCountingGaps(queue, 7401, gaps));
-    assert(payload.state == 6 && gaps.empty());
-    // Nothing it schedules or receives is walked or remembered.
-    assert(NativeRequestStackWalk::RecordAsyncTask(reb::NativeAsyncTaskKind::kSetTimeout) == 0 &&
-           NativeRequestStackWalk::ReceiveMessageOrigin(reb::NativeAsyncTaskKind::kMessagePort,
-                                                        {}) == 0 &&
-           Drain(queue) == 0 && fixture_frames_made == made);
-  });
-  // A new configuration counts the thread again.
-  Configure(queue, 75);
-  extra.Run([&] {
-    std::map<std::string, int> gaps;
-    assert(StackPayload(StartCountingGaps(queue, 7402, gaps)).state == 6 &&
-           gaps["request_stack_thread_limit"] == 1);
-  });
-  // One worker shuts down: its place goes to the next thread that walks.
-  workers.back()->Run([] { NativeRequestStackWalk::DetachThread(); });
-  extra.Run([&] {
-    const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kServiceWorker, 0xB001});
-    assert(StackPayload(Start(queue, 7403).second).state == 1 && fixture_frames_made == made + 1);
-    Drain(queue);
-    NativeRequestStackWalk::DetachThread();
-  });
+  assert(fixture_frames_made == made + static_cast<int>(kWorkers));
   for (auto& worker : workers) {
     worker->Run([] { NativeRequestStackWalk::DetachThread(); });
   }
-  idle.Run([] { NativeRequestStackWalk::DetachThread(); });
   scenario = {};
   transport.Disable();
   Drain(queue);
-  std::cout << "PASS stack thread limit: 32 worker tables per renderer, the next worker reads "
-               "not_walked_thread_limit with its scope, one gap per configuration, nothing "
-               "scheduled or allocated, its place taken after a worker detaches\n";
+  std::cout << "PASS stack tables per worker: " << kWorkers
+            << " workers in one renderer each walk and remember their own stacks, no gap\n";
 }
 
 // A refusal for an artifact whose owner slot 8,192 newer artifacts reused
 // still reaches the thread that queued it: it goes to every attached table,
-// and only the owner's queued index knows the creator.
+// and only the owner's entries name the creator.
 [[gnu::noinline]] void NativeRefusalRouting() {
   using reb::NativeStackThread;
   NativeProbeQueue queue;
@@ -1605,39 +1576,41 @@ NativeProbeEvent StartCountingGaps(NativeProbeQueue& queue,
   scenario.depth = 2;
   scenario.scripts = 1;
   constexpr std::uint32_t kThreads = 9;
-  static_assert(kThreads * reb::kNativeRequestStackArtifactBudget > reb::kNativeStackOwnerRing);
+  constexpr std::uint32_t kPerThread = 1024;
+  static_assert((kThreads - 1) * kPerThread >= reb::kNativeStackOwnerRing);
   std::vector<std::unique_ptr<TestThread>> workers;
-  std::uint64_t first = 0;
+  std::uint64_t last = 0;
   for (std::uint32_t t = 0; t < kThreads; ++t) {
     workers.push_back(std::make_unique<TestThread>());
     workers.back()->Run([&, t] {
       const std::uint64_t key = 0xD000 + t;
       NativeRequestStackWalk::AttachThread(WorkerScope(NativeStackThread::kDedicatedWorker, key));
       const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, key});
-      for (std::uint32_t i = 0; i < reb::kNativeRequestStackArtifactBudget; ++i) {
+      for (std::uint32_t i = 0; i < kPerThread; ++i) {
         scenario.seed = 30000 + 2000 * t + i;
         const auto stack = Start(queue, static_cast<std::int32_t>(8000 + i)).second;
         assert((StackPayload(stack).flags & reb::kNativeRequestStackArtifactQueued) != 0);
-        if (t == 0 && i == 0) {
-          first = stack.header.sequence_number;
+        if (t == 0 && i == kPerThread - 1) {
+          last = stack.header.sequence_number;
         }
         Drain(queue);
       }
     });
   }
-  // The first artifact's owner slot now names a later one.
-  transport.NativeStackArtifactRefused(first);
+  // The first thread's newest artifact, still in its digest table: its owner
+  // slot now names a later one.
+  transport.NativeStackArtifactRefused(last);
   workers.front()->Run([&] {
     const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xD000});
-    scenario.seed = 30000;
+    scenario.seed = 30000 + kPerThread - 1;
     const auto again = StackPayload(Start(queue, 8999).second);
     assert((again.flags & reb::kNativeRequestStackArtifactQueued) != 0);
     Drain(queue);
   });
-  // The other tables ignored it: their first stacks are still known.
+  // The other tables ignored it: their newest stacks are still known.
   workers[1]->Run([&] {
     const reb::NativeFetchOwnerScope owner({reb::NativeLoaderKind::kDedicatedWorker, 0xD001});
-    scenario.seed = 32000;
+    scenario.seed = 32000 + kPerThread - 1;
     assert((StackPayload(Start(queue, 8998).second).flags &
             reb::kNativeRequestStackArtifactQueued) == 0);
     Drain(queue);
@@ -1649,13 +1622,13 @@ NativeProbeEvent StartCountingGaps(NativeProbeQueue& queue,
   transport.Disable();
   Drain(queue);
   std::cout << "PASS refusal routing: a refusal whose owner slot was reused reaches its owner "
-               "through every table's queued index; the others ignore it\n";
+               "through every table's entries; the others ignore it\n";
 }
 
 // Refusals against a full mailbox and refusals racing drains, on a separate
 // transport thread. Filler refusals repeat a creator the worker already
-// owns, so the owner ring routes them to the worker alone and its queued
-// index ignores every repeat. Each phase ends by walking every refused
+// owns, so the owner ring routes them to the worker alone; only the first
+// one applied forgets the filler's digest. Each phase ends by walking every refused
 // stack again: a refusal applied, or covered by an overflow, sends it again;
 // one lost leaves its digest known and the walk sends nothing.
 [[gnu::noinline]] void NativeRefusalConcurrency() {

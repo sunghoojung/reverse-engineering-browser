@@ -1799,23 +1799,25 @@ void NativeWasmDispatch(reb::ArtifactReceiver& receiver) {
   Check(transfers.empty(), "Mismatched br_table immediate rejected");
   observation.table_count = 1;
   Configure();
+  // The sink keeps what the renderer paced: hundreds of records wait on one
+  // module acknowledgement and none is refused for count.
   const auto before_budget = count();
-  for (unsigned i = 0; i < 17; ++i) {
+  for (unsigned i = 0; i < 300; ++i) {
     observation.header.sequence_number = 2000 + i;
+    observation.sample_index = i;
     sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
   }
-  Check(transfers.size() == 1, "Sixteen observations of one module share one artifact");
-  Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete" &&
-            events.back().header.sequence_number == 2016 && events.back().header.process_id == 123,
-        "Cross-renderer browser budget fills the refused observation's own slot");
-  const auto after_budget_gap = events.size();
-  observation.header.sequence_number = 2017;
-  sink.CaptureWasmDispatch(observation, mojo_base::BigBuffer(module), [] { return true; });
-  Check(events.size() == after_budget_gap + 1 && events.back().header.sequence_number == 2017,
-        "Every observation past the browser budget fills its own slot");
+  Check(transfers.size() == 1 && count() == before_budget,
+        "Three hundred observations of one module wait on one artifact");
   while (!transfers.empty())
     Receive(receiver, transfers.begin()->first);
-  Check(count() == before_budget + 16, "Every admitted observation is published after one ACK");
+  const auto last_dispatch = std::find_if(events.rbegin(), events.rend(), [](const auto& e) {
+    return e.header.type == NativeProbeType::kWasmDispatchObservation;
+  });
+  Check(count() == before_budget + 300 && last_dispatch != events.rend() &&
+            last_dispatch->header.sequence_number == 2299,
+        "Every observation is published after one ACK, in order");
+  observation.sample_index = 0;
   Configure();
   NativeArtifactSocketClient::Get().connected = false;
   observation.header.sequence_number = 2100;
@@ -2033,30 +2035,22 @@ void NativeWasmIndirect(reb::ArtifactReceiver& receiver) {
   observation.document_token_low = 73;
   Configure();
   const auto before_budget = indirect();
-  for (unsigned i = 0; i < 17; ++i) {
+  for (unsigned i = 0; i < 300; ++i) {
     observation.header.sequence_number = 4000 + i;
     sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
   }
-  Check(transfers.size() == 1, "Sixteen observations of one module share one artifact");
-  Check(Payload(events.back()) == "native_wasm_indirect_browser_budget_incomplete" &&
-            events.back().header.sequence_number == 4016,
-        "The browser call_indirect budget fills the refused observation's own slot");
-  const auto after_budget_gap = events.size();
-  observation.header.sequence_number = 4017;
-  sink.CaptureWasmIndirect(observation, mojo_base::BigBuffer(module), [] { return true; });
-  Check(events.size() == after_budget_gap + 1 && events.back().header.sequence_number == 4017,
-        "Every observation past the budget fills its own slot");
-  physical.header.sequence_number = 4100;
+  Check(transfers.size() == 1, "Three hundred observations of one module share one artifact");
+  physical.header.sequence_number = 4400;
   sink.CaptureWasmDispatch(physical, mojo_base::BigBuffer(module), [] { return true; });
   while (!transfers.empty())
     Receive(receiver, transfers.begin()->first);
-  Check(indirect() == before_budget + 16, "Every admitted observation is published after one ACK");
+  Check(indirect() == before_budget + 300, "Every observation is published after one ACK");
   Check(std::any_of(events.begin(), events.end(),
                     [](const auto& e) {
                       return e.header.type == NativeProbeType::kWasmDispatchObservation &&
-                             e.header.sequence_number == 4100;
+                             e.header.sequence_number == 4400;
                     }),
-        "An exhausted call_indirect budget leaves br_table observation open");
+        "br_table observation of the same module shares the pending artifact");
   // A record still waiting for its module ACK becomes a gap before expiry.
   auto& runner = *base::SequencedTaskRunner::GetCurrentDefault();
   runner.tasks.clear();
@@ -2172,97 +2166,79 @@ void NativeWasmSampleBudget(reb::ArtifactReceiver& receiver) {
   dispatch.header.sequence_number = 6000;
   sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(blocked), [] { return true; });
   Check(transfers.empty() && Payload(events.back()) == "native_wasm_dispatch_browser_filtered",
-        "A module outside the allowlist does not transfer or take a br_table slot");
+        "A module outside the allowlist does not transfer");
   indirect.header.sequence_number = 6001;
   sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(blocked), [] { return true; });
   Check(transfers.empty() && Payload(events.back()) == "native_wasm_indirect_browser_filtered",
-        "A module outside the allowlist does not take a call_indirect slot");
+        "A module outside the allowlist is filtered on call_indirect too");
   dispatch.header.sequence_number = 6002;
   sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
   Check(transfers.size() == 1, "The allowed module transfers once");
   Receive(receiver, transfers.begin()->first);
-  Check(dispatch_count() == before_dispatch + 1, "First sample of a function is retained");
-  dispatch.header.sequence_number = 6003;
-  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(transfers.empty() && dispatch_count() == before_dispatch + 2,
-        "Second sample of that function is retained");
-  dispatch.header.sequence_number = 6004;
-  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(dispatch_count() == before_dispatch + 2 &&
-            Payload(events.back()) == "native_wasm_dispatch_browser_function_budget_incomplete",
-        "A later sample of that function is a per-function gap");
-  dispatch.function_index = 1;
-  dispatch.header.sequence_number = 6005;
-  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(transfers.empty() && dispatch_count() == before_dispatch + 3,
-        "A different function continues to be recorded");
-  indirect.header.sequence_number = 6006;
-  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
-  indirect.header.sequence_number = 6007;
-  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(indirect_count() == before_indirect + 2,
-        "The br_table per-function cap does not consume the call_indirect budget");
-  indirect.header.sequence_number = 6008;
-  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(indirect_count() == before_indirect + 2 &&
-            Payload(events.back()) == "native_wasm_indirect_browser_function_budget_incomplete",
-        "call_indirect keeps its own per-function cap");
-  dispatch.function_index = 2;
-  dispatch.header.sequence_number = 6009;
-  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(dispatch_count() == before_dispatch + 4,
-        "A full call_indirect per-function cap leaves br_table recording");
-
-  Configure();
-  policy.samples_per_function = 0;
-  sink.SetWasmSampleBudgetPolicy(policy);
-  const auto reset_dispatch = dispatch_count();
-  const auto reset_indirect = indirect_count();
-  dispatch.function_index = 0;
-  dispatch.header.sequence_number = 6100;
-  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(blocked), [] { return true; });
-  indirect.header.sequence_number = 6101;
-  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(blocked), [] { return true; });
-  Check(Payload(events.back()) == "native_wasm_indirect_browser_filtered",
-        "The fresh configuration still excludes the other module");
-  for (unsigned index = 0; index < 16; ++index) {
-    dispatch.header.sequence_number = 6200 + index;
+  const auto module_artifact = events.back().header.artifact_id;
+  Check(dispatch_count() == before_dispatch + 1 && module_artifact != 0,
+        "First sample of a function is retained");
+  // The renderer paces each function per window. The sink keeps every
+  // sample it is sent, well past the policy's samples_per_function.
+  for (unsigned index = 0; index < 40; ++index) {
+    dispatch.header.sequence_number = 6003 + index;
+    dispatch.sample_index = 1 + index;
     sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
-    if (index == 0)
-      Receive(receiver, transfers.begin()->first);
   }
-  Check(dispatch_count() == reset_dispatch + 16 && transfers.empty(),
-        "A filtered module did not consume one of the 16 br_table slots");
-  dispatch.header.sequence_number = 6216;
-  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(Payload(events.back()) == "native_wasm_dispatch_browser_budget_incomplete",
-        "The seventeenth br_table sample is still the global browser budget");
-  for (unsigned index = 0; index < 16; ++index) {
-    indirect.header.sequence_number = 6300 + index;
-    sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
-  }
-  Check(indirect_count() == reset_indirect + 16 && transfers.empty(),
-        "A filtered module did not consume one of the 16 call_indirect slots");
-  indirect.header.sequence_number = 6316;
-  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(Payload(events.back()) == "native_wasm_indirect_browser_budget_incomplete",
-        "Exhausting br_table did not exhaust call_indirect");
-  sink.ResetWasmSampleBudgets();
-  dispatch.header.sequence_number = 6400;
-  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
-  indirect.header.sequence_number = 6401;
-  sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
-  Check(transfers.empty() && dispatch_count() == reset_dispatch + 17 &&
-            indirect_count() == reset_indirect + 17 &&
-            events.back().header.type == NativeProbeType::kWasmIndirectObservation,
-        "Reset accepts both streams again without a new configuration or transfer");
+  Check(transfers.empty() && dispatch_count() == before_dispatch + 41 &&
+            events.back().header.artifact_id == module_artifact,
+        "The sink adds no per-function or session cap to paced samples");
+
+  // A record that names an earlier record's module carries only its size
+  // and digest. It joins that module's artifact without a second transfer.
+  reb::NativeWasmModuleTransfer bound;
+  bound.known = true;
+  bound.size = allowed.size();
+  bound.digest = reb::NativeGuestDigest(allowed);
+  dispatch.header.sequence_number = 6050;
+  sink.CaptureWasmDispatch(dispatch, bound, [] { return true; });
+  Check(transfers.empty() && dispatch_count() == before_dispatch + 42 &&
+            events.back().header.artifact_id == module_artifact,
+        "A bound br_table record joins the module artifact without bytes");
+  indirect.header.sequence_number = 6051;
+  sink.CaptureWasmIndirect(indirect, bound, [] { return true; });
+  Check(transfers.empty() && indirect_count() == before_indirect + 1 &&
+            events.back().header.artifact_id == module_artifact,
+        "A bound call_indirect record joins the same artifact");
+  // Another document never saw these bytes, so the binding is a gap.
+  dispatch.document_token_low = 74;
+  dispatch.header.sequence_number = 6052;
+  sink.CaptureWasmDispatch(dispatch, bound, [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_dispatch_module_unbound",
+        "A bound record with no artifact in its document is an explicit gap");
+  dispatch.document_token_low = 73;
+  // Filters apply to a bound record's digest exactly as to its bytes.
+  auto bound_blocked = bound;
+  bound_blocked.digest = reb::NativeGuestDigest(blocked);
+  dispatch.header.sequence_number = 6053;
+  sink.CaptureWasmDispatch(dispatch, bound_blocked, [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_dispatch_browser_filtered",
+        "A bound record of a module outside the allowlist is filtered");
+  // A bound record must still fit the module it names.
+  auto bound_short = bound;
+  bound_short.size = 8;
+  dispatch.header.sequence_number = 6054;
+  sink.CaptureWasmDispatch(dispatch, bound_short, [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_dispatch_module_invalid",
+        "A bound offset past the module's end is refused");
 
   Configure();
   policy = {};
-  policy.samples_per_function = 1;
+  policy.function_deny_count = 1;
+  policy.function_deny[0] = 3;
   sink.SetWasmSampleBudgetPolicy(policy);
   const auto invalid_dispatch = dispatch_count();
   const auto invalid_indirect = indirect_count();
+  dispatch.function_index = 3;
+  dispatch.header.sequence_number = 6400;
+  sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
+  Check(transfers.empty() && Payload(events.back()) == "native_wasm_dispatch_browser_filtered",
+        "A denied function is filtered by the browser whatever the renderer sent");
   dispatch.function_index = 4;
   dispatch.header.sequence_number = 6500;
   const std::vector<std::uint8_t> invalid_module{1, 2, 3, 4};
@@ -2273,8 +2249,7 @@ void NativeWasmSampleBudget(reb::ArtifactReceiver& receiver) {
   sink.CaptureWasmDispatch(dispatch, mojo_base::BigBuffer(allowed), [] { return true; });
   Check(transfers.size() == 1, "The valid module still transfers after the invalid one");
   Receive(receiver, transfers.begin()->first);
-  Check(dispatch_count() == invalid_dispatch + 1,
-        "An invalid module did not consume the per-function br_table budget");
+  Check(dispatch_count() == invalid_dispatch + 1, "A valid sample follows the refusals");
   indirect.function_index = 4;
   indirect.header.sequence_number = 6502;
   sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(invalid_module), [] { return true; });
@@ -2283,9 +2258,9 @@ void NativeWasmSampleBudget(reb::ArtifactReceiver& receiver) {
   indirect.header.sequence_number = 6503;
   sink.CaptureWasmIndirect(indirect, mojo_base::BigBuffer(allowed), [] { return true; });
   Check(indirect_count() == invalid_indirect + 1 && transfers.empty(),
-        "An invalid module did not consume the per-function call_indirect budget");
-  std::cout << "PASS native Wasm sample budget controls; per function, module allowlist, "
-               "independent streams and reset\n";
+        "call_indirect shares the module artifact br_table started");
+  std::cout << "PASS native Wasm browser filters; module allowlist, function denylist, no "
+               "browser sample cap and module tokens bound per document\n";
 }
 
 #include "guest_dependencies_test.h"
@@ -2446,6 +2421,7 @@ int main(int argc, char** argv) {
     NativeProbeHostBrowserInternalScope();
     NativeProbeHostWorkerTabLinks();
     NativeProbeHostStackRefusal();
+    NativeProbeHostRendererTargets();
     NativeProbeHostArtifactCredit();
     RequestBodyPolicy(output);
     ResponseBodyLimits(receiver, output);

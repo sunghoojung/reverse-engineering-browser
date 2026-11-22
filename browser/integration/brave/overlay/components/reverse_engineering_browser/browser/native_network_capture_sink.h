@@ -166,6 +166,14 @@ class NativeNetworkCaptureSink final {
   bool NoteNavigationInitiator(std::string_view devtools_request_id,
                                std::uint32_t renderer_process_id,
                                std::uint64_t renderer_sequence) noexcept;
+  // A renderer's request_target child whose target passes its inline prefix
+  // (NativeProbeHost::CaptureRendererTarget): keeps the whole target as its
+  // artifact, as EmitRequestTarget keeps a browser request's, and sets the
+  // record's retention and artifact ID. `target` is the path and query.
+  static void RetainRendererTarget(NativeProbeEvent& event,
+                                   NativeRequestTarget target,
+                                   std::string origin,
+                                   std::string text) noexcept;
 
  private:
   friend class base::NoDestructor<NativeNetworkCaptureSink>;

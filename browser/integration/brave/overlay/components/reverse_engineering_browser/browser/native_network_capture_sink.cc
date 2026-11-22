@@ -617,6 +617,24 @@ void NativeNetworkCaptureSink::EndHeaderHop(TrackedHeaders& tracked,
   }
 }
 
+void NativeNetworkCaptureSink::RetainRendererTarget(NativeProbeEvent& event,
+                                                    NativeRequestTarget target,
+                                                    std::string origin,
+                                                    std::string text) noexcept {
+  const std::size_t size = text.size();
+  target.retention = RetentionOf(NativeArtifactCaptureSink::Get().CaptureRequestContent(
+      {.kind = NativeArtifactKind::kRequestTarget,
+       .request_id = event.header.request_id,
+       .frame_id = event.header.frame_id,
+       .creator_event_id = event.header.sequence_number,
+       .url = std::move(origin),
+       .mime_type = "text/plain",
+       .size = size,
+       .text = std::move(text)},
+      event.header.artifact_id));
+  event.inline_payload = EncodeNativeRequestTargetPayload(target);
+}
+
 void NativeNetworkCaptureSink::EmitRequestTarget(const NativeProbeEmitter emitter,
                                                  const NativeProbeHeader& parent,
                                                  const GURL& url) noexcept {

@@ -23,9 +23,11 @@
 
 #include "brave/components/reverse_engineering_browser/browser/native_artifact_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_capture_scope.h"
+#include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_of.h"
 #include "brave/components/reverse_engineering_browser/browser/native_tab_resolver.h"
+#include "brave/components/reverse_engineering_browser/common/native_network_request.h"
 #include "brave/components/reverse_engineering_browser/common/native_network_scope.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_queue.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_guest_adapter.h"
@@ -146,6 +148,61 @@ void NativeProbeHost::EventsAvailable() {
   Drain();
 }
 
+void NativeProbeHost::AdvanceWasmWindow(const std::uint64_t now) {
+  if (now >= wasm_window_started_ns_ && now - wasm_window_started_ns_ < kNativeWasmSampleWindowNs)
+    return;
+  wasm_window_started_ns_ = now;
+  wasm_capture_count_ = 0;
+  wasm_indirect_capture_count_ = 0;
+  wasm_execution_capture_count_ = 0;
+}
+
+std::optional<NativeWasmModuleTransfer> NativeProbeHost::ResolveWasmModule(
+    const std::uint64_t module_token,
+    mojo_base::BigBuffer& content,
+    const std::uint64_t frame_id,
+    const std::uint64_t execution_context_id,
+    const std::uint64_t document_token_high,
+    const std::uint64_t document_token_low) const {
+  NativeWasmModuleTransfer module;
+  if (!module_token) {
+    if (content.size() == 0)
+      return module;
+    // Renderer shared memory remains writable: every check reads this copy.
+    module.bytes.assign(content.begin(), content.end());
+    module.known = true;
+    module.size = module.bytes.size();
+    module.digest = NativeGuestDigest(module.bytes);
+    return module;
+  }
+  const auto bound = wasm_modules_.find(module_token);
+  if (content.size() != 0 || bound == wasm_modules_.end() || bound->second.frame_id != frame_id ||
+      bound->second.execution_context_id != execution_context_id ||
+      bound->second.document_token_high != document_token_high ||
+      bound->second.document_token_low != document_token_low)
+    return std::nullopt;
+  module.known = true;
+  module.size = bound->second.size;
+  module.digest = bound->second.digest;
+  return module;
+}
+
+void NativeProbeHost::BindWasmModule(const std::uint64_t token,
+                                     const NativeWasmModuleTransfer& module,
+                                     const std::uint64_t frame_id,
+                                     const std::uint64_t execution_context_id,
+                                     const std::uint64_t document_token_high,
+                                     const std::uint64_t document_token_low) {
+  if (!token || module.bytes.empty())
+    return;
+  // Tokens are this renderer's sequence numbers, so the smallest is the
+  // oldest binding. Its thread sends the module again in its next window.
+  wasm_modules_[token] = {frame_id,           execution_context_id, document_token_high,
+                          document_token_low, module.size,          module.digest};
+  while (wasm_modules_.size() > kWasmModuleBindingLimit)
+    wasm_modules_.erase(wasm_modules_.begin());
+}
+
 void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
                                           const std::uint64_t session_id,
                                           const std::uint64_t sequence_number,
@@ -167,6 +224,7 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
                                           const std::uint8_t js_invocation_state,
                                           const std::uint32_t js_invocation_id,
                                           const std::string& source_url,
+                                          const std::uint64_t module_token,
                                           mojo_base::BigBuffer content,
                                           const std::uint64_t credit_bytes) {
   // The renderer gets its credit back once the browser no longer holds the
@@ -205,7 +263,7 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
       caller_kind == kWasmDirectCallerSameInstance && caller_function_index < 16U * 1024U * 1024U;
   const bool caller_ok = caller_observed ? (caller_clear || caller_named) : caller_clear;
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
-      !execution_context_id || sample_index >= 16 || !caller_ok ||
+      !execution_context_id || sample_index > kNativeWasmLastSampleIndex || !caller_ok ||
       function_index >= kNativeWasmFunctionIndexLimit ||
       table_count >= kNativeWasmFunctionIndexLimit) {
     refuse("native_wasm_dispatch_limit_or_invalid");
@@ -225,40 +283,43 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   observation.js_invocation_state = js_invocation_state;
   observation.js_invocation_id = js_invocation_id;
   observation.source_url = source_url;
-  // The Mojo buffer is already a copy. Reject it before any sample slot is taken.
-  observation.module_bytes = std::span<const std::uint8_t>(content.data(), content.size());
-  if (!IsValidNativeWasmDispatchInput(observation)) {
+  observation.module_token = module_token;
+  auto module = ResolveWasmModule(module_token, content, frame_id, execution_context_id,
+                                  document_token_high, document_token_low);
+  if (!module) {
+    refuse(module_token ? "native_wasm_dispatch_module_unbound"
+                        : "native_wasm_dispatch_limit_or_invalid");
+    return;
+  }
+  // Rejected before the window count is spent.
+  observation.module_bytes = module->bytes;
+  if (!module->known ||
+      (module->bytes.empty() ? !IsValidNativeWasmDispatchFields(observation, module->size)
+                             : !IsValidNativeWasmDispatchInput(observation))) {
     refuse("native_wasm_dispatch_module_invalid");
     return;
   }
+  observation.module_bytes = {};
   content::RenderFrameHost* owner =
       ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
   if (!owner) {
     refuse("native_wasm_dispatch_document_unavailable");
     return;
   }
-  std::array<std::uint8_t, 32> module_digest{};
-  const std::uint8_t* module_digest_bytes = nullptr;
   const auto& policy = session_->wasm_sample_budget();
-  if (policy.module_allow_count != 0) {
-    module_digest =
-        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
-    module_digest_bytes = module_digest.data();
-  }
-  const auto budget =
-      AdmitNativeWasmBudgetKeys(policy, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_,
-                                function_index, 0, module_digest_bytes);
-  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, false)) {
-    refuse(reason);
+  if (!NativeWasmFunctionAllowed(policy, function_index) ||
+      !NativeWasmModuleAllowed(policy, module->digest.data())) {
+    refuse("native_wasm_dispatch_browser_filtered");
     return;
   }
-  if (wasm_capture_count_ >= 16) {
-    ReleaseNativeWasmBudgetAdmission(budget, wasm_dispatch_function_keys_, {}, wasm_budget_epoch_);
+  AdvanceWasmWindow(now);
+  if (wasm_capture_count_ >= kWasmBrowserWindowLimit) {
     refuse("native_wasm_dispatch_browser_budget_incomplete");
     return;
   }
   ++wasm_capture_count_;
-  observation.module_bytes = {};
+  BindWasmModule(sequence_number, *module, frame_id, execution_context_id, document_token_high,
+                 document_token_low);
   auto* contents = content::WebContents::FromRenderFrameHost(owner);
   auto* main_frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
   if (main_frame)
@@ -267,7 +328,7 @@ void NativeProbeHost::CaptureWasmDispatch(const std::uint64_t capture_epoch,
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
   NativeArtifactCaptureSink::Get().CaptureWasmDispatch(
-      observation, std::move(content), [document, lifetime]() {
+      observation, std::move(*module), [document, lifetime]() {
         return !lifetime.expired() && document.AsRenderFrameHostIfValid() != nullptr;
       });
 }
@@ -292,6 +353,7 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
                                           const std::uint8_t js_invocation_state,
                                           const std::uint32_t js_invocation_id,
                                           const std::string& source_url,
+                                          const std::uint64_t module_token,
                                           mojo_base::BigBuffer content,
                                           const std::uint64_t credit_bytes) {
   // The renderer gets its credit back once the browser no longer holds the
@@ -324,7 +386,7 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
     session_->Emit(RendererGap(NativeProbeEvent{.header = observation.header}, reason));
   };
   if (!monotonic_time_ns || monotonic_time_ns > now || !thread_id || !frame_id ||
-      !execution_context_id || sample_index >= kNativeWasmIndirectSampleBudget ||
+      !execution_context_id || sample_index > kNativeWasmLastSampleIndex ||
       resolution >= kNativeWasmIndirectResolutionCount ||
       function_index >= kNativeWasmFunctionIndexLimit ||
       table_index >= kNativeWasmFunctionIndexLimit || slot >= kNativeWasmFunctionIndexLimit ||
@@ -345,40 +407,42 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
   observation.js_invocation_state = js_invocation_state;
   observation.js_invocation_id = js_invocation_id;
   observation.source_url = source_url;
-  observation.module_bytes = std::span<const std::uint8_t>(content.data(), content.size());
-  if (!IsValidNativeWasmIndirectInput(observation)) {
+  observation.module_token = module_token;
+  auto module = ResolveWasmModule(module_token, content, frame_id, execution_context_id,
+                                  document_token_high, document_token_low);
+  if (!module) {
+    refuse(module_token ? "native_wasm_indirect_module_unbound"
+                        : "native_wasm_indirect_limit_or_invalid");
+    return;
+  }
+  observation.module_bytes = module->bytes;
+  if (!module->known ||
+      (module->bytes.empty() ? !IsValidNativeWasmIndirectFields(observation, module->size)
+                             : !IsValidNativeWasmIndirectInput(observation))) {
     refuse("native_wasm_indirect_module_invalid");
     return;
   }
+  observation.module_bytes = {};
   content::RenderFrameHost* owner =
       ActiveDocumentOwner(*process, frame_id, document_token_high, document_token_low);
   if (!owner) {
     refuse("native_wasm_indirect_document_unavailable");
     return;
   }
-  std::array<std::uint8_t, 32> module_digest{};
-  const std::uint8_t* module_digest_bytes = nullptr;
   const auto& policy = session_->wasm_sample_budget();
-  if (policy.module_allow_count != 0) {
-    module_digest =
-        NativeGuestDigest(std::span<const std::uint8_t>(content.data(), content.size()));
-    module_digest_bytes = module_digest.data();
-  }
-  const auto budget = AdmitNativeWasmBudgetKeys(
-      policy, wasm_indirect_function_keys_, wasm_indirect_site_keys_, wasm_budget_epoch_,
-      function_index, module_byte_offset, module_digest_bytes);
-  if (const char* reason = NativeWasmBrowserBudgetReason(budget.status, true)) {
-    refuse(reason);
+  if (!NativeWasmFunctionAllowed(policy, function_index) ||
+      !NativeWasmModuleAllowed(policy, module->digest.data())) {
+    refuse("native_wasm_indirect_browser_filtered");
     return;
   }
-  if (wasm_indirect_capture_count_ >= kNativeWasmIndirectSampleBudget) {
-    ReleaseNativeWasmBudgetAdmission(budget, wasm_indirect_function_keys_, wasm_indirect_site_keys_,
-                                     wasm_budget_epoch_);
+  AdvanceWasmWindow(now);
+  if (wasm_indirect_capture_count_ >= kWasmBrowserWindowLimit) {
     refuse("native_wasm_indirect_browser_budget_incomplete");
     return;
   }
   ++wasm_indirect_capture_count_;
-  observation.module_bytes = {};
+  BindWasmModule(sequence_number, *module, frame_id, execution_context_id, document_token_high,
+                 document_token_low);
   auto* contents = content::WebContents::FromRenderFrameHost(owner);
   auto* main_frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
   if (main_frame)
@@ -387,7 +451,7 @@ void NativeProbeHost::CaptureWasmIndirect(const std::uint64_t capture_epoch,
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
   NativeArtifactCaptureSink::Get().CaptureWasmIndirect(
-      observation, std::move(content), [document, lifetime]() {
+      observation, std::move(*module), [document, lifetime]() {
         return !lifetime.expired() && document.AsRenderFrameHostIfValid() != nullptr;
       });
 }
@@ -414,6 +478,7 @@ void NativeProbeHost::CaptureWasmExecution(const std::uint64_t capture_epoch,
                                            const std::uint8_t js_invocation_state,
                                            const std::uint32_t js_invocation_id,
                                            const std::string& source_url,
+                                           const std::uint64_t module_token,
                                            mojo_base::BigBuffer content,
                                            const std::uint64_t credit_bytes) {
   // The renderer gets its credit back once the browser no longer holds the
@@ -449,7 +514,15 @@ void NativeProbeHost::CaptureWasmExecution(const std::uint64_t capture_epoch,
     refuse("native_wasm_execution_limit_or_invalid");
     return;
   }
-  if (wasm_execution_capture_count_ >= kNativeWasmExecutionBudget) {
+  auto module = ResolveWasmModule(module_token, content, frame_id, execution_context_id,
+                                  document_token_high, document_token_low);
+  if (!module) {
+    refuse(module_token ? "native_wasm_execution_module_unbound"
+                        : "native_wasm_execution_limit_or_invalid");
+    return;
+  }
+  AdvanceWasmWindow(now);
+  if (wasm_execution_capture_count_ >= kWasmBrowserWindowLimit) {
     refuse("native_wasm_execution_browser_budget_incomplete");
     return;
   }
@@ -480,10 +553,14 @@ void NativeProbeHost::CaptureWasmExecution(const std::uint64_t capture_epoch,
   observation.js_invocation_state = js_invocation_state;
   observation.js_invocation_id = js_invocation_id;
   observation.source_url = source_url;
+  observation.module_token = module_token;
+  // The sink checks the record against these bytes, or this bound size.
+  BindWasmModule(sequence_number, *module, frame_id, execution_context_id, document_token_high,
+                 document_token_low);
   const auto document = owner->GetWeakDocumentPtr();
   const std::weak_ptr<const std::uint64_t> lifetime = wasm_epoch_lifetime_;
   NativeArtifactCaptureSink::Get().CaptureWasmExecution(
-      observation, std::move(content), [document, lifetime]() {
+      observation, std::move(*module), [document, lifetime]() {
         return !lifetime.expired() && document.AsRenderFrameHostIfValid() != nullptr;
       });
 }
@@ -690,6 +767,93 @@ void NativeProbeHost::CaptureNativeGuestHost(const std::uint64_t capture_epoch,
   NativeArtifactCaptureSink::Get().CaptureNativeGuestHost(event, capture_epoch);
 }
 
+// Whether a renderer's request_target child names this target: version 2,
+// complete as sent, its length and inline prefix those of `target`, and an
+// origin of its own scheme. The browser fills in what it retained.
+bool IsRendererTargetChild(const NativeProbeEvent& event,
+                           const std::string_view origin,
+                           const std::string_view target) {
+  const auto byte = [&](const std::size_t at) {
+    return static_cast<std::uint8_t>(event.inline_payload[at]);
+  };
+  const auto read = [&](const std::size_t at, const std::size_t width) {
+    std::uint64_t value = 0;
+    for (std::size_t i = 0; i < width; ++i) {
+      value |= std::uint64_t{byte(at + i)} << (8U * i);
+    }
+    return value;
+  };
+  const auto scheme = static_cast<NativeRequestScheme>(byte(8));
+  const std::string_view prefix = scheme == NativeRequestScheme::kHttps  ? "https://"
+                                  : scheme == NativeRequestScheme::kHttp ? "http://"
+                                  : scheme == NativeRequestScheme::kWss  ? "wss://"
+                                  : scheme == NativeRequestScheme::kWs   ? "ws://"
+                                                                         : "";
+  if (event.header.category != NativeProbeCategory::kNetwork ||
+      event.header.type != NativeProbeType::kRequestTarget ||
+      event.header.payload_size != kNativeRequestPayloadSize || !event.header.parent_event_id ||
+      !event.header.request_id || event.header.artifact_id != 0 ||
+      read(0, 2) != kNativeRequestTargetPayloadVersion || read(2, 2) != kNativeRequestPayloadSize ||
+      read(4, 4) != target.size() || byte(9) != 0 || prefix.empty() ||
+      target.size() <= kNativeRequestTargetPrefixBytes ||
+      target.size() > kNativeRequestTargetMaxBytes || origin.size() <= prefix.size() ||
+      origin.size() > kNativeArtifactMaxUrlBytes || !origin.starts_with(prefix)) {
+    return false;
+  }
+  for (std::size_t i = 0; i < kNativeRequestTargetPrefixBytes; ++i) {
+    if (byte(12 + i) != static_cast<std::uint8_t>(target[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void NativeProbeHost::CaptureRendererTarget(const std::vector<std::uint8_t>& event_record,
+                                            const std::string& origin,
+                                            const std::string& target) {
+  // The renderer pushed the parent before sending this, so draining first
+  // emits it, and its exclusion decision, ahead of its child.
+  Drain();
+  if (!queue_ || browser_internal_ || IsBrowserInternal() || !session_->IsActive() ||
+      event_record.size() != sizeof(NativeProbeEvent)) {
+    return;
+  }
+  NativeProbeEvent event = EventFromRecord(event_record);
+  auto* process = content::RenderProcessHost::FromID(renderer_process_id_);
+  if (!process || event.header.session_id != session_->session_id() ||
+      !event.header.sequence_number ||
+      event.header.process_id != static_cast<std::uint32_t>(process->GetProcess().Pid())) {
+    // Another identity's slot is not this renderer's to fill.
+    return;
+  }
+  const auto now =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
+  // Only a content capture keeps targets; a child the renderer could not have
+  // sent leaves an explicit gap in its slot.
+  if (!session_->capture_request_content() || !event.header.monotonic_time_ns ||
+      event.header.monotonic_time_ns > now || !IsRendererTargetChild(event, origin, target)) {
+    NativeProbeEvent gap = RendererGap(event, "renderer_target_malformed");
+    gap.header.category = NativeProbeCategory::kNetwork;
+    session_->Emit(gap);
+    return;
+  }
+  if (IsExcludedRequestRecord(event)) {
+    return;
+  }
+  if (const std::uint32_t tab =
+          FrameTab(CurrentFrameTabs(renderer_process_id_), event.header.frame_id)) {
+    event.header.tab_id = tab;
+  }
+  NativeRequestTarget kept;
+  kept.target_length = static_cast<std::uint32_t>(target.size());
+  kept.scheme = static_cast<NativeRequestScheme>(event.inline_payload[8]);
+  kept.port = static_cast<std::uint16_t>(static_cast<std::uint8_t>(event.inline_payload[10]) |
+                                         static_cast<std::uint8_t>(event.inline_payload[11]) << 8U);
+  std::copy_n(target.begin(), kept.prefix.size(), kept.prefix.begin());
+  NativeNetworkCaptureSink::RetainRendererTarget(event, kept, origin, target);
+  session_->Emit(event);
+}
+
 void NativeProbeHost::CaptureGeneratedArtifact(const std::uint16_t kind,
                                                const std::uint16_t capture_origin,
                                                const std::uint64_t creator_event_id,
@@ -795,6 +959,9 @@ void NativeProbeHost::Configure(const std::uint64_t session_id,
   wasm_epoch_lifetime_ = std::make_shared<const std::uint64_t>(wasm_capture_epoch_);
   const auto encoded = EncodeNativeWasmSampleBudgetPolicy(session_->wasm_sample_budget());
   client_->SetWasmSampleBudget(std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
+  // Before the configuration, so this renderer's first armed document already
+  // has the scope (protocol/native-debugger-observation-v1.md).
+  SendDebuggerWatchScope();
   client_->Configure(session_id, category_mask, expires_at_monotonic_ns, capture_canvas_images,
                      std::move(renderer_region), wasm_capture_epoch_,
                      session_->guest_adapter_json(), session_->js_dispatch_sites(),
@@ -816,10 +983,9 @@ void NativeProbeHost::Disable() {
     ++wasm_capture_epoch_;
   wasm_capture_count_ = 0;
   wasm_indirect_capture_count_ = 0;
-  if ((wasm_budget_epoch_ & 1U) == 0 &&
-      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
-    wasm_budget_epoch_ += 2;
   wasm_execution_capture_count_ = 0;
+  wasm_window_started_ns_ = 0;
+  wasm_modules_.clear();
   guest_capture_count_ = 0;
   guest_host_malformed_gap_emitted_ = false;
   if (client_.is_bound()) {
@@ -832,13 +998,25 @@ void NativeProbeHost::Disable() {
 }
 
 void NativeProbeHost::ResetWasmSampleBudgets() {
+  // The renderer starts its window when this arrives. Records of its closing
+  // window may still be on the way, which the doubled browser limit covers.
+  wasm_window_started_ns_ =
+      static_cast<std::uint64_t>(base::TimeTicks::Now().since_origin().InNanoseconds());
   wasm_capture_count_ = 0;
   wasm_indirect_capture_count_ = 0;
-  if ((wasm_budget_epoch_ & 1U) == 0 &&
-      wasm_budget_epoch_ <= std::numeric_limits<std::uint64_t>::max() - 2)
-    wasm_budget_epoch_ += 2;
+  wasm_execution_capture_count_ = 0;
   if (client_.is_bound())
     client_->ResetWasmSampleBudgets();
+}
+
+void NativeProbeHost::UpdateJsInvocationSites(const std::vector<std::uint8_t>& records) {
+  if (client_.is_bound() && queue_)
+    client_->UpdateJsInvocationSites(records);
+}
+
+void NativeProbeHost::SendDebuggerWatchScope() {
+  if (client_.is_bound())
+    client_->SetDebuggerWatchScope(session_->debugger_watch_scope().Clone());
 }
 
 std::uint32_t NativeProbeHost::RendererOsPid() {

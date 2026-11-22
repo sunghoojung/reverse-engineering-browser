@@ -88,8 +88,9 @@ report(
 It never logs a raw string, so it cannot leak a token, cookie, credential or
 body even if the observed function handled one. Keep that property in anything
 you write. `report` accepts a string, number, boolean or bigint; a string over
-512 UTF-8 bytes is kept as a visibly truncated prefix, and any other argument
-produces a `refused` record instead.
+8192 UTF-8 bytes is kept as a visibly truncated prefix, and any other argument
+produces a `refused` record instead. A document can report any number of
+records, so report a longer value in parts.
 
 Arm it against the exact origin, for top frames, under the fixture's path:
 
@@ -185,16 +186,19 @@ wildcard, no host suffix, and no URL guessing.
   retroactively injected. Reload it.
 - **Renderer readiness.** `pending_renderer_processes` is zero once every live
   renderer holds the current generation. Reload after it reaches zero; a
-  positive value is a readiness gap, not a lost record. A positive
-  `refused_renderer_processes` means more than 64 renderer processes are
-  running: those never receive a set and keep the pending count above zero
-  while one is armed. Close tabs until they exit.
+  positive value is a readiness gap, not a lost record. Every live renderer
+  receives the set, however many there are.
 - **Reads do not drain.** Pass the last `sequence` you saw as
-  `after_sequence`. A failed or slow read cannot lose a record; the bounded
-  ring reports `dropped` when it evicts one.
+  `after_sequence`. A read returns every retained record after it that fits one
+  reply, so read again while the last `sequence` is below `next_sequence` - 1.
+  A failed or slow read cannot lose a record; the browser keeps 64 MiB of
+  output and reports `dropped` when it evicts the oldest.
 - **Output is page JavaScript.** Every record carries provenance
   `console-document-start-script`, is snippet-authored untrusted text, and is
   never evidence, never correlated, and never exported automatically.
+- **A snippet runs until it returns.** Nothing times it out. Clearing or
+  replacing the set, or ending the session, stops one that is still running,
+  through the same IO-thread Stop a Console command uses.
 - **Clearing really stops it.** After `clear_document_start`, a `report`
   function the page retained becomes an inert no-op. Work the snippet already
   scheduled in the page is not rolled back.
@@ -206,10 +210,12 @@ wildcard, no host suffix, and no URL guessing.
 
 ## Limits worth remembering
 
-Four scripts, 4096 bytes each and 8192 per set; 64 records per document then
-one refusal notice; a 128-record ring with a visible drop count; 32 records per
-read; a 50 ms synchronous injection budget; and a lifetime of at most one hour,
-bounded by the Console session.
+No script count, snippet size, per-document record or execution-time budget.
+One arm command is one 64 MiB Console payload; each renderer maps the encoded
+set read-only rather than copying it. A report is at most 8192 bytes, the
+browser keeps 64 MiB of output with a visible drop count, a read returns every
+record after its cursor that fits one 64 MiB reply, and the experiment lives at
+most one hour, bounded by the Console session.
 
 A snippet runs with the page's full main-world authority. The `(function(report)
 { … })` wrapper exists to supply `report`; it is not a sandbox. A page can see

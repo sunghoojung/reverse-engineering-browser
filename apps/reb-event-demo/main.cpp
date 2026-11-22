@@ -179,7 +179,7 @@ bool CheckNativeConsoleMessages() {
     queue.Push(controls);
   const auto bounded = queue.Poll();
   if (bounded != reply(controls + "," + controls, 14) ||
-      bounded.size() > reb::kNativeConsolePayloadLimit || queue.Poll() != kEmpty)
+      bounded.size() > reb::kNativeConsoleReplyLimit || queue.Poll() != kEmpty)
     return false;
 
   // Count pressure, repeated wraparound and FIFO order are independent of the

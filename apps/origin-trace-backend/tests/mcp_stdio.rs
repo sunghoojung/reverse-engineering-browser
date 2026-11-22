@@ -794,11 +794,9 @@ async fn openapi_mcp_matches_the_live_loopback_api() {
     // worker and changing the set changes the app's next capture, so both
     // stay hidden until --allow-effects.
     assert!(names.iter().any(|name| name == "get_js_invocation_sites"));
-    assert!(
-        !names
-            .iter()
-            .any(|name| name == "resolve_js_invocation_site" || name == "js_invocation_site_action")
-    );
+    assert!(!names
+        .iter()
+        .any(|name| name == "resolve_js_invocation_site" || name == "js_invocation_site_action"));
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -1942,6 +1940,7 @@ dir="$REB_LIVE_SESSION_ROOT/$((4242 + $(ls "$REB_LIVE_SESSION_ROOT" | wc -l)))"
 mkdir -p "$dir/profile" "$dir/artifacts"
 printf '%s\n' "$REB_NATIVE_WASM_DISPATCH $REB_CAPTURE_CATEGORY_MASK $REB_USE_SYSTEM_KEYCHAIN $REB_CONSOLE_DOCUMENT_START $REB_CAPTURE_REQUEST_CONTENT ${{REB_NATIVE_JS_INVOCATION_SITES-unset}} ${{REB_NATIVE_JS_INVOCATION_DIGESTS-unset}}" > "$dir/options"
 printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_IF_SUPPORTED-unset}} ${{REB_JS_INVOCATION_SITE_STORE-unset}}" > "$dir/site-store"
+printf '%s\n' "${{REB_NATIVE_JS_INVOCATION_LIVE-unset}}" > "$dir/live"
 printf '%s\n' "${{REB_NATIVE_REQUEST_STACKS-unset}} ${{REB_NATIVE_REQUEST_STACKS_IF_SUPPORTED-unset}} ${{REB_NATIVE_PROMISE_STACKS-unset}}" > "$dir/stacks"
 printf '%s\n' "${{REB_RESEARCH_PROFILE_ROOT-unset}} ${{REB_FRESH_PROFILE-unset}} ${{REB_CAPTURE_DURATION_SECONDS-unset}} ${{REB_NATIVE_QUIET_MODE-unset}} ${{REB_CAPTURE_CANVAS_IMAGES-unset}} ${{REB_CAPTURE_BROWSER_INTERNAL-unset}} ${{REB_CAPTURE_EXTENSION_TRAFFIC-unset}}" > "$dir/session"
 labels=()
@@ -1949,6 +1948,11 @@ if [[ -n "${{REB_NATIVE_JS_INVOCATION_SITES-}}" ]]; then
   cp "$REB_NATIVE_JS_INVOCATION_SITES" "$dir/sites"
   labels+=(--js-invocation-session-sites "$REB_NATIVE_JS_INVOCATION_SITES" --js-invocation-session-state armed)
   [[ "$REB_NATIVE_JS_INVOCATION_DIGESTS" == 1 ]] && labels+=(--js-invocation-session-digests)
+  # The real launcher's following session, for a Brave that follows revisions.
+  if [[ "${{REB_NATIVE_JS_INVOCATION_LIVE-0}}" == 1 ]]; then
+    printf '0\n' > "$dir/generation"
+    labels+=(--js-invocation-session-generation "$dir/generation")
+  fi
 fi
 # The real launcher's labels.
 [[ "$REB_CAPTURE_REQUEST_CONTENT" == 1 ]] && labels+=(--session-request-content)
@@ -2102,7 +2106,12 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     for option in ["canvas_images", "request_content", "js_invocation_digests"] {
         assert!(start["inputSchema"]["properties"].get(option).is_some());
     }
-    for option in ["browser_internal", "extension_traffic", "fresh_profile"] {
+    for option in [
+        "browser_internal",
+        "extension_traffic",
+        "fresh_profile",
+        "promise_stacks",
+    ] {
         assert_eq!(start["inputSchema"]["properties"][option]["default"], false);
     }
 
@@ -2151,6 +2160,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
         ("browser_internal", json!(false)),
         ("extension_traffic", json!(false)),
         ("fresh_profile", json!(false)),
+        ("promise_stacks", json!(false)),
         ("confirm_sensitive_capture", json!(true)),
     ] {
         assert_eq!(session["options"][option], value, "{option}");
@@ -2171,14 +2181,15 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     );
     // The app's defaults, and nothing inherited: not the shell's invocation
     // sites, digests, duration, profile or browser-internal capture.
-    // The default request stacks are dropped by a Brave without the flag.
+    // The default request stacks are dropped by a Brave without the flag,
+    // and the shell's Promise stacks switch is replaced by the option's off.
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("options")).unwrap(),
         "1 4095 0 1 1 unset 0\n"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "1 1 unset\n"
+        "1 1 0\n"
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("session")).unwrap(),
@@ -2211,7 +2222,7 @@ fn an_agent_starts_drives_and_ends_its_own_live_session() {
     assert_eq!(context["capture_options"]["document_start"], "permitted");
     assert_eq!(
         context["capture_options"]["js_invocation"],
-        json!({"state":"not_armed","count":0,"digests":false})
+        json!({"state":"not_armed","live":false,"count":0,"digests":false})
     );
     let summary = mcp.request("tools/call", json!({"name": "get_session_summary"}));
     assert_eq!(summary["result"]["isError"], false);
@@ -2317,10 +2328,6 @@ fn agent_session_options_are_named_never_inherited() {
             json!({"request_content": true, "confirm_sensitive_capture": true, "category_mask": 1024}),
             "Network and Artifact",
         ),
-        (
-            json!({"js_invocation_saved_sites": true}),
-            "saved set, which is empty",
-        ),
         // The removed content budgets and media choice are unknown options.
         (
             json!({"request_content": true, "confirm_sensitive_capture": true,
@@ -2375,7 +2382,7 @@ fn agent_session_options_are_named_never_inherited() {
     let started = call(
         &mut mcp,
         json!({"document_start": true, "request_content": true,
-            "request_stacks": true,
+            "request_stacks": true, "promise_stacks": true,
             "js_invocation_sites": agent_file, "js_invocation_digests": false,
             "canvas_images": false, "wasm_dispatch": false, "duration_seconds": 7200,
             "fresh_profile": true, "browser_internal": true, "timeout_seconds": 30}),
@@ -2393,6 +2400,7 @@ fn agent_session_options_are_named_never_inherited() {
         ("document_start", json!(true)),
         ("request_content", json!(true)),
         ("request_stacks", json!(true)),
+        ("promise_stacks", json!(true)),
         ("js_invocation_saved_sites", json!(false)),
         ("js_invocation_digests", json!(false)),
         ("canvas_images", json!(false)),
@@ -2427,7 +2435,7 @@ fn agent_session_options_are_named_never_inherited() {
     );
     assert_eq!(
         std::fs::read_to_string(fixture.session("4242").join("stacks")).unwrap(),
-        "1 0 unset\n",
+        "1 0 1\n",
         "named stacks are strict"
     );
     let log = std::fs::read_to_string(launch_logs().last().unwrap()).unwrap();
@@ -2443,7 +2451,13 @@ fn agent_session_options_are_named_never_inherited() {
         context["capture_options"],
         json!({"source":"launcher","request_content":true,
             "canvas_images":false,"request_stacks":true,"document_start":"permitted",
-            "js_invocation":{"state":"armed","count":1,"digests":false}})
+            "js_invocation":{"state":"armed","live":false,"count":1,"digests":false},
+            "wasm_sampling":null})
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4242").join("live")).unwrap(),
+        "unset\n",
+        "a named file is armed as it is"
     );
 
     // The agent sessions' own saved set, written as js_invocation_site_action
@@ -2483,7 +2497,47 @@ fn agent_session_options_are_named_never_inherited() {
     let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
     assert_eq!(
         context["capture_options"]["js_invocation"],
-        json!({"state":"armed","count":2,"digests":true})
+        json!({"state":"armed","live":true,"count":2,"digests":true})
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4243").join("live")).unwrap(),
+        "1\n"
+    );
+    // The session follows the agent's set: a removed site disarms its slot
+    // in the session's copy, and the browser rereads it at the generation.
+    let removed = mcp.request(
+        "tools/call",
+        json!({"name": "js_invocation_site_action", "arguments": {"body":
+            {"action": "remove", "source_sha256": "b".repeat(64), "anchor_offset": 200}}}),
+    );
+    assert_eq!(
+        removed["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&removed)
+    );
+    let slot = |offset: u32, armed: bool| {
+        let entry = site(offset);
+        let at = entry.find(r#""artifact_id""#).unwrap();
+        format!(r#"{}"armed":{armed},{}"#, &entry[..at], &entry[at..])
+    };
+    assert_eq!(
+        std::fs::read_to_string(fields[5]).unwrap(),
+        format!(
+            r#"{{"sites":[{},{}],"version":2}}"#,
+            slot(120, true),
+            slot(200, false)
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4243").join("generation")).unwrap(),
+        "1\n"
+    );
+    let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
+    let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
+    assert_eq!(
+        context["capture_options"]["js_invocation"],
+        json!({"state":"armed","live":true,"count":1,"digests":true})
     );
     assert_eq!(
         context["capture_options"]["document_start"],
@@ -2491,13 +2545,53 @@ fn agent_session_options_are_named_never_inherited() {
     );
     assert_eq!(context["capture_options"]["request_content"], false);
     assert_eq!(context["capture_options"]["request_stacks"], false);
+    let cleared = mcp.request(
+        "tools/call",
+        json!({"name": "js_invocation_site_action", "arguments": {"body":
+            {"action": "clear", "confirm": true}}}),
+    );
+    assert_eq!(
+        cleared["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&cleared)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4243").join("generation")).unwrap(),
+        "2\n"
+    );
+
+    // An empty saved set starts a following session that arms nothing, so
+    // the agent can save its first function while the page runs. Its digests
+    // take the default for armed sites in a session with request content.
+    let empty = call(
+        &mut mcp,
+        json!({"js_invocation_saved_sites": true, "timeout_seconds": 30}),
+    );
+    assert_eq!(empty["result"]["isError"], false, "{}", tool_text(&empty));
+    assert_eq!(empty["result"]["structuredContent"]["session_id"], "4244");
+    assert_eq!(
+        empty["result"]["structuredContent"]["js_invocation_sites_armed"],
+        0
+    );
+    fixture.wait_ended("4243");
+    assert_eq!(
+        std::fs::read_to_string(fixture.session("4244").join("sites")).unwrap(),
+        r#"{"sites":[],"version":2}"#
+    );
+    let context = mcp.request("tools/call", json!({"name": "get_session_context"}));
+    let context: Value = serde_json::from_str(tool_text(&context)).unwrap();
+    assert_eq!(
+        context["capture_options"]["js_invocation"],
+        json!({"state":"armed","live":true,"count":0,"digests":true})
+    );
 
     let ended = mcp.request(
         "tools/call",
         json!({"name": "session_action", "arguments": {"body": {"action": "end", "confirm": true}}}),
     );
     assert_eq!(ended["result"]["isError"], false, "{}", tool_text(&ended));
-    fixture.wait_ended("4243");
+    fixture.wait_ended("4244");
 }
 
 /// The CLI keeps the start tool's gate: request content needs the

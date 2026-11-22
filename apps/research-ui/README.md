@@ -3099,6 +3099,13 @@ The canvas announces this list through `aria-describedby`.
   wider graph opens at reading size at the top of its first band, with the
   whole width in view when it fits, else centred on the busiest entry of that
   band. It never opens as an unreadable overview; the minimap is the overview.
+- The view keeps to the graph as the block graph's does. A drag, a scroll,
+  Shift+arrows, a minimap press, a zoom or a resized canvas stops where half
+  the canvas on each axis still shows the graph, or all of a graph smaller
+  than that. So any edge pans as far as the middle, and the graph is never
+  lost off the canvas with only Fit to bring it back. Both views take the rule
+  from `graphBoundView` in `block_graph.js`.
+  `tools/check-block-graph-ui.mjs` checks each of those in a DOM model.
 - Rows show from 85% zoom.
 - Below that, cards sketch their rows in their rows' colours and paint their
   names at screen size, and band names sit on plates.

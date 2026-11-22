@@ -18,13 +18,13 @@ const BLOCK_GRAPH_CANVAS_BYTES = 32 * 1024 * 1024;
  * pixels: about 8 CSS px at its full size, so a screen of a graph thousands
  * of screens tall is still marked where one can see it. */
 const BLOCK_GRAPH_MINIMAP_MARK = 16;
-/* The share of the stage, on each axis, that a pan, zoom or resize always
- * leaves showing the drawing, or the whole drawing where it is smaller: any
- * edge of a graph pans as far as the middle of the stage, and a graph is
- * never lost off it into empty canvas. */
-const BLOCK_GRAPH_PAN_KEEP = 0.5;
 /* The flow graph's zoom range. The block graph zooms out as far as Fit needs. */
 const GRAPH_ZOOM = Object.freeze({min: 0.02, max: 2.5});
+/* The share of the stage, on each axis, that a pan, zoom or resize of either
+ * graph always leaves showing the drawing, or the whole drawing where it is
+ * smaller: any edge of a graph pans as far as the middle of the stage, and a
+ * graph is never lost off it into empty canvas. */
+const GRAPH_PAN_KEEP = 0.5;
 /* Kinds whose label says what the stroke cannot (a case list, why a target is
  * unknown), drawn always. A true or false arm says it by color and dash, so
  * its label is drawn for the selected block's edges only. */
@@ -67,6 +67,17 @@ function graphZoomAt(view, factor, cx, cy, min = GRAPH_ZOOM.min) {
   const z = Math.min(GRAPH_ZOOM.max, Math.max(min, view.z * factor));
   const gx = view.x + cx / view.z, gy = view.y + cy / view.z;
   return {x: gx - cx / z, y: gy - cy / z, z};
+}
+
+/** `view` moved the least that keeps a `width` by `height` drawing on a
+ * `cssW` by `cssH` stage: on each axis, GRAPH_PAN_KEEP of the view's span of
+ * it, or all of it where it is smaller. */
+function graphBoundView(view, width, height, cssW, cssH) {
+  const axis = (at, size, screen) => {
+    const span = screen / view.z, keep = Math.min(size, span * GRAPH_PAN_KEEP);
+    return Math.min(size - keep, Math.max(keep - span, at));
+  };
+  return {x: axis(view.x, width, cssW), y: axis(view.y, height, cssH), z: view.z};
 }
 
 /** Writes `Laying out with Triskel · N s` as seconds pass. They count on
@@ -178,16 +189,6 @@ function blockGraphSegmentDistance(px, py, ax, ay, bx, by) {
   const t = length ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / length)) : 0;
   return Math.hypot(px - ax - t * dx, py - ay - t * dy);
 }
-/** `view` moved the least that keeps a `width` by `height` drawing on a
- * `cssW` by `cssH` stage: on each axis, BLOCK_GRAPH_PAN_KEEP of the view's
- * span of it, or all of it where it is smaller. */
-function blockGraphBoundView(view, width, height, cssW, cssH) {
-  const axis = (at, size, screen) => {
-    const span = screen / view.z, keep = Math.min(size, span * BLOCK_GRAPH_PAN_KEEP);
-    return Math.min(size - keep, Math.max(keep - span, at));
-  };
-  return {x: axis(view.x, width, cssW), y: axis(view.y, height, cssH), z: view.z};
-}
 /** The scroll offset that shows row `row` (each `rowH` tall) whole in a list
  * `height` px tall that is scrolled to `scroll`: unchanged when it already
  * shows, else the least move. An unmeasured list counts as one row tall. */
@@ -292,7 +293,7 @@ function createBlockGraphView(root, options = {}) {
   };
   // Every change of view asks for a draw, so the view is kept on the drawing here.
   const requestDraw = () => {
-    if (layout && cssW) view = blockGraphBoundView(view, layout.width, layout.height, cssW, cssH);
+    if (layout && cssW) view = graphBoundView(view, layout.width, layout.height, cssW, cssH);
     if (active && !frame) frame = requestAnimationFrame(() => { frame = 0; draw(); });
   };
   /** Rows a card draws: a folded run of structural rows is one summary row. */
@@ -1476,4 +1477,4 @@ function createVmBlockGraph({host, button, getReport, getObservedPath, onReveal}
 }
 
 // The offline check reads the edge kinds and how failures are worded.
-if (typeof module === 'object' && module?.exports) module.exports = {BLOCK_GRAPH_KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView, blockGraphBoundView};
+if (typeof module === 'object' && module?.exports) module.exports = {BLOCK_GRAPH_KIND, blockGraphFailure, blockGraphClipSegment, blockGraphRowInView, graphBoundView};

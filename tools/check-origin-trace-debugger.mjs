@@ -105,6 +105,27 @@ const packageUI = runInNewContext(
   ';({evidencePackageKey,evidencePackageKeyText,evidencePackageSelectionKey,evidencePackageUnavailable,evidencePackageReadBytes,evidencePackageValidationResult,evidencePackageView,createEvidencePackageController})',
   {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,setInterval,clearInterval,fetch},
 );
+// The elapsed-seconds counters of waits with no deadline run on a clock the
+// test advances, so a slow runner cannot leave a counter behind a real sleep.
+function fakeClock() {
+  const timers = new Map();
+  let now = 0, next = 1;
+  return {
+    globals: {Date: {now: () => now}, clearInterval: id => timers.delete(id),
+      setInterval: (fn, ms) => { timers.set(next, {fn, ms, due: now + ms}); return next++; }},
+    advance(ms) {
+      now += ms;
+      for (const [id, timer] of [...timers]) {
+        while (timers.has(id) && timer.due <= now) { timer.due += timer.ms; timer.fn(); }
+      }
+    },
+  };
+}
+const packageClock = fakeClock();
+const packageClockUI = runInNewContext(
+  (await readFile(join(root, 'apps/research-ui/evidence_package.js'), 'utf8')) + ';({createEvidencePackageController})',
+  {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch,...packageClock.globals},
+);
 const packageGoldenBytes = new Uint8Array(await readFile(join(root,'apps/origin-trace-backend/assets/evidence-packages/golden-v1.json')));
 const packageGolden = JSON.parse(new TextDecoder().decode(packageGoldenBytes));
 const packageValid = {protocol_version:1,status:'valid',package_id:packageGolden.package_id,origin:'untrusted_input',authenticity:'not_established',artifact_bytes:'not_present_not_reverified',
@@ -213,11 +234,11 @@ const packageWrongSelection=packageUI.createEvidencePackageController({getSelect
 await packageWrongSelection.export(); assert.equal(packageWrongSelection.model.status,'error'); assert.equal(packageWrongSelection.model.bytes,null);
 // A reply that never arrives has no deadline: it waits, counting seconds, until Cancel.
 let packageSlowChanges=0,packageSlowStarted;
-const packageSlow=packageUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>packageSlowChanges++,
+const packageSlow=packageClockUI.createEvidencePackageController({getSelection:()=>packageSelection,protocol:'http:',onChange:()=>packageSlowChanges++,
   fetcher:async(_url,{signal})=>{packageSlowStarted=true;return new Response(new ReadableStream({start(stream){signal.addEventListener('abort',()=>stream.error(new DOMException('Aborted','AbortError')),{once:true});}}));}});
 const packageSlowRun=packageSlow.export();
 while(!packageSlowStarted)await new Promise(resolve=>setTimeout(resolve,0));
-await new Promise(resolve=>setTimeout(resolve,1100));
+packageClock.advance(1000);
 assert.equal(packageSlow.model.status,'loading');assert.match(packageSlow.model.message,/ 1 s$/);
 packageSlow.cancel();await packageSlowRun;
 assert.equal(packageSlow.model.status,'cancelled'); assert.match(packageSlow.model.message,/Cancelled/); assert.equal(packageSlow.model.bytes,null); assert(packageSlowChanges>=3);
@@ -517,12 +538,15 @@ comparisonController.select(0,comparisonFile(comparisonOriginal));comparisonCont
 comparisonReply=()=>new Response(new Uint8Array(524289));assert.equal(await comparisonController.compare(),false);assert.equal(comparisonController.model.result,null);
 comparisonController.dispose();
 // A comparison has no deadline: it counts seconds until it finishes or Cancel retires it.
+const comparisonClock = fakeClock();
+const comparisonClockUI = runInNewContext(packageSource+'\n'+comparisonSource+'\nRebEvidenceComparison',
+  {TextEncoder,TextDecoder,Uint8Array,AbortController,setTimeout,clearTimeout,fetch,...comparisonClock.globals});
 let comparisonLateReply;
-const comparisonSlow=comparisonUI.createController({fetcher:()=>new Promise(resolve=>{comparisonLateReply=resolve;})});
+const comparisonSlow=comparisonClockUI.createController({fetcher:()=>new Promise(resolve=>{comparisonLateReply=resolve;})});
 comparisonSlow.select(0,comparisonFile(comparisonOriginal));comparisonSlow.select(1,comparisonFile(comparisonOriginal));
 const comparisonSlowRun=comparisonSlow.compare();
 while(!comparisonLateReply)await new Promise(resolve=>setTimeout(resolve,0));
-await new Promise(resolve=>setTimeout(resolve,1100));
+comparisonClock.advance(1000);
 assert.equal(comparisonSlow.model.busy,true);assert.match(comparisonSlow.model.message,/ 1 s$/);
 comparisonSlow.close();
 let comparisonWatchdog;

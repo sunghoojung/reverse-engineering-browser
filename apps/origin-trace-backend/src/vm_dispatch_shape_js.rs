@@ -2514,10 +2514,7 @@ pub(crate) fn worker_command_for(
     test_value: &'static str,
 ) -> std::io::Result<tokio::process::Command> {
     let current = std::env::current_exe()?;
-    let harness = current
-        .parent()
-        .and_then(std::path::Path::file_name)
-        .is_some_and(|name| name == "deps");
+    let harness = test_harness(&current);
     let mut command = tokio::process::Command::new(current);
     command.env_clear();
     #[cfg(test)]
@@ -2557,6 +2554,44 @@ pub(crate) fn worker_command_for(
         command.arg(flag);
     }
     Ok(command)
+}
+
+/// Whether `executable` is a libtest harness, which runs a worker through its
+/// ignored `__reb_javascript_worker` entry rather than a flag. Cargo names a
+/// harness `<crate>-<16 hex digit hash>` and never copies it out under a plain
+/// name, both in `deps/` and in the `build/<package>/<hash>/out/` layout of
+/// newer releases, so the name says so where the directory no longer does. A
+/// built program, the app's bundled copy included, has no hash in its name.
+fn test_harness(executable: &std::path::Path) -> bool {
+    executable
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .and_then(|name| name.rsplit_once('-'))
+        .is_some_and(|(_, hash)| hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+#[cfg(test)]
+#[test]
+fn test_harnesses_are_known_by_name_in_either_cargo_layout() {
+    use std::path::Path;
+    for harness in [
+        "target/debug/deps/origin_trace_backend-109da3ca5bd348d7",
+        "target/debug/build/origin-trace-backend/b3094a8f315928ed/out/origin_trace_backend-b3094a8f315928ed",
+        "target/debug/deps/mcp_stdio-0123456789abcdef.exe",
+    ] {
+        assert!(test_harness(Path::new(harness)), "{harness}");
+    }
+    for program in [
+        "target/debug/origin-trace-backend",
+        "target/release/reb-api",
+        "target/debug/origin-trace-vm",
+        "build/Origin Trace.app/Contents/MacOS/OriginTraceBackend",
+        "target/debug/deps/origin_trace_backend-109da3ca5bd348",
+        "target/debug/deps/origin_trace_backend-109da3ca5bd348zz",
+    ] {
+        assert!(!test_harness(Path::new(program)), "{program}");
+    }
+    assert!(test_harness(&std::env::current_exe().unwrap()));
 }
 
 fn worker_deadline(source_bytes: usize) -> std::time::Duration {

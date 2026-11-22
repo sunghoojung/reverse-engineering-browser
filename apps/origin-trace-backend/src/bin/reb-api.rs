@@ -1198,6 +1198,14 @@ async fn run() -> Result<i32, Box<dyn std::error::Error>> {
             if binary && output.is_none() {
                 return Err("Binary responses require --output PATH or --output -".into());
             }
+            // An existing output path is refused before any request, so no
+            // call runs only to have its answer thrown away. The write itself
+            // still refuses a file created in the meantime.
+            if let Some(path) = output.as_deref().filter(|path| *path != "-")
+                && std::fs::symlink_metadata(path).is_ok()
+            {
+                return Err(format!("--output {path} already exists. No request was sent").into());
+            }
             let mut values = BTreeMap::new();
             for param in params {
                 let (name, value) = param

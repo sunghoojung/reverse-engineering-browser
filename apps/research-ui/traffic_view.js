@@ -530,11 +530,6 @@ function trafficFailedRequestCount(requests) {
   return count;
 }
 
-function trafficFailedRequestNotice(requests) {
-  const count = trafficFailedRequestCount(requests);
-  return count > 0 ? `Failed requests: ${count}.` : '';
-}
-
 // Selection does not change row content, order or geometry. Keep keyboard
 // movement independent of retained-body search and avoid layout reads/writes.
 function renderTrafficRowSelection(container, selectedId) {

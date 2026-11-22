@@ -21,6 +21,7 @@
     <link rel="stylesheet" href="session_panel.css">
     <link rel="stylesheet" href="debugger_sidebar.css">
     <link rel="stylesheet" href="debugger_pause.css">
+    <link rel="stylesheet" href="evidence_chips.css">
   </head>
   <body>
     <div class="app">
@@ -919,16 +920,16 @@
       </dialog>
 
       <footer class="statusbar">
-        <span id="broker-status" class="broker-status">connecting to evidence</span>
+        <span id="broker-status" class="statusbar-connection">Connecting…</span>
         <span id="request-summary"><span id="request-count">0</span> <span id="request-count-label">requests loaded</span></span>
-        <span id="sample-status">Waiting for session mode</span>
-        <span id="gap-status">0 missing event IDs</span>
-        <span id="updated-status">waiting for evidence</span>
-        <span class="local-only">local only</span>
+        <span id="gap-status" class="statusbar-gaps" hidden></span>
+        <span class="local-only"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.75 5.5V4a2.25 2.25 0 0 1 4.5 0v1.5M2.75 5.5h6.5v4.75h-6.5z"/></svg>Local only</span>
       </footer>
     </div>
 
     <script src="command_palette.js"></script>
+    <!-- Shared chips, notices and the evidence time formatter, before every view that draws them. -->
+    <script src="evidence_chips.js"></script>
     <!-- The debugger sidebar's section registry, before any script that adds a section. -->
     <script src="debugger_sidebar.js"></script>
     <script src="app_state.js"></script>

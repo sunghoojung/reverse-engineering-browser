@@ -78,9 +78,9 @@ function response(body, status = 200, etag = 'analysis-a') {
 }
 
 async function loadHarness(root) {
-  const [app, model, initial] = await Promise.all(['app.js', 'evidence_models.js', 'app_state.js']
+  const [app, chips, model, initial] = await Promise.all(['app.js', 'evidence_chips.js', 'evidence_models.js', 'app_state.js']
     .map(name => readFile(join(root, 'apps/research-ui', name), 'utf8')));
-  const code = model + '\n' + initial.slice(0, initial.indexOf('      const elements =')) + '\n' +
+  const code = chips + '\n' + model + '\n' + initial.slice(0, initial.indexOf('      const elements =')) + '\n' +
     section(app, '      function acceptVmOpcodeWorkspace(', '      function setNetworkNotice(') +
     section(app, '      function textElement(', '      function emptyListboxOption(') +
     section(app, '      function setVmNotice(', '      function requestOriginLabel(') +

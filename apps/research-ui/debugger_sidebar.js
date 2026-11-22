@@ -89,13 +89,13 @@ function debuggerButton(text, className, onClick) {
   return button;
 }
 
+function debuggerCount(value) {
+  return globalThis.RebEvidenceChips?.formatCount(value) ?? String(value);
+}
+
 function debuggerTime(ns) {
-  try {
-    const micros = BigInt(ns) / 1000n;
-    return `${(micros / 1000000n).toString()}.${(micros % 1000000n).toString().padStart(6, '0')} s`;
-  } catch {
-    return 'time not recorded';
-  }
+  const time = globalThis.RebEvidenceChips?.formatEvidenceTime(ns);
+  return time?.exact ? time.text : 'time not recorded';
 }
 
 function debuggerRecordKey(record) {
@@ -863,7 +863,7 @@ function debuggerUnread(view) {
 function debuggerGapNote(view) {
   const gaps = view.hooks.sequenceGaps?.();
   return typeof gaps === 'bigint' && gaps > 0n
-    ? debuggerNote(`${gaps} sequence-gap IDs in the retained window: records may be missing, so a missing row is unknown rather than absent.`, 'gap')
+    ? debuggerNote(`${debuggerCount(gaps)} sequence-gap IDs in the retained window: records may be missing, so a missing row is unknown rather than absent.`, 'gap')
     : null;
 }
 
@@ -1295,7 +1295,8 @@ function debuggerObservationsSection() {
     const add = (label, value) => { fields.append(debuggerNode('dt', '', label), debuggerNode('dd', '', value)); };
     add('Operation', record.type);
     add('Category', debuggerCategory(record.type));
-    add('Time', `${debuggerTime(record.monotonic_time_ns)} (monotonic)`);
+    add('Time', debuggerTime(record.monotonic_time_ns));
+    add('Monotonic (ns)', record.monotonic_time_ns);
     add('Source', `renderer process ${record.process_id}, frame ${record.frame_id}`);
     add('Identity', `session ${record.session_id} · process ${record.process_id} · sequence ${record.sequence_number}`);
     if (record.parent_event_id !== '0') add('Parent', `sequence ${record.parent_event_id}`);
@@ -1437,15 +1438,15 @@ function debuggerObservationsSection() {
         notes.push(debuggerNote(`Observation #${wanted.record.sequence_number} of renderer ${wanted.record.process_id} is not among these ${kind}. Show older records reads older ones, and it is chosen once read.`, 'warning'));
       }
       const malformed = answer.observations_malformed + observations.refused + (loaded?.refused ?? 0);
-      if (malformed > 0) notes.push(debuggerNote(`${malformed} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
+      if (malformed > 0) notes.push(debuggerNote(`${debuggerCount(malformed)} ${malformed === 1 ? 'record' : 'records'} in these reads ${malformed === 1 ? 'was' : 'were'} malformed and ${malformed === 1 ? 'is' : 'are'} not shown.`, 'warning'));
       for (const gap of answer.observation_budget_gaps.slice(0, 2)) {
-        notes.push(debuggerNote(`Renderer ${gap.process_id}, from an earlier build, reached its 1,024 observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
+        notes.push(debuggerNote(`Renderer ${gap.process_id}, from an earlier build, reached its ${debuggerCount(1024)} observation records in frame ${gap.frame_id} (gap #${gap.sequence_number}); its later records were refused until the next capture.`, 'gap'));
       }
       const gap = debuggerGapNote(view);
       if (gap) notes.push(gap);
       if (observations.olderError) notes.push(debuggerNote(`Older records were not read: ${observations.olderError}`, 'warning'));
       if (current && loaded?.dropped) {
-        notes.push(debuggerNote(`The list keeps at most ${DEBUGGER_SIDEBAR.rows.toLocaleString('en-US')} records, so ${loaded.dropped.toLocaleString('en-US')} older ${loaded.dropped === 1 ? 'row was' : 'rows were'} dropped as newer ones arrived; get_events pages them.`, 'warning'));
+        notes.push(debuggerNote(`The list keeps at most ${debuggerCount(DEBUGGER_SIDEBAR.rows)} records, so ${debuggerCount(loaded.dropped)} older ${loaded.dropped === 1 ? 'row was' : 'rows were'} dropped as newer ones arrived; get_events pages them.`, 'warning'));
       }
       debuggerReplace(controls.notes, notes);
       const pin = current ? loaded?.pinned : null;

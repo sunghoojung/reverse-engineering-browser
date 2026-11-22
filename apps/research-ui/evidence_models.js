@@ -292,43 +292,103 @@
       }
 
       function namedGapItems(gaps, describe) {
-        const items = gaps.slice(0, 4).map(gap => `${describe(gap)}${gap.count > 1n ? ` ×${gap.count}` : ''}`);
-        if (gaps.length > 4) items.push(`${gaps.length - 4} more ${gaps.length === 5 ? 'reason' : 'reasons'}`);
+        const items = gaps.slice(0, 4).map(gap => `${describe(gap)}${gap.count > 1n ? ` ×${RebEvidenceChips.formatCount(gap.count)}` : ''}`);
+        if (gaps.length > 4) items.push(`${RebEvidenceChips.formatCount(gaps.length - 4)} more ${gaps.length === 5 ? 'reason' : 'reasons'}`);
         return items.join('; ');
       }
 
-      // Scoped coverage sentences; the raw reason is always shown as text.
-      function namedGapNotice(gaps, scope) {
-        const budgets = gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
-        const filters = gaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason));
-        const losses = gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason));
-        const messages = [];
-        if (losses.length) {
-          const categories = [...new Set(losses.map(gap => gap.category))].join('/');
-          messages.push(`Capture reported lost ${categories} evidence in ${scope}: ${namedGapItems(losses, gap => gap.reason)}.`);
+      // The glossary for reason chips: each named gap's label and its one-line
+      // meaning. A reason not listed here is a reported loss and renders as
+      // its own words.
+      globalThis.RebEvidenceChips?.defineReasons(Object.fromEntries([
+        ...[...samplingBudgetGapLabels].map(([reason, label]) => [reason, {label: `${label} budget`, kind: 'limit',
+          meaning: wasmWindowBudgetReasons.has(reason)
+            ? 'This second\'s sampling window filled: retained samples are exact, later executions keep only a compact overflow identity (past its ring, a count), and the next second samples again.'
+            : 'The sampling budget filled: retained observations are exact and later ones were not sampled.'}]),
+        ...[...samplePolicyFilterGapLabels].map(([reason, label]) => [reason, {label: `${label} excluded`, kind: 'policy',
+          meaning: 'The sample policy excluded these executions: none was sampled or took a sample slot.'}]),
+        ['service_worker_end_lost', {label: 'Service worker end lost', kind: 'loss',
+          meaning: 'A service worker request\'s end record was lost, so its row reads End lost instead of Pending.'}]
+      ]));
+
+      // Every class of missing or limited evidence the summaries count, one
+      // entry per class and per named category, for the status bar's gap chip
+      // and the Traffic and VM notices. A zero count is no entry, and a
+      // saturated count is a lower bound.
+      const namedGapClassDefinitions = [
+        {kind: 'lost', tone: 'loss', noun: ['lost', 'lost'], label: 'Reported lost',
+          matches: gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason),
+          detail: 'A capture stage reported this evidence as lost.'},
+        {kind: 'budget', tone: 'limit', noun: ['sampling budget', 'sampling budgets'], label: 'Sampling budgets',
+          matches: gap => samplingBudgetGapLabels.has(gap.reason),
+          detail: 'Retained observations are exact; later ones were not sampled.'},
+        {kind: 'policy', tone: 'limit', noun: ['policy exclusion', 'policy exclusions'], label: 'Sample policy',
+          matches: gap => samplePolicyFilterGapLabels.has(gap.reason),
+          detail: 'The sample policy excluded these executions; none took a sample slot.'}
+      ];
+      function captureGapClasses({sequenceGaps = 0n, queueDrops = 0n, malformedLines = 0, namedGaps = []} = {}) {
+        const classes = [];
+        if (sequenceGaps > 0n) {
+          classes.push({key: 'sequence', tone: 'loss', count: sequenceGaps, atLeast: state.sequenceGapsSaturated === true,
+            noun: ['sequence gap', 'sequence gaps'], label: 'Sequence gaps',
+            detail: 'Sequence IDs absent between the first and last record of a process; a late arrival can still close one.'});
         }
-        if (filters.length) {
-          messages.push(`Sample policy excluded observations in ${scope}: ${namedGapItems(filters, gap => `${samplePolicyFilterGapLabels.get(gap.reason)} (${gap.reason})`)}. Those executions were not sampled and did not consume a sample slot.`);
+        if (queueDrops > 0n) {
+          classes.push({key: 'drops', tone: 'loss', count: queueDrops, atLeast: state.queueDropsSaturated === true,
+            noun: ['queue drop', 'queue drops'], label: 'Queue drops',
+            detail: 'Records a full native queue dropped; they can overlap sequence gaps.'});
         }
-        if (budgets.length) {
-          messages.push(`Sampling budget reached in ${scope} for ${namedGapItems(budgets, gap => `${samplingBudgetGapLabels.get(gap.reason)} (${gap.reason})`)}. Retained observations are exact; later ones were not sampled.`);
-          if (budgets.some(gap => wasmWindowBudgetReasons.has(gap.reason))) {
-            messages.push('Wasm sampling is paced per second: executions past a full window or function allowance keep a compact identity in an overflow record, up to the ring, and identities past the ring are a count on that record, not another full observation. The next second samples again.');
+        if (malformedLines > 0) {
+          classes.push({key: 'unreadable', tone: 'loss', count: BigInt(malformedLines), atLeast: false,
+            noun: ['unreadable line', 'unreadable lines'], label: 'Unreadable lines',
+            detail: 'Stored lines that are not valid events were skipped; no count includes them.'});
+        }
+        for (const definition of namedGapClassDefinitions) {
+          const matching = namedGaps.filter(definition.matches);
+          for (const category of [...new Set(matching.map(gap => gap.category))]) {
+            const gaps = matching.filter(gap => gap.category === category);
+            classes.push({key: `${definition.kind}:${category}`, tone: definition.tone, count: namedGapTotal(gaps), atLeast: false,
+              noun: definition.noun, suffix: `(${category})`, label: `${definition.label} · ${category}`, detail: definition.detail,
+              reasons: gaps.map(gap => ({token: gap.reason, count: gap.count}))});
           }
         }
-        return messages.join(' ');
+        return classes;
       }
 
-      function namedGapStatusLabel(gaps) {
-        const parts = [];
-        const push = (matching, singular, plural) => {
-          const total = namedGapTotal(matching);
-          if (total > 0n) parts.push(`${total} ${total === 1n ? singular : plural} (${[...new Set(matching.map(gap => gap.category))].join('/')})`);
-        };
-        push(gaps.filter(gap => samplingBudgetGapLabels.has(gap.reason)), 'sampling budget reached', 'sampling budgets reached');
-        push(gaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason)), 'sample policy exclusion', 'sample policy exclusions');
-        push(gaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason)), 'reported capture loss', 'reported capture losses');
-        return parts.map(part => ` · ${part}`).join('');
+      // The summaries' scope as a panel heading.
+      function eventCountScopeTitle() {
+        return state.eventCountScope === 'bounded_tail' ? 'newest 64 MiB'
+          : state.eventCountScope === 'store' ? 'stored capture' : 'visible events';
+      }
+
+      // A chip that opens one class: its scope, its meaning and its reasons.
+      function captureGapClassChip(gapClass, extra = {}) {
+        const scope = eventCountScopeLabel();
+        const text = `${gapClass.atLeast ? '≥' : ''}${RebEvidenceChips.formatCount(gapClass.count)} ${gapClass.count === 1n ? gapClass.noun[0] : gapClass.noun[1]}${gapClass.suffix ? ` ${gapClass.suffix}` : ''}`;
+        return {key: gapClass.key, tone: gapClass.tone, text, name: `${text} in ${scope}`,
+          breakdown: {title: gapClass.label, scope: eventCountScopeTitle(), detail: gapClass.detail, reasons: gapClass.reasons ?? [],
+            actions: extra.actions ?? []}};
+      }
+
+      // The status bar's one gap chip: the total of every class, in the tone
+      // of the worst, opening one row per class. Nothing when every count is
+      // zero. A single class keeps its own noun.
+      function captureGapStatusChip(classes, actions = []) {
+        if (!classes.length) return null;
+        if (classes.length === 1) {
+          const single = captureGapClassChip(classes[0], {actions});
+          return {...single, key: 'gaps', prefer: 'above'};
+        }
+        const total = classes.reduce((sum, gapClass) => sum + gapClass.count, 0n);
+        const atLeast = classes.some(gapClass => gapClass.atLeast);
+        const text = `${atLeast ? '≥' : ''}${RebEvidenceChips.formatCount(total)} gaps`;
+        const overlap = classes.some(gapClass => gapClass.key === 'drops') && classes.some(gapClass => gapClass.key === 'sequence');
+        return {key: 'gaps', tone: classes.some(gapClass => gapClass.tone === 'loss') ? 'loss' : 'limit', text, prefer: 'above',
+          name: `${text} in ${eventCountScopeLabel()}`,
+          breakdown: {title: 'Capture gaps', scope: eventCountScopeTitle(),
+            rows: classes.map(gapClass => ({label: gapClass.label, count: gapClass.count, atLeast: gapClass.atLeast, tone: gapClass.tone,
+              detail: gapClass.detail, reasons: gapClass.reasons})),
+            note: overlap ? 'Counts can overlap: a queue drop can also leave a sequence gap.' : '', actions}};
       }
 
       function isCaptureTotal(value) {
@@ -379,22 +439,14 @@
         state.eventMalformedLines = body.event_window?.malformed_lines ?? 0;
       }
 
-      function eventGapLabel(gapCount, reportedDrops, namedGaps = []) {
-        const gaps = `${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount}`;
-        const drops = `${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops}`;
-        return `${gaps} sequence-gap IDs (${eventCountScopeLabel()})` +
-          (reportedDrops > 0n ? ` · ${drops} reported queue ${reportedDrops === 1n ? 'drop' : 'drops'} (may overlap)` : '') +
-          namedGapStatusLabel(namedGaps);
-      }
-
       // namedGaps must already be limited to fingerprint categories.
       function fingerprintCoverageNotice(eventsLimited, displayLimited, displayLimit, gapCount, reportedDrops, scope = 'the stored capture', namedGaps = []) {
         const limits = [];
         if (eventsLimited) limits.push('the event window is capped');
-        if (displayLimited) limits.push(`only the newest ${displayLimit} matching events are rendered`);
+        if (displayLimited) limits.push(`only the newest ${RebEvidenceChips.formatCount(displayLimit)} matching events are rendered`);
         if (scope === 'the scanned tail') limits.push('only the newest 64 MiB is scanned');
-        if (gapCount > 0n) limits.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${gapCount} sequence-gap IDs were observed in ${scope}`);
-        if (reportedDrops > 0n) limits.push(`${state.queueDropsSaturated ? 'at least ' : ''}${reportedDrops} queue drops were reported in ${scope} (may overlap sequence gaps)`);
+        if (gapCount > 0n) limits.push(`${state.sequenceGapsSaturated ? 'at least ' : ''}${RebEvidenceChips.formatCount(gapCount)} sequence-gap IDs were observed in ${scope}`);
+        if (reportedDrops > 0n) limits.push(`${state.queueDropsSaturated ? 'at least ' : ''}${RebEvidenceChips.formatCount(reportedDrops)} queue drops were reported in ${scope} (may overlap sequence gaps)`);
         const filters = namedGaps.filter(gap => samplePolicyFilterGapLabels.has(gap.reason));
         const losses = namedGaps.filter(gap => !samplingBudgetGapLabels.has(gap.reason) && !samplePolicyFilterGapLabels.has(gap.reason));
         const budgets = namedGaps.filter(gap => samplingBudgetGapLabels.has(gap.reason));
@@ -2124,9 +2176,9 @@
           let total = 0;
           for (const count of codes.values()) total += count;
           const byCode = [...codes].sort((left, right) => right[1] - left[1] || (left[0] < right[0] ? -1 : 1))
-            .map(([code, count]) => `${code} ${count.toLocaleString('en-US')}`).join(', ');
+            .map(([code, count]) => `${code} ${RebEvidenceChips.formatCount(count)}`).join(', ');
           vmAnalysisFailureNotices.set(document, total === 0 ? ''
-            : `${total.toLocaleString('en-US')} ${total === 1 ? 'artifact' : 'artifacts'} could not be analyzed (${byCode}).`);
+            : `${RebEvidenceChips.formatCount(total)} ${total === 1 ? 'artifact' : 'artifacts'} could not be analyzed (${byCode}).`);
         }
         return vmAnalysisFailureNotices.get(document);
       }

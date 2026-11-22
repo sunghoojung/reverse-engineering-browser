@@ -1123,5 +1123,25 @@ await check('showObservation waits for Show older to reach its record', async ()
   ui.close();
 });
 
+// Loss counts read in the locale grouping the status bar uses (75,511 in
+// English), and row times are session-relative from the shared formatter.
+await check('loss counts and row times use the shared evidence formatters', async () => {
+  const chips = createRequire(import.meta.url)(join(root, 'apps/research-ui/evidence_chips.js'));
+  const store = createStore(3);
+  const answer = store.answer;
+  store.answer = parameters => ({...answer(parameters), observations_malformed: 75511});
+  chips.setTimeOrigin(String(1e9), 'store');
+  const ui = mount({store, globals: {RebEvidenceChips: chips, shownSequenceGaps: () => 1234567n}});
+  ui.open();
+  await until(() => /malformed/.test(ui.text('.debugger-observation-notes')), 'the loss notes');
+  const notes = ui.text('.debugger-observation-notes');
+  assert.match(notes, new RegExp(`${chips.formatCount(75511)} records in these reads were malformed`));
+  assert.match(notes, new RegExp(`${chips.formatCount(1234567n)} sequence-gap IDs in the retained window`));
+  if (new Intl.NumberFormat().resolvedOptions().locale.startsWith('en')) assert.match(notes, /75,511 records.*1,234,567 sequence-gap IDs/);
+  assert.match(ui.rows('#debugger-observations')[0].textContent, /\+0\.000 s · /, 'the newest row is 2 ns after the first stored record');
+  chips.setTimeOrigin(null);
+  ui.close();
+});
+
 console.log(`PASS debugger sidebar: ${results.length} cases with real timers (offline DOM model; no rendered layout claimed)`);
 for (const name of results) console.log(`  ${name}`);

@@ -2736,6 +2736,7 @@ impl RequestIndex {
                 Position {
                     epoch: self.empty_epoch.clone(),
                     indexed_to: 0,
+                    scanned_to: 0,
                     file_end: 0,
                     reopened: false,
                 }
@@ -4301,7 +4302,18 @@ mod tests {
     fn write(path: &Path, store: &Store) {
         fs::write(path, store.bytes()).unwrap();
     }
+    /// Indexes the store to its end. A read folds new records for at most
+    /// `READ_FOLD` and answers from what is indexed, so a test that expects
+    /// an answer over the whole store catches up first instead of racing that
+    /// slice on a loaded machine.
+    fn catch_up(index: &mut RequestIndex) {
+        index
+            .refresh(Instant::now() + Duration::from_secs(120))
+            .unwrap();
+        assert!(index.is_caught_up());
+    }
     fn page(index: &mut RequestIndex, raw: &str) -> Value {
+        catch_up(index);
         let query = RequestQuery::parse(&Query::new(raw), raw).unwrap();
         match index.respond(&query, None).unwrap() {
             Answer::Document(document, _) => document,
@@ -5144,6 +5156,7 @@ mod tests {
         );
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
+        catch_up(&mut index);
         let range = index.member_range(Some("1"), None, "5").unwrap().unwrap();
         assert!(
             range.first >= renderer_end,
@@ -5292,6 +5305,7 @@ mod tests {
         let path = root.path().join("events.jsonl");
         write(&path, &fixture());
         let mut index = RequestIndex::new(&path);
+        catch_up(&mut index);
         let query = RequestQuery::parse(&Query::new(""), "").unwrap();
         let Answer::Document(_, tag) = index.respond(&query, None).unwrap() else {
             panic!("document")
@@ -5322,6 +5336,7 @@ mod tests {
             .unwrap()
             .write_all(&late.bytes())
             .unwrap();
+        catch_up(&mut index);
         let Answer::Document(document, _) = index.respond(&query, Some(&tag)).unwrap() else {
             panic!("a grown store answers again")
         };
@@ -5339,6 +5354,7 @@ mod tests {
         response_bodies(&mut store);
         write(&path, &store);
         let mut index = RequestIndex::new(&path);
+        catch_up(&mut index);
         let counts = index.response_bodies().unwrap();
         assert_eq!(counts["complete"], true);
         let cases = counts["cases"].as_object().unwrap();

@@ -64,14 +64,16 @@ instrumented Brave and is not established by these offline checks.
 [live acceptance](../docs/development/paired-release.md#7-live-acceptance)
 through a Brave built from this tree. It serves the owned fixtures in
 `live_acceptance/` on 127.0.0.1, plus `localhost` at the same port as a second
-site, and starts one visibly labeled `--localhost-only` session per kind:
+site, and starts one visibly labeled `--localhost-only` session per kind, each
+with `--fresh-profile` so no browser state carries from one kind to the next:
 
 | Session | Start | Areas |
 | --- | --- | --- |
-| `content` | The runbook's content flags, promise stacks on | baseline, #425 tabs, #427 headers, #428 bodies, #429 stacks, #430 cookies, #434 phase 1 debugger, #436 limits |
-| `budget` | The content flags with 1 MiB request and response budgets | #428 and #436 budgets run out and are shown |
+| `content` | The runbook's content flags, with `--promise-stacks` | baseline, #425 tabs, #427 headers, #428 bodies, #429 stacks, #430 cookies, #434 phase 1 debugger, #436 limits, Wasm sampling windows and reset |
+| `volume` | The content flags | #428 and #436: over 256 MiB of request and 512 MiB of response bodies, each over 64 MiB, a 24 MiB script and 5,000 POSTs kept whole, while the browser process's footprint is measured against the same page in the same Brave without a session |
+| `reserve` | The content flags, with `REB_ARTIFACT_DISK_RESERVE_MIB` 1 TiB above the free space | #436: every body is refused for the disk reserve and named so in its record, row and the session summary |
 | `metadata` | Without `--request-content`, `--confirm-sensitive-capture` and `--canvas-images` | No header, cookie or body value is recorded; an `eval` frame reports `source_not_retained` |
-| `no-stacks` | Without `--request-stacks` | No stack walk runs |
+| `no-stacks` | `--request-stacks=false` in place of `--request-stacks` | No stack walk runs |
 
 It drives each page with `session_action` `open_url` (a trusted click opens the
 #425 popup), compares the stored evidence with the requests the fixture server
@@ -121,6 +123,18 @@ unchanged pins/overlays/patch inventory and ordered replay before changing the
 verified destination. Private before/after backups and an audit permit checked
 recovery; unknown edits and conflicting receipts are preserved. See
 [the integrated build guide](../docs/development/integrated-brave-build.md).
+
+## Long-session evidence fixture
+
+`long-session-fixture.py OUT` writes a deterministic stored session from authored
+data only: an early Wasm module, the runtime read that starts an early request and
+that request's renderer and browser records joined by Origin Trace edges, then
+200,000 newer requests, runtime reads and 300,000 JavaScript artifacts (about
+450 MB of events; `--requests` and `--artifacts` change the counts). A reader that
+keeps only a newest window, a first page or a fixed number of rows loses the early
+records, so serve it with `origin-trace-backend --store OUT/events.jsonl
+--trace-store OUT/origin-trace.jsonl --artifacts OUT/artifacts` and check that
+reb-api, MCP and the app reach them.
 
 ## Native broker allocation benchmarks
 

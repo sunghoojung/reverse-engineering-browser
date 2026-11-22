@@ -14,34 +14,73 @@ pauses, no value is read, and no debugger protocol is used.
 Rules are armed per document through the live native Console connection
 (`runtime` command `watch`), pinned to that document's frame and the current
 capture configuration. A new `watch` replaces the set; a refused one leaves
-nothing armed. Navigation, a new configuration, `unwatch`, or a Console Stop
-(which sends `unwatch` first) disarms them. A lost backend connection leaves
-them armed until navigation or the configuration ends. Records need an active
-capture session; without one the Console replies with an error and arms
-nothing. `get_native_debugger` reports the rules the renderer confirmed, the
+nothing armed on that document. Navigation, a new configuration, `unwatch`,
+or a Console Stop (which sends `unwatch` first) disarms them. A lost backend
+connection leaves them armed until navigation or the configuration ends.
+Records need an active capture session; without one the Console replies with
+an error and arms nothing. `get_native_debugger` reports the rules the
+renderer confirmed (`watch.armed`), the kept scope (`watch.kept`), the
 Console documents, recorded workers and observed frames (`threads`), and the
 newest 32 records decoded.
 
-Three limits follow from arming through a live document, and each one makes a
-wait time out with nothing missing from the store, so every place that arms a
-rule or waits on one states them:
+### Kept rules
 
-- Only the armed document's main thread matches. Workers, other frames and
-  same-process iframes never record, and one document is armed at a time.
-- Navigation of that document clears the rules.
-- Rules cannot be armed ahead of a page load. What a new page does before its
-  rules are armed is not observed.
+`watch` with `keep: true` also keeps the rules for every later document of
+the armed document's exact origin and frame kind (top or child), in any tab
+and any renderer process. The scope reuses the document-start rule shape: one
+`url::Origin` serialization and one frame kind, never a pattern. The browser
+reads both from the armed document itself after its renderer confirmed the
+rules, so a command never names an origin. DOM rules name one document's
+nodes and stay with that document; a set of only DOM rules keeps nothing. The
+reply's `kept` names the origin and frame kind kept, or is null when nothing
+is.
+
+The browser holds the scope for the Console session and sends it on each
+renderer's probe channel, the channel-associated interface that also carries
+its capture configuration, before that renderer is configured. Each renderer
+rebuilds the rules and refuses the whole scope when one would not fit its
+tables. A document of that origin and kind is armed when its main-world
+context is created, after any document-start snippet and before the
+document's own scripts, including inline ones; a commit that keeps the
+initial empty document's window is armed when Blink clears that window. So a
+reload or a navigation is observed from its first script. Documents that
+already exist when the scope arrives are not armed by it.
+
+A later `watch` replaces the scope, and one without `keep` clears it. A
+replacement for the same origin and kind gives the documents it armed the new
+rules at once; one for another origin disarms them. `unwatch` forgets the
+scope even when the document it was armed from has navigated, and so does a
+Console Stop and the end of the Console session.
+
+Each renderer holds the Console's own arm of one document and every document
+the scope armed, sorted by frame id, so a hook finds its document by binary
+search. The union of their kinds is the one relaxed load every hook takes
+first, so a renderer with nothing armed pays only that.
+
+Two limits follow from arming through documents, and each one makes a wait
+time out with nothing missing from the store, so every place that arms a rule
+or waits on one states them:
+
+- Only the main thread of an armed document matches. Workers and documents
+  no rule is armed on never record.
+- Without `keep`, navigation of that document clears the rules, and what a
+  new page does before its rules are armed is not observed. With `keep`,
+  documents that were already open when the rules were kept are not armed.
 
 | Rule | Bound |
 | --- | --- |
-| `requests`: `url_contains` (1-256 bytes) and optional `method` | 8 |
-| `events`: event type names (1-27 bytes, ASCII) | 16 |
+| `requests`: `url_contains` (1-256 bytes) and optional `method` | 32 |
+| `events`: event type names (1-27 bytes, ASCII) | 64 |
 | `timers`, `csp`: on or off | - |
 | `exceptions`: `uncaught` or `all` | - |
-| `dom`: element handle with `attributes`, `subtree`, `removal` | 4 nodes, by Blink `DOMNodeId` |
+| `dom`: element handle with `attributes`, `subtree`, `removal` | 32 nodes, by Blink `DOMNodeId` |
 
-Each configuration admits at most 1,024 observation records per renderer;
-the next refused record leaves one `debugger_observation_budget` gap.
+These bound the renderer's rule tables, and a set they cannot hold is refused
+at arming. Records have no count: every match of an armed rule is recorded
+for as long as the rules stay armed, and a full probe queue counts its drops
+like any other record. Renderers from earlier builds admitted at most 1,024
+observation records per configuration and left one
+`debugger_observation_budget` gap for the rest; such gaps are still read.
 
 ## Reading observations
 
@@ -50,11 +89,15 @@ operation: `type` (one of the six below), a thread scope of `session_id`,
 `process_id` and `frame_id` together, `before` (a byte cursor from
 `observations_query.next_before`) and `limit` (1 to 256). The scope matches the
 record envelope exactly. Console documents carry no native frame ID, so the
-scope names a `threads.observed` frame: the session, renderer and frame of the
-observation records among the newest 2,048 records that are observations or
-gaps of any kind, within the newest 64 MiB of the store, at most 64.
-`observation_budget_gaps` lists the newest `debugger_observation_budget` gaps
-(above) in that scan, at most 16.
+scope names a `threads.observed` frame: the session, renderer and frame of
+every valid observation record of the store, newest first. The event index
+(`events.jsonl.events-v1`, layout 4) keeps them as it folds the store, beside
+`threads.workers` (every worker that started a request) and
+`observation_budget_gaps` (every `debugger_observation_budget` gap, above,
+from earlier builds only), so a frame observed early in a long session is
+still listed. `threads.coverage` says what they cover: scope `store` once the
+index has caught up, else its indexed prefix, which the backend's indexer
+extends every second.
 
 A filtered or cursor `get_events` read and every `wait_for_events` put
 `debugger_observation` beside the hex payload of each record of types 40 to
@@ -104,12 +147,14 @@ second look:
 | `source_limit` (deferred) | The page's sites name more than 4 scripts not yet resolved | Read the same cursor again: kept sites cost nothing, so the next 4 scripts are read, and the page's tag never matches a later read while it holds one. A smaller `limit` names fewer scripts. |
 | `site_read_failed` (deferred) | The script identities or the artifact manifest could not be read, or the event store or manifest was replaced during the read | Read again |
 | `source_artifact_missing` | The script's source is retained but its artifact has not landed, or never will (a lost artifact channel, a rejected frame) | Read again after the artifact lands; nothing is re-read until the manifest grows |
-| `script_identity_outside_scan` | The request index has not folded the script's identity yet, or holds its 16,384 identities and keeps no more | Read again once the index moves (it folds 64 MiB a step, and the backend's own schedule refreshes it every 30 seconds); `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
+| `script_identity_outside_scan` | The request index has not folded the script's identity yet: it is still catching up with the store | Read again once the index moves (the backend's indexer folds new records in the background); while it is behind, `get_request_stack` with `stack_read` also scans the newest 4,096 identities of the store's newest 64 MiB |
 
 `stack_read` is exactly the arguments of the `get_request_stack` read named by
-`stack_read_operation`, passed as it is. That read covers the newest 64 MiB of
-the store, so for an older record it answers `outside_scan`; the site on the
-event page does not depend on it.
+`stack_read_operation`, passed as it is. That read finds the record by its
+`(session, process, sequence)` identity anywhere in the store through the event
+index (`events.jsonl.events-v1`); it answers `outside_scan` with `index_behind`
+only while that index is still catching up. The site on the event page does
+not depend on it.
 
 These fields are returned at every MCP permission level, `read-only`
 included, where the hex payload is withheld: none is captured content. A

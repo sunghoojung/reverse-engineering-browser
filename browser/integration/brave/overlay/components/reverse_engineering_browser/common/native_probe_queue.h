@@ -95,6 +95,16 @@ class alignas(64) NativeProbeQueue final {
 
   [[nodiscard]] bool TryPush(const NativeProbeEvent& event,
                              const std::uint64_t dropped_weight = 1) noexcept {
+    if (TryPushUncounted(event)) {
+      return true;
+    }
+    IncrementDroppedCount(dropped_weight);
+    return false;
+  }
+
+  // Like TryPush, but a full queue counts no drop: the caller keeps the record
+  // elsewhere and owns accounting for it.
+  [[nodiscard]] bool TryPushUncounted(const NativeProbeEvent& event) noexcept {
     std::uint64_t position = enqueue_position_.load(std::memory_order_relaxed);
 
     for (;;) {
@@ -113,7 +123,6 @@ class alignas(64) NativeProbeQueue final {
       }
 
       if (difference < 0) {
-        IncrementDroppedCount(dropped_weight);
         return false;
       }
 
@@ -163,9 +172,23 @@ class alignas(64) NativeProbeQueue final {
     return dropped_.load(std::memory_order_relaxed);
   }
 
+  // Slots claimed so far and slots popped so far. A consumer that orders this
+  // queue against records kept elsewhere reads EnqueuePosition() after a
+  // producer's later handoff synchronizes with it: every slot that producer
+  // claimed earlier lies below the value read, and each is popped, once
+  // published, before DequeuePosition() passes it. Only the consumer may read
+  // DequeuePosition().
+  [[nodiscard]] std::uint64_t EnqueuePosition() const noexcept {
+    return enqueue_position_.load(std::memory_order_relaxed);
+  }
+
+  [[nodiscard]] std::uint64_t DequeuePosition() const noexcept {
+    return dequeue_position_.load(std::memory_order_relaxed);
+  }
+
   // Browser-internal requests the producer did not record, per scheme class,
-  // memory-cache reuses past its budget and those in pages that are not
-  // ordinary (protocol/native-network-v3.md).
+  // and memory-cache reuses in pages that are not ordinary
+  // (protocol/native-network-v3.md).
   // Like drops they are counts, never records; the consumer reports them.
   void CountExclusion(const std::uint8_t exclusion_class) noexcept {
     const std::size_t slot = NativeRendererExclusionSlot(exclusion_class);

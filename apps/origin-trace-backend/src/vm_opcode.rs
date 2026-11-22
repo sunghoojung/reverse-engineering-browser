@@ -49,7 +49,7 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.17.0";
+const PRODUCER_VERSION: &str = "2.19.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;
@@ -1469,6 +1469,16 @@ pub(crate) struct Losses<'a> {
     pub native_js: &'a [native_js::Gap],
 }
 
+/// Whether an analysis result has an opcode workspace. A ranked Wasm table
+/// may be worth inspecting without enough independent evidence for
+/// likely-vm; keeping its static workspace never raises that tier.
+pub(crate) fn has_workspace(runtime: &str, tier: &str, frontend: &Value) -> bool {
+    tier == "likely-vm"
+        || (runtime == "webassembly"
+            && tier == "candidate"
+            && frontend["dispatch_inventory"]["selected_byte_offset"].is_u64())
+}
+
 pub(crate) fn workspace(
     root: &Path,
     artifact: &Value,
@@ -1483,12 +1493,11 @@ pub(crate) fn workspace(
         budget: budget_losses,
         native_js: native_js_gaps,
     } = losses;
-    // A ranked Wasm table may be worth inspecting without enough independent
-    // evidence for likely-vm. Keeping its static workspace never raises that tier.
-    let static_wasm_candidate = result["runtime"] == "webassembly"
-        && result["tier"] == "candidate"
-        && result["frontend"]["dispatch_inventory"]["selected_byte_offset"].is_u64();
-    if result["tier"] != "likely-vm" && !static_wasm_candidate {
+    if !has_workspace(
+        result["runtime"].as_str().unwrap_or(""),
+        result["tier"].as_str().unwrap_or(""),
+        &result["frontend"],
+    ) {
         return None;
     }
     let runtime = result["runtime"].as_str()?;

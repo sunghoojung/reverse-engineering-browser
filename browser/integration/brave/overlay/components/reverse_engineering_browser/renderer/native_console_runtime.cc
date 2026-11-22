@@ -21,20 +21,21 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/time/time.h"
+#include "brave/components/reverse_engineering_browser/common/native_console_protocol.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_debugger_observation.h"
 #include "brave/components/reverse_engineering_browser/renderer/native_script_cookie_sink.h"
+#include "third_party/blink/public/platform/web_security_origin.h"
 #include "third_party/blink/public/platform/web_string.h"
+#include "third_party/blink/public/web/web_document.h"
 #include "third_party/blink/public/web/web_element.h"
 #include "third_party/blink/public/web/web_local_frame.h"
+#include "url/origin.h"
 #include "v8/include/v8-debug.h"
 #include "v8/include/v8-native-console.h"
 #include "v8/include/v8-native-stack.h"
 
 namespace reb {
 namespace {
-std::int64_t Now() {
-  return base::TimeTicks::Now().since_origin().InMicroseconds();
-}
 std::string Bounded(std::string text, std::size_t limit = 2048) {
   if (text.size() > limit) {
     text.resize(limit);
@@ -144,6 +145,24 @@ void ObserveThrow(v8::Isolate* isolate) {
   NativeDebuggerWatch::Exception(frame_id, thrown.catcher == v8::NativeThrowCatcher::kNone ? 1 : 2,
                                  site);
 }
+// The renderer's main-thread isolate, recorded before its first arm, so the
+// observer follows every change of armed kinds, including a kept scope the
+// browser replaces while no Console command runs.
+v8::Isolate* g_watch_isolate = nullptr;
+bool g_throw_observer = false;
+void SyncThrowObserver() {
+  const bool wanted = NativeDebuggerWatch::Armed(kNativeWatchUncaught | kNativeWatchCaught);
+  if (!g_watch_isolate || wanted == g_throw_observer)
+    return;
+  v8::SetNativeThrowObserver(g_watch_isolate, wanted ? &ObserveThrow : nullptr);
+  g_throw_observer = wanted;
+}
+void UseWatchIsolate(v8::Isolate* isolate) {
+  if (g_watch_isolate || !isolate)
+    return;
+  g_watch_isolate = isolate;
+  NativeDebuggerWatch::SetKindsChanged(&SyncThrowObserver);
+}
 base::DictValue Location(v8::Isolate* isolate,
                          v8::Local<v8::Value> resource,
                          int line,
@@ -160,34 +179,57 @@ base::DictValue Location(v8::Isolate* isolate,
 NativeConsoleRuntime::NativeConsoleRuntime() = default;
 
 NativeConsoleRuntime::~NativeConsoleRuntime() {
-  Unwatch();
+  DocumentEnded();
 }
 
 void NativeConsoleRuntime::Reset() {
-  for (auto& slot : slots_) {
-    slot.value.Reset();
-    slot.id = 0;
-  }
-  expiration_.Stop();
+  retained_.clear();
   monitors_.clear();
   last_ = 0;
   messages_.Reset();
 }
 void NativeConsoleRuntime::Unwatch() {
-  if (watch_frame_ != 0) {
+  // The throw observer follows the armed kinds, so another document's arm
+  // keeps it.
+  if (watch_frame_ != 0)
     NativeDebuggerWatch::Disarm(watch_frame_);
-    // Another document's newer Arm keeps the observer it installed.
-    if (!NativeDebuggerWatch::Armed(kNativeWatchUncaught | kNativeWatchCaught))
-      v8::SetNativeThrowObserver(watch_isolate_, nullptr);
-  }
   watch_frame_ = 0;
-  watch_isolate_ = nullptr;
+}
+void NativeConsoleRuntime::DocumentStarted(v8::Isolate* isolate, blink::WebLocalFrame* frame) {
+  document_ = frame->GetDocument().Token().value();
+  frame_id_ = FrameId(frame);
+  if (!NativeDebuggerWatch::HasScope())
+    return;
+  // The browser serializes the scope's origin with url::Origin, so compare the
+  // document's own serialization: an opaque origin is "null" and never equals
+  // a scope.
+  const url::Origin origin = frame->GetSecurityOrigin();
+  UseWatchIsolate(isolate);
+  static_cast<void>(
+      NativeDebuggerWatch::ArmScope(frame_id_, origin.Serialize(), frame->IsOutermostMainFrame()));
+}
+void NativeConsoleRuntime::WindowCleared(v8::Isolate* isolate, blink::WebLocalFrame* frame) {
+  if (frame->GetDocument().Token().value() == document_)
+    return;
+  DocumentEnded();
+  DocumentStarted(isolate, frame);
+}
+void NativeConsoleRuntime::DocumentEnded() {
+  Unwatch();
+  // A document the kept scope armed.
+  if (frame_id_ != 0)
+    NativeDebuggerWatch::Disarm(frame_id_);
+  frame_id_ = 0;
+  document_ = base::UnguessableToken();
 }
 base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
                                             blink::WebLocalFrame* frame,
                                             const base::DictValue& command) {
-  // A refused watch leaves nothing armed, so the caller never guesses.
+  // A refused watch leaves nothing armed on this document, so the caller
+  // never guesses; a kept scope still arms later documents.
+  UseWatchIsolate(isolate);
   Unwatch();
+  NativeDebuggerWatch::Disarm(FrameId(frame));
   const auto* rules = command.FindDict("rules");
   if (!rules)
     return Failure("Watch rules must be an object");
@@ -204,12 +246,13 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
     const auto* url = rule ? rule->FindString("url_contains") : nullptr;
     const auto* method = rule ? rule->FindString("method") : nullptr;
     if (!url || !armed.AddRequest(*url, method ? *method : std::string()))
-      return Failure("Request rules are url_contains of 1 to 256 bytes and an uppercase method");
+      return Failure(
+          "At most 32 request rules, each url_contains of 1 to 256 bytes and an uppercase method");
   }
   const auto* events = rules->FindList("events");
   for (std::size_t i = 0; events && i < events->size(); ++i) {
     if (!(*events)[i].is_string() || !armed.AddEvent((*events)[i].GetString()))
-      return Failure("Event rules are 1 to 27 printable ASCII bytes, each once, at most 16");
+      return Failure("Event rules are 1 to 27 printable ASCII bytes, each once, at most 64");
   }
   armed.timers = rules->FindBool("timers").value_or(false);
   armed.csp = rules->FindBool("csp").value_or(false);
@@ -230,15 +273,12 @@ base::DictValue NativeConsoleRuntime::Watch(v8::Isolate* isolate,
     if (!armed.AddDom(element.GetDomNodeId(), rule->FindBool("attributes").value_or(false),
                       rule->FindBool("subtree").value_or(false),
                       rule->FindBool("removal").value_or(false)))
-      return Failure("At most 4 distinct elements, each watching attributes, subtree or removal");
+      return Failure("At most 32 distinct elements, each watching attributes, subtree or removal");
   }
   const std::uint64_t frame_id = FrameId(frame);
   if (!NativeDebuggerWatch::Arm(frame_id, armed))
     return Failure("No capture session is active in this renderer; nothing was armed");
   watch_frame_ = frame_id;
-  watch_isolate_ = isolate;
-  if (armed.uncaught)
-    v8::SetNativeThrowObserver(isolate, &ObserveThrow);
   std::vector<std::string> parts;
   if (armed.request_count)
     parts.push_back(base::NumberToString(armed.request_count) + " request rules");
@@ -284,35 +324,16 @@ void NativeConsoleRuntime::Message(const std::string& text,
   else
     messages_.Drop();
 }
-void NativeConsoleRuntime::Expire() {
-  bool retained = false;
-  for (auto& slot : slots_) {
-    if (slot.id && slot.expires_us <= Now()) {
-      slot.value.Reset();
-      slot.id = 0;
-    }
-    retained |= slot.id != 0;
-  }
-  std::erase_if(monitors_, [](const Monitor& monitor) { return monitor.expires_us <= Now(); });
-  if (!retained && monitors_.empty())
-    expiration_.Stop();
-}
 std::uint64_t NativeConsoleRuntime::Retain(v8::Isolate* isolate,
                                            v8::Local<v8::Value> value,
                                            bool repl) {
   if (next_handle_ == UINT64_MAX)
     return 0;
-  if (!expiration_.IsRunning())
-    expiration_.Start(FROM_HERE, base::Seconds(1),
-                      base::BindRepeating(&NativeConsoleRuntime::Expire, base::Unretained(this)));
-  // Reusing a slot does not reuse its identity. The UI sees an expired-handle
-  // error instead of accidentally inspecting a more recent command's value.
-  auto& slot = slots_[next_slot_++ % slots_.size()];
-  slot.value.Reset(isolate, value);
-  slot.id = next_handle_++;
-  slot.expires_us = Now() + 60000000;
-  slot.repl = repl;
-  return slot.id;
+  const std::uint64_t id = next_handle_++;
+  auto& retained = retained_[id];
+  retained.repl = repl;
+  retained.value.Reset(isolate, value);
+  return id;
 }
 v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate,
                                                   const std::string& handle,
@@ -320,13 +341,12 @@ v8::Local<v8::Value> NativeConsoleRuntime::Lookup(v8::Isolate* isolate,
   std::uint64_t id = 0;
   if (!base::StringToUint64(handle, &id) || !id || base::NumberToString(id) != handle)
     return {};
-  for (auto& slot : slots_)
-    if (slot.id == id && slot.expires_us > Now()) {
-      if (repl)
-        *repl = slot.repl;
-      return slot.value.Get(isolate);
-    }
-  return {};
+  const auto found = retained_.find(id);
+  if (found == retained_.end())
+    return {};
+  if (repl)
+    *repl = found->second.repl;
+  return found->second.value.Get(isolate);
 }
 base::DictValue NativeConsoleRuntime::Value(v8::Isolate* isolate,
                                             v8::Local<v8::Context> context,
@@ -646,11 +666,6 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
                                       v8::Local<v8::Context> context,
                                       blink::WebLocalFrame* frame,
                                       const std::string& command) {
-  for (auto& slot : slots_)
-    if (slot.id && slot.expires_us <= Now()) {
-      slot.value.Reset();
-      slot.id = 0;
-    }
   const base::AutoReset<bool> running(&g_running, true);
   const auto parsed = base::JSONReader::ReadDict(command, base::JSON_PARSE_RFC);
   base::DictValue result;
@@ -672,9 +687,8 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     result = base::DictValue().Set("status", "ok").Set("text", "Watch rules disarmed");
   } else if (*operation == "evaluate") {
     const auto* source = parsed->FindString("source");
-    if (!source || source->empty() || source->size() > 8192 ||
-        source->find('\0') != std::string::npos)
-      result = Failure("JavaScript must be 1 to 8192 bytes without NUL");
+    if (!source || source->empty() || source->find('\0') != std::string::npos)
+      result = Failure("JavaScript must be non-empty without NUL");
     else {
       auto text = v8::String::NewFromUtf8(isolate, source->data(), v8::NewStringType::kNormal,
                                           static_cast<int>(source->size()))
@@ -714,7 +728,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
   } else if (*operation == "last") {
     bool repl = false;
     auto value = Lookup(isolate, base::NumberToString(last_), &repl);
-    result = value.IsEmpty() ? Failure("Previous result expired")
+    result = value.IsEmpty() ? Failure("Previous result was released or cleared")
                              : base::DictValue()
                                    .Set("status", "ok")
                                    .Set("value", Value(isolate, context, value, repl));
@@ -723,13 +737,11 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     bool repl = false;
     auto value = handle ? Lookup(isolate, *handle, &repl) : v8::Local<v8::Value>();
     if (value.IsEmpty())
-      result = Failure("Value expired, was released, or belongs to another document");
+      result = Failure("Value was released, cleared, or belongs to another document");
     else if (*operation == "release" || *operation == "cancel") {
-      for (auto& slot : slots_)
-        if (base::NumberToString(slot.id) == *handle) {
-          slot.value.Reset();
-          slot.id = 0;
-        }
+      std::uint64_t id = 0;
+      if (base::StringToUint64(*handle, &id))
+        retained_.erase(id);
       result.Set("status", "ok");
       result.Set("text", *operation == "cancel" ? "Stopped waiting; page work is not rolled back"
                                                 : "Value released");
@@ -787,23 +799,21 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       } else {
         std::erase_if(monitors_,
                       [&](const Monitor& monitor) { return monitor.element.Equals(node); });
-        if (monitors_.size() >= 8)
-          result = Failure("At most 8 event monitors; stop a monitor first");
-        else {
-          Monitor monitor{node, Now() + 60000000, {}};
-          for (const char* type : {"click", "input", "keydown", "submit"}) {
-            monitor.removals.push_back(node.AddConsoleEventListener(
-                blink::WebString::FromUtf8(type),
-                base::BindRepeating(
-                    [](NativeConsoleRuntime* runtime, std::string type, blink::WebDOMEvent) {
-                      runtime->Message("event: " + type, "", "", 0, 1);
-                    },
-                    base::Unretained(this), std::string(type))));
-          }
-          monitors_.push_back(std::move(monitor));
-          result.Set("status", "ok");
-          result.Set("text", "Monitoring click, input, keydown and submit for 60 seconds");
+        Monitor monitor{node, {}};
+        for (const char* type : {"click", "input", "keydown", "submit"}) {
+          monitor.removals.push_back(node.AddConsoleEventListener(
+              blink::WebString::FromUtf8(type),
+              base::BindRepeating(
+                  [](NativeConsoleRuntime* runtime, std::string type, blink::WebDOMEvent) {
+                    runtime->Message("event: " + type, "", "", 0, 1);
+                  },
+                  base::Unretained(this), std::string(type))));
         }
+        monitors_.push_back(std::move(monitor));
+        result.Set("status", "ok");
+        result.Set("text",
+                   "Monitoring click, input, keydown and submit until unmonitorEvents or the "
+                   "page navigates");
       }
     } else if (*operation == "inspect") {
       const int offset = parsed->FindInt("offset").value_or(-1);
@@ -875,7 +885,7 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
     }
   }
   std::string encoded;
-  if (!base::JSONWriter::Write(result, &encoded) || encoded.size() > 65536)
+  if (!base::JSONWriter::Write(result, &encoded) || encoded.size() > kNativeConsoleReplyLimit)
     return "{\"status\":\"error\",\"text\":\"Result exceeded bounded transport\"}";
   return encoded;
 }

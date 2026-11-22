@@ -24,7 +24,11 @@ enum StoredEvidenceBackendChecks {
     // The workspace pages the whole catalog; a read the scheme handler answered would hold only its newest record.
     precondition(StoredEvidenceBackend.serves(request("/api/artifacts?after=0&limit=1")))
     precondition(StoredEvidenceBackend.serves(request("/api/artifacts?artifact_id=1&limit=1")))
-    for path in ["/api/events", "/api/events?limit=5000", "/api/artifacts?limit=500", "/api/artifacts/1/content", "/api/health",
+    for path in ["/api/events", "/api/events?limit=5000"] {
+      precondition(StoredEvidenceBackend.serves(request(path)) && StoredEvidenceBackend.isEventPoll(request(path)), path)
+    }
+    precondition(!StoredEvidenceBackend.isEventPoll(request("/api/events?request_id=1&limit=5")))
+    for path in ["/api/artifacts?limit=500", "/api/artifacts/1/content", "/api/health",
       "/api/native-debugger/actions", "/api/session/summary"] {
       precondition(!StoredEvidenceBackend.serves(request(path)), "\(path) stays native")
     }
@@ -67,7 +71,7 @@ enum StoredEvidenceBackendChecks {
     precondition((catalog.json["artifacts"] as? [[String: Any]])?.first?["content_path"] == nil, "manifest paths stay private: \(catalog.json)")
 
     let index = call(request("/api/requests?limit=10"))
-    precondition(index.status == 200 && index.json["format"] as? String == "reb-request-index-v1", "\(index)")
+    precondition(index.status == 200 && index.json["format"] as? String == "reb-request-index-v2", "\(index)")
     precondition(index.json["total"] as? Int == 3, "every stored request is indexed: \(index.json)")
     guard let tag = index.tag else { preconditionFailure("the index answer carries its ETag") }
     precondition(call(request("/api/requests?limit=10", etag: tag)).status == 304)
@@ -76,6 +80,33 @@ enum StoredEvidenceBackendChecks {
     precondition((events.json["events"] as? [[String: Any]])?.compactMap { $0["type"] as? String }
       == ["request_started", "request_completed"], "a filtered read returns only that request: \(events.json)")
     precondition(call(request("/api/events?limit=5&misspelled=1")).status == 400, "an unknown filter fails")
+    // The bare poll counts over the whole store and carries the app's broker
+    // state; the tag changes with it, so a stale broker state is never a 304.
+    func poll(_ overlay: StoredEvidenceBackend.Overlay, etag: String? = nil) -> (status: Int, tag: String?, json: [String: Any]) {
+      let done = DispatchSemaphore(value: 0)
+      var result: (Int, String?, [String: Any]) = (0, nil, [:])
+      backend.forward(request("/api/events?limit=5000", etag: etag), overlay: overlay) { body, status, _, headers in
+        result = (status, headers["ETag"], (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:])
+        done.signal()
+      }
+      precondition(done.wait(timeout: .now() + 60) == .success, "no reply for the event poll")
+      return result
+    }
+    let stored = StoredEvidenceBackend.Overlay(fields: ["broker_connected": true, "capture_mode": "live"], tag: "live-1")
+    var window = poll(stored)
+    for _ in 0..<50 where (window.json["event_window"] as? [String: Any])?["scope"] as? String != "store" {
+      Thread.sleep(forTimeInterval: 0.1)
+      window = poll(stored)
+    }
+    precondition(window.status == 200 && window.json["count"] as? Int == 4, "\(window)")
+    precondition(window.json["capture_mode"] as? String == "live" && window.json["broker_connected"] as? Bool == true, "\(window.json)")
+    precondition((window.json["event_window"] as? [String: Any])?["scope"] as? String == "store", "\(window.json)")
+    precondition(window.json["sequence_gaps"] as? String == "0", "\(window.json)")
+    guard let pollTag = window.tag, pollTag.hasSuffix("-live-1\"") else { preconditionFailure("the poll tag names the overlay: \(window)") }
+    precondition(poll(stored, etag: pollTag).status == 304, "an unchanged poll is not modified")
+    let disconnected = StoredEvidenceBackend.Overlay(fields: ["broker_connected": false, "capture_mode": "live"], tag: "live-0")
+    let changed = poll(disconnected, etag: pollTag)
+    precondition(changed.status == 200 && changed.json["broker_connected"] as? Bool == false, "\(changed)")
     let stack = call(request("/api/request-stack?process_id=7&request_id=1"))
     precondition(stack.status == 200 && stack.json["status"] as? String == "not_recorded", "\(stack)")
     for path in ["/api/request-headers?session_id=1&request_id=1", "/api/request-cookies?session_id=1&request_id=1",
@@ -85,6 +116,30 @@ enum StoredEvidenceBackendChecks {
     let layout = call(request("/api/source-format?session_id=1&artifact_id=1"))
     precondition(layout.status == 200 && layout.json["schema"] as? String == "source-format-v2"
       && layout.json["status"] as? String == "formatted", "\(layout)")
+    // The HAR save streams the backend's answer to a file; an error answer writes nothing.
+    guard let firstRow = (index.json["requests"] as? [[String: Any]])?.first?["id"] as? String else {
+      preconditionFailure("the index lists a row: \(index.json)")
+    }
+    precondition(call(request("/api/requests/har?rows=\(firstRow)")).status == 200, "the page's one-row HAR read is forwarded")
+    let har = root.appendingPathComponent("saved.har")
+    func save(_ query: String) -> StoredEvidenceBackend.Failure? {
+      let done = DispatchSemaphore(value: 0)
+      var failure: StoredEvidenceBackend.Failure?
+      backend.download(path: "/api/requests/har", query: query, to: har) { failure = $0; done.signal() }
+      precondition(done.wait(timeout: .now() + 60) == .success, "no answer for the HAR save")
+      return failure
+    }
+    for query in ["sort=capture&order=asc", "rows=\(firstRow)&credential_values=1"] {
+      precondition(save(query) == nil, query)
+      let archive = (try JSONSerialization.jsonObject(with: Data(contentsOf: har)) as? [String: Any])?["log"] as? [String: Any]
+      let summary = archive?["_reb"] as? [String: Any]
+      precondition(summary?["complete"] as? Bool == true && (archive?["entries"] as? [Any])?.isEmpty == false, "\(query): \(String(describing: archive))")
+    }
+    let before = try Data(contentsOf: har)
+    let missingRow = save("rows=missing-row")
+    precondition(missingRow?.status == 404 && missingRow?.message.contains("missing-row") == true, "\(String(describing: missingRow))")
+    let after = try Data(contentsOf: har)
+    precondition(after == before, "an error answer leaves the saved file as it was")
     // Analyses of an artifact are forwarded too, and the packaged backend runs
     // its sibling worker for them.
     let facts = call(request("/api/source-facts?session_id=1&artifact_id=1"))
@@ -130,6 +185,6 @@ enum StoredEvidenceBackendChecks {
     let missing = StoredEvidenceBackend(executableURL: root.appendingPathComponent("missing"), arguments: stores)
     let refused = call(request("/api/requests"), on: missing)
     precondition(refused.status == 503 && refused.json["code"] as? String == "dependency_unavailable", "\(refused)")
-    print("PASS stored-evidence reb:// reads of the request index, filtered events, headers, cookies, stacks, source format, Facts, static cleanup, artifact map, Wasm inspection and debugger state come from the bundled backend, which stops and restarts on demand and never sends a cancelled forward")
+    print("PASS stored-evidence reb:// reads of the request index, the event poll with the app's broker state, filtered events, headers, cookies, HAR exports and saves, stacks, source format, Facts, static cleanup, artifact map, Wasm inspection and debugger state come from the bundled backend, which stops and restarts on demand and never sends a cancelled forward")
   }
 }

@@ -1,0 +1,21 @@
+diff --git a/browser/net/brave_proxying_url_loader_factory.cc b/browser/net/brave_proxying_url_loader_factory.cc
+index baa7193..9c61850 100644
+--- a/browser/net/brave_proxying_url_loader_factory.cc
++++ b/browser/net/brave_proxying_url_loader_factory.cc
+@@ -791,6 +791,16 @@ void BraveProxyingURLLoaderFactory<
+   }
+ 
+   if (!target_loader_.is_bound() && factory_->target_factory_.is_bound()) {
++    // Native capture still reading this request's body apart from it holds
++    // the request until it has the body, so it never keeps one longer than
++    // the request does.
++    if (native_capture_lifecycle_.Open() &&
++        reb::NativeNetworkCaptureSink::Get().WaitForBodyRead(
++            request_id_,
++            base::BindOnce(&InProgressRequest::ContinueToStartRequest,
++                           weak_factory_.GetWeakPtr(), net::OK))) {
++      return;
++    }
+     // Nothing has cancelled us up to this point, so it's now OK to
+     // initiate the real network request.
+     uint32_t options = options_;

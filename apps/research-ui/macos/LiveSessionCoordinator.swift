@@ -40,138 +40,41 @@ enum LiveCaptureMode: String {
 
 }
 
-// How much a Content session keeps, set in the start panel. The bounds and
-// defaults are the launcher's (scripts/run-live-session.sh) and the agent
-// path's (apps/origin-trace-backend/src/session_launch.rs), and the panel's
-// start message is checked as that path checks its options. Each budget counts
-// unique bytes for the whole session; past it, the browser names each body or
-// target it did not keep. All three mean nothing without request content, so a
-// Metadata session carries none of them.
-struct ContentLimits: Equatable {
-  static let requestContentBudgetRange: ClosedRange<UInt32> = 1...4096
-  static let responseBodyBudgetRange: ClosedRange<UInt32> = 1...16384
-  static let defaults = ContentLimits(requestContentBudgetMiB: 256, responseBodyBudgetMiB: 512, responseMedia: false)
-  // The start message's keys, named as the agent options are.
-  static let keys = ["request_content_budget_mib", "response_body_budget_mib", "response_media"]
-
-  var requestContentBudgetMiB: UInt32
-  var responseBodyBudgetMiB: UInt32
-  var responseMedia: Bool
+// What a start panel message asks for besides its session options, which
+// SessionPanel.swift takes out first (LiveSessionOptions): the capture mode,
+// nothing else. SessionPanel.swift accepts a start only through parse;
+// tools/check-live-session-failure.swift runs it.
+struct LivePanelStart: Equatable {
+  let mode: LiveCaptureMode
 
   struct Refusal: Error, Equatable {
     let message: String
   }
 
-  static let requestContentBudgetRule = "Request content budget must be a whole number from 1 to 4096 MiB."
-  static let responseBodyBudgetRule = "Response body budget must be a whole number from 1 to 16384 MiB."
-
-  // What the start panel shows first when this run has not chosen yet: the
-  // app environment's launcher settings when the launcher would accept them,
-  // else the defaults. An unreadable value is left to the automatic launch,
-  // whose launcher names it; the panel never starts from it.
-  static func configured(_ environment: [String: String]) -> ContentLimits {
-    let budget = { (name: String, range: ClosedRange<UInt32>, fallback: UInt32) -> UInt32 in
-      guard let text = environment[name], let value = launcherInteger(text), range.contains(value) else { return fallback }
-      return value
-    }
-    return ContentLimits(
-      requestContentBudgetMiB: budget("REB_REQUEST_CONTENT_BUDGET_MIB", requestContentBudgetRange, defaults.requestContentBudgetMiB),
-      responseBodyBudgetMiB: budget("REB_RESPONSE_BODY_BUDGET_MIB", responseBodyBudgetRange, defaults.responseBodyBudgetMiB),
-      responseMedia: environment["REB_CAPTURE_RESPONSE_MEDIA"] == "1")
-  }
-
-  // The launcher's grammar: ASCII digits without a sign or a leading zero.
-  private static func launcherInteger(_ text: String) -> UInt32? {
-    let bytes = Array(text.utf8)
-    guard (1...5).contains(bytes.count), bytes[0] != UInt8(ascii: "0"),
-      bytes.allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) })
-    else { return nil }
-    return UInt32(text)
-  }
-
-  // A start message from the page. A Content session names all three; each
-  // budget is a whole number in its range and media is true or false. JSON
-  // numbers and booleans both arrive as NSNumber, so a boolean is never read
-  // as a budget, nor a number as the media choice.
-  static func validated(_ body: [String: Any]) -> Result<ContentLimits, Refusal> {
-    guard keys.allSatisfy({ body[$0] != nil }) else {
-      return .failure(Refusal(message: "A Content session needs a request content budget, a response body budget and the media choice."))
-    }
-    let budget = { (key: String, range: ClosedRange<UInt32>) -> UInt32? in
-      guard let number = body[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-      let value = number.doubleValue
-      guard value.isFinite, value.rounded() == value, value >= Double(range.lowerBound),
-        value <= Double(range.upperBound)
-      else { return nil }
-      return UInt32(value)
-    }
-    guard let request = budget(keys[0], requestContentBudgetRange) else { return .failure(Refusal(message: requestContentBudgetRule)) }
-    guard let response = budget(keys[1], responseBodyBudgetRange) else { return .failure(Refusal(message: responseBodyBudgetRule)) }
-    guard let media = body[keys[2]] as? NSNumber, CFGetTypeID(media) == CFBooleanGetTypeID() else {
-      return .failure(Refusal(message: "Capture media and fonts must be on or off."))
-    }
-    return .success(ContentLimits(requestContentBudgetMiB: request, responseBodyBudgetMiB: response, responseMedia: media.boolValue))
-  }
-
-  // The launcher switches for these values.
-  var launcherEnvironment: [String: String] {
-    [
-      "REB_REQUEST_CONTENT_BUDGET_MIB": String(requestContentBudgetMiB),
-      "REB_RESPONSE_BODY_BUDGET_MIB": String(responseBodyBudgetMiB),
-      "REB_CAPTURE_RESPONSE_MEDIA": responseMedia ? "1" : "0",
-    ]
-  }
-
-  // What the page draws: each value with its bounds and default.
-  var panelState: [String: Any] {
-    let defaults = Self.defaults
-    return [
-      Self.keys[0]: ["value": requestContentBudgetMiB, "min": Self.requestContentBudgetRange.lowerBound,
-        "max": Self.requestContentBudgetRange.upperBound, "default": defaults.requestContentBudgetMiB],
-      Self.keys[1]: ["value": responseBodyBudgetMiB, "min": Self.responseBodyBudgetRange.lowerBound,
-        "max": Self.responseBodyBudgetRange.upperBound, "default": defaults.responseBodyBudgetMiB],
-      Self.keys[2]: ["value": responseMedia, "default": defaults.responseMedia],
-    ]
-  }
-}
-
-// What a start panel message asks for: the mode, and for Content its limits.
-// SessionPanel.swift accepts a start only through parse, which applies the
-// agent path's rules; tools/check-live-session-failure.swift runs it.
-struct LivePanelStart: Equatable {
-  let mode: LiveCaptureMode
-  // Present exactly for a Content start.
-  let limits: ContentLimits?
-
-  static func parse(_ body: [String: Any]) -> Result<LivePanelStart, ContentLimits.Refusal> {
-    // The mode and a Content session's limits are the only choices; a page
-    // cannot add a Keychain or any other switch.
-    guard Set(body.keys).isSubset(of: ["op", "mode"] + ContentLimits.keys) else {
-      return .failure(.init(message: "The start panel offers only the capture mode and a Content session's limits."))
+  static func parse(_ body: [String: Any]) -> Result<LivePanelStart, Refusal> {
+    // The mode is the only choice; a page cannot add a Keychain or any other
+    // switch. A Content session keeps every body whole, so it has no size to
+    // choose.
+    guard Set(body.keys).isSubset(of: ["op", "mode"]) else {
+      return .failure(.init(message: "The start panel offers only the capture mode."))
     }
     guard let raw = body["mode"] as? String, let mode = LiveCaptureMode(rawValue: raw) else {
       return .failure(.init(message: "Choose Content or Metadata only."))
     }
-    guard mode.capturesNetworkContent else {
-      guard ContentLimits.keys.allSatisfy({ body[$0] == nil }) else {
-        return .failure(.init(message: "Budgets and media capture apply only to a Content session."))
-      }
-      return .success(LivePanelStart(mode: mode, limits: nil))
-    }
-    return ContentLimits.validated(body).map { LivePanelStart(mode: mode, limits: $0) }
+    return .success(LivePanelStart(mode: mode))
   }
 }
 
 // The content-derived launcher switches of one app-started capture: request
-// content with the three switches only it reads. Each start resolves them once
-// from its mode, the panel's limits and the app environment, and
-// LiveSessionCoordinator.captureDefaults gives the launcher exactly these in
-// place of any inherited value. Metadata turns every one off, whatever the
+// content. Each start resolves it once from its mode and the app environment,
+// and LiveSessionCoordinator.captureDefaults gives the launcher exactly this in
+// place of any inherited value. Metadata turns it off, whatever the
 // environment holds, as the agent path does (session_launch.rs). The start
 // panel holds a failed start's value and Retry starts from it, never from a
-// new reading of the environment, so the mode and limits the panel names are
-// always what the launcher got. Canvas images and the settled-value digests of
-// armed invocation sites are content too; they are session options
+// new reading of the environment, so the mode the panel names is always what
+// the launcher got. A Content session keeps every body whole, so there is no
+// limit to choose. Canvas images and the settled-value digests of armed
+// invocation sites are content too; they are session options
 // (LiveSessionOptions), which captureDefaults applies in Content mode only.
 //
 // Dispatch-site and guest-state capture need a researcher-supplied file and
@@ -180,12 +83,9 @@ struct LiveCaptureContent: Equatable {
   static let requestContent = "REB_CAPTURE_REQUEST_CONTENT"
   static let canvasImages = "REB_CAPTURE_CANVAS_IMAGES"
   static let invocationDigests = "REB_NATIVE_JS_INVOCATION_DIGESTS"
-  static let names = [requestContent, canvasImages, invocationDigests] + ContentLimits.defaults.launcherEnvironment.keys.sorted()
+  static let names = [requestContent, canvasImages, invocationDigests]
 
   let mode: LiveCaptureMode
-  // The limits the start panel chose, present only for a session that retains
-  // request content; nil otherwise and for limits taken from the environment.
-  let limits: ContentLimits?
   // The value of each name the launcher is given; a name absent here is
   // removed, and captureDefaults sets Canvas images and digests.
   let switches: [String: String]
@@ -199,41 +99,30 @@ struct LiveCaptureContent: Equatable {
   // mask leaves it off rather than failing the launch, and an unreadable mask
   // turns nothing on.
   static func resolve(
-    environment: [String: String], mode: LiveCaptureMode, limits: ContentLimits?, modeChosen: Bool
+    environment: [String: String], mode: LiveCaptureMode, modeChosen: Bool
   ) -> LiveCaptureContent {
     guard mode.capturesNetworkContent else {
-      return LiveCaptureContent(mode: mode, limits: nil, switches: [requestContent: "0"])
+      return LiveCaptureContent(mode: mode, switches: [requestContent: "0"])
     }
     let mask = LiveSessionCoordinator.categoryMask(environment["REB_CAPTURE_CATEGORY_MASK"]) ?? 0
     let allows = { (required: UInt32) in mask & required == required }
     var switches: [String: String] = [:]
-    // Request paths, queries and bounded bodies need both Network (256) and
+    // Request paths, queries and whole bodies need both Network (256) and
     // Artifact (1024); a narrower mask keeps hosts only.
     let requestDefault = allows(1280) ? "1" : "0"
     switches[requestContent] = modeChosen ? requestDefault : environment[requestContent] ?? requestDefault
-    // A session that keeps no request content is given none of the three
-    // content-only switches, inherited or chosen. Until the panel chooses
-    // limits, the environment's pass as they are and the launcher checks them.
-    var chosen: ContentLimits?
-    if switches[requestContent] == "1" {
-      if let limits {
-        switches.merge(limits.launcherEnvironment) { _, limit in limit }
-        chosen = limits
-      } else {
-        for name in ContentLimits.defaults.launcherEnvironment.keys { switches[name] = environment[name] }
-      }
-    }
-    return LiveCaptureContent(mode: mode, limits: chosen, switches: switches)
+    return LiveCaptureContent(mode: mode, switches: switches)
   }
 }
 
 // The app's saved native JavaScript invocation sites, which every capture it
 // starts arms (protocol/native-js-invocation-v1.md#site-file). The site file
-// is exactly the browser's native-js-invocation-sites-v1 form with 1 to 8
+// is exactly the browser's native-js-invocation-sites-v1 form with 1 to 256
 // sites; a sidecar the browser never reads keeps each label, source URL and
-// session. The backend's routes add sites from Sources, the start panel lists
-// and removes them, and each capture arms a private copy, because the browser
-// rereads the file it was given and refuses a session whose file changed.
+// session. The backend's routes add sites from Sources and the start panel
+// lists and removes them. Each capture arms a private copy, which its backend
+// rewrites as a slot table when the saved set changes, so the running capture
+// follows the set without the store file ever changing under the browser.
 struct InvocationSiteSet: Equatable {
   struct Site: Equatable {
     let anchorOffset: UInt32
@@ -265,8 +154,11 @@ struct InvocationSiteSet: Equatable {
     case unreadable
   }
 
-  static let limit = 8
-  static let fileLimit = 4096
+  static let limit = 256
+  static let fileLimit = 128 * 1024
+  // A version 2 slot table with no slots: a capture that follows the saved
+  // set starts from it when nothing is saved, or when the store is unreadable.
+  static let emptySlotTable = "{\"sites\":[],\"version\":2}"
   static let fileName = "js-invocation-sites-v1.json"
 
   // An explicit REB_JS_INVOCATION_SITE_STORE wins, as for the other app stores.
@@ -291,7 +183,7 @@ struct InvocationSiteSet: Equatable {
     return text.utf8.count <= fileLimit ? text : nil
   }
 
-  // Accepts exactly what the browser accepts: the canonical text of 1 to 8
+  // Accepts exactly what the browser accepts: the canonical text of 1 to 256
   // distinct valid sites. Rebuilding the text rejects every other spelling.
   static func parse(_ text: String) -> [Site]? {
     guard !text.isEmpty, text.utf8.count <= fileLimit,
@@ -668,14 +560,17 @@ final class LiveSessionCoordinator {
     environment["REB_RESEARCH_PROFILE_ROOT"] = LiveSessionOptions.researchProfileRoot(
       environment: environment, originTrace: originTraceURL).path
     environment["REB_BRAVE_BINARY"] = braveExecutableURL.path
-    // Sources can save sites while this capture runs; the browser keeps
-    // reading the copy it was given, which nothing changes.
+    // Sources can save and remove sites while this capture runs. The browser
+    // reads this private copy, and the backend rewrites it as a slot table
+    // when the saved set changes, so even an empty set gets one.
     let siteStoreURL = InvocationSiteSet.storeURL(environment: environment, applicationSupport: originTraceURL)
     environment["REB_JS_INVOCATION_SITE_STORE"] = siteStoreURL.path
     var invocationSitesURL: URL?
-    if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil,
-      case .saved(let sites) = InvocationSiteSet.load(siteStoreURL), let text = InvocationSiteSet.file(sites)
-    {
+    if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil {
+      var text = InvocationSiteSet.emptySlotTable
+      if case .saved(let sites) = InvocationSiteSet.load(siteStoreURL), let file = InvocationSiteSet.file(sites) {
+        text = file
+      }
       let copy = FileManager.default.temporaryDirectory.appendingPathComponent(
         "origin-trace-live-\(identifier)-js-invocation-sites.json")
       try InvocationSiteSet.writePrivate(Data(text.utf8), to: copy)
@@ -800,9 +695,11 @@ final class LiveSessionCoordinator {
   // turns nothing on.
   //
   // `savedInvocationSites` is this launch's private copy of the app's saved
-  // site set, or nil when the set is empty. The sites need the VM category
-  // (512). The launcher arms them only if this Brave defines invocation
-  // capture, and otherwise starts without them and says so. Canvas images and
+  // site set, an empty slot table when nothing is saved, or nil without one.
+  // The sites need the VM category (512). The launcher arms them only if this
+  // Brave defines invocation capture, and otherwise starts without them and
+  // says so. The capture follows the saved set if this Brave can revise armed
+  // sites while it runs; an older one keeps the copy's sites. Canvas images and
   // the settled-value digests of armed sites are sensitive capture: they follow
   // `options` in Content mode and are never recorded in Metadata mode.
   static func captureDefaults(
@@ -827,6 +724,7 @@ final class LiveSessionCoordinator {
     if environment["REB_NATIVE_JS_INVOCATION_SITES"] == nil, let saved = savedInvocationSites, allows(512) {
       environment["REB_NATIVE_JS_INVOCATION_SITES"] = saved.path
       environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] = environment["REB_NATIVE_JS_INVOCATION_IF_SUPPORTED"] ?? "1"
+      environment["REB_NATIVE_JS_INVOCATION_LIVE"] = environment["REB_NATIVE_JS_INVOCATION_LIVE"] ?? "1"
     }
     let sitesArmed = !(environment["REB_NATIVE_JS_INVOCATION_SITES"] ?? "").isEmpty
     environment[LiveCaptureContent.invocationDigests] = capturesContent && options.invocationDigests && sitesArmed ? "1" : "0"

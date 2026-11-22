@@ -23,15 +23,21 @@
 
 namespace reb {
 
-// The configuration still keeps at most 16 records per stream. A larger global
-// cap would not help: one hot function would fill it. These controls stop a
-// function, call site, or module from spending slots that belong to the rest
-// of the configuration. Zero caps and empty lists are the historical behavior.
+// Each stream keeps at most its window budget of records per sample window.
+// These controls pace one function or call site so it cannot spend a whole
+// window that belongs to the rest of the page, and filter functions and
+// modules. A zero cap or an empty list does not restrict.
 inline constexpr std::size_t kNativeWasmModuleAllowlistLimit = 8;
 inline constexpr std::size_t kNativeWasmFunctionFilterLimit = 32;
 inline constexpr std::uint32_t kNativeWasmFunctionIndexLimit = 16U * 1024U * 1024U;
-inline constexpr std::size_t kNativeWasmBudgetKeySlots = kNativeWasmDispatchSampleBudget;
+// The browser's samples_per_function when the session sets none: 16 hot
+// functions can each keep this many in one window before the stream is full.
+inline constexpr std::uint32_t kNativeWasmDefaultSamplesPerFunction = 64;
+// Twice the most keys one window can hold, so a new key's probe ends at a
+// free slot after a few steps.
+inline constexpr std::size_t kNativeWasmBudgetKeySlots = 2 * kNativeWasmDispatchSampleBudget;
 static_assert(kNativeWasmDispatchSampleBudget == kNativeWasmIndirectSampleBudget);
+static_assert(kNativeWasmDefaultSamplesPerFunction <= kNativeWasmDispatchSampleBudget);
 
 struct NativeWasmSampleBudgetPolicy final {
   std::uint32_t samples_per_function = 0;
@@ -265,7 +271,7 @@ inline void ReleaseWasmBudgetKey(NativeWasmBudgetKeySlot& slot,
 // Same-key admissions probe from one slot. Two threads that publish the same
 // new key in one instant can each hold a slot until the later publisher sees
 // the earlier one; a thread that has already returned is not pulled back.
-// The stream's 16-slot global budget still bounds how many records are kept.
+// The stream's window budget still bounds how many records are kept.
 // A publish bit from any epoch is busy: a reset must not steal the slot and
 // let the older publisher overwrite the new count.
 [[nodiscard]] inline NativeWasmBudgetRetainResult RetainWasmBudgetKey(

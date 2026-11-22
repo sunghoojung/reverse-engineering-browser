@@ -270,7 +270,7 @@ gapsButton.dispatchEvent(new window.Event('click'));
 assert.equal(gapsButton.getAttribute('aria-expanded'), 'true');
 assert.equal(gapsDetail.hidden, false);
 assert.deepEqual([...gapsDetail.querySelectorAll('li')].map(item => item.textContent),
-  ['1 header block not retained (session budget)', '1 late header record on no row', '1 request without final headers (HTTP cache)']);
+  ['1 header block not retained (older header budget)', '1 late header record on no row', '1 request without final headers (HTTP cache)']);
 {
   let focused = null;
   const focus = window.HTMLElement.prototype.focus;
@@ -334,15 +334,15 @@ const shell = (mode, requestContent, canvasImages) => runInContext(`state.sessio
 shell('live', true, true);
 assert.equal(contentLabel.hidden, false);
 assert.equal(contentLabel.textContent, 'Content capture');
-assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies and Canvas images/);
-assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session context that names no limits names no budget');
-// The stacked footer's budget sentence closes when focus leaves it, on a press
+assert.match(contentLabel.getAttribute('title'), /request paths, queries and bodies, every response body whole with media and fonts, request and response headers, cookies and Canvas images/);
+assert.doesNotMatch(contentLabel.getAttribute('title'), /Budget|16 MiB/, 'a content session names no size limit');
+// The stacked footer's not-kept sentence closes when focus leaves it, on a press
 // anywhere else and when the request detail closes or changes, so it never
 // stays over the ledger's rows unasked.
 {
-  const notice = document.getElementById('request-budget');
-  const toggle = document.getElementById('request-budget-toggle');
-  const open = () => { runInContext('toggleTrafficBudget(true)', context); assert.equal(notice.dataset.expanded, 'true'); };
+  const notice = document.getElementById('request-not-kept');
+  const toggle = document.getElementById('request-not-kept-toggle');
+  const open = () => { runInContext('toggleTrafficNotKept(true)', context); assert.equal(notice.dataset.expanded, 'true'); };
   open();
   const leave = new window.Event('focusout');
   leave.relatedTarget = document.getElementById('request-order');
@@ -351,13 +351,13 @@ assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session c
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
   open();
   const inside = new window.Event('focusout');
-  inside.relatedTarget = document.getElementById('request-budget-text');
+  inside.relatedTarget = document.getElementById('request-not-kept-text');
   notice.dispatchEvent(inside);
   assert.equal(notice.dataset.expanded, 'true', 'focus moving inside the notice keeps it open');
   document.getElementById('request-rows').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
   assert.equal(notice.dataset.expanded, 'false', 'a press elsewhere closes the sentence');
   open();
-  document.getElementById('request-budget-text').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
+  document.getElementById('request-not-kept-text').dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
   assert.equal(notice.dataset.expanded, 'true', 'a press on the sentence keeps it open');
   runInContext(`state.trafficDetailOpen = true; renderInspector();`, context);
   open();
@@ -373,34 +373,24 @@ assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session c
   runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
   open();
   escape(toggle);
-  assert.equal(notice.dataset.expanded, 'false', 'Escape on the budget button closes the sentence');
+  assert.equal(notice.dataset.expanded, 'false', 'Escape on the not-kept button closes the sentence');
   assert.equal(gapsOpen(), true, 'and leaves the header gaps breakdown open');
   open();
   escape(gaps);
   assert.equal(gapsOpen(), false, 'Escape on the header gaps button closes its breakdown');
-  assert.equal(notice.dataset.expanded, 'true', 'and leaves the budget sentence open');
+  assert.equal(notice.dataset.expanded, 'true', 'and leaves the not-kept sentence open');
   runInContext(`setTrafficHeaderGapsOpen(document.getElementById('request-header-gaps'), document.getElementById('request-header-gaps-detail'), true)`, context);
   escape(gapsDetail);
   assert.equal(gapsOpen(), false, 'Escape inside the breakdown closes it');
-  assert.equal(notice.dataset.expanded, 'true', 'and not the budget sentence');
+  assert.equal(notice.dataset.expanded, 'true', 'and not the not-kept sentence');
   gaps.dispatchEvent(new window.Event('pointerdown', {bubbles: true}));
-  assert.equal(notice.dataset.expanded, 'false', 'pressing the header gaps button closes the budget sentence');
+  assert.equal(notice.dataset.expanded, 'false', 'pressing the header gaps button closes the not-kept sentence');
 }
-// The session context is the only source of a budget's size; the workspace
-// address carries none, and nothing says it does.
+// No content limit remains to read or name: the session context carries none.
 for (const [file, source] of sources.filter(([file]) => ['app.js', 'app_state.js', 'traffic_view.js'].includes(file))) {
-  assert.doesNotMatch(source, /budget_mib=|address\b[^\n]*(?:budget|limit)|(?:budget|limit)[^\n]*\baddress\b/i, `${file} takes no budget from the address`);
+  assert.doesNotMatch(source, /budget_mib|content_limits|sessionContentLimits|response_media/, `${file} reads no content limit`);
 }
-runInContext(`state.sessionContentLimits = {request_content_budget_mib: 1024, response_body_budget_mib: 2048, response_media: true}`, context);
-shell('live', true, true);
-assert.match(contentLabel.getAttribute('title'), /kept locally\. Budgets: 1,024 MiB of request content and 2,048 MiB of response bodies; media and fonts kept\. Each Traffic row/);
-runInContext(`state.sessionContentLimits = {request_content_budget_mib: 64, response_body_budget_mib: 128, response_media: null}`, context);
-shell('live', true, true);
-assert.match(contentLabel.getAttribute('title'), /Budgets: 64 MiB of request content and 128 MiB of response bodies\. Each Traffic row/,
-  'an unreported media choice is not guessed');
 shell('live', false, true);
-assert.doesNotMatch(contentLabel.getAttribute('title'), /Budgets:/, 'a session without request content names no budget');
-runInContext('state.sessionContentLimits = null', context);
 assert.equal(contentLabel.hidden, false);
 assert.match(contentLabel.getAttribute('aria-label'), /^Content capture: Canvas images$/);
 shell('live', false, false);
@@ -482,7 +472,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     experiment_flag: '--reb-native-debugger', policy: 'proposed_pending_approval', detectable: true, lease_limit_ms: 60000, lease: null,
     paused: false, breakpoints: [], threads: {console: 'idle', frames: [{target_id: '22', label: 'top #22', origin: 'https://a.test', frame: 'top', out_of_process: false}],
       workers: [{kind: 'dedicated_worker', session_id: '1', process_id: 42, context_id: '9001', last_sequence: '12', requests: 3}], observed},
-    watch: {state: 'none', armed: null}, observations: records, observations_malformed: 2,
+    watch: {state: 'none', armed: null, kept: null}, observations: records, observations_malformed: 2,
     observations_query: {type: null, thread: null, scope: 'bounded_range', direction: 'backward', limit: 128, returned: 128, store_end: '9000',
       next_after: '9000', next_before: '4000', limited: true, budget_exhausted: false},
     observation_budget_gaps: [{session_id: '1', process_id: 42, frame_id: '7101', sequence_number: '9001'}], ...overrides});
@@ -523,7 +513,7 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   assert.equal(rows[0].getAttribute('aria-setsize'), '127');
   assert(rows.some(row => row.textContent.includes('<img/src=x/onerror=f()> listener on element')), 'a captured event type renders as text');
   assert.equal(sidebar.querySelector('img'), null, 'captured names never become elements');
-  for (const text of [/3 records in these reads were malformed/, /Renderer 42 reached 1,024 observation records in frame 7101/]) {
+  for (const text of [/3 records in these reads were malformed/, /Renderer 42, from an earlier build, reached its 1,024 observation records in frame 7101/]) {
     assert.match(sidebar.querySelector('.debugger-observation-notes').textContent, text);
   }
   const threadRows = sidebar.querySelectorAll('#debugger-threads .debugger-list-row');
@@ -603,11 +593,20 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
   }
   // Arming goes through the Console's live document only, and invalid rules send nothing.
   // The stub Console arms the way the renderer confirms: later reads report the set.
-  context.__debuggerAnswer = () => answer(context.__debuggerArmed
-    ? {watch: {state: 'armed', armed: {session_id: '5', target_id: '22', rules: JSON.parse(context.__debuggerArmed)}}} : {});
+  // A kept scope is the armed set without DOM rules, named by the browser.
+  context.__debuggerAnswer = () => {
+    const rules = context.__debuggerArmed ? JSON.parse(context.__debuggerArmed) : null;
+    const {dom, ...keptRules} = rules ?? {};
+    return answer(rules ? {watch: {state: context.__debuggerNavigated ? 'none' : 'armed',
+      armed: context.__debuggerNavigated ? null : {session_id: '5', target_id: '22', rules},
+      kept: context.__debuggerKept ? {session_id: '5', target_id: '22', origin: 'https://a.test', frame: 'top', rules: keptRules} : null}} : {});
+  };
   context.__watchCalls = [];
+  context.__keepCalls = [];
   runInContext(`globalThis.RebNativeConsole = {liveDocument: () => ({session_id: '5', target_id: '22', label: 'top #22'}),
-    watch: async rules => { __watchCalls.push(JSON.stringify(rules)); globalThis.__debuggerArmed = rules ? JSON.stringify(rules) : null; return {status: 'ok', text: 'Armed'}; }};`, context);
+    watch: async (rules, keep) => { __watchCalls.push(JSON.stringify(rules)); __keepCalls.push(Boolean(keep));
+      globalThis.__debuggerArmed = rules ? JSON.stringify(rules) : null; globalThis.__debuggerKept = Boolean(rules && keep);
+      return {status: 'ok', text: 'Armed', ...(keep ? {kept: {origin: 'https://a.test', frame: 'top'}} : {})}; }};`, context);
   click(sidebar.querySelector('.debugger-kind[data-kind="all"]'));
   await settle();
   const form = sidebar.querySelector('.debugger-watch-form');
@@ -623,14 +622,42 @@ assert.equal(contentLabel.hidden, true, 'only a live session is labeled');
     events: ['click', 'submit'], timers: true, csp: false, exceptions: 'uncaught', dom: []}]);
   assert.match(form.querySelector('.debugger-watch-result').textContent, /Armed on document 22/);
   // Where a rule is armed, what it cannot observe is said (protocol/native-debugger-observation-v1.md).
-  for (const limit of [/only this document's main thread/, /not its workers, other frames or same-process iframes/, /navigation clears the rules/i, /cannot be armed ahead of a page load/]) {
+  for (const limit of [/main thread of the documents it is armed on/, /never workers or other documents/, /navigation clears its rules/i,
+    /kept rules arm each later document of its origin and frame kind/, /not documents that are already open/]) {
     assert.match(form.querySelector('.debugger-watch-limits').textContent, limit);
   }
+  // Keep names the document's own origin and frame kind, and the browser's
+  // answer says what it kept; the scope outlives the document's navigation.
+  const keep = form.querySelector('.debugger-keep input');
+  assert.equal(form.querySelector('.debugger-keep-text').textContent, 'Keep for every later https://a.test top-frame document');
+  assert.equal(keep.checked, false, 'nothing kept yet');
+  keep.checked = true;
+  form.dispatchEvent(new window.Event('submit', {cancelable: true}));
+  await settle();
+  assert.deepEqual(context.__keepCalls, [false, true]);
+  assert.match(form.querySelector('.debugger-watch-result').textContent, /Kept for every later https:\/\/a\.test top-frame document/);
+  assert.match(sidebar.querySelector('.debugger-watch-state').textContent, /Kept for every later https:\/\/a\.test top-frame document, armed from Console document 22/);
+  context.__debuggerNavigated = true;
+  click(sidebar.querySelector('.debugger-kind[data-kind="all"]'));
+  await settle();
+  const navigated = sidebar.querySelector('.debugger-watch-state').textContent;
+  assert.match(navigated, /No Console document holds rules of its own now/);
+  assert.match(navigated, /Kept for every later https:\/\/a\.test/);
+  assert.match(navigated, /click, submit/, 'the kept rules are listed once no armed set shows them');
+  assert.doesNotMatch(navigated, /DOM mutations/, 'a scope never holds DOM rules');
+  assert.equal(form.querySelector('.debugger-arm').disabled, false);
+  const clear = [...form.querySelectorAll('button')].find(button => button.textContent === 'Clear rules');
+  assert.equal(clear.disabled, false, 'Clear forgets a kept scope after its document navigated');
+  click(clear);
+  await settle();
+  assert.equal(context.__watchCalls.at(-1), 'null', 'Clear sends unwatch');
+  assert.match(sidebar.querySelector('.debugger-watch-state').textContent, /No rules armed/);
+  context.__debuggerNavigated = false;
   form.querySelector('input[type="text"]').value = 'x'.repeat(28);
   form.dispatchEvent(new window.Event('submit', {cancelable: true}));
   await settle();
-  assert.equal(context.__watchCalls.length, 1, 'invalid rules send nothing');
-  assert.match(form.querySelector('.debugger-watch-result').textContent, /At most 16 event types/);
+  assert.equal(context.__watchCalls.length, 3, 'invalid rules send nothing');
+  assert.match(form.querySelector('.debugger-watch-result').textContent, /At most 64 event types/);
   runInContext(`delete globalThis.RebNativeConsole;`, context);
   // The registry: later sections join in order; malformed ones are refused.
   assert.throws(() => runInContext(`RebDebuggerSidebar.addSection({id: 'Bad id', title: 'x', order: 1, render() {}})`, context), /lowercase/);

@@ -200,6 +200,9 @@
         "interpreter_artifact_id",
         "source_artifact_sha256",
         "links",
+        "frame_host_records",
+        "attributed_host_records",
+        "events_filter",
         "omissions"
       ],
       "properties": {
@@ -213,19 +216,52 @@
         },
         "links": {
           "type": "array",
-          "maxItems": 256,
           "items": {
             "$ref": "#/$defs/link"
+          },
+          "description": "Host events naming the interpreter artifact whose direct parent is a VM record: the only host events a dispatch sample can position."
+        },
+        "frame_host_records": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Host events sharing the interpreter's session, navigation and frame, listed or not."
+        },
+        "attributed_host_records": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Those of them naming the interpreter artifact."
+        },
+        "events_filter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "session_id",
+            "navigation_id",
+            "frame_id"
+          ],
+          "description": "get_events parameters that list the frame's records.",
+          "properties": {
+            "session_id": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            },
+            "navigation_id": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            },
+            "frame_id": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]{0,19})$"
+            }
           }
         },
         "omissions": {
           "type": "array",
-          "maxItems": 4,
+          "maxItems": 3,
           "items": {
             "enum": [
               "dispatch-samples-unavailable",
               "dispatch-sample-retention-limit",
-              "host-link-limit",
               "host-events-unavailable"
             ]
           },

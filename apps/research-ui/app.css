@@ -2349,9 +2349,9 @@ var(--panel);
       .request-window button:disabled { opacity: .45; cursor: default; }
       .request-window #request-latest { color: var(--accent); }
       /* Its own line under the counts, after the buttons, only while a budget refused something. */
-      .request-window > .request-budget { order: 1; flex: 1 1 100%; color: var(--amber); overflow-wrap: anywhere; }
-      .request-window .request-budget-toggle { display: none; color: var(--amber); white-space: nowrap; }
-      .request-window .request-budget-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+      .request-window > .request-not-kept { order: 1; flex: 1 1 100%; color: var(--amber); overflow-wrap: anywhere; }
+      .request-window .request-not-kept-toggle { display: none; color: var(--amber); white-space: nowrap; }
+      .request-window .request-not-kept-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
       /* A placeholder is one line across the whole row, not text in the Name track. */
       .request-row.request-placeholder { display: block; padding: 0 8px; overflow: hidden; color: var(--muted); line-height: 28px; white-space: nowrap; text-overflow: ellipsis; }
       .request-spacer { pointer-events: none; }
@@ -2405,15 +2405,17 @@ var(--panel);
       .overview-clear { padding: 3px 4px; border: 0; border-radius: 4px; background: transparent; color: var(--accent); font: 10px var(--sans); }
       .overview-clear:hover { background: var(--panel-3); }
       /* A short stacked inspector leaves the ledger the strip's height unless a range is set.
-         The budget line becomes a one-line button beside the footer's own; it opens the
-         whole sentence above the footer, over the rows, without moving them. */
+         The not-kept line becomes a one-line button beside the footer's own; it opens the
+         whole sentence over the rows without moving them. The sentence is fixed to the
+         window beside its button (placeTrafficNotKept in app.js), so a ledger shorter
+         than the sentence, or a footer an open breakdown has grown, cannot clip it. */
       @media (max-width: 1100px) and (max-height: 650px) {
         #screen-traffic .traffic-grid[data-detail-open="true"] .request-overview[data-range="false"] { display: none; }
-        #screen-traffic .traffic-grid[data-detail-open="true"] .request-window > .request-budget { order: 0; flex: 0 0 auto; position: relative; }
-        #screen-traffic .traffic-grid[data-detail-open="true"] .request-budget-toggle { display: inline-block; }
-        #screen-traffic .traffic-grid[data-detail-open="true"] .request-budget[data-expanded="false"] .request-budget-text { display: none; }
-        #screen-traffic .traffic-grid[data-detail-open="true"] .request-budget[data-expanded="true"] .request-budget-text {
-          position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 5; width: min(420px, calc(100vw - 140px)); padding: 6px 8px;
+        #screen-traffic .traffic-grid[data-detail-open="true"] .request-window > .request-not-kept { order: 0; flex: 0 0 auto; }
+        #screen-traffic .traffic-grid[data-detail-open="true"] .request-not-kept-toggle { display: inline-block; }
+        #screen-traffic .traffic-grid[data-detail-open="true"] .request-not-kept[data-expanded="false"] .request-not-kept-text { display: none; }
+        #screen-traffic .traffic-grid[data-detail-open="true"] .request-not-kept[data-expanded="true"] .request-not-kept-text {
+          position: fixed; z-index: 5; width: min(420px, calc(100vw - 140px)); padding: 6px 8px;
           border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); box-shadow: var(--overlay-shadow); color: var(--text);
           font: 11px/1.45 var(--sans); white-space: normal; }
       }
@@ -2424,6 +2426,12 @@ var(--panel);
       .column-menu button:hover, .column-menu button:focus-visible { background: var(--panel-3); outline: 1px solid var(--accent); outline-offset: -1px; }
       .column-menu button:disabled { color: var(--faint); }
       .column-menu [role="menuitem"] { margin-top: 3px; border-top: 1px solid var(--line-soft); border-radius: 0 0 4px 4px; }
+      /* The Traffic row menu holds actions only: no check column, and one rule, above Export HAR. */
+      .traffic-row-menu { min-width: 160px; }
+      .traffic-row-menu button::before { display: none; }
+      .traffic-row-menu [role="menuitem"] { margin-top: 0; border-top: 0; border-radius: 4px; }
+      .traffic-row-menu [role="menuitem"][data-separated] { margin-top: 3px; border-top: 1px solid var(--line-soft); border-radius: 0 0 4px 4px; }
+      #request-copy-url::after { content: ""; width: 0; height: 0; margin-left: 5px; border: 3px solid transparent; border-top: 4px solid currentColor; border-bottom: 0; display: inline-block; vertical-align: 1px; opacity: .7; }
       /* Keep the phone footer to a full-width count row and one action row.
          Mixing shrinking counts with buttons steals height from the ledger. */
       @media (max-width: 480px) { .request-window > span { flex-basis: 100%; } }
@@ -2898,13 +2906,15 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-input { display: block; padding: 4px 10px 4px; background: var(--chrome); border-top: 1px solid var(--line); }
 .native-console-input:focus-within { box-shadow: inset 2px 0 var(--accent); }
 .native-console-composer-line { display: flex; align-items: flex-start; gap: 6px; }
-#native-console-run { min-width: 52px; margin: 0 0 0 6px; }
+#native-console-run, #native-console-interrupt { min-width: 52px; margin: 0 0 0 6px; }
+#native-console-interrupt:not(:disabled) { border-color: color-mix(in srgb, var(--red) 45%, transparent); color: var(--red); }
 .native-console-composer-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2px 14px; color: var(--faint); font: 10px/16px var(--sans); }
 #native-console-composer-status { color: var(--muted); overflow-wrap: anywhere; }
 #native-console-input-help { position: static; width: auto; height: auto; white-space: normal; clip-path: none; }
 .native-console-command { background: color-mix(in srgb, var(--chrome) 65%, transparent); }
 .native-console-command-status { display: block; padding-left: 16px; margin-bottom: 2px; color: var(--faint); font: 10px/14px var(--sans); }
 .native-console-command-failure { color: var(--red); margin: 4px 0 0 16px; font: 11px/16px var(--sans); }
+.native-console-command-rest { color: var(--muted); margin: 2px 0 0 16px; font: 10px/16px var(--sans); }
 .native-console-result-details > summary { opacity: 1; padding: 0 4px; }
 .native-console-expression { padding-right: 10px; }
 .native-console-result-details button, .native-console-property-pager button { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--muted); padding: 3px 6px; margin: 3px 4px 0 0; font: 10px/16px var(--sans); }
@@ -3030,10 +3040,22 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .evidence-coverage details:not([open]) .evidence-coverage-popover { display: none; }
 .evidence-workspace-notice { padding: 8px 20px; color: var(--amber); border-bottom: 1px solid var(--line); font: 11px/1.6 var(--sans); overflow-wrap: anywhere; }
 .evidence-investigation-layout { min-height: 0; min-width: 0; display: grid; grid-template-columns: minmax(290px, 40%) minmax(0, 1fr); }
-.evidence-observations { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
+.evidence-observations { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; border-right: 1px solid var(--line); background: var(--panel); }
+/* Fixed rows, so a hidden range bar leaves an empty row rather than moving the list. */
+.evidence-observation-tools { grid-row: 1; }
+.evidence-range { grid-row: 2; }
+.evidence-list-caption { grid-row: 3; }
+.evidence-observation-list { grid-row: 4; }
+.evidence-list-footer { grid-row: 5; }
 .evidence-observation-tools { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(125px, auto); gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line-soft); }
 .evidence-observation-tools label { display: grid; gap: 6px; font: 10px/1.4 var(--sans); color: var(--muted); }
 .evidence-observation-tools input, .evidence-observation-tools select { min-width: 0; width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); font: 11px var(--sans); }
+.evidence-range { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 10px; padding: 10px 16px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font: 10px/1.5 var(--sans); }
+.evidence-range[hidden] { display: none; }
+.evidence-range-label { min-width: 0; overflow-wrap: anywhere; }
+.evidence-range[aria-busy="true"] .evidence-range-label { color: var(--faint); }
+.evidence-range-moves { display: flex; flex-wrap: wrap; gap: 6px; }
+.evidence-range-moves button { padding: 4px 8px; font-size: 10px; }
 .evidence-list-caption { display: flex; justify-content: space-between; gap: 10px; padding: 10px 16px 4px; color: var(--muted); font: 10px/1.5 var(--sans); }
 .evidence-observation-list { min-height: 0; overflow: auto; padding: 0 8px 12px; overscroll-behavior: contain; }
 .evidence-observation-group h3 { margin: 16px 8px 3px; font: 600 11px/1.5 var(--sans); color: var(--text); }
@@ -3261,10 +3283,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .captured-export-header h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .captured-export-header > button { font-size: 18px; min-width: 30px; }
 .captured-export-body { padding: 16px 20px; min-height: 0; overflow: auto; font-size: 12px; }
-.captured-export-context { color: var(--muted); margin: 0 0 16px; }
+.captured-export-context { color: var(--muted); margin: 0 0 16px; overflow-wrap: anywhere; }
 .captured-export-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
 .captured-export-fields label { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--muted); font-size: 11px; }
-.captured-export-fields label:first-child, .captured-export-fields [data-export-file-field] { grid-column: 1 / -1; }
+.captured-export-fields label:first-child, .captured-export-fields [data-export-file-field], .captured-export-fields [data-export-scope-field] { grid-column: 1 / -1; }
 .captured-export-fields [hidden] { display: none; }
 .captured-export-fields select, .captured-export-fields input { width: 100%; min-width: 0; max-width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); background: var(--panel-2); font-size: 12px; }
 .captured-export-fields input { font-size: 11px; }
@@ -3920,12 +3942,25 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 #screen-vm .vm-session-status { grid-column: 3; grid-row: 1; justify-self: end; padding: 0; min-width: 0; }
 #screen-vm .vm-session-copy { display: none; }
 #screen-vm .vm-session-chip { padding: 3px 6px; font-size: 10px; letter-spacing: 0; }
-#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; }
+#vm-findings-workspace:not([hidden]) { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; }
 #vm-findings-workspace > .vm-notice { margin: 0; padding: 4px 12px; font-size: 10px; max-height: 48px; overflow: auto; border-bottom: 1px solid var(--line); }
 #vm-findings-workspace > .vm-grid { height: auto; min-height: 0; max-height: none; grid-template-columns: 210px minmax(0, 1fr); }
 #vm-findings-workspace > .vm-notice { grid-row: 1; }
-#vm-findings-workspace > .vm-grid { grid-row: 2; }
-#vm-findings-workspace > .vm-program-example { grid-row: 3; }
+#vm-findings-workspace > .vm-wasm-sampling { grid-row: 2; }
+#vm-findings-workspace > .vm-grid { grid-row: 3; }
+#vm-findings-workspace > .vm-program-example { grid-row: 4; }
+/* The Wasm sample policy this session runs with, beside its window reset.
+   Reset keeps its place at the end of the first line in every state, and a
+   reset's answer goes under the policy. */
+.vm-wasm-sampling { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 2px 12px; padding: 4px 12px; border-bottom: 1px solid var(--line); background: var(--chrome); color: var(--muted); font-size: 10px; line-height: 1.4; }
+.vm-wasm-sampling-policy { grid-column: 1; grid-row: 1; min-width: 0; }
+.vm-wasm-sampling-part { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
+.vm-wasm-sampling-status { grid-column: 1; grid-row: 2; min-width: 0; overflow-wrap: anywhere; }
+.vm-wasm-sampling-status:empty { display: none; }
+.vm-wasm-sampling-status[data-kind="failed"] { color: var(--red); }
+.vm-wasm-sampling-status[data-kind="done"] { color: var(--text); }
+.vm-wasm-sampling > .secondary-button { grid-column: 2; grid-row: 1; min-height: 22px; padding: 0 8px; font-size: 10px; white-space: nowrap; }
+.vm-wasm-sampling > .secondary-button[aria-disabled="true"] { cursor: progress; opacity: .45; }
 #vm-analysis-toggle { display: none; }
 #screen-vm .vm-list-pane { background: var(--chrome); }
 #screen-vm .vm-list-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 12px; font: 600 10px var(--sans); text-transform: none; letter-spacing: 0; color: var(--muted); }
@@ -4022,10 +4057,10 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 @media (max-width: 900px), (max-height: 650px) {
   /* A short workbench shows either the analysis or the dock. The complete
      disclosure header stays outside both scrollers, never a sliver of text. */
-  #vm-findings-workspace:not([hidden]) { grid-template-rows: auto auto minmax(0, 1fr) auto; }
-  #vm-findings-workspace > #vm-analysis-toggle { grid-row: 2; }
-  #vm-findings-workspace > .vm-grid { grid-row: 3; }
-  #vm-findings-workspace > .vm-program-example { grid-row: 4; }
+  #vm-findings-workspace:not([hidden]) { grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
+  #vm-findings-workspace > #vm-analysis-toggle { grid-row: 3; }
+  #vm-findings-workspace > .vm-grid { grid-row: 4; }
+  #vm-findings-workspace > .vm-program-example { grid-row: 5; }
   #vm-findings-workspace:has(.vm-workbench-inspector) > #vm-analysis-toggle { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 4px 10px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: var(--chrome); color: var(--text); font: 600 11px/20px var(--sans); text-align: left; }
   #vm-analysis-toggle::before { content: '▸'; }
   #vm-analysis-toggle[aria-expanded="true"]::before { content: '▾'; }
@@ -5313,7 +5348,7 @@ details.decoder-card > header p { margin-top: 0; }
 #screen-vm .vm-selection-inspector .evidence-name-editor { padding: 8px 10px; }
 
 /* Saved JavaScript invocation sites. The header chip names what this capture
-   tracks; the Sources pane saves functions for the next capture. Context lines
+   tracks; the Sources pane saves the functions captures track. Context lines
    are captured text and wrap rather than widen the sidebar. */
 .session-tracking {
   min-width: 0; max-width: min(46vw, 420px); min-height: 20px; padding: 0 8px; overflow: hidden;

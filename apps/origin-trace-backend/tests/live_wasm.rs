@@ -574,7 +574,7 @@ async fn live_call_dispatch_observations_share_page_script_budget_and_identity()
     assert_eq!(called["budget_gap"], false);
     let (status, state) = server.get("/api/live-wasm").await;
     assert_eq!(status, 200, "{state}");
-    assert_eq!(state["budget"], 16);
+    assert_eq!(state["budget"], 1024);
     assert_eq!(state["dispatch_samples_used"], 2);
     let observations = state["observations"].as_array().unwrap();
     assert_eq!(observations.len(), 2);

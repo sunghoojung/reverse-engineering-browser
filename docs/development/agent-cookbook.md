@@ -65,8 +65,9 @@ checks:
   Its `reason` says why; `from_cache`, `service_worker`, `download` and
   `failed` are expected, `not_reported` is a capture gap. `get_request_headers`
   names the reason per hop as `network_block_missing`.
-- `memory_cache_reuse_not_recorded`: a renderer passed its 4,096 memory-cache
-  rows for the capture; later reuses were counted, not recorded. Reuses in a
+- `memory_cache_reuse_not_recorded`: a renderer from an earlier build passed
+  its 4,096 memory-cache rows for the capture; later reuses were counted, not
+  recorded. Current renderers record every reuse. Reuses in a
   page that is not ordinary (an SVG image's own document), which no tab owns,
   are the separate `non_ordinary_page_reuse` exclusion.
 - `response_bodies_not_observed`: some responses never reached the browser
@@ -129,8 +130,9 @@ payload layouts are in
 (event 17, and event 20 for `call_indirect`) and
 [native Wasm guest](../../protocol/native-wasm-guest-v1.md#capture-and-identity)
 (events 18 and 19). To restrict to one module add `"artifact_id": "5"`. Native
-`br_table` capture keeps at most 16 observations per capture configuration, so
-16 rows and a budget gap (recipe 6) is a full budget, not a broken capture.
+`br_table` capture keeps at most 1024 observations per one-second window, and
+64 of one function, so a budget gap (recipe 6) is a full window, not a broken
+capture. The next window records again.
 
 ## 5. Check guest invocation chains
 
@@ -165,8 +167,8 @@ identifiers, for example:
 
 | Reason | Meaning |
 | --- | --- |
-| `native_wasm_dispatch_budget_incomplete` | The 16-observation `br_table` stream budget filled. Later executions are `wasm_dispatch_overflow` identities up to the ring, then one omitted count. The stream stays enabled. |
-| `native_wasm_dispatch_function_budget_incomplete` | That function's own `br_table` maximum was reached. Other functions can still be recorded. The refused execution is a `wasm_dispatch_overflow` identity. |
+| `native_wasm_dispatch_budget_incomplete` | That second's 1024-observation `br_table` window filled. Later executions of the window are `wasm_dispatch_overflow` identities up to the ring, then one omitted count. The next window records full observations again. |
+| `native_wasm_dispatch_function_budget_incomplete` | That function's own `br_table` allowance for the window was reached (64 unless the session set one). Other functions can still be recorded, and the function records again next window. The refused execution is a `wasm_dispatch_overflow` identity. |
 | `native_wasm_indirect_function_budget_incomplete` | That function's own `call_indirect` maximum was reached. The refused call is a `wasm_indirect_overflow` identity. |
 | `native_wasm_indirect_site_budget_incomplete` | That `call_indirect` site's maximum was reached. The refused call is a `wasm_indirect_overflow` identity. |
 | `native_wasm_dispatch_filtered` | The module or function was excluded. It did not consume a sample index. The research UI labels this as a sample-policy exclusion, not a loss. The excluded execution still keeps an overflow identity. |
@@ -182,14 +184,14 @@ identifiers, for example:
 | `native_guest_parent_unresolved` | A guest record's parent invocation was not linked. |
 | `..._transport_unavailable`, `..._document_unavailable` | A capture stage was not available. |
 
-A full budget is evidence too: the capture saw more than it kept. A session
-start can keep N samples of one function, exclude functions, or admit only
-modules whose SHA-256 is listed (`wasm_samples_per_function`,
+A full window is evidence too: the capture saw more than it kept. A session
+start can keep N samples of one function per window, exclude functions, or
+admit only modules whose SHA-256 is listed (`wasm_samples_per_function`,
 `wasm_samples_per_indirect_site`, `wasm_function_allow`,
 `wasm_function_deny`, `wasm_module_allowlist`).
-`session_action` `reset_wasm_sample_budgets` restarts both sample indexes
-without a new session and starts a new overflow ring. It publishes each
-stream's pending omitted count first. The browser applies that reset on its
+`session_action` `reset_wasm_sample_budgets` opens a new window at once
+without a new session, with a new overflow ring. It publishes each stream's
+pending omitted count first. The browser applies that reset on its
 next writer wake, about 250ms later. A live browser needs a rebuild before it
 honors either control.
 For Wasm `br_table` and `call_indirect`, `get_events` with `type`
@@ -317,21 +319,20 @@ bodies; read headers with `get_request_headers` and cookies with
 named sites, invocation value digests are kept by default, because the
 researcher's Full access is the consent for them; name `"request_content":
 false`, `"canvas_images": false` or `"js_invocation_digests": false` when the
-question does not need what they keep. `"request_content_budget_mib": 1024` raises the request content
-kept from the default 256 MiB, `"response_body_budget_mib": 2048` the response
-bodies kept from the default 512 MiB, and `"response_media": true` also keeps
-element images, audio, video and fonts. Request stacks (the stack that
-started each renderer request, for `get_request_stack`) and document-start
-Console scripts (recipe 19) are on by default; `"browser_internal": true` and
-`"extension_traffic": true` record browser-page and extension-worker requests,
-and `"fresh_profile": true` starts signed out instead of in the agent
-sessions' shared research profile. `"js_invocation_sites": "/absolute/path/sites.json"`, or
+question does not need what they keep. Request content keeps every request and
+response body whole, element images, audio, video and fonts included, with no
+size or count limit; the artifact receiver refuses a body only to keep its
+free-disk reserve, and the session summary counts each one it refused. Request
+stacks (the stack that started each renderer request, for `get_request_stack`)
+and document-start Console scripts (recipe 19) are on by default;
+`"browser_internal": true` and `"extension_traffic": true` record browser-page
+and extension-worker requests, and `"fresh_profile": true` starts signed out
+instead of in the agent sessions' shared research profile. `"js_invocation_sites": "/absolute/path/sites.json"`, or
 `"js_invocation_saved_sites": true` for the sites agent sessions saved with
 `js_invocation_site_action`, arms invocation tracking. None of these is ever
 taken from the environment; `options` in the result and
-`capture_options` in `get_session_context` show what the session runs with,
-its budgets and media choice in `capture_options.content_limits` (null without
-request content). A guest adapter
+`capture_options` in `get_session_context` show what the session runs with.
+A guest adapter
 needs `"guest_adapter": "/absolute/path/recipe.json"` with `wasm_dispatch`.
 An error names the launcher's reason, for example a Brave build that lacks a
 requested V8 flag; nothing is left running. From a shell, `reb-api session
@@ -503,9 +504,10 @@ bytecode buffers and binary bodies. Request and response bodies are
 named in its `get_events` records. For readable JavaScript, page
 `get_source_format {"session_id": "1", "artifact_id": "41", "start_line": 1,
 "line_count": 400}` instead, which at Full access also lays out JSON and
-JavaScript bodies. `replacements` counts bytes that were not UTF-8. Header blocks and cookie
-lists are refused: read them with `get_request_headers` and
-`get_request_cookies`, which withhold credential and cookie values.
+JavaScript bodies. `replacements` counts bytes that were not UTF-8. At Full
+access header blocks and cookie lists read as text too, and
+`get_request_headers` and `get_request_cookies` return credential and cookie
+values; below it the blocks are refused and the values withheld.
 
 ## 22. Find text across every retained file
 
@@ -596,8 +598,8 @@ or cursor adds it; the unfiltered `get_events` window does not:
   armed set, `request_id` is the request, and `site` is null. Read the stack
   that started it with `get_request_stack`, passing `stack_read` as it is
   (`stack_read_operation` names that tool): `frames`, innermost first, with
-  `resolution.url`, `line`, `column` and `function_name`. That read covers
-  the newest 64 MiB of the store; an older record answers `outside_scan`.
+  `resolution.url`, `line`, `column` and `function_name`. That read finds
+  the record anywhere in the store.
 - `listener_dispatch`: `detail.event_type`,
   `detail.target`, and `site.resolution` is the listener's file, line and
   column. A click listener usually runs with no script on the stack, so
@@ -620,13 +622,18 @@ record's `stack_read`, which also scans the store's newest identities.
 `status: invalid` is a record the core refuses, with no fields.
 
 A timeout does not mean nothing happened. Rules match only the main thread of
-the document they were armed on, never a worker, another frame or a
-same-process iframe, and one document is armed at a time. A navigation clears
-them, and they cannot be armed ahead of a page load, so what a new page does
-before you arm it again is not recorded. `get_native_debugger` `watch` says
-what the renderer has armed now (`--permission ask` and up). A renderer
-stops after 1,024 records per capture configuration and leaves one
-`debugger_observation_budget` gap; `get_session_summary` lists it. Disarm with
+the documents they are armed on, never a worker or a document they are not
+armed on. A navigation clears them, so what a new page does before you arm it
+again is not recorded, unless the watch kept them: add `"keep": true` beside
+`rules` and every later document of the armed document's origin and frame
+kind (top or child), in any tab, is armed before its own scripts run, so a
+reload is observed from its first script. Documents already open are not
+armed. The reply's `runtime.kept` names the origin and frame kept, or is null
+when only DOM rules were armed, since those name one document's nodes. `get_native_debugger` `watch` says
+what the renderer has armed now (`--permission ask` and up). Every match is
+recorded while the rules stay armed; only a renderer from an earlier build
+stopped after 1,024 records per capture configuration and left one
+`debugger_observation_budget` gap, which `get_session_summary` lists. Disarm with
 `{"operation": "unwatch"}`; `stop` disarms too.
 
 These fields carry identities, kinds, positions and names only (a rule's

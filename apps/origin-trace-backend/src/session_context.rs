@@ -1,18 +1,11 @@
 //! Bounded discovery, not another evidence export. Never include source, bodies,
 //! debugger endpoint tokens, arbitrary titles, or URL credentials/query/path.
-use crate::{
-    error::{Code, Error, Result},
-    evidence,
-};
+use crate::error::{Error, Result};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{
-    io::{Read, Seek, SeekFrom},
-    path::Path,
-};
+use std::{path::Path, time::Instant};
 
 pub const ITEMS: usize = 16;
-const MANIFEST_BYTES: u64 = 256 * 1024;
 
 /// Same acceptance rule as `/api/health` `instance_id` and `X-REB-Expected-Instance`.
 /// A non-matching value is omitted rather than trimmed into a different identity.
@@ -84,7 +77,6 @@ pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> 
     json!({
         "source": if live { "launcher" } else { "not_live" },
         "request_content": live && options.session_request_content,
-        "content_limits": content_limits(options),
         "canvas_images": live && options.session_canvas_images,
         "request_stacks": live && options.session_request_stacks,
         "document_start": if live && options.session_document_start {
@@ -94,28 +86,52 @@ pub fn capture_options(options: &crate::config::Options, invocation: &Value) -> 
         },
         "js_invocation": {
             "state": invocation["state"],
+            "live": invocation["live"],
             "count": invocation["count"],
             "digests": invocation["digests"],
         },
+        "wasm_sampling": wasm_sampling(options),
     })
 }
 
-/// Version 1 of the content session's limits: its two budgets in MiB and
-/// whether it keeps element media, named as the start options are. Null when
-/// the session retains no request content, or is not live. A launcher from
-/// before the limits were labeled names none of them, so a value it did not
-/// name is null rather than a guessed default.
-pub fn content_limits(options: &crate::config::Options) -> Value {
+/// The browser's full Wasm records per stream per sample window
+/// (`kNativeWasmDispatchSampleBudget`).
+const WASM_RECORDS_PER_WINDOW: u32 = 1024;
+
+/// Version 1 of the session's Wasm sampling: the streams that record, the
+/// one-second window, and the policy the launcher passed, as counts. Null when
+/// neither stream records or the backend is not live. An allowance the
+/// launcher did not name is null: the browser's own default applies, which
+/// this backend does not know for every build. `reset` says whether
+/// `reset_wasm_sample_budgets` has a reset file to write.
+pub fn wasm_sampling(options: &crate::config::Options) -> Value {
     if options.capture_mode() != crate::config::CaptureMode::Live
-        || !options.session_request_content
+        || !(options.session_wasm_dispatch || options.session_wasm_call_indirect)
     {
         return Value::Null;
     }
+    let streams = [
+        (options.session_wasm_dispatch, "br_table"),
+        (options.session_wasm_call_indirect, "call_indirect"),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect::<Vec<_>>();
     json!({
         "version": 1,
-        "request_content_budget_mib": options.session_request_content_budget_mib,
-        "response_body_budget_mib": options.session_response_body_budget_mib,
-        "response_media": options.session_response_media.as_deref().map(|media| media == "1"),
+        "streams": streams,
+        "window_ms": 1000,
+        "records_per_window": WASM_RECORDS_PER_WINDOW,
+        "samples_per_function": options.session_wasm_samples_per_function,
+        "samples_per_indirect_site": options.session_wasm_samples_per_indirect_site,
+        "function_allow_count": options.session_wasm_function_allow_count.unwrap_or(0),
+        "function_deny_count": options.session_wasm_function_deny_count.unwrap_or(0),
+        "module_allowlist": options.session_wasm_module_allowlist,
+        "reset": if options.wasm_budget_reset_file.is_some() {
+            "available"
+        } else {
+            "unavailable"
+        },
     })
 }
 
@@ -137,72 +153,57 @@ pub fn retired_debugger(instance_id: &str) -> Value {
     })
 }
 
-/// Read only a bounded manifest tail; never read artifact blobs or launch a
-/// browser. A tail is explicitly incomplete and is not a script/artifact join.
+/// The newest Wasm modules of the whole manifest, found through the artifact
+/// lookup index, and how many more it holds; never reads artifact blobs or
+/// launches a browser. While the index catches up the inventory says how far
+/// it got. `list_artifacts` with `kind=wasm` pages the rest.
 pub fn artifacts(root: &Path) -> Result<Value> {
-    let mut file = match evidence::regular_file(&root.join("manifest.jsonl")) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({"items": [], "window_truncated": false, "items_omitted": 0}));
-        }
-        Err(_) => {
-            return Err(Error::new(
-                500,
-                "Session context artifact manifest is unavailable",
-            ));
-        }
-    };
-    let length = file.metadata()?.len();
-    let start = length.saturating_sub(MANIFEST_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::new();
-    file.take(MANIFEST_BYTES).read_to_end(&mut bytes)?;
-    let complete = if start > 0 {
-        bytes
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .map(|end| &bytes[end + 1..])
-            .unwrap_or(&[])
-    } else {
-        &bytes
-    };
-    let mut items = Vec::new();
-    let mut omitted = 0usize;
-    let mut identifiers = std::collections::BTreeSet::new();
-    for line in complete.rsplit(|byte| *byte == b'\n') {
-        if line.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        if line.len() > 8192 {
-            return Err(
-                Error::new(500, "Session context artifact record exceeds its limit")
-                    .with_code(Code::ResourceLimit),
-            );
-        }
-        let mut record: Value = serde_json::from_slice(line)
-            .map_err(|_| Error::new(500, "Session context artifact manifest is malformed"))?;
-        evidence::validate_artifact(&mut record)
-            .map_err(|_| Error::new(500, "Session context artifact manifest is malformed"))?;
-        if !identifiers.insert(record["artifact_id"].as_str().unwrap().to_owned()) {
-            return Err(Error::new(
-                500,
-                "Session context manifest contains duplicate artifact IDs",
-            ));
-        }
-        if record["kind"] != "wasm" {
-            continue;
-        }
-        if items.len() == ITEMS {
-            omitted += 1;
-            continue;
-        }
-        items.push(json!({
-            "artifact_id": record["artifact_id"], "session_id": record["session_id"],
-            "url": url_label(&record["url"]), "byte_length": record["byte_size"].as_u64().filter(|n| *n <= crate::validation::MAX_SAFE_INTEGER),
-            "sha256": record["sha256"], "script_id": null,
-        }));
+    let wasm = crate::artifact_lookup::wasm(
+        root,
+        ITEMS,
+        Instant::now() + crate::artifact_lookup::LOOKUP_DEADLINE,
+    )
+    .map_err(|error| {
+        Error::new(
+            500,
+            format!(
+                "Session context artifact manifest is unavailable: {}",
+                error.message
+            ),
+        )
+    })?;
+    if let Some(damage) = wasm.damage {
+        return Err(Error::new(
+            500,
+            format!("Session context artifact manifest is damaged: {damage}"),
+        ));
     }
-    Ok(json!({"items": items, "window_truncated": start > 0, "items_omitted": omitted}))
+    let items = wasm
+        .newest
+        .iter()
+        .map(|record| {
+            json!({
+                "artifact_id": record["artifact_id"], "session_id": record["session_id"],
+                "url": url_label(&record["url"]), "byte_length": record["byte_size"].as_u64().filter(|n| *n <= crate::validation::MAX_SAFE_INTEGER),
+                "sha256": record["sha256"], "script_id": null,
+            })
+        })
+        .collect::<Vec<_>>();
+    let scope = if wasm.stopped.is_some() {
+        "stopped"
+    } else if wasm.complete {
+        "store"
+    } else {
+        "indexing"
+    };
+    Ok(json!({
+        "items_omitted": wasm.total.saturating_sub(items.len() as u64),
+        "items": items,
+        "window_truncated": scope != "store",
+        "scope": scope,
+        "scan_end": wasm.indexed_to.to_string(),
+        "store_end": wasm.file_end.to_string(),
+    }))
 }
 
 pub async fn with_artifacts(
@@ -228,66 +229,58 @@ mod tests {
         json!({"protocol_version":1,"artifact_id":id.to_string(),"session_id":"9","navigation_id":"0","frame_id":"0","parent_artifact_id":"0","creator_event_id":"0","kind":"wasm","url":"https://user:secret_canary@owned.example/private_secret?token=secret_canary#secret_canary","mime_type":"application/wasm","byte_size":8,"sha256":"a".repeat(64),"sensitive":false,"content_path":format!("blobs/{}.bin", "a".repeat(64))})
     }
     #[test]
-    fn content_limits_label_only_a_live_content_session() {
+    fn wasm_sampling_labels_only_a_live_session_that_records_wasm() {
         use clap::Parser;
         let parse = |arguments: &[&str]| {
             crate::config::Options::try_parse_from(
-                ["origin-trace-backend"].iter().chain(arguments).copied(),
+                ["origin-trace-backend", "--socket", "/tmp/broker.sock"]
+                    .iter()
+                    .chain(arguments)
+                    .copied(),
             )
         };
-        let live = ["--socket", "/tmp/broker.sock"];
-        let content = [&live[..], &["--session-request-content"]].concat();
-        let limits = |arguments: &[&str]| {
-            content_limits(&parse(&[&content[..], arguments].concat()).unwrap())
-        };
+        let sampling = |arguments: &[&str]| wasm_sampling(&parse(arguments).unwrap());
+        assert!(sampling(&[]).is_null());
+        assert!(
+            wasm_sampling(
+                &crate::config::Options::try_parse_from(["origin-trace-backend"]).unwrap()
+            )
+            .is_null()
+        );
         assert_eq!(
-            limits(&[
-                "--session-request-content-budget-mib",
-                "256",
-                "--session-response-body-budget-mib",
-                "512",
-                "--session-response-media",
-                "0"
+            sampling(&["--session-wasm-dispatch"]),
+            json!({"version":1,"streams":["br_table"],"window_ms":1000,"records_per_window":1024,
+                "samples_per_function":null,"samples_per_indirect_site":null,
+                "function_allow_count":0,"function_deny_count":0,"module_allowlist":false,
+                "reset":"unavailable"})
+        );
+        assert_eq!(
+            sampling(&[
+                "--session-wasm-dispatch",
+                "--session-wasm-call-indirect",
+                "--session-wasm-samples-per-function",
+                "1024",
+                "--session-wasm-samples-per-indirect-site",
+                "2",
+                "--session-wasm-function-allow-count",
+                "3",
+                "--session-wasm-function-deny-count",
+                "32",
+                "--session-wasm-module-allowlist",
+                "--wasm-budget-reset-file",
+                "/tmp/reset",
             ]),
-            json!({"version":1,"request_content_budget_mib":256,"response_body_budget_mib":512,"response_media":false})
+            json!({"version":1,"streams":["br_table","call_indirect"],"window_ms":1000,
+                "records_per_window":1024,"samples_per_function":1024,"samples_per_indirect_site":2,
+                "function_allow_count":3,"function_deny_count":32,"module_allowlist":true,
+                "reset":"available"})
         );
-        assert_eq!(
-            limits(&[
-                "--session-request-content-budget-mib",
-                "4096",
-                "--session-response-body-budget-mib",
-                "16384",
-                "--session-response-media",
-                "1"
-            ]),
-            json!({"version":1,"request_content_budget_mib":4096,"response_body_budget_mib":16384,"response_media":true})
-        );
-        // A launcher that names no limit reports none, never a guessed default.
-        assert_eq!(
-            limits(&[]),
-            json!({"version":1,"request_content_budget_mib":null,"response_body_budget_mib":null,"response_media":null})
-        );
-        // A metadata session and a backend that is not live carry no limits.
-        assert!(content_limits(&parse(&live).unwrap()).is_null());
-        assert!(content_limits(&parse(&[]).unwrap()).is_null());
-        // The labels mean nothing without request content, and keep the
-        // launcher's bounds.
         for arguments in [
-            &[&live[..], &["--session-request-content-budget-mib", "64"]].concat(),
-            &[&live[..], &["--session-response-media", "1"]].concat(),
-            &[&content[..], &["--session-response-media"]].concat(),
-            &[&content[..], &["--session-response-media", "yes"]].concat(),
-            &[
-                &content[..],
-                &["--session-request-content-budget-mib", "4097"],
-            ]
-            .concat(),
-            &[&content[..], &["--session-request-content-budget-mib", "0"]].concat(),
-            &[
-                &content[..],
-                &["--session-response-body-budget-mib", "16385"],
-            ]
-            .concat(),
+            &["--session-wasm-samples-per-function", "0"][..],
+            &["--session-wasm-samples-per-function", "1025"],
+            &["--session-wasm-samples-per-indirect-site", "1025"],
+            &["--session-wasm-function-allow-count", "0"],
+            &["--session-wasm-function-deny-count", "33"],
         ] {
             assert!(parse(arguments).is_err(), "{arguments:?}");
         }
@@ -310,10 +303,10 @@ mod tests {
         assert!(url_label(&json!("wasm://wasm/abcd?token=secret_canary")).is_null());
     }
     #[test]
-    fn artifact_inventory_is_bounded_and_never_reads_blobs() {
+    fn artifact_inventory_covers_the_whole_manifest_and_never_reads_blobs() {
         let root = tempfile::tempdir().unwrap();
-        let rows: Vec<_> = (0..40).map(|id| record(id).to_string()).collect();
-        std::fs::write(root.path().join("manifest.jsonl"), rows.join("\n")).unwrap();
+        let rows: String = (0..40).map(|id| format!("{}\n", record(id))).collect();
+        std::fs::write(root.path().join("manifest.jsonl"), rows).unwrap();
         let value = artifacts(root.path()).unwrap();
         assert_eq!(value["items"].as_array().unwrap().len(), ITEMS);
         assert_eq!(value["items_omitted"], 24);
@@ -322,16 +315,24 @@ mod tests {
         assert!(value["items"][0]["script_id"].is_null());
         assert!(!value.to_string().contains("secret_canary"));
         assert_eq!(value["window_truncated"], false);
-        std::fs::write(
-            root.path().join("manifest.jsonl"),
-            format!(
-                "{}\n{}\n",
-                " ".repeat(MANIFEST_BYTES as usize + 10),
-                record(1)
-            ),
-        )
-        .unwrap();
-        assert_eq!(artifacts(root.path()).unwrap()["window_truncated"], true);
+        assert_eq!(value["scope"], "store");
+        // A Wasm module ahead of far more than the old 256 KiB tail is listed,
+        // and every module behind it counted.
+        let mut text = format!("{}\n", record(1));
+        let mut id = 1;
+        while text.len() < 4 << 20 {
+            id += 1;
+            let mut script = record(id);
+            script["kind"] = json!("javascript");
+            script["mime_type"] = json!("text/javascript");
+            text.push_str(&format!("{script}\n"));
+        }
+        std::fs::write(root.path().join("manifest.jsonl"), &text).unwrap();
+        let early = artifacts(root.path()).unwrap();
+        assert_eq!(early["items"][0]["artifact_id"], "1", "{early}");
+        assert_eq!(early["items_omitted"], 0);
+        assert_eq!(early["window_truncated"], false);
+        assert_eq!(early["store_end"], text.len().to_string());
         std::fs::write(
             root.path().join("manifest.jsonl"),
             format!("{}\n{}\n", record(1), record(1)),
@@ -343,7 +344,7 @@ mod tests {
                 .to_string()
                 .contains("duplicate")
         );
-        std::fs::write(root.path().join("manifest.jsonl"), "secret_canary").unwrap();
+        std::fs::write(root.path().join("manifest.jsonl"), "secret_canary\n").unwrap();
         assert!(
             !artifacts(root.path())
                 .unwrap_err()

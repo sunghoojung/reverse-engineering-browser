@@ -2506,13 +2506,9 @@ fn render(report: &Report, page: &Page) -> Result<Value> {
 
 static REPORTS: Mutex<Vec<(String, Arc<Report>)>> = Mutex::new(Vec::new());
 
-fn record(artifacts: &[Value], id: &str) -> Result<Value> {
+fn record(root: &Path, id: &str) -> Result<Value> {
     validation::canonical(&json!(id), 64, true, "Artifact ID")?;
-    let record = artifacts
-        .iter()
-        .find(|a| a["artifact_id"] == id)
-        .cloned()
-        .ok_or_else(|| Error::new(404, "Artifact not found"))?;
+    let record = evidence::find_artifact(root, id)?;
     if record["kind"] != "wasm" {
         return Err(Error::bad("Artifact is not WebAssembly"));
     }
@@ -2547,9 +2543,8 @@ fn diff_with(
     if a_id == b_id {
         return Err(Error::bad("Compare two different artifacts"));
     }
-    let artifacts = evidence::artifacts(root, 10000)?;
-    let a = record(&artifacts, a_id)?;
-    let b = record(&artifacts, b_id)?;
+    let a = record(root, a_id)?;
+    let b = record(root, b_id)?;
     // The store is part of the key: two stores can hold the same IDs.
     let key = format!(
         "{}:{a_id}:{}:{b_id}:{}",

@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -20,6 +21,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+#include <arm_neon.h>
+#endif
+
 namespace reb {
 namespace {
 
@@ -36,21 +41,32 @@ constexpr std::array<std::uint32_t, 64> kSha256RoundConstants = {
     0xc67178f2U,
 };
 
+// Every stored byte is hashed on the receiver's one thread, so the digest
+// bounds how fast a session can store content. ARMv8 SHA-256 instructions,
+// which every Apple silicon processor has, hash about ten times faster than
+// the portable rounds, which remain for other processors.
 class Sha256 final {
  public:
   void Update(const std::uint8_t* data, std::size_t size) noexcept {
     total_size_ += size;
-    while (size > 0) {
+    if (block_size_ > 0) {
       const std::size_t copied = std::min(size, block_.size() - block_size_);
       std::copy_n(data, copied, block_.begin() + static_cast<std::ptrdiff_t>(block_size_));
       block_size_ += copied;
       data += copied;
       size -= copied;
-      if (block_size_ == block_.size()) {
-        Transform();
-        block_size_ = 0;
+      if (block_size_ < block_.size()) {
+        return;
       }
+      Transform(block_.data(), 1);
+      block_size_ = 0;
     }
+    const std::size_t blocks = size / block_.size();
+    Transform(data, blocks);
+    data += blocks * block_.size();
+    size -= blocks * block_.size();
+    std::copy_n(data, size, block_.begin());
+    block_size_ = size;
   }
 
   [[nodiscard]] std::array<std::uint8_t, 32> Final() noexcept {
@@ -58,14 +74,14 @@ class Sha256 final {
     block_[block_size_++] = 0x80U;
     if (block_size_ > 56) {
       std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.end(), 0U);
-      Transform();
+      Transform(block_.data(), 1);
       block_size_ = 0;
     }
     std::fill(block_.begin() + static_cast<std::ptrdiff_t>(block_size_), block_.begin() + 56, 0U);
     for (std::size_t index = 0; index < 8; ++index) {
       block_[63 - index] = static_cast<std::uint8_t>(bit_size >> (index * 8U));
     }
-    Transform();
+    Transform(block_.data(), 1);
 
     std::array<std::uint8_t, 32> digest{};
     for (std::size_t index = 0; index < state_.size(); ++index) {
@@ -78,14 +94,55 @@ class Sha256 final {
   }
 
  private:
-  void Transform() noexcept {
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+  void Transform(const std::uint8_t* data, std::size_t blocks) noexcept {
+    uint32x4_t abcd = vld1q_u32(state_.data());
+    uint32x4_t efgh = vld1q_u32(state_.data() + 4);
+    for (; blocks > 0; --blocks, data += 64) {
+      const uint32x4_t abcd_before = abcd;
+      const uint32x4_t efgh_before = efgh;
+      // Big-endian message words, four to a vector.
+      std::array<uint32x4_t, 4> words = {
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data))),
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16))),
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 32))),
+          vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 48))),
+      };
+      // Four rounds per step; the first twelve steps also expand the next
+      // four schedule words in place of the ones just used.
+      for (std::size_t step = 0; step < 16; ++step) {
+        uint32x4_t& current = words[step % 4];
+        const uint32x4_t sum =
+            vaddq_u32(current, vld1q_u32(kSha256RoundConstants.data() + step * 4));
+        const uint32x4_t abcd_round = abcd;
+        abcd = vsha256hq_u32(abcd, efgh, sum);
+        efgh = vsha256h2q_u32(efgh, abcd_round, sum);
+        if (step < 12) {
+          current = vsha256su1q_u32(vsha256su0q_u32(current, words[(step + 1) % 4]),
+                                    words[(step + 2) % 4], words[(step + 3) % 4]);
+        }
+      }
+      abcd = vaddq_u32(abcd, abcd_before);
+      efgh = vaddq_u32(efgh, efgh_before);
+    }
+    vst1q_u32(state_.data(), abcd);
+    vst1q_u32(state_.data() + 4, efgh);
+  }
+#else
+  void Transform(const std::uint8_t* data, std::size_t blocks) noexcept {
+    for (; blocks > 0; --blocks, data += 64) {
+      TransformBlock(data);
+    }
+  }
+
+  void TransformBlock(const std::uint8_t* block) noexcept {
     std::array<std::uint32_t, 64> schedule{};
     for (std::size_t index = 0; index < 16; ++index) {
       const std::size_t offset = index * 4;
-      schedule[index] = (static_cast<std::uint32_t>(block_[offset]) << 24U) |
-                        (static_cast<std::uint32_t>(block_[offset + 1]) << 16U) |
-                        (static_cast<std::uint32_t>(block_[offset + 2]) << 8U) |
-                        static_cast<std::uint32_t>(block_[offset + 3]);
+      schedule[index] = (static_cast<std::uint32_t>(block[offset]) << 24U) |
+                        (static_cast<std::uint32_t>(block[offset + 1]) << 16U) |
+                        (static_cast<std::uint32_t>(block[offset + 2]) << 8U) |
+                        static_cast<std::uint32_t>(block[offset + 3]);
     }
     for (std::size_t index = 16; index < schedule.size(); ++index) {
       const std::uint32_t s0 = std::rotr(schedule[index - 15], 7) ^
@@ -129,6 +186,7 @@ class Sha256 final {
     state_[6] += g;
     state_[7] += h;
   }
+#endif
 
   std::array<std::uint32_t, 8> state_ = {
       0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
@@ -694,11 +752,6 @@ const char* ArtifactCaptureOriginName(const ArtifactCaptureOrigin origin) noexce
 ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
                                    ArtifactReceiverLimits limits)
     : store_directory_(std::move(store_directory)), limits_(limits) {
-  if (limits_.max_artifact_bytes == 0 || limits_.max_store_bytes == 0 ||
-      limits_.max_artifact_bytes > limits_.max_store_bytes || limits_.max_artifacts == 0 ||
-      limits_.max_manifest_bytes == 0) {
-    throw std::invalid_argument("Artifact receiver limits are invalid");
-  }
   std::error_code error;
   const bool created_store = std::filesystem::create_directories(store_directory_, error);
   if (error) {
@@ -752,8 +805,8 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
     stored_bytes_ += static_cast<std::uint64_t>(metadata.st_size);
   }
   closedir(entries);
-  if (!valid_blobs || stored_bytes_ > limits_.max_store_bytes) {
-    throw std::runtime_error("Existing artifact blobs are unsafe or exceed the store limit");
+  if (!valid_blobs) {
+    throw std::runtime_error("Existing artifact blobs are unsafe");
   }
   struct stat metadata {};
   if (fstatat(directory, "manifest.jsonl", &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
@@ -762,9 +815,8 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
     }
     throw std::runtime_error("Unable to inspect artifact manifest");
   }
-  if (!EvidenceGuard::SafeFile(metadata) || metadata.st_size < 0 ||
-      static_cast<std::uint64_t>(metadata.st_size) > limits_.max_manifest_bytes) {
-    throw std::runtime_error("Existing artifact manifest is unsafe or exceeds its byte limit");
+  if (!EvidenceGuard::SafeFile(metadata) || metadata.st_size < 0) {
+    throw std::runtime_error("Existing artifact manifest is unsafe");
   }
   manifest_bytes_ = static_cast<std::uint64_t>(metadata.st_size);
   EvidenceFile manifest;
@@ -797,9 +849,6 @@ ArtifactReceiver::ArtifactReceiver(std::filesystem::path store_directory,
         !artifact_ids_.insert(artifact_id).second) {
       throw std::runtime_error(
           "Artifact manifest contains an invalid, duplicate, or mismatched record");
-    }
-    if (artifact_ids_.size() > limits_.max_artifacts) {
-      throw std::runtime_error("Existing artifact manifest exceeds its artifact count limit");
     }
   }
   if (!manifest.eof() || manifest.Failed()) {
@@ -885,19 +934,6 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveWhole(std::istream& stream,
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kIoError,
                        "Artifact store stopped accepting after an unrecoverable manifest failure");
   }
-  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts) {
-    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact count exceeds its configured limit");
-  }
-  if (open && streams_.size() >= kMaxOpenArtifactStreams) {
-    return RejectFrame(stream, metadata_size, 0, ArtifactReceiveStatus::kTooLarge,
-                       "Too many open artifact streams");
-  }
-  if (header.content_size > limits_.max_artifact_bytes ||
-      header.content_size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
-    return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact exceeds a configured byte limit");
-  }
   if ((header.flags & kArtifactFlagSensitive) != 0 && !limits_.allow_sensitive) {
     return RejectFrame(stream, metadata_size, header.content_size,
                        ArtifactReceiveStatus::kSensitiveCaptureDisabled,
@@ -906,6 +942,11 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveWhole(std::istream& stream,
   if (artifact_ids_.contains(header.artifact_id) || streams_.contains(header.artifact_id)) {
     return RejectFrame(stream, metadata_size, header.content_size, ArtifactReceiveStatus::kConflict,
                        "Artifact identifier already exists");
+  }
+  // An open header declares no size; its data frames are checked as they come.
+  ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
+  if (const char* const why = DiskReserveRefusal(header.content_size, refusal)) {
+    return RejectFrame(stream, metadata_size, header.content_size, refusal, why);
   }
 
   std::string url(header.url_size, '\0');
@@ -1041,12 +1082,10 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
     return frame.op == ArtifactStreamOp::kCheckpoint ? Checkpoint(open, frame)
                                                      : End(frame.artifact_id, frame);
   }
-  if (frame.data_size >
-          limits_.max_artifact_bytes - std::min(limits_.max_artifact_bytes, open.size) ||
-      frame.data_size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
+  ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
+  if (const char* const why = DiskReserveRefusal(frame.data_size, refusal)) {
     DropStream(frame.artifact_id);
-    return RejectFrame(stream, 0, frame.data_size, ArtifactReceiveStatus::kTooLarge,
-                       "Artifact stream exceeds a configured byte limit");
+    return RejectFrame(stream, 0, frame.data_size, refusal, why);
   }
   std::array<std::uint8_t, kMaxArtifactStreamChunkBytes> buffer{};
   stream.read(reinterpret_cast<char*>(buffer.data()),
@@ -1072,7 +1111,6 @@ ArtifactReceiveStatus ArtifactReceiver::ReceiveStreamFrame(std::istream& stream,
   }
   open.sha256.Update(buffer.data(), frame.data_size);
   open.size += frame.data_size;
-  streaming_bytes_ += frame.data_size;
   return ArtifactReceiveStatus::kAccepted;
 }
 
@@ -1085,10 +1123,10 @@ ArtifactReceiveStatus ArtifactReceiver::Checkpoint(Stream& open, const ArtifactS
   if (artifact_ids_.contains(snapshot_id) || streams_.contains(snapshot_id)) {
     return Reject(ArtifactReceiveStatus::kConflict, "Artifact identifier already exists");
   }
-  if (artifact_ids_.size() + streams_.size() >= limits_.max_artifacts ||
-      open.size > limits_.max_store_bytes - stored_bytes_ - streaming_bytes_) {
-    return Reject(ArtifactReceiveStatus::kTooLarge,
-                  "Artifact checkpoint exceeds a configured limit");
+  // The copy writes every byte the stream holds; the stream stays open.
+  ArtifactReceiveStatus refusal = ArtifactReceiveStatus::kAccepted;
+  if (const char* const why = DiskReserveRefusal(open.size, refusal)) {
+    return Reject(refusal, why);
   }
   Sha256 prefix = open.sha256;
   const std::array<std::uint8_t, 32> digest = prefix.Final();
@@ -1155,7 +1193,6 @@ ArtifactReceiveStatus ArtifactReceiver::End(const std::uint64_t artifact_id,
   }
   const std::unique_ptr<Stream> ended = std::move(found->second);
   streams_.erase(found);
-  streaming_bytes_ -= ended->size;
   return Publish(header, ended->url, ended->mime_type, ended->temporary_name, digest);
 }
 
@@ -1166,7 +1203,6 @@ void ArtifactReceiver::DropStream(const std::uint64_t artifact_id) noexcept {
   }
   static_cast<void>(
       unlinkat(evidence_guard_.Directory(), found->second->temporary_name.c_str(), 0));
-  streaming_bytes_ -= found->second->size;
   streams_.erase(found);
 }
 
@@ -1241,11 +1277,6 @@ ArtifactReceiveStatus ArtifactReceiver::Publish(const ArtifactHeader& header,
                  << ((header.flags & kArtifactFlagSensitive) != 0 ? "true" : "false")
                  << ",\"content_path\":\"blobs/" << digest_hex << ".bin\"}\n";
   const std::string manifest_line = manifest_entry.str();
-  if (manifest_line.size() > limits_.max_manifest_bytes - manifest_bytes_) {
-    retire_blob();
-    return Reject(ArtifactReceiveStatus::kTooLarge,
-                  "Artifact manifest exceeds its configured byte limit");
-  }
 
   EvidenceFile manifest;
   manifest.Open(EvidenceGuard::OpenFile(directory, "manifest.jsonl", O_WRONLY | O_APPEND | O_CREAT),
@@ -1291,6 +1322,29 @@ ArtifactReceiveStatus ArtifactReceiver::Publish(const ArtifactHeader& header,
   return ArtifactReceiveStatus::kAccepted;
 }
 
+const char* ArtifactReceiver::DiskReserveRefusal(const std::uint64_t bytes,
+                                                 ArtifactReceiveStatus& status) const noexcept {
+  // Read at every admission rather than cached: fstatvfs costs well under a
+  // microsecond, about 1% of hashing and writing one 64 KiB frame, and each
+  // reading also counts what other writers on the volume used since the last.
+  struct statvfs volume {};
+  if (fstatvfs(evidence_guard_.Directory(), &volume) != 0) {
+    status = ArtifactReceiveStatus::kIoError;
+    return "Unable to read the free space of the artifact store's volume";
+  }
+  // Blocks available to this user, so a root-only reserve never counts.
+  const std::uint64_t blocks = volume.f_bavail;
+  const std::uint64_t block_size = volume.f_frsize;
+  constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
+  const std::uint64_t available =
+      block_size != 0 && blocks > kMax / block_size ? kMax : blocks * block_size;
+  if (available >= limits_.disk_reserve_bytes && bytes <= available - limits_.disk_reserve_bytes) {
+    return nullptr;
+  }
+  status = ArtifactReceiveStatus::kDiskReserve;
+  return "Artifact would leave less free space on the store's volume than its reserve";
+}
+
 ArtifactReceiverStats ArtifactReceiver::Stats() const noexcept {
   return stats_;
 }
@@ -1334,9 +1388,6 @@ ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus statu
     case ArtifactReceiveStatus::kInvalid:
       SaturatingAdd(stats_.invalid, 1);
       break;
-    case ArtifactReceiveStatus::kTooLarge:
-      SaturatingAdd(stats_.too_large, 1);
-      break;
     case ArtifactReceiveStatus::kSensitiveCaptureDisabled:
       SaturatingAdd(stats_.sensitive_rejected, 1);
       break;
@@ -1346,8 +1397,12 @@ ArtifactReceiveStatus ArtifactReceiver::Reject(const ArtifactReceiveStatus statu
     case ArtifactReceiveStatus::kIoError:
       SaturatingAdd(stats_.io_errors, 1);
       break;
+    case ArtifactReceiveStatus::kDiskReserve:
+      SaturatingAdd(stats_.disk_reserve, 1);
+      break;
     case ArtifactReceiveStatus::kAccepted:
     case ArtifactReceiveStatus::kEndOfStream:
+    case ArtifactReceiveStatus::kTooLarge:
       break;
   }
   return status;
@@ -1360,24 +1415,23 @@ ArtifactReceiveStatus ArtifactReceiver::RejectFrame(std::istream& stream,
                                                     std::string message) {
   // Reading the rest of the frame before the acknowledgment also lets a
   // sender that is still writing finish and read this status, rather than
-  // fail on a closed connection and record an I/O error instead.
-  if (unread_content <= std::max(limits_.max_artifact_bytes, kMaxDiscardedArtifactBytes)) {
-    std::uint64_t remaining = unread_metadata + unread_content;
-    // read(), not ignore(): libstdc++'s ignore(n) peeks one byte past n, which
-    // blocks on a socket whose sender is waiting for this acknowledgment.
-    std::array<char, 64 * 1024> discarded{};
-    while (remaining > 0) {
-      const auto requested = static_cast<std::streamsize>(
-          std::min(remaining, static_cast<std::uint64_t>(discarded.size())));
-      stream.read(discarded.data(), requested);
-      if (stream.gcount() != requested) {
-        break;
-      }
-      remaining -= static_cast<std::uint64_t>(requested);
+  // fail on a closed connection and record an I/O error instead. Discarding
+  // costs no memory, so every size is read through.
+  std::uint64_t remaining = unread_metadata + unread_content;
+  // read(), not ignore(): libstdc++'s ignore(n) peeks one byte past n, which
+  // blocks on a socket whose sender is waiting for this acknowledgment.
+  std::array<char, 64 * 1024> discarded{};
+  while (remaining > 0) {
+    const auto requested = static_cast<std::streamsize>(
+        std::min(remaining, static_cast<std::uint64_t>(discarded.size())));
+    stream.read(discarded.data(), requested);
+    if (stream.gcount() != requested) {
+      break;
     }
-    if (remaining == 0) {
-      stream_position_ = ArtifactStreamPosition::kFrameBoundary;
-    }
+    remaining -= static_cast<std::uint64_t>(requested);
+  }
+  if (remaining == 0) {
+    stream_position_ = ArtifactStreamPosition::kFrameBoundary;
   }
   return Reject(status, std::move(message));
 }

@@ -1,20 +1,20 @@
-"""#436: long URLs, large and read request bodies, and 40 parallel scripts are kept whole."""
+"""#436: long URLs, large, read and password form bodies, and 40 parallel scripts are kept whole."""
 
 from __future__ import annotations
 
 from live_acceptance.evidence import find_rows, for_row, members
-from live_acceptance.fixture import Fixture, Request, cors, html_response, payload, redirect, text_response
+from live_acceptance.fixture import Fixture, Request, cors, html_response, payload, redirect, sha256, text_response
 from live_acceptance.pages import document
 from live_acceptance.run import Options, Run
 
 ISSUE = "#436"
 NAME = "limits"
 SCRIPTS = 40
-BODY_LIMIT = 16 * 1024 * 1024
+# Past the 16 MiB an older browser kept of a body.
+LARGE_BODY = 17 * 1024 * 1024
 # ERR_ALPN_NEGOTIATION_FAILED: the stream body needs HTTP/2 or QUIC and the fixture offers HTTP/1.1.
 STREAM_REFUSED = -122
 CHUNKED_DATA_PIPE = 4
-LARGE_BODY = 17 * 1024 * 1024
 GRAPHQL_FIELDS = 760
 
 INDEX = document("limits", f"""<script>
@@ -132,15 +132,21 @@ def body_record(run: Run, target: str, problems: list[str], label: str):
 
 
 def body_kept(run: Run, target: str, expected: bytes, problems: list[str], label: str,
-              read: bool | None = None) -> None:
+              credential_form: bool = False) -> None:
     record = body_record(run, target, problems, label)
     if record is None:
         return
-    if record.state != "captured" or record.captured_length != len(expected):
-        problems.append(f"{label}: state {record.state}, {record.captured_length} of {len(expected)} bytes")
+    if (record.state, record.body_length, record.captured_length) != ("captured", len(expected), len(expected)):
+        problems.append(f"{label}: state {record.state}, {record.captured_length} of {record.body_length} bytes, "
+                        f"the server got {len(expected)}")
         return
-    if read is not None and record.read != read:
-        problems.append(f"{label}: read flag {record.read}, expected {read}")
+    # Payload version 2 reads every kept body, in-memory bytes included.
+    if not record.read:
+        problems.append(f"{label}: no read flag on a kept body")
+    if record.credential_form != credential_form:
+        problems.append(f"{label}: credential_form flag {record.credential_form}, expected {credential_form}")
+    if record.sha256 != sha256(expected):
+        problems.append(f"{label}: the record's digest differs from the body the server received")
     if run.api.content(record.artifact_id) != expected:
         problems.append(f"{label}: the artifact bytes differ from what the server received")
 
@@ -175,8 +181,8 @@ def verify(run: Run) -> None:
     report.check(ISSUE, "8 KB GraphQL GET URL", problems, "the whole path and query is retained")
 
     problems = []
-    for path, label, read in (("/limits/json", "5 MiB JSON POST", False), ("/limits/multipart", "multipart with a file", True),
-                              ("/limits/blob", "Blob upload", True)):
+    for path, label in (("/limits/json", "5 MiB JSON POST"), ("/limits/multipart", "multipart with a file"),
+                        ("/limits/blob", "Blob upload")):
         body = received(run, path)
         if body is None:
             ok, error = run.result(label_name(path))
@@ -184,7 +190,7 @@ def verify(run: Run) -> None:
             continue
         if path == "/limits/json" and len(body) < 5 * 1024 * 1024:
             problems.append(f"{label}: only {len(body)} bytes")
-        body_kept(run, path, body, problems, label, read)
+        body_kept(run, path, body, problems, label)
     report.check(ISSUE, "5 MiB JSON, multipart and Blob bodies", problems,
                  "each kept with the exact bytes the server received")
 
@@ -218,21 +224,20 @@ def verify(run: Run) -> None:
 
     problems = []
     large = received(run, "/limits/large")
-    record = body_record(run, "/limits/large", problems, "17 MiB POST") if large is not None else None
     if large is None:
         problems.append("the server did not receive the 17 MiB POST")
-    elif record is not None:
-        if (record.state, record.body_length, record.captured_length) != ("captured_truncated", len(large), BODY_LIMIT):
-            problems.append(f"state {record.state} length {record.body_length} captured {record.captured_length}")
-        elif run.api.content(record.artifact_id) != large[:BODY_LIMIT]:
-            problems.append("the kept 16 MiB differ from the first 16 MiB the server received")
-    report.check(ISSUE, "body above 16 MiB", problems, "the first 16 MiB are kept and the whole length is recorded")
+    else:
+        body_kept(run, "/limits/large", large, problems, "17 MiB POST")
+    report.check(ISSUE, "body above 16 MiB", problems, "kept whole, with the exact bytes and digest the server received")
 
     problems = []
-    record = body_record(run, "/limits/password", problems, "password form")
-    if record is not None and (record.state != "not_captured_credential_form" or record.sha256):
-        problems.append(f"state {record.state}, digest {'present' if record.sha256 else 'absent'}")
-    report.check(ISSUE, "password form post", problems, "not_captured_credential_form, no bytes and no digest")
+    password = received(run, "/limits/password")
+    if password is None:
+        problems.append("the server did not receive the password form post")
+    else:
+        body_kept(run, "/limits/password", password, problems, "password form", credential_form=True)
+    report.check(ISSUE, "password form post", problems,
+                 "a content session keeps it whole like any other body, marked credential_form")
 
     problems = []
     scripts = {a["sha256"] for a in run.api.artifacts(kind="javascript")}
@@ -260,9 +265,6 @@ def verify(run: Run) -> None:
                   "cannot serve. On an owned HTTPS endpoint that negotiates h2, POST a ReadableStream body with "
                   "duplex 'half' and compare get_events request_body (kind 4, read flag, captured) and its "
                   "artifact with the bytes the server received")
-    report.manual("#428 #436", "browser memory bound",
-                  "watch the browser's memory with Instruments or Activity Monitor during this page: it stays "
-                  "within the 32 MiB in-flight pool plus the browser's baseline; record how it was measured")
 
 
 def label_name(path: str) -> str:

@@ -67,8 +67,10 @@ Below the inline limit, `--omit-content` (implied by `read-only`, `ask` and
 `full`) lists the content reads and returns source, bytecode, disassembly and
 request and response bodies, in bounded pages, so that captured content goes
 to the client's model provider. It also lets an analyst run name a selected
-artifact, which the run reads whole. Header blocks and cookie lists are never
-returned as text.
+artifact, which the run reads whole. Credential header values, cookie values
+and the header blocks and cookie lists that hold them are returned only with
+`--allow-content`, as `x-reb-mcp.credential_values` declares; below it they
+stay withheld and no tool schema lets a model ask for them.
 
 ## Repository ownership
 

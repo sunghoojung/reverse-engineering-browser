@@ -27,6 +27,7 @@ const sourceFactsPanel = createSourceFactsPanel({
 });
 const capturedExportPanel = installCapturedExportDialog({
   getRun: () => null, contextKey: () => null, getRunCapture: () => null,
+  getTrafficExport: id => trafficExportSnapshot(id),
   notice: message => investigationNotice(message)
 });
 const invocationSitesPanel = createInvocationSitesPanel({
@@ -206,6 +207,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       const evidenceWorkspace = createEvidenceWorkspace({
         getContext: () => ({request: state.requests.find(request => request.id === state.selectedRequestId),
           events: state.events, artifacts: state.artifacts, eventsLimited: state.eventsLimited,
+          nextBefore: state.eventNextBefore, storeEnd: state.eventStoreEnd,
           error: state.eventFailureKind, mode: state.sessionMode}),
         packagePanel: evidencePackagePanel,
         onTrace: () => typeof openInvestigation === 'function'
@@ -332,9 +334,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.vmHostLinksGeneration += 1;
           state.selectedVmHandlerKey = null;
         }
-        const query = selection ? `?${new URLSearchParams({request_id: selection.request_id,
+        // The lab lists findings, so a session of many plain scripts reads as
+        // a count rather than one result per artifact.
+        const query = `?${new URLSearchParams({...(selection ? {request_id: selection.request_id,
           session_id: selection.root_event.session_id, root_process_id: String(selection.root_event.process_id),
-          root_sequence_number: selection.root_event.sequence_number})}` : '';
+          root_sequence_number: selection.root_event.sequence_number} : {}), view: 'findings'})}`;
         const headers = state.vmAnalysisEtag ? {'If-None-Match': state.vmAnalysisEtag} : {};
         state.vmAnalysisStatus = 'loading';
         state.vmAnalysisError = null;
@@ -404,13 +408,14 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const indexed = state.trafficIndex?.answer?.() ?? null;
         if (state.eventsLimited && !indexed) {
           if (kind === 'empty') kind = 'gap';
-          messages.push('Showing the last 5,000 evidence events; older events remain recorded on disk.');
+          messages.push('Traffic shows requests from the newest 5,000 evidence events until the request index answers. Older events remain on disk, and Evidence reads them with Earlier and Oldest.');
         }
         if (state.networkEventsLimited && !indexed) messages.push('The network event window is capped; older request lifecycle evidence may be incomplete.');
         if (state.eventCountScope === 'bounded_tail') {
           if (kind === 'empty') kind = 'gap';
-          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence; the request list covers the whole session.'
-            : 'Only the newest 64 MiB of stored evidence is scanned; counts and both windows exclude the older prefix.');
+          // The event index counts the whole store once it catches up (scope store).
+          messages.push(indexed ? 'Gap and drop counts cover only the newest 64 MiB of stored evidence until the event index catches up; the request list covers the whole session.'
+            : 'Only the newest 64 MiB of stored evidence is scanned until the event index catches up; counts and both windows exclude the older prefix.');
         }
         if (gapCount > 0n) {
           if (kind === 'empty') kind = 'gap';
@@ -1537,7 +1542,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
 
       // The index alone knows End lost, every row's body answer (a window row
       // can lack its response_started), the row a reuse names with its body,
-      // and a store copy's tabs (protocol/request-index-v1.md). Copied in
+      // and a store copy's tabs (protocol/request-index-v2.md). Copied in
       // place; the row is then checked against the index.
       function copyTrafficIndexFacts(request, indexed) {
         if (!indexed) return;
@@ -1614,20 +1619,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
                 : 'Deterministic developer evidence is loaded.';
         // Sensitive capture is labeled for the whole session, not only in the
         // rows it fills, because the packaged app turns it on without a dialog.
-        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, and response bodies, up to 16 MiB each, request and response headers, cookies',
+        const retained = [state.requestContentCaptureEnabled && 'request paths, queries and bodies, every response body whole with media and fonts, request and response headers, cookies',
           state.canvasImageCaptureEnabled && 'Canvas images'].filter(Boolean);
         elements.sessionContent.hidden = !live || !retained.length;
         // The launch turned these on; a browser built before them ignores the
         // switch, so each row and body still says what was actually captured.
-        // The limits from the session context (capture_options.content_limits),
-        // so the session's budgets stay visible after the start panel closes.
-        const limits = state.requestContentCaptureEnabled ? state.sessionContentLimits : null;
-        const mib = value => `${value.toLocaleString('en-US')} MiB`;
-        const budgets = limits?.request_content_budget_mib && limits?.response_body_budget_mib
-          ? ` Budgets: ${mib(limits.request_content_budget_mib)} of request content and ${mib(limits.response_body_budget_mib)} of response bodies${
-            typeof limits.response_media === 'boolean' ? `; media and fonts ${limits.response_media ? 'kept' : 'skipped'}` : ''}.`
-          : '';
-        elements.sessionContent.title = `Content capture is on for this session: ${retained.join(' and ')}, kept locally.${budgets} Each Traffic row and body shows what was actually captured. A Metadata only session keeps request hosts and body digests instead.`;
+        elements.sessionContent.title = `Content capture is on for this session: ${retained.join(' and ')}, kept locally. Each Traffic row and body shows what was actually captured. A Metadata only session keeps request hosts and body digests instead.`;
         elements.sessionContent.setAttribute('aria-label', `Content capture: ${retained.join(' and ')}`);
         elements.capture.classList.toggle('offline', offline || artifactOffline);
         elements.capture.classList.toggle('demo', state.sessionMode === 'demo');
@@ -1729,6 +1726,17 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const field = document.createElement('div'); field.className = 'vm-field';
         field.append(textElement('span', '', label), textElement('strong', '', value));
         return field;
+      }
+
+      function vmRuntimeContextText(result) {
+        const context = result.runtime_context;
+        if (!context) return result.runtime === 'mixed' ? 'see each linked artifact' : 'not recorded';
+        const count = (value, word) => `${value.toLocaleString('en-US')} ${word}${value === 1 ? '' : 's'}`;
+        const total = key => context.signal_records.reduce((sum, signal) => sum + signal[key], 0);
+        const own = `${count(total('observed'), 'browser-signal record')} naming this artifact`;
+        if (context.frame_attribution === 'unavailable') return `frame unknown · ${own}`;
+        return `frame ${context.frame_id} · ${count(context.request_records, 'request record')} · ` +
+          `${own} · ${count(total('correlated'), 'other signal record')}`;
       }
 
       function vmSessionPresentation(targetState) {
@@ -2392,6 +2400,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         }
         banner.textContent = view.headline;
         section.append(banner);
+        if (view.countLine) section.append(textElement('p', 'vm-workspace-empty', view.countLine));
         if (row) {
           for (const omission of view.omissionLines) {
             const item = document.createElement('p');
@@ -2876,7 +2885,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           fields.append(
             vmField('tier', selected.confidence),
             vmField('source artifact', selected.sourceArtifactId),
-            vmField('correlated requests (session context only)', result.related_request_ids?.join(', ') || 'none observed'),
+            vmField('frame context (correlation only)', vmRuntimeContextText(result)),
             vmField('exact response-body links', result.exact_request_links?.map(link =>
               `${link.request_id} · session ${link.root_event.session_id} · process ${link.root_event.process_id} · root ${link.root_event.sequence_number} → response ${link.response_event.sequence_number} → capture ${link.capture_event.sequence_number}`).join('; ') || 'unlinked'),
             vmField('evidence families', result.evidence_families?.join(', ') || 'none'),
@@ -2970,6 +2979,127 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.vmDetail.append(provenance);
       }
 
+      // capture_options.wasm_sampling from the versioned session context
+      // (protocol/http-api.md): the window and allowances this session's
+      // renderers sample Wasm br_table and call_indirect with. Read after each
+      // valid poll until it answers. Null, for a session that records no Wasm
+      // stream or a backend from before the addition, hides the strip.
+      function vmWasmSamplingFromContext(sampling) {
+        if (sampling === null || sampling === undefined) return null;
+        const count = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
+        const streams = Array.isArray(sampling?.streams) ? sampling.streams : [];
+        const allowance = value => value === null || count(value, 1, sampling.records_per_window);
+        const valid = sampling?.version === 1 && streams.length >= 1 && streams.length <= 2 &&
+          new Set(streams).size === streams.length && streams.every(stream => stream === 'br_table' || stream === 'call_indirect') &&
+          count(sampling.window_ms, 1, 3600000) && count(sampling.records_per_window, 1, 0xffffffff) &&
+          allowance(sampling.samples_per_function) && allowance(sampling.samples_per_indirect_site) &&
+          count(sampling.function_allow_count, 0, 32) && count(sampling.function_deny_count, 0, 32) &&
+          typeof sampling.module_allowlist === 'boolean' && (sampling.reset === 'available' || sampling.reset === 'unavailable');
+        if (!valid) return Object.freeze({malformed: true});
+        return Object.freeze({streams: Object.freeze([...streams]), window_ms: sampling.window_ms,
+          records_per_window: sampling.records_per_window, samples_per_function: sampling.samples_per_function,
+          samples_per_indirect_site: sampling.samples_per_indirect_site, function_allow_count: sampling.function_allow_count,
+          function_deny_count: sampling.function_deny_count, module_allowlist: sampling.module_allowlist, reset: sampling.reset});
+      }
+
+      function refreshSessionWasmSampling() {
+        if (typeof fetch !== 'function' || state.vmWasmSamplingRead) return;
+        state.vmWasmSamplingRead = 'pending';
+        fetch('/api/session/context', {cache: 'no-store'})
+          .then(response => response.ok ? response.json() : Promise.reject(new Error(`Session context returned ${response.status}`)))
+          .then(context => {
+            state.vmWasmSampling = vmWasmSamplingFromContext(context?.capture_options?.wasm_sampling);
+            state.vmWasmSamplingRead = 'answered';
+            renderVmWasmSampling();
+          })
+          .catch(() => { state.vmWasmSamplingRead = null; });
+      }
+
+      // The browser applies 64 per function when the launcher names no
+      // allowance (protocol/native-wasm-dispatch-v1.md), and no per-site limit.
+      function vmWasmSamplingPolicyParts(sampling) {
+        const count = value => value.toLocaleString('en-US');
+        const plural = (value, noun) => `${count(value)} ${noun}${value === 1 ? '' : 's'}`;
+        // An allowance of a whole window removes that limit.
+        const allowance = (value, unit, unlimited, unnamed) => value === null ? unnamed
+          : value >= sampling.records_per_window ? unlimited : `${count(value)} per ${unit}`;
+        const period = sampling.window_ms === 1000 ? 'each second' : `each ${count(sampling.window_ms)} ms`;
+        const parts = [`Wasm sampling: ${sampling.streams.join(' and ')}`,
+          `up to ${count(sampling.records_per_window)} full records per stream ${period}`,
+          allowance(sampling.samples_per_function, 'function', 'no per-function limit', '64 per function (browser default)')];
+        if (sampling.streams.includes('call_indirect')) {
+          parts.push(allowance(sampling.samples_per_indirect_site, 'call site', 'no per-call-site limit', 'no per-call-site limit'));
+        }
+        if (sampling.function_allow_count) parts.push(plural(sampling.function_allow_count, 'allowed function'));
+        if (sampling.function_deny_count) parts.push(plural(sampling.function_deny_count, 'denied function'));
+        if (sampling.module_allowlist) parts.push('module allowlist');
+        return parts;
+      }
+
+      function renderVmWasmSampling() {
+        const strip = elements.vmWasmSampling;
+        if (!strip) return;
+        const sampling = state.vmWasmSampling;
+        strip.hidden = !sampling;
+        if (!sampling) return;
+        const reset = state.vmWasmSamplingReset;
+        const available = !sampling.malformed && sampling.reset === 'available';
+        if (sampling.malformed) {
+          elements.vmWasmSamplingPolicy.textContent = 'Wasm sampling labels from this backend were malformed and are not shown. Retained samples remain visible.';
+        } else {
+          // Each part wraps as a unit, so a narrow strip breaks between parts.
+          elements.vmWasmSamplingPolicy.replaceChildren(...vmWasmSamplingPolicyParts(sampling).flatMap((text, index) => {
+            const part = document.createElement('span');
+            part.className = 'vm-wasm-sampling-part';
+            part.textContent = text;
+            if (index === 0) return [part];
+            const separator = document.createElement('span');
+            separator.textContent = ' · ';
+            return [separator, part];
+          }));
+        }
+        let kind = reset?.status ?? 'idle', message = '';
+        if (sampling.malformed) kind = 'idle';
+        else if (!available) { kind = 'unavailable'; message = 'This session has no sample-budget reset file.'; }
+        else if (kind === 'pending') message = 'Requesting a new sample window…';
+        else if (kind === 'done') message = `New sample window requested (reset ${reset.generation.toLocaleString('en-US')}). Renderers open it within about 250 ms; sample indexes keep counting.`;
+        else if (kind === 'failed') message = reset.message;
+        elements.vmWasmSamplingStatus.dataset.kind = kind;
+        elements.vmWasmSamplingStatus.textContent = message;
+        elements.vmWasmSamplingReset.disabled = !available;
+        // Pending keeps the button focusable; a disabled button would drop
+        // keyboard focus mid-request.
+        if (kind === 'pending') elements.vmWasmSamplingReset.setAttribute('aria-disabled', 'true');
+        else elements.vmWasmSamplingReset.removeAttribute('aria-disabled');
+      }
+
+      // reset_wasm_sample_budgets closes the current one-second window of both
+      // streams in every renderer of the capture browser (protocol/http-api.md).
+      async function resetVmWasmSampleBudgets() {
+        if (state.vmWasmSamplingReset?.status === 'pending' || state.vmWasmSampling?.reset !== 'available') return;
+        state.vmWasmSamplingReset = {status: 'pending'};
+        renderVmWasmSampling();
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 15000);
+        try {
+          const response = await fetch('/api/session/actions', {method: 'POST', cache: 'no-store',
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset_wasm_sample_budgets'}),
+            signal: controller.signal});
+          const body = await response.json().catch(() => null);
+          const generation = body?.generation;
+          state.vmWasmSamplingReset = response.ok && body?.ok === true && body.action === 'reset_wasm_sample_budgets' &&
+            Number.isSafeInteger(generation) && generation >= 1
+            ? {status: 'done', generation}
+            : {status: 'failed', message: typeof body?.error === 'string' && body.error
+              ? body.error : `The reset returned ${response.status} without a valid answer.`};
+        } catch {
+          state.vmWasmSamplingReset = {status: 'failed', message: 'The backend did not answer in time. The reset may not have been applied.'};
+        } finally {
+          clearTimeout(deadline);
+        }
+        renderVmWasmSampling();
+      }
+
       let renderedVmFindings = null;
       let renderedVmWorkspace = null;
       function vmSessionSourceRefreshKey() { const finding=(state.vmFindings??[]).find(item=>item.findingId===state.selectedVmFindingId); const artifact=vmSourceArtifactForFinding(state.artifacts??[],finding,state.vmAnalysisSelection); const sessionId=artifact?.session_id??''; return [sessionId,(state.artifacts??[]).filter(item=>String(item.session_id)===String(sessionId)).map(item=>item.artifact_id).join(',')]; }
@@ -2985,8 +3115,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.selectedVmFindingId = state.vmFindings[0]?.findingId ?? null;
         }
         renderVmSessionStatus();
+        renderVmWasmSampling();
         const gapCount = shownSequenceGaps();
         const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
+        const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
+        const withFailures = message => failures ? `${message} ${failures}` : message;
         if (state.broker === 'connecting') {
           setVmNotice('loading', 'Waiting for VM findings from the local evidence broker.');
         } else if (state.vmAnalysisStatus === 'loading' && state.vmAnalysisSelection) {
@@ -2996,16 +3129,20 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } else if (state.vmAnalysisStatus === 'unavailable') {
           setVmNotice('disconnected', `The cold analyzer is unavailable. ${state.vmAnalysisError ? `${state.vmAnalysisError} ` : ''}${state.vmFindings.length ? 'Last valid VM evidence remains visible.' : 'No VM evidence is available.'}`);
         } else if (state.broker === 'unavailable') {
-          setVmNotice('disconnected', state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.');
+          setVmNotice('disconnected', withFailures(state.vmFindings.length ? 'Broker disconnected. Last valid VM findings remain visible.' : 'Broker disconnected. No VM findings are available.'));
         } else if (state.malformedVmFindings > 0) {
-          setVmNotice('malformed', `${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`);
+          setVmNotice('malformed', withFailures(`${state.malformedVmFindings} malformed VM ${state.malformedVmFindings === 1 ? 'finding was' : 'findings were'} rejected.`));
         } else if (state.vmFindings.length === 0) {
-          const empty = state.vmAnalysisSelection ? 'No VM candidates are linked to this exact captured response body. Unlinked, legacy and session-wide findings are not shown.' : 'No VM findings yet. The lab waits for observed or explicitly inferred evidence.';
-          setVmNotice(vmLimits ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
-        } else if (gapCount > 0n || vmLimits) {
+          const omitted = state.vmAnalysisDocument?.results_view?.omitted_results ?? 0;
+          const plain = omitted > 0 ? ` ${omitted.toLocaleString('en-US')} analyzed ${omitted === 1 ? 'artifact shows' : 'artifacts show'} no VM structure.` : '';
+          const failed = failures ? ` ${failures}` : '';
+          const empty = state.vmAnalysisSelection ? `No VM candidates are linked to this exact captured response body.${plain}${failed} Unlinked, legacy and session-wide findings are not shown.` : `No VM findings yet.${plain}${failed} The lab waits for observed or explicitly inferred evidence.`;
+          setVmNotice(vmLimits || failures ? 'gap' : 'empty', vmLimits ? `${empty} ${vmLimits}` : empty);
+        } else if (gapCount > 0n || vmLimits || failures) {
           setVmNotice('gap', [
             gapCount > 0n ? `${gapCount} event ${gapCount === 1n ? 'gap may' : 'gaps may'} make VM coverage incomplete (observed sequence jumps in ${eventCountScopeLabel()}).` : '',
-            vmLimits
+            vmLimits,
+            failures
           ].filter(Boolean).join(' '));
         } else if (state.vmAnalysisSelection) {
           const selection = state.vmAnalysisSelection;
@@ -3265,138 +3402,124 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.trafficSort, state.trafficSortDirection, state.trafficFlags, range && `${range.from}:${range.to}`]);
       }
 
-      // Bodies and full URLs a content session listed but did not keep because
-      // a budget was used. The counts are the session summary's, which covers
-      // the whole session (its newest 64 MiB of events); until it answers, or
-      // when it is older than the loaded rows, the loaded rows give a lower
-      // bound. Each budget names its size from the session context, the unique
-      // bytes kept against it and the start panel control for the next session.
-      const TRAFFIC_BUDGETS = [
-        {key: 'request_content_budget_mib', category: 'request', control: 'Request content budget',
-          one: 'request body or URL', many: 'request bodies or URLs',
-          reasons: [['request_body', 'not_captured_session_budget'], ['request_target', 'not_retained_session_budget']],
-          refused: request => request.body?.state === 'not_captured_session_budget' || request.fullTarget?.retention === 'not_retained_session_budget'},
-        {key: 'response_body_budget_mib', category: 'response', control: 'Response body budget',
-          one: 'response body', many: 'response bodies', reasons: [['response_body', 'not_captured_session_budget']],
-          refused: request => request.responseBody?.state === 'not_captured_session_budget'},
+      // Bodies and full URLs a session listed but did not keep: the artifact
+      // receiver refused them to keep its free-disk reserve, or a session an
+      // older browser recorded used a content budget of that browser. The
+      // counts are the session summary's, which covers the whole session (its
+      // newest 64 MiB of events); until it answers, or when it is older than
+      // the loaded rows, the loaded rows give a lower bound.
+      const TRAFFIC_NOT_KEPT = [
+        {key: 'disk_reserve', label: 'Disk reserve reached', one: 'body', many: 'bodies',
+          meaning: 'not stored, to keep the free-disk reserve. Free disk space to keep later bodies',
+          reasons: [['request_body', 'not_captured_disk_reserve'], ['response_body', 'not_captured_disk_reserve']],
+          refused: request => request.body?.state === 'not_captured_disk_reserve' || request.responseBody?.state === 'not_captured_disk_reserve'},
+        {key: 'session_budget', label: 'Older content budget', one: 'body or URL', many: 'bodies or URLs',
+          meaning: 'not kept by the browser that recorded this session. Current capture keeps every body whole',
+          reasons: [['request_body', 'not_captured_session_budget'], ['request_target', 'not_retained_session_budget'],
+            ['response_body', 'not_captured_session_budget']],
+          refused: request => request.body?.state === 'not_captured_session_budget' ||
+            request.fullTarget?.retention === 'not_retained_session_budget' || request.responseBody?.state === 'not_captured_session_budget'},
       ];
-      function renderTrafficBudget() {
-        const notice = document.querySelector('#request-budget');
+      function renderTrafficNotKept() {
+        const notice = document.querySelector('#request-not-kept');
         if (!notice) return;
-        const loaded = TRAFFIC_BUDGETS.map(() => 0);
-        for (const request of state.requests) TRAFFIC_BUDGETS.forEach((budget, index) => { if (budget.refused(request)) loaded[index] += 1; });
+        const loaded = TRAFFIC_NOT_KEPT.map(() => 0);
+        for (const request of state.requests) TRAFFIC_NOT_KEPT.forEach((entry, index) => { if (entry.refused(request)) loaded[index] += 1; });
         // Every session's summary is read once, a stored one included, since a
-        // budget can be met outside the loaded rows; it is read again, at most
-        // every 30 s, in a content session or while a budget shows as used.
-        const last = state.trafficBudgetUse?.use ?? null;
-        const used = last && Object.values(last.counts).some(Boolean);
-        if (!last || used || state.requestContentCaptureEnabled || state.sessionContentLimits || loaded.some(Boolean)) refreshTrafficBudgetUse();
-        const use = state.trafficBudgetUse?.use ?? null;
+        // refusal can be outside the loaded rows; it is read again, at most
+        // every 30 s, in a content session or while a refusal shows.
+        const last = state.trafficNotKept?.use ?? null;
+        const counted = last && Object.values(last.counts).some(Boolean);
+        if (!last || counted || state.requestContentCaptureEnabled || loaded.some(Boolean)) refreshTrafficNotKept();
+        const use = state.trafficNotKept?.use ?? null;
         // Exact only while nothing has arrived since the summary was read: a
         // live session whose event store changed, or a read that failed after
         // it, makes the figure a lower bound. Other backends gain no events.
         const current = Boolean(use) && !use.stale &&
           (state.sessionMode !== 'live' || (use.marker !== null && use.marker === (state.eventEtag ?? null)));
-        const shown = TRAFFIC_BUDGETS.map((budget, index) => {
-          const summary = use ? use.counts[budget.category] ?? 0 : null;
+        const shown = TRAFFIC_NOT_KEPT.map((entry, index) => {
+          const summary = use ? use.counts[entry.key] ?? 0 : null;
           const count = Math.max(loaded[index], summary ?? 0);
-          return {budget, count, exact: summary !== null && current && !use.bounded && summary >= loaded[index]};
-        }).filter(entry => entry.count > 0);
+          return {entry, count, exact: summary !== null && current && !use.bounded && summary >= loaded[index]};
+        }).filter(item => item.count > 0);
         notice.hidden = shown.length === 0;
-        const toggle = notice.querySelector('#request-budget-toggle'), line = notice.querySelector('#request-budget-text');
+        const toggle = notice.querySelector('#request-not-kept-toggle'), line = notice.querySelector('#request-not-kept-text');
         if (!shown.length) {
           if (line) line.textContent = '';
-          notice.dataset.expanded = 'false';
-          toggle?.setAttribute('aria-expanded', 'false');
+          toggleTrafficNotKept(false);
           return;
         }
-        // In the budget's own unit, MiB, rather than the row sizes' decimal units.
-        const amount = bytes => bytes >= 104858
-          ? `${(bytes / 1048576).toLocaleString('en-US', {minimumFractionDigits: 1, maximumFractionDigits: 1})} MiB`
-          : `${Math.ceil(bytes / 1024).toLocaleString('en-US')} KiB`;
-        const parts = shown.map(({budget, count, exact}) => {
-          const size = state.sessionContentLimits?.[budget.key] ?? use?.budgets[budget.category] ?? null;
-          const kept = use?.retained[budget.category];
-          return `${budget.control}${size ? ` (${size.toLocaleString('en-US')} MiB)` : ''} used`
-            + `${kept ? `, ${kept.complete ? '' : 'at least '}${amount(kept.bytes)} kept` : ''}: `
-            + `${exact ? '' : 'at least '}${count.toLocaleString('en-US')} ${count === 1 ? budget.one : budget.many} not kept`;
-        });
-        const text = `${parts.join(' · ')} · Raise ${parts.length === 1 ? 'it' : 'them'} in New Live Session… for the next session.`;
+        const text = `${shown.map(({entry, count, exact}) => `${entry.label}: ${exact ? '' : 'at least '}`
+          + `${count.toLocaleString('en-US')} ${count === 1 ? entry.one : entry.many} ${entry.meaning}`).join(' · ')}.`;
         if (line && line.textContent !== text) line.textContent = text;
         // The short stacked layout shows only this one-line button while a
-        // request is open; it opens the sentence above it (app.css).
-        const label = shown.length === 1 ? `${shown[0].budget.control} used` : 'Budgets used';
+        // request is open; it opens the sentence beside it (placeTrafficNotKept).
+        const label = shown.length === 1 ? shown[0].entry.label : 'Bodies not kept';
         if (toggle && toggle.textContent !== label) toggle.textContent = label;
+        placeTrafficNotKept();
       }
 
-      function toggleTrafficBudget(open) {
-        const notice = document.querySelector('#request-budget');
-        const toggle = notice?.querySelector('#request-budget-toggle');
+      function toggleTrafficNotKept(open) {
+        const notice = document.querySelector('#request-not-kept');
+        const toggle = notice?.querySelector('#request-not-kept-toggle');
         if (!toggle) return;
         const next = open ?? notice.dataset.expanded !== 'true';
         notice.dataset.expanded = String(next);
         toggle.setAttribute('aria-expanded', String(next));
+        placeTrafficNotKept();
       }
 
-      // The summary's budget checks: their counts, the unique bytes kept and
-      // the budget each names, whether its event scan stopped at its bound,
-      // and the event poll's tag when it was read (`marker`), so a later store
-      // change is known. Read at most every 30 s while Traffic shows; a refused
-      // or malformed read keeps the last answer, marked stale.
-      function refreshTrafficBudgetUse() {
-        const use = state.trafficBudgetUse;
+      // The stacked layout's open sentence is fixed to the window (app.css):
+      // above its button when it fits there or that side has more room, below
+      // it otherwise, and always inside the window. Elsewhere the sentence is
+      // in the footer's flow and keeps no placement.
+      function placeTrafficNotKept() {
+        const notice = document.querySelector('#request-not-kept');
+        const toggle = notice?.querySelector('#request-not-kept-toggle');
+        const line = notice?.querySelector('#request-not-kept-text');
+        if (!toggle || !line) return;
+        line.style.left = line.style.top = '';
+        if (notice.dataset.expanded !== 'true' || getComputedStyle(line).position !== 'fixed') return;
+        const anchor = toggle.getBoundingClientRect(), gap = 6, edge = 4;
+        const width = line.offsetWidth, height = line.offsetHeight;
+        const above = anchor.top - gap - edge, below = innerHeight - anchor.bottom - gap - edge;
+        const top = height <= above || above >= below ? anchor.top - gap - height : anchor.bottom + gap;
+        line.style.left = `${Math.max(edge, Math.min(anchor.right - width, innerWidth - width - edge))}px`;
+        line.style.top = `${Math.max(edge, Math.min(top, innerHeight - height - edge))}px`;
+      }
+
+      // The summary's counts of bodies not kept, whether they cover less than
+      // the whole store (still indexing, or stopped at a record it cannot
+      // read), and the event poll's tag when it was read (`marker`), so a later
+      // store change is known. Read at most every 30 s while Traffic shows; a
+      // refused or malformed read keeps the last answer, marked stale.
+      function refreshTrafficNotKept() {
+        const use = state.trafficNotKept;
         if (typeof fetch !== 'function' || use?.pending || (use && Date.now() - use.at < 30000)) return;
         if (document.querySelector('#screen-traffic')?.hidden === true) return;
-        state.trafficBudgetUse = {at: Date.now(), pending: true, use: use?.use ?? null};
+        state.trafficNotKept = {at: Date.now(), pending: true, use: use?.use ?? null};
         const marker = state.eventEtag ?? null;
         const integer = text => /^(0|[1-9][0-9]{0,19})$/.test(text ?? '') ? Number(text) : null;
         fetch('/api/session/summary', {cache: 'no-store'})
           .then(response => response.ok ? response.json() : null)
           .then(summary => {
             if (!Array.isArray(summary?.checks)) throw new Error('No session summary');
-            const next = {counts: {}, retained: {}, budgets: {}, marker, stale: false,
-              bounded: summary.checks.some(check => check?.code === 'bounded_scope')};
-            for (const budget of TRAFFIC_BUDGETS) {
+            const next = {counts: {}, marker, stale: false,
+              bounded: summary.events?.scope !== 'store'};
+            for (const entry of TRAFFIC_NOT_KEPT) {
               for (const check of summary.checks) {
                 if (check?.code !== 'request_content_not_retained' ||
-                    !budget.reasons.some(([category, reason]) => check.category === category && check.reason === reason)) continue;
-                next.counts[budget.category] = (next.counts[budget.category] ?? 0) + (integer(check.count) ?? 0);
-                if (integer(check.retained_bytes) !== null) {
-                  next.retained[budget.category] = {bytes: integer(check.retained_bytes), complete: check.retained_complete === true};
-                }
-                if (Number.isSafeInteger(check.budget_mib)) next.budgets[budget.category] = check.budget_mib;
+                    !entry.reasons.some(([category, reason]) => check.category === category && check.reason === reason)) continue;
+                next.counts[entry.key] = (next.counts[entry.key] ?? 0) + (integer(check.count) ?? 0);
               }
             }
-            state.trafficBudgetUse = {at: Date.now(), pending: false, use: next};
+            state.trafficNotKept = {at: Date.now(), pending: false, use: next};
           })
           .catch(() => {
-            const kept = state.trafficBudgetUse?.use ?? null;
-            state.trafficBudgetUse = {at: Date.now(), pending: false, use: kept && {...kept, stale: true}};
+            const kept = state.trafficNotKept?.use ?? null;
+            state.trafficNotKept = {at: Date.now(), pending: false, use: kept && {...kept, stale: true}};
           })
-          .finally(renderTrafficBudget);
-      }
-
-      // The limits this session runs with, from the versioned session context
-      // (capture_options.content_limits, protocol/http-api.md), the only source
-      // of a budget's size. Read after each valid poll until it answers; a
-      // session that is not live, or keeps no content, has none.
-      function refreshSessionContentLimits() {
-        if (typeof fetch !== 'function' || state.sessionContentLimitsRead) return;
-        state.sessionContentLimitsRead = 'pending';
-        const budget = (value, max) => Number.isSafeInteger(value) && value >= 1 && value <= max ? value : null;
-        fetch('/api/session/context', {cache: 'no-store'})
-          .then(response => response.ok ? response.json() : Promise.reject(new Error(`Session context returned ${response.status}`)))
-          .then(context => {
-            const limits = context?.capture_options?.content_limits;
-            state.sessionContentLimits = limits?.version === 1 ? Object.freeze({
-              request_content_budget_mib: budget(limits.request_content_budget_mib, 4096),
-              response_body_budget_mib: budget(limits.response_body_budget_mib, 16384),
-              response_media: typeof limits.response_media === 'boolean' ? limits.response_media : null}) : null;
-            state.sessionContentLimitsRead = 'answered';
-            if (typeof renderShellStatus === 'function') renderShellStatus();
-            renderTrafficBudget();
-          })
-          .catch(() => { state.sessionContentLimitsRead = null; });
+          .finally(renderTrafficNotKept);
       }
 
       // A null visible count is a query the request index has not answered yet.
@@ -3422,7 +3545,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           renderTrafficHeaderGaps(document.querySelector('#request-header-gaps'),
             document.querySelector('#request-header-gaps-detail'), state.headerCoverage);
         }
-        renderTrafficBudget();
+        renderTrafficNotKept();
       }
 
       // The waterfall spans the selected time range, else the timeline of every matching start.
@@ -3612,7 +3735,6 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           const end = Number(coverage.store_end);
           notes.push(`indexing ${end ? Math.floor(Number(coverage.indexed_end) * 100 / end) : 0}%`);
         }
-        if (coverage.unindexed_records !== '0') notes.push(`${coverage.unindexed_records} records past the ${coverage.request_limit.toLocaleString('en-US')}-request limit`);
         if (coverage.malformed_records !== '0') notes.push(`${coverage.malformed_records} unreadable records`);
         return notes.join(' · ');
       }
@@ -3769,8 +3891,72 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           : request.hostOnly ? `${request.path} (host only metadata)`
             : fullUrl ?? (request.urlTruncated ? `${request.path}… (truncated)` : request.path);
         elements.selectedUrl.title = elements.selectedUrl.textContent;
-        // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
-        elements.requestCopyUrl.disabled = request.hostOnly || (Boolean(request.urlTruncated) && !fullUrl) || request.targetKind === 'path';
+        // The menu says which of its copies this row allows.
+        elements.requestCopyUrl.disabled = false;
+      }
+
+      // A truncated or scheme-less target is not a URL to copy until its full target is loaded.
+      function trafficCopyUrl(request) {
+        const fullUrl = request?.urlTruncated ? requestFullUrl(request) : null;
+        if (!request || request.hostOnly || (request.urlTruncated && !fullUrl) || request.targetKind === 'path') return null;
+        return request.origin === 'sample' ? `https://checkout.acme.test${request.path}` : fullUrl ?? request.path;
+      }
+
+      // What Export offers for Traffic: one exact row and the list as the index
+      // last answered it, pinned to that answer's position. Null without an index.
+      function trafficExportSnapshot(id = null) {
+        if (!trafficIndexActive() || state.sessionMode === 'preview') return null;
+        const origin = state.sessionMode === 'demo' ? 'demo' : 'live';
+        const query = trafficIndexQuery(origin);
+        const answer = state.trafficIndex.answer();
+        const listed = answer?.query === query && answer.origin === origin ? answer.document : null;
+        const chosen = id ?? state.selectedRequestId;
+        const request = chosen === null ? null : state.requests.find(candidate => candidate.id === chosen) ?? state.trafficIndex.row(chosen);
+        const target = request ? trafficCopyUrl(request) ?? request.path ?? '' : '';
+        const label = request ? `${request.method} ${target.length > 140 ? `${target.slice(0, 139)}…` : target}` : '';
+        const selected = request && request.origin !== 'sample' ? {id: request.id, label} : null;
+        const list = listed ? {query, through: listed.through ?? null, matching: Number(listed.matching),
+          filtered: [...new URLSearchParams(query).keys()].some(key => key !== 'sort' && key !== 'order')} : null;
+        return selected || list ? {selected, list} : null;
+      }
+
+      // The row menu's actions. cURL and fetch read the row's HAR entry, so they
+      // need the request index; a sample row has none.
+      function trafficRowActions(id) {
+        const request = state.requests.find(candidate => candidate.id === id) ?? state.trafficIndex?.row(id) ?? null;
+        if (!request) return [];
+        const url = trafficCopyUrl(request);
+        const indexed = trafficIndexActive() && request.origin !== 'sample';
+        const unindexed = 'This row has no request index entry to read its headers and body from.';
+        const copy = (label, build) => async () => {
+          const button = elements.requestCopyUrl;
+          let gaps = [];
+          try {
+            await trafficClipboardWrite((async () => {
+              const result = await build();
+              gaps = result.gaps ?? [];
+              return result.text;
+            })());
+            button.textContent = 'Copied';
+            if (gaps.length) investigationNotice(`Copied the ${label}, but ${gaps.join(' and ')}.`);
+          } catch (error) {
+            button.textContent = 'Copy failed';
+            investigationNotice(`The ${label} was not copied: ${error?.message ?? error}.`, 'ambiguous');
+          }
+          clearTimeout(state.trafficCopyTimer);
+          state.trafficCopyTimer = setTimeout(() => { button.textContent = 'Copy'; }, 1800);
+        };
+        const fromHar = render => async () => {
+          const entry = await trafficHarEntry(id);
+          return {text: render(entry), gaps: trafficCopyGaps(entry)};
+        };
+        return [
+          {label: 'Copy URL', disabled: !url, title: url ? '' : 'This row has no complete URL to copy.', run: copy('URL', async () => ({text: url}))},
+          {label: 'Copy as cURL', disabled: !indexed, title: indexed ? '' : unindexed, run: copy('cURL command', fromHar(trafficCurl))},
+          {label: 'Copy as fetch', disabled: !indexed, title: indexed ? '' : unindexed, run: copy('fetch call', fromHar(trafficFetch))},
+          {label: 'Export HAR…', separated: true, disabled: !indexed, title: indexed ? '' : unindexed,
+            run: () => capturedExportPanel.openTraffic(state.trafficRowMenuOpener, id)}
+        ];
       }
 
       function selectRequest(id, expectedIdentity = null) {
@@ -3888,10 +4074,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.trafficLoadingId = id;
         const row = [...elements.requestRows.querySelectorAll('.request-row')].find(node => node.dataset.requestId === id);
         row?.setAttribute('aria-busy', 'true');
-        // WebKit rejects a timed-out fetch with AbortError; the deadline says whether it was reached.
-        const deadline = AbortSignal.timeout(10000);
         try {
-          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, AbortSignal.any([controller.signal, deadline]));
+          const {events, partial} = await state.trafficIndex.events(indexed.indexRow, controller.signal);
           if (controller.signal.aborted) return;
           const request = requestsFromEvents(events, indexed.origin).find(candidate => candidate.id === id);
           if (!request) throw new Error('its stored records no longer form this request');
@@ -3913,8 +4097,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         } catch (error) {
           if (controller.signal.aborted) return;
           if (select) {
-            const reason = deadline.aborted ? 'the backend did not answer within 10 seconds' : error.message;
-            const message = trafficUnreadSelectionText(indexed, reason, state.selectedRequestId !== null);
+            const message = trafficUnreadSelectionText(indexed, error.message, state.selectedRequestId !== null);
             const bar = document.querySelector('#investigation-navigation');
             // A later valid poll reads it again (retryTrafficUnreadSelection).
             state.trafficUnreadSelection = {id, indexed, message,
@@ -4083,7 +4266,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
             state.signalProfileKey = selection.key;
             state.signalProfileEtag = response.headers.get('ETag');
           } else {
-            if (!response.ok) throw new Error(`Request signal profile store returned ${response.status}`);
+            if (!response.ok) {
+              // A 503 says how far the profile index has got; the next refresh asks again.
+              const failure = response.status === 503 ? await response.json().catch(() => null) : null;
+              throw new Error(typeof failure?.error === 'string' ? failure.error.slice(0, 1024)
+                : `Request signal profile store returned ${response.status}`);
+            }
             const body = await response.json();
             if (!ownsSelection()) return;
             if (!isRequestSignalProfile(body)) throw new TypeError('Malformed request signal profile');
@@ -4392,8 +4580,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         const trafficGrid = document.querySelector('.traffic-grid');
         // The stacked footer's budget sentence never outlives the request it
         // was opened beside, so a request opened later starts with it closed.
-        if (trafficGrid.dataset.detailOpen !== String(state.trafficDetailOpen) && typeof toggleTrafficBudget === 'function') {
-          toggleTrafficBudget(false);
+        if (trafficGrid.dataset.detailOpen !== String(state.trafficDetailOpen) && typeof toggleTrafficNotKept === 'function') {
+          toggleTrafficNotKept(false);
         }
         trafficGrid.dataset.detailOpen = String(state.trafficDetailOpen);
         document.querySelector('.detail-pane').hidden = !state.trafficDetailOpen;
@@ -5029,16 +5217,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           throw new TypeError('Request headers must map names to text values.');
         }
 
-        const forbidden = new Set(['authorization', 'connection', 'content-length', 'cookie', 'host',
-          'proxy-authorization', 'set-cookie', 'transfer-encoding']);
+        // The HTTP client computes framing and connection headers; credentials,
+        // cookies and browser headers are kept as the researcher wrote them.
+        const framing = new Set(['connection', 'content-length', 'host', 'keep-alive', 'proxy-connection',
+          'te', 'trailer', 'transfer-encoding', 'upgrade']);
         const entries = Object.entries(headers);
-        let bytes = 0;
-        if (entries.length > 64 || entries.some(([name, headerValue]) => {
-          bytes += utf8ByteLength(name) + utf8ByteLength(headerValue);
-          return !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || forbidden.has(name.toLowerCase()) ||
-            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 2 * 1024 ||
-            /[\x00-\x1f\x7f]/u.test(headerValue) || bytes > 16 * 1024;
-        })) throw new TypeError('Request headers are forbidden, invalid, or exceed 16 KiB.');
+        if (entries.length > 64 || entries.some(([name, headerValue]) =>
+          !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name) || framing.has(name.toLowerCase()) ||
+            utf8ByteLength(name) > 128 || utf8ByteLength(headerValue) > 64 * 1024 ||
+            /[\x00-\x1f\x7f]/u.test(headerValue)
+        )) throw new TypeError('Request headers must be at most 64 valid names with values of at most 64 KiB; Host, Content-Length, Connection, Transfer-Encoding and hop-by-hop headers belong to the HTTP client.');
         return entries.map(([name, headerValue]) => ({name, value: headerValue}));
       }
 
@@ -9442,7 +9630,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       async function refreshPollDependents(eventsChanged) {
         retryTrafficUnreadSelection();
         // Guarded for the checks that run this section alone.
-        if (typeof refreshSessionContentLimits === 'function') refreshSessionContentLimits();
+        if (typeof refreshSessionWasmSampling === 'function') refreshSessionWasmSampling();
         if (state.refreshingDependents) {
           if (eventsChanged) renderVmLab();
           return;
@@ -9488,6 +9676,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.events = [];
         state.canvasRenderCaptures = [];
         state.eventsLimited = false;
+        state.eventNextBefore = null;
+        state.eventStoreEnd = null;
         state.sequenceGaps = 0n;
         state.queueDrops = 0n;
         state.namedGaps = [];
@@ -9761,18 +9951,16 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       }, {passive: true});
       // A list that gains height, or is shown, mounts the rows that come into view.
       if (typeof ResizeObserver === 'function') new ResizeObserver(() => remountTrafficRows(elements.requestRows)).observe(elements.requestRows);
-      elements.requestCopyUrl.addEventListener('click', async () => {
-        const selected = state.requests.find(request => request.id === state.selectedRequestId);
-        const fullUrl = selected?.urlTruncated ? requestFullUrl(selected) : null;
-        if (!selected || selected.hostOnly || (selected.urlTruncated && !fullUrl) || selected.targetKind === 'path') return;
-        try {
-          const url = selected.origin === 'sample' ? `https://checkout.acme.test${selected.path}` : fullUrl ?? selected.path;
-          await navigator.clipboard.writeText(url);
-          elements.requestCopyUrl.textContent = 'Copied';
-        } catch {
-          elements.requestCopyUrl.textContent = 'Copy unavailable';
-        }
-        setTimeout(() => { elements.requestCopyUrl.textContent = 'Copy URL'; }, 1800);
+      // Right-click, the context-menu key or Shift+F10 on a row selects it and opens the menu the strip's Copy opens.
+      state.trafficRowMenu = createTrafficRowMenu({rows: elements.requestRows, button: elements.requestCopyUrl,
+        select(id, opener) { state.trafficRowMenuOpener = opener; if (id !== state.selectedRequestId) selectTrafficRow(id); },
+        actions: trafficRowActions});
+      elements.requestCopyUrl.addEventListener('click', () => {
+        if (state.trafficRowMenu.isOpen()) { state.trafficRowMenu.close(); return; }
+        const id = state.selectedRequestId;
+        if (id === null) return;
+        const box = elements.requestCopyUrl.getBoundingClientRect();
+        state.trafficRowMenu.open(id, elements.requestCopyUrl, box.left, box.bottom + 4);
       });
       {
         const gaps = document.querySelector('#request-header-gaps');
@@ -9798,25 +9986,30 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         state.requestDomain = 'all';
         renderRequests();
       });
-      // The stacked layout's one-line budget button opens the whole sentence
+      // The stacked layout's one-line not-kept button opens the whole sentence
       // over the ledger's rows. Escape closes it and keeps focus on the button;
       // focus leaving it or a press anywhere else closes it too, so it never
       // stays over rows that the researcher is reaching for.
-      const trafficBudget = document.querySelector('#request-budget');
-      document.querySelector('#request-budget-toggle').addEventListener('click', () => toggleTrafficBudget());
-      trafficBudget.addEventListener('keydown', event => {
-        if (event.key !== 'Escape' || trafficBudget.dataset.expanded !== 'true') return;
+      const trafficNotKept = document.querySelector('#request-not-kept');
+      document.querySelector('#request-not-kept-toggle').addEventListener('click', () => toggleTrafficNotKept());
+      trafficNotKept.addEventListener('keydown', event => {
+        if (event.key !== 'Escape' || trafficNotKept.dataset.expanded !== 'true') return;
         event.preventDefault();
         event.stopPropagation();
-        toggleTrafficBudget(false);
-        document.querySelector('#request-budget-toggle').focus();
+        toggleTrafficNotKept(false);
+        document.querySelector('#request-not-kept-toggle').focus();
       });
-      trafficBudget.addEventListener('focusout', event => {
-        if (trafficBudget.dataset.expanded === 'true' && !trafficBudget.contains(event.relatedTarget)) toggleTrafficBudget(false);
+      trafficNotKept.addEventListener('focusout', event => {
+        if (trafficNotKept.dataset.expanded === 'true' && !trafficNotKept.contains(event.relatedTarget)) toggleTrafficNotKept(false);
       });
       document.addEventListener('pointerdown', event => {
-        if (trafficBudget.dataset.expanded === 'true' && !trafficBudget.contains(event.target)) toggleTrafficBudget(false);
+        if (trafficNotKept.dataset.expanded === 'true' && !trafficNotKept.contains(event.target)) toggleTrafficNotKept(false);
       }, true);
+      // Fixed to the window, the open sentence follows its button when the
+      // window resizes or a pane holding the button scrolls.
+      const followTrafficNotKept = () => { if (trafficNotKept.dataset.expanded === 'true') placeTrafficNotKept(); };
+      addEventListener('resize', followTrafficNotKept);
+      document.addEventListener('scroll', followTrafficNotKept, true);
       elements.requestDomain.addEventListener('change', () => {
         state.requestDomain = elements.requestDomain.value;
         state.requestType = 'all';
@@ -9843,6 +10036,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         showScreen('vm', elements.requestVmCandidates);
         await refresh;
       });
+      elements.vmWasmSamplingReset.addEventListener('click', resetVmWasmSampleBudgets);
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
         if (current?.start) moveSourceWindow(current.start - 1);

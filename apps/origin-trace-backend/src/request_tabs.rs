@@ -3,11 +3,21 @@
 //! when any record has a tab or a request_tab_link or request_extension_link
 //! names it. An unlinked row is a capture error, reported with a reason taken
 //! from its own records. Identifiers only.
-use crate::event_window;
+//!
+//! The summary folds each record into a row of the event index
+//! (`summary_tabs`) and keeps the counts the answer reports as rows change,
+//! so a session of any length is counted whole.
+use crate::{
+    error::Result,
+    event_window,
+    index_db::{self, SqlResult},
+    session_summary::{bump, count_named},
+};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 
-const TRACKED_ROWS: usize = 262_144;
+/// Unresolved rows the answer names; the rest are counted.
 const SAMPLES: usize = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,10 +69,10 @@ struct Record {
     browser: Option<u64>,
 }
 
+/// One fold's records by row, merged into the stored rows in `write`.
 #[derive(Default)]
 pub(crate) struct RequestTabs {
     rows: HashMap<Row, State>,
-    untracked: u64,
 }
 
 fn lifecycle(kind: &str) -> bool {
@@ -167,10 +177,6 @@ impl RequestTabs {
     }
 
     fn note(&mut self, row: Row, linked: bool, extension: bool, record: Option<Record>) {
-        if !self.rows.contains_key(&row) && self.rows.len() >= TRACKED_ROWS {
-            self.untracked += 1;
-            return;
-        }
         let order = self.rows.len();
         let state = self.rows.entry(row).or_insert(State {
             linked: false,
@@ -199,47 +205,234 @@ impl RequestTabs {
         }
     }
 
-    /// A link alone is not a row: only rows with a lifecycle record count.
-    fn rows(&self) -> impl Iterator<Item = &State> {
-        self.rows.values().filter(|state| state.process_id != 0)
-    }
-
-    /// Unresolved rows by reason.
-    pub(crate) fn unresolved_reasons(&self) -> BTreeMap<&'static str, u64> {
-        let mut reasons = BTreeMap::new();
-        for state in self.rows().filter(|state| !state.linked) {
-            *reasons.entry(reason(state)).or_default() += 1;
+    /// Merges this fold's rows into the stored ones, in first-seen order, and
+    /// keeps the counts the answer reports.
+    pub(crate) fn write(&mut self, transaction: &Transaction<'_>) -> Result<()> {
+        let mut rows = self.rows.drain().collect::<Vec<_>>();
+        rows.sort_by_key(|(_, state)| state.order);
+        for (row, delta) in rows {
+            let key = row.columns();
+            let stored = transaction
+                .prepare_cached(
+                    "SELECT ordinal, linked, extension, process_id, request_id, renderer_kind,
+                        renderer_frame, browser_kind
+                     FROM summary_tabs WHERE browser = ?1 AND session = ?2 AND process = ?3
+                        AND high = ?4 AND low = ?5 AND request = ?6",
+                )
+                .sql()?
+                .query_row(
+                    params![key[0], key[1], key[2], key[3], key[4], key[5]],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            State {
+                                linked: row.get(1)?,
+                                extension: row.get(2)?,
+                                order: 0,
+                                process_id: row.get::<_, i64>(3)? as u64,
+                                request_id: row.get::<_, i64>(4)? as u64,
+                                renderer: row
+                                    .get::<_, Option<i64>>(5)?
+                                    .map(|kind| {
+                                        Ok::<_, rusqlite::Error>((kind as u64, row.get(6)?))
+                                    })
+                                    .transpose()?,
+                                browser: row.get::<_, Option<i64>>(7)?.map(|kind| kind as u64),
+                            },
+                        ))
+                    },
+                )
+                .optional()
+                .sql()?;
+            let merged = match &stored {
+                Some((_, state)) => state.merge(&delta),
+                None => delta,
+            };
+            for (state, sign) in [
+                (stored.as_ref().map(|(_, state)| state), -1),
+                (Some(&merged), 1),
+            ] {
+                let Some(state) = state.filter(|state| state.process_id != 0) else {
+                    continue;
+                };
+                bump(transaction, "tab_rows", sign)?;
+                if state.extension {
+                    bump(transaction, "tab_extension_rows", sign)?;
+                }
+                if !state.linked {
+                    bump(transaction, &format!("unresolved:{}", reason(state)), sign)?;
+                }
+            }
+            let unresolved = (merged.process_id != 0 && !merged.linked).then(|| reason(&merged));
+            let values = params![
+                merged.linked,
+                merged.extension,
+                index_db::key(merged.process_id),
+                index_db::key(merged.request_id),
+                merged.renderer.map(|(kind, _)| index_db::key(kind)),
+                merged.renderer.is_some_and(|(_, frame)| frame),
+                merged.browser.map(index_db::key),
+                unresolved,
+            ];
+            match stored {
+                Some((ordinal, _)) => transaction
+                    .prepare_cached(
+                        "UPDATE summary_tabs SET linked = ?1, extension = ?2, process_id = ?3,
+                            request_id = ?4, renderer_kind = ?5, renderer_frame = ?6,
+                            browser_kind = ?7, reason = ?8
+                         WHERE ordinal = ?9",
+                    )
+                    .sql()?
+                    .execute(rusqlite::params_from_iter(
+                        values
+                            .iter()
+                            .copied()
+                            .chain([&ordinal as &dyn rusqlite::ToSql]),
+                    ))
+                    .sql()?,
+                None => transaction
+                    .prepare_cached(
+                        "INSERT INTO summary_tabs(linked, extension, process_id, request_id,
+                            renderer_kind, renderer_frame, browser_kind, reason,
+                            browser, session, process, high, low, request)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    )
+                    .sql()?
+                    .execute(rusqlite::params_from_iter(
+                        values
+                            .iter()
+                            .copied()
+                            .chain(key.iter().map(|value| value as &dyn rusqlite::ToSql)),
+                    ))
+                    .sql()?,
+            };
         }
-        reasons
+        Ok(())
     }
+}
 
-    pub(crate) fn document(&self) -> Value {
-        let mut unresolved = self
-            .rows()
-            .filter(|state| !state.linked)
-            .collect::<Vec<_>>();
-        unresolved.sort_by_key(|state| state.order);
-        json!({
-            "rows": self.rows().count().to_string(),
-            "extension_rows": self.rows().filter(|state| state.extension).count().to_string(),
-            "unresolved": unresolved.len().to_string(),
-            "unresolved_reasons": self.unresolved_reasons().into_iter()
-                .map(|(reason, count)| (reason.to_owned(), json!(count.to_string())))
-                .collect::<serde_json::Map<_, _>>(),
-            "unresolved_requests": unresolved.iter().take(SAMPLES).map(|state| json!({
-                "process_id": state.process_id,
-                "request_id": state.request_id.to_string(),
-                "reason": reason(state),
-            })).collect::<Vec<_>>(),
-            "unresolved_omitted": unresolved.len().saturating_sub(SAMPLES).to_string(),
-            "untracked_records": self.untracked.to_string(),
-        })
+impl Row {
+    /// The stored key: whether it is a browser row, then its identifiers,
+    /// zero where a renderer row has none.
+    fn columns(&self) -> [i64; 6] {
+        let (browser, session, process, high, low, request) = match *self {
+            Row::Renderer(session, process, request) => (0, session, process, 0, 0, request),
+            Row::Browser(session, process, high, low, request) => {
+                (1, session, process, high, low, request)
+            }
+        };
+        [
+            browser,
+            index_db::key(session),
+            index_db::key(process),
+            index_db::key(high),
+            index_db::key(low),
+            index_db::key(request),
+        ]
     }
+}
+
+impl State {
+    /// This row as stored, with a later fold's records applied after it, as
+    /// `note` applies each record in turn.
+    fn merge(&self, later: &State) -> State {
+        let first = if self.process_id != 0 { self } else { later };
+        State {
+            linked: self.linked || later.linked,
+            extension: self.extension || later.extension,
+            order: self.order,
+            process_id: first.process_id,
+            request_id: first.request_id,
+            renderer: self.renderer.or(later.renderer),
+            browser: match later.browser {
+                None => self.browser,
+                Some(0) => Some(self.browser.unwrap_or(0)),
+                kind => kind,
+            },
+        }
+    }
+}
+
+/// The request_tabs document of a store with no rows.
+pub(crate) fn empty_document() -> Value {
+    json!({"rows": "0", "extension_rows": "0", "unresolved": "0",
+        "unresolved_reasons": {}, "unresolved_requests": [], "unresolved_omitted": "0"})
+}
+
+/// The request_tabs document from the stored rows: counts, unresolved rows by
+/// reason, and the unresolved rows first seen most recently, by process and
+/// request id.
+pub(crate) fn document(
+    connection: &Connection,
+    unresolved: &BTreeMap<String, u64>,
+) -> Result<Value> {
+    let total = unresolved
+        .values()
+        .fold(0u64, |sum, count| sum.saturating_add(*count));
+    let samples = connection
+        .prepare_cached(&format!(
+            "SELECT process_id, request_id, reason FROM summary_tabs
+             WHERE reason IS NOT NULL ORDER BY ordinal DESC LIMIT {SAMPLES}"
+        ))
+        .sql()?
+        .query_map([], |row| {
+            Ok(json!({
+                "process_id": row.get::<_, i64>(0)? as u64,
+                "request_id": (row.get::<_, i64>(1)? as u64).to_string(),
+                "reason": row.get::<_, String>(2)?,
+            }))
+        })
+        .sql()?
+        .map(|row| row.sql())
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({
+        "rows": count_named(connection, "tab_rows")?.to_string(),
+        "extension_rows": count_named(connection, "tab_extension_rows")?.to_string(),
+        "unresolved": total.to_string(),
+        "unresolved_reasons": unresolved.iter()
+            .map(|(reason, count)| (reason.clone(), json!(count.to_string())))
+            .collect::<serde_json::Map<_, _>>(),
+        "unresolved_omitted": total.saturating_sub(samples.len() as u64).to_string(),
+        "unresolved_requests": samples,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records kept in order, so a test reads them folded at once and one per
+    /// fold, which must agree: a row merged across folds is the same row.
+    #[derive(Default)]
+    struct Tabs(Vec<Value>);
+    impl Tabs {
+        fn record(&mut self, event: &Value) {
+            self.0.push(event.clone());
+        }
+        fn document(&self) -> Value {
+            let whole = fold(&self.0, self.0.len().max(1));
+            assert_eq!(whole, fold(&self.0, 1));
+            whole
+        }
+    }
+
+    fn fold(events: &[Value], per: usize) -> Value {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(crate::event_index::EVENT_SCHEMA)
+            .unwrap();
+        for chunk in events.chunks(per) {
+            let transaction = connection.transaction().unwrap();
+            let mut tabs = RequestTabs::default();
+            for event in chunk {
+                tabs.record(event);
+            }
+            tabs.write(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        let unresolved = crate::session_summary::counts_named(&connection, "unresolved:").unwrap();
+        document(&connection, &unresolved).unwrap()
+    }
 
     fn record(kind: &str, process: u64, request: u64, tab: u64, fields: Value) -> Value {
         let mut event = json!({
@@ -256,7 +449,7 @@ mod tests {
 
     #[test]
     fn rows_join_like_traffic_and_unlinked_rows_are_errors() {
-        let mut tabs = RequestTabs::default();
+        let mut tabs = Tabs::default();
         // A worker start, its browser record and its link: one linked row.
         tabs.record(&record("request_initiated", 31, 5, 0, json!({})));
         tabs.record(&record(
@@ -373,9 +566,9 @@ mod tests {
         assert_eq!(
             document["unresolved_requests"],
             json!([
-                {"process_id": 2, "request_id": "902", "reason": "browser_factory"},
+                {"process_id": 31, "request_id": "9", "reason": "no_loader_kind"},
                 {"process_id": 31, "request_id": "6", "reason": "worker"},
-                {"process_id": 31, "request_id": "9", "reason": "no_loader_kind"}
+                {"process_id": 2, "request_id": "902", "reason": "browser_factory"}
             ])
         );
         assert_eq!(
@@ -386,7 +579,7 @@ mod tests {
 
     #[test]
     fn unresolved_rows_name_why_from_their_own_records() {
-        let mut tabs = RequestTabs::default();
+        let mut tabs = Tabs::default();
         let renderer =
             |request: u64, fields: Value| record("request_initiated", 31, request, 0, fields);
         tabs.record(&renderer(1, json!({"loader_kind": 16, "frame_id": "77"})));
@@ -420,11 +613,17 @@ mod tests {
             7,
             json!({"loader_kind": 22, "frame_id": "82", "tab_id": 4}),
         ));
-        let reasons = tabs
-            .rows
-            .values()
-            .filter(|state| !state.linked)
-            .map(|state| (state.request_id, reason(state)))
+        let document = tabs.document();
+        let reasons = document["unresolved_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["request_id"].as_str().unwrap().parse::<u64>().unwrap(),
+                    row["reason"].as_str().unwrap(),
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         assert_eq!(
             reasons,
@@ -440,7 +639,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            tabs.document()["unresolved_reasons"],
+            document["unresolved_reasons"],
             json!({"document_frame": "3", "no_document": "1", "no_frame": "1",
                    "no_loader_kind": "1", "no_start": "1", "worker": "1"})
         );

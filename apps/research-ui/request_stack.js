@@ -4,12 +4,14 @@
 const REQUEST_STACK_STATES = Object.freeze({1: 'captured', 2: 'no_script', 3: 'unsupported_thread',
   4: 'not_retained_artifact_unavailable', 5: 'not_retained_budget', 6: 'not_walked_thread_limit'});
 
-// Budgets are per thread: the document main thread and each worker keep their own.
+// not_retained_budget and not_walked_thread_limit come only from captures
+// recorded by a browser that still capped stacks per thread and workers per
+// renderer; current builds record every stack on every worker.
 const REQUEST_STACK_NOTES = Object.freeze({
   unsupported_thread: 'Stacks are recorded on the document main thread and in dedicated, shared and service workers. This request started on another thread: a worklet, or a loader thread that runs no script.',
   not_retained_artifact_unavailable: 'The stack was walked but its frames were not retained: the Artifact category was off.',
-  not_retained_budget: 'The stack was walked but its frames were not retained: this thread already sent 1,024 stacks for requests, navigations, cookie writes and debugger observations in this capture.',
-  not_walked_thread_limit: 'No stack was walked: 32 workers in this renderer already had stack tables, so this one had none until another worker shut down.'
+  not_retained_budget: 'The stack was walked but its frames were not retained: the browser that recorded this capture sent at most 1,024 stacks per thread. Current builds retain every stack.',
+  not_walked_thread_limit: 'No stack was walked: the browser that recorded this capture gave stack tables to at most 32 workers per renderer. Current builds walk every worker.'
 });
 
 const REQUEST_STACK_REASONS = Object.freeze({
@@ -158,8 +160,8 @@ const REQUEST_STACK_TASK_NOTES = Object.freeze({
   no_script: 'scheduled while no script ran (the browser, the parser or a native callback); the chain ends here',
   origin_rejected: 'its task origin did not validate (forged, damaged or longer than 1,544 bytes), so the sender is not known; the chain ends here',
   not_retained_artifact_unavailable: 'frames not retained: the Artifact category was off',
-  not_retained_budget: 'frames not retained: this thread already sent 1,024 scheduling stacks in this capture',
-  not_retained_budget_registration: 'frames not retained: this thread already sent 1,024 promise registration stacks in this capture',
+  not_retained_budget: 'frames not retained: the browser that recorded this capture sent at most 1,024 scheduling stacks per thread',
+  not_retained_budget_registration: 'frames not retained: the browser that recorded this capture sent at most 1,024 promise registration stacks per thread',
   artifact_missing: 'frames artifact missing'
 });
 

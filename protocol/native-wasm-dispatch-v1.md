@@ -48,11 +48,11 @@ selector, slot, or sample.
 
 A worker or worklet gap means the hook ran and the realm was that scope. The
 selector or table slot is not copied into a document observation. The Liftoff
-admission predicate goes false once that stream's 16-observation budget is
-full, and the hook does not run again, so a worker or worklet execution after
-the budget is not visited. A scope notice that does arrive is still recorded;
-the budget gap does not consume the scope slot. A full ring does not mark the
-scope gap sent.
+admission predicate stays true after a stream's window is full, so a worker or
+worklet execution after it is still visited. It goes false only while that
+window's omitted counter is saturated, and true again once the window's second
+has passed. A scope notice that does arrive is still recorded; the budget gap
+does not consume the scope slot. A full ring does not mark the scope gap sent.
 
 Jitless on this desktop pin does not execute Wasm. `--jitless` does not imply
 `wasm_jitless` except on tvOS, where DrumBrake exists. Without DrumBrake,
@@ -115,44 +115,77 @@ The browser captures the module through the artifact receiver and emits the
 observation only after accepted ACK. Stale navigation/configuration callbacks
 are rejected. Observations of the same module in the same document share one
 module artifact; each is emitted once that artifact is accepted (or at once if
-it already was). Capture is capped at 16 observations per configuration and
-16 MiB per module. Raising that global cap does not keep a hot function from
-filling it. A session can instead restrict admission before a sample index is
-taken: a module-digest allowlist, a function-index allowlist and denylist
-(deny wins), and a maximum number of retained samples per function. Empty
-lists and a zero maximum keep the historical behavior. A module whose digest
-is not allowed, and a function that is denied or past its own maximum, does
-not advance the sample index. The same controls apply to `call_indirect`,
-which also has a maximum per caller function and module byte offset. The two
-streams keep independent counters. `session_action`
-`reset_wasm_sample_budgets` restarts both sample indexes at 0 in the same
-browser session and starts a new overflow ring for each stream. It first
-publishes each stream's pending omitted count for the epoch being closed.
-The next retained sample is index 0, and the next overflow identity may reuse
-ring index 0. It does not change the policy, the session id, or the capture
-configuration, and it does not invent a sample, a caller, or a parent. The
-browser notices the reset file on its writer wake, about 250ms later, and
-only when the generation is greater than the last one it applied. The backend
-replaces that file by rename under an exclusive lock, so a reader sees a
-whole decimal and two overlapping resets cannot publish the same generation.
-Executions before that wake still belong to the previous epoch. A rebuilt
-Brave is required before a live session honors the policy, the reset, or the
-overflow records. `sample_index` remains the configuration slot, 0 through
-15, not a per-function index and not an interpreter guest PC.
+it already was). A module is at most 16 MiB.
+
+Full observations are paced, never stopped for the session. Each renderer
+keeps a one-second sample window on its own monotonic clock. A window retains
+at most 1024 full `br_table` observations, 1024 `call_indirect` observations
+and 1024 execution outcomes, and each function at most `samples_per_function`
+of each stream. The first execution after the window's second closes it: the
+closed window's omitted counts are published, and every count, per-function
+allowance and overflow ring starts again. A busy page therefore keeps
+recording for as long as the session runs, at a bounded rate, instead of
+keeping its first 16 executions. A session sets `samples_per_function` from
+its launch file, from 1 to 1024. Without one, a function keeps 64 per window,
+so one hot loop cannot take a whole window from the other functions. 1024, the
+whole window, removes the per-function limit.
+
+A session can also restrict admission before a sample index is taken: a
+module-digest allowlist and a function-index allowlist and denylist (deny
+wins). A module whose digest is not allowed, and a function that is denied or
+past its window allowance, does not take a sample index. The same controls
+apply to `call_indirect`, which also has a maximum per caller function and
+module byte offset. The two streams keep independent counters.
+`session_action` `reset_wasm_sample_budgets` closes the current window at once
+for both streams, with the same effect as its second passing. It first
+publishes each stream's pending omitted count for the window being closed, and
+the next overflow identity may reuse ring index 0. It does not change the
+policy, the session id, or the capture configuration, and it does not invent a
+sample, a caller, or a parent. The browser notices the reset file on its
+writer wake, about 250ms later, and only when the generation is greater than
+the last one it applied. The backend replaces that file by rename under an
+exclusive lock, so a reader sees a whole decimal and two overlapping resets
+cannot publish the same generation. Executions before that wake still belong
+to the previous window. A rebuilt Brave is required before a live session
+honors the policy, the windows, the reset, or the overflow records.
+
+`sample_index` is the configuration's ordinal for that stream: 0 for its first
+retained sample and one more for each later one, across windows and resets,
+up to 4294967294. A replacement configuration starts again at 0. It is not a
+per-function index and not an interpreter guest PC. A hole in the ordinals is
+a sample whose record was lost after it took its index, and that record's own
+sequence slot holds the gap. Builds before this change kept 16 per stream,
+so their indexes are below 16, and every reader accepts both.
+
+A thread sends a module's bytes with the first record of each window that
+names the module. Its later records of that window carry `module_token`, the
+sequence number of that first record, and no bytes. The browser resolves the
+token against the module that record carried, in the same frame, execution
+context and document, and refuses any other token as
+`native_wasm_dispatch_module_unbound` (`_indirect_` and `_execution_` for the
+other streams) in the record's own slot. A hot loop therefore copies its
+module once per window, not once per sample. The browser keeps the last 256
+bindings of a renderer and drops them when capture stops.
+
+The browser applies the same filters to every record, bytes or token, and
+counts each stream per renderer per second on its own clock. Its ceiling is
+twice the renderer's window, 2048, so a renderer that keeps its own pacing is
+never refused for count. A record past it, which only a renderer that ignores
+its pacing can send, is `native_wasm_dispatch_browser_budget_incomplete` in its
+own slot.
 
 A filtered record is an exclusion, not a capacity loss. The renderer coalesces
-it once per budget epoch into `native_wasm_dispatch_filtered`. A new
-configuration and `reset_wasm_sample_budgets` each start an epoch. A
-per-function refusal is
-`native_wasm_dispatch_function_budget_incomplete`. The browser names the same
-cases `native_wasm_dispatch_browser_filtered` and
-`native_wasm_dispatch_browser_function_budget_incomplete` on each refused
-record. The global 16 still coalesces into
-`native_wasm_dispatch_budget_incomplete`. None of these refusals disables the
-stream: the admission predicate stays true so a later execution can keep a
-compact identity in the [overflow ring](#overflow-identities). The predicate
-turns false when that ring's omitted counter saturates or the budget epoch is
-resetting. A per-function, per-module, or per-site refusal leaves the other
+it once per window into `native_wasm_dispatch_filtered`. A new
+configuration, a window turnover and `reset_wasm_sample_budgets` each start a
+window. A per-function refusal is
+`native_wasm_dispatch_function_budget_incomplete`. The browser names a filtered
+record `native_wasm_dispatch_browser_filtered` on each refused record. A full
+window coalesces into `native_wasm_dispatch_budget_incomplete`. None of these
+refusals disables the stream: the admission predicate stays true so a later
+execution can keep a compact identity in the
+[overflow ring](#overflow-identities). The predicate turns false only while
+that ring's omitted counter is saturated, until the window's second has
+passed, or while the window is turning over. A per-function, per-module, or per-site refusal leaves the other
 functions able to take a remaining full-observation slot. These gaps do not
 carry the dropped function, offset, or selector; the overflow identity does.
 A lost observation becomes a `gap` in its own renderer
@@ -183,7 +216,7 @@ The payload is exactly128bytes, explicitly little-endian:
 |8|module instruction offset|u32|
 |12|unsigned selector|u32|
 |16|explicit table arm count|u32|
-|20|sample index (0–15)|u32|
+|20|sample index (0 to 4294967294)|u32|
 |24|reserved, all zero|104bytes|
 
 Version 2 replaces the first 8 reserved bytes with the JavaScript invocation
@@ -331,28 +364,29 @@ indexed by i64 (`table64`) are not observed.
 
 Blink, the renderer sink, the browser host and the artifact sink apply the same
 document, session, generation, category and expiry rules as `br_table`
-observations, through the same bounded transport. A separate budget allows 16
-records per configuration in the renderer and in the browser, so one stream
-never starves the other. Executions that a budget refuses keep compact identities
-in the same [overflow ring](#overflow-identities). The 16 full records stay
-the cap, and the stream stays enabled past that cap until the omitted counter
-saturates. The sample-budget policy in the `br_table` section applies here
-independently, including the per-call-site maximum. A filtered record is
+observations, through the same bounded transport. A separate window allows
+1024 records per second in the renderer and 2048 in the browser, so one stream
+never starves the other. Executions that a window refuses keep compact
+identities in the same [overflow ring](#overflow-identities). The stream stays
+enabled past a full window until the omitted counter saturates, and the next
+window records full observations again. The sample-budget policy in the
+`br_table` section applies here independently, including the per-call-site
+maximum, and the module token works the same way. A filtered record is
 `native_wasm_indirect_filtered` in the renderer and
 `native_wasm_indirect_browser_filtered` in the browser. A per-function refusal
-is `native_wasm_indirect_function_budget_incomplete` or
-`native_wasm_indirect_browser_function_budget_incomplete`. A per-call-site
-refusal is `native_wasm_indirect_site_budget_incomplete` or
-`native_wasm_indirect_browser_site_budget_incomplete`. None of those disable
-the stream. The renderer coalesces input and budget losses into
-one gap per budget epoch: `native_wasm_indirect_input_unavailable` or
-`native_wasm_indirect_budget_incomplete`. A full ring does not mark a gap as
-sent, so it is retried. A record the transport refuses frees its sample index
-and fills the sequence slot it took with
+is `native_wasm_indirect_function_budget_incomplete` and a per-call-site
+refusal is `native_wasm_indirect_site_budget_incomplete`, both in the
+renderer. None of those disable the stream. The renderer coalesces input and
+budget losses into one gap per window: `native_wasm_indirect_input_unavailable`
+or `native_wasm_indirect_budget_incomplete`. A full ring does not mark a gap as
+sent, so it is retried. A record the transport refuses gives its window count
+back and fills the sequence slot it took with
 `native_wasm_indirect_transport_unavailable`, as `br_table` does with
-`native_wasm_dispatch_transport_unavailable`. The browser fills each refused
-record's own slot with `native_wasm_indirect_browser_budget_incomplete`,
+`native_wasm_dispatch_transport_unavailable`. Its ordinal stays used. The
+browser fills each refused record's own slot with
+`native_wasm_indirect_browser_budget_incomplete`,
 `native_wasm_indirect_limit_or_invalid`, `native_wasm_indirect_module_invalid`,
+`native_wasm_indirect_module_unbound`,
 `native_wasm_indirect_document_unavailable` or
 `native_wasm_indirect_artifact_unavailable`. A record waiting for its
 module ACK shares the `br_table` path: it becomes a gap in its own sequence slot
@@ -375,7 +409,7 @@ The artifact ID, scope and identity rules are those of
 | 16 | dynamic slot | u32 |
 | 20 | callee function index | u32 |
 | 24 | resolution (0 to 4) | u32 |
-| 28 | sample index (0 to 15) | u32 |
+| 28 | sample index (0 to 4294967294) | u32 |
 | 32 | reserved, all zero | 96 bytes |
 
 Version 2 adds the JavaScript invocation context at bytes 32..40, as for
@@ -543,21 +577,23 @@ already carries the JavaScript invocation context.
 
 The invocation id is assigned by the renderer for one host-visible call,
 including across an outermost `return_call`. A trap with no open host call
-emits nothing. The outcome budget is 16 records per configuration, separate
-from `br_table` and `call_indirect`. Renderer gaps are
+emits nothing. The outcome window is 1024 records per second in the renderer
+and 2048 in the browser, separate from `br_table` and `call_indirect`, and
+turns over with them. Renderer gaps are
 `native_wasm_execution_input_unavailable`,
 `native_wasm_execution_budget_incomplete`, and
 `native_wasm_execution_transport_unavailable`. Browser gaps are
 `native_wasm_execution_browser_budget_incomplete`,
 `native_wasm_execution_limit_or_invalid`,
+`native_wasm_execution_module_unbound`,
 `native_wasm_execution_document_unavailable`,
 `native_wasm_execution_artifact_unavailable`,
 `native_wasm_execution_module_unavailable` (no module for that document),
 and `native_wasm_execution_module_unresolved` (more than one, so none is
-chosen). A record that still has module bytes shares the module artifact
-with the other Wasm streams. A still-executing or interrupt record carries
-no module bytes; the browser attaches the one module already captured for
-that document. A pending module uses the same ACK queue and, if it is lost,
+chosen). A record that carries module bytes, or a token naming a record of
+its window that did, shares the module artifact with the other Wasm streams.
+A still-executing or interrupt record carries neither; the browser attaches
+the one module already captured for that document. A pending module uses the same ACK queue and, if it is lost,
 the existing `native_wasm_dispatch_artifact_or_document_lost` gap.
 
 ### Named omissions
@@ -584,8 +620,8 @@ the existing `native_wasm_dispatch_artifact_or_document_lost` gap.
 
 `make check` runs the C++ golden producer through the Rust reader and workspace,
 the portable renderer and browser component tests (disabled, expired,
-malformed, transport loss, the 16-record limit, full rings, document loss and
-expiry), and the shipped viewer. `NativeWasmExecutionOutcomes` in the renderer
+malformed, transport loss, a full window and its turnover, full rings,
+module tokens, document loss and expiry), and the shipped viewer. `NativeWasmExecutionOutcomes` in the renderer
 admission test and the artifact-capture test cover a signature-mismatch trap
 distinct from resolution `null`, a still-executing record while the call is
 open, an interrupt that leaves a later call able to run, and a normal return
@@ -596,15 +632,15 @@ by the portable tests.
 
 ## Overflow identities
 
-Full observations stay capped at 16 per stream per budget epoch. An execution
-that a budget refuses is not discarded without a trace. The refusal can be
+Full observations are paced per window, as described above. An execution
+that a window refuses is not discarded without a trace. The refusal can be
 the module allowlist, the function allow or deny list, the per-function
-maximum, the per-call-site maximum on `call_indirect`, or the 16-record
-stream cap. The renderer keeps a fixed ring of 32 compact identities per
-stream per budget epoch. Thirty-two is twice the full-observation cap: a
-fixed renderer array, large enough to name the sites that ran after a budget
-refused them, and not another 128-byte module transfer. The ring is not a
-full observation. It has no parent event and no module artifact id. The
+allowance, the per-call-site maximum on `call_indirect`, or a full window.
+The renderer keeps a fixed ring of 32 compact identities per stream per
+window. The ring is a fixed renderer array that names the first sites that
+ran after a refusal without another 128-byte record. Every later refusal of
+that window is in the omitted count, and the next window has a new ring.
+The ring is not a full observation. It has no parent event and no module artifact id. The
 renderer does not assign those, and this record does not invent them.
 
 `wasm_dispatch_overflow` (numeric 28) and `wasm_indirect_overflow` (numeric
@@ -654,26 +690,28 @@ are 0, and the omitted count is at least 1. A resolved indirect identity does
 not carry a callee; that index exists only on a full
 `wasm_indirect_observation`.
 
-The ring index is a slot in this budget epoch's ring, not an execution
-counter. Sequence number orders the records. A reused index after a new
-configuration or `reset_wasm_sample_budgets` is not a drop.
+The ring index is a slot in this window's ring, not an execution counter.
+Sequence number orders the records. A reused index after a window turnover, a
+new configuration or `reset_wasm_sample_budgets` is not a drop.
 
 Unknown versions, the wrong size, a kind other than 1 or 2, a nonzero reserved
 field, an identity that also carries an omitted count, an omitted record that
 also carries an identity, a ring index past 31, an out-of-range index or
 offset, an unknown resolution, or a nonzero artifact id or parent event id are
-invalid. C++, Rust, Python, JavaScript and the Swift trace builder reject
+invalid. C++, Rust, Python and JavaScript reject
 them. They are not partial observations. Bytes past the payload in the
 inline record must be zero.
 
 The budget gap is unchanged and still marks the refusal. The ring does not
 replace it. Each identity is written when the execution is seen. The omitted
-record is one cumulative snapshot of one budget epoch, written when that
-epoch closes: `reset_wasm_sample_budgets`, or when the configuration retires
-(the renderer emitter is replaced or cleared). If several omitted records
-exist, the count is the maximum, not the sum. The count saturates at 2^32−1
-and does not wrap; at that point the hook stops for that epoch. A later reset
-starts a new epoch, so saturation does not keep the next epoch disabled. The
+record is one cumulative snapshot of one window, written when that window
+closes: its second passes, `reset_wasm_sample_budgets`, or the configuration
+retires (the renderer emitter is replaced or cleared). If several omitted
+records exist for one window, the count is the maximum, not the sum. The count
+saturates at 2^32−1 and does not wrap; at that point the hook stops until the
+window's second has passed, and the next execution opens a new window. The
+portable tests do not reach saturation, which needs 2^32−1 refused executions
+in one second. The
 omitted record's session, time, frame, process and thread are one admission.
 The count is not incremented until that admission is visible, so the record
 cannot mix two executions or name an older epoch. The counter word is tagged
@@ -688,11 +726,18 @@ A crash before that close loses the omitted count; the budget gap and any
 identities already enqueued remain. A late increment after the snapshot is
 read and before the emitter is cleared can be missed.
 
-The admission predicate stays true after the 16 full observations and after a
+The admission predicate stays true after a full window and after a
 per-function, per-module, or per-site refusal, so V8 still walks a frame for
 later executions and those executions can be named or counted. Other functions
 can still take a remaining full-observation slot. The predicate turns false
-when the omitted counter saturates or the budget epoch is resetting.
+only while the omitted counter is saturated and the window's second has not
+passed, or while the window is turning over.
+
+An execution that races a window turnover can go uncounted: a claim that finds
+its window just closed is neither retained nor counted, and an omitted
+increment after the closing snapshot is read is missed. Each is at most the
+executions of a few nanoseconds per window, and the omitted count says so by
+being a lower bound.
 
 `get_events` and `wait_for_events` leave `payload` as the hex and add
 `wasm_overflow` beside it. `status` is `decoded` or `invalid`. Invalid carries

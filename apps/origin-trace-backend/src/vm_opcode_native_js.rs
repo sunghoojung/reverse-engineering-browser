@@ -6,8 +6,13 @@ use crate::vm::dispatch_shape::{Role, Roles};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// Sites one site file can arm, as in `protocol/native-js-dispatch-v1.md`.
-pub(crate) const SITE_LIMIT: usize = 8;
+/// Sites one site file can arm, as in `protocol/native-js-dispatch-v1.md`:
+/// every one-byte record slot.
+pub(crate) const SITE_LIMIT: usize = 256;
+/// What payload version 1, from earlier builds, armed and recorded.
+const V1_SITE_LIMIT: u8 = 8;
+const V1_SITE_SAMPLES: u32 = 64;
+const V1_SAMPLES: u32 = 256;
 /// Refused interpreter-candidate sites listed by the arming export.
 const MAX_REFUSED: usize = 64;
 
@@ -122,8 +127,11 @@ struct Payload {
     handler: Option<(u32, u32, u32)>,
     activation: u32,
     parent: u32,
-    site_sample: u16,
-    sample: u16,
+    /// Version 2: the record's ordinal among its site's records in the
+    /// configuration. Version 1: its per-site sample index.
+    site_sample: u32,
+    /// The version 1 per-configuration sample index; version 2 has none.
+    sample: Option<u32>,
     sha256: [u8; 32],
 }
 
@@ -137,7 +145,7 @@ fn payload(bytes: &[u8]) -> Option<Payload> {
     let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
     let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("fixed"));
     if bytes.len() != 128
-        || u16_at(0) != 1
+        || !matches!(u16_at(0), 1 | 2)
         || u16_at(2) != 128
         || bytes[80..].iter().any(|byte| *byte != 0)
     {
@@ -153,7 +161,12 @@ fn payload(bytes: &[u8]) -> Option<Payload> {
     let (script, anchor, length, selector) = (u32_at(8), u32_at(12), u32_at(16), u32_at(20));
     let (handler_script, start, end) = (u32_at(24), u32_at(28), u32_at(32));
     let (activation, parent) = (u32_at(36), u32_at(40));
-    let (site_sample, sample) = (u16_at(44), u16_at(46));
+    let version_1 = u16_at(0) == 1;
+    let (site_sample, sample) = if version_1 {
+        (u32::from(u16_at(44)), Some(u32::from(u16_at(46))))
+    } else {
+        (u32_at(44), None)
+    };
     let handler = if flags & HANDLER_SPAN != 0 {
         if shape != "indexed-call" || handler_script == 0 || start >= end {
             return None;
@@ -164,14 +177,15 @@ fn payload(bytes: &[u8]) -> Option<Payload> {
     } else {
         None
     };
-    if usize::from(slot) >= SITE_LIMIT
+    if (version_1
+        && (slot >= V1_SITE_LIMIT
+            || site_sample >= V1_SITE_SAMPLES
+            || sample.is_some_and(|sample| sample >= V1_SAMPLES)))
         || flags & !0x0f != 0
         || script == 0
         || length == 0
         || anchor >= length
         || activation == 0
-        || site_sample >= 64
-        || sample >= 256
         || (kind == "boolean" && selector > 1)
         || (!matches!(kind, "integer" | "boolean") && selector != 0)
         || (parent != 0
@@ -381,10 +395,14 @@ pub(crate) fn gap(event: &Value) -> Option<Gap> {
             | "native_js_dispatch_site_budget_incomplete"
             | "native_js_dispatch_transport_unavailable"
             | "native_js_dispatch_input_unavailable"
+            | "native_js_dispatch_ids_exhausted"
     ) || reason
         .strip_prefix("native_js_dispatch_site_")
         .and_then(|rest| rest.strip_suffix("_compiled_before_arming"))
-        .is_some_and(|slot| matches!(slot, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7"));
+        .is_some_and(|slot| {
+            slot.parse::<usize>()
+                .is_ok_and(|value| value < SITE_LIMIT && value.to_string() == slot)
+        });
     known.then(|| Gap {
         session_id: event["session_id"].as_str().unwrap_or("").to_owned(),
         reason: reason.to_owned(),
@@ -547,7 +565,7 @@ pub(super) mod tests {
     pub(crate) fn record(source: &str, anchor: u32, selector: u32) -> [u8; 128] {
         let key = source_key(source.as_bytes()).unwrap();
         let mut bytes = [0u8; 128];
-        bytes[..4].copy_from_slice(&[1, 0, 128, 0]);
+        bytes[..4].copy_from_slice(&[2, 0, 128, 0]);
         bytes[4] = 1;
         bytes[5] = 1;
         put(&mut bytes, 8, 9, 4);
@@ -579,12 +597,18 @@ pub(super) mod tests {
             payload(&bytes).is_some()
         };
         type Mutation<'a> = (&'a str, &'a dyn Fn(&mut [u8; 128]));
-        let rejected: [Mutation<'_>; 16] = [
-            ("version", &|b| b[0] = 2),
+        let version_1 = |b: &mut [u8; 128], slot: u8, site_sample: u32, sample: u32| {
+            b[0] = 1;
+            b[6] = slot;
+            put(b, 44, site_sample, 2);
+            put(b, 46, sample, 2);
+        };
+        let rejected: [Mutation<'_>; 17] = [
+            ("version", &|b| b[0] = 3),
+            ("version zero", &|b| b[0] = 0),
             ("size", &|b| b[2] = 127),
             ("shape", &|b| b[4] = 3),
             ("kind", &|b| b[5] = 10),
-            ("slot", &|b| b[6] = 8),
             ("flags", &|b| b[7] = 16),
             ("script", &|b| put(b, 8, 0, 4)),
             ("anchor", &|b| put(b, 12, 13, 4)),
@@ -601,13 +625,31 @@ pub(super) mod tests {
             }),
             ("handler without flag", &|b| put(b, 24, 9, 4)),
             ("parent order", &|b| put(b, 40, 1, 4)),
-            ("site sample", &|b| put(b, 44, 64, 2)),
-            ("sample", &|b| put(b, 46, 256, 2)),
+            ("version 1 slot", &|b| version_1(b, 8, 0, 0)),
+            ("version 1 site sample", &|b| version_1(b, 0, 64, 0)),
+            ("version 1 sample", &|b| version_1(b, 0, 0, 256)),
             ("reserved", &|b| b[127] = 1),
         ];
         for (name, change) in rejected {
             assert!(!mutate(change), "{name}");
         }
+        // Version 2 takes every slot and ordinal; version 1 stays readable.
+        let last = {
+            let mut bytes = base;
+            bytes[6] = 255;
+            put(&mut bytes, 44, u32::MAX, 4);
+            payload(&bytes).expect("last slot")
+        };
+        assert_eq!(
+            (last.slot, last.site_sample, last.sample),
+            (255, u32::MAX, None)
+        );
+        let old = {
+            let mut bytes = base;
+            version_1(&mut bytes, 7, 63, 255);
+            payload(&bytes).expect("version 1")
+        };
+        assert_eq!((old.slot, old.site_sample, old.sample), (7, 63, Some(255)));
         assert!(mutate(&|b| {
             b[5] = 7;
             put(b, 20, 1, 4);
@@ -693,14 +735,14 @@ pub(super) mod tests {
 
     #[test]
     fn arming_export_writes_the_canonical_site_file_and_refuses_unobservable_shapes() {
-        // Nine owned switch interpreters: eight are armed, the ninth is the limit.
-        let loops = (0..9)
+        // 257 owned switch interpreters: 256 are armed, the last is the limit.
+        let loops = (0..=SITE_LIMIT)
             .map(|n| format!("function r{n}(c){{var p=0;while(p<c.length){{switch(c[p++]){{case 0:p+=1;break;case 1:p+=2;break;}}}}}}\n"))
             .collect::<String>();
         let source = format!("\u{feff}// \u{3a9}\n{loops}");
         let arming = export(&source);
         let sites = arming["sites"].as_array().unwrap();
-        assert_eq!(sites.len(), 8);
+        assert_eq!(sites.len(), SITE_LIMIT);
         let key = source_key(source.as_bytes()).unwrap();
         for (n, site) in sites.iter().enumerate() {
             let byte = source.match_indices("switch").nth(n).unwrap().0;
@@ -717,7 +759,7 @@ pub(super) mod tests {
         }
         assert_eq!(
             arming["refused"],
-            json!([{"byte_offset":source.match_indices("switch").nth(8).unwrap().0,"instruction":"switch","reason":"js-dispatch-site-limit"}])
+            json!([{"byte_offset":source.match_indices("switch").nth(SITE_LIMIT).unwrap().0,"instruction":"switch","reason":"js-dispatch-site-limit"}])
         );
         // Exact compact JSON with sorted keys, as base::JSONWriter writes it.
         let file = arming["file"].as_str().unwrap();
@@ -781,13 +823,15 @@ pub(super) mod tests {
 
     const FIXTURE: &[u8] =
         include_bytes!("../../../tools/fixtures/native-js-dispatch/two-level-vm.js");
-    const GOLDEN_VALID: [&str; 6] = [
+    const GOLDEN_VALID: [&str; 8] = [
         "default",
         "indexed",
         "nested",
         "string-selector",
         "parent-unknown",
         "wide-identities",
+        "last-slot",
+        "version-1",
     ];
 
     fn golden(exe: &str, case: &str) -> Value {
@@ -826,14 +870,14 @@ pub(super) mod tests {
             "truncated",
             "shape",
             "kind",
-            "slot",
+            "version-1-slot",
             "flags",
             "parent-order",
             "handler-without-flag",
             "switch-handler",
             "non-integer-bits",
-            "sample-index",
-            "site-sample-index",
+            "version-1-sample-index",
+            "version-1-site-sample-index",
             "anchor",
             "boolean-bits",
             "activation",
@@ -920,12 +964,15 @@ pub(super) mod tests {
             "native_js_dispatch_site_budget_incomplete",
             "native_js_dispatch_transport_unavailable",
             "native_js_dispatch_input_unavailable",
+            "native_js_dispatch_ids_exhausted",
             "native_js_dispatch_site_7_compiled_before_arming",
+            "native_js_dispatch_site_255_compiled_before_arming",
         ] {
             assert_eq!(gap(&gap_event(reason)).unwrap().reason, reason);
         }
         for reason in [
-            "native_js_dispatch_site_8_compiled_before_arming",
+            "native_js_dispatch_site_256_compiled_before_arming",
+            "native_js_dispatch_site_07_compiled_before_arming",
             "native_js_dispatch_other",
             "native_wasm_dispatch_budget_incomplete",
         ] {

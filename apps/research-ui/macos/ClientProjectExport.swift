@@ -163,22 +163,95 @@ struct ClientProjectArchive {
   }
 }
 
+enum RequestHarSaveError: LocalizedError {
+  case invalidPayload
+
+  var errorDescription: String? { "Invalid HAR save request." }
+}
+
+// The page's request to save the backend's HAR of Traffic rows. The page names
+// only which rows: the path is fixed, and every query key is one that
+// export_requests_har reads (protocol/openapi.json).
+struct RequestHarSave {
+  static let format = "reb-request-har-save-v1"
+  static let path = "/api/requests/har"
+  static let keys: Set<String> = [
+    "rows", "credential_values", "through", "sort", "order", "q", "tab_id", "domain", "type", "named",
+    "failed", "invert", "hide_internal", "third_party", "from_ns", "to_ns",
+  ]
+
+  let query: String
+  let filename: String
+  let credentialValues: Bool
+
+  static func decode(_ body: Any) throws -> RequestHarSave {
+    guard let payload = body as? [String: Any],
+      Set(payload.keys) == Set(["format", "query", "filename"]),
+      payload["format"] as? String == format,
+      let query = payload["query"] as? String, let filename = payload["filename"] as? String,
+      // A query the parser had to re-encode is not one the page built with URLSearchParams.
+      let components = URLComponents(string: "http://127.0.0.1/?" + query), components.percentEncodedQuery == query,
+      let items = components.queryItems, !items.isEmpty,
+      items.allSatisfy({ keys.contains($0.name) }), Set(items.map(\.name)).count == items.count
+    else { throw RequestHarSaveError.invalidPayload }
+    // A suggested name only; the panel's choice is the destination.
+    let suggested = filename.range(of: #"^[a-z][a-z.-]{0,63}\.har$"#, options: .regularExpression) != nil
+    return RequestHarSave(query: query, filename: suggested ? filename : "requests.har",
+      credentialValues: items.contains { $0.name == "credential_values" && $0.value == "1" })
+  }
+}
+
+// The archive's closing _reb object, its last member: whether every selected
+// row was written, how many entries were, and why an export stopped early.
+struct RequestHarSummary {
+  let complete: Bool
+  let entries: Int
+  let error: String?
+
+  static func read(_ file: URL) -> RequestHarSummary? {
+    guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+    defer { try? handle.close() }
+    guard let size = try? handle.seekToEnd() else { return nil }
+    // The object holds counts, the index position and one message.
+    let tail = min(size, 1 << 20)
+    guard (try? handle.seek(toOffset: size - tail)) != nil, let data = try? handle.readToEnd(),
+      let marker = data.range(of: Data(#"],"_reb":"#.utf8), options: .backwards),
+      data.suffix(2).elementsEqual("}}".utf8), marker.upperBound <= data.endIndex - 2,
+      let object = (try? JSONSerialization.jsonObject(with: Data(data[marker.upperBound..<(data.endIndex - 2)]))) as? [String: Any],
+      object["format"] as? String == "reb-request-har-v1",
+      let complete = object["complete"] as? Bool, let entries = object["entries"] as? Int
+    else { return nil }
+    return RequestHarSummary(complete: complete, entries: entries, error: object["error"] as? String)
+  }
+}
+
 #if canImport(Cocoa) && canImport(WebKit)
 import Cocoa
 import UniformTypeIdentifiers
 import WebKit
 
 // A page cannot select a path. Only the owned, fully loaded main document may
-// request a panel, and only a current panel approval may write its bounded ZIP.
+// request a panel, and only a current panel approval may write its bounded ZIP
+// or the Traffic HAR the backend streams to it.
 final class NativeClientProjectExport: NSObject, WKScriptMessageHandlerWithReply {
   static let handlerName = "rebClientProjectExport"
+  static let requestHandlerName = "rebRequestExport"
+  private enum Payload {
+    case project(ClientProjectArchive)
+    case har(RequestHarSave)
+  }
   private struct Request {
     let id: UUID
     let generation: UInt64
-    let archive: ClientProjectArchive
+    let payload: Payload
     let panel: NSSavePanel
     let reply: (Any?, String?) -> Void
   }
+
+  // Streams the backend's answer for the trusted document's path and query to
+  // a file; nil on success, else a message without paths. Set by the app.
+  var download: ((_ document: URL, _ path: String, _ query: String, _ destination: URL,
+    _ done: @escaping (String?) -> Void) -> Void)?
 
   private weak var webView: WKWebView?
   private weak var window: NSWindow?
@@ -186,6 +259,7 @@ final class NativeClientProjectExport: NSObject, WKScriptMessageHandlerWithReply
   private var documentReady = false
   private var generation: UInt64 = 0
   private var pending: Request?
+  private var downloading = false
   private var closeObserver: NSObjectProtocol?
   private var smokePanelObserver: ((NSSavePanel) -> Void)?
   private var smokeWriteObserver: ((URL) -> Void)?
@@ -241,12 +315,14 @@ final class NativeClientProjectExport: NSObject, WKScriptMessageHandlerWithReply
     _ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
     replyHandler: @escaping (Any?, String?) -> Void
   ) {
-    guard message.name == Self.handlerName,
+    let har = message.name == Self.requestHandlerName
+    guard message.name == Self.handlerName || har,
       message.webView === webView, message.frameInfo.isMainFrame,
       documentReady, let trustedURL, webView?.url == trustedURL,
       message.frameInfo.request.url == trustedURL
     else {
-      replyHandler(nil, "Client-project export is unavailable outside the owned application document.")
+      replyHandler(nil, har ? "HAR saving is unavailable outside the owned application document."
+        : "Client-project export is unavailable outside the owned application document.")
       return
     }
     // HTTP additionally has a non-opaque security origin to check. The custom
@@ -258,32 +334,44 @@ final class NativeClientProjectExport: NSObject, WKScriptMessageHandlerWithReply
         origin.host.trimmingCharacters(in: brackets) == trustedURL.host?.trimmingCharacters(in: brackets),
         origin.port == trustedURL.port
       else {
-        replyHandler(nil, "Client-project export refused an unexpected document origin.")
+        replyHandler(nil, har ? "HAR saving refused an unexpected document origin."
+          : "Client-project export refused an unexpected document origin.")
         return
       }
     }
-    guard pending == nil, let window, window.isVisible, window.attachedSheet == nil else {
-      replyHandler(nil, "Finish the current native dialog before exporting a client project.")
+    guard pending == nil, !downloading, let window, window.isVisible, window.attachedSheet == nil else {
+      replyHandler(nil, har ? "Finish the current native dialog or save before saving a HAR."
+        : "Finish the current native dialog before exporting a client project.")
       return
     }
-    let archive: ClientProjectArchive
-    do { archive = try ClientProjectArchive.decode(message.body) }
+    let payload: Payload
+    do { payload = har ? .har(try RequestHarSave.decode(message.body)) : .project(try ClientProjectArchive.decode(message.body)) }
     catch { replyHandler(nil, error.localizedDescription); return }
 
     let panel = NSSavePanel()
-    panel.title = "Save client project"
-    panel.message = archive.mode == .raw
-      ? "Raw evidence can contain credentials and personal data. Save locally and review before sharing."
-      : "This redacted copy can still contain sensitive names, paths and identifiers. Review before sharing."
-    panel.nameFieldStringValue = archive.mode.filename
-    panel.allowedContentTypes = [.zip]
+    switch payload {
+    case .project(let archive):
+      panel.title = "Save client project"
+      panel.message = archive.mode == .raw
+        ? "Raw evidence can contain credentials and personal data. Save locally and review before sharing."
+        : "This redacted copy can still contain sensitive names, paths and identifiers. Review before sharing."
+      panel.nameFieldStringValue = archive.mode.filename
+      panel.allowedContentTypes = [.zip]
+    case .har(let save):
+      panel.title = "Save HAR"
+      panel.message = save.credentialValues
+        ? "Raw requests include credential values, cookies, URLs and bodies. Save locally and review before sharing."
+        : "Credential values are withheld; URLs, other headers and bodies can still be private. Review before sharing."
+      panel.nameFieldStringValue = save.filename
+      panel.allowedContentTypes = [UTType(filenameExtension: "har", conformingTo: .json) ?? .json]
+    }
     panel.allowsOtherFileTypes = false
     panel.canCreateDirectories = true
     panel.isExtensionHidden = false
-    let request = Request(id: UUID(), generation: generation, archive: archive,
+    let request = Request(id: UUID(), generation: generation, payload: payload,
                           panel: panel, reply: { [weak self] value, error in
       self?.smokeReplyObserver?(error == nil
-        ? ((value as? [String: String])?["status"] ?? "unexpected") : "failed")
+        ? ((value as? [String: Any])?["status"] as? String ?? "unexpected") : "failed")
       replyHandler(value, error)
     })
     pending = request
@@ -296,13 +384,37 @@ final class NativeClientProjectExport: NSObject, WKScriptMessageHandlerWithReply
         self.documentReady, self.webView?.url == self.trustedURL,
         let destination = current.panel.url, destination.isFileURL
       else { current.reply(["status": "canceled"], nil); return }
-      do {
+      switch current.payload {
+      case .project(let archive):
+        do {
+          self.smokeWriteObserver?(destination)
+          try archive.bytes.write(to: destination, options: .atomic)
+          current.reply(["status": "saved"], nil)
+        } catch {
+          // Do not expose selected filesystem paths or raw capture data to JS/logs.
+          current.reply(nil, "The client project could not be saved. Choose a writable destination and try again.")
+        }
+      case .har(let save):
+        guard let download = self.download, let document = self.trustedURL else {
+          current.reply(nil, "HAR saving is unavailable in this application.")
+          return
+        }
+        // The reply waits for the whole archive; until then no other save starts.
         self.smokeWriteObserver?(destination)
-        try current.archive.bytes.write(to: destination, options: .atomic)
-        current.reply(["status": "saved"], nil)
-      } catch {
-        // Do not expose selected filesystem paths or raw capture data to JS/logs.
-        current.reply(nil, "The client project could not be saved. Choose a writable destination and try again.")
+        self.downloading = true
+        download(document, RequestHarSave.path, save.query, destination) { failure in
+          DispatchQueue.main.async {
+            self.downloading = false
+            if let failure { current.reply(nil, failure); return }
+            guard let summary = RequestHarSummary.read(destination) else {
+              current.reply(nil, "The saved file does not end with a HAR summary.")
+              return
+            }
+            var result: [String: Any] = ["status": "saved", "complete": summary.complete, "entries": summary.entries]
+            if let error = summary.error { result["error"] = error }
+            current.reply(result, nil)
+          }
+        }
       }
     }
   }

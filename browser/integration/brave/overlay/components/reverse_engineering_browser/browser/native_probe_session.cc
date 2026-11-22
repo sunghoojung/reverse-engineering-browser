@@ -33,30 +33,13 @@ namespace reb {
 
 namespace {
 
-bool ReadRequestContentBudget(const base::CommandLine& command_line, std::uint64_t& budget) {
-  budget = kNativeRequestContentDefaultBudgetBytes;
-  return !command_line.HasSwitch("reb-request-content-budget-bytes") ||
-         (base::StringToUint64(command_line.GetSwitchValueASCII("reb-request-content-budget-bytes"),
-                               &budget) &&
-          budget >= kNativeRequestContentMinBudgetBytes &&
-          budget <= kNativeRequestContentMaxBudgetBytes);
-}
-
-bool ReadResponseBodyPolicy(const base::CommandLine& command_line,
-                            NativeResponseBodyPolicy& policy) {
-  policy = {};
-  policy.media = command_line.HasSwitch("reb-capture-response-media");
-  return !command_line.HasSwitch("reb-response-body-budget-bytes") ||
-         (base::StringToUint64(command_line.GetSwitchValueASCII("reb-response-body-budget-bytes"),
-                               &policy.budget) &&
-          policy.budget >= kNativeResponseBodyMinBudgetBytes &&
-          policy.budget <= kNativeResponseBodyMaxBudgetBytes);
-}
-
 bool ReadNativeWasmSampleBudget(const base::CommandLine& command_line,
                                 const std::uint64_t category_mask,
                                 NativeWasmSampleBudgetPolicy& policy) {
   policy = {};
+  // Paced by default: one hot function keeps at most this many full samples
+  // per window, so the rest of the page still gets the window's budget.
+  policy.samples_per_function = kNativeWasmDefaultSamplesPerFunction;
   const bool present = command_line.HasSwitch("reb-wasm-samples-per-function") ||
                        command_line.HasSwitch("reb-wasm-samples-per-indirect-site") ||
                        command_line.HasSwitch("reb-wasm-function-allow") ||
@@ -216,43 +199,38 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
     }
     js_dispatch_startup_sites_json_ = std::move(json);
   }
-  js_invocation_sites_.clear();
+  js_invocation_sites_.reset();
   js_invocation_digests_ = false;
+  std::optional<std::vector<NativeJsInvocationSite>> invocation_sites;
   if (command_line->HasSwitch("reb-js-invocation-sites")) {
-    // Same lifetime rule as dispatch sites: armed entries cannot be
-    // retargeted, so a changed or invalid file refuses the session.
+    // Records name sites by slot and renderers keep their slots, so a file
+    // that renumbers a slot this browser has sent, or is invalid, refuses the
+    // session. Its armed flags and appended slots may change.
     const auto path = command_line->GetSwitchValuePath("reb-js-invocation-sites");
     std::string json;
     if (path.empty() ||
         !base::ReadFileToStringWithMaxSize(path, &json, kNativeJsInvocationSitesFileLimit) ||
-        (!js_invocation_startup_sites_json_.empty() && js_invocation_startup_sites_json_ != json) ||
-        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0) {
+        (category_mask & NativeProbeCategoryMask(NativeProbeCategory::kVm)) == 0 ||
+        !(invocation_sites = ParseNativeJsInvocationSiteList(json)) ||
+        !KeepsJsInvocationSlots(*invocation_sites)) {
       guest_adapter_json_.clear();
       js_dispatch_sites_.clear();
       return false;
     }
-    js_invocation_sites_ = ParseNativeJsInvocationSites(json);
-    if (js_invocation_sites_.empty()) {
-      guest_adapter_json_.clear();
-      js_dispatch_sites_.clear();
-      return false;
-    }
-    js_invocation_startup_sites_json_ = std::move(json);
     // Digests are a sensitive capture path; the launcher passes this switch
     // only with a visible sensitive-capture label.
     js_invocation_digests_ = command_line->HasSwitch("reb-js-invocation-digests");
   }
   NativeWasmSampleBudgetPolicy budget;
-  std::uint64_t request_content_budget = 0;
-  NativeResponseBodyPolicy response_bodies;
-  if (!ReadNativeWasmSampleBudget(*command_line, category_mask, budget) ||
-      !ReadRequestContentBudget(*command_line, request_content_budget) ||
-      !ReadResponseBodyPolicy(*command_line, response_bodies)) {
+  if (!ReadNativeWasmSampleBudget(*command_line, category_mask, budget)) {
     guest_adapter_json_.clear();
     js_dispatch_sites_.clear();
-    js_invocation_sites_.clear();
     js_invocation_digests_ = false;
     return false;
+  }
+  if (invocation_sites) {
+    AdoptJsInvocationSlots(*invocation_sites);
+    js_invocation_sites_ = EncodeNativeJsInvocationSites(*invocation_sites);
   }
   wasm_sample_budget_ = budget;
   category_mask_.store(category_mask, std::memory_order_relaxed);
@@ -277,11 +255,12 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   NativeNetworkCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
                                              category_mask, expires_at_monotonic_ns,
                                              capture_request_content_.load());
-  // Response bodies follow the same content gate as request content.
-  response_bodies.enabled = capture_request_content_.load();
+  // Response bodies, media and fonts included, follow the same content gate as
+  // request content.
+  const NativeResponseBodyPolicy response_bodies{.enabled = capture_request_content_.load()};
   NativeArtifactCaptureSink::Get().SetEmitter(&NativeProbeSession::EmitBrowserEvent, session_id,
                                               category_mask, expires_at_monotonic_ns,
-                                              request_content_budget, response_bodies);
+                                              response_bodies);
   // SetEmitter restores the unrestricted policy. Publish this session's copy.
   NativeArtifactCaptureSink::Get().SetWasmSampleBudgetPolicy(wasm_sample_budget_);
   for (NativeProbeHost* const host : hosts_) {
@@ -291,10 +270,39 @@ bool NativeProbeSession::StartSession(const std::uint64_t session_id,
   return true;
 }
 
+bool NativeProbeSession::KeepsJsInvocationSlots(
+    const std::vector<NativeJsInvocationSite>& sites) const noexcept {
+  const std::size_t kept = std::min(sites.size(), js_invocation_slots_.size());
+  for (std::size_t slot = 0; slot < kept; ++slot) {
+    if (!IsSameNativeJsInvocationSite(sites[slot], js_invocation_slots_[slot]))
+      return false;
+  }
+  return true;
+}
+
+void NativeProbeSession::AdoptJsInvocationSlots(
+    const std::vector<NativeJsInvocationSite>& sites) noexcept {
+  for (std::size_t slot = js_invocation_slots_.size(); slot < sites.size(); ++slot)
+    js_invocation_slots_.push_back(sites[slot]);
+}
+
+void NativeProbeSession::UpdateJsInvocationSites(const std::string& json) noexcept {
+  if (!IsActive() || !js_invocation_sites_)
+    return;
+  const auto sites = ParseNativeJsInvocationSiteList(json);
+  if (!sites || !KeepsJsInvocationSlots(*sites)) {
+    EmitNamedGap(NativeProbeCategory::kVm, "native_js_invocation_sites_revision_refused");
+    return;
+  }
+  AdoptJsInvocationSlots(*sites);
+  js_invocation_sites_ = EncodeNativeJsInvocationSites(*sites);
+  for (NativeProbeHost* const host : hosts_)
+    host->UpdateJsInvocationSites(*js_invocation_sites_);
+}
+
 void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
   if (!IsActive())
     return;
-  NativeArtifactCaptureSink::Get().ResetWasmSampleBudgets();
   for (NativeProbeHost* const host : hosts_)
     host->ResetWasmSampleBudgets();
 }
@@ -302,7 +310,7 @@ void NativeProbeSession::ResetWasmSampleBudgets() noexcept {
 void NativeProbeSession::StopSession() noexcept {
   guest_adapter_json_.clear();
   js_dispatch_sites_.clear();
-  js_invocation_sites_.clear();
+  js_invocation_sites_.reset();
   js_invocation_digests_ = false;
   wasm_sample_budget_ = {};
   // Hosts drain records their renderers already queued, and the artifact sink
@@ -421,6 +429,12 @@ void NativeProbeSession::Emit(const NativeProbeEvent& event) const noexcept {
       now < expires_at_monotonic_ns_.load(std::memory_order_relaxed)) {
     downstream(event);
   }
+}
+
+void NativeProbeSession::SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) {
+  debugger_watch_scope_ = std::move(scope);
+  for (NativeProbeHost* const host : hosts_)
+    host->SendDebuggerWatchScope();
 }
 
 void NativeProbeSession::AddHost(NativeProbeHost& host) {

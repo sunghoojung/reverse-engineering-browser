@@ -548,34 +548,119 @@ void MemoryCacheReuses() {
   record(reuse_of(6003, "chrome", 3));
   assert(Drain(queue) == 0 && queue.ExclusionCount(0) == 1 && queue.ExclusionCount(5) == 0);
   // An SVG image's own document or a page popup belongs to no tab: counted
-  // as class 71, apart from the budget's overflow.
+  // as class 71.
   assert(!record(image, /*ordinary=*/false).admitted());
   assert(Drain(queue) == 0 && queue.ExclusionCount(5) == 0 && queue.ExclusionCount(6) == 1 &&
          reb::NativeRendererExclusionClass(6) == reb::kNativeNonOrdinaryPageReuseExclusion);
 
-  // Metadata sessions record the reuse without its path, at most 4,096 per
-  // configuration; the rest are counted as class 70. An internal URL counted
-  // by its scheme class returns its budget charge.
+  // A content capture sends a target past the inline prefix to the browser
+  // with its origin: the child takes the next sequence and keeps its prefix,
+  // and nothing of it enters the ring. 12,000 of them, each with its own
+  // 300-byte path, are all recorded and all sent whole.
+  const auto sent_before = reb::mojom::NativeProbeHost::targets.load();
+  std::string long_path(300, 'p');
+  long_path[0] = '/';
+  auto long_image = image;
+  long_image.port = 8443;
+  constexpr std::uint32_t kLongReuses = 12000;
+  for (std::uint32_t index = 0; index < kLongReuses; ++index) {
+    const std::string suffix = std::to_string(index);
+    std::copy(suffix.begin(), suffix.end(),
+              long_path.end() - static_cast<std::ptrdiff_t>(suffix.size()));
+    long_image.request_id = static_cast<std::int32_t>(20000 + index);
+    long_image.target = long_path;
+    long_image.target_length = long_path.size();
+    record(long_image);
+    const auto parent = Core(One(queue));
+    assert(parent.header.type == reb::EventType::kMemoryCacheReuse);
+    const auto child = std::bit_cast<NativeProbeEvent>([&] {
+      std::array<std::uint8_t, sizeof(NativeProbeEvent)> bytes{};
+      assert(reb::mojom::NativeProbeHost::target_record.size() == bytes.size());
+      std::copy(reb::mojom::NativeProbeHost::target_record.begin(),
+                reb::mojom::NativeProbeHost::target_record.end(), bytes.begin());
+      return bytes;
+    }());
+    // Complete as sent: the browser sets the retention it reached.
+    reb::RequestTargetPayload sent;
+    assert(reb::DecodeRequestTargetPayload(std::bit_cast<reb::EventRecord>(child).inline_payload,
+                                           sent));
+    assert(child.header.sequence_number == parent.header.sequence_number + 1 &&
+           child.header.parent_event_id == parent.header.sequence_number &&
+           child.header.request_id == parent.header.request_id && sent.target_length == 300 &&
+           sent.reserved0 == 0 && sent.port == 8443 &&
+           std::string_view(sent.target_prefix.data(), sent.target_prefix.size()) ==
+               std::string_view(long_path).substr(0, sent.target_prefix.size()) &&
+           reb::mojom::NativeProbeHost::target_origin == "https://cdn.example.test:8443" &&
+           reb::mojom::NativeProbeHost::target_text == long_path);
+  }
+  assert(reb::mojom::NativeProbeHost::targets == sent_before + kLongReuses &&
+         queue.DroppedCount() == 0 && queue.ExclusionCount(5) == 0);
+  // A long target with no origin, or past what an artifact keeps, stays
+  // inline and says why; one whose caller converted only the prefix too.
+  auto long_data = reuse_of(6006, "data", 1);
+  const std::string data_text(500, 'd');
+  long_data.target = data_text;
+  long_data.target_length = data_text.size();
+  long_data.static_data = true;
+  record(long_data);
+  Pop(queue);
+  assert(TargetOf(One(queue)).reserved0 ==
+         static_cast<std::uint8_t>(reb::RequestTargetRetention::kNotRetainedUrl));
+  auto huge = image;
+  huge.target = std::string_view(long_path).substr(0, 116);
+  huge.target_length = reb::kNativeRequestTargetMaxBytes + 1;
+  record(huge);
+  Pop(queue);
+  assert(TargetOf(One(queue)).reserved0 ==
+         static_cast<std::uint8_t>(reb::RequestTargetRetention::kNotRetainedUrl));
+  auto prefix_only = image;
+  prefix_only.target = std::string_view(long_path).substr(0, 116);
+  prefix_only.target_length = 300;
+  record(prefix_only);
+  Pop(queue);
+  assert(
+      TargetOf(One(queue)).reserved0 ==
+          static_cast<std::uint8_t>(reb::RequestTargetRetention::kNotRetainedArtifactUnavailable) &&
+      reb::mojom::NativeProbeHost::targets == sent_before + kLongReuses);
+  // Blink converts the whole of an http(s) target the browser would keep,
+  // else the inline prefix; and a content capture's host whole.
+  static_assert(reb::NativeMemoryCacheTargetBytes(true, 300) == 300 &&
+                reb::NativeMemoryCacheTargetBytes(false, 300) == 116 &&
+                reb::NativeMemoryCacheTargetBytes(true, reb::kNativeRequestTargetMaxBytes + 1) ==
+                    116 &&
+                reb::NativeMemoryCacheTargetBytes(false, 20) == 20 &&
+                reb::NativeMemoryCacheHostBytes(false, 500) == 121 &&
+                reb::NativeMemoryCacheHostBytes(true, 500) == 500);
+
+  // Metadata sessions record every reuse without its path, with no
+  // per-configuration budget: 20,000 here, drained as they come, none counted
+  // as class 70.
   auto metadata_ring = std::make_unique<NativeProbeQueue>();
   auto& metadata = *metadata_ring;
   ConfigureScope(metadata, false, false, 68);
   record(reuse_of(6004, "devtools", 3));
-  for (std::uint32_t index = 0; index < reb::kNativeMemoryCacheReuseBudget + 10; ++index) {
-    image.request_id = static_cast<std::int32_t>(7000 + index);
+  constexpr std::uint32_t kReuses = 20000;
+  std::uint32_t recorded = 0;
+  for (std::uint32_t index = 0; index < kReuses; ++index) {
+    image.request_id = static_cast<std::int32_t>(40000 + index);
     record(image);
+    if (index % 4096 == 4095) {
+      recorded += static_cast<std::uint32_t>(Drain(metadata));
+    }
   }
-  assert(Drain(metadata) == reb::kNativeMemoryCacheReuseBudget && metadata.DroppedCount() == 0);
-  assert(metadata.ExclusionCount(3) == 1 && metadata.ExclusionCount(5) == 10 &&
+  recorded += static_cast<std::uint32_t>(Drain(metadata));
+  assert(recorded == kReuses && metadata.DroppedCount() == 0);
+  assert(metadata.ExclusionCount(3) == 1 && metadata.ExclusionCount(5) == 0 &&
          reb::NativeRendererExclusionClass(5) == reb::kNativeMemoryCacheReuseExclusion);
-  // Past the budget a reuse costs its checks and one counter increment.
+  // An admission costs its checks and nothing else.
   auto before = allocations.load();
   for (int index = 0; index < 1000; ++index) {
-    assert(!sink.AdmitMemoryCacheReuse(true).admitted());
+    assert(sink.AdmitMemoryCacheReuse(true).admitted());
   }
-  assert(allocations == before && metadata.ExclusionCount(5) == 1010 &&
+  assert(allocations == before && metadata.ExclusionCount(5) == 0 &&
          metadata.ExclusionCount(6) == 0);
-  // A new configuration starts a fresh count, and a reuse admitted by the
-  // replaced one is never recorded into it.
+  // A reuse admitted by a replaced configuration is never recorded into the
+  // new one.
   ConfigureScope(metadata, false, false, 68);
   const auto fresh = sink.AdmitMemoryCacheReuse(true);
   assert(fresh.admitted() && !fresh.capture_request_content);
@@ -592,8 +677,9 @@ void MemoryCacheReuses() {
   }
   assert(allocations == before && Drain(metadata) == 0);
   std::cout << "PASS memory-cache reuses record their owner, host, status, size and content "
-               "target; count browser-internal URLs, pages that are not ordinary and every reuse "
-               "past 4,096; a new configuration starts a fresh budget\n";
+               "target, 12,000 long targets sent whole to the browser and 20,000 metadata reuses "
+               "with no budget; browser-internal URLs and pages that are not ordinary are "
+               "counted\n";
 }
 
 }  // namespace

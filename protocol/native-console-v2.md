@@ -26,8 +26,8 @@ Disconnect, explicitly select a current document, and authorize again to proceed
 This is **not read-only or side-effect-safe evaluation**. Commands can mutate the
 captured page, cookies and storage, initiate network requests, and schedule work.
 Disconnect clears retained console values/monitors in reachable selected documents;
-stale documents are never remapped for cleanup and retain their bounded native
-expiry. Disconnect does not undo mutations or
+stale documents are never remapped for cleanup, and their values and monitors
+end when that document's main-world context goes away. Disconnect does not undo mutations or
 scheduled work, or kill the capture browser. A command already running during
 navigation or disconnect may have had effects; requests are never retried.
 
@@ -36,9 +36,10 @@ The console does not use browser-root `Target.setAutoAttach` or CDP
 inspect paused frames. Remote-debugging flags reject only the disposable profile.
 Loss of its control channel exits the disposable browser; a live binding leaves
 the capture browser running. This replaces [v1](native-console-v1.md); helpers,
-backend, packaged assets and browser must be rebuilt together. Wire version is
-unchanged from v2, but stable live IDs require this matching browser overlay.
-Older v2 browsers that rotate IDs on each listing fail closed, not by URL fallback.
+backend, packaged assets and browser must be rebuilt together. Stable live IDs
+require this matching browser overlay. Older v2 browsers that rotate IDs on each
+listing fail closed, not by URL fallback, and a helper or browser of another wire
+version refuses the connection (see [Wire and API](#wire-and-api)).
 Native V8 REPL evaluation uses the pinned engine's debug evaluation API. This does
 not promise undetectability or zero active cost.
 
@@ -51,6 +52,12 @@ complete expression; Shift+Enter adds a line; Command/Ctrl+Enter submits immedia
 An unmatched bracket continues on Enter. Up/Down recalls bounded history only
 at the first/last line. Undo/redo includes completion insertion. The prompt has
 no placeholder and the next draft remains editable during evaluation.
+
+A command runs until it returns. While it runs, Run becomes **Stop**, which ends
+it in the page at its next interrupt check; the command then reads `Stopped`,
+and the changes it made before stopping stay. Input has no size limit below the
+64 MiB command record. The transcript shows a command's first 4096 characters
+and its full size; history keeps the newest command whole, however large.
 
 Completion combines static hints with native data properties and global lexical
 names. Only ASCII identifier chains cross the native completion boundary; no
@@ -84,7 +91,8 @@ store an own data property as `window.tempN`, or release a handle. Standalone ut
 once. They are console syntax, not globals installed on the page. Listener
 inspection returns native registration metadata and existing callbacks; it does
 not compile inline event handlers or read a `handleEvent` getter. Explicit event
-monitoring observes click/input/keydown/submit for at most 60 seconds.
+monitoring observes click/input/keydown/submit until `unmonitorEvents` or the
+page navigates.
 
 Command/Ctrl+F filters console text; levels and timestamps are optional. Clearing
 output releases values but preserves command history. A separate transcript
@@ -126,19 +134,20 @@ and page temporary variables require explicit researcher actions.
 
 | Resource | Limit |
 | --- | --- |
-| JavaScript source / legacy result | 8192 UTF-8 bytes |
-| Runtime command / response | 65536 bytes |
+| JavaScript source | One 64 MiB command record; a runtime command counts its JSON escapes |
+| Legacy result / runtime response | 8192 UTF-8 bytes / 65536 bytes |
 | Runtime value preview | 2048 UTF-8 bytes |
 | Targets | 64; origin 256, label 128, URL 512 bytes |
-| Retained renderer values | 128 handles; expire after 60 seconds, swept once per second |
+| Retained renderer values | Until released, Clear, Disconnect or the document's main-world context ends |
 | Property page / depth | 16 properties plus prototype; UI depth 8; first 65536 array indices |
 | Completion | 8 path components, 24 suggestions, 1024 lexical names, 4096 names per prototype, 8 prototypes |
 | Renderer messages | 32 / 32 KiB serialized JSON; visible saturating drop count |
 | Browser activity | 64 events; visible saturating drop count |
 | UI transcript / history | Each 128 entries / 256 KiB; transcript also caps 8192 DOM elements; eviction is visible |
 | Snippets / activity view | 16 / 64 KiB snippets; 128 metadata records |
-| Event monitors | 8 Elements, four event types each, 60 seconds |
-| Synchronous watchdog / dispatch / reply | 200 ms / 500 ms / 2 seconds |
+| Event monitors | Any number of Elements, four event types each, until `unmonitorEvents`, Clear, Disconnect or navigation |
+| Command run time | Until it returns or is stopped, within the session hour |
+| Dispatch / record transfer / Stop answer | 500 ms / 2 seconds / 5 seconds |
 | Session / await wait | One hour / ten seconds |
 
 Renderer message accounting includes JSON escaping and record metadata, so a poll
@@ -147,8 +156,8 @@ visible drop count; polling or clearing releases their encoded storage.
 
 These are transport and retained-state bounds, not a hard page heap quota.
 Retained objects can keep reachable page data alive. Key and event-type enumeration can allocate
-engine arrays; active work is covered by the synchronous watchdog. Scheduled
-async work is page work and can outlive an evaluation. A transport failure can
+engine arrays. A command's own synchronous work runs until it returns or Stop
+ends it. Scheduled async work is page work and can outlive an evaluation. A transport failure can
 occur after side effects. Requests are serialized and never automatically
 retried. Loss of the control channel exits the disposable browser. A
 live-capture binding does not exit the capture browser.
@@ -164,9 +173,12 @@ capture published none. For `lost`, `message` says why; restart the capture to
 recover. No second browser profile is launched.
 
 The backend waits for the first answer in its own handshake, so a state read
-never waits for browser startup. A state read waits for a running action rather
-than failing it, then lists the documents again, from the idle binding or the
-open connection, so a selected document that navigated reads stale. Console
+never waits for browser startup. A state read waits for a short action, such as
+a listing, rather than failing it, then lists the documents again, from the idle
+binding or the open connection, so a selected document that navigated reads
+stale. While an action runs a command, a read waits for nothing: it reports the
+listing from before the command with `command` (`running` or `stopping`, and its
+request ID). Console
 operations run to completion even when the HTTP client disconnects, so a
 dropped request cannot leave a half-written exchange. A failed or timed-out exchange, a record that retires the
 connection, unconfirmed Disconnect cleanup, an exited bridge, or the
@@ -183,7 +195,7 @@ a reused directory.
 ## Wire and API
 
 `common/native_console_protocol.h` owns trivially copyable little-endian ABI.
-Magic remains `0x43424552`; version is **2**. Authentication uses the existing
+Magic remains `0x43424552`; version is **3**, which adds Stop. Authentication uses the existing
 64-byte hello, user-only socket/token and peer UID check. Request/response headers
 remain 32 bytes. Operation 1 lists targets, 2 evaluates legacy source, 3 carries
 an exact runtime command as bounded UTF-8 JSON. Type 11 carries a JSON runtime
@@ -207,6 +219,28 @@ An empty timeout (5) or disconnected (6) record retires the wire connection.
 Either status with text is one command's unknown outcome, such as a renderer
 that went away mid-command: the connection stays usable, the result carries
 `command_outcome_unknown`, and the command is never retried.
+
+### Running and stopping a command
+
+Operations 2 and 3 have no execution budget: the browser waits for the reply
+for as long as the command runs, within the connection's hour. While one is in
+flight, the only record the owner may send is Stop, operation 5, naming that
+request with no target and no source. The browser forwards it to the
+renderer's IO thread, which terminates the running script; the command then
+answers status 7, stopped, with the text `Stopped; changes are not rolled
+back`, and the connection goes on. A Stop that crosses the answer to the
+request it names is ignored. Any other record while a command runs, or a Stop
+for another request, ends the connection, because the exchange is then
+ambiguous. A Stop that gets no answer within 5 seconds, such as for a command
+that never started because the page itself is stuck, ends the connection with
+an empty timeout record. A connection that ends while a command runs stops it,
+because nobody could read its answer.
+
+Over HTTP, `interrupt` (`session_id`) sends that Stop without waiting for the
+session lock the running command holds, and answers `command: stopping`, or
+`command: none` when nothing was running. The command's own request answers
+`status: stopped` with code `cancelled`. The `reb-console` bridge forwards a Stop
+from its owner while a command runs.
 
 The renderer uses the project-owned `v8-native-console.h` public bridge rather
 than V8's internal debug headers. Explicit commands retain native REPL evaluation
@@ -233,7 +267,8 @@ python3 tools/check-native-console.py --binary build/reb-console --browser /abso
 ```
 
 This checks real logs, lexical completion, object getter isolation, promise
-settlement, release, watchdog recovery, UTF-8 bounds, navigation rejection and
+settlement, release, Stop of an endless loop and recovery, 8 MiB input, UTF-8
+bounds, navigation rejection and
 control-channel disposal. Browser compilation and real execution remain required
 before treating runtime behavior or active performance as verified.
 

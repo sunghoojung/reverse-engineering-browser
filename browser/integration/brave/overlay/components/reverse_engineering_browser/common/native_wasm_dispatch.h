@@ -85,7 +85,16 @@ static_assert(offsetof(NativeWasmDispatchObservationPayload, reserved) == 40);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 40);
   return out;
 }
-inline constexpr std::size_t kNativeWasmDispatchSampleBudget = 16;
+// One sample window. A renderer restarts each stream's budget and each
+// per-function count when its window turns over, so a hot loop is paced
+// rather than stopped for the rest of the capture.
+inline constexpr std::uint64_t kNativeWasmSampleWindowNs = 1'000'000'000ULL;
+// Full br_table observations one renderer keeps in one sample window.
+inline constexpr std::size_t kNativeWasmDispatchSampleBudget = 1024;
+// A sample index is its stream's ordinal in the configuration, not a slot of
+// one window, so samples of different windows never share one. The last
+// ordinal leaves kNativeWasmExecutionNoSample unused.
+inline constexpr std::uint32_t kNativeWasmLastSampleIndex = 0xfffffffeU;
 struct NativeWasmDispatchObservation final {
   NativeProbeHeader header{};
   std::uint64_t execution_context_id = 0;
@@ -106,32 +115,44 @@ struct NativeWasmDispatchObservation final {
   std::uint32_t caller_function_index = 0;
   std::string_view source_url;
   std::span<const std::uint8_t> module_bytes;
+  // 0 when module_bytes go with this record. Otherwise the sequence number of
+  // the earlier record this thread sent them with in this window, and the
+  // transport sends no bytes.
+  std::uint64_t module_token = 0;
 };
 // Views are valid only during this call; transport must bound/copy before returning.
 using NativeWasmDispatchEmitter = bool (*)(const NativeWasmDispatchObservation&,
                                            std::uint64_t) noexcept;
-[[nodiscard]] inline bool IsValidNativeWasmDispatchInput(
-    const NativeWasmDispatchObservation& value) noexcept {
-  constexpr std::array<std::uint8_t, 8> magic{0, 97, 115, 109, 1, 0, 0, 0};
-  const auto bytes = value.module_bytes;
+// Every field of a record that names a module of module_size bytes. A record
+// bound to a module an earlier record carried is checked this far only: the
+// browser does not keep the bytes, and the backend matches each offset to a
+// real instruction of the captured module.
+[[nodiscard]] inline bool IsValidNativeWasmDispatchFields(
+    const NativeWasmDispatchObservation& value,
+    std::size_t module_size) noexcept {
   if (!value.execution_context_id || !value.header.frame_id ||
       !(value.document_token_high || value.document_token_low) || value.source_url.empty() ||
-      value.source_url.size() > kNativeArtifactMaxUrlBytes || bytes.size() < magic.size() ||
-      bytes.size() > kNativeArtifactMaxContentBytes ||
-      !std::equal(magic.begin(), magic.end(), bytes.begin()) || value.module_byte_offset < 8 ||
-      value.module_byte_offset >= bytes.size() || bytes[value.module_byte_offset] != 0x0e ||
-      value.sample_index >= kNativeWasmDispatchSampleBudget ||
+      value.source_url.size() > kNativeArtifactMaxUrlBytes || module_size < 8 ||
+      module_size > kNativeArtifactMaxContentBytes || value.module_byte_offset < 8 ||
+      value.module_byte_offset >= module_size || value.sample_index > kNativeWasmLastSampleIndex ||
+      value.function_index >= 16U * 1024U * 1024U || value.table_count >= 16U * 1024U * 1024U ||
       !IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id))
     return false;
   // A walked caller is either unknown (index 0, not a function index) or one
   // function of this module. An unwalked record cannot carry either.
-  bool caller_ok =
+  const bool caller_clear =
       value.caller_kind == kWasmDirectCallerUnknown && value.caller_function_index == 0;
-  if (value.caller_observed) {
-    caller_ok = caller_ok || (value.caller_kind == kWasmDirectCallerSameInstance &&
-                              value.caller_function_index < 16U * 1024U * 1024U);
-  }
-  if (!caller_ok)
+  return caller_clear ||
+         (value.caller_observed && value.caller_kind == kWasmDirectCallerSameInstance &&
+          value.caller_function_index < 16U * 1024U * 1024U);
+}
+[[nodiscard]] inline bool IsValidNativeWasmDispatchInput(
+    const NativeWasmDispatchObservation& value) noexcept {
+  constexpr std::array<std::uint8_t, 8> magic{0, 97, 115, 109, 1, 0, 0, 0};
+  const auto bytes = value.module_bytes;
+  if (!IsValidNativeWasmDispatchFields(value, bytes.size()) ||
+      !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
+      bytes[value.module_byte_offset] != 0x0e)
     return false;
   // Match V8's immediate, including overflow rejection. This is not a Wasm interpreter.
   std::size_t offset = static_cast<std::size_t>(value.module_byte_offset) + 1;
@@ -221,8 +242,9 @@ static_assert(offsetof(NativeWasmIndirectObservationPayload, reserved) == 40);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 40);
   return out;
 }
-// Separate from the br_table budget so neither stream can starve the other.
-inline constexpr std::size_t kNativeWasmIndirectSampleBudget = 16;
+// Per sample window, separate from the br_table budget so neither stream can
+// starve the other. Its sample index is also a configuration ordinal.
+inline constexpr std::size_t kNativeWasmIndirectSampleBudget = 1024;
 struct NativeWasmIndirectObservation final {
   NativeProbeHeader header{};
   std::uint64_t execution_context_id = 0;
@@ -240,6 +262,8 @@ struct NativeWasmIndirectObservation final {
   std::uint32_t js_invocation_id = 0;
   std::string_view source_url;
   std::span<const std::uint8_t> module_bytes;
+  // Same as NativeWasmDispatchObservation::module_token.
+  std::uint64_t module_token = 0;
 };
 // Views are valid only during this call; transport must bound/copy before returning.
 using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
@@ -261,25 +285,31 @@ using NativeWasmIndirectEmitter = bool (*)(const NativeWasmIndirectObservation&,
   }
   return false;
 }
+// Same rule as IsValidNativeWasmDispatchFields.
+[[nodiscard]] inline bool IsValidNativeWasmIndirectFields(
+    const NativeWasmIndirectObservation& value,
+    std::size_t module_size) noexcept {
+  constexpr std::uint32_t kLimit = 16U * 1024U * 1024U;
+  const auto resolution = static_cast<std::uint32_t>(value.resolution);
+  return value.execution_context_id && value.header.frame_id &&
+         (value.document_token_high || value.document_token_low) && !value.source_url.empty() &&
+         value.source_url.size() <= kNativeArtifactMaxUrlBytes && module_size >= 8 &&
+         module_size <= kNativeArtifactMaxContentBytes && value.module_byte_offset >= 8 &&
+         value.module_byte_offset < module_size && value.function_index < kLimit &&
+         value.table_index < kLimit && resolution < kNativeWasmIndirectResolutionCount &&
+         value.callee_function_index < kLimit &&
+         (value.resolution == NativeWasmIndirectResolution::kResolved ||
+          value.callee_function_index == 0) &&
+         value.sample_index <= kNativeWasmLastSampleIndex &&
+         IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id);
+}
 [[nodiscard]] inline bool IsValidNativeWasmIndirectInput(
     const NativeWasmIndirectObservation& value) noexcept {
   constexpr std::array<std::uint8_t, 8> magic{0, 97, 115, 109, 1, 0, 0, 0};
-  constexpr std::uint32_t kLimit = 16U * 1024U * 1024U;
   const auto bytes = value.module_bytes;
-  const auto resolution = static_cast<std::uint32_t>(value.resolution);
-  if (!value.execution_context_id || !value.header.frame_id ||
-      !(value.document_token_high || value.document_token_low) || value.source_url.empty() ||
-      value.source_url.size() > kNativeArtifactMaxUrlBytes || bytes.size() < magic.size() ||
-      bytes.size() > kNativeArtifactMaxContentBytes ||
-      !std::equal(magic.begin(), magic.end(), bytes.begin()) || value.module_byte_offset < 8 ||
-      value.module_byte_offset >= bytes.size() ||
-      (bytes[value.module_byte_offset] != 0x11 && bytes[value.module_byte_offset] != 0x13) ||
-      value.function_index >= kLimit || value.table_index >= kLimit ||
-      resolution >= kNativeWasmIndirectResolutionCount || value.callee_function_index >= kLimit ||
-      (value.resolution != NativeWasmIndirectResolution::kResolved &&
-       value.callee_function_index != 0) ||
-      value.sample_index >= kNativeWasmIndirectSampleBudget ||
-      !IsValidNativeJsInvocationContext(value.js_invocation_state, value.js_invocation_id))
+  if (!IsValidNativeWasmIndirectFields(value, bytes.size()) ||
+      !std::equal(magic.begin(), magic.end(), bytes.begin()) ||
+      (bytes[value.module_byte_offset] != 0x11 && bytes[value.module_byte_offset] != 0x13))
     return false;
   // Type index, then table index; the observed table must be the immediate's.
   std::size_t offset = static_cast<std::size_t>(value.module_byte_offset) + 1;
@@ -445,7 +475,8 @@ inline constexpr std::uint64_t kNativeWasmExecutionDeadlineNs = 5'000'000'000ULL
 // waiting on the deadline. Otherwise it returns the remaining time, or 50ms
 // when the deadline is already due and still-executing has not been emitted.
 inline constexpr std::uint64_t kNativeWasmExecutionNoNudge = ~std::uint64_t{0};
-inline constexpr std::size_t kNativeWasmExecutionBudget = 16;
+// Trap and still-executing records one renderer keeps per sample window.
+inline constexpr std::size_t kNativeWasmExecutionBudget = 1024;
 enum class NativeWasmExecutionKind : std::uint8_t { kTrap = 0, kStillExecuting = 1 };
 enum class NativeWasmExecutionReason : std::uint8_t {
   kUnknown = 0,
@@ -474,6 +505,7 @@ enum class NativeWasmExecutionStream : std::uint8_t {
   kCallIndirect = 2,
 };
 inline constexpr std::uint32_t kNativeWasmExecutionNoSample = 0xffffffffu;
+static_assert(kNativeWasmLastSampleIndex < kNativeWasmExecutionNoSample);
 enum class NativeWasmExecutionHeartbeat : std::uint8_t { kContinue = 0, kInterrupt = 1 };
 struct NativeWasmExecutionOutcomePayload final {
   std::uint8_t kind = 0;
@@ -527,9 +559,12 @@ struct NativeWasmExecutionObservation final {
   std::uint8_t js_invocation_state = 0;
   std::uint32_t js_invocation_id = 0;
   std::string_view source_url;
-  // Empty when the record has no borrowed module bytes. The browser then
-  // attaches the one module already captured for this document, or gaps.
+  // Empty when the record has no borrowed module bytes. With module_token 0
+  // the browser then attaches the one module already captured for this
+  // document, or gaps.
   std::span<const std::uint8_t> module_bytes;
+  // Same as NativeWasmDispatchObservation::module_token.
+  std::uint64_t module_token = 0;
 };
 using NativeWasmExecutionEmitter = bool (*)(const NativeWasmExecutionObservation&,
                                             std::uint64_t) noexcept;
@@ -584,7 +619,7 @@ using NativeWasmExecutionNudge = void (*)() noexcept;
   }
   if (value.related_stream == NativeWasmExecutionStream::kNone)
     return value.related_sample_index == kNativeWasmExecutionNoSample;
-  return value.related_sample_index < kNativeWasmIndirectSampleBudget;
+  return value.related_sample_index <= kNativeWasmLastSampleIndex;
 }
 }  // namespace reb
 #endif

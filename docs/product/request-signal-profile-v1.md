@@ -67,8 +67,11 @@ field. Exact value flow remains future work.
 - Parent traversal stops after 32 events and reports the limit in coverage.
 - Retention eviction remains visible as `retention_truncated`.
 - A saturated category count remains visible as `count_saturated`.
-- The UI reads at most 10,000 profiles of 8 KiB each and validates the complete
-  closed contract before replacing the last valid state.
+- The backend indexes every profile of the signal store by its exact root
+  (`request-signals.jsonl.profiles-v1`), so a profile of any age is found
+  without reading the newer ones. A later record for the same root replaces
+  an earlier one. Each line holds at most 16 KiB, and the UI validates the
+  complete closed contract before replacing the last valid state.
 - Missing profiles render an explicit empty state. Malformed stores render an
   error and do not mutate the evidence.
 - The benchmark exercises one million cold-path events and guards a minimum of

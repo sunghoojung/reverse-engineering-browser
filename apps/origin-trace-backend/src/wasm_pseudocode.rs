@@ -4136,7 +4136,7 @@ mod tests {
             base: 0,
         }];
         let mut dead = false;
-        let legacy = seed % 3 == 0;
+        let legacy = seed.is_multiple_of(3);
         for _ in 0..15 + next(80) {
             let available = height - frames.last().unwrap().base;
             match next(43) {

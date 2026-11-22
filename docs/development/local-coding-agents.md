@@ -153,12 +153,12 @@ sending a request. `start_live_session` takes named capture options (`url`,
 `wasm_samples_per_indirect_site`, `wasm_function_allow`,
 `wasm_function_deny`, `wasm_module_allowlist`, `guest_adapter`, `js_dispatch_sites`,
 `quiet`, `category_mask`, `duration_seconds`, `localhost_only`,
-`document_start`, `request_content`, `request_content_budget_mib`,
-`request_stacks`, `browser_internal`, `extension_traffic`, `fresh_profile`,
-`js_invocation_sites`, `js_invocation_saved_sites`, `js_invocation_digests`
-and others; an option left unset takes the Origin Trace app's default, request
-content and Canvas images included, `false` turns one off, and none is
-inherited from the environment), starts the same launcher as `make live`
+`document_start`, `request_content`, `request_stacks`, `browser_internal`,
+`extension_traffic`, `fresh_profile`, `js_invocation_sites`,
+`js_invocation_saved_sites`, `js_invocation_digests` and others; an option left
+unset takes the Origin Trace app's default, request content and Canvas images
+included, `false` turns one off, and none is inherited from the environment),
+starts the same launcher as `make live`
 with an Origin Trace window, and moves this connection to that exact session.
 `get_session_context` then reports the session's `capture_options`, and
 `get_native_console` lists its documents and frames for the Console
@@ -202,7 +202,7 @@ scripts/reb-api-mcp.sh --print-config claude --permission auto
 | `read-only` | Structural reads; every result has captured content omitted | Any |
 | `ask` | Also every effectful operation except running captured Wasm, content still omitted | Keep the client asking before each `origin-trace` tool call, as Claude Code does by default for MCP tools |
 | `auto` | The same tools as `ask` | Let the client run `origin-trace` tools without asking: in Claude Code an allow rule for `mcp__origin-trace`; in other clients their own approval setting for this server |
-| `full` | Also `start_live_session`, `session_action`, `get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`, `run_wasm_function` and `get_wasm_runs`, with content in results | As for `auto`, if the agent should act without asking |
+| `full` | Also `start_live_session`, `session_action`, `get_artifact_text`, `search_artifact_text`, `search_wasm_inspection`, `export_requests_har`, `run_wasm_function` and `get_wasm_runs`, with content in results | As for `auto`, if the agent should act without asking |
 
 The server cannot see whether the client asks, so `ask` and `auto` list the
 same tools; `get_session_context` reports the level in `mcp_admission` so the
@@ -597,10 +597,11 @@ source, bodies, headers, socket URLs, and diagnostics. HTTP(S) URLs are origin
 labels; conventional Wasm hex labels are retained. IDs are never truncated into
 different identities: an oversized ID is `null`. These labels/IDs can still be
 sensitive metadata, so establish provider-sharing scope first. Each inventory
-has at most 16 entries. Artifact coverage is only a 256 KiB manifest tail;
-`window_truncated` and `items_omitted` are not evidence that an absent module was
-never captured. Artifact `script_id` is always `null`; no script is joined by
-URL, time, or hash.
+has at most 16 entries. The Wasm inventory lists the newest modules of the
+whole artifact manifest and counts the rest in `items_omitted`;
+`list_artifacts` with `kind=wasm` pages every one. While `scope` is `indexing`
+the counts cover the manifest up to `scan_end`, so read again shortly. Artifact
+`script_id` is always `null`; no script is joined by URL, time, or hash.
 
 Then call `get_session_summary` with no arguments. It reports event counts by
 type and frame, gap reasons, artifact digests, and `checks` that name what

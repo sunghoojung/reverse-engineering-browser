@@ -141,19 +141,26 @@ Payload capture is limited to a bounded metadata prefix. Network request
 prefixes contain only the method and destination host. Fragments and URL
 credentials are never captured. Every admitted request
 also gets a `request_body` child record from `browser/native_network_capture_sink.cc`
-with the body's kind, length, normalized content type and a SHA-256 of
-in-memory bytes up to 4 MiB. Only with `--reb-capture-request-content` does the
-sink also emit `request_target` children (path and query, 116-byte prefix plus
-original length) for starts and redirects and hand longer targets and at most
-16 MiB of in-memory body bytes to `NativeArtifactCaptureSink::CaptureRequestContent`
-as sensitive `request_target` and `request_body` artifacts, copied and hashed
-off the UI sequence within a per-session byte budget. Brave patch
-`0019-tee-native-request-bodies` hands bodies with file, blob or stream parts to
-`browser/native_request_body_reader.cc`, which reads them on a background
-sequence (a stream part through a forwarding tee getter) and records them when
-the read ends. Password form posts keep neither bytes nor a digest. The wire
-and limits are in [Native network v2](../../../../../../protocol/native-network-v2.md)
-and [v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
+with the body's kind, length and normalized content type; a Metadata only
+session hashes an in-memory body whole on a worker and records the digest
+without the bytes. Only with `--reb-capture-request-content` does the sink also
+emit `request_target` children (path and query, 116-byte prefix plus original
+length) for starts and redirects, hand longer targets to
+`NativeArtifactCaptureSink::CaptureRequestContent` as sensitive `request_target`
+artifacts, and read every body whole: Brave patch
+`0019-tee-native-request-bodies` hands it to
+`browser/native_request_body_reader.cc`, which reads it on a background
+sequence (a stream part through a forwarding tee getter), streams it to the
+receiver as a sensitive `request_body` artifact and records it when the read
+ends. No size limit or session byte budget applies; the receiver's disk reserve
+refuses what would fill the store's volume, and that refusal is its own state.
+Brave patch `0027-hold-requests-for-body-reads` holds a request whose body is
+read or hashed apart from it until that ends, so the browser never keeps a body
+past its request. A content session keeps a password form post like any other
+body and marks it `credential_form`; a Metadata only session keeps neither its
+bytes nor a digest. The wire and limits are in
+[Native network v2](../../../../../../protocol/native-network-v2.md) and
+[v3](../../../../../../protocol/native-network-v3.md#request-body-reads).
 Every network body streams to the receiver through
 `browser/native_artifact_stream.cc` in data frames of at most 64 KiB, so the
 in-flight pool bounds bytes in flight rather than bodies
@@ -179,12 +186,15 @@ response, race network requests included, through
 recorded http(s) starts indexed by the request ID's low 10 bits. Chromium patch
 `0040-record-memory-cache-reuse` records each
 `ResourceFetcher::DidLoadResourceFromMemoryCache` in an ordinary page as a
-`memory_cache_reuse` record once the sink admits it, 4,096 per configuration,
-with the rest counted in the queue (version 4) as class 70 and those of pages
-that are not ordinary as class 71. Chromium patch
-`0062-name-memory-cache-reuse-sources` passes the reused resource's
-`ResourceResponse::RequestId()`, the renderer request that loaded it, which the
-record (payload version 2) names through its initiator fields.
+`memory_cache_reuse` record once the sink admits it, every one, with those of
+pages that are not ordinary counted in the queue (version 4) as class 71.
+Chromium patch `0062-name-memory-cache-reuse-sources` passes the reused
+resource's `ResourceResponse::RequestId()`, the renderer request that loaded
+it, which the record (payload version 2) names through its initiator fields.
+Chromium patch `0065-record-whole-memory-cache-targets` converts the whole
+http(s) target in a content session; the sink sends a target past the inline
+prefix to the browser over `NativeProbeHost.CaptureRendererTarget`, which
+drains the parent first and keeps the target as the child's artifact.
 See [Native network v3](../../../../../../protocol/native-network-v3.md).
 
 Each request names the tab that caused it. Brave patch
@@ -251,23 +261,26 @@ configuration.
 Large artifact bytes use the separate 128-byte framed contract and 32-byte
 acknowledgment in `common/native_artifact_header.h`. Only the browser-process
 bridge owns that receiver connection. JavaScript and WASM response bodies are
-streamed by an asynchronous Mojo tee with a 16 MiB per-artifact limit. Tees and
-request content share the 32 MiB in-flight pool in
+streamed whole, at any length, by an asynchronous Mojo tee, in frames of at
+most 64 KiB with an incremental SHA-256. Tees, request content and renderer
+content share the 32 MiB in-flight pool in
 `common/native_artifact_memory_pool.h`, charged with each queued data frame and
-returned when the writer drops it. Compiled script source that no response body
-carries and WASM byte-buffer API inputs use a separate one-way Mojo submission
-with the same per-artifact cap; see
-[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v1.md).
+returned when the writer drops it; a stream that finds the pool full waits for
+it to drain. Compiled script source that no response body carries and WASM
+byte-buffer API inputs use a separate one-way Mojo submission, charged to a
+256 MiB renderer credit that the browser returns once it no longer holds the
+buffer; see
+[native compiled scripts](../../../../../../protocol/native-compiled-scripts-v2.md).
 The browser copies renderer-owned shared memory before validation and records
 the stable execution context plus exact capture origin. A dedicated writer
-thread drains a bounded 32 MiB queue to the authenticated artifact socket.
+thread drains the pool's frames to the authenticated artifact socket.
 Successful evidence is emitted only after receiver acknowledgment; every local
 or remote rejection becomes an `artifact_capture_failed` event. Artifact bytes
 do not enter the renderer event ring. Other response bodies need request
 content capture: `browser/native_response_body_capture.cc` takes them from the
 same tee, joins each to its loader completion, retains it as a sensitive
-`response_body` artifact deduplicated by SHA-256 within a per-session byte
-budget, and writes a `response_body` record (type 33) for every outcome, from
+`response_body` artifact deduplicated by SHA-256, and writes a
+`response_body` record (type 33) for every outcome, from
 `common/native_network_response_body.h`. See
 [Native network v3](../../../../../../protocol/native-network-v3.md) and
 [`SAFETY.md`](../../../../../../SAFETY.md).
@@ -325,19 +338,20 @@ use `common/native_js_dispatch.h` for the 128-byte payload and the fixed 44-byte
 site records, and `common/native_js_dispatch_sites.h` for the browser-side
 canonical site file. The renderer sink exposes a pulled epoch and an
 allocation-free admission predicate to V8, never calls the frame-id provider on
-that path, and claims one of 256 configuration samples and one of 64 site samples
-before emitting through the ordinary ring. A full ring returns both claims and
-keeps its drop count; budget, emitter, invalid-input and compiled-before-arming
-refusals are coalesced gaps. See the
+that path, and gives every dispatch of up to 256 sites its site's next ordinal
+before emitting through the ordinary ring. A full ring keeps its drop count and
+leaves the ordinal missing; emitter, invalid-input, compiled-before-arming and
+activation-ID refusals are coalesced gaps. See the
 [contract](../../../../../../protocol/native-js-dispatch-v1.md).
 
 Native JavaScript invocation records (`js_invocation_start`,
 `js_invocation_settle` and `js_invocation_request`, events 24 to 26) use
 `common/native_js_invocation.h` for the payloads and the 44-byte
 function-entry site records (shape 3), and `common/native_js_invocation_sites.h`
-for the browser-side site file. The sink claims one of 256 starts per
-configuration and one of 64 per site, and one of 256 request records; settles
-carry a digest only under the session's opt-in. It reads the current
+for the browser-side site file. The sink records every start of up to 256
+sites with its site's next ordinal, tells V8 whether it recorded each start so
+V8 settles only those, and gives each request record the configuration's next
+ordinal; settles carry a digest only under the session's opt-in. It reads the current
 invocation through a provider Blink installs, for Wasm `br_table` and
 `call_indirect` observations, guest invocation markers and loader requests.
 See the [contract](../../../../../../protocol/native-js-invocation-v1.md).
@@ -353,8 +367,8 @@ hooks and `common/native_navigation_initiator_hook.h` carries a navigation's
 renderer stack to the browser link (event 47). Every table belongs to one
 thread: the document main thread and each dedicated, shared and service worker
 are named without allocating, and get their own tables at their first walk
-or message receipt while capture is active (at most 32 workers per renderer;
-a schedule or post with no script running makes none), so later walks take
+or message receipt while capture is active (every worker its own; a
+schedule or post with no script running makes none), so later walks take
 no lock; only the call that makes the tables, detach and the transport's
 routing of a browser refusal to its owning thread take the registry lock.
 `common/native_request_stack.h` also defines the task origin a posted message

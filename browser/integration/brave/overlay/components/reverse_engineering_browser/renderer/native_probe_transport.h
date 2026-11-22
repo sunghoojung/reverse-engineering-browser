@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -51,14 +52,17 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                  std::uint64_t wasm_capture_epoch = 0,
                  const std::string& guest_adapter_json = {},
                  const std::vector<std::uint8_t>& js_dispatch_sites = {},
-                 const std::vector<std::uint8_t>& js_invocation_sites = {},
+                 const std::optional<std::vector<std::uint8_t>>& js_invocation_sites = {},
                  bool js_invocation_digests = false,
                  bool capture_request_content = false,
                  bool capture_browser_internal = false) override;
   void SetWasmSampleBudget(const std::vector<std::uint8_t>& policy) override;
   void ResetWasmSampleBudgets() override;
+  void UpdateJsInvocationSites(const std::vector<std::uint8_t>& js_invocation_sites) override;
+  void SetDebuggerWatchScope(mojom::NativeWatchScopePtr scope) override;
   void Disable() override;
   void NativeStackArtifactRefused(std::uint64_t creator_event_id) override;
+  void ReleaseArtifactCredit(std::uint64_t bytes) override;
   void NativeGuestModuleStatus(std::uint64_t wasm_capture_epoch,
                                std::uint64_t module_token,
                                bool accepted) override;
@@ -79,6 +83,10 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                              std::uint64_t config_generation) noexcept;
   static bool EmitNativeGuest(const NativeGuestCapture& capture, std::uint64_t generation) noexcept;
   static bool EmitNativeGuestHost(const NativeProbeEvent& event, std::uint64_t generation) noexcept;
+  static bool EmitRendererTarget(const NativeProbeEvent& child,
+                                 std::string_view origin,
+                                 std::string_view target,
+                                 std::uint64_t generation) noexcept;
   static bool EmitWasmDispatch(const NativeWasmDispatchObservation& observation,
                                std::uint64_t generation) noexcept;
   static bool EmitWasmIndirect(const NativeWasmIndirectObservation& observation,
@@ -92,7 +100,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                            std::uint64_t frame_id,
                            std::string_view source_url,
                            std::span<const std::uint8_t> content,
-                           const NativeRuntimeScript& script) noexcept;
+                           const NativeRuntimeScript& script,
+                           std::uint64_t credit_bytes) noexcept;
   void EmitGeneratedArtifact(NativeArtifactKind kind,
                              NativeArtifactCaptureOrigin capture_origin,
                              std::uint64_t creator_event_id,
@@ -100,7 +109,8 @@ class NativeProbeTransport final : public mojom::NativeProbeClient {
                              std::uint64_t frame_id,
                              std::string_view source_url,
                              std::span<const std::uint8_t> content,
-                             const NativeRuntimeScript& script) noexcept;
+                             const NativeRuntimeScript& script,
+                             std::uint64_t credit_bytes) noexcept;
   mojo::SharedRemote<mojom::NativeProbeHost>* HostForCurrentSequence();
 
   mojo::SharedRemote<mojom::NativeProbeHost> host_;

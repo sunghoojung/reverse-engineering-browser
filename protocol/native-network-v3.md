@@ -59,7 +59,11 @@ stored v1 or v2 meaning. [SAFETY.md](../SAFETY.md) governs capture and export.
 | Chromium patch 0039, 0040 | `finish-service-worker-ends`, `record-memory-cache-reuse` | Request scope and tabs |
 | `memory_cache_reuse` payload version 2 | flag bit 2 `source_named` | Request scope and tabs |
 | `response_body` payload version 2 | flag bit 7 `snapshots_withheld` | Response bodies |
+| `response_body` payload version 3 | every body whole, media and fonts kept, state 13 `not_captured_disk_reserve` | Response bodies |
+| `request_body` payload version 2 | every body read and hashed whole, flag bit 7 `credential_form`, state 13 `not_captured_disk_reserve` | Request body reads |
 | Chromium patch 0062 | `name-memory-cache-reuse-sources` | Request scope and tabs |
+| Chromium patch 0065 | `record-whole-memory-cache-targets` | Request scope and tabs |
+| Mojo `NativeProbeHost.CaptureRendererTarget` | a renderer `request_target` child with its whole target | Request scope and tabs |
 | Chromium patch 0058 | `observe-early-hints-preload-headers` | Headers and cookies |
 | `script_cookie` version 3, flag bit 4 | a `document.cookie` read named per cookie | Headers and cookies |
 | `response_headers` source 2 | `network`: what `OnRawResponse` reported, with `Set-Cookie` | Headers and cookies |
@@ -321,20 +325,28 @@ in the document's cached resources. Chromium patch `0040-record-memory-cache-reu
 handles each call after its detached and observer check:
 
 1. `NativeProbeSink::AdmitMemoryCacheReuse` checks the Network category,
-   expiry and the page, then charges the configuration's budget. A reuse in a
-   page that is not ordinary (`Page::IsOrdinary`, checked by
+   expiry and the page. A reuse in a page that is not ordinary
+   (`Page::IsOrdinary`, checked by
    `FetchContext::IsOrdinaryPageForNativeCapture`: an SVG image's own document,
    whose `IsolatedSVGDocumentHost` frame the browser never registers, or a
    page popup) belongs to no tab: it is counted as exclusion class 71 and
-   charges no budget. A reuse past the budget is counted as class 70. Either
-   way nothing else is done.
-2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner,
-   and bounded prefixes of its host and, in content sessions only, its target
+   nothing else is done. Every other reuse is recorded; nothing counts them.
+2. Only an admitted reuse takes a fresh renderer request ID, its fetch owner
+   and its host: 121 bytes, one past what the record keeps, or in content
+   sessions the whole host up to one past an artifact URL's 8,192 bytes. In
+   content sessions only it also takes its target
    (`NativeRequestTargetRange` keeps the range inside the URL whatever the
-   parser left).
+   parser left): the whole path and query of an `http` or `https` URL up to
+   the 2 MiB the browser keeps for its own requests
+   (`NativeMemoryCacheTargetBytes`, Chromium patch
+   `0065-record-whole-memory-cache-targets`), else a 116-byte prefix, since a
+   `data:` URL can be megabytes long and has no origin to name an artifact.
 3. One `memory_cache_reuse` (type 52) record, a Traffic row of its own, and in
    content sessions a `request_target` child, as above, with `parent_event_id`
-   its sequence.
+   its sequence. A target that fits the 116-byte prefix is complete in the
+   ring. A longer `http(s)` target goes whole to the browser (below), which
+   keeps it as that child's `request_target` artifact exactly as for its own
+   requests.
 
 The record names no method: Blink adds only GET resources to the memory cache
 (`ShouldResourceBeAddedToMemoryCache`), and static data is GET too, so
@@ -410,16 +422,40 @@ zero. Host bytes are printable ASCII. Other bits and reserved bytes are zero.
 Version 1 records, which name no source, stay valid.
 
 A browser-internal URL (class 16 to 20) is counted per class as a request
-would be, unless the configuration opts in, and returns its budget charge.
-Each renderer configuration records at most 4,096 reuses. Every later one is
-counted, not recorded, in the queue's counter for exclusion class 70
-`memory_cache_reuse`, and every reuse in a page that is not ordinary in the one
-for class 71 `non_ordinary_page_reuse`, so a researcher can tell lost tab rows
-from reuses no tab owned. The browser reports each as a cumulative
-`capture_exclusion` of that renderer like the scheme counters. The count is tagged with the admitting configuration's generation,
-so a reuse still in flight from a replaced configuration neither charges nor
-resets the new one's budget, and one it admitted is not recorded into the new
-configuration.
+would be, unless the configuration opts in. Every reuse in a page that is not
+ordinary is counted, not recorded, in the queue's counter for exclusion class
+71 `non_ordinary_page_reuse`, so a researcher can tell reuses no tab owned. The
+browser reports it as a cumulative `capture_exclusion` of that renderer like
+the scheme counters. Earlier renderers recorded at most 4,096 reuses per
+configuration and counted the rest as class 70 `memory_cache_reuse`; the class
+and its queue counter stay so that evidence still reads, and current renderers
+never count it. A reuse admitted by a replaced configuration is not recorded
+into the new one.
+
+##### Whole targets
+
+A content-session reuse whose `http(s)` target passes the 116-byte prefix
+takes the next renderer sequence for its `request_target` child and sends the
+child, its origin (scheme, host and explicit port, never user info) and its
+whole target to the browser over Mojo
+(`NativeProbeHost.CaptureRendererTarget`) instead of the ring. The renderer
+pushed the parent to the ring first, so the host drains the ring before it
+reads the child: the parent, and any exclusion decision for its row, always
+come first. The host emits the child in the slot the renderer took, with the
+retention and artifact `EmitRequestTarget` gives a browser request's long
+target (retained as a sensitive `request_target` artifact of kind 9, capture
+origin 10, named by the origin and created by the child; or not retained for
+the session budget, an unavailable artifact path or a refused transfer). It
+checks the child against the renderer's own identity: session, process and
+nonzero sequence, a `request_target` version 2 child of a nonzero parent and
+request ID, complete as sent, whose length and prefix are those of the target,
+of 117 bytes to 2 MiB, and whose origin has its scheme and fits an artifact
+URL. A child that fails, or that arrives outside a content capture, leaves a
+`renderer_target_malformed` gap in its slot and keeps nothing; one naming
+another process or session is dropped. A child the renderer could not send
+(no host on its thread) stays in the ring as `not_retained_artifact_unavailable`
+with its prefix. A target with no origin or longer than 2 MiB stays in the ring
+as `not_retained_url`, as the browser decides for its own.
 
 ### Request owners and tabs
 
@@ -790,13 +826,15 @@ the row has one, else the newest nonzero loader kind of a browser
   then reports as lost), and each end reads one slot and emits at most two
   records and one gap.
 - Memory-cache reuse, inactive: one atomic load before the hook converts
-  anything. Active: one virtual page check and the admission (the category,
-  expiry and budget reads and one compare-and-swap of the budget word). Past
-  4,096, or in a page that is not ordinary, that is all, plus one counter
-  increment; nothing is converted or allocated. An admitted reuse then takes a
-  request ID and its owner, copies at most 121 host bytes and, with request
-  content only, a 116-byte target prefix, and emits one fixed-size record and
-  that target.
+  anything. Active: one virtual page check and the admission (the category
+  and expiry reads). In a page that is not ordinary that is all, plus one
+  counter increment; nothing is converted or allocated. An admitted reuse then
+  takes a request ID and its owner, copies at most 121 host bytes and emits
+  one fixed-size record. With request content it also copies its host and the
+  target Blink converts (at most 2 MiB of an http(s) path and query, else 116
+  bytes) and emits that target: inline, or for a long http(s) target one Mojo
+  message carrying the target to the browser, which copies it once more into
+  the artifact it queues. Nothing else per reuse is bounded or counted.
 - Tabs, inactive: the loaders' owner scope and the proxy's factory hook add at
   most one atomic load and allocate nothing. Active: one virtual
   call and a thread-local write per load, one registry insert per factory, and
@@ -822,8 +860,9 @@ the row has one, else the newest nonzero loader kind of a browser
 - `get_session_summary` lists `exclusions` by class and adds the info checks
   `browser_internal_excluded` and `no_tab_traffic_excluded` (classes 65, 66,
   68 and 69), `request_tabs` (with `extension_rows` and `unresolved_reasons`),
-  and the error check `network_tab_unresolved`. Class 70 is its own info check,
-  `memory_cache_reuse_not_recorded`; class 71 is listed in `exclusions` only,
+  and the error check `network_tab_unresolved`. Class 70, from earlier
+  renderers only, is its own info check, `memory_cache_reuse_not_recorded`;
+  class 71 is listed in `exclusions` only,
   since no tab lost a row. The backend keeps types 36 to 38, 50 and 52 in its
   network window.
 - Traffic has no Unattributed group. A row is in every tab its records or link
@@ -872,10 +911,18 @@ gap names, an earlier configuration, one completion on either side of the
 on one start slot, where any accepted mix of two starts fails (accepting every
 read, or ignoring the odd version, fails it); target ranges with empty and
 invalid components; and memory-cache reuses with their owner, host, status,
-size, target, static data, a 200-byte host, counted internal URLs that return
-their charge, a page that is not ordinary and its class 71 count, the 4,096 budget and its class 70
-count at no allocation, a new configuration's fresh budget, a reuse admitted
-by a replaced configuration, and the inactive path.
+size, target, static data, a 200-byte host, counted internal URLs, a page
+that is not ordinary and its class 71 count, 12,000 content reuses with
+300-byte paths each sent whole with their origin and prefix in the slot after
+their parent, long `data:`, over-2 MiB and prefix-only targets kept inline
+with their retention, 20,000 metadata reuses all recorded with no class 70
+count and admission at no allocation, a reuse admitted by a replaced
+configuration, and the inactive path. `make native-artifact-capture-check`
+drives the production `NativeProbeHost` through `CaptureRendererTarget`: the
+parent drained first, the child retained with its whole target as a sensitive
+`request_target` artifact under its origin, a forged prefix and a wrong
+scheme each leaving a `renderer_target_malformed` gap in its slot, another
+process's child dropped, and a child outside a content capture gapped.
 `tests/network_scope_test.cpp` also checks type 52 and classes 70 and 71 for parity and
 malformed records and keeps 68 and 69 valid, and `make network-scope-wire-check`
 drives the Traffic model through memory-cache rows, a service-worker failure, a
@@ -980,12 +1027,10 @@ capture path. `NativeArtifactCaptureSink::MaybeCaptureResponse` keeps scripts
 and Wasm as before, in every artifact session, and hands every other response
 to `browser/native_response_body_capture.cc`:
 
-- Kept by default: documents, JSON, text, XML, fetch and XHR responses, and any
-  other subresource.
-- Skipped unless `--reb-capture-response-media` (`REB_CAPTURE_RESPONSE_MEDIA=1`):
-  fonts and media (resource types 5 and 8, `font/*`, `audio/*`, `video/*`, font
-  application types), and images that page elements load (resource types 4 and
-  12, `image/*` except `image/svg+xml`). A fetch or XHR image is kept.
+- Every response is kept: documents, JSON, text, XML, fetch and XHR
+  responses, images, fonts, audio, video and any other subresource. Before
+  payload version 3, fonts and media and the images page elements load were
+  skipped unless the session asked for them (state 9).
 - The tee forwards decoded bytes, so the artifact holds the decoded body. The
   record keeps the `Content-Encoding` codings as sent and flags bodies Chromium
   left encoded for client-side decoding.
@@ -1016,71 +1061,67 @@ all of these hold:
    snapshot n (since the body opened, for the first). A body open for an hour
    is snapshotted at most about 180 times, a day about 300, so the 16-bit
    partial index is never reached.
-3. The copy fits the body's allowance, an eighth of the session's response body
-   budget (64 MiB of the default 512 MiB). A quarter of it may be spent at
-   once; of the rest, the share spendable so far is the larger of the share of
-   the session left when the body opened that has passed, and the share of the
-   16 MiB limit the body has filled. So a body spends its allowance evenly over
-   the session, or faster when it fills toward the limit.
-4. All snapshots of the session together stay within a quarter of the budget
-   (128 MiB by default), so whole bodies always keep three quarters, and the
-   copy fits what is left of the budget. Snapshots are charged to the budget;
-   a receiver refusal refunds them.
+3. The copy fits the body's bound: all its snapshots together copy at most
+   four times the bytes it has kept so far, plus 64 MiB.
 
-A snapshot the spacing holds back, or one only the body's paced allowance
-holds back, is not left waiting for the next chunk: the first chunk that
-arrives too soon posts one delayed task on the capture's sequence for the time
-the spacing, or the pace, allows. The task takes the snapshot then if the body
-is still open and the byte bounds allow it, or posts again for the next such
-time; a body has at most one pending. It finds the body by key and capture ID,
-as the completion wait does, so a body that ended or a new configuration
-leaves it nothing to do. A burst followed by silence is therefore published
-within the spacing, or once the session has run long enough for the body's
-pace to allow it. A snapshot the session quarter or the budget withholds waits
-for the next chunk, because time alone frees neither.
+The bound is the body's own, not a session budget, so one stream never takes
+room from another and nothing a session already kept counts against a later
+body. It exists because the receiver writes each snapshot as a copy of the
+whole prefix: spacing by age alone lets a steadily growing body copy about 32
+times its size, which for a fast stream open for an hour is several GiB of
+disk the researcher never asked for. Four times the body plus 64 MiB keeps
+that disk cost proportional to the body, and the 64 MiB lets every small or
+medium stream follow the age spacing exactly. Once a fast stream reaches the
+bound, its next snapshot waits until the body has grown by a quarter of what
+the copies cost, so the newest snapshot is at most about a quarter of the
+body's age old. The ended body is always kept whole: the bound limits only
+how fresh the intermediate snapshots are.
 
-A snapshot the spacing allows but a byte bound withholds (the body's
-allowance, the session's quarter, or the budget) is not taken, and the
-session quarter goes to whichever bodies asked first. That is a counted limit:
-every later record of that body carries flag bit 7, `snapshots_withheld`
-(payload version 2), Traffic says the newest snapshot is older than the
-schedule would make it, and `get_session_summary` counts such bodies in
+A snapshot the spacing holds back is not left waiting for the next chunk: the
+first chunk that arrives too soon posts one delayed task on the capture's
+sequence for the time the spacing allows. The task takes the snapshot then if
+the body is still open and the bound allows it; a body has at most one
+pending. It finds the body by key and capture ID, as the completion wait does,
+so a body that ended or a new configuration leaves it nothing to do. A burst
+followed by silence is therefore published within the spacing.
+
+A snapshot the spacing allows but the bound withholds is not taken, and no
+timer waits for it, because only more kept bytes raise the bound. That is a
+counted limit: every later record of that body carries flag bit 7,
+`snapshots_withheld`, Traffic says the newest snapshot is older than the
+spacing would make it, and `get_session_summary` counts such bodies in
 `response_bodies.snapshots_withheld` with a `response_snapshots_withheld`
 check. The receiver keeps every snapshot it accepted, so a superseded one
 cannot be released to make room.
-
-A body whose kept prefix reaches the 16 MiB limit is sealed: those bytes can no
-longer change, so its stream ends there and a `partial` record names that
-artifact at once, without a copy. Later bytes are counted, and every later
-record of the body, including its end, names the sealed artifact.
 
 The bounds come from real streams. Wikimedia's public `recentchange` event
 stream ran at about 60 KB/s (42 events a second) and its `page-create` stream at
 about 3.6 KB/s (two 1.3 KB events a second); a chat completion streams 1 to
 20 KB/s for under a minute, and a notification channel sends a heartbeat of a
-few bytes every 15 to 30 s. In a one-hour session with the default budget:
+few bytes every 15 to 30 s. In a one-hour session:
 
 | Stream | Snapshots | Copied | Newest snapshot at most |
 | --- | ---: | ---: | --- |
-| 60 KB/s | 33 | 58 MiB | 82 s old, then sealed after 279 s |
-| 3.6 KB/s | 97 | 62 MiB | 888 s old |
+| 60 KB/s | 65 | 873 MiB | 884 s old, snapshots withheld |
+| 3.6 KB/s | 134 | 110 MiB | 842 s old, snapshots withheld |
 | 10 KB/s for 60 s | 51 | 13 MiB | 1 s old |
 | a heartbeat every 15 s | 95 | 0 MiB | 110 s old |
 
-Snapshots count `partial` records, the seal included; copied counts the
-receiver checkpoints, so not the seal. `make native-artifact-capture-check`
-replays these streams through the capture itself (chunks every 250 ms for the
-fast and chat streams, every 500 ms for the medium one, each posted timer run
-at its due time) and fails when this table differs from the replay. The newest
-snapshot's age is sampled just before each chunk and just before each timer
-runs, where it peaks.
+Snapshots count `partial` records and copied counts the receiver checkpoints;
+each stream ends captured whole (205 MiB for the fastest).
+`make native-artifact-capture-check` replays these streams through the capture
+itself (chunks every 250 ms for the fast and chat streams, every 500 ms for
+the medium one, each posted timer run at its due time, the writer keeping up)
+and fails when this table differs from the replay. The newest snapshot's age
+is sampled just before each chunk and just before each timer runs, where it
+peaks. The same check drives a two-hour stream past the old limit of 15
+snapshots and checks the spacing, the bound and its withheld flag, a declared
+length, and a 40 MiB body snapshotted and kept whole.
 
-A larger budget (`REB_RESPONSE_BODY_BUDGET_MIB`) keeps a medium stream
-fresher, because its allowance grows with it; the 1 MiB minimum budget leaves
-a body 128 KiB of snapshots, so a stream past that is read when it ends.
-`make native-artifact-capture-check` drives a two-hour stream past the old
-limit of 15 snapshots and checks the spacing, the allowance, the session share
-and its refund, a declared length, and the seal.
+Sessions recorded before payload version 3 used a different schedule: each
+body's snapshots shared an eighth of the session's response body budget, all
+snapshots together a quarter of it, and a body that reached the 16 MiB capture
+limit was sealed there. Their records keep the meaning they had.
 
 ### `response_body` (type 33)
 
@@ -1092,7 +1133,7 @@ time is when the body ended or was snapshotted. Little endian:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
-| 0 | 2 | payload version, `2` (`1` in older captures) |
+| 0 | 2 | payload version, `3` (`1` and `2` in older captures) |
 | 2 | 2 | payload size, `128` |
 | 4 | 1 | state |
 | 5 | 1 | flags |
@@ -1109,25 +1150,27 @@ time is when the body ended or was snapshotted. Little endian:
 | State | Meaning |
 | ---: | --- |
 | 1 `captured` | The whole body is the named artifact |
-| 2 `captured_truncated` | The first 16 MiB are the named artifact |
+| 2 `captured_truncated` | Before version 3 only: the first 16 MiB are the named artifact |
 | 3 `partial` | The body is still open; the artifact is what arrived so far |
 | 4 `aborted` | The network failed before the end; any bytes that arrived are the artifact |
 | 5 `cancelled` | The page or browser stopped the request; any bytes that arrived are the artifact |
 | 6 `empty` | The body ended with zero bytes, or the loader sent no body |
 | 7 `not_modified` | HTTP 304; no body |
 | 8 `redirected` | A redirect hop; Chromium discards its body |
-| 9 `not_captured_type` | Media or a font, not asked for |
+| 9 `not_captured_type` | Before version 3 only: media or a font, not asked for |
 | 10 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
-| 11 `not_captured_transfer_refused` | The in-flight pool, the tee or the artifact queue refused it |
-| 12 `not_captured_session_budget` | The session's response body budget was used |
+| 11 `not_captured_transfer_refused` | The in-flight pool refused the stream's opening metadata, or the tee or the artifact queue refused it |
+| 12 `not_captured_session_budget` | Before version 3 only: the session's response body budget was used |
+| 13 `not_captured_disk_reserve` | Version 3 only: the receiver refused it to keep its free-disk reserve ([disk reserve](../services/artifact-receiver/README.md#disk-reserve)) |
 
 Flags: bit 0 `shared`, identical bytes were already retained in this
 configuration and `artifact_id` names that earlier artifact; bit 1 served from
 the HTTP cache; bit 2 served by a service worker; bit 3 bytes still encoded
 (client-side decoding); bit 4 more than four codings, the rest not recorded;
-bit 5 completion not observed; bit 6 content type present; bit 7, in version 2
-only, a snapshot the schedule's spacing allowed was withheld by a byte bound
-([partial bodies](#partial-bodies)). Version 1 records stay valid without it.
+bit 5 completion not observed; bit 6 content type present; bit 7, from
+version 2, a snapshot the schedule's spacing allowed was withheld by a byte
+bound ([partial bodies](#partial-bodies)). Version 1 records stay valid without
+it.
 
 Codings: 1 `gzip` (and `x-gzip`), 2 `deflate`, 3 `br`, 4 `zstd`, 5 `dcb`,
 6 `dcz`, 7 `compress`, 15 any other token. `identity` is not a coding.
@@ -1137,11 +1180,13 @@ Trace decoder (`make network-request-wire-check`):
 
 - `artifact_id` is nonzero, the digest nonzero and the captured length nonzero
   all together, or none of them. `shared` needs an artifact.
-- Captured length is at most body length. With L = min(body length, 16 MiB):
-  state 1 has captured equal to a nonzero body length; state 2 has a body over
-  16 MiB and captured 16 MiB; state 3 has a nonzero body and captured L;
-  states 4 and 5 have captured 0 or L; states 6 to 9 have body length 0;
-  states 10 to 12 have no artifact.
+- Captured length is at most body length. With L the body length in version
+  3, or min(body length, 16 MiB) before it: state 1 has captured equal to a
+  nonzero body length; state 2, before version 3 only, has a body over 16 MiB
+  and captured 16 MiB; state 3 has a nonzero body and captured L; states 4 and
+  5 have captured 0 or L; states 6 to 8, and state 9 before version 3, have
+  body length 0; states 10 and 11, state 12 before version 3 and state 13 in
+  version 3 have no artifact.
 - Partial index is nonzero exactly for state 3. Bit 5 only with states 1, 2
   and 6. Bit 4 only with four codings. Coding bytes follow the coding count.
 - Content type: bit 6 if and only if the length is nonzero, normalized as in
@@ -1168,36 +1213,30 @@ launcher passes for content sessions.
   one relaxed load per response start, completion and untyped body.
 - Each open body holds at most one pending 64 KiB data frame, plus frames the
   writer has not yet sent, in the 32 MiB in-flight pool it shares with scripts
-  and request content; a declared length reserves nothing. A full pool or a
-  refused frame is state 11, never a stall.
-- At most 16 MiB per body. Past it the tee keeps the prefix and counts every
-  byte.
+  and request content; a declared length reserves nothing. A body that finds
+  the pool full stops taking bytes from the network and waits until the writer
+  drains below the pool's wake mark, so a fast body slows to the receiver's
+  pace instead of losing bytes. Browser memory stays within the pool however
+  large or many the bodies are.
+- No size or count bound: every body is kept whole, and the tee counts every
+  byte. Before version 3 a body kept at most its first 16 MiB.
 - SHA-256 grows by at most one 64 KiB tee read per task, so the record carries
   the digest when the body ends; the receiver verifies it.
-- Unique bytes per session are budgeted: 512 MiB by default, 1 MiB to 16 GiB
-  with `--reb-response-body-budget-bytes` (`REB_RESPONSE_BODY_BUDGET_MIB`, the
-  app start panel's **Response body budget**, or the start option
-  `response_body_budget_mib`). Media and fonts are asked for with
-  `REB_CAPTURE_RESPONSE_MEDIA=1`, **Capture media and fonts** or
-  `response_media`.
-  A body is charged when it ends, once its digest is known: identical bytes
-  are stored once by SHA-256 and charge nothing (the repeat stream is aborted),
-  each snapshot is charged within its [shares](#partial-bodies), and a receiver
-  refusal refunds them. The launcher grows a content session's receiver store
-  by both budgets.
-- Every refusal is a named state. The session summary counts states 2 and 9 to
-  12 under `request_content_not_retained`, category `response_body`; state 12
-  also carries the budget in force (`budget_mib`) and the unique
-  `response_body` bytes retained (`retained_bytes`), and
-  `get_session_context` reports the session's limits as
-  `capture_options.content_limits`.
+- No session budget. Identical bytes are stored once by SHA-256 (the repeat
+  stream is aborted). The receiver's free-disk reserve is the only bound on
+  what a session stores: a body it refuses is state 13, and the refusal is
+  visible in the record, Traffic and the session summary.
+- Every refusal is a named state. The session summary counts states 2 and 9
+  to 13 under `request_content_not_retained`, category `response_body`, and
+  names states 2, 9 and 12 as limits of the browser that recorded the
+  session.
 
 ### Bodies the proxy never sees
 
 Some requests have no browser `response_started`, so they have no
 `response_body` record. Each request instead has one body case, which Traffic's
 `responseBodyCase` and the request index decide alike
-([request index v1](request-index-v1.md)): the state of the newest
+([request index v2](request-index-v2.md)): the state of the newest
 `response_body` record of its final `response_started`, or `malformed`, else in
 this order:
 
@@ -1244,7 +1283,7 @@ them instead of nothing:
   with `reason` `host_differs` or `started_after`, and `not_recorded` when no
   such row exists. A found source's `response_body` is shown in Response and
   Preview, labelled as the reused request's, with a control that opens it, and
-  with its state: complete, cut at 16 MiB, a snapshot with how much had
+  with its state: complete, cut at 16 MiB in an older session, a snapshot with how much had
   arrived and when relative to the reuse, stopped mid-body, or not retained.
   For a `multipart/x-mixed-replace` source Blink holds the last part while the
   retained body has every part, which the view says.
@@ -1319,8 +1358,8 @@ binary is refused and oversized JSON returns a structural summary.
   syntax-colored text with pretty print, wrap, find, copy and hex (always hex
   for binary), hex in 256 KiB windows paged to the end of the retained body,
   reading the next 2 MiB range when a window passes the bytes loaded. A
-  partial record says how many bytes had arrived and when, and whether the
-  body was sealed at the 16 MiB limit. Preview shows a bounded
+  partial record says how many bytes had arrived and when, and, in an older
+  session, whether the body was sealed at its 16 MiB limit. Preview shows a bounded
   JSON tree, a raster image whose signature matches its bytes, plain text, or
   markup as source. HTML and SVG are never rendered. Reads are ranged 2 MiB at a
   time and rechecked by size and SHA-256. Both tabs name the body case and its
@@ -1331,11 +1370,12 @@ binary is refused and oversized JSON returns a structural summary.
 `make native-artifact-capture-check` drives the real network sink, artifact
 sink, response capture and production receiver and broker: JSON, gzip HTML,
 brotli and service-worker JSON, a fetched PNG, a chunked stream partial then
-captured, an aborted prefix, 304, a redirect, a cancelled body, a skipped font,
-digest dedupe, budget exhaustion, receiver refusal refund, 50 parallel bodies,
-the full pool, 16 MiB truncation, a missing completion, coding order, the
-capture-end partial, media opt-in, metadata-only sessions and tee refusal, and
-the [partial body schedule](#partial-bodies).
+captured, an aborted prefix, 304, a redirect, a cancelled body, a captured
+font, digest dedupe, 528 MiB with no session budget, receiver and disk reserve
+refusals, 50 parallel bodies, a wait for the full pool, a body past 16 MiB
+kept whole, a missing completion, coding order, the capture-end partial, media
+by default, metadata-only sessions and tee refusal, and the
+[partial body schedule](#partial-bodies).
 `make native-network-capture-check` covers the redirect and unavailable records.
 `tests/network_request_test.cpp` checks layout parity and every valid and
 malformed record. `tools/check-traffic-response-ui.mjs` and
@@ -1351,14 +1391,16 @@ Still required before declaring this browser-ready:
 2. With an authorized fixture, compare server bytes with retained artifacts for
    JSON, HTML, an image, gzip and brotli, a chunked response, server-sent
    events, an aborted download, a 304, a redirect and a service-worker-served
-   response; load 50 responses in parallel; exhaust a small budget; and watch
-   browser memory stay within the pool.
+   response and a body over 64 MiB; load 50 responses in parallel; force the
+   disk reserve; and watch browser memory stay within the pool.
 
 ## Request body reads
 
-Defined by #436 and #428. In content sessions a `request_body` (type 22) whose
-parts include a file, blob or stream is read instead of only described, and is
-retained as a `request_body` artifact with exact bytes and digest.
+Defined by #436 and #428. In content sessions every `request_body` (type 22)
+is read instead of only described, and is retained as a `request_body`
+artifact with exact bytes and digest. Before payload version 2 only bodies
+with a file, blob or stream part were read. A Metadata only session hashes an
+in-memory body on a worker and keeps no bytes.
 
 ### Read
 
@@ -1372,15 +1414,26 @@ retained as a `request_body` artifact with exact bytes and digest.
 - A stream part (`fetch` with a `ReadableStream` body) can be consumed only
   once, so its getter is replaced by one that forwards the size and every byte
   unchanged to the network through a tee. That getter is the only change to the
-  request, and the upload is never delayed: a full pool ends the read, not the
-  upload. The page answers the size once its stream ends, so the read is
+  request. A full pool makes the upload wait for the writer, as a response body
+  does, so the upload is never cut short and no byte is lost. The page answers
+  the size once its stream ends, so the read is
   complete when that answer is OK and the tee saw exactly that many bytes,
   whether the page's pipe closing or the network dropping the getter comes
   next; the network drops it as soon as the size completes a read that already
   has every byte. The request's completion status says whether the network
   then sent them.
-- Bytes stream to the receiver as they are read. Past 16 MiB a part is sized,
-  not read.
+- Bytes stream to the receiver as they are read, whole at any length, and
+  are hashed as they pass. Before payload version 2 a part past 16 MiB was
+  sized, not read.
+- A read of an in-memory, file or blob body, and a Metadata only hash, run
+  apart from the request, so Brave patch 0027 holds the request in
+  `ContinueToStartRequest` until they end
+  (`NativeNetworkCaptureSink::WaitForBodyRead`). The reader's reference keeps
+  the body alive, and a request that finished first would leave the browser
+  holding a body Chromium had already released: four 72 MiB uploads in a row
+  kept 168 MiB more than the same Brave without a session. The hold ends when
+  the read does for any reason, a refused or dropped read included. A stream
+  part is read as the network sends it, so its request never waits.
 - The record is emitted when the read ends, still the child of
   `request_started`; its end frame names it as the artifact's creator. A body
   never handed to the reader (no hook) is recorded as `not_captured_body_kind`
@@ -1388,42 +1441,62 @@ retained as a `request_body` artifact with exact bytes and digest.
 
 ### Record
 
-Payload version 1. Bit 6 `read` marks a body the browser read; it needs bit 0
-and kind 2 to 5 (a stream has one element). With bit 6:
+Payload version 2. Bit 6 `read` marks a body the browser read and hashed
+whole: every body a content session kept or tried to keep, and an in-memory
+body a Metadata only session hashed. Bit 7 `credential_form` marks a body
+Chromium flags as a password form post, which a content session keeps like
+any other and a Metadata only session keeps neither bytes nor a digest of
+(state 11). Version
+2 has no state 5 `captured_truncated`, no state 10 `not_captured_session_budget`
+and no bit 2 `digest_size_limit`. With bit 6:
 
 | State | Rule |
 | ---: | --- |
-| 2 `empty` | Length 0, digest of nothing, bit 3 clear |
-| 4 `captured` | Exact length up to 16 MiB, captured equal, digest present, bit 3 clear, artifact |
-| 5 `captured_truncated` | Exact length over 16 MiB, captured 16 MiB, bit 2, bit 3 clear, artifact |
-| 8 `not_captured_transfer_refused` | The pool or queue refused it while reading; bit 3 set |
-| 10 `not_captured_session_budget` | The read passed its budget allowance; bit 3 set |
-| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, capture ended, the body started within the last 250 ms before expiry so it was not read, or the requesting renderer may not read a named file (`ChildProcessSecurityPolicy::CanReadFile`, the check the network service's upload path makes); bit 3 set |
+| 2 `empty` | Length 0, digest of nothing |
+| 3 `metadata_only` | Metadata only: an in-memory body hashed, no bytes kept |
+| 4 `captured` | Exact length, captured equal, digest present, artifact |
+| 8 `not_captured_transfer_refused` | The artifact queue refused it or the socket closed while reading |
+| 12 `not_captured_read_incomplete` | A part changed or failed, the upload was cancelled, capture ended, the body started within the last 250 ms before expiry so it was not read, or the requesting renderer may not read a named file (`ChildProcessSecurityPolicy::CanReadFile`, the check the network service's upload path makes) |
+| 13 `not_captured_disk_reserve` | The receiver refused it to keep its free-disk reserve ([disk reserve](../services/artifact-receiver/README.md#disk-reserve)) |
 
-For states 8, 10 and 12 the length counts what was read; no digest and no
-artifact. Without bit 6, kinds 2 to 5 may also carry states 7 to 10 when the
-read was refused before it started, and state 12 is invalid. Every other v2 rule
-is unchanged.
+For states 8, 12 and 13 the length counts what was read; no digest and no
+artifact; bit 3 is set for parts other than in-memory bytes. Without bit 6 a
+body was refused before any read: states 1, 2, 3, 6, 7, 8, 9 and 11, with a
+digest only for an empty in-memory body.
+
+Payload version 1, from older browsers, keeps its rules: bit 6 needed kind 2
+to 5, a read part past 16 MiB kept its prefix (state 5, bit 2), a read past
+the session's budget allowance was state 10, and a content session's password
+form post was state 11.
 
 ### Bounds
 
-- Disabled and metadata-only: unchanged; nothing is read.
-- A read charges `min(16 MiB, remaining budget)` of the request-content budget
-  when it starts and settles to its unique bytes when it ends, so parallel reads
-  cannot pass the budget together.
-- Each read holds at most one pending 64 KiB data frame in the in-flight pool.
-  A file or blob read waits for pool space, about 5 s at most, then is state 8.
+- Disabled: unchanged; nothing is read.
+- Metadata only: an in-memory body is hashed whole on a worker while a
+  reference keeps the immutable body alive, and its record follows with the
+  digest. A file, blob or stream part is not read.
+- No size, count or budget bound: every body a content session admits is read
+  whole.
+- Each read holds at most one pending 64 KiB data frame in the in-flight pool
+  and waits for space when it is full; a file or blob read resumes when the
+  writer drains, as a stream upload does. Its request waits for it (see
+  [Read](#read)), so a large body starts its request after about the time the
+  artifact channel takes to move it, and the browser holds no body past its
+  request.
+- The receiver's free-disk reserve is the only bound on what is stored; a
+  refused body is state 13.
 
 ### Consumers and validation
 
 The C++ core, the Python validator and the Traffic decoder share the rules
-(`make network-request-wire-check`); Traffic names state 12 and read lengths;
-the session summary counts state 12 under `request_content_not_retained`.
+(`make network-request-wire-check`); Traffic names states 12 and 13 and read
+lengths; the session summary counts states 12 and 13 under
+`request_content_not_retained`.
 `make native-network-capture-check` covers the deferred record, the hook and
 refusals. `make native-artifact-capture-check` retains a multipart upload with a
 file and a stream-body `fetch` with exact bytes and digest through the
-production receiver and broker, and covers the 16 MiB prefix, the budget
-allowance, a stuck pool, incomplete and empty reads, capture end and a missing
+production receiver and broker, and covers a body read whole past 16 MiB, a
+full pool that waits, incomplete and empty reads, capture end and a missing
 hook. The reader's Mojo and file glue compiles only in a Brave build.
 
 ### Acceptance
@@ -1617,7 +1690,7 @@ transfer sizes and resource type zero, the parent's identity, and
 | 4 `not_captured_block_limit` | Longer than 320 KiB; count and length only |
 | 5 `not_captured_artifact_unavailable` | Artifact category off, receiver disconnected or session inactive |
 | 6 `not_captured_transfer_refused` | The bounded artifact queue refused it |
-| 7 `not_captured_session_budget` | This configuration already holds 64 MiB of header blocks; a block the receiver refused, or a second accepted copy, returns its bytes |
+| 7 `not_captured_session_budget` | Older browsers only: the configuration already held 64 MiB of header blocks. Current capture has no header budget and never emits it |
 | 8 `not_captured_url` | Not HTTP(S), the URL is longer than 8 KiB, or the request is untracked so its hop URL is unknown |
 
 Rules, shared by the C++ core, the Python evidence validator, the Origin Trace
@@ -1703,7 +1776,7 @@ and 2; reserved bytes are zero.
 Kind 12 `cookie_list`, capture origin 10 `network_request`, MIME type
 `application/x-reb-cookie-list`, always sensitive, with the hop's URL like a
 header block. Identical lists are shared by direction, length and SHA-256, in
-the header table and the header 64 MiB budget. Little endian, never truncated
+the header table. Little endian, never truncated
 or rewritten:
 
 | Offset | Size | Field |
@@ -1860,7 +1933,7 @@ string while content capture is on.
 - Disabled or metadata-only: no cookie list is serialized, and a script cookie
   call costs one atomic load.
 - A sent and a received list per hop, at most 2 MiB each, sharing the header
-  table and budget.
+  table.
 - Script cookie records: one per write, at most 2 + log2(reads) per read key,
   one per read past the table, and one read record per read with unrecorded
   names; each is one 320-byte record, one SHA-256 of
@@ -1882,18 +1955,22 @@ the responses that set it and the requests that sent it in the newest 5,000
 cookie list, request start, redirect, script call and script identity records
 within the last 64 MiB of events. A cookie is often written once early and sent
 on every later request, so the request index locates every `script_cookie`
-record of the session (at most 65,536) and provenance reads back those older
+record of the session and provenance reads back those older
 than its window by byte range; `script_coverage` says whether that list is
 complete. `coverage` says what the window read, so an absent response or request
 is not proof when `coverage.complete` is false (see
-[request index v1](request-index-v1.md#per-request-detail-reads)). Each
+[request index v2](request-index-v2.md#per-request-detail-reads)). Each
 script call's `stack` resolves like `get_request_stack`: through
 `script_identity` records in the window and the index to line, column and function name,
 with every walked frame when its digest names a retained stack artifact; at
 most 64 distinct positions per answer, the rest counted in
 `stacks_unresolved`.
 Cookie values are withheld as `value_withheld: true` with their byte length
-and SHA-256, like credential headers; a script write links to a sent cookie
+and SHA-256, and a received line as `line_withheld: true` with its length, like
+credential headers, unless the read passes `credential_values=1`: then each
+cookie has its `value` and each received line its `line`, invalid UTF-8
+replaced, beside the same length and digest. `reb-api mcp` passes it only with
+`--allow-content` (`--permission full`). A script write links to a sent cookie
 when their value digests are equal. A `document.cookie` read joins a name by
 its version 3 name record. `read_coverage` counts the reads that may hold the
 name without naming it: `whole_jar_reads` (version 1 and 2 reads, recorded
@@ -1928,8 +2005,9 @@ provenance. Values are inserted as text after a size and SHA-256 check.
   (`HttpStreamParser::kMaxHeaderBufSize`, `kSpdyMaxHeaderListSize`) plus the
   byte `: ` normalization can add to a line of at least 4 bytes. Request blocks
   use the same bound.
-- 64 MiB of retained blocks per session configuration; shared blocks cost
-  nothing. Exhaustion is the visible state 7, never silence.
+- No byte budget: every block within the 320 KiB bound is retained. Older
+  browsers kept at most 64 MiB of blocks per configuration and named the rest
+  state 7.
 - Identical blocks are retained once by kind, length and SHA-256, through a
   4,096-entry table per configuration. When it is full, later blocks are
   retained individually.
@@ -1951,9 +2029,12 @@ whose name contains a credential root (`token`, `secret`, `passw`, `csrf`,
 and similar), has the whole word `auth`, `session`, `jwt`, `otp` or `pwd`, or
 has a word ending in `key`, except `Sec-WebSocket-Key`, `Idempotency-Key` and
 `Public-Key-Pins`, are withheld as `value_withheld: true` with
-their byte length: like request bodies, they stay in the binary artifact, which
-MCP never inlines. Withholding goes by name, so another value, such as a
-`Location` query, is returned as captured.
+their byte length unless the read passes `credential_values=1`, which returns
+each as `value` with `credential: true`. `reb-api mcp` never lets a model pass
+it and passes it only with `--allow-content` (`--permission full`), so below
+Full access those values stay in the binary artifact. Each document's
+`credential_values` says which it did. Withholding goes by name, so another
+value, such as a `Location` query, is returned as captured.
 
 ### Missing final blocks
 
@@ -1981,15 +2062,16 @@ a response), `no_raw_response`, since the received list comes with the
 response headers and what was sent was reported, or `record_dropped` in its
 place under the rule above. The backend reads the session's gap records of
 every category beside the request's own, from a tally it keeps per store: the
-first read scans the newest 64 MiB for gaps, a later one only the bytes
-appended since and none while the store is unchanged, and a store that shrank,
-was replaced or was cleared and written again (the bytes before the last
-boundary changed, as the request index checks) is scanned again. So a Headers,
-Cookies or provenance read costs its own records, not a 64 MiB scan.
+first read scans the whole store for gaps, so a drop early in a long session
+still counts, a later one only the bytes appended since and none while the
+store is unchanged, and a store that shrank, was replaced or was cleared and
+written again (the bytes before the last boundary changed, as the request index
+checks) is scanned again. So a Headers, Cookies or provenance read costs its
+own records, not a store scan.
 Origin Trace's Headers tab adds the reason to "Provisional headers are shown",
 and the Cookies tab lists each such hop with it.
 
-`get_session_summary` counts, over the newest 64 MiB of events:
+`get_session_summary` counts, over every record of the session:
 
 - every header block and cookie list in states 4 to 8, as
   `request_content_not_retained` with category `request_headers`,
@@ -1999,11 +2081,11 @@ and the Cookies tab lists each such hop with it.
 - the requests whose final hop ended without a `network` block, one
   `final_headers_missing` check per reason: `info` for `download`,
   `service_worker`, `from_cache` and `failed`, `warning` for `not_reported`
-  and `record_dropped` (a drop of any category while the request ran).
-  It follows at most 131,072 browser requests; header records of later ones
-  are counted as `final_headers_untracked`. A request with no header record
-  (any request of a metadata-only session) has no final block to miss and is
-  never counted there.
+  and `record_dropped` (a drop of any category while the request ran, or
+  reported within a second of its end, wherever in the store the drop's
+  record lies). Every browser request is followed. A request with no header
+  record (any request of a metadata-only session) has no final block to miss
+  and is never counted there.
 
 The Traffic footer shows the same counts for the loaded rows as one item,
 "N header gaps", whose breakdown lists each count with its reason, so the
@@ -2029,7 +2111,7 @@ footer stays one item however many reasons there are.
 sessions, provisional, network and response blocks over two redirect hops, a
 raw response with `Set-Cookie` and its status, out-of-order raw notifications,
 early hints, pseudo-headers, sharing, a 200 KiB block retained whole, the block
-limit and the session budget.
+limit, and 70 MiB of blocks with no session budget.
 It also drives sent and received cookie lists with blocked cookies, an
 unparsed `Set-Cookie`, sharing and late lists. `make native-probe-admission-check`
 drives the renderer cookie sink: disabled, metadata-only, writes, read
@@ -2092,14 +2174,16 @@ no values, no debugger.
   it a request start costs one atomic load and nothing is walked.
 - The renderer walks, for a request whose `request_initiated` record was
   admitted, on the document main thread and on each dedicated, shared and
-  service worker thread ([threads](#threads)), up to 32 workers with tables
-  per renderer. Worklets and the background loader thread have no tables and
+  service worker thread ([threads](#threads)), every worker with its own
+  tables. Worklets and the background loader thread have no tables and
   record `unsupported_thread`. A synchronous XHR's start is recorded and walked
   on its calling thread, not on the pool thread that sends it
   ([synchronous requests](#synchronous-requests)).
 - V8 flag `--reb-promise-stacks`, off by default everywhere including the
   packaged app, adds [promise registrations](#promise-registrations). The
   launcher adds it for `REB_NATIVE_PROMISE_STACKS=1` with request stacks on.
+  The app's start panel offers it as an option, and the launcher drops that
+  choice, with a launch log line, from a Brave that does not define the flag.
 
 ### `request_initiator_stack` (type 34)
 
@@ -2132,8 +2216,8 @@ frame and renderer `request_id`. Payload 128 bytes, little endian:
 | 2 `no_script` | No JavaScript or Wasm was on the stack: the parser, a preload, a worker's script or module loader, or a start the loader deferred |
 | 3 `unsupported_thread` | A thread with no tables: a worklet or the background loader thread. Version 1 and 2 producers also used it for workers. A synchronous request is walked on its calling thread ([synchronous requests](#synchronous-requests)) |
 | 4 `not_retained_artifact_unavailable` | Frames walked; Artifact category off or no artifact path |
-| 5 `not_retained_budget` | Frames walked; this thread already sent 1,024 stack artifacts in this configuration for requests, navigations, cookie writes and debugger observations, which share that thread's budget |
-| 6 `not_walked_thread_limit` | Version 3: nothing was walked, because 32 other workers in this renderer held stack tables ([threads](#threads)); the scope names the worker |
+| 5 `not_retained_budget` | Frames walked; this thread already sent 1,024 stack artifacts in this configuration. Written only by earlier producers, which capped each thread; current ones send every stack |
+| 6 `not_walked_thread_limit` | Version 3: nothing was walked, because 32 other workers in this renderer held stack tables. Written only by earlier producers, which gave tables to at most 32 workers; current ones give every worker its own. The scope names the worker |
 
 Flags: bit 0 the stack artifact was queued with this record; bit 1 frames were
 omitted; bit 2 the `await` chain reached 32 frames and may continue. Bit 3 in
@@ -2191,8 +2275,10 @@ the document main thread's. A worker's records carry its context ID as
 ### Threads
 
 Each thread with tables keeps its own frame buffer, digest, script, segment,
-task attribution and promise registration tables and its own budgets; only that
-thread's walks read or write them, so a walk takes no lock after its first.
+task attribution and promise registration tables; only that thread's walks
+read or write them, so a walk takes no lock after its first. Nothing counts
+the stacks a thread sends: every walked stack whose digest the thread does not
+remember is sent.
 
 - Naming. Blink names the document main thread's isolate at V8 initialization
   and each dedicated, shared and service worker's in
@@ -2203,7 +2289,7 @@ thread's walks read or write them, so a walk takes no lock after its first.
   The name is what `script_cookie` records carry (byte 6), so it exists without
   the provider too. Worklets, the background loader thread and the pool
   thread synchronous XHR uses are never named.
-- Tables. A named thread's tables (539,920 bytes) and Blink's buffer for V8's
+- Tables. A named thread's tables (361,712 bytes) and Blink's buffer for V8's
   frames (1,056 frames of 16 bytes, 16,896 bytes) are allocated by its first
   call that needs them while capture is active: a walk (a request start, a
   schedule or post with script running, a navigation, a cookie write, a
@@ -2212,27 +2298,27 @@ thread's walks read or write them, so a walk takes no lock after its first.
   whose `no_script` handle needs no tables (worker start schedules such tasks
   under `WorkerThread::lock_`). So a worker that does neither under an active
   configuration costs nothing. With `--reb-promise-stacks` the tables also
-  hold the 2,048-entry registration ring (114,688 bytes). Walks run from
+  hold the 2,048-entry registration ring (131,072 bytes). Walks run from
   script and receipts from message dispatch, after worker initialization and
   outside `WorkerThread::lock_`; the call that makes the tables takes the
   registry lock once to register them. Nothing else allocates.
-- Limit. At most 32 worker threads per renderer process have tables
-  (`kNativeStackThreadLimit`), so at most 17,818,112 bytes of worker tables
-  and buffers, or 21,488,128 with promise stacks; the document main thread is not counted. A worker that
-  walks while 32 others hold tables walks nothing: its requests record state
-  6 `not_walked_thread_limit` with its scope, its schedules and received
-  messages are not remembered, and one `request_stack_thread_limit` gap per
-  configuration counts the thread. Its place is taken by the first call that
-  makes tables after a worker's tables are freed.
+- Workers. Every worker that walks gets its own tables, however many a page
+  starts, so their memory grows with the workers (378,608 bytes each with
+  Blink's buffer, 509,680 with promise stacks), beside the several MiB each
+  worker's own isolate and global scope already take. Earlier producers gave
+  tables to at most 32 workers per renderer and recorded state 6 and a
+  `request_stack_thread_limit` gap for the rest.
 - Shutdown. `PerformShutdownOnWorkerThread` frees a worker's tables and Blink's
-  buffer and forgets its name and its place.
+  buffer and forgets its name.
 
 A browser refusal (`NativeStackArtifactRefused`) arrives on the transport's
 sequence for the record that created a stack artifact. Every refusal is either
 applied or covered, and a cover is counted; none is lost unseen. The order:
 
-1. Before `CaptureGeneratedArtifact` sends an artifact, the walk adds its
-   creator sequence, digest and budget to the thread's queued index and
+1. Before `CaptureGeneratedArtifact` sends an artifact, the walk stores its
+   digest with its creator sequence in the thread's digest table, and every
+   segment or registration naming that digest from then on, the creating one
+   and those that find it remembered, carries the same creator. It also
    stores one word, the creator sequence and the table's ordinal together,
    into the 8,192-slot owner ring with release. One word is one writer's
    pair, so two writers that claimed the same slot 8,192 claims apart replace
@@ -2242,8 +2328,7 @@ applied or covered, and a cover is counted; none is lost unseen. The order:
    step 1. Under the registry lock it goes to the table whose word holds its
    creator (read with acquire). When no word holds it (the slot was reused, or
    the pair did not fit), it goes to every table with a scope instead; each
-   looks the creator up in its own queued index, so only the owner acts on
-   it.
+   looks the creator up in its own entries, so only the owner acts on it.
 3. Each table's mailbox is a 256-entry single-producer, single-consumer ring
    that never overwrites: the producer reads the consumer's published tail with
    acquire and stores an entry only into a free slot (the entry as plain
@@ -2254,19 +2339,21 @@ applied or covered, and a cover is counted; none is lost unseen. The order:
 4. The owning thread drains at the start of its next walk: head with acquire,
    the entries below it copied, the tail published with release (only then
    can the producer reuse those slots), then the overflow flag exchanged.
-   Each found refusal refunds its budget, forgets its digest and, in one scan
-   of the segment and registration rings per drain however many arrived, stops
-   calling captured any segment or registration on that digest. An overflow
+   One scan of the digest table and the segment and registration rings finds
+   the digests the refused creators name and forgets them, and a second scan
+   of the rings stops calling captured any segment or registration on one of
+   those digests, however many refusals arrived. A segment copied from a
+   message carries no creator but is still found by its digest. An overflow
    instead forgets every digest, stops calling any remembered segment or
    registration captured, and counts a `request_stack_refusals_overflowed`
    gap.
 
-The queued index holds 4,096 entries, more than the three budgets' 3,072 that
-can be outstanding in one configuration (each refusal removes its entry and
-refunds its budget), so an entry is never displaced; it is cleared when the
-configuration changes, when an older configuration's refusals no longer
-matter. A refusal for a thread that has detached changes nothing: its
-segments are gone with it.
+Creators are renderer sequences, never reused in a process, and every entry is
+matched within its own configuration, so a late refusal from an older one
+matches nothing. When every entry naming a refused creator was already
+evicted, nothing the thread remembers claims that artifact, and the next
+identical stack is sent again anyway. A refusal for a thread that has
+detached changes nothing: its segments are gone with it.
 
 ### Stack artifact
 
@@ -2310,8 +2397,7 @@ synchronous ones in chain order; each async frame is one segment.
 Each thread remembers 256 digests it sent in the current configuration. A
 repeated stack sends no artifact. A digest that falls out of that table, or that
 the browser reports refused or lost (`NativeStackArtifactRefused`), is sent again,
-never dropped. Each thread sends at most 1,024 request stack artifacts per
-configuration; a refused attempt does not count.
+never dropped. No count limits what a thread sends.
 
 ### `script_identity` (type 35)
 
@@ -2340,16 +2426,16 @@ and Artifact gate.
 Flags: bit 0 `eval` or `new Function` script; bit 1 the source was queued as
 an artifact with this record as creator; bit 2 source longer than 16 MiB, not
 hashed; bit 3 source unavailable; bit 4 not retained: Artifact category off,
-content capture off, or the source budget is spent. Exactly one of bit 1, bit 2, bit 3, bit 4 or none
+content capture off, or no artifact URL (empty, or longer than the artifact
+header allows). Exactly one of bit 1, bit 2, bit 3, bit 4 or none
 (a Wasm module, never re-sent) holds. A digest is present unless bit 2 or 3.
 
 JavaScript sources are retained only in content capture
 (`--reb-capture-request-content`), so a Metadata only session keeps frames,
 script IDs, positions and digests but no script source; the browser refuses
 such an artifact from a renderer outside content capture. They are retained as
-kind 1 `javascript`, capture origin 13 `stack_script`, at most 64 MiB of
-source per renderer configuration, with
-the script URL, or the document URL for an inline script, as the artifact URL.
+kind 1 `javascript`, capture origin 13 `stack_script`, every script a stack
+names once per thread and configuration, with the script URL, or the document URL for an inline script, as the artifact URL.
 Wasm modules are not re-sent: the compile-time Wasm artifacts join by SHA-256.
 A network script the body tee retained also joins by SHA-256.
 
@@ -2361,7 +2447,7 @@ scripts even when the main isolate described the same script IDs.
 
 `get_request_stack` (`GET /api/request-stack?process_id=&request_id=`, the
 renderer identity) returns the newest stack record for that request with its
-frames, reading the bytes the [request index](request-index-v1.md#per-request-detail-reads)
+frames, reading the bytes the [request index](request-index-v2.md#per-request-detail-reads)
 names for it. `status` is `outside_scan`, not `not_recorded`, when the read did
 not reach them all; `coverage` says what was read:
 
@@ -2372,7 +2458,7 @@ not reach them all; `coverage` says what was read:
   at the function start position. The join ignores capture origin: the identity
   and every retained source hash the same UTF-8 text V8 compiled, so a network
   response body, the `stack_script` artifact retained during the walk, and the
-  [compiled script](native-compiled-scripts-v1.md) artifacts (`compiled_script`
+  [compiled script](native-compiled-scripts-v2.md) artifacts (`compiled_script`
   for inline, inserted and `blob:` scripts, `dynamic_javascript` for `eval` and
   `new Function` text) all resolve the frame. When several hold the same bytes,
   the session's newest is shown. `eval` and `new Function` frames resolve the
@@ -2404,10 +2490,11 @@ records.
   frame, and "Request initiator chain" from the request's initiator edges.
   `no_script` reads "Parser", or "Worker loader" for a worker; a worker stack
   says which worker kind started it, and `not_walked_thread_limit` says no
-  stack was walked because 32 other workers held tables. The Traffic table's
-  Initiator column reads "Worker script", "Worker loader" and "Worker, not
-  walked" for version 3 worker stacks. Budget notes name the thread's own
-  budget and which one: request stacks, scheduling stacks or promise
+  stack was walked because the recording browser held at most 32 workers'
+  tables. The Traffic table's Initiator column reads "Worker script", "Worker
+  loader" and "Worker, not walked" for version 3 worker stacks. A
+  `not_retained_budget` note says the recording browser capped stacks per
+  thread, and which kind: request stacks, scheduling stacks or promise
   registration stacks. Captured values are inserted as text.
 
 ### Hot path and bounds
@@ -2419,15 +2506,14 @@ records.
   SHA-256 of at most 18,480 bytes, one 320-byte record. First sightings add
   one artifact, and for each new script one record and one source copy.
   Draining routed refusals is two loads when none arrived; a drain that found
-  some does one scan of the 2,048-entry segment ring (and the registration
-  ring) however many it applies, plus a bounded index lookup per refusal.
-- Memory: 556,816 bytes per thread with tables (539,920 of tables, refusal
-  mailbox, queued index and recent posts, 16,896 of Blink's frame buffer), plus 114,688 for
+  some scans the 256-entry digest table and the 2,048-entry segment ring (and
+  the registration ring) twice however many it applies.
+- Memory: 378,608 bytes per thread with tables (361,712 of tables, refusal
+  mailbox and recent posts, 16,896 of Blink's frame buffer), plus 131,072 for
   the registration ring with `--reb-promise-stacks`. Allocated by the thread's
   first walk or message receipt while capture is active, never when it is
   named or by a schedule with no script, and freed when a
-  worker stops; at most 32 workers per renderer have them
-  ([threads](#threads)). The owner ring is 64 KiB of process-static storage,
+  worker stops ([threads](#threads)). The owner ring is 64 KiB of process-static storage,
   untouched until a stack artifact is queued.
 
 ### Validation
@@ -2437,7 +2523,8 @@ with the overlay, every state and version, stack scopes, the frame bounds and
 malformed records.
 `make native-probe-admission-check` drives the real renderer sink with a
 fixture provider: disabled, 150 and 5,000 frames, Wasm and `await` frames,
-repeated stacks, table eviction, budgets and script identity, and on a second
+repeated stacks, table eviction, 5,000 distinct stacks on one thread all sent,
+and script identity, and on a second
 thread a dedicated worker's own tables, scope, frame IDs and identities; that
 naming allocates nothing, a schedule or post with no script makes no tables,
 and a thread's first walk or message receipt makes them;
@@ -2576,9 +2663,8 @@ Its artifact is a version 3 (version 1 from earlier producers) stack artifact
 of the synchronous frames (total depth equal to recorded), kind 13, capture
 origin 12 `request_stack`, creator this record; scripts it names get
 `script_identity` children. Stacks share the thread's 256-digest table with
-request stacks, so a repeated scheduling site sends nothing; each thread sends
-at most 1,024 scheduling stacks and 1,024 registration stacks per
-configuration, and a refused attempt does not count.
+request stacks, so a repeated scheduling site sends nothing, and every new
+one is sent.
 
 #### Task segment
 
@@ -2589,7 +2675,7 @@ it.
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 1 | task kind: 1 to 9, and in version 3 also 10 to 12 |
-| 1 | 1 | state: 1 captured, 4 not retained (Artifact off, or the browser refused its artifact), 5 not retained (the thread's scheduling budget, or its registration budget for kind 9), 6 not recorded (kind 9 only), 7 `no_script` (version 3, not kind 9), 8 `origin_rejected` (version 3, kinds 10 to 12) |
+| 1 | 1 | state: 1 captured, 4 not retained (Artifact off, or the browser refused its artifact), 5 not retained (the thread's scheduling budget, or its registration budget for kind 9, written only by earlier producers), 6 not recorded (kind 9 only), 7 `no_script` (version 3, not kind 9), 8 `origin_rejected` (version 3, kinds 10 to 12) |
 | 2 | 1 | flags: bit 0 the walk stopped at its frame limit; bit 1, version 3 kind 9 in state 6 only, promise registration stacks were on but no registration was remembered |
 | 3 | 1 | version 3, kind 9 in state 1, 4 or 5: the registration (1 to 4, as in `async_task_stack`); else zero |
 | 4 | 4 | frames in its stack: 1 to 256, or 1 to 32 for a kind 9 registration; 0 in states 6, 7 and 8 |
@@ -2702,10 +2788,9 @@ inspector's delegate pointer. While capture is inactive the delegate's `active` 
 fails before V8 scans a frame or assigns an ID.
 
 Each registration in an active capture walks the innermost 32 frames, hashes
-at most 560 bytes and stores one 56-byte entry in the thread's 2,048-entry
+at most 560 bytes and stores one 64-byte entry in the thread's 2,048-entry
 registration ring keyed by the task ID; a new digest is sent once as an
-`async_task_stack` kind 9 record with its artifact, within the thread's
-registration budget. When a reaction runs, a request or schedule inside it
+`async_task_stack` kind 9 record with its artifact. When a reaction runs, a request or schedule inside it
 reads its entry: the chain's kind 9 segment then carries the registration and
 its stack (state 1, 4 or 5) instead of state 6. An entry is used only for its
 own task ID and configuration; a later registration in the same slot replaces
@@ -2718,7 +2803,8 @@ on each promise creation, `then` and reaction. In an active capture each user
 registration adds V8's own scan to the first user frame, which allocates a
 small vector per frame scanned as it does for DevTools, plus one walk of up to
 32 frames, one SHA-256 and one table entry, a few microseconds. The flag is
-therefore off by default, including in the packaged app. On each microtask
+therefore off by default, including in the packaged app, whose start panel
+can turn it on. On each microtask
 segment without a registration the Initiator tab says which applies: flag bit
 1 clear, promise registration stacks were off; set, they were on but the
 thread remembered no registration (a builtin registered it, capture was off
@@ -2792,8 +2878,8 @@ flag bit 1, else null). A microtask segment without its registration says
 whether promise registration stacks were off (and that
 `REB_NATIVE_PROMISE_STACKS=1` records them) or on with nothing remembered; an
 `origin_rejected` segment says its sender is not known; a `not_retained_budget`
-segment names its thread's scheduling budget, or its registration budget for
-a microtask.
+segment, from an earlier producer, names the recording browser's scheduling
+budget, or its registration budget for a microtask.
 
 ### Hot path and bounds
 
@@ -2835,7 +2921,8 @@ down before the page receives, a no-script post, cut and truncated ends
 carried apart, Network off) and promise registrations (flag off, tables made
 before the flag, the registration in the microtask segment and in the hop of
 a task scheduled in a reaction, dedupe, the 32-frame bound, an unknown
-reaction marked with promise stacks on, the budget and capture off, where an
+reaction marked with promise stacks on, 3,000 registrations all sent, and
+capture off, where an
 attached worker never makes its tables). The Mojo traits and `ShallowClone`
 bound are Chromium code no host harness compiles; the harness covers what the
 receiver does with their oversize marker. `make request-stack-wire-check` renders a worker stack with a
@@ -2879,5 +2966,4 @@ Still required before declaring this browser-ready:
    provenance, not a page script with the same ID; a `BroadcastChannel`
    message whose origin a test build corrupts reads `origin_rejected` with one
    `message_task_origin_rejected` gap; a page that starts 40 workers which
-   each `fetch` shows `Worker, not walked` for the workers past 32 and one
-   `request_stack_thread_limit` gap per such worker.
+   each `fetch` shows a worker stack for every one of them and no gap.

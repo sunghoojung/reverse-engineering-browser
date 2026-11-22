@@ -147,8 +147,8 @@ fn load(root: &Path, input: &Input) -> Result<Loaded> {
             if *byte_length > MAX_BYTES {
                 return Err(limit());
             }
-            let record = evidence::find_artifact_bounded(root, artifact_id, 8192, 8 * 1024 * 1024)
-                .map_err(|error| match error.status {
+            let record =
+                evidence::find_artifact(root, artifact_id).map_err(|error| match error.status {
                     404 => error.with_code(Code::TargetUnavailable),
                     408 => error.with_code(Code::Timeout),
                     _ => error,

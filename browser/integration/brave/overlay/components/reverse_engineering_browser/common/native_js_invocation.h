@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <type_traits>
 #include "native_probe_event.h"
@@ -17,17 +18,22 @@ namespace reb {
 // protocol/native-js-invocation-v1.md. The renderer copies no argument,
 // receiver, return or exception content: values keep only a kind, integer and
 // boolean low bits, a length and, under sensitive capture, a digest.
-inline constexpr std::size_t kNativeJsInvocationSiteLimit = 8;
-inline constexpr std::size_t kNativeJsInvocationSampleBudget = 256;
-inline constexpr std::size_t kNativeJsInvocationSiteSampleBudget = 64;
-inline constexpr std::size_t kNativeJsInvocationRequestBudget = 256;
+// Every call of an armed site is recorded; there is no call count. The site
+// table is bounded by the records' u8 site slot.
+inline constexpr std::size_t kNativeJsInvocationSiteLimit = 256;
 inline constexpr std::size_t kNativeJsInvocationArgumentLimit = 8;
 inline constexpr std::size_t kNativeJsInvocationSiteRecordSize = 44;
-inline constexpr std::size_t kNativeJsInvocationSitesFileLimit = 4096;
+// Holds 256 sites in their longest JSON form (about 340 bytes each).
+inline constexpr std::size_t kNativeJsInvocationSitesFileLimit = 128 * 1024;
+// Payload version 2 replaces version 1's sample indexes, which counted into
+// the removed per-configuration budgets, with u32 ordinals.
+inline constexpr std::uint16_t kNativeJsInvocationPayloadVersion = 2;
 inline constexpr std::size_t kNativeJsInvocationPayloadSize = 128;
 inline constexpr std::uint32_t kNativeJsInvocationDigestByteLimit = 1U << 20U;
 // The site record's shape byte. Dispatch sites use 1 and 2.
 inline constexpr std::uint8_t kNativeJsInvocationFunctionEntryShape = 3;
+// The site record's flags byte: the slot keeps its site but arms nothing.
+inline constexpr std::uint8_t kNativeJsInvocationSiteDisarmed = 1U << 0U;
 
 enum class NativeJsInvocationValueKind : std::uint8_t {
   kInteger = 1,
@@ -70,6 +76,9 @@ enum class NativeJsInvocationDigestEncoding : std::uint8_t { kNone = 0, kUtf8 = 
 enum class NativeJsInvocationSiteStatus : std::uint8_t {
   kCompiledBeforeArming = 1,
   kUnsupportedFunction = 2,
+  // V8 has no invocation ID left for the renderer; later calls are not
+  // reported.
+  kIdsExhausted = 3,
 };
 
 inline constexpr std::uint8_t kNativeJsInvocationParentUnknown = 1U << 0U;
@@ -104,15 +113,24 @@ struct NativeJsInvocationContext final {
 };
 using NativeJsInvocationContextProvider = NativeJsInvocationContext (*)() noexcept;
 
-// One armed function-entry site, keyed exactly like a dispatch site: SHA-256
-// over the script text as UTF-16LE code units, its UTF-16 length, and the
-// UTF-16 offset of the function's V8 start position.
+// One function-entry site, keyed exactly like a dispatch site: SHA-256 over
+// the script text as UTF-16LE code units, its UTF-16 length, and the UTF-16
+// offset of the function's V8 start position. A slot keeps its site for the
+// browser lifetime; `armed` is what a site file revision changes.
 struct NativeJsInvocationSite final {
   std::array<std::uint8_t, 32> source_sha256{};
   std::uint32_t source_length = 0;
   std::uint32_t anchor_offset = 0;
+  bool armed = true;
   friend bool operator==(const NativeJsInvocationSite&, const NativeJsInvocationSite&) = default;
 };
+
+[[nodiscard]] constexpr bool IsSameNativeJsInvocationSite(
+    const NativeJsInvocationSite& a,
+    const NativeJsInvocationSite& b) noexcept {
+  return a.source_sha256 == b.source_sha256 && a.source_length == b.source_length &&
+         a.anchor_offset == b.anchor_offset;
+}
 
 [[nodiscard]] constexpr bool IsValidNativeJsInvocationSite(
     const NativeJsInvocationSite& site) noexcept {
@@ -164,7 +182,7 @@ template <std::size_t N>
 }  // namespace native_js_invocation_detail
 
 struct NativeJsInvocationStartPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kNativeJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t site_slot = 0;
   std::uint8_t flags = 0;
@@ -174,8 +192,9 @@ struct NativeJsInvocationStartPayload final {
   std::uint32_t source_length = 0;
   std::uint32_t invocation_id = 0;
   std::uint32_t parent_invocation_id = 0;
-  std::uint16_t site_sample_index = 0;
-  std::uint16_t sample_index = 0;
+  // This start's 0-based ordinal among its site's starts in the renderer's
+  // configuration; a missing ordinal is a dropped start.
+  std::uint32_t site_ordinal = 0;
   std::array<std::uint8_t, kNativeJsInvocationArgumentLimit> argument_kinds{};
   std::array<std::uint32_t, kNativeJsInvocationArgumentLimit> argument_low32{};
   std::array<std::uint8_t, 32> source_sha256{};
@@ -190,6 +209,7 @@ static_assert(std::is_trivially_copyable_v<NativeJsInvocationStartPayload>);
 static_assert(std::has_unique_object_representations_v<NativeJsInvocationStartPayload>);
 static_assert(offsetof(NativeJsInvocationStartPayload, argument_count) == 6);
 static_assert(offsetof(NativeJsInvocationStartPayload, invocation_id) == 20);
+static_assert(offsetof(NativeJsInvocationStartPayload, site_ordinal) == 28);
 static_assert(offsetof(NativeJsInvocationStartPayload, argument_kinds) == 32);
 static_assert(offsetof(NativeJsInvocationStartPayload, argument_low32) == 40);
 static_assert(offsetof(NativeJsInvocationStartPayload, source_sha256) == 72);
@@ -200,12 +220,10 @@ static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 112);
     const NativeJsInvocationStartPayload& value) noexcept {
   using native_js_invocation_detail::ValidKind;
   using native_js_invocation_detail::ValidLowBits;
-  if (value.protocol_version != 1 || value.payload_size != 128 ||
-      value.site_slot >= kNativeJsInvocationSiteLimit ||
+  if (value.protocol_version != kNativeJsInvocationPayloadVersion || value.payload_size != 128 ||
       (value.flags & ~kNativeJsInvocationStartFlagMask) != 0 || value.script_id == 0 ||
       value.source_length == 0 || value.anchor_offset >= value.source_length ||
-      value.invocation_id == 0 || value.site_sample_index >= kNativeJsInvocationSiteSampleBudget ||
-      value.sample_index >= kNativeJsInvocationSampleBudget || value.document_id == 0)
+      value.invocation_id == 0 || value.document_id == 0)
     return false;
   if (value.parent_invocation_id != 0 && (value.parent_invocation_id >= value.invocation_id ||
                                           (value.flags & kNativeJsInvocationParentUnknown) != 0))
@@ -239,8 +257,7 @@ static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 112);
   Put(out, 16, value.source_length, 4);
   Put(out, 20, value.invocation_id, 4);
   Put(out, 24, value.parent_invocation_id, 4);
-  Put(out, 28, value.site_sample_index, 2);
-  Put(out, 30, value.sample_index, 2);
+  Put(out, 28, value.site_ordinal, 4);
   for (std::size_t i = 0; i < kNativeJsInvocationArgumentLimit; ++i) {
     Put(out, 32 + i, value.argument_kinds[i], 1);
     Put(out, 40 + 4 * i, value.argument_low32[i], 4);
@@ -253,7 +270,7 @@ static_assert(offsetof(NativeJsInvocationStartPayload, reserved) == 112);
 }
 
 struct NativeJsInvocationSettlePayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kNativeJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t site_slot = 0;
   std::uint8_t outcome = 0;
@@ -295,10 +312,9 @@ static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 72);
   const bool rejected =
       value.outcome == static_cast<std::uint8_t>(NativeJsInvocationOutcome::kRejected);
   const auto via = static_cast<Via>(value.via);
-  if (value.protocol_version != 1 || value.payload_size != 128 ||
-      value.site_slot >= kNativeJsInvocationSiteLimit || (!fulfilled && !rejected) ||
-      !native_js_invocation_detail::ValidKind(value.value_kind) || value.invocation_id == 0 ||
-      value.document_id == 0 || value.reserved0 != 0 ||
+  if (value.protocol_version != kNativeJsInvocationPayloadVersion || value.payload_size != 128 ||
+      (!fulfilled && !rejected) || !native_js_invocation_detail::ValidKind(value.value_kind) ||
+      value.invocation_id == 0 || value.document_id == 0 || value.reserved0 != 0 ||
       (value.flags & ~kNativeJsInvocationLossyUtf8) != 0)
     return false;
   if (via == Via::kSyncReturn  ? !fulfilled
@@ -370,13 +386,13 @@ static_assert(offsetof(NativeJsInvocationSettlePayload, reserved) == 72);
 }
 
 struct NativeJsInvocationRequestPayload final {
-  std::uint16_t protocol_version = 1;
+  std::uint16_t protocol_version = kNativeJsInvocationPayloadVersion;
   std::uint16_t payload_size = 128;
   std::uint8_t state = 0;
   std::array<std::byte, 3> reserved0{};
   std::uint32_t invocation_id = 0;
-  std::uint16_t sample_index = 0;
-  std::uint16_t reserved1 = 0;
+  // This request's 0-based ordinal among the configuration's request records.
+  std::uint32_t ordinal = 0;
   std::array<std::byte, 112> reserved{};
 };
 static_assert(sizeof(NativeJsInvocationRequestPayload) == 128);
@@ -385,7 +401,7 @@ static_assert(std::is_trivially_copyable_v<NativeJsInvocationRequestPayload>);
 static_assert(std::has_unique_object_representations_v<NativeJsInvocationRequestPayload>);
 static_assert(offsetof(NativeJsInvocationRequestPayload, state) == 4);
 static_assert(offsetof(NativeJsInvocationRequestPayload, invocation_id) == 8);
-static_assert(offsetof(NativeJsInvocationRequestPayload, sample_index) == 12);
+static_assert(offsetof(NativeJsInvocationRequestPayload, ordinal) == 12);
 static_assert(offsetof(NativeJsInvocationRequestPayload, reserved) == 16);
 
 [[nodiscard]] constexpr bool IsValidNativeJsInvocationRequestPayload(
@@ -394,9 +410,9 @@ static_assert(offsetof(NativeJsInvocationRequestPayload, reserved) == 16);
       value.state == static_cast<std::uint8_t>(NativeJsInvocationContextState::kInside);
   const bool unknown =
       value.state == static_cast<std::uint8_t>(NativeJsInvocationContextState::kUnknown);
-  return value.protocol_version == 1 && value.payload_size == 128 && (inside || unknown) &&
+  return value.protocol_version == kNativeJsInvocationPayloadVersion && value.payload_size == 128 &&
+         (inside || unknown) &&
          IsValidNativeJsInvocationContext(value.state, value.invocation_id) &&
-         value.sample_index < kNativeJsInvocationRequestBudget && value.reserved1 == 0 &&
          native_js_invocation_detail::AllZero(value.reserved0) &&
          native_js_invocation_detail::AllZero(value.reserved);
 }
@@ -410,8 +426,7 @@ static_assert(offsetof(NativeJsInvocationRequestPayload, reserved) == 16);
   Put(out, 4, value.state, 1);
   std::copy(value.reserved0.begin(), value.reserved0.end(), out.begin() + 5);
   Put(out, 8, value.invocation_id, 4);
-  Put(out, 12, value.sample_index, 2);
-  Put(out, 14, value.reserved1, 2);
+  Put(out, 12, value.ordinal, 4);
   std::copy(value.reserved.begin(), value.reserved.end(), out.begin() + 16);
   return out;
 }
@@ -434,7 +449,7 @@ static_assert(offsetof(NativeJsInvocationRequestPayload, reserved) == 16);
 }
 
 // Fixed 44-byte renderer site records, the dispatch site layout with shape 3:
-// sha256, length, anchor, shape, 3 zero bytes.
+// sha256, length, anchor, shape, flags (bit 0 disarmed), 2 zero bytes.
 [[nodiscard]] inline std::array<std::uint8_t, kNativeJsInvocationSiteRecordSize>
 EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
   std::array<std::uint8_t, kNativeJsInvocationSiteRecordSize> out{};
@@ -444,17 +459,19 @@ EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
     out[36 + i] = static_cast<std::uint8_t>((site.anchor_offset >> (8U * i)) & 255U);
   }
   out[40] = kNativeJsInvocationFunctionEntryShape;
+  out[41] = site.armed ? 0 : kNativeJsInvocationSiteDisarmed;
   return out;
 }
 
-// Decodes 1 to 8 records into out and returns the count, or 0 when any record
-// is malformed or a (source_sha256, anchor_offset) key repeats.
-[[nodiscard]] inline std::size_t DecodeNativeJsInvocationSites(
+// Decodes 1 to 256 records into out and returns the count, or nullopt when any
+// record is malformed or a (source_sha256, anchor_offset) key repeats. A
+// session that tracks functions but has armed none yet sends no records.
+[[nodiscard]] inline std::optional<std::size_t> DecodeNativeJsInvocationSites(
     std::span<const std::uint8_t> bytes,
     std::span<NativeJsInvocationSite, kNativeJsInvocationSiteLimit> out) noexcept {
-  if (bytes.empty() || bytes.size() % kNativeJsInvocationSiteRecordSize != 0 ||
+  if (bytes.size() % kNativeJsInvocationSiteRecordSize != 0 ||
       bytes.size() / kNativeJsInvocationSiteRecordSize > kNativeJsInvocationSiteLimit)
-    return 0;
+    return std::nullopt;
   const std::size_t count = bytes.size() / kNativeJsInvocationSiteRecordSize;
   for (std::size_t n = 0; n < count; ++n) {
     const auto record =
@@ -465,13 +482,15 @@ EncodeNativeJsInvocationSite(const NativeJsInvocationSite& site) noexcept {
       site.source_length |= static_cast<std::uint32_t>(record[32 + i]) << (8U * i);
       site.anchor_offset |= static_cast<std::uint32_t>(record[36 + i]) << (8U * i);
     }
-    if (record[40] != kNativeJsInvocationFunctionEntryShape || record[41] || record[42] ||
-        record[43] || !IsValidNativeJsInvocationSite(site))
-      return 0;
+    if (record[40] != kNativeJsInvocationFunctionEntryShape ||
+        (record[41] & ~kNativeJsInvocationSiteDisarmed) != 0 || record[42] || record[43] ||
+        !IsValidNativeJsInvocationSite(site))
+      return std::nullopt;
+    site.armed = record[41] == 0;
     for (std::size_t previous = 0; previous < n; ++previous)
       if (out[previous].source_sha256 == site.source_sha256 &&
           out[previous].anchor_offset == site.anchor_offset)
-        return 0;
+        return std::nullopt;
     out[n] = site;
   }
   return count;

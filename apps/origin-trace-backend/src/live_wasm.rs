@@ -24,16 +24,24 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use wasmparser::{
     BlockType, CompositeInnerType, Encoding, ExternalKind, Operator, Parser, Payload, TypeRef,
     ValType,
 };
 
-/// Same cap as `kNativeWasmDispatchSampleBudget`. Page script and a live call
-/// share one counter so neither stream grows a private budget.
-pub const DISPATCH_BUDGET: u32 = 16;
+/// Full samples per window, as `kNativeWasmDispatchSampleBudget`. Page script
+/// and a live call share one window so neither stream grows a private budget.
+pub const DISPATCH_BUDGET: u32 = 1024;
+/// Full samples of one function per window, the browser's default
+/// `kNativeWasmDefaultSamplesPerFunction`.
+pub const SAMPLES_PER_FUNCTION: u32 = 64;
+/// The sample window, as `kNativeWasmSampleWindowNs`. Each window starts the
+/// counts again, so recording paces instead of stopping for the attachment.
+const SAMPLE_WINDOW: Duration = Duration::from_secs(1);
+/// The last sample ordinal. `u32::MAX` is the native no-sample value.
+const LAST_SAMPLE_INDEX: u32 = u32::MAX - 1;
 /// A call that is still running after this many instructions did not return.
 /// The bound is what makes a non-terminating body observable in this peer.
 const STEP_LIMIT: u32 = 64;
@@ -302,8 +310,14 @@ pub struct Engine {
     memories: Vec<Memory>,
     attachment: Attachment,
     detached: bool,
+    /// Every sample this attachment kept; the next sample's ordinal.
     samples_used: u32,
     gaps: u32,
+    /// The open window's start, or none before the first record.
+    window_started: Option<Instant>,
+    window_samples: u32,
+    /// Samples of each function in the open window, by function index.
+    window_function_samples: Vec<u32>,
     observations: Vec<Value>,
     commands: u64,
     entries: u64,
@@ -509,6 +523,7 @@ impl Engine {
                 .then_some(u32::try_from(index).ok())
                 .flatten()
         });
+        let function_count = functions.len();
         Ok(Self {
             module: bytes.to_vec(),
             functions,
@@ -517,6 +532,9 @@ impl Engine {
             detached: false,
             samples_used: 0,
             gaps: 0,
+            window_started: None,
+            window_samples: 0,
+            window_function_samples: vec![0; function_count],
             observations: Vec::new(),
             commands: 0,
             entries: 0,
@@ -590,12 +608,36 @@ impl Engine {
         table_count: u32,
     ) -> Recorded {
         let identity = self.attachment.clone();
-        if self.samples_used >= DISPATCH_BUDGET {
+        let now = Instant::now();
+        if self
+            .window_started
+            .is_none_or(|started| now.duration_since(started) >= SAMPLE_WINDOW)
+        {
+            self.window_started = Some(now);
+            self.window_samples = 0;
+            self.window_function_samples.fill(0);
+        }
+        let function_samples = self
+            .window_function_samples
+            .get(function_index as usize)
+            .copied()
+            .unwrap_or(0);
+        // A full window wins, as in the renderer, which checks it before the
+        // per-function allowance.
+        let refusal =
+            if self.window_samples >= DISPATCH_BUDGET || self.samples_used > LAST_SAMPLE_INDEX {
+                Some("native_wasm_dispatch_budget_incomplete")
+            } else if function_samples >= SAMPLES_PER_FUNCTION {
+                Some("native_wasm_dispatch_function_budget_incomplete")
+            } else {
+                None
+            };
+        if let Some(reason) = refusal {
             self.gaps = self.gaps.saturating_add(1);
             self.push_observation(json!({
                 "source": source.as_str(),
                 "kind": "gap",
-                "reason": "native_wasm_dispatch_budget_incomplete",
+                "reason": reason,
                 "instance_id": dec(identity.instance_id),
                 "document_token_high": dec(identity.document_token_high),
                 "document_token_low": dec(identity.document_token_low),
@@ -613,6 +655,13 @@ impl Engine {
         }
         let sample = self.samples_used;
         self.samples_used += 1;
+        self.window_samples += 1;
+        if let Some(count) = self
+            .window_function_samples
+            .get_mut(function_index as usize)
+        {
+            *count += 1;
+        }
         self.push_observation(json!({
             "source": source.as_str(),
             "kind": "sample",
@@ -2318,21 +2367,41 @@ mod tests {
     }
 
     #[test]
-    fn the_seventeenth_sample_is_a_gap_for_either_source() {
+    fn a_spent_window_is_a_gap_for_either_source_and_the_next_window_records() {
         let mut engine = engine();
         let index = engine.br_table_function().unwrap();
-        for _ in 0..DISPATCH_BUDGET {
+        for _ in 0..SAMPLES_PER_FUNCTION {
             engine.run_page_script(index, &[Val::I32(0)]);
         }
-        assert_eq!(engine.samples_used(), DISPATCH_BUDGET);
+        assert_eq!(engine.samples_used(), SAMPLES_PER_FUNCTION);
         let (status, entered, _, recorded) = engine.call(index, &[Val::I32(0)], Source::LiveCall);
         assert_eq!(status, Status::Ok);
         assert!(entered);
         assert!(recorded.samples.is_empty() && recorded.gap);
-        assert_eq!(engine.samples_used(), DISPATCH_BUDGET);
+        assert_eq!(engine.samples_used(), SAMPLES_PER_FUNCTION);
         assert!(engine.observations.iter().any(|row| {
-            row["kind"] == "gap" && row["source"] == "live_call" && row["sample_index"].is_null()
+            row["kind"] == "gap"
+                && row["source"] == "live_call"
+                && row["reason"] == "native_wasm_dispatch_function_budget_incomplete"
+                && row["sample_index"].is_null()
         }));
+        // A second later the function records again, and its index is the
+        // attachment's next ordinal, not a restarted slot.
+        engine.window_started = engine
+            .window_started
+            .and_then(|started| started.checked_sub(SAMPLE_WINDOW));
+        let (_, _, _, recorded) = engine.call(index, &[Val::I32(0)], Source::LiveCall);
+        assert_eq!(recorded.samples, vec![SAMPLES_PER_FUNCTION]);
+        assert!(!recorded.gap);
+        // A full window refuses every function, before any allowance.
+        engine.window_samples = DISPATCH_BUDGET;
+        let (_, _, _, recorded) = engine.call(index, &[Val::I32(0)], Source::PageScript);
+        assert!(recorded.samples.is_empty() && recorded.gap);
+        assert_eq!(
+            engine.observations.last().unwrap()["reason"],
+            "native_wasm_dispatch_budget_incomplete"
+        );
+        crate::validation::schema("LiveWasmState", &engine.state_json(), 500).unwrap();
     }
 
     #[test]
@@ -2409,36 +2478,40 @@ mod tests {
     fn the_observation_window_drops_the_oldest_row_and_keeps_the_counters() {
         let mut engine = engine();
         let index = engine.br_table_function().unwrap();
-        for _ in 0..OBSERVATION_WINDOW + 1 {
+        // 64 samples, then 17 refusals of the same window: 81 rows.
+        for _ in 0..SAMPLES_PER_FUNCTION + 17 {
             engine.run_page_script(index, &[Val::I32(0)]);
         }
-        assert_eq!(engine.samples_used(), DISPATCH_BUDGET);
-        assert_eq!(engine.gaps, DISPATCH_BUDGET + 1);
+        assert_eq!(engine.samples_used(), SAMPLES_PER_FUNCTION);
+        assert_eq!(engine.gaps, 17);
         let state = engine.state_json();
         assert_eq!(state["observations_truncated"], true);
-        assert_eq!(state["dispatch_samples_used"], DISPATCH_BUDGET);
-        assert_eq!(state["dispatch_gaps"], DISPATCH_BUDGET + 1);
+        assert_eq!(state["dispatch_samples_used"], SAMPLES_PER_FUNCTION);
+        assert_eq!(state["dispatch_gaps"], 17);
         let observations = state["observations"].as_array().unwrap();
         assert_eq!(observations.len(), OBSERVATION_WINDOW);
         assert_eq!(observations[0]["kind"], "sample");
-        assert_eq!(observations[0]["sample_index"], 1);
+        assert_eq!(observations[0]["sample_index"], 49);
         let last = observations.last().unwrap();
         assert_eq!(last["kind"], "gap");
-        assert_eq!(last["reason"], "native_wasm_dispatch_budget_incomplete");
+        assert_eq!(
+            last["reason"],
+            "native_wasm_dispatch_function_budget_incomplete"
+        );
         assert!(last["sample_index"].is_null());
         assert!(observations.iter().all(|row| match row["kind"].as_str() {
             Some("sample") => row["reason"].is_null() && row["sample_index"].as_u64().is_some(),
             Some("gap") => {
-                row["reason"] == "native_wasm_dispatch_budget_incomplete"
+                row["reason"] == "native_wasm_dispatch_function_budget_incomplete"
                     && row["sample_index"].is_null()
             }
             _ => false,
         }));
-        assert!(
-            observations
-                .iter()
-                .all(|row| row["sample_index"].as_u64().is_none_or(|index| index < 16))
-        );
+        assert!(observations.iter().all(|row| {
+            row["sample_index"]
+                .as_u64()
+                .is_none_or(|index| index < u64::from(SAMPLES_PER_FUNCTION))
+        }));
         crate::validation::schema("LiveWasmState", &state, 500).unwrap();
     }
 

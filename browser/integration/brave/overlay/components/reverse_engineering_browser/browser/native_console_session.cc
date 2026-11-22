@@ -15,8 +15,10 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -70,7 +72,22 @@ struct Reply final {
                             base::WaitableEvent::InitialState::NOT_SIGNALED};
   void Fail(NativeConsoleStatus status, const char* message) {
     header.status = status;
+    header.type = NativeConsoleType::kUndefined;
+    header.flags = 0;
+    header.item_count = 0;
     payload = message;
+    header.payload_bytes = static_cast<std::uint32_t>(payload.size());
+    ready.Signal();
+  }
+  // Sends `payload` as it is. The record format names a payload with 32 bits,
+  // and that is the only size a reply is ever refused for.
+  void Send() {
+    if (payload.size() > kNativeConsoleRecordLimit) {
+      payload.clear();
+      Fail(NativeConsoleStatus::kMalformed,
+           "Result is larger than the 4 GiB a Console record can name");
+      return;
+    }
     header.payload_bytes = static_cast<std::uint32_t>(payload.size());
     ready.Signal();
   }
@@ -87,9 +104,30 @@ struct Target final {
   std::string label;
   std::string url;
   bool main_frame = false;
-  bool metadata_truncated = false;
   bool complete = false;
 };
+
+// One resource load in a target document, for the Console's activity view.
+// Metadata only, compact so retention is bounded by bytes, not by a count.
+struct Activity final {
+  std::uint64_t event_id = 0;
+  std::uint64_t document_id = 0;
+  std::int64_t resource_id = 0;
+  std::uint64_t after_request_id = 0;
+  std::string origin;
+  std::string method;
+  int status = 0;
+  int network_error = 0;
+  bool cached = false;
+  double time = 0;
+};
+
+// What the browser holds for an owner that has not read activity yet. The
+// Console reads a document's activity when asked, so this bounds browser
+// memory for a long session with busy pages; past it the oldest events go,
+// counted as dropped. The capture path records every load as evidence
+// regardless, so this view loses nothing the evidence keeps.
+constexpr std::size_t kActivityRetainedBytes = 64 * 1024 * 1024;
 
 // A Console `watch` on one document: whether to keep its rules, and the exact
 // origin and frame kind the browser itself reads from that document, so a
@@ -227,14 +265,17 @@ class Session final {
       return;
     }
     active_.store(true, std::memory_order_release);
-    const auto expires = std::chrono::steady_clock::now() + std::chrono::hours(1);
+    // A connected session has no lifetime: it waits for the owner's next
+    // request for as long as the owner keeps the socket, and ends when the
+    // owner closes it or breaks the protocol.
+    constexpr auto forever = NativeConsoleDeadline::max();
     // A record already being sent must keep moving; however large, it fails
     // only when it stalls this long.
     constexpr std::chrono::milliseconds stall(kNativeConsoleTransferMillis);
     std::uint64_t last_request = 0;
     for (;;) {
       NativeConsoleRequest request;
-      if (!NativeConsoleRead(socket.get(), NativeConsoleBytes(request), expires) ||
+      if (!NativeConsoleRead(socket.get(), NativeConsoleBytes(request), forever) ||
           !IsNativeConsoleRequest(request))
         break;
       // A Stop that crossed the answer to the request it names is spent.
@@ -246,8 +287,8 @@ class Session final {
       if (request.request_id <= last_request)
         break;
       last_request = request.request_id;
-      std::string source(request.source_bytes, '\0');
-      if (!NativeConsoleRead(socket.get(), std::as_writable_bytes(std::span(source)), stall))
+      std::string source;
+      if (!NativeConsoleReadPayload(socket.get(), request.source_bytes, stall, source))
         break;
       auto reply = std::make_shared<Reply>(request.request_id);
       const auto execute_before =
@@ -256,7 +297,7 @@ class Session final {
                         base::BindOnce(&Session::Dispatch, base::Unretained(this), request,
                                        std::move(source), execute_before, reply)))
         break;
-      if (!Await(socket.get(), ui, request, *reply, expires)) {
+      if (!Await(socket.get(), ui, request, *reply)) {
         active_.store(false, std::memory_order_release);
         // Nobody can read a later answer, so the command must not run on.
         ui->PostTask(FROM_HERE, base::BindOnce(&Session::Stop, base::Unretained(this),
@@ -279,18 +320,17 @@ class Session final {
   }
 
   // Waits for the reply to `request` for as long as the command runs, while
-  // listening for the owner's Stop. False when the session hour ends, the
-  // owner sends anything but a Stop for this request, or a Stop gets no reply
-  // in time: the exchange is then ambiguous and the session retires.
+  // listening for the owner's Stop. False when the owner sends anything but a
+  // Stop for this request, or a Stop gets no reply in time: the exchange is
+  // then ambiguous and the session retires.
   bool Await(int socket,
              const scoped_refptr<base::SingleThreadTaskRunner>& ui,
              const NativeConsoleRequest& request,
-             Reply& reply,
-             std::chrono::steady_clock::time_point expires) {
+             Reply& reply) {
     std::optional<std::chrono::steady_clock::time_point> stopping;
     while (!reply.ready.TimedWait(base::Milliseconds(50))) {
       const auto now = std::chrono::steady_clock::now();
-      if (now >= expires || (stopping && now >= *stopping))
+      if (stopping && now >= *stopping)
         return false;
       pollfd owner{socket, POLLIN, 0};
       const int ready = poll(&owner, 1, 0);
@@ -329,6 +369,7 @@ class Session final {
     documents_.clear();
     observers_.clear();
     activity_.clear();
+    activity_bytes_ = 0;
     // Losing the owner must not leave armed scripts running in new documents,
     // or kept watch rules arming them.
     NativeConsoleDocumentStartRegistry::Get().Clear();
@@ -353,8 +394,9 @@ class Session final {
 
   // One monotonic identity space for Console targets and document-start
   // records. A document that is not a current target still gets a stable
-  // nonsecret ID, remembered in a bounded table keyed by its exact generation.
-  // The lookup half of DocumentId: no assignment, no recycling.
+  // nonsecret ID, remembered keyed by its exact generation for as long as the
+  // document lives, so it is never relabeled.
+  // The lookup half of DocumentId: no assignment.
   std::uint64_t DocumentIdIfAssigned(content::RenderFrameHost* frame) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     if (!Eligible(frame))
@@ -363,35 +405,18 @@ class Session final {
       if (target.document.AsRenderFrameHostIfValid() == frame)
         return target.id;
     }
-    const auto token = frame->GetDocumentToken().value();
-    for (const auto& entry : documents_) {
-      if (entry.first == token)
-        return entry.second;
-    }
-    return 0;
+    const auto found = documents_.find(frame->GetDocumentToken().value());
+    return found == documents_.end() ? 0 : found->second;
   }
 
   std::uint64_t DocumentId(content::RenderFrameHost* frame) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-    if (!Eligible(frame))
+    if (const auto id = DocumentIdIfAssigned(frame))
+      return id;
+    if (!Eligible(frame) || !next_target_)
       return 0;
-    for (const auto& target : targets_) {
-      if (target.document.AsRenderFrameHostIfValid() == frame)
-        return target.id;
-    }
-    const auto token = frame->GetDocumentToken().value();
-    for (const auto& entry : documents_) {
-      if (entry.first == token)
-        return entry.second;
-    }
-    if (!next_target_)
-      return 0;
-    // Recycling the oldest entry only relabels a long-idle document that
-    // reports again; it never drops or rewrites a retained record.
-    if (documents_.size() >= 256)
-      documents_.pop_front();
     const auto id = next_target_++;
-    documents_.emplace_back(token, id);
+    documents_.emplace(frame->GetDocumentToken().value(), id);
     return id;
   }
 
@@ -402,7 +427,8 @@ class Session final {
                 std::shared_ptr<Reply> reply) {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     if (!active_.load(std::memory_order_acquire) || base::TimeTicks::Now() >= deadline) {
-      reply->Fail(NativeConsoleStatus::kTimeout, "Console session expired before dispatch");
+      reply->Fail(NativeConsoleStatus::kTimeout,
+                  "Console session ended, or the browser was too busy to dispatch the command");
       return;
     }
     if (request.operation == NativeConsoleOperation::kTargets) {
@@ -439,27 +465,48 @@ class Session final {
       return;
     }
     if (operation && *operation == "traffic") {
+      // This document's oldest events, a page at a time, and whether more
+      // remain for the owner to read at once.
       base::ListValue events;
+      std::size_t used = 0;
+      bool more = false;
       for (auto iterator = activity_.begin(); iterator != activity_.end();) {
-        if (*iterator->FindString("document_id") == base::NumberToString(request.target_id)) {
-          events.Append(std::move(*iterator));
-          iterator = activity_.erase(iterator);
-        } else
+        if (iterator->document_id != request.target_id) {
           ++iterator;
+          continue;
+        }
+        if (used >= kNativeConsolePageBytes) {
+          more = true;
+          break;
+        }
+        used += ActivityBytes(*iterator);
+        activity_bytes_ -= ActivityBytes(*iterator);
+        events.Append(base::DictValue()
+                          .Set("event_id", base::NumberToString(iterator->event_id))
+                          .Set("document_id", base::NumberToString(iterator->document_id))
+                          .Set("resource_id", base::NumberToString(iterator->resource_id))
+                          .Set("after_request_id", base::NumberToString(iterator->after_request_id))
+                          .Set("origin", std::move(iterator->origin))
+                          .Set("method", std::move(iterator->method))
+                          .Set("status", iterator->status)
+                          .Set("network_error", iterator->network_error)
+                          .Set("cached", iterator->cached)
+                          .Set("time", iterator->time)
+                          .Set("operation", "resource_load_complete"));
+        iterator = activity_.erase(iterator);
       }
       base::DictValue value;
       value.Set("status", "ok");
       value.Set("events", std::move(events));
       value.Set("dropped", static_cast<int>(activity_drops_));
+      value.Set("more", more);
       activity_drops_ = 0;
-      if (!base::JSONWriter::Write(value, &reply->payload) ||
-          reply->payload.size() > kNativeConsoleReplyLimit) {
-        reply->Fail(NativeConsoleStatus::kMalformed, "Activity exceeded bounded transport");
+      if (!base::JSONWriter::Write(value, &reply->payload)) {
+        reply->Fail(NativeConsoleStatus::kMalformed, "Activity could not be serialized");
         return;
       }
       reply->header.type = NativeConsoleType::kRuntime;
-      reply->header.payload_bytes = static_cast<std::uint32_t>(reply->payload.size());
-      reply->ready.Signal();
+      reply->Send();
       return;
     }
     if (request.operation == NativeConsoleOperation::kEvaluate ||
@@ -479,7 +526,7 @@ class Session final {
         base::BindOnce(
             [](Session* session, std::optional<WatchCommand> watch,
                content::WeakDocumentPtr document, std::shared_ptr<Reply> result,
-               std::uint16_t status, std::uint16_t type, const std::string& text, bool truncated) {
+               std::uint16_t status, std::uint16_t type, const std::string& text) {
               if (!document.AsRenderFrameHostIfValid()) {
                 result->Fail(NativeConsoleStatus::kStaleTarget,
                              "Document changed during execution; side effects may have occurred");
@@ -490,9 +537,6 @@ class Session final {
               if (status > static_cast<std::uint16_t>(NativeConsoleStatus::kStopped) ||
                   type > static_cast<std::uint16_t>(NativeConsoleType::kRuntime) ||
                   type == static_cast<std::uint16_t>(NativeConsoleType::kTargets) ||
-                  text.size() > (type == static_cast<std::uint16_t>(NativeConsoleType::kRuntime)
-                                     ? kNativeConsoleReplyLimit
-                                     : kNativeConsoleTextLimit) ||
                   !base::IsStringUTF8(text)) {
                 result->Fail(NativeConsoleStatus::kMalformed,
                              "Renderer returned an invalid console result");
@@ -500,19 +544,17 @@ class Session final {
               }
               result->header.status = static_cast<NativeConsoleStatus>(status);
               result->header.type = static_cast<NativeConsoleType>(type);
-              result->header.flags = truncated ? kNativeConsoleTruncated : 0;
               result->payload =
                   watch && status == static_cast<std::uint16_t>(NativeConsoleStatus::kOk) &&
                           type == static_cast<std::uint16_t>(NativeConsoleType::kRuntime)
                       ? session->Watched(*watch, text)
                       : text;
-              result->header.payload_bytes = static_cast<std::uint32_t>(result->payload.size());
-              result->ready.Signal();
+              result->Send();
             },
             base::Unretained(this), std::move(watch), weak_document, reply),
         static_cast<std::uint16_t>(NativeConsoleStatus::kDisconnected),
         static_cast<std::uint16_t>(NativeConsoleType::kUndefined),
-        std::string("Renderer disconnected"), false);
+        std::string("Renderer disconnected"));
     const auto expires = static_cast<std::uint64_t>(deadline.since_origin().InMicroseconds());
     if (request.operation == NativeConsoleOperation::kRuntime)
       selected->agent->Runtime(selected->renderer_document, request.request_id, expires, source,
@@ -555,7 +597,7 @@ class Session final {
       result->Set("text", reply_text);
       // A reply that cannot say what is kept keeps nothing, so the owner never
       // misses a scope the browser holds.
-      if (!base::JSONWriter::Write(*result, &reply) || reply.size() > kNativeConsoleReplyLimit) {
+      if (!base::JSONWriter::Write(*result, &reply) || reply.size() > kNativeConsoleRecordLimit) {
         reply = text;
         scope = nullptr;
       }
@@ -573,24 +615,19 @@ class Session final {
       activity_drops_ =
           std::min(2147483647u, activity_drops_ + static_cast<unsigned>(activity_.size()));
       activity_.clear();
+      activity_bytes_ = 0;
     }
     std::erase_if(observers_,
                   [](const auto& observer) { return observer->web_contents() == nullptr; });
+    // Every eligible document in every renderer process is listed.
     bool truncated = false;
-    std::size_t processes = 0;
+    std::set<base::UnguessableToken> live_documents;
     for (auto iterator = content::RenderProcessHost::AllHostsIterator(); !iterator.IsAtEnd();
          iterator.Advance()) {
-      if (++processes > kNativeConsoleTargetLimit) {
-        truncated = true;
-        break;
-      }
       iterator.GetCurrentValue()->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
         if (!Eligible(frame))
           return;
-        if (targets_.size() == kNativeConsoleTargetLimit) {
-          truncated = true;
-          return;
-        }
+        live_documents.insert(frame->GetDocumentToken().value());
         Target target;
         // Keep an ID only while its exact weak document is still alive. A
         // navigation/reload can reuse the frame host, URL and title, but cannot
@@ -612,37 +649,40 @@ class Session final {
         }
         target.document = frame->GetWeakDocumentPtr();
         auto* contents = content::WebContents::FromRenderFrameHost(frame);
-        if (contents && observers_.size() < kNativeConsoleTargetLimit &&
+        if (contents &&
             std::none_of(observers_.begin(), observers_.end(), [&](const auto& observer) {
               return observer->web_contents() == contents;
             }))
           observers_.push_back(std::make_unique<ConsoleActivity>(
               contents, base::BindRepeating(&Session::CaptureActivity, base::Unretained(this))));
+        // The whole origin, URL, frame name and title: the record carries
+        // whatever the browser holds.
         target.origin = frame->GetLastCommittedOrigin().Serialize();
         target.main_frame = frame->GetParentOrOuterDocument() == nullptr;
-        const auto& url = frame->GetLastCommittedURL().spec();
-        const auto& frame_name = frame->GetFrameName();
-        auto name = frame_name.substr(0, 48);
-        while (!name.empty() && !base::IsStringUTF8(name))
-          name.pop_back();
-        target.url = url.substr(0, 512);
-        target.metadata_truncated = url.size() > 512 || name.size() < frame_name.size() ||
-                                    (contents && contents->GetTitle().size() > 64);
+        target.url = frame->GetLastCommittedURL().spec();
+        const auto& name = frame->GetFrameName();
         target.label =
             (target.main_frame ? "top #" : "frame #") + base::NumberToString(target.id) +
-            (target.main_frame || name.empty() ? "" : " " + name) + " · " +
-            (contents ? base::UTF16ToUTF8(contents->GetTitle().substr(0, 64)) : std::string());
+            (target.main_frame || name.empty() || !base::IsStringUTF8(name) ? "" : " " + name) +
+            " · " + (contents ? base::UTF16ToUTF8(contents->GetTitle()) : std::string());
         frame->GetRemoteAssociatedInterfaces()->GetInterface(&target.agent);
         target.agent->BindControl(target.control.BindNewPipeAndPassReceiver());
         targets_.push_back(std::move(target));
       });
     }
+    // A document that is gone can never report again, so its identity is
+    // released here; one still alive keeps its id however long it lives.
+    std::erase_if(documents_,
+                  [&](const auto& entry) { return !live_documents.contains(entry.first); });
     if (live) {
       const auto before = activity_.size();
-      std::erase_if(activity_, [this](const auto& event) {
-        return std::none_of(targets_.begin(), targets_.end(), [&](const Target& target) {
-          return *event.FindString("document_id") == base::NumberToString(target.id);
-        });
+      std::erase_if(activity_, [this](const Activity& event) {
+        const bool gone =
+            std::none_of(targets_.begin(), targets_.end(),
+                         [&](const Target& target) { return event.document_id == target.id; });
+        if (gone)
+          activity_bytes_ -= ActivityBytes(event);
+        return gone;
       });
       activity_drops_ =
           std::min(2147483647u, activity_drops_ + static_cast<unsigned>(before - activity_.size()));
@@ -686,30 +726,21 @@ class Session final {
         reply->header.flags |= kNativeConsoleTruncated;
         continue;
       }
+      // Each record is followed by its strings, whole. A title is UTF-16 the
+      // browser converts, so every string here is already valid UTF-8.
       NativeConsoleTarget record;
       record.id = target.id;
-      const std::size_t size = std::min(target.origin.size(), record.origin.size());
-      record.origin_bytes = static_cast<std::uint16_t>(size);
-      record.flags =
-          (target.origin.size() > size || target.metadata_truncated ? kNativeConsoleTruncated : 0) |
-          (target.main_frame ? 2 : 0);
-      base::span(record.origin).first(size).copy_from(base::span(target.origin).first(size));
-      auto copy = [&](const std::string& text, auto& buffer, std::uint16_t& bytes) {
-        auto bounded = text.substr(0, buffer.size());
-        while (!bounded.empty() && !base::IsStringUTF8(bounded))
-          bounded.pop_back();
-        bytes = static_cast<std::uint16_t>(bounded.size());
-        base::span(buffer).first(bounded.size()).copy_from(base::span(bounded));
-        if (bounded.size() < text.size())
-          record.flags |= kNativeConsoleTruncated;
-      };
-      copy(target.label, record.label, record.label_bytes);
-      copy(target.url, record.url, record.url_bytes);
+      record.origin_bytes = static_cast<std::uint32_t>(target.origin.size());
+      record.label_bytes = static_cast<std::uint32_t>(target.label.size());
+      record.url_bytes = static_cast<std::uint32_t>(target.url.size());
+      record.flags = target.main_frame ? kNativeConsoleTargetTopFrame : 0;
       reply->payload.append(reinterpret_cast<const char*>(&record), sizeof(record));
+      reply->payload += target.origin;
+      reply->payload += target.label;
+      reply->payload += target.url;
       ++reply->header.item_count;
     }
-    reply->header.payload_bytes = static_cast<std::uint32_t>(reply->payload.size());
-    reply->ready.Signal();
+    reply->Send();
   }
 
   void DocumentStart(const std::string& source, std::shared_ptr<Reply> reply) {
@@ -730,12 +761,22 @@ class Session final {
     base::DictValue result;
     if (!operation) {
       result = failure("Malformed document-start command");
-    } else if (*operation == "arm") {
+    } else if (*operation == "arm" || *operation == "add") {
       const auto* scripts = command->FindList("scripts");
       std::string error;
       if (command->size() != 2 || !scripts)
-        result = failure("arm takes exactly operation and scripts");
-      else if (!registry.Arm(*scripts, error))
+        result = failure(*operation + " takes exactly operation and scripts");
+      else if (!(*operation == "arm" ? registry.Arm(*scripts, error)
+                                     : registry.Add(*scripts, error)))
+        result = failure(error);
+      else
+        result = registry.State(0);
+    } else if (*operation == "remove") {
+      const auto* ids = command->FindList("script_ids");
+      std::string error;
+      if (command->size() != 2 || !ids)
+        result = failure("remove takes exactly operation and script_ids");
+      else if (!registry.Remove(*ids, error))
         result = failure(error);
       else
         result = registry.State(0);
@@ -756,16 +797,13 @@ class Session final {
     } else {
       result = failure("Unknown document-start operation");
     }
-    if (!base::JSONWriter::Write(result, &reply->payload) ||
-        reply->payload.size() > kNativeConsoleDocumentStartReplyLimit) {
+    if (!base::JSONWriter::Write(result, &reply->payload)) {
       reply->payload.clear();
-      reply->Fail(NativeConsoleStatus::kMalformed,
-                  "Document-start result exceeded bounded transport");
+      reply->Fail(NativeConsoleStatus::kMalformed, "Document-start result could not be serialized");
       return;
     }
     reply->header.type = NativeConsoleType::kDocumentStart;
-    reply->header.payload_bytes = static_cast<std::uint32_t>(reply->payload.size());
-    reply->ready.Signal();
+    reply->Send();
   }
 
   void CaptureActivity(content::RenderFrameHost* frame,
@@ -776,30 +814,36 @@ class Session final {
       if (target.document.AsRenderFrameHostIfValid() != frame)
         continue;
       auto origin = url::Origin::Create(info.final_url).Serialize();
-      if (origin.size() > 256 || origin == "null")
+      if (origin == "null")
         return;
-      if (activity_.size() == 64) {
+      Activity event{.event_id = next_activity_++,
+                     .document_id = target.id,
+                     .resource_id = info.request_id,
+                     .after_request_id = last_evaluation_,
+                     .origin = std::move(origin),
+                     .method = info.method,
+                     .status = info.http_status_code,
+                     .network_error = info.net_error,
+                     .cached = info.was_cached,
+                     .time = base::Time::Now().InMillisecondsFSinceUnixEpoch()};
+      const auto bytes = ActivityBytes(event);
+      while (!activity_.empty() && activity_bytes_ + bytes > kActivityRetainedBytes) {
+        activity_bytes_ -= ActivityBytes(activity_.front());
         activity_.pop_front();
         if (activity_drops_ < 2147483647)
           ++activity_drops_;
       }
-      activity_.push_back(base::DictValue()
-                              .Set("event_id", base::NumberToString(next_activity_++))
-                              .Set("document_id", base::NumberToString(target.id))
-                              .Set("resource_id", base::NumberToString(info.request_id))
-                              .Set("after_request_id", base::NumberToString(last_evaluation_))
-                              .Set("origin", origin)
-                              .Set("method", info.method.substr(0, 16))
-                              .Set("status", info.http_status_code)
-                              .Set("network_error", info.net_error)
-                              .Set("cached", info.was_cached)
-                              .Set("time", base::Time::Now().InMillisecondsFSinceUnixEpoch())
-                              .Set("operation", "resource_load_complete"));
+      activity_bytes_ += bytes;
+      activity_.push_back(std::move(event));
       break;
     }
   }
+  static std::size_t ActivityBytes(const Activity& event) {
+    return sizeof(Activity) + event.origin.size() + event.method.size();
+  }
   std::vector<std::unique_ptr<ConsoleActivity>> observers_;
-  std::deque<base::DictValue> activity_;
+  std::deque<Activity> activity_;
+  std::size_t activity_bytes_ = 0;
   std::uint64_t next_activity_ = 1;
   std::uint64_t last_evaluation_ = 0;
   unsigned activity_drops_ = 0;
@@ -807,8 +851,9 @@ class Session final {
   // Metadata and weak document references only; no V8 objects are retained.
   base::FilePath user_data_dir_;
   std::vector<Target> targets_;
-  // Exact document generations only; recycled oldest-first and never published.
-  std::deque<std::pair<base::UnguessableToken, std::uint64_t>> documents_;
+  // Exact document generations only, never published. Pruned when List
+  // finds the document gone.
+  std::map<base::UnguessableToken, std::uint64_t> documents_;
   std::uint64_t next_target_ = 1;
   // Kept watch scope serials; never 0.
   std::uint64_t next_scope_ = 1;

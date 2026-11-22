@@ -27,10 +27,6 @@
 namespace reb {
 
 inline constexpr std::string_view kNativeConsoleDocumentStartHexDigits = "0123456789abcdef";
-// The rule fields are identities, not content: an origin is at most a host and
-// port, and a path prefix names one literal place in it.
-inline constexpr std::size_t kNativeConsoleDocumentStartOriginLimit = 256;
-inline constexpr std::size_t kNativeConsoleDocumentStartPathLimit = 256;
 inline constexpr std::uint16_t kNativeConsoleDocumentStartTopFrame = 1;
 inline constexpr std::uint16_t kNativeConsoleDocumentStartChildFrame = 2;
 
@@ -54,11 +50,10 @@ struct NativeConsoleDocumentStartScript final {
 
 // The encoded set crosses to every renderer as one read-only shared memory
 // region, so each process maps the same pages instead of copying the set.
-// Neither the number of scripts nor their size has a budget: an arm command is
-// one Console payload, so the transport bounds the set. Layout: this header,
-// then per script one record header followed by its origin, path prefix and
-// source bytes, with no padding. Every length is checked against the region
-// before it is read.
+// Neither the number of scripts nor the size of a script, an origin or a path
+// prefix has a budget. Layout: this header, then per script one record header
+// followed by its origin, path prefix and source bytes, with no padding. Every
+// length is checked against the region before it is read.
 inline constexpr std::uint32_t kNativeConsoleDocumentStartSetMagic = 0x53444552;
 
 struct NativeConsoleDocumentStartSetHeader final {
@@ -69,14 +64,15 @@ struct NativeConsoleDocumentStartSetHeader final {
   std::uint64_t bytes = 0;
 };
 
+// The set lives only in one browser session's memory and is rebuilt by every
+// arm, so its layout is not a stored format: it changes with the browser.
 struct NativeConsoleDocumentStartRecordHeader final {
   std::uint64_t script_id = 0;
   std::uint32_t source_bytes = 0;
-  std::uint16_t origin_bytes = 0;
-  std::uint16_t path_bytes = 0;
+  std::uint32_t origin_bytes = 0;
+  std::uint32_t path_bytes = 0;
   std::uint16_t frame_flags = 0;
   std::uint16_t reserved = 0;
-  std::uint32_t reserved_tail = 0;
 };
 
 static_assert(sizeof(NativeConsoleDocumentStartSetHeader) == 16);
@@ -84,29 +80,42 @@ static_assert(sizeof(NativeConsoleDocumentStartRecordHeader) == 24);
 static_assert(std::is_trivially_copyable_v<NativeConsoleDocumentStartSetHeader>);
 static_assert(std::is_trivially_copyable_v<NativeConsoleDocumentStartRecordHeader>);
 
-// Snippet output is one string per record. Reading an object would require
-// touching page-controlled property access, so `report` accepts only
-// primitives; a snippet that wants structure formats its own text. A document
-// may report any number of records, so a longer value is reported in parts
-// rather than lost: one record keeps the same 8192-byte prefix a Console
-// result does, and says that it is truncated.
-inline constexpr std::size_t kNativeConsoleDocumentStartReportLimit = kNativeConsoleTextLimit;
-// The browser keeps this much reported text and evicts the oldest records past
-// it with a visible drop count. A read returns every retained record after its
-// cursor that fits one reply, so a reader polling at the panel's pace drains
-// it long before eviction.
-inline constexpr std::size_t kNativeConsoleDocumentStartRetainedBytes = kNativeConsolePayloadLimit;
-// Half of one reply may list the armed set, so the other half always carries
-// output. A set whose listing would not fit is refused at arming.
-inline constexpr std::size_t kNativeConsoleDocumentStartListingLimit =
-    kNativeConsoleDocumentStartReplyLimit / 2;
-// A snippet runs until it returns. Clearing the set, arming a new one, or
-// ending the session stops one still running in any renderer, through the same
-// IO-thread Stop a Console command uses. Commands are named by the owner's
-// request ids, which count up from 1, and an injection by its set's generation
-// with this bit set, so a Console Stop never ends an injection and a Clear
-// never ends a command.
+// Snippet output is one string per record, kept whole however long. Reading an
+// object would require touching page-controlled property access, so `report`
+// accepts only primitives; a snippet that wants structure formats its own
+// text.
+//
+// The browser keeps reported records until a reader has had them, and the one
+// bound is what it holds for readers that stop reading: past this many bytes
+// the oldest records go, counted as dropped. A Console connection reads the
+// output continuously, a page at a time, so a connected reader is never
+// behind by this much. Without the bound, a page reporting in a loop with no
+// reader would grow the browser process until it is killed, losing every
+// record at once.
+inline constexpr std::size_t kNativeConsoleDocumentStartRetainedBytes = 64 * 1024 * 1024;
+// A snippet runs until it returns. Removing its script, clearing the set,
+// arming a new one, or ending the session stops one still running in any
+// renderer, through the same IO-thread Stop a Console command uses. Commands
+// are named by the owner's request ids, which count up from 1, and an
+// injection by its script id with the Stop bit set, so a Console Stop never
+// ends an injection and a document-start Stop never ends a command. With the
+// Below bit too, a Stop names every injection whose script id is lower than
+// the rest of it: ids only grow, so that ends a whole replaced or cleared set
+// at once and never a script armed after it.
 inline constexpr std::uint64_t kNativeConsoleDocumentStartStopBit = std::uint64_t{1} << 63;
+inline constexpr std::uint64_t kNativeConsoleDocumentStartStopBelowBit = std::uint64_t{1} << 62;
+
+// Whether a Stop for `stop_id` ends the execution that began as `running`.
+[[nodiscard]] inline constexpr bool NativeConsoleStopNames(std::uint64_t stop_id,
+                                                           std::uint64_t running) noexcept {
+  constexpr auto kBoth = kNativeConsoleDocumentStartStopBit | kNativeConsoleDocumentStartStopBelowBit;
+  if (stop_id == 0 || running == 0)
+    return false;
+  if (stop_id == running)
+    return true;
+  return (stop_id & kBoth) == kBoth && (running & kBoth) == kNativeConsoleDocumentStartStopBit &&
+         (running & ~kBoth) < (stop_id & ~kBoth);
+}
 
 // Why a record exists. The agent needs the gap kinds, not only the snippet's
 // own output, to tell "the snippet said nothing" from "nothing ran".
@@ -140,9 +149,9 @@ enum class NativeConsoleDocumentStartRecord : std::uint32_t {
 
 namespace native_console_document_start_detail {
 
-// Shortest-form UTF-8 without NUL, surrogates or over-long encodings. Bounded
-// text crosses Mojo and JSON, so an invalid sequence must be refused at arming
-// rather than truncated into a different string later.
+// Shortest-form UTF-8 without NUL, surrogates or over-long encodings. The text
+// crosses Mojo and JSON, so an invalid sequence must be refused at arming
+// rather than replaced into a different string later.
 [[nodiscard]] inline constexpr bool Utf8(std::string_view text) noexcept {
   std::size_t index = 0;
   while (index < text.size()) {
@@ -332,7 +341,7 @@ namespace native_console_document_start_detail {
   } else {
     return false;
   }
-  if (host.empty() || host.size() > 255)
+  if (host.empty())
     return false;
   std::string_view port;
   bool has_port = false;
@@ -390,7 +399,7 @@ namespace native_console_document_start_detail {
 [[nodiscard]] inline bool IsValidNativeConsoleDocumentStartPath(std::string_view path) noexcept {
   if (path.empty())
     return true;
-  if (path.front() != '/' || path.size() > kNativeConsoleDocumentStartPathLimit)
+  if (path.front() != '/')
     return false;
   for (char character : path) {
     const auto value = static_cast<unsigned char>(character);
@@ -402,8 +411,9 @@ namespace native_console_document_start_detail {
 
 [[nodiscard]] inline bool IsValidNativeConsoleDocumentStartRule(
     const NativeConsoleDocumentStartRule& rule) noexcept {
-  if (rule.origin.empty() || rule.origin.size() > kNativeConsoleDocumentStartOriginLimit ||
-      rule.path.size() > kNativeConsoleDocumentStartPathLimit)
+  // The lengths are only the set record's own: each crosses as 32 bits.
+  if (rule.origin.empty() || rule.origin.size() > std::numeric_limits<std::uint32_t>::max() ||
+      rule.path.size() > std::numeric_limits<std::uint32_t>::max())
     return false;
   if (rule.frame_flags != kNativeConsoleDocumentStartTopFrame &&
       rule.frame_flags != kNativeConsoleDocumentStartChildFrame)
@@ -490,8 +500,8 @@ namespace native_console_document_start_detail {
     NativeConsoleDocumentStartRecordHeader record;
     record.script_id = script.script_id;
     record.source_bytes = static_cast<std::uint32_t>(script.source.size());
-    record.origin_bytes = static_cast<std::uint16_t>(script.rule.origin.size());
-    record.path_bytes = static_cast<std::uint16_t>(script.rule.path.size());
+    record.origin_bytes = static_cast<std::uint32_t>(script.rule.origin.size());
+    record.path_bytes = static_cast<std::uint32_t>(script.rule.path.size());
     record.frame_flags = script.rule.frame_flags;
     put(std::as_bytes(std::span(&record, 1)));
     put(std::as_bytes(std::span(script.rule.origin)));
@@ -537,7 +547,6 @@ namespace native_console_document_start_detail {
   for (std::uint32_t index = 0; index < header.count; ++index) {
     NativeConsoleDocumentStartRecordHeader record;
     if (!take(std::as_writable_bytes(std::span(&record, 1))) || record.reserved != 0 ||
-        record.reserved_tail != 0 ||
         source.size() - offset <
             std::uint64_t{record.origin_bytes} + record.path_bytes + record.source_bytes) {
       out.clear();

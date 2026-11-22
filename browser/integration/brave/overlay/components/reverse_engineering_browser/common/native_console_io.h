@@ -9,9 +9,12 @@
 #include <chrono>
 #include <cstddef>
 #include <span>
+#include <string>
 
 namespace reb {
 
+// NativeConsoleDeadline::max() waits for as long as it takes: an idle Console
+// session has no lifetime, and its owner ends it by closing the socket.
 using NativeConsoleDeadline = std::chrono::steady_clock::time_point;
 [[nodiscard]] bool NativeConsoleRead(int socket,
                                      std::span<std::byte> bytes,
@@ -27,6 +30,13 @@ using NativeConsoleDeadline = std::chrono::steady_clock::time_point;
 [[nodiscard]] bool NativeConsoleWrite(int socket,
                                       std::span<const std::byte> bytes,
                                       std::chrono::milliseconds stall) noexcept;
+// Reads a `bytes`-long payload into `out` under the same stall rule. `out`
+// grows with the bytes that actually arrived, so a header's length alone
+// allocates nothing.
+[[nodiscard]] bool NativeConsoleReadPayload(int socket,
+                                            std::size_t bytes,
+                                            std::chrono::milliseconds stall,
+                                            std::string& out);
 
 template <typename T>
 [[nodiscard]] auto NativeConsoleBytes(T& value) noexcept {

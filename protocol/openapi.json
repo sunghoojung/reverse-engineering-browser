@@ -144,7 +144,7 @@
         "start"
       ],
       "title": "Start a live capture session",
-      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content_budget_mib (1 to 4096, default 256) sets how much unique request content is kept. response_body_budget_mib (1 to 16384, default 512) sets how much unique response content is kept, and response_media also keeps element images, audio, video and fonts; both need request_content. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and response bodies. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
+      "description": "Starts a new visibly labeled live capture session with named capture options: the capture browser, an Origin Trace window and every helper. When it is ready this connection moves to that session; other endpoint changes still retire the connection. Starting again first ends the session this connection started. An option left unset takes the Origin Trace app's default, false turns a default off, and none is inherited from the environment. On by default: request_content, canvas_images, request_stacks (the call stack that started each renderer request, get_request_stack), wasm_dispatch, wasm_call_indirect, quiet, document_start (permits document-start Console scripts; arming is a separate Console action), and js_invocation_digests with armed sites. Off by default: browser_internal, extension_traffic and fresh_profile. Allowing this tool is the researcher's consent to that sensitive capture, so a start needs no confirm_sensitive_capture. Agent sessions share one browser profile of their own, so a sign-in carries over; fresh_profile starts signed out in a new profile. The session runs until it is ended; duration_seconds sets a limit. request_content keeps request paths, queries and bodies, request and response headers including Cookie, Set-Cookie and Authorization, each request's cookies, and every response body, media and fonts included, each kept whole. js_invocation_sites (a site file) or js_invocation_saved_sites (the agent sessions' own saved set) arm invocation sites. wasm_samples_per_function, wasm_samples_per_indirect_site, wasm_function_allow, wasm_function_deny and wasm_module_allowlist restrict the 16-record Wasm sample budgets and require wasm_dispatch or wasm_call_indirect. The result options and get_session_context capture_options show what the session runs with. With url, the result reports capture_observed; false means nothing was recorded, so end the session. Next: get_session_context, then get_session_summary; get_native_console for the Console. Start only for an authorized target. session_action, listed with this tool, acts only on a session this connection started. reset_wasm_sample_budgets restarts both Wasm sample indexes without a new session.",
       "input": {
         "$ref": "#/components/schemas/LiveSessionStart"
       },
@@ -196,7 +196,7 @@
       "get": {
         "operationId": "get_session_context",
         "summary": "Get compact session context and capture options",
-        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, content_limits with the content session's budgets and media choice, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and the 16 newest retained Wasm artifacts of the whole manifest with a count of the rest (list_artifacts with kind=wasm pages them), without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
+        "description": "First read for a connected agent. Reports live_admission (ready means live capture with its broker connected), capture mode, the health instance id, capture_options (what the launcher passed to Brave: request_content, canvas_images, document_start permitted or not_permitted, and js_invocation state, count and digests), and the 16 newest retained Wasm artifacts of the whole manifest with a count of the rest (list_artifacts with kind=wasm pages them), without fetching bytecode. Next: get_session_summary. Debugger fields are fixed retirement values since CDP was removed. The HTTP API cannot know client effects flags: allow_effects is null; reb-api mcp fills its actual invocation admission. live_admission is availability, not authorization. Cache the context with its own ETag.",
         "tags": [
           "health"
         ],
@@ -312,7 +312,7 @@
       "get": {
         "operationId": "get_session_summary",
         "summary": "Summarize what this capture recorded",
-        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (budget, block limit, pool, channel, URL or kind) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed, not_reported or record_dropped), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the whole session; while the backend first indexes a long store it covers what is indexed, and a summary_indexing check says how far. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
+        "description": "One call that answers whether a capture worked: capture state, event counts by type, the busiest frames with their event types, session IDs, gap counts and named gap reasons, artifact counts by kind with the newest digests, and checks that name what looks wrong, such as a full sampling budget, Wasm compiled without a stored module, each artifact capture failure reason, or request bodies, full targets, header blocks and cookie lists a content session did not retain (block limit, pool, channel, URL, the receiver's free-disk reserve, or an older browser's budget, size limit or media exception) with counts, network header blocks and cookie lists that arrived for requests no longer tracked (network_headers_unattributed), requests that ended with only provisional headers (final_headers_missing, one check per reason: download, service_worker, from_cache, failed, not_reported or record_dropped), counted browser-internal exclusions, requests without a browser tab, and every request's response body case (retained, or why not: served by a service worker, reused from the memory cache, 304, redirected, aborted, cancelled, empty and the rest). Call it after get_session_context and again after an action. Counts, identifiers and origin labels only: no payloads, source, URLs paths or bodies. Covers the whole session; while the backend first indexes a long store it covers what is indexed, and a summary_indexing check says how far. Use get_events filters (type, frame_id, request_id) to read the records behind a count.",
         "tags": [
           "health"
         ],
@@ -34719,50 +34719,6 @@
                 "type": "boolean",
                 "description": "Request paths, queries, headers and bodies, and response bodies, are retained (request_target, request_headers, response_headers and response_body events, request_body, header and response_body artifacts)."
               },
-              "content_limits": {
-                "type": [
-                  "object",
-                  "null"
-                ],
-                "additionalProperties": false,
-                "required": [
-                  "version",
-                  "request_content_budget_mib",
-                  "response_body_budget_mib",
-                  "response_media"
-                ],
-                "description": "Version 1 of the limits a content session runs with, named as the LiveSessionStart options: set by the app's start panel, the start options or the launcher's REB_REQUEST_CONTENT_BUDGET_MIB, REB_RESPONSE_BODY_BUDGET_MIB and REB_CAPTURE_RESPONSE_MEDIA. Null when request_content is false or the backend is not live. Not required: a backend from before this object omits it, which a reader treats as not reported; every backend that knows it reports it.",
-                "properties": {
-                  "version": {
-                    "const": 1
-                  },
-                  "request_content_budget_mib": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "minimum": 1,
-                    "maximum": 4096,
-                    "description": "MiB of unique request bodies and full targets this session keeps. Null when the launcher did not name it."
-                  },
-                  "response_body_budget_mib": {
-                    "type": [
-                      "integer",
-                      "null"
-                    ],
-                    "minimum": 1,
-                    "maximum": 16384,
-                    "description": "MiB of unique response bodies this session keeps. Null when the launcher did not name it."
-                  },
-                  "response_media": {
-                    "type": [
-                      "boolean",
-                      "null"
-                    ],
-                    "description": "Element images, audio, video and fonts are kept too, against the response body budget. Null when the launcher did not name the choice."
-                  }
-                }
-              },
               "canvas_images": {
                 "type": "boolean"
               },
@@ -42737,6 +42693,7 @@
                 "not_captured_artifact_unavailable",
                 "not_captured_transfer_refused",
                 "not_captured_session_budget",
+                "not_captured_disk_reserve",
                 "malformed",
                 "source_artifact",
                 "no_record",
@@ -43433,6 +43390,7 @@
                           "not_captured_artifact_unavailable",
                           "not_captured_transfer_refused",
                           "not_captured_session_budget",
+                          "not_captured_disk_reserve",
                           "malformed",
                           "source_artifact",
                           "no_record",
@@ -43539,22 +43497,6 @@
                 "lists": {
                   "$ref": "#/components/schemas/Uint64String",
                   "description": "network_headers_unattributed: cookie lists that arrived for a request no longer tracked."
-                },
-                "budget_mib": {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "minimum": 1,
-                  "description": "On a request_content_not_retained check for a session budget: the budget in force in MiB, as get_session_context capture_options.content_limits reports it, or null when this backend does not know it."
-                },
-                "retained_bytes": {
-                  "$ref": "#/components/schemas/Uint64String",
-                  "description": "On a session budget check: the unique bytes of that budget's artifacts (request_body and request_target, or response_body) in the indexed manifest, identical content counted once as the browser charges it."
-                },
-                "retained_complete": {
-                  "type": "boolean",
-                  "description": "False while the backend is still indexing the manifest, so retained_bytes is a lower bound."
                 }
               }
             }
@@ -44428,24 +44370,7 @@
           },
           "request_content": {
             "type": "boolean",
-            "description": "Retain request paths, queries and bodies (at most 16 MiB each, 256 MiB of unique content per session unless request_content_budget_mib) as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus response bodies (at most 16 MiB each, 512 MiB of unique content per session; element images, audio, video and fonts are skipped) as response_body events and artifacts, and request and response headers (at most 64 MiB of blocks per session) as request_headers and response_headers events and artifacts. Sensitive capture, on by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 256 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits. Off, Network capture still records each body's length, type and digest."
-          },
-          "request_content_budget_mib": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 4096,
-            "description": "MiB of unique request bodies and full targets this content session retains, default 256. Identical bytes are stored once; a request past the budget keeps its length, type and digest and names the refusal. Requires request_content."
-          },
-          "response_body_budget_mib": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 16384,
-            "description": "MiB of unique response bodies this content session retains, default 512. A response past the budget keeps its length, type and digest. Requires request_content."
-          },
-          "response_media": {
-            "type": "boolean",
-            "default": false,
-            "description": "Also retain the images, audio, video and fonts that page elements load, which content sessions otherwise skip. They count against response_body_budget_mib and can hold sensitive page content. Requires request_content, so it is sensitive capture behind confirm_sensitive_capture."
+            "description": "Retain request paths, queries and bodies as request_target events, request_target artifacts for targets past the 116-byte prefix, and request_body artifacts, plus every response body, element images, audio, video and fonts included, as response_body events and artifacts, and request and response headers as request_headers and response_headers events and artifacts. Every body is kept whole, at any length; the artifact receiver refuses only what would leave less free disk than its reserve, and names that refusal. Sensitive capture, on by default for a confirmed start (start_live_session always is; reb-api session start with --confirm-sensitive-capture) when category_mask holds 256 and 1024. Set to true through the CLI, it requires confirm_sensitive_capture and those category bits. Off, Network capture still records each body's length, type and digest."
           },
           "request_stacks": {
             "type": "boolean",

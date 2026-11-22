@@ -149,26 +149,31 @@ frames. Losing the connection reports every open stream as `io_error`.
 
 ## Limits and backpressure
 
-Defaults are:
+No artifact is too large and no session store runs out of budget. What is
+bounded is memory in flight and free disk:
 
-- 16 MiB per artifact;
-- 32 MiB in-flight pool for response tees and request content. A stream holds
-  its pending data frame of at most 64 KiB plus frames the writer has not yet
-  sent; each frame returns its share when the writer drops it. The pool bounds
-  bytes in flight, not bodies, and a declared Content-Length reserves nothing;
-- 288 queued whole frames or stream openings, 4,096 queued data frames, and
-  32 MiB of queued browser content; end, abort and checkpoint frames always
-  queue so an admitted stream can be closed;
-- 128 open streams per receiver connection;
-- 256 MiB of immutable blobs per session store;
+- 32 MiB in-flight pool for everything the browser has queued: response tees,
+  request content, header blocks and renderer content. A stream holds its
+  pending data frame of at most 64 KiB plus frames the writer has not yet sent;
+  each frame returns its share when the writer drops it. The pool bounds bytes
+  in flight, not bodies, and a declared Content-Length reserves nothing. It is
+  the writer queue's only bound; end, abort and checkpoint frames always queue
+  so an admitted stream can be closed. Streams stop at three quarters of the
+  pool, leaving the rest for content that already arrived whole, and wait
+  until a sixteenth of the pool drains below that mark;
+- 256 MiB renderer credit for compiled script sources and Wasm modules the
+  browser still holds ([native compiled scripts](../../protocol/native-compiled-scripts-v2.md#limits));
+- the receiver's free-disk reserve, 4 GiB by default
+  ([disk reserve](../../services/artifact-receiver/README.md#disk-reserve));
 - 8 KiB source URL;
 - 255-byte MIME type;
 - 64 KiB streaming copy, hashing and stream data chunk;
 - 2 MiB maximum UI content response and 20,000 rendered lines.
 
 Canvas data URLs use the 2 MiB UI limit as their capture limit so accepted
-images are always available as complete base64 content. Other artifact kinds
-retain the 16 MiB transfer limit.
+images are always available as complete base64 content. The Wasm observation,
+guest, runtime buffer and stack paths keep a 16 MiB limit with records of their
+own. Network bodies, compiled script sources and Wasm modules have none.
 
 The receiver validates declared sizes before it allocates metadata or reads
 content. Content is streamed to a temporary file while SHA-256 is computed, so
@@ -176,17 +181,18 @@ receiver memory does not scale with artifact size. A completed temporary file
 is atomically renamed into the blob directory. The manifest is published only
 after the blob is durable enough for the local development contract.
 
-When a limit is exceeded, the receiver rejects the frame and increments a
-visible status counter. It does not truncate original evidence. The
+When the receiver refuses a frame, for invalid metadata, a sensitive artifact
+it may not keep, a conflict or the disk reserve, it increments a visible
+status counter. It does not truncate original evidence. The
 browser-process bridge must treat rejection as artifact-unavailable evidence
 and emit a small gap or failure event through the normal event path.
 
-After a header passes validation and matches the authenticated session, its
-declared lengths are bounded. Socket mode then discards the rest of a rejected
-frame, at most `max(16 MiB, configured artifact limit)` of content, before
+After a header passes validation and matches the authenticated session, its URL
+and MIME type lengths are bounded and its content may be any length. Socket mode then reads through the rest of a
+rejected frame, at any declared size and without holding it, before
 acknowledging, so the connection stays at a frame boundary and carries the next
-frame. An invalid header, a session mismatch, a truncated stream or a larger
-declared body leaves the stream unsynchronized; the receiver acknowledges and
+frame. An invalid header, a session mismatch or a truncated stream leaves the
+stream unsynchronized; the receiver acknowledges and
 closes that connection, then keeps listening for a reconnect. The
 standard-input receiver stops after any rejected frame, because without an
 acknowledgment its exit status is the producer's only signal. The live session
@@ -197,14 +203,37 @@ running.
 The browser writer's lifecycle is explicit: connected, reconnecting, lost,
 stopping or idle. A rejection acknowledgment keeps the connection. A failed
 connection is replaced within five attempts over about three seconds. During
-those attempts, new transfers wait in the same bounded queue and capture
-admission stays open. Before writing a frame, the writer replaces an idle
+those attempts, new transfers wait in the queue, bounded by the in-flight pool,
+and capture admission stays open. Before writing a frame, the writer replaces an idle
 connection the receiver has already closed. If a send fails, the writer reads an
 acknowledgment the receiver wrote before closing, so the real status is
 recorded instead of an I/O error. When reconnection fails, every queued transfer
 is reported as `artifact_capture_failed` with `io_error`, and the browser emits
 one `artifact_channel_lost` gap. Capture admission refuses artifacts from then
 on, and that gap marks where they stop.
+
+### Throughput
+
+The writer sends one frame and waits for its acknowledgment before the next,
+so each 64 KiB data frame costs one round trip plus the receiver's work on it,
+and a stream that outruns that waits on the pool. Two choices keep the round
+trip short without a limit on what is captured:
+
+- Both ends ask for 1 MiB socket buffers. macOS starts a local stream socket
+  with 8 KiB, which would split each frame into eight writes, each waking both
+  processes. The pool still charges every byte until its acknowledgment, so the
+  buffers add no memory it does not bound.
+- The receiver hashes with the ARMv8 SHA-256 instructions every Apple silicon
+  processor has, about 22 microseconds per 64 KiB frame instead of about 258
+  with the portable rounds, which other processors still use.
+
+Measured on an Apple M5 Pro with loopback fixtures, a content session keeps
+96 MiB responses at about 300 MiB/s, where the same Brave without a session
+reads them at about 480 MiB/s, and the browser process grows by about 30 MiB,
+the pool. The receiver is then idle most of the time: what remains is the
+round trip itself. Sending data frames before earlier ones are acknowledged
+would shorten it further, at the cost of reporting refusals that arrive after
+later frames already left.
 
 ## Storage layout
 

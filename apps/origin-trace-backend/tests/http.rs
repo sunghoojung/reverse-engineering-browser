@@ -127,32 +127,24 @@ fn specification() -> Value {
     serde_json::from_str(include_str!("../../../protocol/openapi.json")).unwrap()
 }
 
-/// content_limits is a versioned addition: the schema must not require what an
-/// older backend omits, and an unnamed media choice is null, as the budgets are.
+/// Content sessions have no budget or media choice, so capture_options names
+/// none, and start_live_session takes none.
 #[test]
-fn session_context_content_limits_schema_matches_its_prose() {
+fn removed_content_limits_are_absent_from_the_schema() {
     let spec = specification();
-    let options = &spec["components"]["schemas"]["SessionContext"]["properties"]["capture_options"];
-    let required = options["required"].as_array().unwrap();
-    assert!(!required.contains(&json!("content_limits")), "{required:?}");
-    let limits = &options["properties"]["content_limits"];
-    assert!(
-        limits["description"]
-            .as_str()
-            .unwrap()
-            .contains("a backend from before this object omits it")
-    );
-    assert_eq!(limits["required"].as_array().unwrap().len(), 4);
+    let schemas = &spec["components"]["schemas"];
+    let options = &schemas["SessionContext"]["properties"]["capture_options"];
+    assert!(options["properties"].get("content_limits").is_none());
     for field in [
         "request_content_budget_mib",
         "response_body_budget_mib",
         "response_media",
     ] {
         assert!(
-            limits["properties"][field]["type"]
-                .as_array()
-                .is_some_and(|types| types.contains(&json!("null"))),
-            "{field} may be unknown"
+            schemas["LiveSessionStart"]["properties"]
+                .get(field)
+                .is_none(),
+            "{field}"
         );
     }
 }
@@ -2293,18 +2285,17 @@ async fn session_summary_counts_every_capture_refusal_by_reason() {
         .unwrap();
     assert_eq!(response["reason"], "not_captured_session_budget");
     assert_eq!(response["count"], "2");
-    // The remedy is the start panel control for the next session, never an
-    // environment variable; this backend is not live, so the budget is unknown.
+    // An older browser's budget: named as such, with no control to raise.
     let message = response["message"].as_str().unwrap();
     assert!(
-        message.contains(
-            "Raise Response body budget in the start panel (New Live Session…) for the next session"
-        ),
+        message.contains("a limit of the browser that recorded this session"),
         "{message}"
     );
-    assert!(!message.contains("REB_"), "{message}");
-    assert!(response["budget_mib"].is_null());
-    assert_eq!(response["retained_bytes"], "0");
+    assert!(
+        !message.contains("REB_") && !message.contains("Raise"),
+        "{message}"
+    );
+    assert!(response.get("budget_mib").is_none());
     assert_eq!(
         summary["checks"]
             .as_array()
@@ -8682,6 +8673,10 @@ async fn source_format_lays_out_json_and_javascript_bodies_with_anchors() {
     assert_contract_response(server.get(&named).await, "get", route, 400).await;
 }
 
+// This stand-in and invocation_site_worker take the request with cat, never
+// the shell's read: read takes a pipe one byte per system call, which for a
+// 4 MiB source request came close to the 5 s worker deadline and passed it on
+// a loaded machine.
 #[cfg(unix)]
 fn source_facts_worker(directory: &Path, tail: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -8689,7 +8684,7 @@ fn source_facts_worker(directory: &Path, tail: &str) -> std::path::PathBuf {
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"source_facts\"'*) ;; *) exit 2;; esac\n{tail}\n"
+            "#!/bin/sh\nrequest=$(/bin/cat)\ncase \"$request\" in *'\"operation\":\"source_facts\"'*) ;; *) exit 2;; esac\n{tail}\n"
         ),
     )
     .unwrap();
@@ -11669,7 +11664,7 @@ fn invocation_site_worker(directory: &Path) -> std::path::PathBuf {
     std::fs::write(
         &worker,
         format!(
-            "#!/bin/sh\nIFS= read -r request\ncase \"$request\" in *'\"operation\":\"invocation_site\"'*) ;; *) exit 2;; esac\nkey=$(printf '%s' \"$request\" | /usr/bin/sed -n 's/.*\"byte_offset\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$key\" ] || key=name\nexec /bin/cat '{}/reply-'\"$key\"'.json'\n",
+            "#!/bin/sh\nrequest=$(/bin/cat)\ncase \"$request\" in *'\"operation\":\"invocation_site\"'*) ;; *) exit 2;; esac\nkey=$(printf '%s' \"$request\" | /usr/bin/sed -n 's/.*\"byte_offset\":\\([0-9]*\\).*/\\1/p')\n[ -n \"$key\" ] || key=name\nexec /bin/cat '{}/reply-'\"$key\"'.json'\n",
             directory.display()
         ),
     )

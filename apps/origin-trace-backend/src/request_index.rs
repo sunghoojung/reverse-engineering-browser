@@ -1081,6 +1081,7 @@ fn canonical(value: &Value, nonzero: bool) -> Option<u64> {
 /// Port of `decodeResponseBodyRecord`; the C++ core and the Python validator
 /// share its rules (protocol/native-network-v3.md `response_body`).
 fn decode_response_body(event: &Value) -> Option<BodyRecord> {
+    // Versions 1 and 2 kept at most this much of a body.
     const CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
     let payload = event["payload"].as_str()?;
     let (sequence, parent) = (
@@ -1125,13 +1126,15 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
     let mut halves = content_type.splitn(2, |byte| *byte == b'/');
     let well_typed = !typed
         || matches!((halves.next(), halves.next()), (Some(kind), Some(sub)) if token(kind) && token(sub));
-    // Version 2 adds bit 7, snapshots withheld by a byte bound.
+    // Version 2 adds bit 7, snapshots withheld by a byte bound. Version 3
+    // keeps every body whole and every media type.
     let version = u16_at(0);
-    if !(version == 1 || version == 2)
+    let limited = version < 3;
+    if !(1..=3).contains(&version)
         || u16_at(2) != 128
         || u16_at(30) != 0
-        || !(1..=12).contains(&state)
-        || flags & !(if version == 2 { 0xff } else { 0x7f }) != 0
+        || !(1..=13).contains(&state)
+        || flags & !(if version == 1 { 0x7f } else { 0xff }) != 0
         || type_length > 64
         || typed != (type_length != 0)
         || bytes[64 + usize::from(type_length.min(64))..]
@@ -1151,7 +1154,11 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
         return None;
     }
     let retained = captured != 0;
-    let whole = body.min(CAPTURE_BYTES);
+    let whole = if limited {
+        body.min(CAPTURE_BYTES)
+    } else {
+        body
+    };
     if captured > body
         || (artifact != 0) != retained
         || digest.iter().any(|byte| *byte != 0) != retained
@@ -1163,10 +1170,13 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
     }
     let valid = match state {
         1 => body != 0 && captured == body,
-        2 => body > CAPTURE_BYTES && captured == CAPTURE_BYTES,
+        2 => limited && body > CAPTURE_BYTES && captured == CAPTURE_BYTES,
         3 => body != 0 && captured == whole,
         4 | 5 => !retained || captured == whole,
-        6..=9 => body == 0,
+        6..=8 => body == 0,
+        9 => limited && body == 0,
+        12 => limited && !retained,
+        13 => !limited && !retained,
         _ => !retained,
     };
     valid.then(|| BodyRecord {
@@ -1179,7 +1189,7 @@ fn decode_response_body(event: &Value) -> Option<BodyRecord> {
         sha256: retained.then(|| hex::encode(digest)),
     })
 }
-const BODY_STATES: [&str; 12] = [
+const BODY_STATES: [&str; 13] = [
     "captured",
     "captured_truncated",
     "partial",
@@ -1192,6 +1202,7 @@ const BODY_STATES: [&str; 12] = [
     "not_captured_artifact_unavailable",
     "not_captured_transfer_refused",
     "not_captured_session_budget",
+    "not_captured_disk_reserve",
 ];
 /// Why a row's response body is or is not retained: its final response's
 /// newest `response_body` record, else why there is none. Port of

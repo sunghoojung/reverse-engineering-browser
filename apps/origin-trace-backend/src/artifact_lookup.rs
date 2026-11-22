@@ -4,11 +4,10 @@
 //! duplicate row fails every lookup until the manifest is rewritten, as a
 //! complete scan of it would. Content integrity is never cached: a caller
 //! verifies the bytes a record names when it reads them. The index also
-//! counts the manifest for the session summary: records by kind, and the
-//! unique bytes each content budget's artifacts hold. JavaScript artifacts are
-//! also kept by content digest and URL, so a saved invocation site finds the
-//! retained versions of its script in a manifest of any length, and Wasm
-//! modules by ID, so the session context lists the newest of them.
+//! counts the manifest's records by kind for the session summary. JavaScript
+//! artifacts are kept by content digest and URL, so a saved invocation site
+//! finds the retained versions of its script in a manifest of any length,
+//! and Wasm modules by ID, so the session context lists the newest of them.
 use crate::{
     error::{Error, Result},
     evidence,
@@ -35,12 +34,6 @@ const SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS artifacts_order ON artifacts(start);
     CREATE TABLE IF NOT EXISTS damage(id INTEGER PRIMARY KEY CHECK (id = 0), message TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS kinds(kind TEXT PRIMARY KEY, count INTEGER NOT NULL) WITHOUT ROWID;
-    -- A content budget's artifacts by digest, as its start option names it.
-    -- The browser charges unique bytes, so identical content counts once; a
-    -- digest is kept as its first 64 bits.
-    CREATE TABLE IF NOT EXISTS budget_digests(budget TEXT NOT NULL, digest INTEGER NOT NULL,
-        PRIMARY KEY(budget, digest)) WITHOUT ROWID;
-    CREATE TABLE IF NOT EXISTS budget_bytes(budget TEXT PRIMARY KEY, bytes INTEGER NOT NULL) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, sha256 TEXT NOT NULL, url TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS scripts_sha256 ON scripts(sha256);
     CREATE INDEX IF NOT EXISTS scripts_url ON scripts(url);
@@ -407,31 +400,6 @@ fn count(transaction: &rusqlite::Transaction<'_>, value: &Value) -> Result<()> {
         .sql()?
         .execute([kind])
         .sql()?;
-    let (Some(budget), Some(digest), Some(size)) = (
-        crate::session_summary::budget_of_kind(kind),
-        value["sha256"]
-            .as_str()
-            .and_then(|text| text.get(..16))
-            .and_then(|prefix| u64::from_str_radix(prefix, 16).ok()),
-        value["byte_size"].as_u64(),
-    ) else {
-        return Ok(());
-    };
-    let fresh = transaction
-        .prepare_cached("INSERT OR IGNORE INTO budget_digests(budget, digest) VALUES (?1, ?2)")
-        .sql()?
-        .execute(params![budget, index_db::key(digest)])
-        .sql()?;
-    if fresh == 1 {
-        transaction
-            .prepare_cached(
-                "INSERT INTO budget_bytes(budget, bytes) VALUES (?1, ?2)
-                 ON CONFLICT(budget) DO UPDATE SET bytes = bytes + excluded.bytes",
-            )
-            .sql()?
-            .execute(params![budget, i64::try_from(size).unwrap_or(i64::MAX)])
-            .sql()?;
-    }
     Ok(())
 }
 
@@ -444,8 +412,6 @@ pub struct Summary {
     pub file_end: u64,
     pub total: u64,
     pub by_kind: Vec<(String, u64)>,
-    /// Unique bytes by the start option of the budget they are charged to.
-    pub retained: Vec<(String, u64)>,
     /// The newest records, newest first, with public fields only.
     pub newest: Vec<Value>,
     /// The first malformed or duplicate record, which no count includes.
@@ -472,7 +438,6 @@ pub fn summary(root: &Path, items: usize, deadline: Instant) -> Result<Summary> 
             .by_kind
             .iter()
             .fold(0u64, |sum, (_, count)| sum.saturating_add(*count));
-        summary.retained = pairs("SELECT budget, bytes FROM budget_bytes")?;
         summary.newest = newest(
             connection,
             file,

@@ -29,12 +29,17 @@ export const REQUEST_BODY_MARKER = '<img src=x onerror="window.__rebInjected=4">
 export const METADATA_BODY_HOST = 'api.metadata.test';
 // A content-session response body (native-network-v3.md) whose JSON carries markup.
 export const RESPONSE_BODY_HOST = 'api.response.test';
-// A content-session POST, recorded as real capture records it: its target's
-// first 116 bytes, the rest refused by the request content budget, and its
-// body and response refused by their budgets (native-network-v2.md target
-// retention 4 and body state 10, v3 response state 12).
+// A content-session POST from an older browser, recorded as it recorded it:
+// its target's first 116 bytes, the rest refused by that browser's request
+// content budget, and its body and response refused by their budgets
+// (native-network-v2.md target retention 4 and version 1 body state 10, v3
+// version 1 response state 12). Current capture emits none of these.
 export const BUDGET_HOST = 'api.budget.test';
 export const BUDGET_TARGET = `/collect/batch?session=fixture&events=${'e'.repeat(160)}`;
+// A current content-session POST whose body and response the artifact
+// receiver refused to keep its free-disk reserve (native-network-v3.md request
+// body version 2 and response body version 3, state 13).
+export const DISK_RESERVE_HOST = 'api.disk-reserve.test';
 // Rows only the renderer finishes (protocol/native-network-v3.md).
 export const MEMORY_CACHE_HOST = 'cdn.memory.test';
 export const MEMORY_CACHE_TARGET = '/sprite.png?v=3';
@@ -420,13 +425,41 @@ function responseBodyPayload(bytes, contentType = 'application/json') {
   return payload.toString('hex');
 }
 
-// A response_body record refused by the session's response body budget:
-// no artifact, no captured bytes and no digest.
+// A version 1 response_body record an older browser's response body budget
+// refused: no artifact, no captured bytes and no digest.
 function budgetResponsePayload(length, contentType = 'application/json') {
   const payload = Buffer.alloc(128);
   payload.writeUInt16LE(1, 0);
   payload.writeUInt16LE(128, 2);
   payload[4] = 12;
+  payload[5] = 0x40;
+  payload[6] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+
+// Refused to keep the receiver's free-disk reserve: a version 2 request body
+// read whole (bit 6) with no digest, and a version 3 response body with no
+// artifact, captured bytes or digest.
+function diskReserveRequestBodyPayload(length, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(2, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 1;
+  payload[5] = 13;
+  payload[6] = 1 | 16 | 64;
+  payload[7] = contentType.length;
+  payload.writeBigUInt64LE(BigInt(length), 8);
+  payload.writeUInt32LE(1, 24);
+  payload.write(contentType, 64, 'ascii');
+  return payload.toString('hex');
+}
+function diskReserveResponsePayload(length, contentType = 'application/json') {
+  const payload = Buffer.alloc(128);
+  payload.writeUInt16LE(3, 0);
+  payload.writeUInt16LE(128, 2);
+  payload[4] = 13;
   payload[5] = 0x40;
   payload[6] = contentType.length;
   payload.writeBigUInt64LE(BigInt(length), 8);
@@ -550,6 +583,12 @@ async function requestBodyRequests(template, firstSequence, firstTime, artifacts
   const refusedResponse = row(refused, 'response_started', hex('application/json'), {status_code: 200});
   row(refused, 'response_body', budgetResponsePayload(2048), {parent_event_id: refusedResponse.sequence_number});
   row(refused, 'request_completed', hex('completed'), {status_code: 200});
+  const reserved = {request_id: '3005'};
+  const reservedStart = row(reserved, 'request_started', hex(`POST ${DISK_RESERVE_HOST}`), {resource_type: 13});
+  row(reserved, 'request_body', diskReserveRequestBodyPayload(18), {parent_event_id: reservedStart.sequence_number});
+  const reservedResponse = row(reserved, 'response_started', hex('application/json'), {status_code: 200});
+  row(reserved, 'response_body', diskReserveResponsePayload(4096), {parent_event_id: reservedResponse.sequence_number});
+  row(reserved, 'request_completed', hex('completed'), {status_code: 200});
   const responseArtifact = await artifact(artifactsRoot, {artifact_id: '325', session_id: template.session_id, navigation_id: '0',
     frame_id: template.frame_id, creator_event_id: responded.sequence_number, execution_context_id: '0',
     capture_origin: 'network_response', kind: 'response_body', mime_type: 'application/json', sensitive: true,

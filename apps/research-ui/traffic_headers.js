@@ -11,7 +11,7 @@ const trafficHeaderStateNotes = {
   not_captured_block_limit: 'Longer than the 320 KiB block limit, so only its count and size were recorded.',
   not_captured_artifact_unavailable: 'Not retained: the artifact channel was unavailable.',
   not_captured_transfer_refused: 'Not retained: the bounded artifact queue refused it.',
-  not_captured_session_budget: 'Not retained: this session already retained 64 MiB of header blocks.',
+  not_captured_session_budget: 'Not retained: it arrived after 64 MiB of header blocks were retained, a limit of the browser that recorded this session.',
   not_captured_url: 'Not retained: not an HTTP(S) URL, longer than 8 KiB, or its hop was not tracked.'
 };
 

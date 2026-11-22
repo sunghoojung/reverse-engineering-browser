@@ -18,8 +18,10 @@ namespace reb {
 inline constexpr std::uint16_t kNativeHeaderPayloadVersion = 1;
 // Chromium's 256 KiB header bound plus what `: ` normalization can add.
 inline constexpr std::size_t kNativeHeaderBlockLimitBytes = 320U * 1024U;
-inline constexpr std::size_t kNativeHeaderSessionBytes = 64U * 1024U * 1024U;
-inline constexpr std::size_t kNativeHeaderShareEntries = 4096;
+// Accepted blocks a later identical block can name instead of being sent
+// again. Past it a repeat is sent and stored once more by digest, so the
+// bound costs only dedupe, never a block.
+inline constexpr std::size_t kNativeHeaderShareEntries = 65'536;
 inline constexpr std::size_t kNativeHeaderTrackedRequests = 4096;
 
 enum class NativeHeaderSource : std::uint8_t {
@@ -35,6 +37,7 @@ enum class NativeHeaderState : std::uint8_t {
   kNotCapturedBlockLimit = 4,
   kNotCapturedArtifactUnavailable = 5,
   kNotCapturedTransferRefused = 6,
+  // Retired: older sessions' 64 MiB header budget. Never emitted.
   kNotCapturedSessionBudget = 7,
   kNotCapturedUrl = 8,
 };

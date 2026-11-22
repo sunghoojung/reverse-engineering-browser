@@ -22,6 +22,9 @@
 #include "once_callback_stub.h"
 #define BUILDFLAG(flag) (flag)
 #define IS_POSIX 1
+#define FROM_HERE ::base::Location()
+template <class T>
+using scoped_refptr = std::shared_ptr<T>;
 namespace base {
 // Chromium 157 counts URLLoaderCompletionStatus lengths as unsigned
 // base::ByteSize; the sink converts them with base::saturated_cast.
@@ -100,6 +103,65 @@ auto BindOnce(Function function, Bound... bound) {
   return [function, ... bound = std::move(bound)](auto&&... rest) mutable -> decltype(auto) {
     return std::invoke(function, std::move(bound)..., std::forward<decltype(rest)>(rest)...);
   };
+}
+struct Location {};
+enum class TaskPriority { USER_VISIBLE };
+enum class TaskShutdownBehavior { SKIP_ON_SHUTDOWN };
+struct TaskTraits {
+  TaskTraits(TaskPriority, TaskShutdownBehavior) {}
+};
+// Holds the background hash until a test runs it, so the record's wait for it
+// is observable.
+struct ThreadPool {
+  template <class Task, class Reply>
+  static bool PostTaskAndReplyWithResult(const Location&,
+                                         const TaskTraits&,
+                                         Task task,
+                                         Reply reply) {
+    if (refuse) {
+      return false;
+    }
+    pending.emplace_back(
+        [task = std::move(task), reply = std::move(reply)]() mutable { reply(task()); });
+    return true;
+  }
+  static std::size_t RunPending() {
+    std::size_t count = 0;
+    while (!pending.empty()) {
+      auto task = std::move(pending.front());
+      pending.erase(pending.begin());
+      std::move(task).Run();
+      ++count;
+    }
+    return count;
+  }
+  static inline bool refuse = false;
+  // Move-only, since a reply may own a ScopedClosureRunner.
+  static inline std::vector<OnceCallback<void()>> pending;
+};
+using OnceClosure = OnceCallback<void()>;
+// The sink's own sequence: tasks posted back to it wait until a test runs them.
+struct SequencedTaskRunner {
+  static std::shared_ptr<SequencedTaskRunner> GetCurrentDefault() {
+    return std::make_shared<SequencedTaskRunner>();
+  }
+  static std::size_t RunPosted() {
+    std::size_t count = 0;
+    while (!posted.empty()) {
+      auto task = std::move(posted.front());
+      posted.erase(posted.begin());
+      std::move(task).Run();
+      ++count;
+    }
+    return count;
+  }
+  static inline std::vector<OnceClosure> posted;
+};
+template <class Task>
+OnceClosure BindPostTask(const std::shared_ptr<SequencedTaskRunner>&, Task task) {
+  return OnceClosure([posted_task = OnceClosure(std::move(task))]() mutable {
+    SequencedTaskRunner::posted.push_back(std::move(posted_task));
+  });
 }
 }  // namespace base
 namespace content {
@@ -214,13 +276,11 @@ struct NativeRequestContent final {
   std::string url;
   std::string mime_type;
   std::size_t size = 0;
-  std::shared_ptr<network::ResourceRequestBody> body{};
   std::string text{};
 };
 enum class NativeRequestContentAdmission : std::uint8_t {
   kQueued,
   kUnavailable,
-  kSessionBudget,
   kRefused,
 };
 struct NativeRequestBodyReadOutcome final {
@@ -240,24 +300,22 @@ class NativeRequestBodyReader {
     return true;
   }
   static bool CanRead(const network::ResourceRequestBody& body) noexcept {
-    bool readable = false;
     for (const auto& element : *body.elements()) {
       if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
         return false;
       }
-      if (element.TryAs<network::DataElementFile>() ||
-          element.TryAs<network::DataElementDataPipe>() ||
-          element.TryAs<network::DataElementChunkedDataPipe>()) {
-        readable = true;
-      } else if (!element.TryAs<network::DataElementBytes>()) {
+      if (!element.TryAs<network::DataElementBytes>() &&
+          !element.TryAs<network::DataElementFile>() &&
+          !element.TryAs<network::DataElementDataPipe>() &&
+          !element.TryAs<network::DataElementChunkedDataPipe>()) {
         return false;
       }
     }
-    return readable;
+    return !body.elements()->empty();
   }
 };
 // Records what the network sink hands to the artifact channel; the real
-// artifact sink, its budget and pool, and the receiver run in
+// artifact sink, its pool, and the receiver run in
 // tools/check-native-artifact-capture.py.
 class NativeArtifactCaptureSink {
  public:
@@ -284,17 +342,8 @@ class NativeArtifactCaptureSink {
               std::move(content.url),
               std::move(content.mime_type),
               {}};
-    if (content.body) {
-      for (const auto& element : *content.body->elements()) {
-        const auto& bytes = element.As<network::DataElementBytes>().bytes();
-        const auto count = std::min(bytes.size(), content.size - call.content.size());
-        call.content.insert(call.content.end(), bytes.begin(),
-                            bytes.begin() + static_cast<std::ptrdiff_t>(count));
-      }
-    } else {
-      call.content.assign(content.text.begin(),
-                          content.text.begin() + static_cast<std::ptrdiff_t>(content.size));
-    }
+    call.content.assign(content.text.begin(),
+                        content.text.begin() + static_cast<std::ptrdiff_t>(content.size));
     calls.push_back(std::move(call));
     artifact_id = next_artifact_id++;
     return NativeRequestContentAdmission::kQueued;
@@ -327,7 +376,7 @@ class NativeArtifactCaptureSink {
     std::string url, mime_type;
     NativeRequestBodyRecorder record;
   };
-  NativeRequestContentAdmission ReadRequestBody(network::ResourceRequest&,
+  NativeRequestContentAdmission ReadRequestBody(network::ResourceRequestBody&,
                                                 std::uint64_t request_id,
                                                 std::uint64_t frame_id,
                                                 std::string url,

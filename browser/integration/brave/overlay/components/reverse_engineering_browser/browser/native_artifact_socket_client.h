@@ -47,7 +47,8 @@ struct NativeArtifactTransfer final {
   std::string mime_type;
   std::vector<std::uint8_t> content;
   NativeArtifactStreamFrame frame;
-  // Pool share for content, returned when the writer drops the transfer.
+  // Pool share for content and metadata, returned when the writer drops the
+  // transfer. Control frames hold none.
   NativeArtifactReservation reservation;
 };
 
@@ -67,7 +68,7 @@ enum class NativeArtifactChannelState : std::uint8_t {
   // The writer owns an authenticated receiver connection.
   kConnected,
   // That connection failed. The writer reconnects while new transfers wait in
-  // the same bounded queue.
+  // the same queue, still bounded by the in-flight pool.
   kReconnecting,
   // Reconnection failed. Queued transfers were reported as I/O errors, the
   // loss was announced, and new transfers are refused until Stop().
@@ -76,10 +77,12 @@ enum class NativeArtifactChannelState : std::uint8_t {
   kStopping,
 };
 
-// Owns the browser-process side of the independently bounded artifact stream.
-// Network and generated-source capture sequences enqueue completed immutable
-// bodies; a dedicated writer thread performs all socket I/O and waits for
-// durable receiver acks.
+// Owns the browser-process side of the artifact channel. Network and
+// generated-source capture sequences enqueue whole items and stream frames,
+// each holding its share of the in-flight pool; a dedicated writer thread
+// performs all socket I/O and waits for durable receiver acks. A receiver that
+// stops reading for kTransferTimeoutSeconds loses the connection, which
+// returns every share and ends every waiting stream.
 class NativeArtifactSocketClient final {
  public:
   static NativeArtifactSocketClient& Get();
@@ -92,7 +95,7 @@ class NativeArtifactSocketClient final {
                                           NativeArtifactChannelLost channel_lost);
   [[nodiscard]] bool Enqueue(std::unique_ptr<NativeArtifactTransfer> transfer) noexcept;
   // True while transfers are accepted: connected, or reconnecting with them
-  // held in the bounded queue. Capture admission keys off this, so a brief
+  // held in the queue. Capture admission keys off this, so a brief
   // reconnect never skips a capture without a record.
   [[nodiscard]] bool IsConnected() const noexcept;
   [[nodiscard]] NativeArtifactChannelState state() const noexcept;
@@ -123,8 +126,6 @@ class NativeArtifactSocketClient final {
   base::Lock lock_;
   base::ConditionVariable wakeup_{&lock_};
   std::deque<std::unique_ptr<NativeArtifactTransfer>> queue_ GUARDED_BY(lock_);
-  std::size_t queued_bytes_ GUARDED_BY(lock_) = 0;
-  std::size_t queued_stream_frames_ GUARDED_BY(lock_) = 0;
   // Writer thread only: streams the receiver opened on this connection.
   std::set<std::uint64_t> open_streams_;
   // The writer replaces it on reconnect and Stop() shuts it down, both under

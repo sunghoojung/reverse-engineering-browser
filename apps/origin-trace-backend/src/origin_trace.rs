@@ -296,9 +296,8 @@ fn gap(reason: &str, after: usize, detail: &str) -> Value {
 // hop that initiator resolution failed to close. One millisecond bounds that
 // hop with room to spare while staying far below navigation scale.
 const ADJACENCY_WINDOW_NS: u64 = 1_000_000;
-// Canonical decimal only, matching the step projection and the native builder,
-// so a non-canonical sibling cannot count toward the uniqueness test in one
-// implementation and be skipped in the other.
+// Canonical decimal only, as the step projection requires, so a sibling the
+// projection would refuse never counts toward the uniqueness test.
 fn monotonic(value: &Value) -> Option<u64> {
     validation::canonical(&value["monotonic_time_ns"], 64, false, "monotonic_time_ns").ok()
 }
@@ -413,10 +412,10 @@ fn request_bodies(
 /// The single settle record whose exact digested value occurs in `body`.
 /// Candidates share the session and the renderer process of `request`, and
 /// precede it in that process's sequence: causal order inside one stream, not
-/// a time window. `settles` are that stream's `js_invocation_settle` records,
-/// and every candidate's digest is searched in one pass per value length. The
-/// inner `Err` names why no link is drawn when more than one matches; the outer
-/// one is a cancelled request.
+/// a time window. `settles` are that stream's `js_invocation_settle` records.
+/// Every candidate's digest is searched in one pass per value length. The
+/// inner `Err` names why no link is drawn when more than one matches; the
+/// outer one is a cancelled request.
 fn value_flow(
     settles: &[Value],
     visited: &BTreeSet<Reference>,
@@ -674,8 +673,8 @@ pub fn build_with_bodies(
 }
 
 /// Traces `request_id` back through `evidence`, reading the raw request
-/// bodies value flow searches from `artifact_root`. `cancelled` stops a
-/// body search for a request the client has dropped.
+/// bodies value flow searches from `artifact_root`. A set `cancelled` stops
+/// the body search.
 pub fn build(
     evidence: &mut impl Evidence,
     request_id: &str,
@@ -733,6 +732,7 @@ pub(crate) fn check_selectors(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn trace(
     evidence: &mut impl Evidence,
     bodies: &RequestBodies,

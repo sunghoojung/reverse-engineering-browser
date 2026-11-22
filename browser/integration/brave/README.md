@@ -267,9 +267,8 @@ Native network records keep the v1 host-only start payload. Each admitted
 request also gets a `request_body` summary record (length, normalized content
 type, SHA-256, kind and capture state). When `--reb-capture-request-content` is
 explicitly present, the browser also records the raw path and query as
-`request_target` children, retains targets past their 116-byte prefix and at
-most 16 MiB of body bytes per request through the artifact channel, within a
-per-session byte budget. Patch `0019` hands bodies with file, blob or stream
+`request_target` children, and retains targets past their 116-byte prefix and
+every body whole through the artifact channel, at any length. Patch `0019` hands bodies with file, blob or stream
 parts to the overlay reader, which reads them off the UI sequence; a stream
 part's getter is replaced by one that forwards every byte unchanged. See
 [Native network v2](../../../protocol/native-network-v2.md) and
@@ -331,24 +330,25 @@ capture policy.
 When the Artifact category is authorized, the browser process recognizes
 JavaScript and WebAssembly responses, preserves the observed source URL
 (including credentials, queries and fragments) in local artifact metadata, and
-asynchronously tees at most 16 MiB per response, holding only the bytes it has
-within a shared 32 MiB in-flight pool. The original response pipe remains the page's source of bytes. A
-separate queue permits at most 16 pending artifacts and 32 MiB of queued
-content, then transfers frames over an authenticated user-only socket. Brave
-emits `artifact_captured` only after a durable receiver acknowledgment and
-emits `artifact_capture_failed` for limits, incomplete bodies, queue pressure,
-disconnects, and receiver rejection. A receiver rejection keeps the
+asynchronously tees every response whole, holding only the bytes it has within
+a shared 32 MiB in-flight pool, which is also the writer queue's only bound. The
+original response pipe remains the page's source of bytes. The writer transfers
+frames over an authenticated user-only socket. Brave emits `artifact_captured`
+only after a durable receiver acknowledgment and emits
+`artifact_capture_failed` for incomplete bodies, pool pressure, disconnects,
+and receiver rejection, including the receiver's free-disk reserve. A receiver rejection keeps the
 connection, and a failed connection is replaced within a bounded retry budget.
 If the receiver stays unreachable, Brave emits one `artifact_channel_lost`
 gap; later artifacts are not attempted.
 
 The same category enables runtime-generated source capture. V8 reports every
 script it compiles, including `eval` and `Function` text on pages with no CSP and
-in workers, as described in [native compiled scripts](../../../protocol/native-compiled-scripts-v1.md).
+in workers, as described in [native compiled scripts](../../../protocol/native-compiled-scripts-v2.md).
 V8 also exposes copied byte buffers used by
 `WebAssembly.compile`, `WebAssembly.Module`, and `WebAssembly.instantiate`.
-Renderer hooks perform one inactive atomic check, cap each submission at 16
-MiB, and send bytes one way to the browser process. The browser copies shared
+Renderer hooks perform one inactive atomic check, charge each module to the
+renderer's 256 MiB artifact credit, and send bytes one way to the browser
+process. The browser copies shared
 memory before validation, preserves the bounded context URL, assigns the artifact ID,
 and remains the only process that owns the authenticated artifact socket.
 
@@ -357,7 +357,7 @@ The VM category separately enables runtime-buffer snapshots for `ArrayBuffer`,
 an embedder callback after initialization; no JavaScript constructor or host
 builtin is wrapped. Buffers from 32 bytes through 16 MiB are copied into
 `bytecode_buffer` artifacts, with at most 16 snapshots per session sharing the
-existing 16-artifact, 32-MiB transfer queue.
+32 MiB in-flight artifact pool.
 
 Runtime snapshots now carry exact allocating-script provenance. After the VM
 capture gate, V8 exposes the innermost JavaScript frame's native script identity,

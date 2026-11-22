@@ -205,7 +205,7 @@ assert.equal(panel.querySelector('pre')?.textContent, 'Location: /final\r\nSet-C
   const coverage = api.trafficHeaderCoverage([...rows, redirected, sent, refused]);
   assert.deepEqual(Object.fromEntries(coverage.missing), {from_cache: 2, failed: 1, download: 1, service_worker: 2, not_reported: 1});
   assert.equal(api.trafficHeaderCoverageNotice(coverage),
-    '2 header blocks not retained (1 session budget, 1 size limit) · 1 cookie list not retained (queue refused) · ' +
+    '2 header blocks not retained (1 older header budget, 1 size limit) · 1 cookie list not retained (queue refused) · ' +
     '3 late header records on no row · 7 requests without final headers (2 HTTP cache, 1 failed, 1 download, 2 service worker, 1 not reported)');
   assert.equal(api.trafficHeaderCoverageNotice(api.trafficHeaderCoverage([sent])), '', 'a complete row adds nothing');
   // The footer shows one count for all of them.
@@ -226,7 +226,7 @@ statesRender();
 await settle();
 assert.match(panel.textContent, /do not match the recorded SHA-256/);
 assert.match(panel.textContent, /receiver refused this block: sensitive_capture_disabled/);
-assert.match(panel.textContent, /already retained 64 MiB of header blocks/);
+assert.match(panel.textContent, /after 64 MiB of header blocks were retained, a limit of the browser that recorded this session/);
 assert.match(panel.textContent, /320 KiB block limit/);
 
 // Metadata-only and legacy rows say why there is nothing to show.

@@ -143,17 +143,17 @@ enum SessionCommand {
         /// Open this HTTP or HTTPS page once capture is ready.
         #[arg(long)]
         url: Option<String>,
-        /// Sample Wasm br_table dispatch (at most 16 observations per
-        /// configuration). Default: on when --category-mask holds 512 and 1024.
+        /// Sample Wasm br_table dispatch (at most 1024 full observations per
+        /// renderer each second). Default: on when --category-mask holds 512 and 1024.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
         wasm_dispatch: Option<bool>,
         /// Sample Wasm call_indirect targets. Default: as --wasm-dispatch.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
         wasm_call_indirect: Option<bool>,
-        /// Keep at most this many samples of each function on each Wasm stream (1..16).
+        /// Keep at most this many samples of each function on each Wasm stream per second (1..1024; default 64).
         #[arg(long)]
         wasm_samples_per_function: Option<u32>,
-        /// Keep at most this many call_indirect samples of each call site (1..16).
+        /// Keep at most this many call_indirect samples of each call site per second (1..1024).
         #[arg(long)]
         wasm_samples_per_indirect_site: Option<u32>,
         /// Function indexes to admit. Empty admits every function that is not denied.
@@ -201,6 +201,10 @@ enum SessionCommand {
         /// dropped by a Brave without the flag; naming it is strict.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
         request_stacks: Option<bool>,
+        /// Also record the stack that registered each Promise reaction a
+        /// request is later made in. Needs request stacks. Default: off.
+        #[arg(long)]
+        promise_stacks: bool,
         /// Permit document-start Console scripts in this capture browser.
         /// Arming one is still a separate confirmed Console action. Default: on.
         #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
@@ -223,7 +227,8 @@ enum SessionCommand {
             conflicts_with = "js_invocation_saved_sites"
         )]
         js_invocation_sites: Option<PathBuf>,
-        /// Arm the agent sessions' own saved invocation sites, never the app's.
+        /// Arm the agent sessions' own saved invocation sites, never the app's,
+        /// and follow that set while the session runs.
         #[arg(long)]
         js_invocation_saved_sites: bool,
         /// Hash settled values of armed calls (sensitive). Needs sites.
@@ -1452,6 +1457,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         canvas_images,
         request_content,
         request_stacks,
+        promise_stacks,
         document_start,
         browser_internal,
         extension_traffic,
@@ -1481,6 +1487,7 @@ async fn run_session(command: SessionCommand) -> Result<i32, Box<dyn std::error:
         browser_internal,
         extension_traffic,
         fresh_profile,
+        promise_stacks,
         js_invocation_sites,
         js_invocation_saved_sites,
         confirm_sensitive_capture,

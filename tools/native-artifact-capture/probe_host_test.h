@@ -9,7 +9,7 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
                  std::uint64_t epoch,
                  const std::string&,
                  const std::vector<std::uint8_t>& js_dispatch_sites,
-                 const std::vector<std::uint8_t>& js_invocation_sites,
+                 const std::optional<std::vector<std::uint8_t>>& js_invocation_sites,
                  bool js_invocation_digests,
                  bool capture_request_content,
                  bool capture_browser_internal) override {
@@ -24,6 +24,10 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   }
   void SetWasmSampleBudget(const std::vector<std::uint8_t>&) override {}
   void ResetWasmSampleBudgets() override {}
+  void UpdateJsInvocationSites(const std::vector<std::uint8_t>& records) override {
+    invocation_revisions.push_back(records);
+  }
+  void SetDebuggerWatchScope(reb::mojom::NativeWatchScopePtr) override { ++watch_scopes; }
   void Disable() override { ++disabled; }
   void NativeGuestModuleStatus(std::uint64_t epoch, std::uint64_t token, bool accepted) override {
     verdicts.push_back({epoch, token, accepted});
@@ -39,12 +43,13 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
     bool accepted;
   };
   std::uint64_t configured_epoch = 0;
-  unsigned configured = 0, disabled = 0;
+  unsigned configured = 0, disabled = 0, watch_scopes = 0;
   bool request_content = false, browser_internal = false;
   std::vector<Verdict> verdicts;
   base::UnsafeSharedMemoryRegion region;
   std::vector<std::uint8_t> js_sites;
-  std::vector<std::uint8_t> invocation_sites;
+  std::optional<std::vector<std::uint8_t>> invocation_sites;
+  std::vector<std::vector<std::uint8_t>> invocation_revisions;
   bool invocation_digests = false;
 };
 
@@ -234,7 +239,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto indirect = [&](std::uint64_t capture_epoch, std::uint64_t sequence,
                             std::uint32_t resolution, std::uint32_t callee) {
     host.CaptureWasmIndirect(capture_epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12,
-                             1, 8, 0, 4, callee, resolution, 0, 0, 0, "fixture://host-indirect",
+                             1, 8, 0, 4, callee, resolution, 0, 0, 0, "fixture://host-indirect", 0,
                              mojo_base::BigBuffer(indirect_module));
   };
   const auto before_indirect = events.size();
@@ -260,35 +265,39 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
                              e.header.sequence_number == 604 && e.header.tab_id == 1;
                     }),
         "The host keeps the observation's own sequence and tab");
-  // Function 9 has not been claimed. A missing document and a module that is
-  // not a call_indirect must not take its one sample.
-  session.wasm_budget = {};
-  session.wasm_budget.samples_per_function = 1;
+  // The renderer paces each function; the host only filters. A missing
+  // document, a module that is not a call_indirect, and a denied function
+  // are each refused in their own slot.
   const auto capture_indirect = [&](std::uint64_t sequence,
                                     const std::vector<std::uint8_t>& bytes) {
     host.CaptureWasmIndirect(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 9, 8, 0,
-                             4, 2, 0, 0, 0, 0, "fixture://host-indirect",
+                             4, 2, 0, 0, 0, 0, "fixture://host-indirect", 0,
                              mojo_base::BigBuffer(bytes));
   };
   frame.document = {11, 99};
   capture_indirect(605, indirect_module);
   Check(gap_for(605, "native_wasm_indirect_document_unavailable") && transfers.empty(),
-        "A missing document is refused before the per-function budget");
+        "A missing document is refused");
   frame.document = {11, 12};
   capture_indirect(606, std::vector<std::uint8_t>{1, 2, 3, 4});
   Check(gap_for(606, "native_wasm_indirect_module_invalid") && transfers.empty(),
-        "An invalid module is refused before the per-function budget");
+        "An invalid module is refused");
+  session.wasm_budget = {};
+  session.wasm_budget.function_deny_count = 1;
+  session.wasm_budget.function_deny[0] = 9;
   capture_indirect(607, indirect_module);
+  Check(gap_for(607, "native_wasm_indirect_browser_filtered") && transfers.empty(),
+        "A denied function is filtered by the host whatever the renderer sent");
+  session.wasm_budget = {};
+  capture_indirect(608, indirect_module);
   Check(std::any_of(events.begin(), events.end(),
                     [](const auto& e) {
                       return e.header.type == NativeProbeType::kWasmIndirectObservation &&
-                             e.header.sequence_number == 607;
-                    }) &&
-            !gap_for(607, "native_wasm_indirect_browser_function_budget_incomplete"),
-        "Refusals did not consume function 9's host sample");
-  session.wasm_budget = {};
+                             e.header.sequence_number == 608;
+                    }),
+        "Refusals spend nothing a later valid record needs");
   host.CaptureWasmExecution(epoch, kSession, 610, 100, 123, 7, frame_id, 10, 11, 12, 4, 9, 8, 0, 0,
-                            1, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            1, 0, 3, 2, 0, 0, "fixture://host-indirect", 0,
                             mojo_base::BigBuffer(indirect_module));
   const auto trap = std::find_if(events.begin(), events.end(), [](const auto& event) {
     return event.header.type == reb::NativeProbeType::kWasmExecutionOutcome &&
@@ -302,7 +311,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
             trap_payload.function_index == 9,
         "The host publishes a signature-mismatch trap for a resolved entry");
   host.CaptureWasmExecution(epoch, kSession, 611, 100, 123, 7, frame_id, 10, 11, 12, 5, 1, 8, 0, 1,
-                            0, 0, 3, 2, 0, 0, "fixture://host-indirect",
+                            0, 0, 3, 2, 0, 0, "fixture://host-indirect", 0,
                             mojo_base::BigBuffer(std::span<const std::uint8_t>{}));
   const auto still = std::find_if(events.begin(), events.end(), [](const auto& event) {
     return event.header.sequence_number == 611;
@@ -322,7 +331,7 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   const auto wasm_dispatch = [&](std::uint64_t sequence, bool observed, std::uint8_t kind,
                                  std::uint32_t caller_index) {
     host.CaptureWasmDispatch(epoch, kSession, sequence, 100, 123, 7, frame_id, 10, 11, 12, 1, 8, 0,
-                             1, observed, kind, caller_index, 0, 0, 0, "fixture://host-dispatch",
+                             1, observed, kind, caller_index, 0, 0, 0, "fixture://host-dispatch", 0,
                              mojo_base::BigBuffer(dispatch_module));
   };
   const auto published = [&](std::uint64_t sequence) {
@@ -358,6 +367,53 @@ void NativeProbeHostGuestBoundary(reb::ArtifactReceiver& receiver) {
   Check(transfers.empty() && gap_for(702, "native_wasm_dispatch_limit_or_invalid") &&
             events.size() == before_unwalked_index + 1,
         "A function index on an unwalked record is a gap, not a dropped caller");
+
+  // A record that names an earlier record's module carries no bytes. The
+  // host resolves the token against the module that record sent in the same
+  // document, and the sink joins that artifact without a second transfer.
+  const auto module_artifact = published(700)->header.artifact_id;
+  const auto bound_dispatch = [&](std::uint64_t sequence, std::uint64_t context,
+                                  std::uint64_t token, const std::vector<std::uint8_t>& bytes) {
+    host.CaptureWasmDispatch(epoch, kSession, sequence, 100, 123, 7, frame_id, context, 11, 12, 1,
+                             8, 0, 1, false, 0, 0, 0, 0, 0, "fixture://host-dispatch", token,
+                             mojo_base::BigBuffer(bytes));
+  };
+  bound_dispatch(703, 10, 700, {});
+  Check(transfers.empty() && published(703) != events.end() &&
+            published(703)->header.artifact_id == module_artifact,
+        "A module token resolves to the bytes its record carried");
+  bound_dispatch(704, 10, 999, {});
+  bound_dispatch(705, 10, 700, dispatch_module);
+  bound_dispatch(706, 14, 700, {});
+  Check(transfers.empty() && gap_for(704, "native_wasm_dispatch_module_unbound") &&
+            gap_for(705, "native_wasm_dispatch_module_unbound") &&
+            gap_for(706, "native_wasm_dispatch_module_unbound"),
+        "An unknown token, a token with bytes, and another context's token are explicit gaps");
+
+  // The host counts each stream per second on its own clock, as a ceiling a
+  // renderer that ignores its own pacing cannot pass. A new window reopens it.
+  const auto saved_expires = session.expires;
+  constexpr std::int64_t kWindow = 1'000'000'000;
+  base::test_now_ns += kWindow;
+  const auto far_expiry = static_cast<std::uint64_t>(base::test_now_ns) + 10 * kWindow;
+  session.expires = far_expiry;
+  NativeArtifactCaptureSink::Get().SetEmitter(Emit, kSession, mask, far_expiry);
+  bound_dispatch(9'999, 10, 0, dispatch_module);
+  Receive(receiver, transfers.begin()->first);
+  const auto before_window = events.size();
+  for (std::uint64_t index = 1; index < 2048; ++index)
+    bound_dispatch(10'000 + index, 10, 9'999, {});
+  Check(published(9'999) != events.end() && events.size() == before_window + 2047 &&
+            published(12'047) != events.end(),
+        "A window admits twice the renderer's dispatch budget");
+  bound_dispatch(12'048, 10, 9'999, {});
+  Check(gap_for(12'048, "native_wasm_dispatch_browser_budget_incomplete"),
+        "A record past the browser window ceiling fills its own slot");
+  base::test_now_ns += kWindow;
+  bound_dispatch(12'049, 10, 9'999, {});
+  Check(published(12'049) != events.end(), "The next window admits records again");
+  session.expires = saved_expires;
+  Configure(kSession, mask);
   host.Disable();
   session.active = false;
   session.emitted = {};
@@ -389,7 +445,7 @@ void NativeProbeHostJsDispatchForwarding() {
   invocation_site.source_length = 900;
   invocation_site.anchor_offset = 41;
   const auto invocation_record = reb::EncodeNativeJsInvocationSite(invocation_site);
-  session.invocation_sites.assign(invocation_record.begin(), invocation_record.end());
+  session.invocation_sites.emplace(invocation_record.begin(), invocation_record.end());
   session.invocation_digests = true;
   session.request_content = true;
   session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
@@ -408,6 +464,12 @@ void NativeProbeHostJsDispatchForwarding() {
         "Renderer configuration carries the session's JS dispatch site records");
   Check(client.invocation_sites == session.invocation_sites && client.invocation_digests,
         "Renderer configuration carries the invocation sites and the digest opt-in");
+  // A revision reaches the configured renderer as its own message.
+  invocation_site.armed = false;
+  const auto disarmed = reb::EncodeNativeJsInvocationSite(invocation_site);
+  host.UpdateJsInvocationSites({disarmed.begin(), disarmed.end()});
+  Check(client.invocation_revisions.size() == 1 && client.invocation_revisions[0][41] == 1,
+        "A site revision reaches the configured renderer with its disarmed flag");
   Check(client.request_content, "Renderer configuration carries the request-content gate");
 
   reb::NativeJsDispatchObservationPayload payload;
@@ -468,7 +530,7 @@ void NativeProbeHostJsDispatchForwarding() {
         "Disable publishes what the renderer already queued");
   session.active = false;
   session.js_sites.clear();
-  session.invocation_sites.clear();
+  session.invocation_sites.reset();
   session.invocation_digests = false;
   session.emitted = {};
   process.frames.clear();
@@ -531,6 +593,111 @@ void NativeProbeHostStackRefusal() {
   session.emitted = {};
   std::cout << "PASS production NativeProbeHost reports refused stack artifacts to the renderer "
                "and refuses content from a renderer that became browser-internal\n";
+}
+
+// protocol/native-network-v3.md "Memory-cache reuse": a reuse's target past
+// the inline prefix arrives over Mojo after its parent entered the ring. The
+// host drains the parent first, then emits the child in the slot the renderer
+// took, with the whole target as its request_target artifact.
+void NativeProbeHostRendererTargets() {
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.request_content = true;
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  events.clear();
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  transfers.clear();
+  RecordingProbeClient client;
+  reb::NativeProbeHost host(session, 1);
+  host.BindClient({&client});
+  auto mapping = client.region.Map();
+  auto* queue = static_cast<reb::NativeProbeQueue*>(mapping.memory());
+  const std::string target = "/" + std::string(299, 'q') + "?x=1";
+  const auto reuse = [&](const std::uint64_t sequence) {
+    NativeProbeEvent parent;
+    parent.header.category = reb::NativeProbeCategory::kNetwork;
+    parent.header.type = NativeProbeType::kMemoryCacheReuse;
+    parent.header.session_id = kSession;
+    parent.header.process_id = 123;
+    parent.header.sequence_number = sequence;
+    parent.header.monotonic_time_ns = 100;
+    parent.header.frame_id = kFrame;
+    parent.header.request_id = 55;
+    Check(queue->TryPush(parent), "The ring admits the reuse");
+    NativeProbeEvent child = parent;
+    child.header.type = NativeProbeType::kRequestTarget;
+    child.header.sequence_number = sequence + 1;
+    child.header.parent_event_id = sequence;
+    child.header.payload_size = reb::kNativeRequestPayloadSize;
+    reb::NativeRequestTarget sent;
+    sent.target_length = static_cast<std::uint32_t>(target.size());
+    sent.scheme = reb::NativeRequestScheme::kHttps;
+    sent.port = 8443;
+    std::copy_n(target.begin(), sent.prefix.size(), sent.prefix.begin());
+    child.inline_payload = reb::EncodeNativeRequestTargetPayload(sent);
+    return child;
+  };
+  const auto bytes = [](const NativeProbeEvent& event) {
+    std::vector<std::uint8_t> record(sizeof(event));
+    std::memcpy(record.data(), &event, sizeof(event));
+    return record;
+  };
+  const auto retention = [](const NativeProbeEvent& event) {
+    return static_cast<reb::NativeRequestTargetRetention>(event.inline_payload[9]);
+  };
+  host.CaptureRendererTarget(bytes(reuse(800)), "https://cdn.example.test:8443", target);
+  Check(events.size() == 2 && events[0].header.sequence_number == 800 &&
+            events[1].header.sequence_number == 801 &&
+            events[1].header.type == NativeProbeType::kRequestTarget &&
+            retention(events[1]) == reb::NativeRequestTargetRetention::kRetained &&
+            events[1].header.artifact_id != 0 && transfers.size() == 1,
+        "The parent is drained first, then the child names its retained target");
+  const auto& artifact = *transfers.begin()->second;
+  Check(artifact.header.kind == reb::NativeArtifactKind::kRequestTarget &&
+            artifact.header.capture_origin == reb::NativeArtifactCaptureOrigin::kNetworkRequest &&
+            (artifact.header.flags & reb::kNativeArtifactFlagSensitive) != 0 &&
+            artifact.op == reb::NativeArtifactTransferOp::kWhole &&
+            artifact.url == "https://cdn.example.test:8443" && artifact.mime_type == "text/plain" &&
+            std::string(artifact.content.begin(), artifact.content.end()) == target &&
+            artifact.header.artifact_id == events[1].header.artifact_id &&
+            artifact.header.creator_event_id == 801,
+        "One whole transfer holds the target, named by its origin and created by the child");
+  events.clear();
+  transfers.clear();
+  // A prefix that is not the target's, or an origin of another scheme, is
+  // not this renderer's record: an explicit gap takes its slot.
+  auto forged = reuse(810);
+  forged.inline_payload[12] = std::byte{'x'};
+  host.CaptureRendererTarget(bytes(forged), "https://cdn.example.test", target);
+  host.CaptureRendererTarget(bytes(reuse(820)), "http://cdn.example.test", target);
+  Check(events.size() == 4 && events[1].header.type == NativeProbeType::kGap &&
+            events[1].header.sequence_number == 811 &&
+            Payload(events[1]) == "renderer_target_malformed" &&
+            events[3].header.type == NativeProbeType::kGap &&
+            events[3].header.sequence_number == 821 && transfers.empty(),
+        "A malformed child leaves a gap in its slot and keeps nothing");
+  events.clear();
+  // Another process's identity is not this renderer's slot to fill.
+  auto foreign = reuse(830);
+  foreign.header.process_id = 999;
+  host.CaptureRendererTarget(bytes(foreign), "https://cdn.example.test", target);
+  Check(events.size() == 1 && events[0].header.sequence_number == 830 && transfers.empty(),
+        "A child naming another process is dropped");
+  events.clear();
+  // Outside a content capture no renderer sends one.
+  session.request_content = false;
+  host.CaptureRendererTarget(bytes(reuse(840)), "https://cdn.example.test", target);
+  Check(events.size() == 2 && events[1].header.type == NativeProbeType::kGap && transfers.empty(),
+        "A child outside a content capture keeps nothing");
+  events.clear();
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost emits a renderer's long target after its parent "
+               "with the whole target as its artifact, and gaps a malformed one\n";
 }
 
 // A Wasm module or compiled script source the renderer sent counts against
@@ -657,7 +824,7 @@ void NativeProbeHostBrowserInternalScope() {
   Check(session.exclusions.size() == 4 && session.exclusions[3].process == 123 &&
             session.exclusions[3].exclusion_class == 70 && session.exclusions[3].count == 2 &&
             events.empty(),
-        "Memory-cache reuses past the renderer's budget are reported as class 70");
+        "Class 70 counts, from an earlier renderer's memory-cache budget, are still reported");
   queue->CountExclusion(reb::kNativeNonOrdinaryPageReuseExclusion);
   host.EventsAvailable();
   Check(session.exclusions.size() == 5 && session.exclusions[4].exclusion_class == 71 &&

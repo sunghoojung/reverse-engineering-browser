@@ -38,9 +38,8 @@ pub const SCHEMA: &str = "flow-graph-v1";
 /// A pathological store is a visible cut rather than an endless request.
 const SCAN_DEADLINE: Duration = Duration::from_secs(30);
 const CANCELLED: &str = "The flow graph request was cancelled";
-/// Distinct stacks decoded. A stack is one digest however often it repeats, and
-/// each renderer sends at most 1,024 request and 1,024 scheduling stacks per
-/// configuration; past this the rest are counted, not drawn.
+/// Distinct stacks decoded. A stack is one digest however often it repeats;
+/// past this the rest are counted, not drawn.
 const MAX_STACKS: usize = 16_384;
 const MAX_NODES: usize = 32_768;
 const MAX_EDGES: usize = 131_072;

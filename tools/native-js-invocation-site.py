@@ -29,8 +29,8 @@ import json
 import sys
 from pathlib import Path
 
-SITE_LIMIT = 8
-FILE_LIMIT = 4096
+SITE_LIMIT = 256
+FILE_LIMIT = 128 * 1024
 U64_MAX = 2**64 - 1
 CASES = Path(__file__).resolve().parent / "fixtures/native-js-invocation/site-cases.json"
 

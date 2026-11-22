@@ -1,0 +1,975 @@
+diff --git a/include/v8-callbacks.h b/include/v8-callbacks.h
+index 245695d..8efdab9 100644
+--- a/include/v8-callbacks.h
++++ b/include/v8-callbacks.h
+@@ -684,7 +684,9 @@ using DynamicScriptCompiledFromEmbedderCallback =
+ // REB native JavaScript dispatch capture. Inactive unless V8 runs with
+ // --reb-js-dispatch-capture (off by default) and the embedder reports a
+ // nonzero epoch. Positions are UTF-16 code-unit offsets into Script::source.
+-constexpr size_t kJsDispatchSiteLimit = 8;
++// Every dispatch at an armed site is reported; the site count is bounded by
++// the embedder record's one-byte slot.
++constexpr size_t kJsDispatchSiteLimit = 256;
+ 
+ enum class JsDispatchShape : uint8_t {
+   // SwitchStatement; the anchor is the `switch` keyword.
+@@ -742,6 +744,9 @@ enum class JsDispatchSiteStatus : uint8_t {
+   // The function containing this armed anchor already had bytecode generated
+   // without it when arming began. It becomes observable after regeneration.
+   kCompiledBeforeArming = 1,
++  // The isolate has used every activation ID, so new activations at this
++  // site are not reported.
++  kIdsExhausted = 2,
+ };
+ 
+ // Current embedder capture epoch; 0 means inactive. Must not call into V8.
+@@ -777,7 +782,9 @@ struct JsDispatchCallbacks {
+ // nonzero epoch. A site is a function whose V8 start position (the `(` of its
+ // parameter list, or the first character of an arrow head) is anchor_offset,
+ // in UTF-16 code units of Script::source.
+-constexpr size_t kJsInvocationSiteLimit = 8;
++// Every call of an armed site is reported; the site count is bounded by the
++// embedder record's one-byte slot.
++constexpr size_t kJsInvocationSiteLimit = 256;
+ constexpr size_t kJsInvocationArgumentLimit = 8;
+ constexpr uint32_t kJsInvocationDigestByteLimit = 1u << 20;
+ 
+@@ -865,6 +872,9 @@ enum class JsInvocationSiteStatus : uint8_t {
+   kCompiledBeforeArming = 1,
+   // The armed function is a generator, constructor or initializer.
+   kUnsupportedFunction = 2,
++  // The isolate has used every invocation ID, so this and later calls of the
++  // site are not reported.
++  kIdsExhausted = 3,
+ };
+ 
+ enum class JsInvocationContextState : uint8_t {
+@@ -893,8 +903,9 @@ using JsInvocationEnabledCallback = bool (*)(uint64_t epoch, uint32_t slot);
+ // call into V8.
+ using JsInvocationDigestsCallback = bool (*)(uint64_t epoch);
+ // Synchronous on the isolate thread. Do not execute JS, allocate V8 heap
+-// objects, retain pointers, block, or perform I/O.
+-using JsInvocationStartCallback = void (*)(Local<Context> context,
++// objects, retain pointers, block, or perform I/O. Returns whether the
++// embedder recorded the start: V8 carries and settles only those calls.
++using JsInvocationStartCallback = bool (*)(Local<Context> context,
+                                            uint64_t epoch,
+                                            const JsInvocationStart& start);
+ // Same restrictions. The context is the armed function's for a synchronous
+diff --git a/src/interpreter/interpreter.cc b/src/interpreter/interpreter.cc
+index 1482532..b9e514a 100644
+--- a/src/interpreter/interpreter.cc
++++ b/src/interpreter/interpreter.cc
+@@ -279,7 +279,7 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
+                                          BailoutReason::kNeverOptimize);
+       }
+       isolate->reb_js_dispatch().RecordArmedFunction(
+-          Cast<Script>(shared_info->script())->id(),
++          isolate, Cast<Script>(shared_info->script())->id(),
+           shared_info->function_literal_id(kRelaxedLoad),
+           generator()->reb_activation_register().index(),
+           generator()->reb_emitted_anchors());
+@@ -293,7 +293,7 @@ InterpreterCompilationJob::Status InterpreterCompilationJob::DoFinalizeJobImpl(
+                                          BailoutReason::kNeverOptimize);
+       }
+       isolate->reb_js_invocation().RecordArmedFunction(
+-          Cast<Script>(shared_info->script())->id(),
++          isolate, Cast<Script>(shared_info->script())->id(),
+           shared_info->StartPosition());
+     }
+   }
+diff --git a/src/interpreter/reb-js-dispatch.h b/src/interpreter/reb-js-dispatch.h
+index 2c86a9c..36f6e49 100644
+--- a/src/interpreter/reb-js-dispatch.h
++++ b/src/interpreter/reb-js-dispatch.h
+@@ -5,8 +5,13 @@
+ #ifndef V8_INTERPRETER_REB_JS_DISPATCH_H_
+ #define V8_INTERPRETER_REB_JS_DISPATCH_H_
+ 
++#include <algorithm>
+ #include <cstddef>
+ #include <cstdint>
++#include <unordered_map>
++#include <unordered_set>
++#include <utility>
++#include <vector>
+ 
+ #include "include/v8-callbacks.h"
+ #include "src/common/globals.h"
+@@ -14,27 +19,85 @@
+ 
+ namespace v8::internal::interpreter {
+ 
++// A set of armed site slots, one bit per slot. Dispatch and invocation sites
++// share the bound, the embedder record's one-byte slot.
++class RebSiteSet final {
++ public:
++  void Set(size_t slot) { words_[slot / 64] |= uint64_t{1} << (slot % 64); }
++  bool Test(size_t slot) const {
++    return ((words_[slot / 64] >> (slot % 64)) & 1) != 0;
++  }
++  bool Any() const {
++    for (uint64_t word : words_) {
++      if (word != 0) return true;
++    }
++    return false;
++  }
++
++ private:
++  static_assert(v8::kJsDispatchSiteLimit == v8::kJsInvocationSiteLimit);
++  uint64_t words_[(v8::kJsDispatchSiteLimit + 63) / 64] = {};
++};
++
++// The IDs of the isolate's live scripts.
++std::unordered_set<int> RebLiveScriptIds(Isolate* isolate);
++
++// Facts about armed bytecode by script ID and a per-script function key, kept
++// across configurations. Entries of collected scripts are dropped whenever
++// the table doubles, so it stays proportional to the live armed functions;
++// it allocates only while armed bytecode is made, never on a call.
++template <typename Value>
++class RebArmedFunctions final {
++ public:
++  const Value* Find(int script_id, int function) const {
++    const auto entry = functions_.find(Key(script_id, function));
++    return entry == functions_.end() ? nullptr : &entry->second;
++  }
++  void Record(Isolate* isolate, int script_id, int function, Value value) {
++    functions_.insert_or_assign(Key(script_id, function), std::move(value));
++    if (functions_.size() < prune_at_) return;
++    const std::unordered_set<int> live = RebLiveScriptIds(isolate);
++    std::erase_if(functions_, [&live](const auto& entry) {
++      return !live.contains(static_cast<int>(entry.first >> 32));
++    });
++    prune_at_ = std::max(kPruneFloor, 2 * functions_.size());
++  }
++
++ private:
++  static constexpr size_t kPruneFloor = 64;
++  static uint64_t Key(int script_id, int function) {
++    return (uint64_t{static_cast<uint32_t>(script_id)} << 32) |
++           static_cast<uint32_t>(function);
++  }
++  std::unordered_map<uint64_t, Value> functions_;
++  size_t prune_at_ = kPruneFloor;
++};
++
+ // Armed JavaScript dispatch anchors for one function. An anchor is the UTF-16
+ // source position of a `switch` keyword or of the `[` that opens an indexed
+-// callee, together with its shape.
++// callee, together with its shape. Grown only while bytecode is generated
++// for an armed function, never on a dispatch.
+ struct RebJsDispatchAnchors {
+-  int positions[v8::kJsDispatchSiteLimit] = {};
+-  v8::JsDispatchShape shapes[v8::kJsDispatchSiteLimit] = {};
++  struct Anchor {
++    int position;
++    v8::JsDispatchShape shape;
++  };
++  std::vector<Anchor> entries;
+   size_t count = 0;
+ 
+   bool Contains(v8::JsDispatchShape shape, int position) const;
+-  // Ignores duplicates; the bound is the site limit.
++  // Ignores duplicates.
+   void Add(v8::JsDispatchShape shape, int position);
+ };
+ 
+ // REB native JavaScript dispatch capture (--reb-js-dispatch-capture). Holds
+ // the per-isolate copy of the embedder's armed sites. It is used only on the
+-// isolate's main thread: the flag keeps every bytecode generation there. All
+-// tables are fixed-size, so neither inactive nor hot paths allocate.
++// isolate's main thread: the flag keeps every bytecode generation there. The
++// sites and anchors are allocated when a configuration or an armed function's
++// bytecode is made, so neither inactive nor hot paths allocate.
+ class RebJsDispatch final {
+  public:
+   static constexpr size_t kBindingLimit = 64;
+-  static constexpr size_t kArmedFunctionLimit = 32;
+   static constexpr size_t kParentLimit = 256;
+   static constexpr int kFrameWalkLimit = 64;
+ 
+@@ -51,7 +114,8 @@ class RebJsDispatch final {
+ 
+   // Records bytecode generated with armed anchors. These are facts about
+   // bytecode, so an epoch change keeps them.
+-  void RecordArmedFunction(int script_id, int function_literal_id,
++  void RecordArmedFunction(Isolate* isolate, int script_id,
++                           int function_literal_id,
+                            int activation_register,
+                            const RebJsDispatchAnchors& emitted);
+ 
+@@ -76,11 +140,9 @@ class RebJsDispatch final {
+   };
+   struct Binding {
+     int script_id;
+-    uint32_t mask;
++    RebSiteSet mask;
+   };
+   struct ArmedFunction {
+-    int script_id;
+-    int function_literal_id;
+     int activation_register;
+     RebJsDispatchAnchors anchors;
+   };
+@@ -90,13 +152,14 @@ class RebJsDispatch final {
+     kParentSearchTruncated = 1 << 2,
+   };
+   struct Parent {
+-    uint32_t id;
++    uint32_t activation;
++    uint32_t parent;
+     uint8_t flags;
+   };
+ 
+   bool Complete() const;
+   void Reset(uint64_t epoch);
+-  uint32_t BindingMask(Tagged<Script> script);
++  RebSiteSet BindingMask(Tagged<Script> script);
+   void ReportCompiledBeforeArming(Isolate* isolate);
+   const ArmedFunction* FindArmedFunction(int script_id,
+                                          int function_literal_id) const;
+@@ -109,18 +172,21 @@ class RebJsDispatch final {
+   bool synced_ = false;
+   bool any_armed_ = false;
+   uint64_t epoch_ = 0;
+-  Site sites_[v8::kJsDispatchSiteLimit] = {};
++  std::vector<Site> sites_;
+   size_t site_count_ = 0;
++  // Slots whose ID exhaustion was reported this configuration.
++  RebSiteSet reported_exhausted_;
+   Binding bindings_[kBindingLimit] = {};
+   size_t binding_count_ = 0;
+   size_t next_binding_ = 0;
+-  ArmedFunction armed_functions_[kArmedFunctionLimit] = {};
+-  size_t armed_function_count_ = 0;
+-  size_t next_armed_function_ = 0;
++  RebArmedFunctions<ArmedFunction> armed_functions_;
+   // Activation IDs are never reused. IDs below activation_floor_ belong to an
+   // earlier epoch, so an activation never carries a stale configuration's ID.
+   uint32_t next_activation_ = 1;
+   uint32_t activation_floor_ = 1;
++  // The parents of the most recent activations, by ID modulo the table size.
++  // An activation whose entry a later one replaced reports its parent as
++  // unknown on later dispatches; its first dispatch always carries it.
+   Parent parents_[kParentLimit] = {};
+ };
+ 
+diff --git a/src/interpreter/reb-js-dispatch.cc b/src/interpreter/reb-js-dispatch.cc
+index 67190c0..ad1c0d7 100644
+--- a/src/interpreter/reb-js-dispatch.cc
++++ b/src/interpreter/reb-js-dispatch.cc
+@@ -24,8 +24,9 @@ namespace v8::internal::interpreter {
+ 
+ namespace {
+ 
+-// Smi range for activation IDs. Admission is bounded per configuration by the
+-// embedder, so exhausting this range is not reachable in practice.
++// Smi range for activation IDs, which are never reused in an isolate. Once it
++// is spent, new activations are not reported and the embedder is told once
++// per configuration and slot.
+ constexpr uint32_t kRebActivationIdLimit =
+     static_cast<uint32_t>(Smi::kMaxValue);
+ 
+@@ -96,17 +97,27 @@ void RebClassifySelector(Tagged<Object> selector,
+ }  // namespace
+ 
+ bool RebJsDispatchAnchors::Contains(JsDispatchShape shape, int position) const {
+-  for (size_t i = 0; i < count; ++i) {
+-    if (positions[i] == position && shapes[i] == shape) return true;
++  for (const Anchor& anchor : entries) {
++    if (anchor.position == position && anchor.shape == shape) return true;
+   }
+   return false;
+ }
+ 
++std::unordered_set<int> RebLiveScriptIds(Isolate* isolate) {
++  DisallowGarbageCollection no_gc;
++  std::unordered_set<int> ids;
++  Script::Iterator scripts(isolate);
++  for (Tagged<Script> script = scripts.Next(); !script.is_null();
++       script = scripts.Next()) {
++    ids.insert(script->id());
++  }
++  return ids;
++}
++
+ void RebJsDispatchAnchors::Add(JsDispatchShape shape, int position) {
+-  if (count == kJsDispatchSiteLimit || Contains(shape, position)) return;
+-  positions[count] = position;
+-  shapes[count] = shape;
+-  ++count;
++  if (Contains(shape, position)) return;
++  entries.push_back({position, shape});
++  count = entries.size();
+ }
+ 
+ void RebJsDispatch::SetCallbacks(Isolate* isolate,
+@@ -129,6 +140,7 @@ void RebJsDispatch::Reset(uint64_t epoch) {
+   site_count_ = 0;
+   binding_count_ = 0;
+   next_binding_ = 0;
++  reported_exhausted_ = {};
+   activation_floor_ = next_activation_;
+   for (Parent& parent : parents_) parent = {};
+ }
+@@ -143,9 +155,10 @@ bool RebJsDispatch::Sync(Isolate* isolate) {
+   synced_ = true;
+   Reset(epoch);
+   if (epoch == 0) return false;
+-  JsDispatchSite copied[kJsDispatchSiteLimit] = {};
+-  size_t count = callbacks_.sites(epoch, copied, kJsDispatchSiteLimit);
++  std::vector<JsDispatchSite> copied(kJsDispatchSiteLimit);
++  size_t count = callbacks_.sites(epoch, copied.data(), kJsDispatchSiteLimit);
+   if (count > kJsDispatchSiteLimit) count = kJsDispatchSiteLimit;
++  sites_.assign(count, Site{});
+   for (size_t slot = 0; slot < count; ++slot) {
+     const JsDispatchSite& from = copied[slot];
+     Site& to = sites_[slot];
+@@ -167,10 +180,10 @@ bool RebJsDispatch::Sync(Isolate* isolate) {
+   return any_armed_;
+ }
+ 
+-uint32_t RebJsDispatch::BindingMask(Tagged<Script> script) {
++RebSiteSet RebJsDispatch::BindingMask(Tagged<Script> script) {
+   if (script->type() != Script::Type::kNormal || script->id() <= 0 ||
+       !IsString(script->source())) {
+-    return 0;
++    return {};
+   }
+   const int script_id = script->id();
+   for (size_t i = 0; i < binding_count_; ++i) {
+@@ -184,15 +197,15 @@ uint32_t RebJsDispatch::BindingMask(Tagged<Script> script) {
+                                         sites_[slot].source_length == length);
+   }
+   // Most scripts are rejected here without hashing or a cache entry.
+-  if (!length_matches) return 0;
++  if (!length_matches) return {};
+   uint8_t digest[kSizeOfSha256Digest];
+-  if (!RebSourceDigest(source, digest)) return 0;
+-  uint32_t mask = 0;
++  if (!RebSourceDigest(source, digest)) return {};
++  RebSiteSet mask;
+   for (size_t slot = 0; slot < site_count_; ++slot) {
+     const Site& site = sites_[slot];
+     if (site.usable && site.source_length == length &&
+         std::memcmp(site.source_sha256, digest, sizeof(digest)) == 0) {
+-      mask |= 1u << slot;
++      mask.Set(slot);
+     }
+   }
+   // Negative results are cached too; eviction only costs a rehash.
+@@ -206,9 +219,9 @@ void RebJsDispatch::AnchorsIn(Isolate* isolate, Tagged<Script> script,
+                               int start, int end,
+                               RebJsDispatchAnchors* anchors) {
+   if (!Sync(isolate)) return;
+-  const uint32_t mask = BindingMask(script);
++  const RebSiteSet mask = BindingMask(script);
+   for (size_t slot = 0; slot < site_count_; ++slot) {
+-    if ((mask & (1u << slot)) == 0) continue;
++    if (!mask.Test(slot)) continue;
+     const int anchor = static_cast<int>(sites_[slot].anchor_offset);
+     if (anchor >= start && anchor < end) {
+       anchors->Add(sites_[slot].shape, anchor);
+@@ -216,42 +229,24 @@ void RebJsDispatch::AnchorsIn(Isolate* isolate, Tagged<Script> script,
+   }
+ }
+ 
+-void RebJsDispatch::RecordArmedFunction(int script_id, int function_literal_id,
++void RebJsDispatch::RecordArmedFunction(Isolate* isolate, int script_id,
++                                        int function_literal_id,
+                                         int activation_register,
+                                         const RebJsDispatchAnchors& emitted) {
+-  ArmedFunction* entry = nullptr;
+-  for (size_t i = 0; i < armed_function_count_; ++i) {
+-    if (armed_functions_[i].script_id == script_id &&
+-        armed_functions_[i].function_literal_id == function_literal_id) {
+-      entry = &armed_functions_[i];
+-      break;
+-    }
+-  }
+-  if (entry == nullptr) {
+-    // Oldest first. A lost entry only stops parent linking through it.
+-    entry = &armed_functions_[next_armed_function_];
+-    next_armed_function_ = (next_armed_function_ + 1) % kArmedFunctionLimit;
+-    if (armed_function_count_ < kArmedFunctionLimit) ++armed_function_count_;
+-  }
+-  *entry = {script_id, function_literal_id, activation_register, emitted};
++  armed_functions_.Record(isolate, script_id, function_literal_id,
++                          {activation_register, emitted});
+ }
+ 
+ const RebJsDispatch::ArmedFunction* RebJsDispatch::FindArmedFunction(
+     int script_id, int function_literal_id) const {
+-  for (size_t i = 0; i < armed_function_count_; ++i) {
+-    if (armed_functions_[i].script_id == script_id &&
+-        armed_functions_[i].function_literal_id == function_literal_id) {
+-      return &armed_functions_[i];
+-    }
+-  }
+-  return nullptr;
++  return armed_functions_.Find(script_id, function_literal_id);
+ }
+ 
+ bool RebJsDispatch::CurrentlyArmed(const ArmedFunction& function,
+                                    Tagged<Script> script) {
+-  const uint32_t mask = BindingMask(script);
++  const RebSiteSet mask = BindingMask(script);
+   for (size_t slot = 0; slot < site_count_; ++slot) {
+-    if ((mask & (1u << slot)) != 0 &&
++    if (mask.Test(slot) &&
+         function.anchors.Contains(
+             sites_[slot].shape, static_cast<int>(sites_[slot].anchor_offset))) {
+       return true;
+@@ -265,12 +260,12 @@ void RebJsDispatch::ReportCompiledBeforeArming(Isolate* isolate) {
+   Script::Iterator scripts(isolate);
+   for (Tagged<Script> script = scripts.Next(); !script.is_null();
+        script = scripts.Next()) {
+-    const uint32_t mask = BindingMask(script);
+-    if (mask == 0) continue;
++    const RebSiteSet mask = BindingMask(script);
++    if (!mask.Any()) continue;
+     Tagged<WeakFixedArray> infos = script->infos();
+     const uint32_t info_count = infos->ulength().value();
+     for (size_t slot = 0; slot < site_count_; ++slot) {
+-      if ((mask & (1u << slot)) == 0) continue;
++      if (!mask.Test(slot)) continue;
+       const int anchor = static_cast<int>(sites_[slot].anchor_offset);
+       // The innermost function containing the anchor. A compiled function
+       // has SharedFunctionInfos for its inner functions, so a compiled
+@@ -364,10 +359,10 @@ Tagged<Object> RebJsDispatch::Trace(Isolate* isolate, Tagged<Object> activation,
+                                     ? JsDispatchShape::kIndexedCall
+                                     : JsDispatchShape::kSwitch;
+   const uint32_t anchor = static_cast<uint32_t>(encoded_anchor >> 1);
+-  const uint32_t mask = BindingMask(script);
++  const RebSiteSet mask = BindingMask(script);
+   size_t slot = site_count_;
+   for (size_t i = 0; i < site_count_; ++i) {
+-    if ((mask & (1u << i)) != 0 && sites_[i].anchor_offset == anchor &&
++    if (mask.Test(i) && sites_[i].anchor_offset == anchor &&
+         sites_[i].shape == shape) {
+       slot = i;
+       break;
+@@ -386,23 +381,27 @@ Tagged<Object> RebJsDispatch::Trace(Isolate* isolate, Tagged<Object> activation,
+   bool new_activation = false;
+   if (IsCurrentActivation(activation)) {
+     id = static_cast<uint32_t>(Smi::ToInt(Cast<Smi>(activation)));
+-    const uint32_t index = id - activation_floor_;
+-    if (index < kParentLimit &&
+-        (parents_[index].flags & kParentRecorded) != 0) {
+-      parent = parents_[index].id;
+-      flags = parents_[index].flags;
++    const Parent& entry = parents_[id % kParentLimit];
++    if (entry.activation == id && (entry.flags & kParentRecorded) != 0) {
++      parent = entry.parent;
++      flags = entry.flags;
+     } else {
+       flags = kParentUnknown;
+     }
+   } else {
+-    if (next_activation_ >= kRebActivationIdLimit) return activation;
++    if (next_activation_ >= kRebActivationIdLimit) {
++      if (!reported_exhausted_.Test(slot)) {
++        reported_exhausted_.Set(slot);
++        callbacks_.status(epoch_, static_cast<uint32_t>(slot),
++                          JsDispatchSiteStatus::kIdsExhausted, script->id());
++      }
++      return activation;
++    }
+     id = next_activation_++;
+     new_activation = true;
+     FindParent(isolate, closure, &parent, &flags);
+-    const uint32_t index = id - activation_floor_;
+-    if (index < kParentLimit) {
+-      parents_[index] = {parent, static_cast<uint8_t>(flags | kParentRecorded)};
+-    }
++    parents_[id % kParentLimit] = {
++        id, parent, static_cast<uint8_t>(flags | kParentRecorded)};
+   }
+ 
+   JsDispatchObservation observation = {};
+diff --git a/src/interpreter/reb-js-invocation.h b/src/interpreter/reb-js-invocation.h
+index d457bb3..94659c3 100644
+--- a/src/interpreter/reb-js-invocation.h
++++ b/src/interpreter/reb-js-invocation.h
+@@ -7,10 +7,12 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <vector>
+ 
+ #include "include/v8-callbacks.h"
+ #include "src/common/globals.h"
+ #include "src/handles/handles.h"
++#include "src/interpreter/reb-js-dispatch.h"
+ #include "src/objects/function-kind.h"
+ #include "src/objects/tagged.h"
+ 
+@@ -33,7 +35,8 @@ enum RebJsInvocationExitKind : int {
+ // Holds the per-isolate copy of the embedder's armed function-entry sites and
+ // the invocation counter. Used only on the isolate's main thread: the flag
+ // implies --reb-js-dispatch-capture, which keeps every bytecode generation
+-// there. Tables are fixed-size, so the inactive and hot paths never allocate.
++// there. Sites and armed functions are allocated only when a configuration
++// or armed bytecode is made, so the inactive and hot paths never allocate.
+ //
+ // The current invocation lives in the continuation-preserved embedder data
+ // slot as an internal Tuple2{embedder value, Smi invocation ID}. Promise
+@@ -43,7 +46,6 @@ enum RebJsInvocationExitKind : int {
+ class RebJsInvocation final {
+  public:
+   static constexpr size_t kBindingLimit = 64;
+-  static constexpr size_t kArmedFunctionLimit = 32;
+   // Frame record slots: saved embedder data slot, signed invocation ID
+   // (negative once the synchronous extent ended), site slot, native context.
+   static constexpr int kRecordSaved = 0;
+@@ -68,7 +70,8 @@ class RebJsInvocation final {
+ 
+   // Records bytecode generated with an entry call. A fact about bytecode, so
+   // an epoch change keeps it.
+-  void RecordArmedFunction(int script_id, int start_position);
++  void RecordArmedFunction(Isolate* isolate, int script_id,
++                           int start_position);
+ 
+   // Runtime_RebJsInvocationEnter: returns the frame record, or undefined
+   // when the call was not admitted.
+@@ -79,7 +82,7 @@ class RebJsInvocation final {
+   Tagged<Object> Exit(Isolate* isolate, DirectHandle<Object> record,
+                       DirectHandle<Object> value, int kind);
+   // A watched promise settled; called from the internal reaction's handler.
+-  void PromiseSettled(Isolate* isolate, uint32_t encoded, bool fulfilled,
++  void PromiseSettled(Isolate* isolate, uint64_t encoded, bool fulfilled,
+                       DirectHandle<Object> value);
+ 
+   // The invocation the running code belongs to. Never allocates or calls
+@@ -103,16 +106,14 @@ class RebJsInvocation final {
+   };
+   struct Binding {
+     int script_id;
+-    uint32_t mask;
+-  };
+-  struct ArmedFunction {
+-    int script_id;
+-    int start_position;
++    RebSiteSet mask;
+   };
++  // Presence in armed_functions_ is the fact; there is nothing else to keep.
++  struct ArmedFunction {};
+ 
+   bool Complete() const;
+   void Reset(uint64_t epoch);
+-  uint32_t BindingMask(Tagged<Script> script);
++  RebSiteSet BindingMask(Tagged<Script> script);
+   bool SlotFor(Tagged<Script> script, int start_position, uint32_t* slot);
+   bool IsArmedFunction(int script_id, int start_position) const;
+   void ReportCompiledBeforeArming(Isolate* isolate);
+@@ -130,17 +131,16 @@ class RebJsInvocation final {
+   bool any_armed_ = false;
+   bool digests_ = false;
+   uint64_t epoch_ = 0;
+-  Site sites_[v8::kJsInvocationSiteLimit] = {};
++  std::vector<Site> sites_;
+   size_t site_count_ = 0;
+   // Statuses already reported this configuration, one bit per slot.
+-  uint32_t reported_unsupported_ = 0;
+-  uint32_t reported_compiled_ = 0;
++  RebSiteSet reported_unsupported_;
++  RebSiteSet reported_compiled_;
++  RebSiteSet reported_exhausted_;
+   Binding bindings_[kBindingLimit] = {};
+   size_t binding_count_ = 0;
+   size_t next_binding_ = 0;
+-  ArmedFunction armed_functions_[kArmedFunctionLimit] = {};
+-  size_t armed_function_count_ = 0;
+-  size_t next_armed_function_ = 0;
++  RebArmedFunctions<ArmedFunction> armed_functions_;
+   // IDs are never reused. IDs below id_floor_ belong to an earlier epoch and
+   // are reported as unknown, never as a current invocation.
+   uint32_t next_id_ = 1;
+diff --git a/src/interpreter/reb-js-invocation.cc b/src/interpreter/reb-js-invocation.cc
+index 51e35ae..2a685f8 100644
+--- a/src/interpreter/reb-js-invocation.cc
++++ b/src/interpreter/reb-js-invocation.cc
+@@ -33,8 +33,10 @@ namespace v8::internal::interpreter {
+ 
+ namespace {
+ 
+-// The site slot (at most 8) travels with the ID in one Smi-sized value.
+-constexpr uint32_t kRebIdLimit = static_cast<uint32_t>(Smi::kMaxValue) >> 3;
++// IDs live in Smis; a watched promise's reaction carries ID * 256 + slot as
++// an exactly representable Number.
++constexpr uint32_t kRebIdLimit = static_cast<uint32_t>(Smi::kMaxValue);
++constexpr uint64_t kRebSlotRadix = v8::kJsInvocationSiteLimit;
+ constexpr uint64_t kRebRollingBase = 0x100000001b3ULL;
+ 
+ bool IsRebWrapper(Tagged<Object> slot) {
+@@ -205,10 +207,15 @@ void OnWatchedPromise(const v8::FunctionCallbackInfo<v8::Value>& info,
+                       bool fulfilled) {
+   Isolate* isolate = reinterpret_cast<Isolate*>(info.GetIsolate());
+   v8::Local<v8::Data> data = info.DataV2();
+-  if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsUint32()) {
++  if (data.IsEmpty() || !data->IsValue() || !data.As<v8::Value>()->IsNumber()) {
+     return;
+   }
+-  const uint32_t encoded = data.As<v8::Uint32>()->Value();
++  const double number = data.As<v8::Number>()->Value();
++  if (!(number >= 0) || number >= 9007199254740992.0 ||
++      std::trunc(number) != number) {
++    return;
++  }
++  const uint64_t encoded = static_cast<uint64_t>(number);
+   DirectHandle<Object> value = isolate->factory()->undefined_value();
+   if (info.Length() > 0) value = Utils::OpenDirectHandle(*info[0]);
+   isolate->reb_js_invocation().PromiseSettled(isolate, encoded, fulfilled,
+@@ -247,8 +254,9 @@ void RebJsInvocation::Reset(uint64_t epoch) {
+   site_count_ = 0;
+   binding_count_ = 0;
+   next_binding_ = 0;
+-  reported_unsupported_ = 0;
+-  reported_compiled_ = 0;
++  reported_unsupported_ = {};
++  reported_compiled_ = {};
++  reported_exhausted_ = {};
+   id_floor_ = next_id_;
+ }
+ 
+@@ -263,9 +271,11 @@ bool RebJsInvocation::Sync(Isolate* isolate) {
+   synced_ = true;
+   Reset(epoch);
+   if (epoch == 0) return false;
+-  v8::JsInvocationSite copied[v8::kJsInvocationSiteLimit] = {};
+-  size_t count = callbacks_.sites(epoch, copied, v8::kJsInvocationSiteLimit);
++  std::vector<v8::JsInvocationSite> copied(v8::kJsInvocationSiteLimit);
++  size_t count =
++      callbacks_.sites(epoch, copied.data(), v8::kJsInvocationSiteLimit);
+   if (count > v8::kJsInvocationSiteLimit) count = v8::kJsInvocationSiteLimit;
++  sites_.assign(count, Site{});
+   for (size_t slot = 0; slot < count; ++slot) {
+     const v8::JsInvocationSite& from = copied[slot];
+     Site& to = sites_[slot];
+@@ -289,10 +299,10 @@ bool RebJsInvocation::Sync(Isolate* isolate) {
+ #endif
+ }
+ 
+-uint32_t RebJsInvocation::BindingMask(Tagged<Script> script) {
++RebSiteSet RebJsInvocation::BindingMask(Tagged<Script> script) {
+   if (script->type() != Script::Type::kNormal || script->id() <= 0 ||
+       !IsString(script->source())) {
+-    return 0;
++    return {};
+   }
+   const int script_id = script->id();
+   for (size_t i = 0; i < binding_count_; ++i) {
+@@ -306,15 +316,15 @@ uint32_t RebJsInvocation::BindingMask(Tagged<Script> script) {
+                                         sites_[slot].source_length == length);
+   }
+   // Most scripts are rejected here without hashing or a cache entry.
+-  if (!length_matches) return 0;
++  if (!length_matches) return {};
+   uint8_t digest[kSizeOfSha256Digest];
+-  if (!RebSourceDigest(source, digest)) return 0;
+-  uint32_t mask = 0;
++  if (!RebSourceDigest(source, digest)) return {};
++  RebSiteSet mask;
+   for (size_t slot = 0; slot < site_count_; ++slot) {
+     const Site& site = sites_[slot];
+     if (site.usable && site.source_length == length &&
+         std::memcmp(site.source_sha256, digest, sizeof(digest)) == 0) {
+-      mask |= 1u << slot;
++      mask.Set(slot);
+     }
+   }
+   // Negative results are cached too; eviction only costs a rehash.
+@@ -326,9 +336,9 @@ uint32_t RebJsInvocation::BindingMask(Tagged<Script> script) {
+ 
+ bool RebJsInvocation::SlotFor(Tagged<Script> script, int start_position,
+                               uint32_t* slot) {
+-  const uint32_t mask = BindingMask(script);
++  const RebSiteSet mask = BindingMask(script);
+   for (size_t i = 0; i < site_count_; ++i) {
+-    if ((mask & (1u << i)) != 0 &&
++    if (mask.Test(i) &&
+         sites_[i].anchor_offset == static_cast<uint32_t>(start_position)) {
+       *slot = static_cast<uint32_t>(i);
+       return true;
+@@ -340,12 +350,14 @@ bool RebJsInvocation::SlotFor(Tagged<Script> script, int start_position,
+ void RebJsInvocation::ReportStatus(uint32_t slot,
+                                    v8::JsInvocationSiteStatus status,
+                                    int script_id) {
+-  uint32_t* reported =
++  RebSiteSet* reported =
+       status == v8::JsInvocationSiteStatus::kUnsupportedFunction
+           ? &reported_unsupported_
++      : status == v8::JsInvocationSiteStatus::kIdsExhausted
++          ? &reported_exhausted_
+           : &reported_compiled_;
+-  if ((*reported & (1u << slot)) != 0) return;
+-  *reported |= 1u << slot;
++  if (reported->Test(slot)) return;
++  reported->Set(slot);
+   callbacks_.status(epoch_, slot, status, script_id);
+ }
+ 
+@@ -361,24 +373,14 @@ bool RebJsInvocation::ArmedSlot(Isolate* isolate, Tagged<Script> script,
+   return true;
+ }
+ 
+-void RebJsInvocation::RecordArmedFunction(int script_id, int start_position) {
+-  if (IsArmedFunction(script_id, start_position)) return;
+-  // Oldest first. A lost entry can only repeat a compiled-before-arming
+-  // status for a function that is in fact armed; it never arms anything.
+-  armed_functions_[next_armed_function_] = {script_id, start_position};
+-  next_armed_function_ = (next_armed_function_ + 1) % kArmedFunctionLimit;
+-  if (armed_function_count_ < kArmedFunctionLimit) ++armed_function_count_;
++void RebJsInvocation::RecordArmedFunction(Isolate* isolate, int script_id,
++                                          int start_position) {
++  armed_functions_.Record(isolate, script_id, start_position, {});
+ }
+ 
+ bool RebJsInvocation::IsArmedFunction(int script_id,
+                                       int start_position) const {
+-  for (size_t i = 0; i < armed_function_count_; ++i) {
+-    if (armed_functions_[i].script_id == script_id &&
+-        armed_functions_[i].start_position == start_position) {
+-      return true;
+-    }
+-  }
+-  return false;
++  return armed_functions_.Find(script_id, start_position) != nullptr;
+ }
+ 
+ void RebJsInvocation::ReportCompiledBeforeArming(Isolate* isolate) {
+@@ -386,12 +388,12 @@ void RebJsInvocation::ReportCompiledBeforeArming(Isolate* isolate) {
+   Script::Iterator scripts(isolate);
+   for (Tagged<Script> script = scripts.Next(); !script.is_null();
+        script = scripts.Next()) {
+-    const uint32_t mask = BindingMask(script);
+-    if (mask == 0) continue;
++    const RebSiteSet mask = BindingMask(script);
++    if (!mask.Any()) continue;
+     Tagged<WeakFixedArray> infos = script->infos();
+     const uint32_t info_count = infos->ulength().value();
+     for (size_t slot = 0; slot < site_count_; ++slot) {
+-      if ((mask & (1u << slot)) == 0) continue;
++      if (!mask.Test(slot)) continue;
+       const int anchor = static_cast<int>(sites_[slot].anchor_offset);
+       for (uint32_t i = 0; i < info_count; ++i) {
+         Tagged<HeapObject> object;
+@@ -432,7 +434,12 @@ Tagged<Object> RebJsInvocation::Enter(Isolate* isolate,
+   // Bytecode armed by an earlier configuration keeps its call; it returns
+   // here unless the current configuration arms the same function.
+   if (!SlotFor(script, shared->StartPosition(), &slot) ||
+-      !callbacks_.enabled(epoch_, slot) || next_id_ >= kRebIdLimit) {
++      !callbacks_.enabled(epoch_, slot)) {
++    return roots.undefined_value();
++  }
++  if (next_id_ >= kRebIdLimit) {
++    ReportStatus(slot, v8::JsInvocationSiteStatus::kIdsExhausted,
++                 script->id());
+     return roots.undefined_value();
+   }
+ 
+@@ -487,7 +494,12 @@ Tagged<Object> RebJsInvocation::Enter(Isolate* isolate,
+   record->set(kRecordSlot, Smi::FromInt(static_cast<int>(slot)));
+   record->set(kRecordContext, *context);
+   isolate->isolate_data()->set_continuation_preserved_embedder_data(*wrapper);
+-  callbacks_.start(Utils::ToLocal(context), epoch_, start);
++  if (!callbacks_.start(Utils::ToLocal(context), epoch_, start)) {
++    // The embedder did not record this start, so the call is neither carried
++    // nor settled: its callees and continuations keep the caller's context.
++    isolate->isolate_data()->set_continuation_preserved_embedder_data(*saved);
++    return roots.undefined_value();
++  }
+   return *record;
+ }
+ 
+@@ -548,8 +560,8 @@ void RebJsInvocation::Watch(Isolate* isolate, DirectHandle<JSPromise> promise,
+   if (!Sync(isolate) || !IsCurrentId(id)) return;
+   v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(isolate);
+   v8::Local<v8::Context> local_context = Utils::ToLocal(context);
+-  v8::Local<v8::Value> data =
+-      v8::Integer::NewFromUnsigned(v8_isolate, (id << 3) | slot);
++  v8::Local<v8::Value> data = v8::Number::New(
++      v8_isolate, static_cast<double>(id * kRebSlotRadix + slot));
+   v8::Local<v8::Function> fulfilled;
+   v8::Local<v8::Function> rejected;
+   if (!v8::Function::New(local_context, OnWatchedFulfilled, data, 1,
+@@ -586,12 +598,13 @@ void RebJsInvocation::Watch(Isolate* isolate, DirectHandle<JSPromise> promise,
+   promise->set_reactions_or_result(*reaction);
+ }
+ 
+-void RebJsInvocation::PromiseSettled(Isolate* isolate, uint32_t encoded,
++void RebJsInvocation::PromiseSettled(Isolate* isolate, uint64_t encoded,
+                                      bool fulfilled,
+                                      DirectHandle<Object> value) {
+   HandleScope scope(isolate);
+   DirectHandle<NativeContext> context = isolate->native_context();
+-  Settle(isolate, context, encoded >> 3, encoded & 7, fulfilled,
++  Settle(isolate, context, static_cast<uint32_t>(encoded / kRebSlotRadix),
++         static_cast<uint32_t>(encoded % kRebSlotRadix), fulfilled,
+          v8::JsInvocationSettleVia::kPromise, value);
+ }
+ 
+diff --git a/test/cctest/test-api.cc b/test/cctest/test-api.cc
+index 4d46cfc..a133725 100644
+--- a/test/cctest/test-api.cc
++++ b/test/cctest/test-api.cc
+@@ -33366,6 +33366,72 @@ TEST(RebNativeJsDispatchParentActivation) {
+   CHECK(!late_outer.parent_unknown);
+ }
+ 
++// An armed function stays linkable however many functions were armed after
++// it, and an activation keeps its parent on later dispatches however many
++// activations came before it.
++TEST(RebNativeJsDispatchParentsAcrossManyFunctionsAndActivations) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsDispatchScope capture(isolate);
++  constexpr size_t kOthers = 40;
++  constexpr int kCalls = 300;
++  std::string source =
++      "function rebManyInner(code) { var r = 0; for (var i = 0; i < "
++      "code.length; i++) { switch (code[i]) { default: r++; } } return r; }"
++      "var rebManyOps = [function (s) { return s + rebManyInner([0, 0]); }];"
++      "function rebManyOuter(code) { var s = 0; for (var pc = 0; "
++      "pc < code.length; pc++) { s = rebManyOps[code[pc]](s); } return s; }";
++  for (size_t n = 0; n < kOthers; ++n) {
++    source += "function rebManyOther" + std::to_string(n) +
++              "(x) { switch (x) { default: return 1; } }";
++  }
++  std::vector<v8::JsDispatchSite> sites{
++      RebJsSite(source, RebAnchor(source, "rebManyOps[code[pc]]", 10),
++                v8::JsDispatchShape::kIndexedCall),
++      RebJsSite(source, RebAnchor(source, "switch (code[i])"),
++                v8::JsDispatchShape::kSwitch)};
++  for (size_t n = 0; n < kOthers; ++n) {
++    const std::string head =
++        "function rebManyOther" + std::to_string(n) + "(x) { ";
++    sites.push_back(RebJsSite(source, RebAnchor(source, head, head.size()),
++                              v8::JsDispatchShape::kSwitch));
++  }
++  capture.Arm(1, sites);
++  CompileRun(source.c_str());
++  // The outer function's bytecode is made first, then every other armed
++  // function's.
++  CHECK_EQ(0,
++           CompileRun("rebManyOuter([])")->Int32Value(env.local()).FromJust());
++  for (size_t n = 0; n < kOthers; ++n) {
++    const std::string call = "rebManyOther" + std::to_string(n) + "(0)";
++    CHECK_EQ(1, CompileRun(call.c_str())->Int32Value(env.local()).FromJust());
++  }
++  CHECK_EQ(2 * kCalls,
++           CompileRun("rebManyOuter(new Array(300).fill(0))")
++               ->Int32Value(env.local())
++               .FromJust());
++  const auto& records = capture.embedder().observations;
++  CHECK_EQ(kOthers + 3 * kCalls, records.size());
++  const v8::JsDispatchObservation& outer = records[kOthers].observation;
++  CHECK_EQ(0u, outer.slot);
++  CHECK(outer.new_activation);
++  size_t inner = 0;
++  for (size_t i = kOthers; i < records.size(); ++i) {
++    const v8::JsDispatchObservation& record = records[i].observation;
++    if (record.slot == 0) {
++      CHECK_EQ(outer.activation_id, record.activation_id);
++      continue;
++    }
++    CHECK_EQ(1u, record.slot);
++    CHECK_EQ(inner % 2 == 0, record.new_activation);
++    CHECK_EQ(outer.activation_id, record.parent_activation_id);
++    CHECK(!record.parent_unknown);
++    ++inner;
++  }
++  CHECK_EQ(static_cast<size_t>(2 * kCalls), inner);
++}
++
+ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
+   LocalContext env;
+   v8::Isolate* isolate = env.isolate();
+@@ -33388,7 +33454,7 @@ TEST(RebNativeJsDispatchAdmissionAndSiteCap) {
+   }
+   sites.push_back(
+       RebJsSite(kept, RebAnchor(kept, "switch"), v8::JsDispatchShape::kSwitch));
+-  // A ninth site is beyond the limit and never armed.
++  // A site past the limit is never armed.
+   sites.push_back(RebJsSite(capped, RebAnchor(capped, "switch"),
+                             v8::JsDispatchShape::kSwitch));
+   capture.Arm(1, sites);
+@@ -33421,6 +33487,8 @@ struct RebJsInvocationEmbedder {
+   std::vector<v8::JsInvocationSite> sites;
+   bool enabled = true;
+   bool digests = false;
++  // Whether the embedder records a start, as its transport would.
++  bool records = true;
+   std::vector<v8::JsInvocationStart> starts;
+   std::vector<v8::JsInvocationSettle> settles;
+   std::vector<std::pair<uint32_t, v8::JsInvocationSiteStatus>> statuses;
+@@ -33454,15 +33522,17 @@ bool RebJsInvocationDigests(uint64_t epoch) {
+          reb_js_invocation_embedder->digests;
+ }
+ 
+-void RebJsInvocationStarted(v8::Local<v8::Context> context, uint64_t epoch,
++bool RebJsInvocationStarted(v8::Local<v8::Context> context, uint64_t epoch,
+                             const v8::JsInvocationStart& start) {
+   CHECK(!context.IsEmpty());
+   CHECK_NOT_NULL(reb_js_invocation_embedder);
+   CHECK_EQ(epoch, reb_js_invocation_embedder->epoch);
+   CHECK_NOT_NULL(start.source_sha256);
++  if (!reb_js_invocation_embedder->records) return false;
+   v8::JsInvocationStart copy = start;
+   copy.source_sha256 = nullptr;
+   reb_js_invocation_embedder->starts.push_back(copy);
++  return true;
+ }
+ 
+ void RebJsInvocationSettled(v8::Local<v8::Context> context, uint64_t epoch,
+@@ -33898,6 +33968,48 @@ TEST(RebNativeJsInvocationAdmissionAndUnsupportedKinds) {
+   CompileRun("rebAdmitted(2)");
+   CHECK_EQ(1u, capture.embedder().starts.size());
+   CHECK_EQ(0u, capture.embedder().starts[0].slot);
++  // A start the embedder could not record is neither current nor settled.
++  const size_t settled = capture.embedder().settles.size();
++  capture.embedder().records = false;
++  CompileRun("rebAdmitted(3)");
++  CHECK_EQ(1u, capture.embedder().starts.size());
++  CHECK_EQ(settled, capture.embedder().settles.size());
++  CHECK(capture.embedder().observed.back().second.state ==
++        v8::JsInvocationContextState::kNone);
++}
++
++TEST(RebNativeJsInvocationArmsEverySiteUpToTheLimit) {
++  LocalContext env;
++  v8::Isolate* isolate = env.isolate();
++  v8::HandleScope scope(isolate);
++  RebJsInvocationScope capture(env);
++  std::string source;
++  for (size_t i = 0; i <= v8::kJsInvocationSiteLimit; ++i) {
++    source += "function rebSite" + std::to_string(i) + "(a) { return a; }";
++  }
++  std::vector<v8::JsInvocationSite> sites;
++  for (size_t i = 0; i <= v8::kJsInvocationSiteLimit; ++i) {
++    const std::string name = "rebSite" + std::to_string(i) + "(";
++    sites.push_back(
++        RebInvocationSite(source, RebAnchor(source, name, name.size() - 1)));
++  }
++  capture.Arm(7, sites);
++  CompileRun(source.c_str());
++  std::string calls;
++  for (size_t i = 0; i <= v8::kJsInvocationSiteLimit; ++i) {
++    calls += "rebSite" + std::to_string(i) + "(" + std::to_string(i) + ");";
++  }
++  CompileRun(calls.c_str());
++  // Every site below the limit is armed in its own slot; the one past it is
++  // never armed.
++  const auto& starts = capture.embedder().starts;
++  CHECK_EQ(v8::kJsInvocationSiteLimit, starts.size());
++  for (size_t i = 0; i < starts.size(); ++i) {
++    CHECK_EQ(static_cast<uint32_t>(i), starts[i].slot);
++  }
++  CHECK_EQ(v8::kJsInvocationSiteLimit, capture.embedder().settles.size());
++  CHECK_EQ(static_cast<uint32_t>(v8::kJsInvocationSiteLimit - 1),
++           capture.embedder().settles.back().slot);
+ }
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+ 

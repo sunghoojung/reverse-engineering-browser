@@ -625,7 +625,7 @@ for (const mutate of [
   doc=>{doc.workspaces[0].native_wasm_observations[0].table_count=199;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].selector=-1;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].selected_arm=1;},
-  doc=>{doc.workspaces[0].native_wasm_observations[0].sample_index=16;},
+  doc=>{doc.workspaces[0].native_wasm_observations[0].sample_index=0xffffffff;},
   doc=>{doc.workspaces[0].native_wasm_observations[0].guest_pc=1;},
   doc=>{doc.workspaces[0].handlers[2].sample_count=doc.workspaces[0].handlers[2].native_wasm_sample_count=1;doc.workspaces[0].handlers[2].state='observed';},
   doc=>{delete doc.workspaces[0].native_wasm_observation_count;}
@@ -720,10 +720,10 @@ if (process.env.REB_NATIVE_WASM_GOLDEN) {
   }
   console.log('PASS actual C++ → viewer typed payload, unsigned fields, envelope and reserved-byte cases');
 }
-const jsValid = ['default', 'indexed', 'nested', 'string-selector', 'parent-unknown', 'wide-identities'];
+const jsValid = ['default', 'indexed', 'nested', 'string-selector', 'parent-unknown', 'wide-identities', 'last-slot', 'version-1'];
 if (process.env.REB_NATIVE_JS_GOLDEN) {
-  for (const mode of [...jsValid, 'reserved', 'version', 'size', 'truncated', 'shape', 'kind', 'slot', 'flags', 'parent-order',
-    'handler-without-flag', 'switch-handler', 'non-integer-bits', 'sample-index', 'site-sample-index', 'anchor', 'boolean-bits',
+  for (const mode of [...jsValid, 'reserved', 'version', 'size', 'truncated', 'shape', 'kind', 'version-1-slot', 'flags', 'parent-order',
+    'handler-without-flag', 'switch-handler', 'non-integer-bits', 'version-1-sample-index', 'version-1-site-sample-index', 'anchor', 'boolean-bits',
     'activation', 'script', 'source-length', 'parent-flags', 'handler-order', 'handler-script', 'envelope-version',
     'envelope-flags', 'identity', 'artifact', 'parent-event', 'navigation', 'request', 'big-endian']) {
     const event=JSON.parse(execFileSync(process.env.REB_NATIVE_JS_GOLDEN,['--case',mode],{encoding:'utf8'}));

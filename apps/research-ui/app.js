@@ -2979,6 +2979,127 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         elements.vmDetail.append(provenance);
       }
 
+      // capture_options.wasm_sampling from the versioned session context
+      // (protocol/http-api.md): the window and allowances this session's
+      // renderers sample Wasm br_table and call_indirect with. Read after each
+      // valid poll until it answers. Null, for a session that records no Wasm
+      // stream or a backend from before the addition, hides the strip.
+      function vmWasmSamplingFromContext(sampling) {
+        if (sampling === null || sampling === undefined) return null;
+        const count = (value, min, max) => Number.isSafeInteger(value) && value >= min && value <= max;
+        const streams = Array.isArray(sampling?.streams) ? sampling.streams : [];
+        const allowance = value => value === null || count(value, 1, sampling.records_per_window);
+        const valid = sampling?.version === 1 && streams.length >= 1 && streams.length <= 2 &&
+          new Set(streams).size === streams.length && streams.every(stream => stream === 'br_table' || stream === 'call_indirect') &&
+          count(sampling.window_ms, 1, 3600000) && count(sampling.records_per_window, 1, 0xffffffff) &&
+          allowance(sampling.samples_per_function) && allowance(sampling.samples_per_indirect_site) &&
+          count(sampling.function_allow_count, 0, 32) && count(sampling.function_deny_count, 0, 32) &&
+          typeof sampling.module_allowlist === 'boolean' && (sampling.reset === 'available' || sampling.reset === 'unavailable');
+        if (!valid) return Object.freeze({malformed: true});
+        return Object.freeze({streams: Object.freeze([...streams]), window_ms: sampling.window_ms,
+          records_per_window: sampling.records_per_window, samples_per_function: sampling.samples_per_function,
+          samples_per_indirect_site: sampling.samples_per_indirect_site, function_allow_count: sampling.function_allow_count,
+          function_deny_count: sampling.function_deny_count, module_allowlist: sampling.module_allowlist, reset: sampling.reset});
+      }
+
+      function refreshSessionWasmSampling() {
+        if (typeof fetch !== 'function' || state.vmWasmSamplingRead) return;
+        state.vmWasmSamplingRead = 'pending';
+        fetch('/api/session/context', {cache: 'no-store'})
+          .then(response => response.ok ? response.json() : Promise.reject(new Error(`Session context returned ${response.status}`)))
+          .then(context => {
+            state.vmWasmSampling = vmWasmSamplingFromContext(context?.capture_options?.wasm_sampling);
+            state.vmWasmSamplingRead = 'answered';
+            renderVmWasmSampling();
+          })
+          .catch(() => { state.vmWasmSamplingRead = null; });
+      }
+
+      // The browser applies 64 per function when the launcher names no
+      // allowance (protocol/native-wasm-dispatch-v1.md), and no per-site limit.
+      function vmWasmSamplingPolicyParts(sampling) {
+        const count = value => value.toLocaleString('en-US');
+        const plural = (value, noun) => `${count(value)} ${noun}${value === 1 ? '' : 's'}`;
+        // An allowance of a whole window removes that limit.
+        const allowance = (value, unit, unlimited, unnamed) => value === null ? unnamed
+          : value >= sampling.records_per_window ? unlimited : `${count(value)} per ${unit}`;
+        const period = sampling.window_ms === 1000 ? 'each second' : `each ${count(sampling.window_ms)} ms`;
+        const parts = [`Wasm sampling: ${sampling.streams.join(' and ')}`,
+          `up to ${count(sampling.records_per_window)} full records per stream ${period}`,
+          allowance(sampling.samples_per_function, 'function', 'no per-function limit', '64 per function (browser default)')];
+        if (sampling.streams.includes('call_indirect')) {
+          parts.push(allowance(sampling.samples_per_indirect_site, 'call site', 'no per-call-site limit', 'no per-call-site limit'));
+        }
+        if (sampling.function_allow_count) parts.push(plural(sampling.function_allow_count, 'allowed function'));
+        if (sampling.function_deny_count) parts.push(plural(sampling.function_deny_count, 'denied function'));
+        if (sampling.module_allowlist) parts.push('module allowlist');
+        return parts;
+      }
+
+      function renderVmWasmSampling() {
+        const strip = elements.vmWasmSampling;
+        if (!strip) return;
+        const sampling = state.vmWasmSampling;
+        strip.hidden = !sampling;
+        if (!sampling) return;
+        const reset = state.vmWasmSamplingReset;
+        const available = !sampling.malformed && sampling.reset === 'available';
+        if (sampling.malformed) {
+          elements.vmWasmSamplingPolicy.textContent = 'Wasm sampling labels from this backend were malformed and are not shown. Retained samples remain visible.';
+        } else {
+          // Each part wraps as a unit, so a narrow strip breaks between parts.
+          elements.vmWasmSamplingPolicy.replaceChildren(...vmWasmSamplingPolicyParts(sampling).flatMap((text, index) => {
+            const part = document.createElement('span');
+            part.className = 'vm-wasm-sampling-part';
+            part.textContent = text;
+            if (index === 0) return [part];
+            const separator = document.createElement('span');
+            separator.textContent = ' · ';
+            return [separator, part];
+          }));
+        }
+        let kind = reset?.status ?? 'idle', message = '';
+        if (sampling.malformed) kind = 'idle';
+        else if (!available) { kind = 'unavailable'; message = 'This session has no sample-budget reset file.'; }
+        else if (kind === 'pending') message = 'Requesting a new sample window…';
+        else if (kind === 'done') message = `New sample window requested (reset ${reset.generation.toLocaleString('en-US')}). Renderers open it within about 250 ms; sample indexes keep counting.`;
+        else if (kind === 'failed') message = reset.message;
+        elements.vmWasmSamplingStatus.dataset.kind = kind;
+        elements.vmWasmSamplingStatus.textContent = message;
+        elements.vmWasmSamplingReset.disabled = !available;
+        // Pending keeps the button focusable; a disabled button would drop
+        // keyboard focus mid-request.
+        if (kind === 'pending') elements.vmWasmSamplingReset.setAttribute('aria-disabled', 'true');
+        else elements.vmWasmSamplingReset.removeAttribute('aria-disabled');
+      }
+
+      // reset_wasm_sample_budgets closes the current one-second window of both
+      // streams in every renderer of the capture browser (protocol/http-api.md).
+      async function resetVmWasmSampleBudgets() {
+        if (state.vmWasmSamplingReset?.status === 'pending' || state.vmWasmSampling?.reset !== 'available') return;
+        state.vmWasmSamplingReset = {status: 'pending'};
+        renderVmWasmSampling();
+        const controller = new AbortController();
+        const deadline = setTimeout(() => controller.abort(), 15000);
+        try {
+          const response = await fetch('/api/session/actions', {method: 'POST', cache: 'no-store',
+            headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset_wasm_sample_budgets'}),
+            signal: controller.signal});
+          const body = await response.json().catch(() => null);
+          const generation = body?.generation;
+          state.vmWasmSamplingReset = response.ok && body?.ok === true && body.action === 'reset_wasm_sample_budgets' &&
+            Number.isSafeInteger(generation) && generation >= 1
+            ? {status: 'done', generation}
+            : {status: 'failed', message: typeof body?.error === 'string' && body.error
+              ? body.error : `The reset returned ${response.status} without a valid answer.`};
+        } catch {
+          state.vmWasmSamplingReset = {status: 'failed', message: 'The backend did not answer in time. The reset may not have been applied.'};
+        } finally {
+          clearTimeout(deadline);
+        }
+        renderVmWasmSampling();
+      }
+
       let renderedVmFindings = null;
       let renderedVmWorkspace = null;
       function vmSessionSourceRefreshKey() { const finding=(state.vmFindings??[]).find(item=>item.findingId===state.selectedVmFindingId); const artifact=vmSourceArtifactForFinding(state.artifacts??[],finding,state.vmAnalysisSelection); const sessionId=artifact?.session_id??''; return [sessionId,(state.artifacts??[]).filter(item=>String(item.session_id)===String(sessionId)).map(item=>item.artifact_id).join(',')]; }
@@ -2994,6 +3115,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           state.selectedVmFindingId = state.vmFindings[0]?.findingId ?? null;
         }
         renderVmSessionStatus();
+        renderVmWasmSampling();
         const gapCount = shownSequenceGaps();
         const vmLimits = namedGapNotice(namedGapsIn(shownNamedGaps(), vmGapCategories), eventCountScopeLabel());
         const failures = state.vmAnalysisStatus === 'ready' ? vmAnalysisFailureNotice(state.vmAnalysisDocument) : '';
@@ -9507,6 +9629,8 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       // poll keeps the connection state current meanwhile.
       async function refreshPollDependents(eventsChanged) {
         retryTrafficUnreadSelection();
+        // Guarded for the checks that run this section alone.
+        if (typeof refreshSessionWasmSampling === 'function') refreshSessionWasmSampling();
         if (state.refreshingDependents) {
           if (eventsChanged) renderVmLab();
           return;
@@ -9912,6 +10036,7 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
         showScreen('vm', elements.requestVmCandidates);
         await refresh;
       });
+      elements.vmWasmSamplingReset.addEventListener('click', resetVmWasmSampleBudgets);
       elements.sourceWindowPrevious.addEventListener('click', () => {
         const current = state.sourceEditorView?.window;
         if (current?.start) moveSourceWindow(current.start - 1);

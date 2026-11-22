@@ -92,7 +92,8 @@ async function loadHarness(root) {
       vmRequestSelection, vmRequestSelectionKey, isVmRequestSelection, isVmExactRequestLink,
       isVmAnalysisDocument, vmAnalysisMatchesSelection, vmFindingsFromAnalysis, vmVisibleFindings,
       vmSourceArtifactForFinding, vmOpcodeWorkspaceForFinding, isVmOpcodeWorkspaceDocument,
-      isBrokerResponse, isBrokerEvent, isArtifactResponse, requestsFromEvents})`;
+      isBrokerResponse, isBrokerEvent, isArtifactResponse, requestsFromEvents,
+      refreshSessionWasmSampling, renderVmWasmSampling})`;
   return function fixture() {
     let api;
     const notices = [], calls = [], sourceSelections = [], pending = [];
@@ -116,7 +117,8 @@ async function loadHarness(root) {
       click() { return this.events.click?.(); }
       focus() { document.activeElement = this; }
     }
-    const elements = Object.fromEntries(['requestVmCandidates', 'vmDetail', 'vmNotice', 'vmList', 'vmCount', 'requestRows', 'requestFilter'].map(name => [name, new Element()]));
+    const elements = Object.fromEntries(['requestVmCandidates', 'vmDetail', 'vmNotice', 'vmList', 'vmCount', 'requestRows', 'requestFilter',
+      'vmWasmSampling', 'vmWasmSamplingPolicy', 'vmWasmSamplingStatus', 'vmWasmSamplingReset'].map(name => [name, new Element()]));
     elements.requestVmCandidates.id = 'request-vm-candidates';
     const screens = ['traffic', 'vm', 'sources'].map(name => Object.assign(new Element(), {id: `screen-${name}`, hidden: name !== 'traffic'}));
     const nav = Object.assign(new Element('button'), {id: 'nav-vm-workspace', className: 'nav-button', dataset: {screen: 'vm'}});
@@ -132,6 +134,7 @@ async function loadHarness(root) {
     const noop = () => {};
     api = runInNewContext(code, {
       TextEncoder, TextDecoder, Uint8Array, URLSearchParams, URL, TypeError, SyntaxError,
+      AbortController, setTimeout, clearTimeout,
       location: {protocol: 'http:', search: ''}, document, elements,
       fetch: (url, options) => {
         calls.push({url, options: copy(options)});
@@ -354,8 +357,101 @@ export async function checkVmRequestLinkageUI(root = repository) {
   }
 
   await checkCacheAndRaces(create);
+  await checkWasmSamplingStrip(create);
   console.log('PASS exact Traffic→VM production models, click/navigation, finding/source DOM adapter, full-scope identity, cache and stale async isolation (not rendered browser QA)');
   return {create};
+}
+
+// The VM strip labels capture_options.wasm_sampling and posts the session's
+// reset_wasm_sample_budgets action. It never changes stored evidence.
+async function checkWasmSamplingStrip(create) {
+  const f = create(), strip = f.elements.vmWasmSampling, button = f.elements.vmWasmSamplingReset;
+  const policy = () => f.elements.vmWasmSamplingPolicy.textContent;
+  const status = () => f.elements.vmWasmSamplingStatus;
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  const sampling = changes => ({version: 1, streams: ['br_table', 'call_indirect'], window_ms: 1000,
+    records_per_window: 1024, samples_per_function: null, samples_per_indirect_site: 16,
+    function_allow_count: 2, function_deny_count: 1, module_allowlist: true, reset: 'available', ...changes});
+  const read = async (body, code = 200) => {
+    f.reply = url => (assert.equal(url, '/api/session/context'), response(body, code));
+    f.state.vmWasmSamplingRead = null;
+    f.refreshSessionWasmSampling(); await f.settle(); await tick();
+  };
+  f.renderVmWasmSampling();
+  assert.equal(strip.hidden, true, 'No session context answer hides the strip');
+  await read({capture_options: {wasm_sampling: null}});
+  assert.equal(f.state.vmWasmSamplingRead, 'answered');
+  assert.equal(strip.hidden, true, 'A session without Wasm streams has no strip');
+  const reads = f.calls.length;
+  f.refreshSessionWasmSampling(); await f.settle();
+  assert.equal(f.calls.length, reads, 'An answered context is not read again');
+  await read({capture_options: {}});
+  assert.equal(strip.hidden, true, 'A backend from before the addition omits it');
+  await read({error: 'Session context unavailable'}, 503);
+  assert.equal(f.state.vmWasmSamplingRead, null, 'A failed read is retried after a later poll');
+
+  await read({capture_options: {wasm_sampling: sampling()}});
+  assert.equal(strip.hidden, false);
+  assert.equal(policy(), 'Wasm sampling: br_table and call_indirect · up to 1,024 full records per stream each second · 64 per function (browser default) · 16 per call site · 2 allowed functions · 1 denied function · module allowlist');
+  assert.equal(button.disabled, false);
+  assert.equal(status().textContent, '');
+  await read({capture_options: {wasm_sampling: sampling({streams: ['br_table'], samples_per_function: 1024,
+    function_allow_count: 1, function_deny_count: 0, module_allowlist: false})}});
+  assert.equal(policy(), 'Wasm sampling: br_table · up to 1,024 full records per stream each second · no per-function limit · 1 allowed function');
+  await read({capture_options: {wasm_sampling: sampling({samples_per_function: 7, samples_per_indirect_site: null})}});
+  assert.match(policy(), / · 7 per function · no per-call-site limit · /);
+
+  for (const changes of [{version: 2}, {streams: []}, {streams: ['br_table', 'br_table']}, {streams: ['loop']},
+    {samples_per_function: 0}, {samples_per_function: 1025}, {samples_per_indirect_site: '16'},
+    {function_allow_count: 33}, {module_allowlist: 'yes'}, {reset: undefined}, {window_ms: 0}]) {
+    await read({capture_options: {wasm_sampling: sampling(changes)}});
+    assert.equal(strip.hidden, false, JSON.stringify(changes));
+    assert.match(policy(), /malformed and are not shown/, JSON.stringify(changes));
+    assert.equal(button.disabled, true, `A malformed label offers no reset: ${JSON.stringify(changes)}`);
+  }
+  await read({capture_options: {wasm_sampling: sampling({reset: 'unavailable'})}});
+  assert.equal(button.disabled, true);
+  assert.equal(status().dataset.kind, 'unavailable');
+  assert.match(status().textContent, /no sample-budget reset file/);
+  const before = f.calls.length;
+  await button.click();
+  assert.equal(f.calls.length, before, 'An unavailable reset posts nothing');
+
+  await read({capture_options: {wasm_sampling: sampling()}});
+  const answer = deferred();
+  f.reply = (url, options) => {
+    assert.equal(url, '/api/session/actions');
+    assert.equal(options.method, 'POST');
+    assert.deepEqual(JSON.parse(options.body), {action: 'reset_wasm_sample_budgets'});
+    return answer.promise;
+  };
+  const posts = f.calls.length;
+  const reset = button.click();
+  await tick();
+  assert.equal(f.calls.length, posts + 1);
+  assert.equal(status().dataset.kind, 'pending');
+  assert.equal(button.disabled, false, 'A pending reset keeps keyboard focus on its button');
+  assert.equal(button.attributes['aria-disabled'], 'true');
+  await button.click();
+  assert.equal(f.calls.length, posts + 1, 'A pending reset is not posted twice');
+  answer.resolve(response({ok: true, action: 'reset_wasm_sample_budgets', generation: 3}));
+  await reset;
+  assert.equal(status().dataset.kind, 'done');
+  assert.match(status().textContent, /^New sample window requested \(reset 3\)\. Renderers open it within about 250 ms; sample indexes keep counting\.$/);
+  assert.equal(button.attributes['aria-disabled'], undefined);
+
+  const refused = 'Native capture is not running, so the Wasm sample budgets were not reset.';
+  f.reply = () => response({error: refused, code: 'native_capture_unavailable'}, 409);
+  await button.click();
+  assert.equal(status().dataset.kind, 'failed');
+  assert.equal(status().textContent, refused);
+  f.reply = () => response({ok: true, action: 'reset_wasm_sample_budgets', generation: 0});
+  await button.click();
+  assert.equal(status().textContent, 'The reset returned 200 without a valid answer.');
+  f.reply = () => Promise.reject(new TypeError('Failed to fetch'));
+  await button.click();
+  assert.match(status().textContent, /did not answer in time\. The reset may not have been applied\./);
+  assert.equal(button.disabled, false, 'A failed reset can be tried again');
 }
 
 async function checkCacheAndRaces(create) {

@@ -9,6 +9,7 @@
 
 #if BUILDFLAG(IS_POSIX)
 #include <poll.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -17,6 +18,7 @@
 #include <bit>
 #include <cerrno>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -38,6 +40,7 @@
 #include "brave/components/reverse_engineering_browser/browser/native_network_capture_sink.h"
 #include "brave/components/reverse_engineering_browser/browser/native_probe_session.h"
 #include "brave/components/reverse_engineering_browser/common/native_factory_owner_hook.h"
+#include "brave/components/reverse_engineering_browser/common/native_js_invocation.h"
 #include "brave/components/reverse_engineering_browser/common/native_wasm_sample_budget.h"
 
 namespace reb {
@@ -53,6 +56,9 @@ constexpr char kArtifactSocketSwitch[] = "reb-artifact-socket";
 constexpr char kCaptureCanvasImagesSwitch[] = "reb-capture-canvas-images";
 constexpr char kCaptureRequestContentSwitch[] = "reb-capture-request-content";
 constexpr std::size_t kSocketBatchCapacity = 32;
+// A burst wakes the writer thousands of times a second; the control files
+// change a few times a session.
+constexpr base::TimeDelta kControlFilePollInterval = base::Milliseconds(100);
 
 bool SendAll(const int descriptor, base::span<const std::uint8_t> bytes, const bool non_blocking) {
   while (!bytes.empty()) {
@@ -188,6 +194,12 @@ bool NativeProbeSocketClient::StartFromCommandLine() {
   session_id_ = session_id;
   wasm_budget_reset_file_ = command_line.GetSwitchValueASCII("reb-wasm-budget-reset-file");
   applied_wasm_budget_reset_ = 0;
+  js_invocation_sites_file_ = command_line.GetSwitchValueASCII("reb-js-invocation-sites");
+  js_invocation_generation_file_ =
+      js_invocation_sites_file_.empty()
+          ? std::string()
+          : command_line.GetSwitchValueASCII("reb-js-invocation-sites-generation");
+  applied_js_invocation_generation_ = 0;
   // Every drop records its category, but a gap can be built before that store
   // is visible; the session's lowest admitted category covers that window.
   last_dropped_category_.store(
@@ -253,17 +265,76 @@ void NativeProbeSocketClient::ArtifactChannelLost() noexcept {
   session.Emit(gap);
 }
 
+std::size_t NativeProbeSocketClient::SetSpillChunkLimitForTesting(const std::size_t chunks) {
+  base::AutoLock lock(spill_lock_);
+  return std::exchange(spill_chunk_limit_, chunks);
+}
+
+std::size_t NativeProbeSocketClient::SpillChunkCountForTesting() {
+  base::AutoLock lock(spill_lock_);
+  return spill_chunks_;
+}
+
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent& event) noexcept {
   if (!connected_.load(std::memory_order_acquire)) {
     return;
   }
-  if (!queue_.TryPush(event, NativeProbeDropWeight(event))) {
-    last_dropped_category_.store(event.header.category, std::memory_order_relaxed);
+  // A thread reads its own spilled flag, or the writer's later clear, so once
+  // one of its records spills the rest follow it until the spill is sent.
+  if (spilling_.load(std::memory_order_relaxed) || !queue_.TryPushUncounted(event)) {
+    SpillRecord(event);
     return;
   }
   if (queue_.MarkNotificationPending()) {
     wakeup_.Signal();
   }
+}
+
+void NativeProbeSocketClient::SpillRecord(const NativeProbeEvent& event) noexcept {
+  bool started = false;
+  {
+    base::AutoLock lock(spill_lock_);
+    spilling_.store(true, std::memory_order_relaxed);
+    if (spill_.empty() || spill_.back()->size == kSpillChunkRecords) {
+      SpillChunkPointer chunk;
+      if (spill_chunks_ < spill_chunk_limit_) {
+        chunk = MapSpillChunk();
+      }
+      if (!chunk) {
+        const std::uint64_t weight = NativeProbeDropWeight(event);
+        spill_dropped_ = weight > std::numeric_limits<std::uint64_t>::max() - spill_dropped_
+                             ? std::numeric_limits<std::uint64_t>::max()
+                             : spill_dropped_ + weight;
+        last_dropped_category_.store(event.header.category, std::memory_order_relaxed);
+        return;
+      }
+      started = spill_.empty();
+      spill_.push_back(std::move(chunk));
+      ++spill_chunks_;
+    }
+    SpillChunk& tail = *spill_.back();
+    tail.records[tail.size++] = event;
+  }
+  // The writer takes the whole spill at once, so only the record that starts
+  // a new spill has to wake it.
+  if (started) {
+    wakeup_.Signal();
+  }
+}
+
+NativeProbeSocketClient::SpillChunkPointer NativeProbeSocketClient::MapSpillChunk() noexcept {
+  void* const pages =
+      mmap(nullptr, kSpillChunkBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (pages == MAP_FAILED) {
+    return nullptr;
+  }
+  return SpillChunkPointer(new (pages) SpillChunk);
+}
+
+void NativeProbeSocketClient::SpillChunkUnmapper::operator()(
+    SpillChunk* const chunk) const noexcept {
+  chunk->~SpillChunk();
+  munmap(chunk, kSpillChunkBytes);
 }
 
 NativeProbeEvent NativeProbeSocketClient::MakeTransportGap(
@@ -284,6 +355,7 @@ NativeProbeEvent NativeProbeSocketClient::MakeTransportGap(
 
 void NativeProbeSocketClient::Run() {
   std::uint64_t reported_dropped = 0;
+  base::TimeTicks next_file_poll;
   while (connected_.load(std::memory_order_acquire)) {
     wakeup_.TimedWait(base::Milliseconds(250));
     pollfd connection{socket_descriptor_, static_cast<short>(POLLIN), 0};
@@ -293,33 +365,25 @@ void NativeProbeSocketClient::Run() {
         connection_status > 0 && ((connection.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 ||
                                   ((connection.revents & POLLIN) != 0 &&
                                    recv(socket_descriptor_, &control_byte, 1, MSG_PEEK) == 0));
-    PollWasmBudgetReset();
-    if (peer_closed) {
+    if (const base::TimeTicks now = base::TimeTicks::Now(); now >= next_file_poll) {
+      PollWasmBudgetReset();
+      PollJsInvocationSites();
+      next_file_poll = now + kControlFilePollInterval;
+    }
+    if (peer_closed || !SendQueued()) {
       browser_task_runner_->PostTask(
           FROM_HERE,
           base::BindOnce(&NativeProbeSocketClient::HandleDisconnect, base::Unretained(this)));
       return;
     }
-    std::array<NativeProbeEvent, kSocketBatchCapacity> batch;
-    for (;;) {
-      std::size_t batch_size = 0;
-      while (batch_size < batch.size() && queue_.TryPop(batch[batch_size])) {
-        ++batch_size;
-      }
-      if (batch_size == 0) {
-        break;
-      }
-      if (!SendAll(socket_descriptor_, base::as_bytes(base::span(batch).first(batch_size)), true)) {
-        browser_task_runner_->PostTask(
-            FROM_HERE,
-            base::BindOnce(&NativeProbeSocketClient::HandleDisconnect, base::Unretained(this)));
-        return;
-      }
-    }
 
     // Reported on the next wake-up even if nothing else is queued, so drops
     // in a final burst are not held back waiting for a later record.
-    const std::uint64_t dropped = queue_.DroppedCount();
+    std::uint64_t dropped = 0;
+    {
+      base::AutoLock lock(spill_lock_);
+      dropped = spill_dropped_;
+    }
     if (dropped > reported_dropped) {
       const NativeProbeEvent gap = MakeTransportGap(dropped - reported_dropped);
       if (!SendAll(socket_descriptor_, base::byte_span_from_ref(gap), true)) {
@@ -338,6 +402,68 @@ void NativeProbeSocketClient::Run() {
   }
 }
 
+// The ring up to the spill's fence, then the spill. A thread's record spills
+// only after its earlier records claimed their ring slots, and its later
+// records spill until the writer clears the flag, so each thread's records
+// reach the broker in its order. One spill a pass, so a page that floods
+// for longer still has its drops reported and the control files read.
+bool NativeProbeSocketClient::SendQueued() {
+  Spill spill;
+  std::uint64_t fence = 0;
+  {
+    base::AutoLock lock(spill_lock_);
+    spill.swap(spill_);
+    // Each spilled record's producer released this lock after claiming its
+    // earlier ring slots, so the position read here lies past all of them.
+    fence = queue_.EnqueuePosition();
+  }
+  if (!SendRing(fence)) {
+    return false;
+  }
+  for (const auto& chunk : spill) {
+    if (!SendAll(socket_descriptor_, base::as_bytes(base::span(chunk->records).first(chunk->size)),
+                 true)) {
+      return false;
+    }
+  }
+  const std::size_t sent = spill.size();
+  spill.clear();
+  base::AutoLock lock(spill_lock_);
+  spill_chunks_ -= sent;
+  if (spill_.empty()) {
+    spilling_.store(false, std::memory_order_relaxed);
+  } else {
+    wakeup_.Signal();
+  }
+  return true;
+}
+
+// Sends ring records through `fence`, waiting for any slot below it that a
+// producer has claimed but not yet filled, and what else is published, up to
+// one ring's worth, so a steady stream still lets the pass end.
+bool NativeProbeSocketClient::SendRing(const std::uint64_t fence) {
+  const std::uint64_t limit = std::max(fence, queue_.DequeuePosition() + kNativeProbeQueueCapacity);
+  std::array<NativeProbeEvent, kSocketBatchCapacity> batch;
+  for (;;) {
+    std::size_t batch_size = 0;
+    while (batch_size < batch.size() && queue_.DequeuePosition() < limit &&
+           queue_.TryPop(batch[batch_size])) {
+      ++batch_size;
+    }
+    if (batch_size == 0) {
+      if (queue_.DequeuePosition() >= fence) {
+        return true;
+      }
+      // The producer is copying its record into the claimed slot.
+      base::PlatformThread::YieldCurrentThread();
+      continue;
+    }
+    if (!SendAll(socket_descriptor_, base::as_bytes(base::span(batch).first(batch_size)), true)) {
+      return false;
+    }
+  }
+}
+
 void NativeProbeSocketClient::PollWasmBudgetReset() {
   if (wasm_budget_reset_file_.empty())
     return;
@@ -352,6 +478,31 @@ void NativeProbeSocketClient::PollWasmBudgetReset() {
       FROM_HERE, base::BindOnce([] { NativeProbeSession::Get().ResetWasmSampleBudgets(); }));
 }
 
+void NativeProbeSocketClient::PollJsInvocationSites() {
+  if (js_invocation_generation_file_.empty())
+    return;
+  // The generation file has the Wasm reset file's format.
+  const auto generation = ReadNativeWasmBudgetResetGeneration(js_invocation_generation_file_);
+  if (!generation || *generation <= applied_js_invocation_generation_)
+    return;
+  applied_js_invocation_generation_ = *generation;
+  // The backend replaces the site file before it advances the generation, so
+  // this read sees that revision or a newer one. Each revision is a whole slot
+  // table, so a newer one applied twice changes nothing. An unreadable file
+  // reaches the session as a refused revision and its gap.
+  std::string json;
+  if (!base::ReadFileToStringWithMaxSize(base::FilePath(js_invocation_sites_file_), &json,
+                                         kNativeJsInvocationSitesFileLimit)) {
+    json.clear();
+  }
+  browser_task_runner_->PostTask(FROM_HERE,
+                                 base::BindOnce(
+                                     [](const std::string& sites) {
+                                       NativeProbeSession::Get().UpdateJsInvocationSites(sites);
+                                     },
+                                     std::move(json)));
+}
+
 void NativeProbeSocketClient::HandleDisconnect() {
   if (!connected_.exchange(false, std::memory_order_acq_rel)) {
     return;
@@ -361,6 +512,13 @@ void NativeProbeSocketClient::HandleDisconnect() {
   if (socket_descriptor_ >= 0) {
     close(socket_descriptor_);
     socket_descriptor_ = -1;
+  }
+  // The writer has returned, so nothing will send what is still spilled.
+  Spill abandoned;
+  {
+    base::AutoLock lock(spill_lock_);
+    abandoned.swap(spill_);
+    spill_chunks_ = 0;
   }
   LOG(ERROR) << "Native probe broker disconnected; capture disabled";
 }
@@ -381,14 +539,33 @@ NativeProbeSocketClient::~NativeProbeSocketClient() = default;
 bool NativeProbeSocketClient::StartFromCommandLine() {
   return false;
 }
+std::size_t NativeProbeSocketClient::SetSpillChunkLimitForTesting(std::size_t) {
+  return 0;
+}
+std::size_t NativeProbeSocketClient::SpillChunkCountForTesting() {
+  return 0;
+}
 void NativeProbeSocketClient::Emit(const NativeProbeEvent&) noexcept {}
 void NativeProbeSocketClient::ArtifactChannelLost() noexcept {}
 void NativeProbeSocketClient::Enqueue(const NativeProbeEvent&) noexcept {}
+void NativeProbeSocketClient::SpillRecord(const NativeProbeEvent&) noexcept {}
+NativeProbeSocketClient::SpillChunkPointer NativeProbeSocketClient::MapSpillChunk() noexcept {
+  return nullptr;
+}
+// Nothing maps a chunk here.
+void NativeProbeSocketClient::SpillChunkUnmapper::operator()(SpillChunk*) const noexcept {}
 NativeProbeEvent NativeProbeSocketClient::MakeTransportGap(std::uint64_t) const noexcept {
   return {};
 }
 void NativeProbeSocketClient::Run() {}
+bool NativeProbeSocketClient::SendQueued() {
+  return false;
+}
+bool NativeProbeSocketClient::SendRing(std::uint64_t) {
+  return false;
+}
 void NativeProbeSocketClient::PollWasmBudgetReset() {}
+void NativeProbeSocketClient::PollJsInvocationSites() {}
 void NativeProbeSocketClient::HandleDisconnect() {}
 
 }  // namespace reb

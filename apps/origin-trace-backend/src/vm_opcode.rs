@@ -49,7 +49,7 @@ mod observed;
 #[path = "vm_opcode_wasm.rs"]
 mod wasm;
 
-const PRODUCER_VERSION: &str = "2.17.0";
+const PRODUCER_VERSION: &str = "2.19.0";
 const MAX_SAMPLES: usize = 4096;
 const MAX_HANDLERS: usize = 1024;
 const MAX_SNAPSHOTS: usize = 16;

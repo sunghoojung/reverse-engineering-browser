@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -126,6 +127,22 @@ struct BigBuffer {
 }  // namespace mojo_base
 
 namespace reb::mojom {
+struct NativeWatchRequestRule {
+  std::string url_contains;
+  std::string method;
+};
+struct NativeWatchScope {
+  std::uint64_t serial = 0;
+  std::string origin;
+  bool top_frame = false;
+  std::vector<std::unique_ptr<NativeWatchRequestRule>> requests;
+  std::vector<std::string> events;
+  bool timers = false;
+  bool csp = false;
+  bool uncaught = false;
+  bool caught = false;
+};
+using NativeWatchScopePtr = std::unique_ptr<NativeWatchScope>;
 struct NativeProbeClient {
   virtual ~NativeProbeClient() = default;
   virtual void Configure(std::uint64_t,
@@ -136,12 +153,14 @@ struct NativeProbeClient {
                          std::uint64_t,
                          const std::string&,
                          const std::vector<std::uint8_t>&,
-                         const std::vector<std::uint8_t>&,
+                         const std::optional<std::vector<std::uint8_t>>&,
                          bool,
                          bool,
                          bool) = 0;
   virtual void SetWasmSampleBudget(const std::vector<std::uint8_t>&) = 0;
   virtual void ResetWasmSampleBudgets() = 0;
+  virtual void UpdateJsInvocationSites(const std::vector<std::uint8_t>&) = 0;
+  virtual void SetDebuggerWatchScope(NativeWatchScopePtr) = 0;
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
   virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
@@ -170,6 +189,19 @@ struct NativeProbeHost {
   template <class... Args>
   void CaptureNativeGuestHost(Args&&...) {
     ++artifacts;
+  }
+  // The newest request_target child sent with its whole target.
+  inline static std::vector<std::uint8_t> target_record;
+  inline static std::string target_origin;
+  inline static std::string target_text;
+  inline static std::atomic<unsigned> targets{0};
+  void CaptureRendererTarget(std::vector<std::uint8_t> record,
+                             std::string origin,
+                             std::string text) {
+    ++targets;
+    target_record = std::move(record);
+    target_origin = std::move(origin);
+    target_text = std::move(text);
   }
   // The newest stack artifact (capture origin 12), for content checks.
   inline static std::vector<std::uint8_t> generated;
@@ -248,5 +280,14 @@ struct WebLocalFrame {
     return &frame;
   }
   FrameToken GetLocalFrameToken() const { return {}; }
+};
+// The transport binds its host remote to the IO thread's runner; the stub
+// remote takes any runner.
+struct Platform {
+  static Platform* Current() {
+    static Platform platform;
+    return &platform;
+  }
+  int GetIOTaskRunner() const { return 0; }
 };
 }  // namespace blink

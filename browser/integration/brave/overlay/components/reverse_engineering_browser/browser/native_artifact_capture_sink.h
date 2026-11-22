@@ -80,6 +80,20 @@ using NativeRequestBodyRecorder =
 
 // Browser-process capture boundary for immutable JavaScript and WebAssembly
 // response bodies plus renderer-submitted generated source. Other response
+// The module of one physical Wasm record, as the probe host resolved it. A
+// renderer thread sends each module's bytes once per sample window; its later
+// records of that window name the record that carried them.
+struct NativeWasmModuleTransfer final {
+  // The host's private copy of the bytes this record carried, or empty when
+  // it named an earlier record's module or carried none.
+  std::vector<std::uint8_t> bytes;
+  // False only for an execution record that names no module: the sink then
+  // binds the one module captured for its document.
+  bool known = false;
+  std::size_t size = 0;
+  std::array<std::uint8_t, 32> digest{};
+};
+
 // bodies go to NativeResponseBodyCapture in content sessions. It is enabled
 // only for an authorized artifact category. No item has a size limit: the
 // in-flight pool bounds the bytes held, and a source that can wait does.
@@ -110,21 +124,33 @@ class NativeArtifactCaptureSink final {
       const network::mojom::URLResponseHead& response_head,
       mojo::ScopedDataPipeConsumerHandle body);
 
+  // Each renderer paces these records and its probe host bounds them, so the
+  // sink keeps no count of its own: one shared count would let one renderer's
+  // window spend another's. A module named by an earlier record must already
+  // be in this sink, or the record is a native_wasm_*_module_unbound gap.
+  void CaptureWasmDispatch(const NativeWasmDispatchObservation& observation,
+                           NativeWasmModuleTransfer module,
+                           std::function<bool()> is_current_document);
+  // Same module transfer and ACK ordering as CaptureWasmDispatch.
+  void CaptureWasmIndirect(const NativeWasmIndirectObservation& observation,
+                           NativeWasmModuleTransfer module,
+                           std::function<bool()> is_current_document);
+  // The bytes a record carried itself, copied here.
   void CaptureWasmDispatch(const NativeWasmDispatchObservation& observation,
                            mojo_base::BigBuffer content,
                            std::function<bool()> is_current_document);
-  // Same module transfer and ACK ordering as CaptureWasmDispatch.
   void CaptureWasmIndirect(const NativeWasmIndirectObservation& observation,
                            mojo_base::BigBuffer content,
                            std::function<bool()> is_current_document);
   // Replaces the filters used by later observations. A new SetEmitter restores
   // the unrestricted policy. Invalid policies are ignored.
   void SetWasmSampleBudgetPolicy(const NativeWasmSampleBudgetPolicy& policy) noexcept;
-  // Zeros both stream counters without dropping pending module transfers or
-  // changing the session. The next observation of each stream is index 0.
-  void ResetWasmSampleBudgets() noexcept;
-  // Empty content binds the single module artifact already stored for this
-  // document. Zero or several matches are explicit gaps, never a guess.
+  // A module that is not known binds the single module artifact already
+  // stored for this document. Zero or several matches are explicit gaps,
+  // never a guess.
+  void CaptureWasmExecution(const NativeWasmExecutionObservation& observation,
+                            NativeWasmModuleTransfer module,
+                            std::function<bool()> is_current_document);
   void CaptureWasmExecution(const NativeWasmExecutionObservation& observation,
                             mojo_base::BigBuffer content,
                             std::function<bool()> is_current_document);
@@ -287,7 +313,7 @@ class NativeArtifactCaptureSink final {
   // Holds a physical Wasm observation until its document's module artifact is
   // accepted, transferring the module once per document.
   void PublishAfterWasmModule(NativeProbeEvent event,
-                              const std::vector<std::uint8_t>& bytes,
+                              const NativeWasmModuleTransfer& module,
                               std::uint64_t execution_context_id,
                               std::uint64_t document_token_high,
                               std::uint64_t document_token_low,
@@ -373,7 +399,6 @@ class NativeArtifactCaptureSink final {
   std::map<std::uint64_t, PendingContext> pending_;
   std::map<std::uint64_t, ResponseStream> response_streams_;
   std::map<std::uint64_t, GeneratedStream> generated_streams_;
-  std::size_t wasm_dispatch_count_ = 0;
   // One artifact per exact module and document for physical observations.
   // Value is the artifact ID and whether its transfer was already accepted.
   using WasmModuleKey = std::tuple<std::uint32_t,
@@ -383,13 +408,7 @@ class NativeArtifactCaptureSink final {
                                    std::uint64_t,
                                    std::array<std::uint8_t, 32>>;
   std::map<WasmModuleKey, std::pair<std::uint64_t, bool>> wasm_dispatch_modules_;
-  std::size_t wasm_indirect_count_ = 0;
-  std::uint64_t wasm_budget_epoch_ = 2;
   NativeWasmSampleBudgetPolicy wasm_sample_budget_{};
-  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_dispatch_function_keys_{};
-  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_function_keys_{};
-  std::array<NativeWasmBudgetKeySlot, kNativeWasmBudgetKeySlots> wasm_indirect_site_keys_{};
-  std::size_t wasm_execution_count_ = 0;
   // Only the browser assigns artifact IDs. Never key this relation by URL.
   using ScriptKey = std::tuple<int, std::uint64_t, std::uint64_t, std::uint64_t>;
   std::map<ScriptKey, std::uint64_t> allocating_scripts_;

@@ -876,8 +876,9 @@ fn execution_metadata_covers_operations_actions_and_dispatch_without_safe_defaul
     // reset_wasm_sample_budgets is the extra SessionAction. The four
     // LiveWasmAction variants are read_memory, write_memory, call_export,
     // and call_function. set_wasm_function_name is the narrow AnalystAction
-    // write of one researcher Wasm name.
-    assert_eq!(action_count, 41);
+    // write of one researcher Wasm name. interrupt is the NativeConsoleAction
+    // that stops a running command.
+    assert_eq!(action_count, 42);
     // Source checks intentionally follow the dispatch syntax. If it changes,
     // audit the new handler before updating this narrow test helper.
     fn arms<'a>(source: &'a str, start: &str, end: &str, indent: usize) -> BTreeSet<&'a str> {
@@ -11702,7 +11703,8 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         store.display().to_string(),
     ])
     .await;
-    let source = (0..9)
+    // One function past the 256 one capture can arm.
+    let source = (0..257)
         .map(|index| format!("f{index}=function(a){{return a}};"))
         .collect::<String>();
     put_source_facts_artifact(&server, source.as_bytes(), "javascript");
@@ -11738,7 +11740,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     .await);
     assert_eq!(
         (list["count"].as_u64(), list["limit"].as_u64()),
-        (Some(0), Some(8))
+        (Some(0), Some(256))
     );
     assert_eq!(list["session"]["state"], "not_armed");
     assert!(
@@ -11861,7 +11863,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
     let bytes =
         assert_contract_response(duplicate, "post", "/api/js-invocation-sites/actions", 409).await;
     assert!(String::from_utf8_lossy(&bytes).contains("already saved"));
-    for &anchor in &anchors[1..8] {
+    for &anchor in &anchors[1..256] {
         let response = action(json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchor,"label":format!("f at {anchor}")})).await;
         assert_eq!(
             set(assert_contract_response(
@@ -11874,13 +11876,13 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             true
         );
     }
-    let ninth = action(
-        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[8]}),
+    let over = action(
+        json!({"action":"add","session_id":"11","artifact_id":"7","byte_offset":anchors[256]}),
     )
     .await;
     let bytes =
-        assert_contract_response(ninth, "post", "/api/js-invocation-sites/actions", 409).await;
-    assert!(String::from_utf8_lossy(&bytes).contains("8 functions"));
+        assert_contract_response(over, "post", "/api/js-invocation-sites/actions", 409).await;
+    assert!(String::from_utf8_lossy(&bytes).contains("256 functions"));
     // A refused resolution saves nothing and returns its reason.
     std::fs::write(
         directory.path().join("reply-1.json"),
@@ -11901,7 +11903,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
         ),
         (Some(false), Some("no_function"))
     );
-    assert_eq!(refused["set"]["count"], 8);
+    assert_eq!(refused["set"]["count"], 256);
 
     let sha = entry["site"]["source_sha256"].clone();
     let removed =
@@ -11911,7 +11913,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             assert_contract_response(removed, "post", "/api/js-invocation-sites/actions", 200)
                 .await
         )["set"]["count"],
-        7
+        255
     );
     let missing =
         action(json!({"action":"remove","source_sha256":sha,"anchor_offset":anchors[0]})).await;
@@ -11930,7 +11932,7 @@ async fn js_invocation_site_routes_keep_the_saved_set_exact_bounded_and_private(
             cleared["cleared"].as_u64(),
             cleared["set"]["count"].as_u64()
         ),
-        (Some(7), Some(0))
+        (Some(255), Some(0))
     );
     assert!(!store.exists());
 }
@@ -12027,6 +12029,225 @@ async fn js_invocation_site_set_reports_the_session_and_stale_script_versions() 
         500,
     )
     .await;
+}
+
+#[tokio::test]
+async fn js_invocation_live_session_follows_the_saved_set_in_a_stable_slot_table() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("js-invocation-sites-v1.json");
+    let source = "window.a=function(x){};window.b=function(y){};window.c=function(z){};";
+    let units = source
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<u8>>();
+    let site = |name: &str| {
+        let anchor = source.find(&format!("({name})")).unwrap();
+        format!(
+            r#"{{"anchor_offset":{anchor},"artifact_id":"3","artifact_sha256":"{}","byte_offset":{anchor},"shape":"function-entry","source_length":{},"source_sha256":"{}"}}"#,
+            hex::encode(Sha256::digest(source.as_bytes())),
+            units.len() / 2,
+            hex::encode(Sha256::digest(&units))
+        )
+    };
+    let slot = |name: &str, armed: bool| {
+        let entry = site(name);
+        let at = entry.find(r#""artifact_id""#).unwrap();
+        format!(r#"{}"armed":{armed},{}"#, &entry[..at], &entry[at..])
+    };
+    let v1 = |names: &[&str]| {
+        format!(
+            r#"{{"sites":[{}],"version":1}}"#,
+            names
+                .iter()
+                .map(|name| site(name))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let v2 = |slots: &[(&str, bool)]| {
+        format!(
+            r#"{{"sites":[{}],"version":2}}"#,
+            slots
+                .iter()
+                .map(|(name, armed)| slot(name, *armed))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    std::fs::write(&store, v1(&["x", "y"])).unwrap();
+    // The launcher's private copy and the generation file Brave polls.
+    let armed = directory.path().join("armed.json");
+    let generation = directory.path().join("generation");
+    std::fs::write(&armed, v1(&["x", "y"])).unwrap();
+    std::fs::write(&generation, "0\n").unwrap();
+    let server = Server::start_with_args(&[
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+        "--js-invocation-session-sites".into(),
+        armed.display().to_string(),
+        "--js-invocation-session-generation".into(),
+        generation.display().to_string(),
+    ])
+    .await;
+    let list = || async {
+        serde_json::from_slice::<Value>(
+            &assert_contract_response(
+                server.get("/api/js-invocation-sites").await,
+                "get",
+                "/api/js-invocation-sites",
+                200,
+            )
+            .await,
+        )
+        .unwrap()
+    };
+    let published = || {
+        (
+            std::fs::read_to_string(&armed).unwrap(),
+            std::fs::read_to_string(&generation).unwrap(),
+        )
+    };
+    let slots = |set: &Value| {
+        set["session"]["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|slot| slot["armed"].as_bool().unwrap())
+            .collect::<Vec<_>>()
+    };
+    // The saved set equals the startup table, so nothing is published.
+    let first = list().await;
+    assert_eq!(first["session"]["live"], true);
+    assert_eq!(first["session"]["count"], 2);
+    assert_eq!(first["session"]["revision"], 0);
+    assert!(
+        first["next_capture"]
+            .as_str()
+            .unwrap()
+            .starts_with("This capture arms")
+    );
+    assert_eq!(published(), (v1(&["x", "y"]), "0\n".into()));
+
+    // Removing disarms its slot in place; slot 1 keeps its site.
+    let source_sha256 = first["sites"][1]["site"]["source_sha256"].clone();
+    let anchor_y = first["sites"][1]["site"]["anchor_offset"].clone();
+    let removed = serde_json::from_slice::<Value>(
+        &assert_contract_response(
+            server
+                .action(
+                    "/api/js-invocation-sites/actions",
+                    json!({"action":"remove","source_sha256":source_sha256,"anchor_offset":anchor_y}),
+                )
+                .await,
+            "post",
+            "/api/js-invocation-sites/actions",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(slots(&removed["set"]), [true, false]);
+    assert_eq!(removed["set"]["session"]["count"], 1);
+    assert_eq!(removed["set"]["sites"][0]["armed_in_capture"], true);
+    assert_eq!(
+        published(),
+        (v2(&[("x", true), ("y", false)]), "1\n".into())
+    );
+
+    // Another writer's change reaches the capture at the next listing: a new
+    // site takes the next slot and a returning one its old slot.
+    std::fs::write(&store, v1(&["z", "y"])).unwrap();
+    let revised = list().await;
+    assert_eq!(slots(&revised), [false, true, true]);
+    assert_eq!(revised["session"]["revision"], 2);
+    assert_eq!(
+        published(),
+        (v2(&[("x", false), ("y", true), ("z", true)]), "2\n".into())
+    );
+    // An unchanged set publishes nothing.
+    list().await;
+    assert_eq!(published().1, "2\n");
+
+    // Clearing disarms every slot and keeps them.
+    let cleared = serde_json::from_slice::<Value>(
+        &assert_contract_response(
+            server
+                .action(
+                    "/api/js-invocation-sites/actions",
+                    json!({"action":"clear","confirm":true}),
+                )
+                .await,
+            "post",
+            "/api/js-invocation-sites/actions",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(slots(&cleared["set"]), [false, false, false]);
+    assert_eq!(cleared["set"]["session"]["count"], 0);
+    assert_eq!(
+        published(),
+        (
+            v2(&[("x", false), ("y", false), ("z", false)]),
+            "3\n".into()
+        )
+    );
+
+    // A table that cannot be published is reported, the capture keeps the
+    // table it has, and the next listing retries.
+    std::fs::remove_file(&generation).unwrap();
+    std::fs::create_dir(&generation).unwrap();
+    std::fs::write(&store, v1(&["x"])).unwrap();
+    let failed = list().await;
+    assert!(
+        failed["session"]["revision_error"]
+            .as_str()
+            .unwrap()
+            .contains("could not follow"),
+        "{failed}"
+    );
+    assert_eq!(slots(&failed), [false, false, false]);
+    assert_eq!(failed["sites"][0]["armed_in_capture"], false);
+    std::fs::remove_dir(&generation).unwrap();
+    let recovered = list().await;
+    assert_eq!(recovered["session"]["revision_error"], Value::Null);
+    assert_eq!(slots(&recovered), [true, false, false]);
+    assert_eq!(
+        published(),
+        (v2(&[("x", true), ("y", false), ("z", false)]), "4\n".into())
+    );
+    drop(server);
+
+    // Without a generation file the capture keeps its startup sites.
+    std::fs::write(&armed, v1(&["x"])).unwrap();
+    let fixed = Server::start_with_args(&[
+        "--js-invocation-site-store".into(),
+        store.display().to_string(),
+        "--js-invocation-session-sites".into(),
+        armed.display().to_string(),
+    ])
+    .await;
+    std::fs::write(&store, v1(&["y"])).unwrap();
+    let kept = serde_json::from_slice::<Value>(
+        &assert_contract_response(
+            fixed.get("/api/js-invocation-sites").await,
+            "get",
+            "/api/js-invocation-sites",
+            200,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(kept["session"]["live"], false);
+    assert_eq!(kept["sites"][0]["armed_in_capture"], false);
+    assert!(
+        kept["next_capture"]
+            .as_str()
+            .unwrap()
+            .starts_with("Tracking starts with the next capture")
+    );
+    assert_eq!(std::fs::read_to_string(&armed).unwrap(), v1(&["x"]));
 }
 
 #[tokio::test]

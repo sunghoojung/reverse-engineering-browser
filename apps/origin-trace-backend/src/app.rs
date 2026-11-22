@@ -219,7 +219,7 @@ pub struct App {
     event_waiters: Arc<Semaphore>,
     live_browser: LiveBrowser,
     invocation_sites: Arc<js_invocation_sites::Store>,
-    invocation_session: js_invocation_sites::Session,
+    invocation_session: Arc<js_invocation_sites::Session>,
     /// Script-text digests of immutable artifacts, by artifact SHA-256.
     text_digests: Arc<std::sync::Mutex<BTreeMap<String, String>>>,
 }
@@ -251,12 +251,13 @@ impl App {
         let invocation_sites = Arc::new(js_invocation_sites::Store::new(
             options.js_invocation_site_store.clone(),
         ));
-        let invocation_session = js_invocation_sites::Session::read(
+        let invocation_session = Arc::new(js_invocation_sites::Session::read(
             options.js_invocation_session_sites.as_deref(),
             options.js_invocation_session_state.as_deref(),
             options.js_invocation_session_digests,
+            options.js_invocation_session_generation.as_deref(),
             &invocation_sites,
-        );
+        ));
         let app = Arc::new(Self {
             port,
             ui_root: options.ui_root(),
@@ -2314,17 +2315,31 @@ impl App {
         let saved = tokio::task::spawn_blocking(move || store.load())
             .await
             .map_err(|e| Error::new(500, e.to_string()))??;
-        let document =
-            js_invocation_sites::resolution(&raw, &artifact, target, &response, label, &saved)?;
+        let document = js_invocation_sites::resolution(
+            &raw,
+            &artifact,
+            target,
+            &response,
+            label,
+            &saved,
+            self.invocation_session.applies(),
+        )?;
         Ok((document, artifact))
     }
     /// The saved set, whether this session retained each saved version, and
-    /// what this session's launcher armed.
+    /// what this capture arms. A live capture follows the set it reads here,
+    /// so every change through these routes, and any other writer's change
+    /// at the next listing, reaches the running capture.
     async fn invocation_site_set(&self) -> Result<Value> {
         let store = self.invocation_sites.clone();
-        let saved = tokio::task::spawn_blocking(move || store.load())
-            .await
-            .map_err(|e| Error::new(500, e.to_string()))??;
+        let session = self.invocation_session.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            let saved = store.load()?;
+            session.follow(&saved);
+            Ok::<_, Error>(saved)
+        })
+        .await
+        .map_err(|e| Error::new(500, e.to_string()))??;
         let root = self.options.artifacts.clone();
         let digests = self.text_digests.clone();
         let listed = saved.clone();

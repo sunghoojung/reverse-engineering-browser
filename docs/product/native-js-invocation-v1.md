@@ -1,7 +1,10 @@
 # Native JavaScript invocation identity v1
 
 Status: reviewed design, written before any probe code and now implemented by
-V8 patch `0011`, Chromium patch `0021`, the overlay and the backend. The wire
+V8 patch `0011`, Chromium patch `0021`, the overlay and the backend. V8 patch
+`0023` and Chromium patch `0066` later removed the call budgets, raised the
+site limit from 8 to 256 and moved start and settle pairing into V8 (payload
+version 2); the bounds below are the current ones. The wire
 contract is
 [native JavaScript invocation observations v1](../../protocol/native-js-invocation-v1.md).
 [Implementation map](#implementation-map) records which layer does what and
@@ -113,11 +116,17 @@ The refusal is the gap `native_js_invocation_site_<n>_unsupported_function`.
 
 `native-js-invocation-sites-v1` has the exact form of
 `native-js-dispatch-sites-v1` with `shape` fixed to `function-entry`: compact
-canonical JSON, at most 4096 bytes, 1 to 8 sites, each
-`(source_sha256, anchor_offset)` unique. The browser validates it once, sends
-the renderer only fixed 44-byte records (shape byte 3), and the renderer never
-parses JSON. The file is immutable for the browser lifetime, like the other
-site files.
+canonical JSON, at most 128 KiB, 1 to 256 sites, each
+`(source_sha256, anchor_offset)` unique. Version 2 of the same file is a slot
+table of 0 to 256 sites with an `armed` flag each. The browser validates each
+version it reads, sends the renderer only fixed 44-byte records (shape byte 3
+and a disarmed flag), and the renderer never parses JSON.
+
+Records name a site by its one-byte slot, so a slot keeps its site for the
+browser's lifetime. That is what lets a running capture change its sites: a
+removed site is disarmed in place instead of shifting every later slot, so
+each record still names the site it was recorded for. The browser and the
+renderer refuse a table that renumbers a slot.
 
 ### Saving sites from Origin Trace
 
@@ -160,16 +169,31 @@ browser reads it unchanged, at
 beside the app's other per-user stores, plus a
 `js-invocation-sites-v1.labels.json` sidecar with each site's label, source URL
 and session, which the browser never reads. Both are written atomically with
-user-only permissions; an empty set has no site file. At most 8 sites, and a
+user-only permissions; an empty set has no site file. At most 256 sites, and a
 duplicate `(source_sha256, anchor_offset)` is refused.
 
 Every capture the app starts arms the saved set from a private copy made at
-launch: the browser rereads the file it was given and refuses a session whose
-file changed, and Sources can save more sites while the capture runs. Tracking
-therefore starts with the **next** capture, never the open page, and a
-function compiled before arming could not gain tracking anyway. The start
-dialog shows "Tracking N functions" with each label and Remove and Clear All;
-the titlebar names what the running capture tracks.
+launch, an empty slot table when nothing is saved, and follows the set while
+it runs ([revisions](../../protocol/native-js-invocation-v1.md#revisions)).
+The store itself never changes under the browser: the capture's backend
+rewrites only its copy, as a slot table, whenever it sees the saved set
+change, and Brave applies it to every renderer of the session within about
+250 ms. Saving a function in Sources therefore tracks it in the running
+capture; removing one stops recording its new calls while a call already
+running still settles. A function the page compiled before its site was armed
+still cannot gain an entry call, so its calls are recorded after the page
+reloads, which recompiles it on the capture path. Once a capture has used all
+256 slots, a newly saved site waits for the next capture, and the pane says
+so. A Brave built before revisions keeps the startup sites, and the next
+capture arms the set as before. The start dialog shows "Tracking N functions"
+with each label and Remove and Clear All; the titlebar names what the running
+capture tracks.
+
+An empty set still turns on `--reb-js-invocation-capture` for app captures, so
+the first function saved during a capture can be armed. With no armed site
+its cost is the dispatch flag's: off-thread compile tasks, which are
+experimental and off by default, stay off, and each compile compares the
+script length with no armed site.
 
 Digests follow the capture mode: on in Content mode when sites are saved, off
 in Metadata mode whatever the environment holds. An explicit
@@ -180,9 +204,9 @@ when the start request names them (`js_invocation_sites` or
 record digests as a Content session does, with request content under the
 same consent, unless `js_invocation_digests` is `false`. They keep
 their own saved set at `~/.config/origin-trace/agent-sessions/`, which an
-agent session's site routes edit and a later `js_invocation_saved_sites`
-start arms, so an agent never reads or changes the researcher's next capture.
-A named set is strict: a Brave without invocation capture refuses the start.
+agent session's site routes edit and a `js_invocation_saved_sites` start arms
+and follows, so an agent never reads or changes the researcher's set. A named
+set is strict: a Brave without invocation capture refuses the start.
 
 A Brave built before invocation capture would refuse a session that asks for
 `--reb-js-invocation-capture`. For the app's saved sites only, the launcher
@@ -194,12 +218,14 @@ match the new version.
 ### Compilation paths and late arming
 
 Arming is decided at bytecode generation, so the compilation-path review of the
-dispatch probe applies unchanged: code caches are neither consumed nor
-produced, the in-memory compilation cache, script streaming and off-thread
-compiles are off, and source positions are eager. The new V8 flag
-`--reb-js-invocation-capture` implies `--reb-js-dispatch-capture` to inherit
-exactly those guarantees rather than restating them. With no dispatch site
-file the dispatch probe arms nothing.
+dispatch probe applies unchanged: off-thread compiles are off, and a script
+whose text an armed invocation site names neither consumes nor produces a code
+cache, skips the in-memory compilation cache, recompiles a streamed result on
+the main thread and records source positions eagerly. Every other script
+compiles as without the flag. The new V8 flag `--reb-js-invocation-capture`
+implies `--reb-js-dispatch-capture` to inherit exactly those guarantees rather
+than restating them. With no dispatch site file the dispatch probe arms
+nothing.
 
 A function compiled before its site was armed cannot gain an entry call. When
 the arming table changes, V8 scans scripts whose length matches an armed site,
@@ -207,13 +233,13 @@ hashes them once, finds the function literal starting at each anchor, and
 reports `native_js_invocation_site_<n>_compiled_before_arming` when it already
 has bytecode without the entry. The site becomes observable after bytecode
 regeneration or a reload. Armed functions are never optimized
-(`kNeverOptimize`): at most 8 functions lose optimization, which keeps the
+(`kNeverOptimize`): at most 256 functions lose optimization, which keeps the
 entry, exit and settle calls in the only tiers that run them (Ignition and
 Sparkplug) and keeps timing changes declared rather than tier-dependent.
 
 ## Identity model
 
-- **What gets an ID.** One admitted call of an armed function. V8 allocates the
+- **What gets an ID.** One recorded call of an armed function. V8 allocates the
   ID at entry from a per-isolate counter that never resets. IDs below the
   current configuration's floor are stale and never treated as current, so a
   configuration change cannot revive an old ID.
@@ -224,15 +250,14 @@ Sparkplug) and keeps timing changes declared rather than tier-dependent.
   a dynamic-extent relation (the call happened on behalf of the parent); it is
   not value flow.
 - **Admission.** Before allocating anything, V8 asks the embedder's
-  allocation-free predicate, which rechecks session, VM category, generation,
-  expiry and the per-configuration and per-site budgets. A call that is not
-  admitted gets no ID and does not change the current invocation, so its work
-  stays attributed to whatever was current before (its own caller's
-  invocation, or none). The budget loss is a coalesced gap. A call admitted
-  here spends budget even when the renderer then refuses its start record, and
-  a spent budget closes the predicate at once, even while a full ring delays
-  the gap. The budget therefore bounds how many calls V8 wraps, not only how
-  many starts are retained.
+  allocation-free predicate, which rechecks session, VM category, generation
+  and expiry; there is no count. V8 then reports the start, and the embedder
+  answers whether it recorded it. A call that is not recorded (refused as
+  input, rejected by the emitter or dropped by a full ring) is neither carried
+  nor settled, gets no current invocation, and its work stays attributed to
+  whatever was current before (its own caller's invocation, or none). Each
+  recorded start takes its site's next ordinal, so a dropped one is a missing
+  ordinal beside the ring's drop count.
 
 ## Propagation rules
 
@@ -399,11 +424,11 @@ state, never an inferred one.
   when invocation capture is active and either an invocation is current
   (`inside`), or no script is on the stack while at least one admitted
   invocation has not settled (`unknown`: a deferred load start that cannot be
-  attributed). The renderer keeps the ID of each admitted start in a fixed
-  256-entry table, one entry per sample index, and a settle closes its own
-  entry even when its record is lost, so a lost settle never leaves an
-  invocation open and the settle of a refused start never closes another. A
-  request started by script outside any invocation produces no record.
+  attributed). The renderer counts recorded starts that have not settled. V8
+  settles only recorded starts, each exactly once (or reports the settle
+  unavailable), and a settle closes its start even when its record is lost,
+  so a lost settle never leaves an invocation open. A request started by
+  script outside any invocation produces no record.
   Requests from workers are unsupported.
 
 ## Ownership versus metadata
@@ -440,10 +465,12 @@ The value-flow join counts as a correlated link only when all hold:
 
 | Bound or failure | Value | Visible as |
 | --- | --- | --- |
-| Armed sites per configuration | 8 | site file refused at browser startup |
-| Invocations per configuration | 256 | `native_js_invocation_budget_incomplete`, once per configuration |
-| Invocations per site | 64 | `native_js_invocation_site_budget_incomplete`, once per configuration |
-| Request records per configuration | 256 | `native_js_invocation_request_budget_incomplete`, once per configuration |
+| Armed sites per configuration | 256 | site file refused at browser startup; in a following capture a later site waits for the next capture (`armed_in_capture: false`) |
+| Site revision that renumbers a slot or is invalid | per revision | browser gap `native_js_invocation_sites_revision_refused`, renderer gap `native_js_invocation_input_unavailable`; the capture keeps its table |
+| Slot table the backend could not write | per change | `revision_error` in the site set; the capture keeps its table and the next listing retries |
+| Invocations per configuration or site | none | every call is recorded with its site's ordinal |
+| Request records per configuration | none | every attributable request is recorded with its ordinal |
+| Invocation IDs per isolate | 2^30 - 1 | `native_js_invocation_ids_exhausted`, once per configuration |
 | Arguments described per start | 8 | `arguments_truncated` flag; the count is still exact up to 65535 |
 | Digested bytes per settle | 1 MiB | `digest_state: too_large` |
 | Function compiled before arming | per site | `native_js_invocation_site_<n>_compiled_before_arming` |
@@ -451,7 +478,7 @@ The value-flow join counts as a correlated link only when all hold:
 | Context is not a live local document | per configuration | `native_js_invocation_input_unavailable` |
 | Settle job ran after its document went away | per configuration | `native_js_invocation_settle_unavailable` |
 | Emitter refused an admitted record | per configuration | `native_js_invocation_transport_unavailable` |
-| Renderer ring full | 8,192 records | existing drop counter |
+| Renderer ring full | 8,192 records | existing drop counter, and a missing site or request ordinal |
 | Wrapper from an older configuration | per record | state `unknown`, never a guessed ID |
 | Settlement never observed | per invocation | a start without a settle record: its settlement was not observed, and no value-flow join can use it |
 | Value search in one request body | 16 MiB hashed | gap `value_flow_unsearched`; no link |
@@ -465,24 +492,26 @@ the last known invocation.
 - **Flag off.** No wrapper exists. The CPED API adds one flag test per call;
   bytecode is byte-identical (the generator checks one flag per function).
 - **Flag on, epoch 0 or no armed site.** Bytecode for unarmed functions is
-  byte-identical; the dispatch probe's browser-wide cache and streaming costs
-  apply.
+  byte-identical, and a script no armed site names keeps its code cache,
+  compilation cache, streaming and lazy source positions. Each compile entry
+  compares the script's length with the armed lengths.
 - **Armed but not called.** One frame-record register and the handler table
   entry in the armed function only.
-- **Armed and called.** Per admitted call: one runtime entry call, one
+- **Armed and called.** Per recorded call: one runtime entry call, one
   `Tuple2`, one two-slot frame record, one exit call, and for a pending promise
   two native functions and one reaction. Per CPED write while a wrapper is
   current: one `Tuple2`. A digest hashes at most 1 MiB once, at settlement.
-- **After the budget.** The entry call returns at the embedder predicate before
-  any allocation.
+- **Not recorded.** A call the embedder does not record has already taken an
+  ID, a `Tuple2` and a frame record, which become garbage at once; V8 restores
+  the caller's context and nothing carries or settles the call.
 
 ## Contracts
 
 | Event | Number | Category | Payload |
 | --- | --- | --- | --- |
-| `js_invocation_start` | 24 | `vm` | 128 bytes, version 1 |
-| `js_invocation_settle` | 25 | `vm` | 128 bytes, version 1 |
-| `js_invocation_request` | 26 | `vm` | 128 bytes, version 1 |
+| `js_invocation_start` | 24 | `vm` | 128 bytes, version 2 (1 still read) |
+| `js_invocation_settle` | 25 | `vm` | 128 bytes, version 2 (1 still read) |
+| `js_invocation_request` | 26 | `vm` | 128 bytes, version 2 (1 still read) |
 
 Numbers 24 to 26 follow 22 `request_body` and 23 `request_target` of
 [native network v2](../../protocol/native-network-v2.md). Renumbering is a mechanical change to the C++
@@ -495,14 +524,18 @@ Python, Rust and JavaScript agree byte for byte; old payload versions stay
 readable; the origin-trace index emits `issued_during_invocation` and
 `invocation_settlement` only from exact identities; the value-flow join links
 only on an exact, unique digest match in the same process stream; the renderer
-sink's budgets, expiry, gaps and digest gating behave as specified.
+sink's ordinals, expiry, gaps, open count and digest gating behave as
+specified.
 
 V8 cctests (`RebNativeJsInvocation*`): disabled and unarmed bytecode identity;
 armed-but-not-called; argument kinds; sync return, sync throw, pending and
 settled promises, async functions; interleaved invocations keep separate IDs
 through awaits and `then`; CPED reads and writes preserve Blink's value;
-unhandled rejection still reported; budget exhaustion allocates nothing;
-compiled-before-arming and unsupported-kind statuses.
+unhandled rejection still reported; a refused start is neither carried nor
+settled; every slot up to the 256-site limit arms; compiled-before-arming and
+unsupported-kind statuses; a site revision that disarms a slot while its call
+is pending, appends slots and re-arms a slot keeps the call's ID and records
+again without recompiling (`RebNativeJsInvocationRevisionKeepsCallsInFlight`).
 
 Live (needs a rebuilt Brave, on the build machine):
 
@@ -519,12 +552,12 @@ Live (needs a rebuilt Brave, on the build machine):
 
 | Layer | Change |
 | --- | --- |
-| V8 | patch `v8/0011`: flag (implies the dispatch flag), embedder interface, arming table and statuses, entry/exit/handler emission, frame record, CPED wrapper and API rules, settle reaction, digests, `GetCurrentJsInvocation`, cctests |
-| Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync` |
-| Overlay | wire header, site-file parsing for `function-entry`, renderer budgets and gaps, Mojo configuration, browser forwarding of Wasm context |
+| V8 | patch `v8/0011`: flag (implies the dispatch flag), embedder interface, arming table and statuses, entry/exit/handler emission, frame record, CPED wrapper and API rules, settle reaction, digests, `GetCurrentJsInvocation`, cctests; `v8/0024` limits the capture compile path to armed scripts; `v8/0025` adds the revision callback |
+| Chromium | patch `chromium/0021`: install the callbacks, admit live documents, read the current invocation for Wasm records and `SendAsync`; `chromium/0067` installs the revision callback |
+| Overlay | wire header, site-file and slot-table parsing for `function-entry`, the browser's lifetime slot table and revision polling, renderer ordinals, armed flags and gaps, Mojo configuration and `UpdateJsInvocationSites`, browser forwarding of Wasm context |
 | Protocol and backend | events 24 to 26, Wasm payload versions, C++/Python/Rust/JavaScript validators, origin-trace relations in the broker index, the value-flow join in the Rust trace builder, which the native app also answers through, viewer labels |
-| Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS` and `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` |
-| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set and routes (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
+| Tooling | `tools/native-js-invocation-site.py` writes the site file; the launcher's `REB_NATIVE_JS_INVOCATION_SITES`, `REB_NATIVE_JS_INVOCATION_DIGESTS`, `REB_NATIVE_JS_INVOCATION_IF_SUPPORTED` and `REB_NATIVE_JS_INVOCATION_LIVE` |
+| Saved sites | the worker's `invocation_site` query, the backend's site key, saved set, routes and slot-table follower (`js_invocation_sites.rs`), Sources **Track calls**, the titlebar, and the app's start panel and `captureDefaults` |
 
 What runs in this repository's gate: the C++ parity and rule test, the Python
 validator, the Rust readers and value search, the shared trace cases over slices

@@ -1006,8 +1006,9 @@ the native app accepts a choice only from the document it loaded and only
 while that decision is open, checks it, and starts the session itself
 ([`SessionPanel.swift`](macos/SessionPanel.swift)). A Dock reopen while the
 panel shows a decision starts nothing behind it. **Content (default)** sets `REB_CAPTURE_REQUEST_CONTENT=1`,
-which retains request paths, queries and request bodies up to 16 MiB each, and
-retains Canvas images. While a live session has either turned on, the titlebar
+which retains request paths, queries and bodies, every response body whole
+with media and fonts, request and response headers, cookies, and Canvas
+images. While a live session has either turned on, the titlebar
 shows **Content capture** and its tooltip names which; a browser built before
 that capture ignores the switch, and each Traffic row and Payload tab still shows what
 was actually captured. **Metadata only** is the
@@ -1024,43 +1025,26 @@ launcher gets `REB_CAPTURE_REQUEST_CONTENT=0`, `REB_CAPTURE_CANVAS_IMAGES=0`
 and `REB_NATIVE_JS_INVOCATION_DIGESTS=0` whatever the environment holds
 ([`LiveCaptureContent`](macos/LiveSessionCoordinator.swift)).
 
-With Content chosen, the panel also shows the session's **Content limits**:
-
-| Control | Range and default | What it means |
-| --- | --- | --- |
-| **Request content budget** | 1 to 4,096 MiB, default 256 | How much of the request bodies and full URLs the session keeps, counting identical content once |
-| **Response body budget** | 1 to 16,384 MiB, default 512 | How much of the response bodies the session keeps, counting identical bodies once |
-| **Capture media and fonts** | Off by default | Also keep the images, audio, video and fonts that pages load; they count against the response body budget |
-
-Past a budget the browser still lists each later body or URL and names it as
-not kept, never silently. The budgets stay on this Mac with the session, and
-the launcher grows the session's artifact store by both, so a raised budget can
-use that much more disk. A value outside its range, or not a whole number, is
-named at its field with the rule, and nothing starts. The native side checks a
-Content start again ([`ContentLimits`](macos/LiveSessionCoordinator.swift)) with
-the rules the agent path applies to `request_content_budget_mib`,
-`response_body_budget_mib` and `response_media`, and passes the values to the
-launcher as `REB_REQUEST_CONTENT_BUDGET_MIB`, `REB_RESPONSE_BODY_BUDGET_MIB`
-and `REB_CAPTURE_RESPONSE_MEDIA`, replacing any inherited value. The panel
-first shows those variables when the launcher would accept them, else the
-defaults; the limits it starts with hold for later Content sessions in the same
-app run, including Retry and a Dock reopen, as the mode does. Until the panel
-starts a Content session, the automatic launch takes the variables as they are.
-**Metadata only** keeps no content, so the panel shows none of the limits, and
-a session that keeps no request content, whatever started it, is given none of
-the three variables, inherited ones included, as the agent path removes them.
-The starting and failed panels name the limits the session runs with, and
-only for a session that keeps request content; the launch log's `Request content capture` and
-`Response body capture` lines record them, and `get_session_context` reports
-them as `capture_options.content_limits`, so a researcher or an agent can tell
-which budgets the session ran with.
+A Content session keeps every body whole: there is no size, count or budget
+to choose, so the panel offers no content limit, and images, audio, video and
+fonts are always kept. Content stays on this Mac with the session. With
+Content chosen the panel names the one bound: the artifact receiver keeps
+4 GiB of disk free by default, and names each body it could not store
+([disk reserve](../../services/artifact-receiver/README.md#disk-reserve)).
+`REB_ARTIFACT_DISK_RESERVE_MIB` in the app's environment sets another reserve;
+like the other session switches, the panel does not name it. Metadata only
+keeps no content and names no reserve. Besides the session options below, the
+native side accepts a start that names only the mode
+([`LivePanelStart`](macos/LiveSessionCoordinator.swift)), and refuses any other
+key, the removed `request_content_budget_mib`, `response_body_budget_mib` and
+`response_media` included, so a stale page starts nothing. The starting and
+failed panels name the mode.
 
 The start panel saves its capture mode and Advanced options for later app runs
 in `~/Library/Application Support/Origin Trace/live-session-preferences-v1.json`
 (user-only; `REB_LIVE_SESSION_PREFERENCES` names another path), and opens with
-them. The content limits are not saved, and neither is **Fresh profile**: it
-holds for the rest of that app run, and the next run's automatic session opens
-the research profile again. While any choice differs from its
+them. **Fresh profile** is not saved: it holds for the rest of that app run,
+and the next run's automatic session opens the research profile again. While any choice differs from its
 default, **Advanced options** says how many (for example **2 changed**).
 `REB_AUTOMATIC_CAPTURE_MODE=metadata`
 selects Metadata for the automatic launch and preselects it in the start panel.
@@ -1416,9 +1400,10 @@ Hex shows 256 KiB at a time with **Previous** and **Next**, paged to the end of
 the retained body, and Copy copies the window shown. Find counts every match of
 the whole text, its layout or every hex row in the background, as Sources does
 (`N of M+ · finding X%` until the exact count), marks only the rows on screen,
-and opens the hex window of a match. A body
-still arriving says how many bytes had arrived, when, and whether it was sealed
-at the 16 MiB limit, and a body whose snapshot a byte bound withheld says so. Text that is
+and opens the hex window of a match. A body still arriving says how many bytes
+had arrived, when, and, in a session an older browser recorded, whether it was
+sealed at that browser's 16 MiB limit, and a body whose snapshot a byte bound
+withheld says so. Text that is
 not valid UTF-8 shows with replacement characters and a notice, and a cut,
 partial, aborted or cancelled body may end inside a character without reading
 as binary. Preview shows the
@@ -1433,7 +1418,8 @@ still pending, and the rest
 A memory-cache reuse that names the request whose response it reused shows
 that request's retained bytes, labelled as the reused request's, with
 **Open the request it reused** and the source's state (complete, cut at
-16 MiB, a snapshot and when it was recorded, stopped, or not retained); a
+16 MiB by an older browser, a snapshot and when it was recorded, stopped, or
+not retained); a
 named row on another host or started after the reuse is not its source, and
 one not recorded says so. A service worker's answer lists the worker's own
 requests for the same URL made while it was open, from the request index, each
@@ -1709,34 +1695,33 @@ selects or moves a bucket, Shift+Arrow grows or shrinks the range, and Escape
 or **Clear range** removes it. The footer reads `N / M requests · X transferred
 · Y resources` for the matching requests of the whole session.
 
-When a content session's budget runs out, the browser lists each later body or
-URL and names it as not kept. The footer then adds a line naming each used
-budget, for example `Response body budget (512 MiB) used, 511.8 MiB kept: 2,400
-response bodies not kept · Raise it in New Live Session… for the next session.`
+A content session keeps every body whole. When the artifact receiver refuses a
+body to keep its free-disk reserve, the browser still lists it and names it as
+not kept, and the footer adds a line, for example `Disk reserve reached: 2,400
+bodies not stored, to keep the free-disk reserve. Free disk space to keep later
+bodies.` A session an older browser recorded may name that browser's content
+budgets instead, as `Older content budget: N bodies or URLs not kept by the
+browser that recorded this session. Current capture keeps every body whole.`
 
-- The counts are the whole session's, from `get_session_summary`'s budget
-  checks, like the `N / M requests` beside them. Traffic reads the summary once
-  in every session, a stored one included, so a budget met outside the loaded
-  rows still shows, and again at most every 30 s while it shows in a content
-  session or while a budget shows as used.
+- The counts are the whole session's, from `get_session_summary`'s
+  `request_content_not_retained` checks, like the `N / M requests` beside
+  them. Traffic reads the summary once in every session, a stored one
+  included, so a refusal outside the loaded rows still shows, and again at
+  most every 30 s while it shows in a content session or while a refusal
+  shows.
 - A count is exact only while nothing has arrived since the summary was read:
   it records the event poll's tag then, and in a live session a later change
   of that tag makes it `at least N` until the next read. So do a failed re-read
   (which keeps the last figure), a summary whose scan stopped at its 64 MiB
   bound, and the loaded rows before the first read answers.
-- The size is the session context's `capture_options.content_limits`
-  (`get_session_context`), read once after the first valid poll; a session that
-  is not live, or keeps no content, names the budget without a size. The bytes
-  kept are the unique bytes of that budget's artifacts, from the summary.
-- The Payload tab and the Request URL row name the request content budget the
-  same way, and the Response tab names **Response body budget** and **Capture
-  media and fonts**; each remedy applies to the next session.
+- The Payload and Response tabs and the Request URL row name the same reason
+  for one body; no line asks to raise a setting, since none exists.
 - In the short stacked layout (at most 1,100 by 650 px) with a request open, the
-  line becomes a one-line **Budgets used** button (or the one budget's name)
-  beside the footer's own, so the ledger keeps its rows. Return or Space opens
-  the whole sentence above the footer; Escape, focus leaving it, a press
-  anywhere else or closing the request closes it, so it never stays over the
-  rows unasked.
+  line becomes a one-line **Bodies not kept** button (or the one reason's
+  label) beside the footer's own, so the ledger keeps its rows. Return or
+  Space opens the whole sentence above the footer; Escape, focus leaving it, a
+  press anywhere else or closing the request closes it, so it never stays over
+  the rows unasked.
 
 The filter box matches the method, URL or host and status as literal,
 case-insensitive text. `-text` excludes rows that contain it. `domain:` (with

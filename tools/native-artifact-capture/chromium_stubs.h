@@ -22,7 +22,6 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
-#include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_header.h"
 #include "brave/components/reverse_engineering_browser/common/native_artifact_memory_pool.h"
 #include "brave/components/reverse_engineering_browser/common/native_probe_event.h"
@@ -35,7 +34,12 @@
 template <class T>
 using scoped_refptr = std::shared_ptr<T>;
 
+#ifndef GUARDED_BY
+#define GUARDED_BY(x)
+#endif
+
 namespace base {
+using OnceClosure = OnceCallback<void()>;
 // Chromium 157 counts URLLoaderCompletionStatus lengths as unsigned
 // base::ByteSize; the sink converts them with base::saturated_cast.
 class ByteSize {
@@ -116,10 +120,9 @@ auto BindOnce(Function function, Bound... bound) {
   };
 }
 template <class Function, class... Bound>
-std::function<void(std::span<const std::uint8_t>)> BindRepeating(Function function,
-                                                                 Bound... bound) {
-  return [function, bound...](std::span<const std::uint8_t> chunk) {
-    std::invoke(function, bound..., chunk);
+auto BindRepeating(Function function, Bound... bound) {
+  return [function, bound...](auto&&... rest) -> decltype(auto) {
+    return std::invoke(function, bound..., std::forward<decltype(rest)>(rest)...);
   };
 }
 struct Location {};
@@ -165,14 +168,33 @@ inline TimeDelta Nanoseconds(std::int64_t value) {
 // Records posted work so tests can run the pre-expiry flush deterministically.
 struct SequencedTaskRunner {
   static bool HasCurrentDefault() { return true; }
-  static SequencedTaskRunner* GetCurrentDefault() {
-    static SequencedTaskRunner runner;
-    return &runner;
+  static const std::shared_ptr<SequencedTaskRunner>& GetCurrentDefault() {
+    static const std::shared_ptr<SequencedTaskRunner> runner(new SequencedTaskRunner,
+                                                             [](SequencedTaskRunner*) {});
+    return runner;
   }
   template <class Task>
   void PostDelayedTask(const Location&, Task&& task, TimeDelta delay) {
     tasks.push_back({delay.ns, std::function<void()>(std::forward<Task>(task)), test_now_ns});
   }
+  // Immediate tasks, such as a stream's resume once the pool has room, wait
+  // here until a test runs them.
+  bool PostTask(const Location&, OnceClosure task) {
+    posted.push_back(std::move(task));
+    return true;
+  }
+  static std::size_t RunPosted() {
+    auto& queue = GetCurrentDefault()->posted;
+    std::size_t count = 0;
+    while (!queue.empty()) {
+      OnceClosure task = std::move(queue.front());
+      queue.erase(queue.begin());
+      std::move(task).Run();
+      ++count;
+    }
+    return count;
+  }
+  std::vector<OnceClosure> posted;
   // `first` is the delay and `second` the task, as a pair names them, and
   // `posted` the test clock when it was posted.
   struct Posted {
@@ -182,6 +204,14 @@ struct SequencedTaskRunner {
   };
   std::vector<Posted> tasks;
 };
+// The returned closure posts `task` to the runner, where it waits for
+// RunPosted like any other posted task.
+template <class Task>
+OnceClosure BindPostTask(const std::shared_ptr<SequencedTaskRunner>& runner, Task task) {
+  return OnceClosure([runner, posted_task = OnceClosure(std::move(task))]() mutable {
+    runner->PostTask(Location(), std::move(posted_task));
+  });
+}
 }  // namespace base
 #define FROM_HERE ::base::Location()
 
@@ -302,6 +332,8 @@ class BigBuffer {
   std::vector<std::uint8_t> bytes_;
 };
 }  // namespace mojo_base
+// After the base adapters it needs.
+#include "brave/components/reverse_engineering_browser/browser/native_artifact_stream.h"
 namespace reb {
 enum class NativeArtifactTransferOp : std::uint8_t { kWhole, kOpen, kStream };
 struct NativeArtifactTransfer final {
@@ -397,56 +429,92 @@ class NativeArtifactSocketClient {
   std::map<std::uint64_t, std::unique_ptr<NativeArtifactTransfer>> transfers;
 };
 enum class NativeArtifactBodyEnd : std::uint8_t { kSourceClosed, kSourceFailed, kTargetClosed };
-// Feeds the observer in forwarding-pipe-sized chunks, so the stream's
-// coalescing, size bound and pool bound run as they do behind the Mojo tee.
+// Feeds the observer in forwarding-pipe-sized chunks and holds what it does not
+// take until its resume runs, as the Mojo tee holds the source pipe. The end
+// is reported once every byte was taken.
 class NativeArtifactBodyTee {
  public:
   using Completion = base::OnceCallback<void(NativeArtifactBodyEnd)>;
-  using Observer = std::function<void(std::span<const std::uint8_t>)>;
+  using Observer =
+      std::function<std::size_t(std::span<const std::uint8_t>, base::OnceClosure resume)>;
   static mojo::ScopedDataPipeConsumerHandle Create(mojo::ScopedDataPipeConsumerHandle body,
                                                    Completion completion,
                                                    Observer observer,
                                                    bool& started) {
     started = !unavailable;
     if (started) {
-      pending.emplace(body.id, Pending{std::move(completion), std::move(observer)});
+      pending.emplace(body.id,
+                      Pending{std::move(completion), std::move(observer), {}, false, std::nullopt});
     }
     return body;
   }
   // Forwards part of a body without ending it.
   static void Deliver(int id, std::span<const std::uint8_t> content) {
     auto& entry = pending.at(id);
-    constexpr std::size_t kChunk = 64U * 1024U;
-    for (std::size_t offset = 0; offset < content.size(); offset += kChunk) {
-      entry.observer(content.subspan(offset, std::min(kChunk, content.size() - offset)));
-    }
+    entry.backlog.insert(entry.backlog.end(), content.begin(), content.end());
+    Pump(id);
   }
   static void End(int id, NativeArtifactBodyEnd end) {
-    auto entry = std::move(pending.at(id));
-    pending.erase(id);
-    std::move(entry.completion).Run(end);
+    pending.at(id).end = end;
+    Pump(id);
   }
   static void Complete(int id, bool complete, std::span<const std::uint8_t> content) {
     Deliver(id, content);
     End(id, complete ? NativeArtifactBodyEnd::kSourceClosed : NativeArtifactBodyEnd::kSourceFailed);
   }
+  // Bytes delivered but not yet taken by the observer.
+  static std::size_t Waiting(int id) {
+    const auto found = pending.find(id);
+    return found == pending.end() ? 0 : found->second.backlog.size();
+  }
   struct Pending {
     Completion completion;
     Observer observer;
+    std::vector<std::uint8_t> backlog;
+    bool waiting = false;
+    std::optional<NativeArtifactBodyEnd> end;
   };
   static inline bool unavailable = false;
   static inline std::map<int, Pending> pending;
+
+ private:
+  static void Pump(int id) {
+    constexpr std::size_t kChunk = 64U * 1024U;
+    for (auto found = pending.find(id); found != pending.end() && !found->second.waiting;
+         found = pending.find(id)) {
+      Pending& entry = found->second;
+      if (entry.backlog.empty()) {
+        if (entry.end) {
+          Completion completion = std::move(entry.completion);
+          const NativeArtifactBodyEnd end = *entry.end;
+          pending.erase(found);
+          std::move(completion).Run(end);
+        }
+        return;
+      }
+      const std::size_t size = std::min(kChunk, entry.backlog.size());
+      const std::size_t taken = entry.observer(
+          std::span<const std::uint8_t>(entry.backlog.data(), size), base::OnceClosure([id] {
+            if (const auto again = pending.find(id); again != pending.end()) {
+              again->second.waiting = false;
+              Pump(id);
+            }
+          }));
+      // The observer may have ended the capture; the entry is still here.
+      Pending& after = pending.at(id);
+      after.backlog.erase(after.backlog.begin(),
+                          after.backlog.begin() + static_cast<std::ptrdiff_t>(taken));
+      if (taken < size) {
+        after.waiting = true;
+      }
+    }
+  }
 };
 // Scripted parts stand in for file reads, blob getters and the stream tee; the
-// real stream, budget allowance and sink outcome classification run.
+// real stream and sink outcome classification run.
 struct NativeRequestBodyReadResult final {
   NativeArtifactStream stream;
-  enum class End : std::uint8_t {
-    kComplete,
-    kIncomplete,
-    kBudget,
-    kRefused
-  } end = End::kIncomplete;
+  enum class End : std::uint8_t { kComplete, kIncomplete } end = End::kIncomplete;
   std::uint64_t body_length = 0;
 };
 using NativeRequestBodyReadEnd = NativeRequestBodyReadResult::End;
@@ -459,64 +527,90 @@ class NativeRequestBodyReader {
     return !refuse_files;
   }
   static bool CanRead(const network::ResourceRequestBody& body) noexcept {
-    bool readable = false;
     for (const auto& element : *body.elements()) {
       if (element.TryAs<network::DataElementChunkedDataPipe>() && body.elements()->size() != 1) {
         return false;
       }
-      if (element.TryAs<network::DataElementFile>() ||
-          element.TryAs<network::DataElementDataPipe>() ||
-          element.TryAs<network::DataElementChunkedDataPipe>()) {
-        readable = true;
-      } else if (!element.TryAs<network::DataElementBytes>()) {
+      if (!element.TryAs<network::DataElementBytes>() &&
+          !element.TryAs<network::DataElementFile>() &&
+          !element.TryAs<network::DataElementDataPipe>() &&
+          !element.TryAs<network::DataElementChunkedDataPipe>()) {
         return false;
       }
     }
-    return readable;
+    return !body.elements()->empty();
   }
-  static bool Start(network::ResourceRequestBody&,
-                    NativeArtifactStream stream,
-                    std::size_t allowance,
-                    Done done) {
+  // An in-memory body is fed by a worker task, as PartsReader reads it; any
+  // other part waits for a test to Finish it.
+  static bool Start(network::ResourceRequestBody& body, NativeArtifactStream stream, Done done) {
     if (refuse) {
       return false;
     }
-    reads.push_back({std::move(stream), allowance, std::move(done)});
+    const std::size_t index = reads.size();
+    reads.push_back({std::move(stream), std::move(done)});
+    std::vector<std::uint8_t> bytes;
+    for (const auto& element : *body.elements()) {
+      const auto* part = element.TryAs<network::DataElementBytes>();
+      if (!part) {
+        return true;
+      }
+      bytes.insert(bytes.end(), part->bytes().begin(), part->bytes().end());
+    }
+    base::ThreadPool::pending.emplace_back([index, bytes = std::move(bytes)] {
+      Finish(index, bytes, NativeRequestBodyReadEnd::kComplete, bytes.size());
+    });
     return true;
   }
-  // Feeds `bytes` as PartsReader does: aligned chunks, stopping at the
-  // allowance and at the 16 MiB cap, so the stream never sees a byte past the
-  // prefix. Ends the read with `end` and the parts' total length.
+  // Feeds `bytes` as PartsReader does: aligned chunks, waiting for the pool
+  // when it is full. Ends the read with `end` and the parts' total length once
+  // every byte was offered, which may be after a test drains the pool and runs
+  // the posted resumes.
   static void Finish(std::size_t index,
                      std::span<const std::uint8_t> bytes,
                      NativeRequestBodyReadEnd end,
                      std::uint64_t body_length) {
     Read& read = reads.at(index);
-    constexpr std::size_t kChunk = 64U * 1024U;
-    for (std::size_t offset = 0; offset < bytes.size() && read.stream.is_open() &&
-                                 read.stream.kept() < kNativeArtifactMaxContentBytes;
-         offset += kChunk) {
-      const auto chunk = bytes.subspan(offset, std::min(kChunk, bytes.size() - offset));
-      const auto keeps = std::min<std::uint64_t>(
-          chunk.size(), kNativeArtifactMaxContentBytes - read.stream.kept());
-      if (read.allowance < kNativeArtifactMaxContentBytes &&
-          read.stream.kept() + keeps > read.allowance) {
-        end = NativeRequestBodyReadEnd::kBudget;
-        break;
-      }
-      read.stream.Append(chunk);
-    }
-    std::move(read.done).Run(NativeRequestBodyReadResult{
-        .stream = std::move(read.stream), .end = end, .body_length = body_length});
+    read.bytes.assign(bytes.begin(), bytes.end());
+    read.end = end;
+    read.body_length = body_length;
+    Pump(index);
   }
+  // Whether the read at `index` still waits for pool space.
+  static bool Waiting(std::size_t index) { return static_cast<bool>(reads.at(index).done); }
   struct Read {
     NativeArtifactStream stream;
-    std::size_t allowance = 0;
     Done done;
+    std::vector<std::uint8_t> bytes = {};
+    std::size_t offset = 0;
+    NativeRequestBodyReadEnd end = NativeRequestBodyReadEnd::kIncomplete;
+    std::uint64_t body_length = 0;
   };
   static inline bool refuse = false;
   static inline bool refuse_files = false;
   static inline std::vector<Read> reads;
+
+ private:
+  static void Pump(std::size_t index) {
+    constexpr std::size_t kChunk = 64U * 1024U;
+    Read& read = reads.at(index);
+    while (read.offset < read.bytes.size() && read.stream.is_open()) {
+      const auto chunk =
+          std::span<const std::uint8_t>(read.bytes)
+              .subspan(read.offset, std::min(kChunk, read.bytes.size() - read.offset));
+      const std::size_t taken = read.stream.Offer(chunk);
+      read.offset += taken;
+      if (taken < chunk.size() && read.stream.is_open()) {
+        read.stream.WaitForSpace(base::OnceClosure([index] { Pump(index); }));
+        return;
+      }
+    }
+    if (!read.done) {
+      return;
+    }
+    Done done = std::move(read.done);
+    std::move(done).Run(NativeRequestBodyReadResult{
+        .stream = std::move(read.stream), .end = read.end, .body_length = read.body_length});
+  }
 };
 class NativeProbeHost;
 // Session boundary seen by NativeProbeHost; the policy is set by each test.
@@ -645,6 +739,15 @@ class WeakPtrFactory {
  private:
   std::shared_ptr<T*> cell_;
 };
+// A method bound to a WeakPtr does nothing once its object is gone.
+template <class R, class T, class... Params, class... Bound>
+auto BindOnce(R (T::*method)(Params...), WeakPtr<T> target, Bound... bound) {
+  return [method, target, ... bound = std::move(bound)](auto&&... rest) mutable {
+    if (target) {
+      (target.operator->()->*method)(std::move(bound)..., std::forward<decltype(rest)>(rest)...);
+    }
+  };
+}
 struct UnguessableToken {
   std::uint64_t high = 0, low = 0;
   std::uint64_t GetHighForSerialization() const { return high; }
@@ -697,6 +800,7 @@ class NativeProbeClient {
   virtual void Disable() = 0;
   virtual void NativeGuestModuleStatus(std::uint64_t, std::uint64_t, bool) = 0;
   virtual void NativeStackArtifactRefused(std::uint64_t) = 0;
+  virtual void ReleaseArtifactCredit(std::uint64_t) = 0;
 };
 class NativeProbeHost {
  public:
@@ -789,6 +893,7 @@ class NativeProbeHost {
                                         std::uint64_t,
                                         bool,
                                         mojo_base::BigBuffer,
+                                        std::uint64_t,
                                         std::uint64_t) = 0;
 };
 }  // namespace reb::mojom

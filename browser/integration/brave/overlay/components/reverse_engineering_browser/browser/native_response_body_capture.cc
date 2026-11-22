@@ -6,7 +6,6 @@
 #include "brave/components/reverse_engineering_browser/browser/native_response_body_capture.h"
 
 #include <algorithm>
-#include <cmath>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -40,7 +39,7 @@ std::uint64_t Now() {
 }
 
 // Scheme, host, explicit port, path and query, never credentials or a
-// fragment. Past the manifest's 8 KiB it is the origin.
+// fragment. Past the artifact URL bound it is the origin.
 std::string ArtifactUrl(const GURL& url) {
   const char* const scheme = url.SchemeIs("https")  ? "https://"
                              : url.SchemeIs("http") ? "http://"
@@ -87,14 +86,10 @@ void NativeResponseBodyCapture::Configure(const NativeProbeEmitter emitter,
   bodies_.clear();
   digests_.clear();
   queued_.clear();
-  used_ = 0;
-  snapshot_used_ = 0;
   last_response_started_ = {};
   emitter_ = enabled ? emitter : nullptr;
   session_id_ = enabled ? session_id : 0;
   expires_at_monotonic_ns_ = enabled ? expires_at_monotonic_ns : 0;
-  media_ = enabled && policy.media;
-  budget_ = enabled ? policy.budget : 0;
   enabled_.store(enabled, std::memory_order_relaxed);
 }
 
@@ -138,10 +133,6 @@ mojo::ScopedDataPipeConsumerHandle NativeResponseBodyCapture::MaybeCapture(
   } else if (!body.is_valid()) {
     // The loader delivered no body pipe at all.
     refusal = NativeResponseBodyState::kEmpty;
-  } else if (!media_ && IsNativeResponseMedia(request.resource_type, response_head.mime_type)) {
-    refusal = NativeResponseBodyState::kNotCapturedType;
-  } else if (used_ >= budget_) {
-    refusal = NativeResponseBodyState::kNotCapturedSessionBudget;
   } else if (url.empty()) {
     refusal = NativeResponseBodyState::kNotCapturedTransferRefused;
   }
@@ -165,9 +156,7 @@ mojo::ScopedDataPipeConsumerHandle NativeResponseBodyCapture::MaybeCapture(
           ? "application/octet-stream"
           : response_head.mime_type;
   // The digest grows by at most one 64 KiB tee read per task.
-  NativeArtifactStream stream(artifacts.memory_pool(), header, url, mime_type,
-                              kNativeArtifactMaxContentBytes, /*keep_prefix=*/true,
-                              /*digest=*/true);
+  NativeArtifactStream stream(artifacts.memory_pool(), header, url, mime_type, /*digest=*/true);
   if (!stream.is_open()) {
     summary.state = NativeResponseBodyState::kNotCapturedTransferRefused;
     Emit(parent, summary, 0);
@@ -200,12 +189,13 @@ mojo::ScopedDataPipeConsumerHandle NativeResponseBodyCapture::MaybeCapture(
   return body;
 }
 
-void NativeResponseBodyCapture::OnData(const Key key,
-                                       const std::uint64_t capture_id,
-                                       const std::span<const std::uint8_t> chunk) {
+std::size_t NativeResponseBodyCapture::OnData(const Key key,
+                                              const std::uint64_t capture_id,
+                                              const std::span<const std::uint8_t> chunk,
+                                              base::OnceClosure resume) {
   const auto found = bodies_.find(key);
   if (found == bodies_.end() || found->second.capture_id != capture_id) {
-    return;
+    return chunk.size();
   }
   Body& body = found->second;
   NativeArtifactStream& stream = body.stream;
@@ -215,65 +205,54 @@ void NativeResponseBodyCapture::OnData(const Key key,
     // so neither its bytes nor a checkpoint reach the receiver past it.
     stream.Abort();
     bodies_.erase(found);
-    return;
+    return chunk.size();
   }
-  // The budget counts unique bytes, so it is charged once the digest is known.
-  // A sealed or refused stream is no longer open, so Append only counts.
-  stream.Append(chunk);
-  if (body.sealed || body.refused) {
-    return;
-  }
-  if (stream.state() == NativeArtifactStreamState::kMemoryLimit ||
-      stream.state() == NativeArtifactStreamState::kRefused) {
-    body.refused = NativeResponseBodyState::kNotCapturedTransferRefused;
-    return;
+  // A refused stream is no longer open, so Offer only counts.
+  const std::size_t taken = stream.Offer(chunk);
+  if (body.refused) {
+    return taken;
   }
   if (!stream.is_open()) {
-    return;
+    body.refused = NativeResponseBodyState::kNotCapturedTransferRefused;
+    return taken;
+  }
+  // The body waits for the pool rather than passing bytes it could not keep.
+  if (taken < chunk.size()) {
+    stream.WaitForSpace(std::move(resume));
   }
   // Every open body is retained as it arrives, whether or not it declared a
-  // length. At the capture limit its kept bytes are final, so it is sealed
-  // instead of copied again.
-  if (stream.kept() == kNativeResponseBodyCaptureBytes) {
-    Seal(found);
-  } else {
-    TrySnapshot(found, now);
-  }
+  // length.
+  TrySnapshot(found, now);
+  return taken;
 }
 
 void NativeResponseBodyCapture::TrySnapshot(const std::map<Key, Body>::iterator found,
                                             const std::uint64_t now) {
   Body& body = found->second;
   const std::uint64_t size = body.stream.kept();
-  const SnapshotGate gate = SnapshotDue(body, size, now);
-  switch (gate) {
+  switch (SnapshotDue(body, size, now)) {
     case SnapshotGate::kReady:
       Snapshot(found);
       return;
     case SnapshotGate::kWithheld:
-    case SnapshotGate::kPaced:
-      // Every later record of the body says a byte bound withheld one.
+      // Every later record of the body says its bound withheld one. More kept
+      // bytes raise the bound, so a later arrival may take the next one.
       body.summary.flags |= kNativeResponseBodySnapshotsWithheld;
-      if (gate == SnapshotGate::kWithheld) {
-        return;
-      }
-      break;
+      return;
     case SnapshotGate::kTooSoon:
       break;
     case SnapshotGate::kUnchanged:
       return;
   }
-  // A burst followed by silence is still published once the spacing, or the
-  // per-body pace that only time relaxes, allows: one delayed task per body,
-  // which finds the body by key and capture ID as the completion wait does,
-  // so a body that ended or a new configuration leaves it nothing to do. The
-  // session share and the budget are not retried; the next chunk tries again.
+  // A burst followed by silence is still published once the spacing allows:
+  // one delayed task per body, which finds the body by key and capture ID as
+  // the completion wait does, so a body that ended or a new configuration
+  // leaves it nothing to do.
   if (body.snapshot_timer || !base::SequencedTaskRunner::HasCurrentDefault()) {
     return;
   }
   body.snapshot_timer = true;
-  const std::uint64_t due =
-      gate == SnapshotGate::kPaced ? PaceDueNs(body, size, now) : NextSnapshotNs(body);
+  const std::uint64_t due = NextSnapshotNs(body);
   base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
       FROM_HERE,
       base::BindOnce([](Key key, std::uint64_t id) { Get().OnSnapshotTimer(key, id); },
@@ -290,8 +269,7 @@ void NativeResponseBodyCapture::OnSnapshotTimer(const Key key, const std::uint64
   body.snapshot_timer = false;
   const std::uint64_t now = Now();
   // A body whose tee ended waits for its record; past expiry nothing is sent.
-  if (body.tee_done || body.sealed || body.refused || !body.stream.is_open() ||
-      now >= expires_at_monotonic_ns_) {
+  if (body.tee_done || body.refused || !body.stream.is_open() || now >= expires_at_monotonic_ns_) {
     return;
   }
   TrySnapshot(found, now);
@@ -307,29 +285,10 @@ std::uint64_t NativeResponseBodyCapture::NextSnapshotNs(const Body& body) noexce
   return body.started_ns + std::max(last + kNativeResponseBodySnapshotFirstNs, spaced);
 }
 
-std::uint64_t NativeResponseBodyCapture::PaceDueNs(const Body& body,
-                                                   const std::uint64_t size,
-                                                   const std::uint64_t now) const noexcept {
-  // SnapshotDue's pace solved for the age: the size share cannot grow while
-  // the body is silent, so the elapsed share of the session must reach the
-  // fraction of the paced part of the allowance this snapshot needs. kPaced
-  // means it needs more than the quarter at once and at most the allowance.
-  const std::uint64_t allowance = budget_ / kNativeResponseBodySnapshotBodyDivisor;
-  const std::uint64_t at_once = allowance / 4;
-  const double fraction =
-      static_cast<double>(body.copied + size - at_once) / static_cast<double>(allowance - at_once);
-  const double span = static_cast<double>(expires_at_monotonic_ns_ - body.started_ns);
-  const std::uint64_t due =
-      body.started_ns + static_cast<std::uint64_t>(std::ceil(fraction * span));
-  // Rounding can leave the pace a few nanoseconds short at `due`; a retry
-  // then waits the shortest spacing instead of running at once.
-  return due > now ? due : now + kNativeResponseBodySnapshotFirstNs;
-}
-
 NativeResponseBodyCapture::SnapshotGate NativeResponseBodyCapture::SnapshotDue(
     const Body& body,
     const std::uint64_t size,
-    const std::uint64_t now) const noexcept {
+    const std::uint64_t now) noexcept {
   // The partial index is 16 bits; the age spacing keeps a body far below it.
   if (size <= body.snapshot_size ||
       body.partials >= std::numeric_limits<std::uint16_t>::max() - 1) {
@@ -340,27 +299,11 @@ NativeResponseBodyCapture::SnapshotGate NativeResponseBodyCapture::SnapshotDue(
       std::max(kNativeResponseBodySnapshotFirstNs, age / kNativeResponseBodySnapshotAgeDivisor)) {
     return SnapshotGate::kTooSoon;
   }
-  // A snapshot copies all `size` kept bytes. A body may spend a quarter of its
-  // allowance at once, and the rest as the larger of the share of the session
-  // left when it opened that has passed and the share of the capture limit it
-  // has filled. The body opened and is still open before expiry, so the span
-  // is not zero.
-  const std::uint64_t allowance = budget_ / kNativeResponseBodySnapshotBodyDivisor;
-  const std::uint64_t span = expires_at_monotonic_ns_ - body.started_ns;
-  const double share =
-      std::max(std::min(1.0, static_cast<double>(age) / static_cast<double>(span)),
-               static_cast<double>(size) / static_cast<double>(kNativeResponseBodyCaptureBytes));
-  const std::uint64_t paced =
-      allowance / 4 +
-      static_cast<std::uint64_t>(static_cast<double>(allowance - allowance / 4) * share);
-  const bool shared =
-      snapshot_used_ + size <= budget_ / kNativeResponseBodySnapshotSessionDivisor &&
-      size <= budget_ - std::min(budget_, used_);
-  if (body.copied + size <= paced && shared) {
-    return SnapshotGate::kReady;
-  }
-  // Only the pace grows with time alone, and only up to the whole allowance.
-  return shared && body.copied + size <= allowance ? SnapshotGate::kPaced : SnapshotGate::kWithheld;
+  // A snapshot copies all `size` kept bytes. Sizes stay far below 2^60, so
+  // the bound cannot overflow.
+  const std::uint64_t bound =
+      kNativeResponseBodySnapshotCopyFactor * size + kNativeResponseBodySnapshotSlackBytes;
+  return body.copied + size <= bound ? SnapshotGate::kReady : SnapshotGate::kWithheld;
 }
 
 void NativeResponseBodyCapture::OnEnd(const Key key,
@@ -424,9 +367,6 @@ void NativeResponseBodyCapture::Finish(const std::map<Key, Body>::iterator found
     Refuse(body.parent, summary, *body.refused);
     return;
   }
-  // A sealed stream holds the capture limit's prefix; later bytes were only
-  // counted, so the observed length says whether the body was cut.
-  const bool truncated = stream.observed() > stream.kept();
   if (open) {
     summary.state = NativeResponseBodyState::kPartial;
     summary.partial_index = static_cast<std::uint16_t>(body.partials + 1);
@@ -438,7 +378,6 @@ void NativeResponseBodyCapture::Finish(const std::map<Key, Body>::iterator found
       summary.flags |= kNativeResponseBodyCompletionUnobserved;
     }
     summary.state = summary.body_length == 0 ? NativeResponseBodyState::kEmpty
-                    : truncated              ? NativeResponseBodyState::kCapturedTruncated
                                              : NativeResponseBodyState::kCaptured;
   }
   const auto name = [&summary](const Retained& retained) {
@@ -448,11 +387,6 @@ void NativeResponseBodyCapture::Finish(const std::map<Key, Body>::iterator found
       summary.flags |= kNativeResponseBodyShared;
     }
   };
-  if (body.sealed) {
-    name(*body.sealed);
-    Emit(body.parent, summary, body.sealed->artifact_id);
-    return;
-  }
   if (stream.kept() == 0) {
     stream.Abort();
     if (open) {
@@ -485,17 +419,12 @@ NativeResponseBodyCapture::Retained NativeResponseBodyCapture::Retain(
     retained.refused = NativeResponseBodyState::kNotCapturedArtifactUnavailable;
     return retained;
   }
-  // The receiver stores one blob per digest; a repeat names the first artifact
-  // and charges nothing. The receiver discards the aborted stream.
+  // The receiver stores one blob per digest; a repeat names the first
+  // artifact. The receiver discards the aborted stream.
   if (const auto shared = digests_.find(retained.digest); shared != digests_.end()) {
     stream.Abort();
     retained.artifact_id = shared->second;
     retained.shared = true;
-    return retained;
-  }
-  if (retained.size > budget_ - std::min(budget_, used_)) {
-    stream.Abort();
-    retained.refused = NativeResponseBodyState::kNotCapturedSessionBudget;
     return retained;
   }
   const std::uint64_t artifact_id = stream.artifact_id();
@@ -503,39 +432,14 @@ NativeResponseBodyCapture::Retained NativeResponseBodyCapture::Retain(
     retained.refused = NativeResponseBodyState::kNotCapturedTransferRefused;
     return retained;
   }
-  used_ += retained.size;
   artifacts.TrackResponseBody(artifact_id, parent.request_id, parent.frame_id,
                               parent.sequence_number);
-  queued_.emplace(artifact_id,
-                  Queued{retained.digest, static_cast<std::size_t>(retained.size), false});
+  queued_.emplace(artifact_id, retained.digest);
   if (digests_.size() < kDigestLimit) {
     digests_.emplace(retained.digest, artifact_id);
   }
   retained.artifact_id = artifact_id;
   return retained;
-}
-
-void NativeResponseBodyCapture::Seal(const std::map<Key, Body>::iterator found) {
-  Body& body = found->second;
-  Retained retained = Retain(body.parent, body.stream);
-  if (retained.refused) {
-    body.refused = retained.refused;
-    return;
-  }
-  NativeResponseBodySummary summary = body.summary;
-  summary.state = NativeResponseBodyState::kPartial;
-  summary.partial_index = ++body.partials;
-  summary.body_length = body.stream.observed();
-  summary.captured_length = retained.size;
-  summary.sha256 = retained.digest;
-  if (retained.shared) {
-    summary.flags |= kNativeResponseBodyShared;
-  }
-  body.snapshot_ns = Now();
-  body.snapshot_size = retained.size;
-  const std::uint64_t artifact_id = retained.artifact_id;
-  body.sealed = std::move(retained);
-  Emit(body.parent, summary, artifact_id);
 }
 
 void NativeResponseBodyCapture::Snapshot(const std::map<Key, Body>::iterator found) {
@@ -548,8 +452,6 @@ void NativeResponseBodyCapture::Snapshot(const std::map<Key, Body>::iterator fou
   if (!stream.Checkpoint(snapshot_id)) {
     return;
   }
-  used_ += size;
-  snapshot_used_ += size;
   body.copied += size;
   NativeResponseBodySummary summary = body.summary;
   summary.state = NativeResponseBodyState::kPartial;
@@ -561,19 +463,18 @@ void NativeResponseBodyCapture::Snapshot(const std::map<Key, Body>::iterator fou
   body.snapshot_size = size;
   artifacts.TrackResponseBody(snapshot_id, body.parent.request_id, body.parent.frame_id,
                               body.parent.sequence_number);
-  queued_.emplace(snapshot_id, Queued{summary.sha256, static_cast<std::size_t>(size), true});
+  queued_.emplace(snapshot_id, summary.sha256);
   Emit(body.parent, summary, snapshot_id);
 }
 
-void NativeResponseBodyCapture::Refund(const std::uint64_t bytes) noexcept {
-  used_ -= std::min(used_, bytes);
-}
-
-bool NativeResponseBodyCapture::OnStreamRefused(const std::uint64_t artifact_id) noexcept {
+bool NativeResponseBodyCapture::OnStreamRefused(const std::uint64_t artifact_id,
+                                                const NativeArtifactReceiveStatus status) noexcept {
   for (auto& [key, body] : bodies_) {
     if (body.stream.artifact_id() == artifact_id && body.stream.is_open()) {
       body.stream.Abort();
-      body.refused = NativeResponseBodyState::kNotCapturedTransferRefused;
+      body.refused = status == NativeArtifactReceiveStatus::kDiskReserve
+                         ? NativeResponseBodyState::kNotCapturedDiskReserve
+                         : NativeResponseBodyState::kNotCapturedTransferRefused;
       return true;
     }
   }
@@ -586,17 +487,12 @@ void NativeResponseBodyCapture::OnTransferCompleted(const std::uint64_t artifact
   if (found == queued_.end()) {
     return;
   }
-  const Queued queued = found->second;
+  const Digest digest = found->second;
   queued_.erase(found);
   if (accepted) {
     return;
   }
-  // Nothing was stored, so the bytes are refunded and a repeat is sent again.
-  Refund(queued.size);
-  if (queued.snapshot) {
-    snapshot_used_ -= std::min<std::uint64_t>(snapshot_used_, queued.size);
-  }
-  const Digest& digest = queued.digest;
+  // Nothing was stored, so a repeat is sent again.
   if (const auto entry = digests_.find(digest);
       entry != digests_.end() && entry->second == artifact_id) {
     digests_.erase(entry);

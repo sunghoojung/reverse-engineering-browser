@@ -31,9 +31,11 @@ using reb::services::ScopedDescriptor;
 using reb::services::ScopedSocketPath;
 using reb::services::StopSignal;
 
-constexpr std::uint64_t kDefaultMaxArtifactBytes = 16ULL * 1024ULL * 1024ULL;
-constexpr std::uint64_t kDefaultMaxStoreBytes = 256ULL * 1024ULL * 1024ULL;
 constexpr int kSocketTimeoutSeconds = 30;
+// macOS starts a local stream socket with 8 KiB buffers, so a 64 KiB data
+// frame would arrive in eight reads, each waking the browser's writer again.
+// Room for a whole frame lets it arrive in one.
+constexpr int kSocketBufferBytes = 1024 * 1024;
 
 bool InstallSignalHandlers() noexcept {
   if (!StopSignal::Install({SIGINT, SIGTERM})) {
@@ -50,10 +52,7 @@ struct Options final {
   std::string socket_path;
   std::string token_path;
   std::uint64_t session_id = 0;
-  std::uint64_t max_artifact_bytes = kDefaultMaxArtifactBytes;
-  std::uint64_t max_store_bytes = kDefaultMaxStoreBytes;
-  std::uint64_t max_artifacts = reb::kDefaultMaxStoredArtifacts;
-  std::uint64_t max_manifest_bytes = reb::kDefaultMaxManifestBytes;
+  std::uint64_t disk_reserve_bytes = reb::kDefaultArtifactDiskReserveBytes;
   bool allow_sensitive = false;
 };
 
@@ -94,14 +93,10 @@ class DescriptorStreamBuffer final : public std::streambuf {
 
 void PrintUsage(const char* program) {
   std::cerr << "Usage: " << program
-            << " --store PATH [--max-artifact-bytes COUNT] [--max-store-bytes COUNT]"
-               " [--max-artifacts COUNT] [--max-manifest-bytes COUNT]"
-               " [--allow-sensitive]\n"
+            << " --store PATH [--disk-reserve-bytes COUNT] [--allow-sensitive]\n"
             << "       " << program
             << " --store PATH --socket PATH --token-file PATH --session-id ID"
-               " [--max-artifact-bytes COUNT] [--max-store-bytes COUNT]"
-               " [--max-artifacts COUNT] [--max-manifest-bytes COUNT]"
-               " [--allow-sensitive]\n";
+               " [--disk-reserve-bytes COUNT] [--allow-sensitive]\n";
 }
 
 bool ParseSize(const std::string_view value, std::uint64_t& result) {
@@ -124,20 +119,8 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       if (!ParseSize(argv[++index], options.session_id)) {
         return false;
       }
-    } else if (argument == "--max-artifact-bytes" && index + 1 < argc) {
-      if (!ParseSize(argv[++index], options.max_artifact_bytes)) {
-        return false;
-      }
-    } else if (argument == "--max-store-bytes" && index + 1 < argc) {
-      if (!ParseSize(argv[++index], options.max_store_bytes)) {
-        return false;
-      }
-    } else if (argument == "--max-artifacts" && index + 1 < argc) {
-      if (!ParseSize(argv[++index], options.max_artifacts)) {
-        return false;
-      }
-    } else if (argument == "--max-manifest-bytes" && index + 1 < argc) {
-      if (!ParseSize(argv[++index], options.max_manifest_bytes)) {
+    } else if (argument == "--disk-reserve-bytes" && index + 1 < argc) {
+      if (!ParseSize(argv[++index], options.disk_reserve_bytes)) {
         return false;
       }
     } else if (argument == "--allow-sensitive") {
@@ -150,8 +133,7 @@ bool ParseOptions(const int argc, char* argv[], Options& options) {
       !options.socket_path.empty() || !options.token_path.empty() || options.session_id != 0;
   const bool all_socket_options =
       !options.socket_path.empty() && !options.token_path.empty() && options.session_id != 0;
-  return !options.store_path.empty() && options.max_artifact_bytes <= options.max_store_bytes &&
-         (!any_socket_option || all_socket_options);
+  return !options.store_path.empty() && (!any_socket_option || all_socket_options);
 }
 
 bool PeerIsCurrentUser(const int descriptor) noexcept {
@@ -269,6 +251,9 @@ bool ReceiveSocketConnections(const int listener,
                 << "; waiting for reconnect\n";
       continue;
     }
+    // Only throughput depends on it, so a refusal keeps the default buffer.
+    static_cast<void>(setsockopt(connection.get(), SOL_SOCKET, SO_RCVBUF, &kSocketBufferBytes,
+                                 sizeof(kSocketBufferBytes)));
     if (!Authenticate(connection.get(), options.session_id, token)) {
       std::cerr
           << "Artifact connection closed after authentication failure; waiting for reconnect\n";
@@ -306,9 +291,9 @@ void PrintStats(const reb::ArtifactReceiver& receiver) {
   const reb::ArtifactReceiverStats stats = receiver.Stats();
   std::cerr << "Artifact receiver stopped: accepted=" << stats.accepted
             << " bytes_accepted=" << stats.bytes_accepted << " invalid=" << stats.invalid
-            << " too_large=" << stats.too_large
             << " sensitive_rejected=" << stats.sensitive_rejected
             << " conflicts=" << stats.conflicts << " io_errors=" << stats.io_errors
+            << " disk_reserve=" << stats.disk_reserve
             << " streams_abandoned=" << stats.streams_abandoned
             << " stored_bytes=" << receiver.StoredBytes() << '\n';
 }
@@ -325,14 +310,14 @@ int main(const int argc, char* argv[]) {
 
   try {
     reb::ArtifactReceiverLimits limits;
-    limits.max_artifact_bytes = options.max_artifact_bytes;
-    limits.max_store_bytes = options.max_store_bytes;
-    limits.max_artifacts = options.max_artifacts;
-    limits.max_manifest_bytes = options.max_manifest_bytes;
+    limits.disk_reserve_bytes = options.disk_reserve_bytes;
     limits.expected_session_id = options.session_id;
     limits.allow_sensitive = options.allow_sensitive;
     reb::ArtifactReceiver receiver(options.store_path, limits);
     std::cerr << "Artifact store ready\n";
+    std::cerr << "Artifact store: disk reserve " << options.disk_reserve_bytes
+              << " bytes; an artifact that would leave less free space on its volume is "
+                 "refused\n";
     if (receiver.RemovedStreamFiles() != 0) {
       std::cerr << "Artifact store: removed " << receiver.RemovedStreamFiles()
                 << " partial stream files left by an interrupted receiver\n";

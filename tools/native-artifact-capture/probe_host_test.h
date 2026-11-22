@@ -31,7 +31,9 @@ struct RecordingProbeClient final : reb::mojom::NativeProbeClient {
   void NativeStackArtifactRefused(std::uint64_t creator) override {
     refused_stacks.push_back(creator);
   }
+  void ReleaseArtifactCredit(std::uint64_t bytes) override { released_credit.push_back(bytes); }
   std::vector<std::uint64_t> refused_stacks;
+  std::vector<std::uint64_t> released_credit;
   struct Verdict {
     std::uint64_t epoch, token;
     bool accepted;
@@ -496,7 +498,7 @@ void NativeProbeHostStackRefusal() {
         static_cast<std::uint16_t>(reb::NativeArtifactKind::kStack),
         static_cast<std::uint16_t>(reb::NativeArtifactCaptureOrigin::kRequestStack), creator, 77,
         kFrame, "reb-stack:sha256-00", mojo_base::BigBuffer(std::span<const std::uint8_t>(bytes)),
-        0, false, mojo_base::BigBuffer(std::span<const std::uint8_t>()), 0);
+        0, false, mojo_base::BigBuffer(std::span<const std::uint8_t>()), 0, 0);
   };
   capture(900);
   Check(transfers.size() == 1 && client.refused_stacks.empty(),
@@ -529,6 +531,86 @@ void NativeProbeHostStackRefusal() {
   session.emitted = {};
   std::cout << "PASS production NativeProbeHost reports refused stack artifacts to the renderer "
                "and refuses content from a renderer that became browser-internal\n";
+}
+
+// A Wasm module or compiled script source the renderer sent counts against
+// its artifact credit until the browser no longer holds the buffer, whatever
+// becomes of the content: copied whole, streamed, refused or ended.
+void NativeProbeHostArtifactCredit() {
+  auto& session = reb::NativeProbeSession::Get();
+  session.active = true;
+  session.id = kSession;
+  session.mask = kMask;
+  session.expires = 200;
+  session.emitted = [](const NativeProbeEvent& event) { Emit(event); };
+  Configure(kSession, kMask);
+  auto& transfers = NativeArtifactSocketClient::Get().transfers;
+  transfers.clear();
+  RecordingProbeClient client;
+  auto host = std::make_unique<reb::NativeProbeHost>(session, 1);
+  host->BindClient({&client});
+  const auto capture = [&](const std::size_t size, const std::uint64_t credit) {
+    const std::vector<std::uint8_t> bytes(size, 0x61);
+    host->CaptureGeneratedArtifact(
+        static_cast<std::uint16_t>(reb::NativeArtifactKind::kWasm),
+        static_cast<std::uint16_t>(reb::NativeArtifactCaptureOrigin::kWebAssemblyCompile), 0, 77,
+        kFrame, "https://example.test/module.wasm",
+        mojo_base::BigBuffer(std::span<const std::uint8_t>(bytes)), 0, false,
+        mojo_base::BigBuffer(std::span<const std::uint8_t>()), 0, credit);
+  };
+  const auto released = [&] { return std::exchange(client.released_credit, {}); };
+  capture(4096, 4096);
+  Check(transfers.size() == 1 && released() == std::vector<std::uint64_t>{4096},
+        "A module copied whole returns its credit once the copy is queued");
+  transfers.clear();
+  // Larger than the pool: the browser streams from the renderer's buffer and
+  // holds it until the last frame is queued.
+  constexpr std::size_t kLarge =
+      reb::kNativeArtifactInFlightBytes + reb::kNativeArtifactStreamChunkBytes;
+  capture(kLarge, kLarge);
+  Check(transfers.size() == 1 && released().empty(),
+        "A module waiting for pool space keeps its credit");
+  DrainQueued();
+  Check(released() == std::vector<std::uint64_t>{kLarge},
+        "A module returns its credit once its last frame is queued");
+  Check(
+      transfers.begin()->second->ended && transfers.begin()->second->header.content_size == kLarge,
+      "That module's stream ended whole");
+  transfers.clear();
+  capture(kLarge, kLarge);
+  NativeArtifactCaptureSink::TransferCompleted(transfers.begin()->first,
+                                               reb::NativeArtifactReceiveStatus::kDiskReserve);
+  Check(released() == std::vector<std::uint64_t>{kLarge},
+        "A stream the receiver refuses returns its credit");
+  transfers.clear();
+  capture(kLarge, kLarge);
+  Configure(kSession, kMask);
+  Check(released() == std::vector<std::uint64_t>{kLarge},
+        "A stream a configuration change ends returns its credit");
+  transfers.clear();
+  capture(4096, 0);
+  Check(transfers.size() == 1 && released().empty(), "Content without credit returns none");
+  transfers.clear();
+  // A renderer found browser-internal stays refused.
+  auto& security = *content::ChildProcessSecurityPolicy::GetInstance();
+  security.webui.insert(1);
+  capture(4096, 4096);
+  Check(transfers.empty() && released() == std::vector<std::uint64_t>{4096},
+        "Content from a browser-internal renderer is refused and returns its credit");
+  security.webui.clear();
+  // A host gone before its stream ends has no renderer to tell.
+  host = std::make_unique<reb::NativeProbeHost>(session, 2);
+  host->BindClient({&client});
+  capture(kLarge, kLarge);
+  host.reset();
+  DrainQueued();
+  Check(released().empty(), "A stream outliving its host sends nothing");
+  transfers.clear();
+  Configure(kSession, kMask);
+  session.active = false;
+  session.emitted = {};
+  std::cout << "PASS production NativeProbeHost returns a renderer's artifact credit once the "
+               "browser no longer holds its content, on every path\n";
 }
 
 void NativeProbeHostBrowserInternalScope() {

@@ -110,7 +110,9 @@ socket, authenticates one Brave connection, rejects records from any other
 session, and removes the socket after disconnect.
 For a live session, `SIGUSR1` requests a graceful stop. The broker flushes its
 stores and closes the authenticated connection; the browser then disables its
-native probes. This signal does not delete evidence.
+native probes. This signal does not delete evidence. It ends every wait at once:
+for the connection, its authentication or the next event, so a connected
+browser that sends nothing cannot hold the broker until the session expires.
 
 ```sh
 build/reb-event-broker \

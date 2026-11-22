@@ -306,7 +306,7 @@ const TRAFFIC_INITIATOR_TITLES = Object.freeze({
   worker: 'A service worker started this request.',
   worker_script: 'JavaScript or WebAssembly was running in a dedicated, shared or service worker when it started this request. The Initiator tab shows its call stack.',
   worker_loader: 'A dedicated, shared or service worker started this request with no script on its stack: its script or module loader, or a deferred start.',
-  worker_unwalked: 'A dedicated, shared or service worker started this request, but the renderer\'s 32 worker stack tables were in use, so no stack was walked.',
+  worker_unwalked: 'A dedicated, shared or service worker started this request, but no stack was walked: the browser that recorded this capture gave stack tables to at most 32 workers per renderer. Current builds walk every worker.',
   browser: 'The browser process started this request, such as a navigation; no renderer record names it.'});
 function trafficInitiatorLabel(request) {
   return Object.hasOwn(TRAFFIC_INITIATOR_LABELS, request?.initiator ?? '') ? TRAFFIC_INITIATOR_LABELS[request.initiator] : null;

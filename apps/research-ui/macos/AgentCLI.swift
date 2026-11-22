@@ -133,6 +133,9 @@ final class AgentChildProcess: @unchecked Sendable {
   private func readLines(_ fd: Int32, onLine: @Sendable (Data) -> Void) {
     defer { close(fd) }
     var buffer = Data()
+    // What is left in the buffer holds no newline, so each chunk is searched
+    // alone: a line of any length is scanned once, not again per chunk.
+    var scanned = 0
     var chunk = [UInt8](repeating: 0, count: 64 * 1024)
     while true {
       let count = read(fd, &chunk, chunk.count)
@@ -140,11 +143,14 @@ final class AgentChildProcess: @unchecked Sendable {
       if count <= 0 { break }
       buffer.append(contentsOf: chunk[0..<count])
       var start = buffer.startIndex
-      while let newline = buffer[start...].firstIndex(of: 0x0A) {
+      var from = buffer.index(start, offsetBy: scanned)
+      while let newline = buffer[from...].firstIndex(of: 0x0A) {
         if newline > start { onLine(Data(buffer[start..<newline])) }
         start = buffer.index(after: newline)
+        from = start
       }
       buffer.removeSubrange(buffer.startIndex..<start)
+      scanned = buffer.count
     }
     if !buffer.isEmpty { onLine(buffer) }
   }

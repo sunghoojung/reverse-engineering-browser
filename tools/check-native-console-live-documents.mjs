@@ -99,8 +99,8 @@ async function mount(root, fetch) {
 
 export async function checkNativeConsoleLiveDocuments(root) {
   let documents = [
-    {id: '11', origin: 'https://alpha.test', label: 'Alpha', url: 'https://alpha.test/a', main_frame: true, truncated: false},
-    {id: '22', origin: 'https://alpha.test', label: 'Beta', url: 'https://alpha.test/a', main_frame: true, truncated: false},
+    {id: '11', origin: 'https://alpha.test', label: 'Alpha', url: 'https://alpha.test/a', main_frame: true},
+    {id: '22', origin: 'https://alpha.test', label: 'Beta', url: 'https://alpha.test/a', main_frame: true},
   ];
   const calls = [];
   let session = null, selected = null, liveAvailable = true, nextSession = 42, binding = '7';
@@ -114,9 +114,9 @@ export async function checkNativeConsoleLiveDocuments(root) {
     // This capture never permitted document-start scripts, so live selection
     // and consent must stay unaffected by the experiment being unavailable.
     if (path.startsWith('/api/native-console/document-start')) {
-      return {ok: true, status: 200, json: async () => ({contract_version: 3, available: true, state: session ? 'ready' : 'idle', session_id: session,
+      return {ok: true, status: 200, json: async () => ({contract_version: 4, available: true, state: session ? 'ready' : 'idle', session_id: session,
         document_start: {status: 'unavailable', permitted: false, scripts: [], message: 'This live capture does not permit document-start scripts'},
-        limits: {command_bytes: 67108864, rule_bytes: 256, report_bytes: 8192, retained_bytes: 67108864, reply_bytes: 67108864, listing_bytes: 33554432}})};
+        limits: {record_bytes: 4294967295, page_bytes: 8388608, retained_bytes: 67108864}})};
     }
     calls.push(action);
     assert.notEqual(action.action, 'start', 'live selection must never silently launch a disposable browser');
@@ -139,7 +139,7 @@ export async function checkNativeConsoleLiveDocuments(root) {
     let runtime = {status: 'ok', text: 'Complete'};
     if (command.operation === 'evaluate') {
       assert.equal(command.source, 'location.href');
-      runtime = {status: 'ok', value: {type: 'string', text: `document ${selected}`, truncated: false}};
+      runtime = {status: 'ok', value: {type: 'string', text: `document ${selected}`}};
     }
     if (command.operation === 'poll') runtime = {status: 'ok', messages: [], dropped: 0};
     return {ok: true, status: 200, json: async () => ({...state(), request_id: '1', runtime})};
@@ -213,8 +213,8 @@ export async function checkNativeConsoleLiveDocuments(root) {
 // and a session ended by another window must each stay visible to this one.
 async function checkNativeConsoleSessionLifecycle(root) {
   const documents = [
-    {id: '11', origin: 'https://alpha.test', label: 'Alpha', url: 'https://alpha.test/a', main_frame: true, truncated: false},
-    {id: '22', origin: 'https://alpha.test', label: 'Beta', url: 'https://alpha.test/b', main_frame: true, truncated: false},
+    {id: '11', origin: 'https://alpha.test', label: 'Alpha', url: 'https://alpha.test/a', main_frame: true},
+    {id: '22', origin: 'https://alpha.test', label: 'Beta', url: 'https://alpha.test/b', main_frame: true},
   ];
   const calls = [], held = {};
   let session = null, live = true, bindingState = 'ready', nextSession = 70;
@@ -230,7 +230,7 @@ async function checkNativeConsoleSessionLifecycle(root) {
         : {...state(), message: 'Native console uses a separate disposable browser profile'});
     }
     if (path.startsWith('/api/native-console/document-start')) {
-      return reply({contract_version: 3, available: true, state: session ? 'ready' : 'idle', session_id: session,
+      return reply({contract_version: 4, available: true, state: session ? 'ready' : 'idle', session_id: session,
         document_start: {status: 'unavailable', permitted: false, scripts: [], message: 'Unavailable'}});
     }
     const action = JSON.parse(options.body);
@@ -242,10 +242,10 @@ async function checkNativeConsoleSessionLifecycle(root) {
     assert.equal(action.session_id, session, 'an action addresses the backend session');
     if (action.action === 'stop') { session = null; return reply(state()); }
     if (action.action === 'targets') return reply(live ? listing() : {...state(), targets: documents, truncated: false});
-    let runtime = {status: 'ok', value: {type: 'number', text: '1', truncated: false}};
+    let runtime = {status: 'ok', value: {type: 'number', text: '1'}};
     if (operation === 'poll') runtime = {status: 'ok', messages: [], dropped: 0};
-    if (operation === 'evaluate' && action.command.source === 'fixture.promise') runtime = {status: 'ok', value: {type: 'promise', text: 'Promise {<pending>}', handle: '9', truncated: false}};
-    if (operation === 'await') runtime = {status: 'ok', value: {type: 'number', text: '2', truncated: false}};
+    if (operation === 'evaluate' && action.command.source === 'fixture.promise') runtime = {status: 'ok', value: {type: 'promise', text: 'Promise {<pending>}', handle: '9'}};
+    if (operation === 'await') runtime = {status: 'ok', value: {type: 'number', text: '2'}};
     return reply({...state(), request_id: '1', runtime});
   };
   const want = name => { held[`want:${name}`] = true; };

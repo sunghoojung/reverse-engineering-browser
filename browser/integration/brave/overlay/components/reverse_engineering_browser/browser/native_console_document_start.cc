@@ -226,11 +226,10 @@ void NativeConsoleDocumentStartRegistry::ClearOutput() {
   stale_ = 0;
 }
 
-bool NativeConsoleDocumentStartRegistry::Parse(
-    const base::ListValue& scripts,
-    std::vector<Armed>& armed,
-    std::vector<NativeConsoleDocumentStartScript>& views,
-    std::string& error) const {
+bool NativeConsoleDocumentStartRegistry::Parse(const base::ListValue& scripts,
+                                               std::vector<Armed>& armed,
+                                               std::vector<NativeConsoleDocumentStartScript>& views,
+                                               std::string& error) const {
   if (!IsPermitted()) {
     error =
         "Document-start scripts are not permitted in this browser session. Rebuild the pinned "
@@ -385,11 +384,9 @@ bool NativeConsoleDocumentStartRegistry::Remove(const base::ListValue& script_id
       error = "Script ids are decimal strings from the armed listing";
       return false;
     }
-    const auto found =
-        std::lower_bound(scripts_.begin(), scripts_.end(), id,
-                         [](const Armed& script, std::uint64_t value) {
-                           return script.script_id < value;
-                         });
+    const auto found = std::lower_bound(
+        scripts_.begin(), scripts_.end(), id,
+        [](const Armed& script, std::uint64_t value) { return script.script_id < value; });
     if (found == scripts_.end() || found->script_id != id) {
       error = "Script " + entry.GetString() + " is not armed";
       return false;

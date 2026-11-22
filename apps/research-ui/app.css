@@ -2787,7 +2787,8 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-ds .native-console-setting select { height: 24px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--text); font: 11px var(--sans); }
 .native-console-ds .native-console-setting input[type="checkbox"] { width: auto; }
 .native-console-ds-armed { margin: 6px 0 0; padding: 0; list-style: none; }
-.native-console-ds-armed li { color: var(--muted); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+.native-console-ds-armed li { display: flex; gap: 6px; align-items: flex-start; margin-top: 4px; color: var(--muted); font: 10px/16px var(--mono); overflow-wrap: anywhere; }
+.native-console-ds-armed li > span { flex: 1; min-width: 0; }
 #native-console-ds-state, #native-console-ds-counters, #native-console-ds-privacy, #native-console-ds-rule-help { margin: 6px 0 0; color: var(--faint); font: 10px/16px var(--sans); overflow-wrap: anywhere; }
 .native-console-ds-record { border-left: 2px solid color-mix(in srgb, var(--amber) 55%, transparent); }
 .native-console-ds-record[data-record="script_error"] { border-left-color: var(--red); }
@@ -2908,7 +2909,6 @@ body.resizing-panes-y, body.resizing-panes-y * { cursor: row-resize !important; 
 .native-console-command { background: color-mix(in srgb, var(--chrome) 65%, transparent); }
 .native-console-command-status { display: block; padding-left: 16px; margin-bottom: 2px; color: var(--faint); font: 10px/14px var(--sans); }
 .native-console-command-failure { color: var(--red); margin: 4px 0 0 16px; font: 11px/16px var(--sans); }
-.native-console-command-rest { color: var(--muted); margin: 2px 0 0 16px; font: 10px/16px var(--sans); }
 .native-console-result-details > summary { opacity: 1; padding: 0 4px; }
 .native-console-expression { padding-right: 10px; }
 .native-console-result-details button, .native-console-property-pager button { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); color: var(--muted); padding: 3px 6px; margin: 3px 4px 0 0; font: 10px/16px var(--sans); }

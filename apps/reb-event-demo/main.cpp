@@ -238,9 +238,10 @@ bool CheckNativeConsoleMessages() {
   if (queue.Poll() != empty)
     return false;
 
-  std::cout << "Native console messages: escaping=passed no_count_limit=passed whole_message=passed "
-               "paging=passed unpolled_backlog=passed rejected_record=passed "
-               "drop_saturation=passed reset=passed\n";
+  std::cout
+      << "Native console messages: escaping=passed no_count_limit=passed whole_message=passed "
+         "paging=passed unpolled_backlog=passed rejected_record=passed "
+         "drop_saturation=passed reset=passed\n";
   return true;
 }
 

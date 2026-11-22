@@ -146,8 +146,8 @@ inline constexpr std::uint16_t kNativeConsoleTargetTopFrame = 2;
   if (offset > payload.size() || payload.size() - offset < sizeof(target))
     return false;
   std::memcpy(&target, payload.data() + offset, sizeof(target));
-  const std::uint64_t bytes = std::uint64_t{target.origin_bytes} + target.label_bytes +
-                              target.url_bytes;
+  const std::uint64_t bytes =
+      std::uint64_t{target.origin_bytes} + target.label_bytes + target.url_bytes;
   if (payload.size() - offset - sizeof(target) < bytes)
     return false;
   const auto* text = reinterpret_cast<const char*>(payload.data() + offset + sizeof(target));

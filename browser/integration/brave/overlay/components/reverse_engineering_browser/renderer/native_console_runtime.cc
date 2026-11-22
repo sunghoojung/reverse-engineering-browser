@@ -479,12 +479,13 @@ base::DictValue NativeConsoleRuntime::Properties(v8::Isolate* isolate,
     for (std::uint64_t index = offset; index < end; ++index) {
       auto member =
           Data(isolate, context, object, Key(isolate, base::NumberToString(index).c_str()));
-      properties.Append(base::DictValue()
-                            .Set("name", base::NumberToString(index))
-                            .Set("value", member.IsEmpty() ? base::DictValue()
-                                                                 .Set("type", "accessor")
-                                                                 .Set("text", "[Empty / Accessor]")
-                                                           : Value(isolate, context, member)));
+      properties.Append(
+          base::DictValue()
+              .Set("name", base::NumberToString(index))
+              .Set("value",
+                   member.IsEmpty()
+                       ? base::DictValue().Set("type", "accessor").Set("text", "[Empty / Accessor]")
+                       : Value(isolate, context, member)));
     }
     return base::DictValue()
         .Set("status", "ok")
@@ -686,8 +687,8 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
         if (!success)
           result = Failure("JavaScript is longer than V8 can hold in one string");
         else
-          success = v8::debug::EvaluateNativeConsole(
-                        isolate, text, v8::debug::NativeConsoleEvaluationMode::kRepl)
+          success = v8::debug::EvaluateNativeConsole(isolate, text,
+                                                     v8::debug::NativeConsoleEvaluationMode::kRepl)
                         .ToLocal(&value);
         repl = success && value->IsPromise();
       }
@@ -802,10 +803,10 @@ std::string NativeConsoleRuntime::Run(v8::Isolate* isolate,
       // Any member position a JavaScript array or typed array can have, up to
       // 2^53 - 1, which a JSON number and a double both hold exactly.
       const auto offset = parsed->FindDouble("offset");
-      result = !offset || *offset < 0 || *offset > 9007199254740991.0 ||
-                       *offset != std::floor(*offset)
-                   ? Failure("Invalid property offset")
-                   : Properties(isolate, context, value, static_cast<std::uint64_t>(*offset));
+      result =
+          !offset || *offset < 0 || *offset > 9007199254740991.0 || *offset != std::floor(*offset)
+              ? Failure("Invalid property offset")
+              : Properties(isolate, context, value, static_cast<std::uint64_t>(*offset));
     } else if (*operation == "await") {
       if (!value->IsPromise())
         result = Failure("Value is not a promise");

@@ -170,8 +170,8 @@ void NativeConsoleAgent::DetailedConsoleMessageAdded(const std::u16string& messa
                                                      const std::u16string& stack,
                                                      uint32_t line,
                                                      blink::mojom::ConsoleMessageLevel level) {
-  runtime_.Message(base::UTF16ToUTF8(message), base::UTF16ToUTF8(source),
-                   base::UTF16ToUTF8(stack), line, static_cast<int>(level));
+  runtime_.Message(base::UTF16ToUTF8(message), base::UTF16ToUTF8(source), base::UTF16ToUTF8(stack),
+                   line, static_cast<int>(level));
 }
 void NativeConsoleAgent::Runtime(const base::UnguessableToken& document,
                                  std::uint64_t request_id,

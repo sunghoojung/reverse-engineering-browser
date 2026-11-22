@@ -157,8 +157,8 @@ const char* StatusName(reb::NativeConsoleStatus status) {
   return names[static_cast<std::size_t>(status)];
 }
 const char* TypeName(reb::NativeConsoleType type) {
-  constexpr std::array names{"undefined", "null",    "boolean", "number",  "string",
-                             "bigint",    "symbol",  "function", "object", "promise",
+  constexpr std::array names{"undefined", "null",    "boolean",       "number", "string",
+                             "bigint",    "symbol",  "function",      "object", "promise",
                              "targets",   "runtime", "document_start"};
   return names[static_cast<std::size_t>(type)];
 }
@@ -249,8 +249,8 @@ class Console final {
       return ReportError();
     if (response_.type == reb::NativeConsoleType::kTargets)
       return Fail("Unexpected target listing");
-    std::cout << "result:\n  type: " << TypeName(response_.type) << "\n  value: "
-              << Quote(payload_) << '\n';
+    std::cout << "result:\n  type: " << TypeName(response_.type) << "\n  value: " << Quote(payload_)
+              << '\n';
     std::cout.flush();
     return true;
   }
@@ -500,6 +500,7 @@ int main(int argc, char** argv) {
       continue;
     }
 #endif
+    reb::NativeConsoleWidenBuffers(accepted);
     reb::NativeProbeLocalIpcHello hello;
     if (fcntl(accepted, F_SETFD, FD_CLOEXEC) == 0 && SameUser(accepted) &&
         reb::NativeConsoleRead(

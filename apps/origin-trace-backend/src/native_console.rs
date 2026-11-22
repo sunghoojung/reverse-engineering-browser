@@ -316,7 +316,9 @@ impl Session {
         header[8..16].copy_from_slice(&id.to_le_bytes());
         header[16..24].copy_from_slice(&target.to_le_bytes());
         header[24..28].copy_from_slice(&(source.len() as u32).to_le_bytes());
-        let answer = (running.is_none()).then(|| Duration::from_secs(if id == 1 { 35 } else { 6 }));
+        let answer = running
+            .is_none()
+            .then(|| answer_deadline(id == 1, source.len()));
         let (session_id, shared) = (self.id.clone(), self.input.clone());
         let result = async {
             let mut input = shared.lock().await;
@@ -367,6 +369,15 @@ impl Session {
         }
         Ok(result)
     }
+}
+
+// How long browser work may take to start answering. The first listing waits
+// for the browser's own start. The browser receives and parses the whole
+// command before it answers, across two more processes than the HTTP body, so
+// the deadline grows by a second per 4 MiB of it: a document-start set is
+// never refused for its size, only a browser that stops answering is.
+fn answer_deadline(first: bool, command_bytes: usize) -> Duration {
+    Duration::from_secs(if first { 35 } else { 6 } + (command_bytes >> 22) as u64)
 }
 
 fn timed_out() -> Error {
@@ -847,7 +858,7 @@ impl Inner {
             "document_source":"live_capture","binding_state":live.name(),"targets":[],"truncated":false,"message":message})
     }
     // Read-only. It never arms, clears, drains, launches, evaluates, or retires
-    // a session, including an expired or poisoned one: retirement stays with
+    // a session, including a poisoned one: retirement stays with
     // the explicit actions so a read can never destroy a researcher's context.
     async fn document_start(&self, after: u64) -> Result<Value> {
         let mut guard = self.session().await.map_err(|_| {
@@ -2192,6 +2203,22 @@ fn validate_command(command: &Value) -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn browser_work_deadline_grows_with_the_command() {
+        assert_eq!(answer_deadline(true, 0), Duration::from_secs(35));
+        assert_eq!(answer_deadline(false, 0), Duration::from_secs(6));
+        assert_eq!(
+            answer_deadline(false, (4 << 20) - 1),
+            Duration::from_secs(6)
+        );
+        assert_eq!(answer_deadline(false, 64 << 20), Duration::from_secs(22));
+        // A command at the record bound still has time to be read and parsed.
+        assert_eq!(
+            answer_deadline(false, u32::MAX as usize),
+            Duration::from_secs(6 + 1023)
+        );
+    }
 
     #[test]
     fn frames_name_their_kind_and_relation_to_the_top_document() {

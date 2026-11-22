@@ -10382,13 +10382,12 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
       document.querySelector('#console-traffic-back').addEventListener('click', () => setConsoleTrafficView(false));
       document.addEventListener('reb-console-traffic', event => {
         const {session, target, events, dropped} = event.detail;
-        if (!/^[1-9][0-9]{0,19}$/.test(session) || !/^[1-9][0-9]{0,19}$/.test(target) || !Array.isArray(events) || events.length > 64) return;
+        if (!/^[1-9][0-9]{0,19}$/.test(session) || !/^[1-9][0-9]{0,19}$/.test(target) || !Array.isArray(events)) return;
         for (const record of events) {
-          if (!/^[1-9][0-9]{0,19}$/.test(record.event_id) || record.document_id !== target || typeof record.origin !== 'string' || record.origin.length > 256 || typeof record.method !== 'string' || record.method.length > 16 || !Number.isInteger(record.status) || !Number.isFinite(record.time)) continue;
+          if (!/^[1-9][0-9]{0,19}$/.test(record.event_id) || record.document_id !== target || typeof record.origin !== 'string' || typeof record.method !== 'string' || !Number.isInteger(record.status) || !Number.isFinite(record.time)) continue;
           consoleTraffic.set(`${session}:${target}:${record.event_id}`, {...record, session});
         }
         if (investigationScreen() === 'traffic') investigationNavigation?.record();
-        while (consoleTraffic.size > 128) consoleTraffic.delete(consoleTraffic.keys().next().value);
         showScreen('traffic'); setConsoleTrafficView(true);
         document.querySelector('#console-experiment-traffic').dataset.session = session;
         document.querySelector('#console-experiment-traffic').dataset.document = target;
@@ -10405,12 +10404,11 @@ document.addEventListener('reb:console-documents', event => { state.consoleDocum
           command.disabled = record.after_request_id === '0';
           command.addEventListener('click', () => {
             if (!/^[1-9][0-9]{0,19}$/.test(record.after_request_id)) return;
-            const candidates = [...document.querySelectorAll('#native-console-output [data-request-id]')].filter(row =>
-              row.dataset.requestId === record.after_request_id && row.dataset.consoleSession === session && row.dataset.consoleDocument === target);
-            const result = candidates.find(row => row.classList.contains('native-console-command')) ?? candidates[0];
-            if (!result) {investigationNotice('This evaluation belongs to a Console session or document whose output is no longer retained.', 'stale'); return;}
-            if (document.querySelector('#native-console-panel').hidden) document.querySelector('#native-console-toggle').click();
-            result.tabIndex = -1; result.focus({preventScroll: true}); result.scrollIntoView({block: 'center'});
+            // The transcript renders only the rows around its viewport, so it
+            // finds the row and scrolls it into view itself.
+            const result = globalThis.RebNativeConsole?.reveal(record.after_request_id, session, target);
+            if (!result) {investigationNotice('This evaluation belongs to a Console session or document whose output was cleared.', 'stale'); return;}
+            result.tabIndex = -1; result.focus({preventScroll: true});
             investigationNotice(`Console session ${session} · document ${target} · evaluation request ${record.after_request_id}${result.dataset.commandNumber ? ` · displayed command #${result.dataset.commandNumber}` : ''}. Observation order is not proof of causation.`);
           });
           overview.append(command);

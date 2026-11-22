@@ -846,8 +846,10 @@ the chip becomes a colored marker whose tooltip and accessible name keep the
 state. Snippet output appears in the transcript
 labeled `page JavaScript · console-document-start-script`, inserted as text and
 filterable by level like any other row. It is never evidence, never joined into
-correlated links, and never exported automatically. Clearing the set, or
-disconnecting, removes the scripts and their output. When a live capture cannot
+correlated links, and never exported automatically. **Arm** adds a script
+beside the armed ones and each armed script has its own **Remove**, which keeps
+its records. Clearing the set, or disconnecting, removes the scripts and their
+output. When a live capture cannot
 confirm that removal, Disconnect fails and the chip turns red and reads
 `Doc-start: unconfirmed` instead of switching off. See
 [Native Console v3](../../protocol/native-console-v3.md) and the
@@ -855,14 +857,16 @@ confirm that removal, Disconnect fails and the chip turns red and reads
 
 Set `REB_BRAVE_BINARY` to the matching rebuilt custom browser and use the live
 backend. The [native contract](../../protocol/native-console-v2.md) specifies
-ownership, rebuild compatibility and the real-browser acceptance gates. No
+ownership, rebuild compatibility and the real-browser acceptance gates, and
+[v4](../../protocol/native-console-v4.md) the bounds that remain. No
 breakpoints, stepping or paused-frame inspection are supplied by this console.
 Console sits at the foot of the sidebar (⌘ / Ctrl + J). When no compatible
 Console or live document is available and the transcript is empty, opening the
 dock focuses the unavailable state's **Check availability** action instead of
 opening Session settings over it. Commands are
 syntax colored while typing and in the transcript; primitive results use colors
-for their value types. Coloring uses inert text spans and a bounded tokenizer.
+for their value types. Coloring uses inert text spans and colors a long text's
+opening only; the rest is shown as plain text.
 Console keeps a persistent command composer below its independently scrolling
 transcript. Its header identifies the selected document and connection state;
 Find, Clear and Session settings remain available without leaving the dock.
@@ -873,20 +877,21 @@ refresh documents explicitly, or disconnect and start a fresh disposable session
 The Run button and Enter both submit; the composer also shows its UTF-8 size.
 A command runs until it returns: while it runs, Run becomes **Stop**, which ends
 it in the page and marks it Stopped, keeping the changes it already made. Input
-of any size up to the 64 MiB command record is accepted. The transcript shows a
-long command's first 4096 characters with its full size, and history keeps the
-newest command whole however large; inputs over 64 KiB are shown uncolored so
-typing stays fast.
+of any size up to the 4 GiB a Console record names is sent whole, the
+transcript shows it whole, and history keeps every command; inputs over 64 KiB
+are shown uncolored so typing stays fast.
 An empty prompt has no placeholder text. Fully typed built-in names do not open
 automatic suggestions, so Enter runs them unchanged; Ctrl+Space can still request
 their completions explicitly.
 
 New output follows only when already reading the bottom. Otherwise **Latest
 output** shows new entries and returns to the end explicitly. Filtering shows
-visible/retained counts and a no-match state. Output is bounded to 128 entries,
-256 KiB of text and 8,192 DOM elements; eviction counts stay visible without
-replacing connection errors. Clear removes output and releases retained values
-while preserving command history. Object expansion loads one native property
+visible/retained counts and a no-match state. The transcript keeps every entry
+until Clear and renders only the rows near the viewport, so hours of output
+scroll, filter and follow at the same cost, and filters search rows that are
+not rendered. An evaluation link in Traffic scrolls its command into view
+wherever it is. Clear removes output and releases retained values while
+preserving command history. Object expansion loads one native property
 page at a time; Previous/Next replace that page rather than growing the DOM.
 Loading, expired-handle errors and explicit retry remain local to the object;
 a failed page request keeps the previous page readable. If the live object shrinks
@@ -900,22 +905,23 @@ copy, store, release and other native utilities separate from passive inspection
 Toggle the dock with Console or Command/Ctrl+J while keeping the current workspace visible.
 Drag its top divider or use the focused divider's arrow keys to resize; Home resets
 the saved height. Enter runs, Shift+Enter adds a line, and Command/Ctrl+Enter also
-submits multiline input. Up/Down recalls a separate bounded command history at the first/last line.
+submits multiline input. Up/Down recalls a separate command history at the first/last line.
 Clearing output preserves history; Forget command history removes it. Undo/redo
 works for typing and completion insertion. An incomplete bracketed expression
 continues on Enter; Command/Ctrl+Enter explicitly submits. The next draft remains
 editable while a request runs.
 
-Completion combines built-in hints with bounded native properties and global
-lexical bindings. Calls, computed keys, strings and comments never cross the
+Completion combines built-in hints with native properties and global lexical
+bindings, every match at any path depth, and lexes only the edited line onward
+so a long source completes as it is typed. Calls, computed keys, strings and comments never cross the
 completion boundary. Native traversal stops at accessors and proxies. Suggestions
 include function argument counts where available. Fully typed names submit
 unchanged; Ctrl+Space explicitly requests completion.
 
-Results expand into property pages, DOM element previews, function source and
-source locations. Getters remain labeled, proxies are opaque, and retained values
+Results expand into property pages at any depth, DOM element previews,
+function source and source locations. Getters remain labeled, proxies are opaque, and retained values
 stay until they are released, the output is cleared or the page navigates.
-Explicit actions copy bounded property previews, store a
+Explicit actions copy property values, store a
 value as `window.tempN`, or release it. `$_` reads the previous result. `copy(value)`,
 `inspect(value)`, `getEventListeners(element)`, `monitorEvents(element)` and
 `unmonitorEvents(element)` are standalone console utilities. They evaluate their
@@ -936,8 +942,8 @@ snippets are available without a permanent toolbar expansion.
 
 The document selector identifies top frames, named child frames, titles and
 URLs in the owned disposable browser. Navigation rejects old IDs and clears
-retained handles. Experiment activity opens a separate Traffic view of bounded
-native resource-completion metadata. It contains session/document/resource IDs
+retained handles. Experiment activity opens a separate Traffic view of every
+delivered native resource-completion record. It contains session/document/resource IDs
 and the last evaluation request ID; observation order does not prove causation.
 Paths, queries, headers and bodies are excluded. Source links search retained captured URLs with an explicit unverified label.
 They do not automatically open a source or claim an exact artifact relationship.

@@ -2,7 +2,7 @@
 
 [`openapi.json`](openapi.json) describes the Rust loopback backend in
 `apps/origin-trace-backend`, including the [native console](native-console-v2.md)
-state and action routes and the
+state and action routes, whose records [v4](native-console-v4.md) carries whole, and the
 [live Wasm instance commands](live-wasm-instance-v1.md). Those commands are
 confirmed reads, writes, and calls on an already attached instance. They do
 not restore the retired `/api/debugger` routes. Without a command peer they
@@ -674,9 +674,12 @@ budget, and its request waits that long; a client that stops waiting leaves it
 running. Meanwhile `get_native_console` answers at once with `command`, other
 actions are 409 refusals, and `interrupt` (`session_id`) stops it: the command
 answers `status: stopped`, `code: cancelled`, and keeps the changes it already
-made. Document-start rules for a child frame name that
-frame's exact origin with `frame: child`; see
-[Native Console v3](native-console-v3.md).
+made. Sources, values, messages and listings are whole, and a drained read
+(`poll`, `traffic`, document-start state) says with `more` that another page
+remains; see [Native Console v4](native-console-v4.md). Document-start rules
+for a child frame name that frame's exact origin with `frame: child`;
+`add_document_start` and `remove_document_start` change the armed set one
+script at a time; see [Native Console v3](native-console-v3.md).
 
 ## Session summary
 
@@ -1062,8 +1065,8 @@ that static metadata cannot establish. Check the uncertainty and condition text.
 
 Important distinctions captured by the catalog:
 
-- VM GET can write its analysis cache. Native-console GET can retire an expired
-  or poisoned session, stop processes, and delete its temporary profile.
+- VM GET can write its analysis cache. Native-console GET can retire a
+  poisoned session, stop processes, and delete its temporary profile.
 - Capture clear truncates stored records after capture stops, while leaving
   artifact files. Workspace replacements and clear-history actions discard
   data even when they do not touch the live target.

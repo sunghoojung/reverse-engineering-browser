@@ -114,6 +114,12 @@ bool NativeConsoleWrite(int socket,
   return Write(socket, bytes, {}, stall);
 }
 
+void NativeConsoleWidenBuffers(int socket) noexcept {
+  constexpr int kBytes = 1024 * 1024;
+  static_cast<void>(setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &kBytes, sizeof(kBytes)));
+  static_cast<void>(setsockopt(socket, SOL_SOCKET, SO_RCVBUF, &kBytes, sizeof(kBytes)));
+}
+
 bool NativeConsoleReadPayload(int socket,
                               std::size_t bytes,
                               std::chrono::milliseconds stall,

@@ -184,11 +184,9 @@ class DocumentStart final : public mojom::NativeConsoleScriptClient {
     bool lossless = false;
     const auto script_id = bound.As<v8::BigInt>()->Uint64Value(&lossless);
     // The decoded set is in increasing id order.
-    const auto found = std::lower_bound(
-        scripts_.begin(), scripts_.end(), script_id,
-        [](const NativeConsoleDocumentStartScript& script, std::uint64_t id) {
-          return script.script_id < id;
-        });
+    const auto found = std::lower_bound(scripts_.begin(), scripts_.end(), script_id,
+                                        [](const NativeConsoleDocumentStartScript& script,
+                                           std::uint64_t id) { return script.script_id < id; });
     if (!lossless || found == scripts_.end() || found->script_id != script_id)
       return;
     const auto index = static_cast<std::size_t>(found - scripts_.begin());

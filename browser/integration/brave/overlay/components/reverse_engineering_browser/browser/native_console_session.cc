@@ -264,6 +264,7 @@ class Session final {
       ui->PostTask(FROM_HERE, base::BindOnce(&Session::Retire, base::Unretained(this)));
       return;
     }
+    NativeConsoleWidenBuffers(socket.get());
     active_.store(true, std::memory_order_release);
     // A connected session has no lifetime: it waits for the owner's next
     // request for as long as the owner keeps the socket, and ends when the
@@ -677,9 +678,9 @@ class Session final {
     if (live) {
       const auto before = activity_.size();
       std::erase_if(activity_, [this](const Activity& event) {
-        const bool gone =
-            std::none_of(targets_.begin(), targets_.end(),
-                         [&](const Target& target) { return event.document_id == target.id; });
+        const bool gone = std::none_of(targets_.begin(), targets_.end(), [&](const Target& target) {
+          return event.document_id == target.id;
+        });
         if (gone)
           activity_bytes_ -= ActivityBytes(event);
         return gone;

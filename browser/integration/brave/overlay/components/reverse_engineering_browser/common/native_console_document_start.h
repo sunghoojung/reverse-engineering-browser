@@ -108,7 +108,8 @@ inline constexpr std::uint64_t kNativeConsoleDocumentStartStopBelowBit = std::ui
 // Whether a Stop for `stop_id` ends the execution that began as `running`.
 [[nodiscard]] inline constexpr bool NativeConsoleStopNames(std::uint64_t stop_id,
                                                            std::uint64_t running) noexcept {
-  constexpr auto kBoth = kNativeConsoleDocumentStartStopBit | kNativeConsoleDocumentStartStopBelowBit;
+  constexpr auto kBoth =
+      kNativeConsoleDocumentStartStopBit | kNativeConsoleDocumentStartStopBelowBit;
   if (stop_id == 0 || running == 0)
     return false;
   if (stop_id == running)

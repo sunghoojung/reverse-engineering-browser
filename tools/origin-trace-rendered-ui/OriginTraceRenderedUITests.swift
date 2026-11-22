@@ -2346,8 +2346,8 @@ final class OriginTraceRenderedUITests: XCTestCase {
           if (path === '/api/native-console') return Promise.resolve(reply({contract_version: 2, state: 'idle', session_id: null,
             available: true, live_available: true, document_source: 'live_capture', binding_id: '5', truncated: false,
             selected_target_id: null, document_start_supported: true, message: 'live capture',
-            targets: [{id: '21', origin: 'https://authorized.test', label: 'top #21', url: 'https://authorized.test/', main_frame: true, truncated: false}]}));
-          if (path.startsWith('/api/native-console/document-start')) return Promise.resolve(reply({contract_version: 3, available: true,
+            targets: [{id: '21', origin: 'https://authorized.test', label: 'top #21', url: 'https://authorized.test/', main_frame: true}]}));
+          if (path.startsWith('/api/native-console/document-start')) return Promise.resolve(reply({contract_version: 4, available: true,
             state: 'idle', session_id: null, document_start: {status: 'idle', permitted: false, scripts: [],
               message: 'Connect the Console with document-start scripts enabled, then arm a rule.'}}));
           return original(input, init);
@@ -2403,6 +2403,169 @@ final class OriginTraceRenderedUITests: XCTestCase {
       let clipped = try await ui.value("__rebUiProbe.clippedText('.native-console-head')") as? [String] ?? ["probe failed"]
       XCTAssertEqual(clipped, [], "\(size.name): clipped Console header text")
       try await ui.screenshot("live-capture-defaults-\(size.name)")
+    }
+  }
+
+  // The Console transcript keeps every entry and draws only the rows near the
+  // viewport. This test's page fetch stands in for a live capture document
+  // that logs twelve thousand messages of mixed heights and then one of 1 MiB,
+  // so WebKit itself lays out the window: the drawn rows stay few and always
+  // cover the viewport, the scroll offset, PageDown, Home and End reach every
+  // part of the transcript, the large message is drawn whole, and search finds
+  // a row that is not in the document.
+  @MainActor
+  func test45ConsoleTranscriptKeepsEveryEntry() async throws {
+    // The rows in the document, the largest gap between visible rows, and the
+    // message numbers drawn, in order.
+    let window = """
+      (() => {
+        const scroll = document.querySelector('#native-console-scroll'), view = scroll.getBoundingClientRect();
+        const top = view.top + scroll.clientTop, bottom = top + scroll.clientHeight;
+        const rows = [...document.querySelector('#native-console-output').children], boxes = rows.map(row => row.getBoundingClientRect());
+        const number = row => Number(/^rendered message (\\d+)/.exec(row.querySelector('pre')?.textContent ?? '')?.[1] ?? -1);
+        let edge = top, gap = 0;
+        for (const box of boxes.filter(box => box.bottom > top + 0.5 && box.top < bottom - 0.5)) { gap = Math.max(gap, box.top - edge); edge = Math.max(edge, box.bottom); }
+        gap = Math.max(gap, bottom - edge);
+        const numbers = rows.map(number).filter(value => value >= 0), visible = rows.findIndex((row, index) => boxes[index].bottom > top + 0.5);
+        const large = rows.findIndex(row => row.querySelector('pre')?.textContent.length === 1 << 20);
+        return {drawn: rows.length, gap: Math.round(gap * 10) / 10, numbers: numbers.length, first: numbers[0] ?? -1, last: numbers.at(-1) ?? -1,
+          contiguous: numbers.every((value, index) => !index || value === numbers[index - 1] + 1),
+          visible: visible < 0 ? -2 : number(rows[visible]), firstDrawn: rows[0]?.textContent.slice(0, 40) ?? '',
+          large: large >= 0, largeHeight: large < 0 ? 0 : Math.round(boxes[large].height), largeEnd: large < 0 ? 0 : Math.round(boxes[large].bottom - bottom),
+          offset: Math.round(scroll.scrollTop), end: Math.round(scroll.scrollHeight - scroll.clientHeight),
+          count: document.querySelector('#native-console-output-count').textContent};
+      })()
+      """
+    let frames = "new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))"
+    for size in windowSizes {
+      let ui = try await prepare(size)
+      _ = try await ui.webView.callAsyncJavaScript(
+        """
+        const original = window.fetch.bind(window);
+        const reply = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
+        const total = 12000, page = 1000;
+        let session = null, sent = 0, large = false;
+        const state = () => ({contract_version: 2, state: session ? 'ready' : 'idle', session_id: session, available: true});
+        const listing = () => ({...state(), document_source: 'live_capture', live_available: true, binding_id: '5', truncated: false,
+          selected_target_id: session ? '31' : null, document_start_supported: false, message: 'live capture',
+          targets: [{id: '31', origin: 'https://authorized.test', label: 'top #31', url: 'https://authorized.test/', main_frame: true}]});
+        window.fetch = async (input, init) => {
+          const path = typeof input === 'string' ? input : input.url;
+          if (path === '/api/native-console') return reply(listing());
+          if (path.startsWith('/api/native-console/document-start')) return reply({contract_version: 4, available: true,
+            state: session ? 'ready' : 'idle', session_id: session, document_start: {status: 'unavailable', permitted: false, scripts: [],
+              message: 'This live capture does not permit document-start scripts'},
+            limits: {record_bytes: 4294967295, page_bytes: 8388608, retained_bytes: 67108864}});
+          if (path !== '/api/native-console/actions') return original(input, init);
+          const action = JSON.parse(init.body);
+          if (action.action === 'connect_live') { session = '77'; return reply(listing()); }
+          if (action.action === 'stop') { session = null; return reply(state()); }
+          if (action.command?.operation !== 'poll') return reply({...state(), request_id: '1', runtime: {status: 'ok', text: 'Complete'}});
+          // A page of a thousand messages at a time, every 97th two lines
+          // tall, then the 1 MiB message alone, as the bridge pages a backlog.
+          const messages = [], time = Date.now();
+          if (sent < total) for (const end = sent + page; sent < end; ++sent) messages.push({level: sent % 7 ? 'info' : 'warning',
+            text: sent % 97 ? `rendered message ${sent}` : `rendered message ${sent}\\nsecond line`, time});
+          else if (!large) { large = true; messages.push({level: 'info', text: 'x'.repeat(1 << 20), time}); }
+          return reply({...state(), request_id: '1', runtime: {status: 'ok', messages, dropped: 0, more: sent < total || !large}});
+        };
+        return true;
+        """, contentWorld: .page)
+      try await ui.click("#native-console-toggle")
+      _ = try await ui.value(
+        """
+        (() => { const mode = document.querySelector('#native-console-mode'); mode.value = 'live_capture'; mode.dispatchEvent(new Event('change')); return true; })()
+        """)
+      try await ui.waitUntil("__rebUiProbe.count('#native-console-target option[value=\"31\"]') === 1",
+        "\(size.name): the live capture document was not listed")
+      _ = try await ui.value(
+        """
+        (() => { const target = document.querySelector('#native-console-target'); target.value = '31'; target.dispatchEvent(new Event('change'));
+          const consent = document.querySelector('#native-console-live-consent'); consent.checked = true; consent.dispatchEvent(new Event('change'));
+          document.querySelector('#native-console-start').click(); return true; })()
+        """)
+      try await ui.waitUntil("(() => { const state = \(window); return state.large && state.largeEnd === 0; })()", timeout: 60,
+        "\(size.name): the transcript did not follow to the end of twelve thousand messages and the 1 MiB one")
+      _ = try await ui.value(frames)
+
+      // At the end the 1 MiB message is drawn whole, below the last small rows.
+      let end = try await ui.json(window)
+      let entries = Int((end["count"] as? String ?? "").split(separator: " ").first ?? "") ?? 0
+      XCTAssertGreaterThan(entries, 12000, "\(size.name): every message is an entry: \(end)")
+      XCTAssertEqual(end["large"] as? Bool, true, "\(size.name): the 1 MiB message is drawn whole: \(end)")
+      XCTAssertGreaterThan(end["largeHeight"] as? Int ?? 0, 100_000, "\(size.name): the 1 MiB message wraps in full: \(end)")
+      XCTAssertLessThan(end["drawn"] as? Int ?? .max, 250, "\(size.name): only rows near the viewport are drawn: \(end)")
+      XCTAssertEqual(end["offset"] as? Int, end["end"] as? Int, "\(size.name): the transcript follows its end: \(end)")
+      XCTAssertEqual(end["gap"] as? Double, 0, "\(size.name): drawn rows cover the viewport at the end: \(end)")
+      try await ui.screenshot("console-transcript-end-\(size.name)")
+
+      // A quarter of the way down is the middle of the small rows, which are
+      // estimated until drawn. Each scroll step there draws only what it
+      // reaches and leaves no gap.
+      _ = try await ui.value("(() => { const scroll = document.querySelector('#native-console-scroll'); scroll.scrollTop = scroll.scrollHeight / 4; return true; })()")
+      _ = try await ui.value(frames)
+      let middle = try await ui.json(window)
+      let visible = middle["visible"] as? Int ?? -1
+      XCTAssertTrue((1000...11000).contains(visible), "\(size.name): a quarter of the way down reaches the middle rows: \(middle)")
+      let steps = try await ui.json(
+        """
+        (async () => {
+          const scroll = document.querySelector('#native-console-scroll');
+          let gap = 0, drawn = 0, contiguous = true, moved = 0;
+          const start = (\(window)).visible;
+          for (let step = 0; step < 40; ++step) {
+            scroll.scrollTop += step < 20 ? 137 : -211;
+            await \(frames);
+            const state = \(window);
+            gap = Math.max(gap, state.gap); drawn = Math.max(drawn, state.drawn); contiguous &&= state.contiguous; moved = state.visible - start;
+          }
+          return {gap, drawn, contiguous, moved};
+        })()
+        """)
+      XCTAssertEqual(steps["gap"] as? Double, 0, "\(size.name): every scroll step leaves the viewport covered: \(steps)")
+      XCTAssertLessThan(steps["drawn"] as? Int ?? .max, 250, "\(size.name): scrolling draws only rows near the viewport: \(steps)")
+      XCTAssertEqual(steps["contiguous"] as? Bool, true, "\(size.name): the drawn rows are consecutive messages: \(steps)")
+      XCTAssertLessThan(steps["moved"] as? Int ?? 0, 0, "\(size.name): scrolling up moved back past where it started: \(steps)")
+      try await assertLayout(ui, "#native-console-panel", "\(size.name) Console transcript middle")
+      try await ui.screenshot("console-transcript-middle-\(size.name)")
+
+      // The keyboard scrolls the focused transcript like any other.
+      _ = try await ui.value("(() => { document.querySelector('#native-console-scroll').focus({focusVisible: true}); return true; })()")
+      let before = try await ui.json(window)
+      try await ui.key(121, "\u{F72D}", modifiers: [.function])
+      try await ui.waitUntil("(\(window)).visible > \(before["visible"] as? Int ?? 0)", "\(size.name): PageDown did not scroll the transcript")
+      _ = try await ui.value(frames)
+      let paged = try await ui.json(window)
+      XCTAssertEqual(paged["gap"] as? Double, 0, "\(size.name): PageDown leaves the viewport covered: \(paged)")
+      try await ui.key(115, "\u{F729}", modifiers: [.function])
+      try await ui.waitUntil("(\(window)).offset === 0", "\(size.name): Home did not reach the start of the transcript")
+      _ = try await ui.value(frames)
+      let start = try await ui.json(window)
+      XCTAssertEqual(start["first"] as? Int, 0, "\(size.name): the first message is drawn at the start: \(start)")
+      XCTAssertEqual(start["firstDrawn"] as? String, "Context selected: top #31 · https://auth", "\(size.name): the first entry is kept: \(start)")
+      XCTAssertEqual(start["gap"] as? Double, 0, "\(size.name): drawn rows cover the viewport at the start: \(start)")
+      try await ui.screenshot("console-transcript-start-\(size.name)")
+      try await ui.key(119, "\u{F72B}", modifiers: [.function])
+      try await ui.waitUntil("(() => { const state = \(window); return state.large && state.largeEnd === 0; })()",
+        "\(size.name): End did not return to the 1 MiB message")
+
+      // Search runs over every entry, drawn or not, and Escape restores them.
+      try await ui.click("#native-console-search")
+      _ = try await ui.value(
+        """
+        (() => { const filter = document.querySelector('#native-console-filter'); filter.value = 'rendered message 4242'; filter.dispatchEvent(new Event('input')); return true; })()
+        """)
+      try await ui.waitUntil("document.querySelector('#native-console-output-count').textContent === '1 / \(entries) entries'",
+        "\(size.name): search did not find the one undrawn match")
+      _ = try await ui.value(frames)
+      let found = try await ui.json(window)
+      XCTAssertEqual(found["numbers"] as? Int, 1, "\(size.name): search draws only its match: \(found)")
+      XCTAssertEqual(found["first"] as? Int, 4242, "\(size.name): search drew the matching message: \(found)")
+      try await assertLayout(ui, "#native-console-panel", "\(size.name) Console transcript search")
+      try await ui.screenshot("console-transcript-search-\(size.name)")
+      try await ui.key(53, "\u{1B}")
+      try await ui.waitUntil("document.querySelector('#native-console-output-count').textContent === '\(entries) entries'",
+        "\(size.name): closing search did not restore every entry")
     }
   }
   @MainActor

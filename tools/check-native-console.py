@@ -7,6 +7,7 @@ not evidence that the browser overlay compiled or executed JavaScript.
 
 import argparse
 import contextlib
+import hashlib
 import http.server
 import json
 import os
@@ -23,23 +24,34 @@ import urllib.error
 import urllib.request
 
 MAGIC = 0x43424552
-VERSION = 3
-# One command record carries at most 64 MiB (common/native_console_protocol.h).
-PAYLOAD_LIMIT = 64 * 1024 * 1024
+VERSION = 4
+# A header names its payload with 32 bits, the only bound on a Console record
+# (common/native_console_protocol.h). A drained reply stops adding records past
+# a page and says more remain; the browser retains 64 MiB of document-start
+# output for a reader that is behind.
+RECORD_LIMIT = 0xFFFFFFFF
+PAGE_BYTES = 8 * 1024 * 1024
+RETAINED_BYTES = 64 * 1024 * 1024
+# Past the 64 MiB every record was once capped at.
+LARGE = 64 * 1024 * 1024 + 1
 STOPPED = b"Stopped; changes are not rolled back"
 REQUEST = struct.Struct("<IHHQQII")
 RESPONSE = struct.Struct("<IHHQHHIII")
 HELLO = struct.Struct("<IHHQ32s16s")
-TARGET = struct.Struct("<QHHI256sHH128s512sI")
+# A target is this header followed by its origin, label and URL bytes.
+TARGET = struct.Struct("<QIIIHH")
 
 
 def exact(stream, count):
-    data = bytearray()
-    while len(data) < count:
-        chunk = stream.recv(count - len(data))
-        if not chunk:
+    # Into one buffer: a recv of the remaining count would allocate that much
+    # for every chunk of a large record.
+    data = bytearray(count)
+    view = memoryview(data)
+    while view:
+        received = stream.recv_into(view)
+        if not received:
             raise EOFError("native peer disconnected")
-        data.extend(chunk)
+        view = view[received:]
     return bytes(data)
 
 
@@ -62,9 +74,35 @@ def response(stream, request, kind, payload=b"", status=0, count=0, flags=0):
     stream.sendall(RESPONSE.pack(MAGIC, VERSION, status, request, kind, flags, count, len(payload), 0) + payload)
 
 
+def target_record(target, origin, label, url, top):
+    origin, label, url = origin.encode(), label.encode(), url.encode()
+    return TARGET.pack(target, len(origin), len(label), len(url), 2 if top else 0, 0) + origin + label + url
+
+
+def read_targets(payload, count):
+    targets, offset = [], 0
+    for _ in range(count):
+        target, origin, label, url, flags, reserved = TARGET.unpack_from(payload, offset)
+        assert reserved == 0 and flags & ~2 == 0
+        offset += TARGET.size
+        text = payload[offset:offset + origin + label + url]
+        assert len(text) == origin + label + url, "a target ran past its listing"
+        offset += len(text)
+        targets.append({"id": target, "origin": text[:origin].decode(), "label": text[origin:origin + label].decode(),
+                        "url": text[origin + label:].decode(), "top": bool(flags & 2)})
+    assert offset == len(payload), "a listing carried bytes past its last target"
+    return targets
+
+
 def fnv1a(text):
+    encoded = text.encode()
+    # The browser's FNV-1a, byte by byte, is far too slow in Python for the
+    # snippets past 64 MiB these checks arm; past 1 MiB the synthetic peer
+    # reports a 64-bit digest of the same shape instead.
+    if len(encoded) > 1 << 20:
+        return hashlib.blake2b(encoded, digest_size=8).hexdigest()
     value = 0xcbf29ce484222325
-    for byte in text.encode():
+    for byte in encoded:
         value = ((value ^ byte) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
     return f"{value:016x}"
 
@@ -76,13 +114,12 @@ class DocumentStart:
     admission, cursor, drop counting and refusal paths are exercised by the
     real C++ transport and the real HTTP API. Like the browser, it counts no
     scripts, snippet bytes or records per document: it retains 64 MiB of
-    output and pages every record after the cursor that fits one reply.
+    output and pages the records after the cursor, the first whole however
+    large and then whole records while the page has room.
     """
 
-    RETAINED_BYTES = PAYLOAD_LIMIT
     RECORD_OVERHEAD = 96
-    REPLY_BYTES = PAYLOAD_LIMIT
-    ENVELOPE_BYTES = 64 * 1024
+    PAGE_RECORD_BYTES = 320
 
     def __init__(self, permitted):
         self.permitted = permitted
@@ -96,7 +133,7 @@ class DocumentStart:
 
     def record(self, script, kind, text):
         cost = self.RECORD_OVERHEAD + len(text.encode())
-        while self.output and self.retained_bytes + cost > self.RETAINED_BYTES:
+        while self.output and self.retained_bytes + cost > RETAINED_BYTES:
             oldest = self.output.pop(0)
             self.retained_bytes -= self.RECORD_OVERHEAD + len(oldest["text"].encode())
             self.dropped += 1
@@ -105,7 +142,7 @@ class DocumentStart:
             "sequence": str(self.next_sequence), "record": kind,
             "provenance": "console-document-start-script", "script_id": script["script_id"],
             "document_id": "7", "frame_id": "99", "top_frame": script["rule"]["frame"] == "top",
-            "time": 1700000000000.0, "truncated": False, "text": text,
+            "time": 1700000000000.0, "text": text,
         })
         self.next_sequence += 1
         script["records"] += 1
@@ -123,30 +160,29 @@ class DocumentStart:
         state["text"] = text
         return state
 
-    def arm(self, scripts):
+    def prepare(self, scripts):
+        # Returns the new scripts, or a refusal; ids are spent only on success.
         if not isinstance(scripts, list) or not scripts:
-            return self.refusal("Arm at least one document-start script")
+            return None, self.refusal("Arm at least one document-start script")
         prepared = []
-        for entry in scripts:
+        for index, entry in enumerate(scripts):
             if not isinstance(entry, dict) or entry.get("frame") not in {"top", "child"}:
-                return self.refusal("A document-start rule matches frame top or child")
+                return None, self.refusal("A document-start rule matches frame top or child")
             source = entry.get("source") or ""
             if not source:
-                return self.refusal("A document-start snippet must be nonempty")
+                return None, self.refusal("A document-start snippet must be nonempty")
             rule = {"origin": entry["origin"], "frame": entry["frame"]}
             if entry.get("path_prefix"):
                 rule["path_prefix"] = entry["path_prefix"]
-            prepared.append({"script_id": str(self.next_script), "rule": rule,
+            prepared.append({"script_id": str(self.next_script + index), "rule": rule,
                              "source_bytes": len(source.encode()), "digest": fnv1a(source),
                              "records": 0, "injected_documents": 0, "refused": 0, "source": source})
-            self.next_script += 1
-        self.scripts = prepared
-        self.generation += 1
-        self.output = []
-        self.retained_bytes = 0
-        self.dropped = 0
-        # A matching new document would run each armed script exactly once.
-        for script in self.scripts[:4]:
+        self.next_script += len(prepared)
+        return prepared, None
+
+    def run(self, scripts):
+        # A matching new document would run each new script exactly once.
+        for script in scripts[:4]:
             self.record(script, "injected", "Snippet ran before this document's own scripts")
             if "__flood__" in script["source"]:
                 # More reported text than the browser retains, so the oldest
@@ -155,6 +191,39 @@ class DocumentStart:
                     self.record(script, "report", f"flood-{index:05d}-" + "x" * 7990)
             else:
                 self.record(script, "report", "kinds=string:12 return=4 digest=0f0f")
+
+    def arm(self, scripts):
+        prepared, refusal = self.prepare(scripts)
+        if refusal:
+            return refusal
+        # Replacing the set discards the previous set's output; sequences go on.
+        self.scripts = prepared
+        self.generation += 1
+        self.output = []
+        self.retained_bytes = 0
+        self.dropped = 0
+        self.run(prepared)
+        return self.state(0)
+
+    def add(self, scripts):
+        prepared, refusal = self.prepare(scripts)
+        if refusal:
+            return refusal
+        # The armed scripts keep running and their output stays.
+        self.scripts += prepared
+        self.generation += 1
+        self.run(prepared)
+        return self.state(0)
+
+    def remove(self, ids):
+        if not isinstance(ids, list) or not ids:
+            return self.refusal("Name at least one armed script id to remove")
+        armed = {script["script_id"] for script in self.scripts}
+        for entry in ids:
+            if entry not in armed:
+                return self.refusal(f"Script {entry} is not armed")
+        self.scripts = [script for script in self.scripts if script["script_id"] not in ids]
+        self.generation += 1
         return self.state(0)
 
     def clear(self):
@@ -170,25 +239,24 @@ class DocumentStart:
         return self.state(0)
 
     def state(self, after):
-        listing = sum(256 + 2 * len(json.dumps(script["rule"])) for script in self.scripts)
-        budget = self.REPLY_BYTES - self.ENVELOPE_BYTES - listing
-        page, used = [], 0
+        page, used, more = [], 0, False
         for record in self.output:
             if int(record["sequence"]) <= after:
                 continue
-            cost = 320 + 6 * len(record["text"].encode())
-            if used + cost > budget:
+            cost = self.PAGE_RECORD_BYTES + len(record["text"].encode())
+            if page and used + cost > PAGE_BYTES:
+                more = True
                 break
             used += cost
             page.append(record)
         return {
-            "status": "ok", "contract_version": 3, "permitted": self.permitted,
+            "status": "ok", "contract_version": 4, "permitted": self.permitted,
             "generation": str(self.generation), "renderer_processes": 1,
             "pending_renderer_processes": 0,
             "scripts": [{key: value for key, value in script.items() if key != "source"}
                         for script in self.scripts],
             "output": {
-                "records": page, "next_sequence": str(self.next_sequence),
+                "records": page, "more": more, "next_sequence": str(self.next_sequence),
                 "oldest_sequence": self.output[0]["sequence"] if self.output else "0",
                 "retained": len(self.output), "retained_bytes": self.retained_bytes,
                 "dropped": self.dropped, "unattributed": 0, "stale": 0,
@@ -204,8 +272,14 @@ class DocumentStart:
             return {"status": "unavailable", "permitted": False, "scripts": [],
                     "text": "This browser session does not permit document-start scripts"}
         operation = command.get("operation")
-        if operation == "arm":
-            return self.arm(command.get("scripts"))
+        if operation in {"arm", "add"}:
+            if set(command) != {"operation", "scripts"}:
+                return self.refusal(f"{operation} takes exactly operation and scripts")
+            return (self.arm if operation == "arm" else self.add)(command["scripts"])
+        if operation == "remove":
+            if set(command) != {"operation", "script_ids"}:
+                return self.refusal("remove takes exactly operation and script_ids")
+            return self.remove(command["script_ids"])
         if operation == "clear":
             return self.clear()
         if operation == "state":
@@ -230,13 +304,21 @@ def fake_browser(arguments):
     stream = connect(flags["reb-native-console-socket"])
     stream.sendall(HELLO.pack(0x52454249, 1, 64, int(flags["reb-native-console-session-id"]), bytes.fromhex(token_path.read_text().strip()), bytes(16)))
     stream.settimeout(None)
-    origin = b"http://127.0.0.1:fixture"
+    origin = "http://127.0.0.1:fixture"
     target_id = 0
     # Opt-in page with frames for the agent iframe check: a top document, a
     # same-site child on another localhost port and a cross-site child on
     # 127.0.0.1, which site isolation would put in its own renderer process.
     # Listing order follows the browser's, which groups frames by process.
     frames = None
+    # More documents than the 64 a listing once held, the last with a URL and
+    # label far past the fixed fields a target record once had.
+    extra = []
+    if "--reb-test-many-targets" in arguments:
+        extra = [target_record(1000 + index, f"http://127.0.0.1:{20000 + index}", f"frame #{1000 + index}",
+                               f"http://127.0.0.1:{20000 + index}/frame.html", False) for index in range(298)]
+        extra.append(target_record(1298, "http://127.0.0.1:29999", "long " + "l" * (64 << 10),
+                                   "http://127.0.0.1:29999/" + "u" * (1 << 20), False))
     if "--reb-test-frames" in arguments:
         frames = [
             {"id": 1, "origin": "http://localhost:41001", "url": "http://localhost:41001/top.html", "top": True, "name": "", "parent": None},
@@ -259,7 +341,7 @@ def fake_browser(arguments):
     try:
         while True:
             magic, version, operation, request, target, size, reserved = REQUEST.unpack(exact(stream, 32))
-            assert magic == MAGIC and version == VERSION and reserved == 0 and size <= PAYLOAD_LIMIT
+            assert magic == MAGIC and version == VERSION and reserved == 0
             # A Stop that crossed the answer to the request it names is spent.
             if operation == 5:
                 assert request == answered and target == 0 and size == 0
@@ -270,10 +352,8 @@ def fake_browser(arguments):
             if operation == 1 and frames:
                 records = []
                 for entry in frames:
-                    label = f"{'top' if entry['top'] else 'frame'} #{entry['id']}{'' if entry['top'] else ' ' + entry['name']} · Synthetic frames".encode()
-                    records.append(TARGET.pack(entry["id"], len(entry["origin"]), 2 if entry["top"] else 0, 0,
-                                               entry["origin"].encode(), len(label), len(entry["url"]), label,
-                                               entry["url"].encode(), 0))
+                    label = f"{'top' if entry['top'] else 'frame'} #{entry['id']}{'' if entry['top'] else ' ' + entry['name']} · Synthetic frames"
+                    records.append(target_record(entry["id"], entry["origin"], label, entry["url"], entry["top"]))
                 response(stream, request, 10, b"".join(records), count=len(records),
                          flags=2 if document_start.permitted else 0)
             elif operation == 1:
@@ -281,7 +361,8 @@ def fake_browser(arguments):
                 # disposable fixture renumbers so stale-target paths are reachable.
                 if not (live and target_id):
                     target_id += 1
-                response(stream, request, 10, TARGET.pack(target_id, len(origin), 2, 0, origin, 27, 29, b"Synthetic transport fixture", b"http://127.0.0.1:fixture/page", 0), count=1,
+                records = [target_record(target_id, origin, "Synthetic transport fixture", "http://127.0.0.1:fixture/page", True), *extra]
+                response(stream, request, 10, b"".join(records), count=len(records),
                          flags=2 if document_start.permitted else 0)
             elif operation == 4:
                 # No target: the armed set belongs to the session, so it can
@@ -323,7 +404,11 @@ def fake_browser(arguments):
                             kind, text = "number", "42"
                         elif expression == "console.log(\"hello\")":
                             kind, text = "undefined", "undefined"
-                            logs.append({"text": "hello", "url": "reb-console", "line": 1, "level": "info", "time": 1, "stack": "", "truncated": False})
+                            logs.append({"text": "hello", "url": "reb-console", "line": 1, "level": "info", "time": 1, "stack": ""})
+                        elif expression.startswith("console.log('x'.repeat(") and expression.endswith("))"):
+                            # A message of any size is kept and polled whole.
+                            kind, text = "undefined", "undefined"
+                            logs.append({"text": "x" * int(expression[23:-2]), "url": "reb-console", "line": 1, "level": "info", "time": 1, "stack": ""})
                         elif expression.startswith("await ") or expression == "new Promise(() => {})":
                             kind, text = "promise", "Promise {<pending>}"
                         elif expression == "window.previewObject":
@@ -334,7 +419,7 @@ def fake_browser(arguments):
                             kind, text = "function", "ƒ querySelector(…)"
                         elif expression == "$_" and last:
                             kind, text = last["type"], last["text"]
-                        preview = {"type": kind, "text": text, "truncated": False}
+                        preview = {"type": kind, "text": text}
                         if kind in ["object", "function", "promise"]:
                             next_handle += 1
                             preview["handle"] = str(next_handle)
@@ -346,8 +431,12 @@ def fake_browser(arguments):
                         value["value"] = preview
                         last = preview
                 elif op == "poll":
-                    value.update(messages=logs.copy(), dropped=0)
-                    logs.clear()
+                    # At least one message, then whole messages while the page has room.
+                    page, used = [], 0
+                    while logs and (not page or used + len(logs[0]["text"]) <= PAGE_BYTES):
+                        used += len(logs[0]["text"])
+                        page.append(logs.pop(0))
+                    value.update(messages=page, dropped=0, more=bool(logs))
                 elif op == "traffic":
                     value.update(events=[{"event_id": "1", "document_id": str(target), "resource_id": "81", "after_request_id": "2", "origin": "http://127.0.0.1", "method": "GET", "status": 200, "network_error": 0, "cached": False, "time": 1, "operation": "resource_load_complete"}], dropped=0)
                 elif op == "clear":
@@ -362,12 +451,12 @@ def fake_browser(arguments):
                 elif command.get("handle") not in handles:
                     value = {"status": "error", "text": "Value was released, cleared, or belongs to another document"}
                 elif op == "inspect":
-                    properties = [{"name": "value", "accessor": True, "value": {"type": "accessor", "text": "[Getter / Setter]", "truncated": False}}, {"name": "fixture", "value": {"type": "number", "text": "41", "truncated": False}}] if command["offset"] == 0 else []
+                    properties = [{"name": "value", "accessor": True, "value": {"type": "accessor", "text": "[Getter / Setter]"}}, {"name": "fixture", "value": {"type": "number", "text": "41"}}] if command["offset"] == 0 else []
                     value.update(properties=properties, more=False, offset=2)
                 elif op == "await" and command["handle"] in pending_handles:
                     value["status"] = "pending"
                 elif op == "await":
-                    value["value"] = {"type": "number", "text": "42", "truncated": False}
+                    value["value"] = {"type": "number", "text": "42"}
                 elif op in ["release", "cancel"]:
                     handles.pop(command["handle"])
                     value["text"] = "Value released"
@@ -376,7 +465,7 @@ def fake_browser(arguments):
                 elif op == "source":
                     value["text"] = "function querySelector(selector) { /* synthetic fixture */ }"
                 elif op == "listeners":
-                    value.update(properties=[], more=False, offset=0, truncated=False)
+                    value.update(properties=[], more=False, offset=0)
                 elif op in ["monitor", "unmonitor"]:
                     value["text"] = "Synthetic event monitor response"
                 response(stream, request, 11, json.dumps(value).encode())
@@ -391,7 +480,7 @@ def fake_browser(arguments):
             elif source == "window.fixture + 1":
                 response(stream, request, 3, b"42")
             else:
-                response(stream, request, 4, source.encode()[:8192])
+                response(stream, request, 4, source.encode())
     except (EOFError, BrokenPipeError, ConnectionResetError):
         pass
     finally:
@@ -412,7 +501,7 @@ def kill_browser_group(process):
 
 
 @contextlib.contextmanager
-def bridge(binary, browser=None, binary_mode=True, document_start=False):
+def bridge(binary, browser=None, binary_mode=True, document_start=False, extra=()):
     with tempfile.TemporaryDirectory(prefix="reb-console-check.", dir="/tmp") as directory:
         # Chromium canonicalizes aliases such as /tmp on macOS. Keep the
         # explicitly owned socket, token and profile under that same root.
@@ -427,6 +516,7 @@ def bridge(binary, browser=None, binary_mode=True, document_start=False):
         browser_arguments = ["--reb-native-console", f"--reb-native-console-socket={root / 'console.sock'}", f"--reb-native-console-token-file={token}", "--reb-native-console-session-id=1", f"--user-data-dir={root / 'profile'}", "--no-first-run", "--no-default-browser-check", "--use-mock-keychain", "--password-store=basic"]
         if document_start:
             browser_arguments.append("--reb-native-console-document-start")
+        browser_arguments += extra
         child = None
         try:
             if browser:
@@ -516,7 +606,7 @@ def check(binary, browser):
         kill_browser_group(exited)
         assert exited.wait(timeout=5) == 0, "Exited browser fixture was not reaped"
     for flag in ["--version", "-v", "-V"]:
-        assert subprocess.check_output([binary, flag]) == b"3\n"
+        assert subprocess.check_output([binary, flag]) == b"4\n"
     invalid = subprocess.run([binary, "--unexpected"], capture_output=True)
     assert invalid.returncode == 2 and b"USAGE" in invalid.stdout
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
@@ -545,7 +635,7 @@ def check(binary, browser):
                     f"HTTP fixture never became an eligible frame in {time.monotonic() - started:.1f} s: "
                     f"last status {header[2]}, {header[6]} targets, browser {browser_state}")
                 time.sleep(0.1)
-            target = TARGET.unpack(payload[:TARGET.size])[0]
+            target = TARGET.unpack_from(payload)[0]
             header, payload = run(2, target, "window.fixture + 1")
             assert header[2] == 0 and header[4] == 3 and payload == b"42"
             header, _ = run(2, target, "throw 'fixture'")
@@ -562,17 +652,20 @@ def check(binary, browser):
             send(process, request, 5)
             header, payload = run(2, target, "window.fixture + 1")
             assert header[2] == 0 and payload == b"42", "Execution did not recover after Stop"
-            # Input of any size up to the record bound reaches the page whole.
+            # Input of any size up to the record bound reaches the page whole,
+            # including one past the 64 MiB a record was once capped at.
             header, payload = run(2, target, "/*" + "a" * (8 << 20) + "*/ 6 * 7")
+            assert header[2] == 0 and payload == b"42", (header, payload)
+            header, payload = run(2, target, "/*" + "a" * LARGE + "*/ 6 * 7")
             assert header[2] == 0 and payload == b"42", (header, payload)
             if browser:
                 header, _ = run(2, target, "window.previewObject")
                 assert header[4] == 8
                 _, payload = run(2, target, "window.previewCalls")
                 assert payload == b"0", "Preview invoked page code"
-                header, payload = run(2, target, "'雪'.repeat(8192)")
-                assert header[5] == 1 and len(payload) <= 8192
-                payload.decode("utf-8", errors="strict")
+                # A result of any size returns whole: 3 MiB of UTF-8 here.
+                header, payload = run(2, target, "'雪'.repeat(1 << 20)")
+                assert header[2] == 0 and header[5] == 0 and payload.decode("utf-8", errors="strict") == "雪" * (1 << 20)
                 def runtime(operation, **fields):
                     header, data = run(3, target, json.dumps({"operation": operation, **fields}))
                     assert header[4] == 11 and header[2] == 0, (header, data)
@@ -640,26 +733,36 @@ def check(binary, browser):
                 runtime("cancel", handle=pending["handle"])
                 assert runtime("await", handle=pending["handle"])["status"] == "error"
                 typed = runtime("evaluate", source="new Uint8Array(65537)")["value"]
+                # Paging reaches every index, past the 65536 once listed.
                 typed_properties = runtime("inspect", handle=typed["handle"], offset=65520)
-                assert typed_properties.get("truncated"), typed_properties
                 assert typed_properties["status"] == "ok" and len(typed_properties["properties"]) == 16
+                assert typed_properties["more"] is True and typed_properties["offset"] == 65536, typed_properties
                 assert all(prop["value"]["type"] == "number" and prop["value"]["text"] == "0" for prop in typed_properties["properties"])
+                last_page = runtime("inspect", handle=typed["handle"], offset=65536)
+                assert [prop["name"] for prop in last_page["properties"]] == ["65536"] and last_page["more"] is False, last_page
                 proxy = runtime("evaluate", source="new Proxy(new Uint8Array(4), {getOwnPropertyDescriptor() { window.previewCalls++; return undefined }})")["value"]
                 assert runtime("inspect", handle=proxy["handle"], offset=0)["status"] == "error"
                 assert runtime("evaluate", source="window.previewCalls")["value"]["text"] == "0"
+                # No message count or size: every message is kept whole until
+                # polled, and a backlog past one page arrives over several.
                 runtime("evaluate", source="for (let i=0;i<40;i++) console.log('queue-' + i)")
                 messages = runtime("poll")
-                assert len(messages["messages"]) <= 32 and messages["dropped"] > 0
-                # JSON escaping must be charged before enqueue. This batch fit
-                # the old 32 KiB raw-text budget but exceeded the 64 KiB reply,
-                # losing all logs after poll had already reset its drop count.
+                assert [message["text"] for message in messages["messages"]] == [f"queue-{i}" for i in range(40)], messages
+                assert messages["dropped"] == 0 and messages["more"] is False
                 runtime("evaluate", source="for (let i=0;i<16;i++) console.log(String.fromCharCode(1).repeat(2048))")
                 messages = runtime("poll")
-                assert messages["status"] == "ok" and messages["messages"]
-                assert len(messages["messages"]) + messages["dropped"] == 16
-                assert messages["dropped"] > 0
+                assert len(messages["messages"]) == 16 and messages["dropped"] == 0
                 assert all(message["text"] == "\x01" * 2048 for message in messages["messages"])
-                assert runtime("poll")["dropped"] == 0
+                runtime("evaluate", source="for (let i=0;i<12;i++) console.log(String(i).padEnd(1 << 20, 'x'))")
+                polled, pages = [], 0
+                while True:
+                    page = runtime("poll")
+                    polled += [message["text"] for message in page["messages"]]
+                    pages += 1
+                    if not page["more"]:
+                        break
+                assert pages > 1, "a 12 MiB backlog fit one page"
+                assert polled == [str(i).ljust(1 << 20, "x") for i in range(12)], "a message was lost or cut across pages"
                 runtime("evaluate", source="fetch('/console-resource')")
                 deadline = time.monotonic() + 5
                 while True:
@@ -677,6 +780,15 @@ def check(binary, browser):
                 run()
             header, _ = run(2, target, "window.fixture + 1")
             assert header[2] == 2, "Stale selection was reused"
+            if not browser:
+                # A message of any size polls whole through the real relay.
+                header, payload = run()
+                target = TARGET.unpack_from(payload)[0]
+                header, data = run(3, target, json.dumps({"operation": "evaluate", "source": "console.log('x'.repeat(3145728))"}))
+                assert header[2] == 0, (header, data[:200])
+                header, data = run(3, target, json.dumps({"operation": "poll"}))
+                polled = json.loads(data)
+                assert [len(message["text"]) for message in polled["messages"]] == [3 << 20] and polled["more"] is False
             if browser:
                 process.stdin.close()
                 assert process.wait(timeout=5) == 0
@@ -686,6 +798,14 @@ def check(binary, browser):
             # bit clear, so the owner never sends operation 4 to it.
             header, _ = exchange(process, 1)
             assert header[5] & 2 == 0, "A session without the switch advertised document-start support"
+        with bridge(binary, extra=["--reb-test-many-targets"]) as process:
+            # A listing of any length, with metadata of any length, crosses whole.
+            header, payload = exchange(process, 1)
+            assert header[2] == 0 and header[5] == 0 and header[6] == 300, header
+            listed = read_targets(payload, header[6])
+            assert listed[0]["top"] and not any(entry["top"] for entry in listed[1:])
+            assert len(listed[-1]["url"]) == len("http://127.0.0.1:29999/") + (1 << 20)
+            assert listed[-1]["label"] == "long " + "l" * (64 << 10)
         with bridge(binary, document_start=True) as process:
             request = 0
             def run(operation=1, target=0, source=""):
@@ -708,14 +828,28 @@ def check(binary, browser):
             records = armed["output"]["records"]
             assert [record["record"] for record in records] == ["injected", "report"], records
             assert all(record["provenance"] == "console-document-start-script" for record in records)
+            assert armed["output"]["more"] is False
             # Reads never drain: the same cursor repeats, a later cursor advances.
             assert document_start(operation="state", after="0")["output"]["records"] == records
             assert document_start(operation="state", after=records[-1]["sequence"])["output"]["records"] == []
+            # A set is built and pruned one script at a time. An added script
+            # joins the armed ones and their output stays; ids are never reused.
+            added = document_start(operation="add", scripts=[
+                {"origin": "https://b.test", "frame": "child", "source": "report('second');"}])
+            assert [script["script_id"] for script in added["scripts"]] == ["1", "2"], added
+            assert added["output"]["records"][:2] == records and len(added["output"]["records"]) == 4
+            pruned = document_start(operation="remove", script_ids=["1"])
+            assert [script["script_id"] for script in pruned["scripts"]] == ["2"], pruned
+            assert pruned["output"]["records"] == added["output"]["records"], "removing a script dropped output"
+            armed = pruned
             # Each refusal leaves the previously armed set exactly as it was.
             for refused in [
                 {"operation": "arm", "scripts": []},
                 {"operation": "arm", "scripts": [{"origin": "https://a.test", "frame": "any", "source": "1"}]},
                 {"operation": "arm", "scripts": [{"origin": "https://a.test", "frame": "top", "source": ""}]},
+                {"operation": "add", "scripts": []},
+                {"operation": "remove", "script_ids": []},
+                {"operation": "remove", "script_ids": ["1"]},
                 {"operation": "unknown"},
                 {"operation": "state", "after": "not-a-number"},
             ]:
@@ -724,47 +858,51 @@ def check(binary, browser):
                 assert refusal["scripts"] == armed["scripts"], refused
                 assert "output" not in refusal, "a refusal must not re-send records"
             assert document_start(operation="state", after="0")["scripts"] == armed["scripts"]
-            # No script count or snippet budget: a thousand scripts and an
-            # 8 MiB snippet arm through the real relay in one command.
+            # No script count or snippet budget: a thousand scripts and a
+            # snippet past the 64 MiB a record was once capped at arm through
+            # the real relay in one command.
             many = document_start(operation="arm", scripts=[
                 {"origin": "https://a.test", "frame": "top", "source": f"report({index});"}
                 for index in range(1000)] + [
-                {"origin": "https://b.test", "frame": "top", "source": "/*" + "a" * (8 << 20) + "*/"}])
+                {"origin": "https://b.test", "frame": "top", "source": "/*" + "a" * LARGE + "*/"}])
             assert many["status"] == "ok" and len(many["scripts"]) == 1001, many.get("text")
-            assert many["scripts"][-1]["source_bytes"] == (8 << 20) + 4
+            assert many["scripts"][-1]["source_bytes"] == LARGE + 4
             # Past 64 MiB of reported text the oldest records are evicted and
-            # counted. A read returns every record after its cursor that fits
-            # one reply, so paging from the oldest reads every retained record
-            # exactly once, in order.
+            # counted. A read returns the records after its cursor a page at a
+            # time and says when more remain, so paging from the oldest reads
+            # every retained record exactly once, in order.
             flooded = document_start(operation="arm", scripts=[
                 {"origin": "https://a.test", "frame": "child", "source": "report('__flood__');"}])
             assert flooded["output"]["dropped"] > 0, flooded["output"]["dropped"]
-            assert flooded["output"]["retained_bytes"] <= PAYLOAD_LIMIT
-            assert len(flooded["output"]["records"]) > 32, "a page is bounded by the reply, not by 32 records"
-            cursor, seen = "0", []
-            while True:
-                page = document_start(operation="state", after=cursor)["output"]["records"]
-                if not page:
-                    break
-                seen += [int(record["sequence"]) for record in page]
-                cursor = page[-1]["sequence"]
+            assert flooded["output"]["retained_bytes"] <= RETAINED_BYTES
+            assert len(flooded["output"]["records"]) > 32, "a page is bounded by its bytes, not by 32 records"
+            assert flooded["output"]["more"] is True, "64 MiB of output fit one page"
+            cursor, seen, more = "0", [], True
+            while more:
+                output = document_start(operation="state", after=cursor)["output"]
+                assert output["records"], "a page that says more remain carried nothing"
+                seen += [int(record["sequence"]) for record in output["records"]]
+                cursor, more = output["records"][-1]["sequence"], output["more"]
+            assert document_start(operation="state", after=cursor)["output"]["records"] == []
             assert len(seen) == flooded["output"]["retained"], (len(seen), flooded["output"]["retained"])
             assert seen == list(range(seen[0], seen[0] + len(seen))), "paging skipped or repeated a record"
             assert seen[0] == int(flooded["output"]["oldest_sequence"])
             cleared = document_start(operation="clear")
             assert cleared["status"] == "ok" and cleared["scripts"] == []
-            assert cleared["output"]["records"] == [] and cleared["output"]["dropped"] == 0
+            assert cleared["output"]["records"] == [] and cleared["output"]["dropped"] == 0 and cleared["output"]["more"] is False
             # Operation 4 is session-scoped: a target makes it malformed, so a
             # stale document can never satisfy or block the armed set.
             process.stdin.write(REQUEST.pack(MAGIC, VERSION, 4, request + 1, 1, 2, 0) + b"{}")
             process.stdin.flush()
             assert process.wait(timeout=5) == 1, "A document-start request with a target was accepted"
         with bridge(binary) as process:
+            # Any declared size is a valid record, so a payload that ends
+            # before the size its header names is what the bridge refuses.
             _, targets = exchange(process, 1)
-            target = TARGET.unpack(targets)[0]
-            process.stdin.write(REQUEST.pack(MAGIC, VERSION, 2, 2, target, PAYLOAD_LIMIT + 1, 0))
-            process.stdin.flush()
-            assert process.wait(timeout=5) == 1, "Oversized input was accepted"
+            target = TARGET.unpack_from(targets)[0]
+            process.stdin.write(REQUEST.pack(MAGIC, VERSION, 2, 2, target, RECORD_LIMIT, 0) + b"1 + 1")
+            process.stdin.close()
+            assert process.wait(timeout=5) == 1, "A payload cut short of its declared size was accepted"
         with bridge(binary) as process:
             exchange(process, 1)
             # A Stop that names neither the running nor the answered request
@@ -773,13 +911,13 @@ def check(binary, browser):
             assert process.wait(timeout=5) == 1, "A Stop for an unknown request was accepted"
         with bridge(binary) as process:
             _, targets = exchange(process, 1)
-            target = TARGET.unpack(targets)[0]
+            target = TARGET.unpack_from(targets)[0]
             send(process, 2, 2, target, "while (true) {}")
             send(process, 3, 5)
             assert process.wait(timeout=5) == 1, "A Stop for another request was forwarded"
         with bridge(binary) as process:
             _, targets = exchange(process, 1)
-            target = TARGET.unpack(targets)[0]
+            target = TARGET.unpack_from(targets)[0]
             malformed = b"__malformed_native_reply__"
             process.stdin.write(REQUEST.pack(MAGIC, VERSION, 2, 2, target, len(malformed), 0) + malformed)
             process.stdin.flush()
@@ -790,9 +928,9 @@ def check(binary, browser):
         with bridge(binary, binary_mode=False) as process:
             process.communicate(b":unknown\n:quit\n", timeout=10)
             assert process.returncode == 2, "Invalid stdin commands must exit with a usage error"
-        print("PASS native console version/usage, authentication, actual C++ pipe/socket handoff, malformed lengths, stale selection, exception responses, Stop of a running command, 8 MiB input")
-        print("PASS document-start capability advertisement, session-scoped operation 4, a thousand scripts and an 8 MiB snippet, non-draining paging of every retained record, 64 MiB retention drops, refusals that preserve the armed set")
-        print("PASS real Blink/V8 execution, Stop of an endless loop and recovery, 8 MiB input, preview isolation and Unicode bounds" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
+        print("PASS native console version/usage, authentication, actual C++ pipe/socket handoff, short payloads, stale selection, exception responses, Stop of a running command, input past 64 MiB, a 3 MiB message and a 300-document listing with 1 MiB metadata, whole")
+        print("PASS document-start capability advertisement, session-scoped operation 4, add and remove beside an armed set, a thousand scripts and a snippet past 64 MiB, paged non-draining reads of every retained record, 64 MiB retention drops, refusals that preserve the armed set")
+        print("PASS real Blink/V8 execution, Stop of an endless loop and recovery, input past 64 MiB, a 3 MiB result, every typed-array index, a paged 12 MiB log backlog, preview isolation" if browser else "NOT RUN browser overlay compilation and actual Blink/V8 execution; supply --browser after rebuilding Brave")
     finally:
         server.shutdown()
         server.server_close()
@@ -856,6 +994,7 @@ def check_backend(binary, backend):
             live_peer = subprocess.Popen([
                 sys.executable, __file__, "--reb-native-console",
                 "--reb-native-console-live-binding", "--reb-native-console-document-start",
+                "--reb-test-many-targets",
                 f"--reb-native-console-socket={live_socket}",
                 f"--reb-native-console-token-file={live_token}",
                 f"--reb-native-console-session-id={live_id}",
@@ -870,6 +1009,10 @@ def check_backend(binary, backend):
             assert state["available"] and state["state"] == "idle"
             assert state["binding_state"] == "ready", state
             assert state["live_available"] and state["targets"], "Live bridge did not authenticate"
+            # Every listed document, with its metadata whole, through HTTP.
+            assert len(state["targets"]) == 300 and state["truncated"] is False, len(state["targets"])
+            assert state["targets"][-1]["url"] == "http://127.0.0.1:29999/" + "u" * (1 << 20)
+            assert "truncated" not in state["targets"][-1]
             # The packaged app launches its captures with the permission. Before
             # any Console connection, the listing carries the browser's own report
             # of it, which the Console header shows.
@@ -880,8 +1023,8 @@ def check_backend(binary, backend):
             assert idle["state"] == "idle" and idle["session_id"] is None
             assert idle["document_start"]["permitted"] is False
             assert idle["document_start"]["scripts"] == []
-            assert idle["limits"]["command_bytes"] == PAYLOAD_LIMIT and "scripts" not in idle["limits"] \
-                and "execution_millis" not in idle["limits"], idle["limits"]
+            assert idle["limits"] == {"record_bytes": RECORD_LIMIT, "page_bytes": PAGE_BYTES,
+                                      "retained_bytes": RETAINED_BYTES}, idle["limits"]
             # Out-of-scope contexts are stated rather than silently skipped.
             contexts = {entry["context"] for entry in idle["unsupported"]}
             assert {"service_worker", "dedicated_worker", "isolated_world", "already_open_document"} <= contexts
@@ -918,9 +1061,10 @@ def check_backend(binary, backend):
             assert call()["state"] == "ready", "A refused arm retired the session"
             assert call({**base, "source": "window.fixture + 1"})["text"] == "42"
             call({**base, "session_id": "1", "source": "1"}, 409)
-            # Input of any size up to the record bound; past it, nothing runs.
+            # Input of any size up to the record bound, past the 64 MiB a
+            # command was once capped at.
             assert call({**base, "source": "/*" + "雪" * 2731 + "*/ 6 * 7"})["text"] == "42"
-            call({**base, "source": "a" * (PAYLOAD_LIMIT + 1)}, 400)
+            assert call({**base, "source": "/*" + "a" * LARGE + "*/ 6 * 7"})["text"] == "42"
             call({**base, "source": "a\0b"}, 400)
             call({**base, "target_id": "01", "source": "1"}, 400)
             call({**base, "target_id": "18446744073709551616", "source": "1"}, 400)
@@ -968,7 +1112,9 @@ def check_backend(binary, backend):
             assert command("await", handle=promise["handle"])["value"]["text"] == "42"
             command("cancel", handle=promise["handle"])
             assert command("await", handle=promise["handle"])["status"] == "error"
-            for invalid in [{"operation": "complete", "path": "window", "prefix": ""}, {"operation": "complete", "path": ["a"] * 9, "prefix": ""}, {"operation": "inspect", "handle": "01", "offset": 0}, {"operation": "inspect", "handle": "1", "offset": -1}, {"operation": "poll", "source": "1"}]:
+            # A completion path of any depth; only its shape is checked.
+            assert command("complete", path=["a"] * 32, prefix="to")["items"] == [{"name": "toString", "kind": "function"}]
+            for invalid in [{"operation": "complete", "path": "window", "prefix": ""}, {"operation": "inspect", "handle": "01", "offset": 0}, {"operation": "inspect", "handle": "1", "offset": -1}, {"operation": "poll", "source": "1"}]:
                 call({**runtime, "command": invalid}, 400)
             activity = command("traffic")
             assert activity["events"][0]["document_id"] == target and activity["dropped"] == 0
@@ -1025,7 +1171,7 @@ def check_backend(binary, backend):
                           "confirm_document_start": True,
                           "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "child",
                                        "path_prefix": "/lab/", "source": "report('kinds=string:12');"}]})
-            assert armed["contract_version"] == 3 and armed["document_start"]["status"] == "ok"
+            assert armed["contract_version"] == 4 and armed["document_start"]["status"] == "ok"
             assert armed["document_start"]["scripts"][0]["rule"]["frame"] == "child"
             records = armed["document_start"]["output"]["records"]
             assert [record["record"] for record in records] == ["injected", "report"]
@@ -1046,7 +1192,6 @@ def check_backend(binary, backend):
                 {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": ""}]},
                 {"scripts": [{"origin": "https://fixture.test", "frame": "top", "path_prefix": "lab", "source": "1"}]},
                 {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "1", "extra": 1}]},
-                {"scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "a" * (PAYLOAD_LIMIT // 2)}] * 2},
             ]:
                 call({"action": "arm_document_start", "session_id": session,
                       "confirm_document_start": True,
@@ -1054,11 +1199,30 @@ def check_backend(binary, backend):
                       **refused}, 400)
             preserved = read_document_start()["document_start"]
             assert preserved["scripts"] == armed["document_start"]["scripts"], "A refusal changed the armed set"
-            # Through HTTP too, the set has no script count or snippet budget.
+            # Add and remove change the set without replacing it, with the
+            # same consent, and keep its output.
+            first = armed["document_start"]["scripts"][0]["script_id"]
+            add = {"action": "add_document_start", "session_id": session, "confirm_document_start": True,
+                   "scripts": [{"origin": "https://fixture.test", "frame": "top", "source": "report(2);"}]}
+            call({**add, "confirm_document_start": False}, 400)
+            added = call(add)["document_start"]
+            assert added["status"] == "ok" and len(added["scripts"]) == 2, added
+            assert added["output"]["records"][:2] == records
+            second = added["scripts"][1]["script_id"]
+            assert int(second) > int(first)
+            call({"action": "remove_document_start", "session_id": session, "script_ids": []}, 400)
+            call({"action": "remove_document_start", "session_id": session, "script_ids": ["01"]}, 400)
+            missing = call({"action": "remove_document_start", "session_id": session, "script_ids": [str(int(second) + 1)]})
+            assert missing["document_start"]["status"] == "error" and len(missing["document_start"]["scripts"]) == 2
+            removed = call({"action": "remove_document_start", "session_id": session, "script_ids": [first]})["document_start"]
+            assert [script["script_id"] for script in removed["scripts"]] == [second], removed
+            assert read_document_start()["document_start"]["output"]["records"] == added["output"]["records"]
+            # Through HTTP too, the set has no script count or snippet budget,
+            # and a command past the 64 MiB it was once capped at arms.
             large = call({"action": "arm_document_start", "session_id": session, "confirm_document_start": True,
                           "scripts": [{"origin": "https://fixture.test", "frame": "top", "source": f"report({index});"}
                                       for index in range(500)] +
-                                     [{"origin": "https://fixture.test", "frame": "child", "source": "/*" + "a" * (4 << 20) + "*/"}]})
+                                     [{"origin": "https://fixture.test", "frame": "child", "source": "/*" + "a" * LARGE + "*/"}]})
             assert large["document_start"]["status"] == "ok", large["document_start"].get("text")
             assert len(large["document_start"]["scripts"]) == 501
             cleared = call({"action": "clear_document_start", "session_id": session})
@@ -1067,7 +1231,7 @@ def check_backend(binary, backend):
             call({"action": "arm_document_start", "session_id": "1", "confirm_document_start": True,
                   "scripts": [{"origin": "http://127.0.0.1:8080", "frame": "top", "source": "report(1);"}]}, 409)
             call({"action": "stop", "session_id": session})
-            print("PASS document-start HTTP surface: disabled control, launch-time permission, consent and rule refusals that preserve the armed set, non-draining cursor reads and clearing")
+            print("PASS document-start HTTP surface: disabled control, launch-time permission, consent and rule refusals that preserve the armed set, add and remove beside it, a command past 64 MiB, non-draining cursor reads and clearing")
 
             # Live capture: the browser's armed set outlives each Console
             # connection, so Disconnect must clear it before reporting idle.
@@ -1100,7 +1264,7 @@ def check_backend(binary, backend):
             assert lost["live_available"] is False, "An unconfirmed clear handed the live binding back"
             assert lost["binding_state"] == "lost" and "restart the capture" in lost["message"], lost
             print("PASS live Disconnect clears and confirms armed document-start scripts, and an unconfirmed clear is never reported idle")
-            print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 limits, identity guards, Stop of a running command while reads go on, malformed peer retirement and profile disposal")
+            print("PASS public HTTP -> Rust session -> actual C++ bridge -> synthetic browser; locality, UTF-8 checks, input past 64 MiB, a 300-document listing with 1 MiB metadata, identity guards, Stop of a running command while reads go on, malformed peer retirement and profile disposal")
         finally:
             process.terminate()
             process.wait(timeout=10)
@@ -1227,7 +1391,7 @@ def check_agent_iframes(binary, backend):
             assert (result["status"], result["type"], result["text"]) == ("ok", "string", "http://127.0.0.1:41003"), result
             ancestors = mcp.console({**run, "source": "Array.from(location.ancestorOrigins)"})
             assert json.loads(ancestors["text"]) == ["http://localhost:41001"], ancestors
-            # Bounded output: console messages are read with runtime poll.
+            # Console messages are read with runtime poll.
             runtime = {"action": "runtime", "session_id": session, "target_id": cross["id"]}
             mcp.console({**runtime, "command": {"operation": "evaluate", "source": 'console.log("hello")'}})
             polled = mcp.console({**runtime, "command": {"operation": "poll"}})

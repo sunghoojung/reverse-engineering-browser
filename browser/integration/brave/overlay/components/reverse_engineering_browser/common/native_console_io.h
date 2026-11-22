@@ -30,6 +30,11 @@ using NativeConsoleDeadline = std::chrono::steady_clock::time_point;
 [[nodiscard]] bool NativeConsoleWrite(int socket,
                                       std::span<const std::byte> bytes,
                                       std::chrono::milliseconds stall) noexcept;
+// Asks for 1 MiB socket buffers each way. A macOS local socket defaults to
+// 8 KiB, which moves a record of many megabytes in thousands of round trips;
+// this moves it about ten times faster. Only throughput depends on it, so a
+// refusal keeps the default buffers.
+void NativeConsoleWidenBuffers(int socket) noexcept;
 // Reads a `bytes`-long payload into `out` under the same stall rule. `out`
 // grows with the bytes that actually arrived, so a header's length alone
 // allocates nothing.

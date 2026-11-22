@@ -839,7 +839,7 @@
                   <label class="native-console-setting">Execution mode <select id="native-console-mode" aria-label="Console execution mode"><option value="disposable">Disposable browser (default)</option><option value="live_capture">Live capture (explicit opt-in)</option></select></label>
                   <label id="native-console-live-confirmation" class="native-console-setting" hidden><input id="native-console-live-consent" type="checkbox" /> I authorize commands that can change this specifically selected captured document. Disconnect before choosing another document.</label>
                 <div class="native-console-controls">
-                  <input id="native-console-url" type="url" aria-label="Authorized page URL" maxlength="4096" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
+                  <input id="native-console-url" type="url" aria-label="Authorized page URL" placeholder="https://your-authorized-site.example" autocomplete="off" spellcheck="false" />
                   <button id="native-console-start" type="button" class="native-console-button native-console-primary" disabled>Connect</button>
                 </div>
                 <button id="native-console-check" type="button" class="native-console-button">Check availability</button>
@@ -853,9 +853,9 @@
                   <summary>Document-start scripts (experiment)</summary>
                   <p id="native-console-ds-state" role="status">Checking document-start availability.</p>
                   <label class="native-console-setting"><input id="native-console-ds-enable" type="checkbox" /> Permit document-start scripts in the next disposable session</label>
-                  <label class="native-console-setting">Origin <input id="native-console-ds-origin" type="text" maxlength="256" placeholder="http://127.0.0.1:8080" autocomplete="off" spellcheck="false" aria-describedby="native-console-ds-rule-help" /></label>
+                  <label class="native-console-setting">Origin <input id="native-console-ds-origin" type="text" placeholder="http://127.0.0.1:8080" autocomplete="off" spellcheck="false" aria-describedby="native-console-ds-rule-help" /></label>
                   <label class="native-console-setting">Frame <select id="native-console-ds-frame" aria-label="Matching frame kind"><option value="top">Top frame</option><option value="child">Child frame</option></select></label>
-                  <label class="native-console-setting">Path prefix <input id="native-console-ds-path" type="text" maxlength="256" placeholder="/ (optional)" autocomplete="off" spellcheck="false" /></label>
+                  <label class="native-console-setting">Path prefix <input id="native-console-ds-path" type="text" placeholder="/ (optional)" autocomplete="off" spellcheck="false" /></label>
                   <p id="native-console-ds-rule-help">One exact origin and one frame kind. No pattern, wildcard or host suffix. Documents already open are never injected; reload them.</p>
                   <label class="native-console-setting">Snippet <textarea id="native-console-ds-source" rows="4" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" aria-describedby="native-console-ds-privacy"></textarea></label>
                   <label class="native-console-setting"><input id="native-console-ds-consent" type="checkbox" /> I authorize this snippet to run automatically in every new matching document, before that document&rsquo;s own scripts.</label>
@@ -873,7 +873,7 @@
             </details>
             <button id="native-console-close" type="button" class="icon-button" aria-label="Close console panel" title="Close panel (⌘ / Ctrl + J)">×</button>
           </header>
-          <div id="native-console-filter-row" class="native-console-filter-row" hidden><input id="native-console-filter" type="search" aria-label="Filter console" placeholder="Find in retained output" maxlength="256" /><select id="native-console-level" aria-label="Console message level"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option><option value="debug">Debug</option></select><button id="native-console-filter-close" type="button" class="native-console-button" aria-label="Close console filter">×</button></div>
+          <div id="native-console-filter-row" class="native-console-filter-row" hidden><input id="native-console-filter" type="search" aria-label="Filter console" placeholder="Find in retained output" /><select id="native-console-level" aria-label="Console message level"><option value="all">All levels</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option><option value="debug">Debug</option></select><button id="native-console-filter-close" type="button" class="native-console-button" aria-label="Close console filter">×</button></div>
           <div id="native-console-notice" class="native-console-notice" role="status" aria-live="polite" hidden></div>
           <div class="native-console-scroll" id="native-console-scroll" tabindex="0" aria-label="Console transcript">
             <div id="native-console-output" class="native-console-output" role="log" aria-live="polite" aria-label="Console results"></div>

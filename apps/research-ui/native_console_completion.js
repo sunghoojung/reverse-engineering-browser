@@ -60,24 +60,63 @@ const nativeConsoleCatalog = (() => {
   return groups;
 })();
 
+// Completion lexes on every keystroke, so it must not cost the whole source
+// each time. An edit can change how its own line lexes, and any string,
+// comment or template that reaches that line, but no token that ended on an
+// earlier line: each of those was decided by text before it that is
+// unchanged, and none looks past the whitespace that ends its line. So the
+// previous pass's tokens are kept up to the start of the edited line and only
+// the rest is lexed again.
+const nativeConsoleLexed = {text: '', tokens: [], significant: []};
+const nativeConsoleInsignificant = token => token.kind === 'whitespace' || token.kind === 'comment' || token.kind === 'line-comment';
+function nativeConsoleLex(text) {
+  const cache = nativeConsoleLexed;
+  const shared = Math.min(text.length, cache.text.length);
+  let same = 0;
+  while (same < shared && text.charCodeAt(same) === cache.text.charCodeAt(same)) ++same;
+  if (same === text.length && same === cache.text.length) return cache;
+  const line = same ? text.lastIndexOf('\n', same - 1) + 1 : 0;
+  // The first token, of each list, that ends on or after the edited line.
+  const keep = list => {
+    let low = 0, high = list.length;
+    while (low < high) { const middle = (low + high) >> 1; if (list[middle].end < line) low = middle + 1; else high = middle; }
+    return low;
+  };
+  cache.tokens.length = keep(cache.tokens); cache.significant.length = keep(cache.significant);
+  let last = null;
+  for (let index = cache.tokens.length - 1; index >= 0 && !last; --index) if (cache.tokens[index].kind !== 'whitespace' && cache.tokens[index].kind !== 'comment') last = cache.tokens[index];
+  const next = createSourcePrettyLexer(text, 'javascript', cache.tokens.at(-1)?.end ?? 0, last);
+  for (let token = next(); token; token = next()) {
+    cache.tokens.push(token);
+    if (!nativeConsoleInsignificant(token)) cache.significant.push(token);
+  }
+  cache.text = text;
+  return cache;
+}
+
 // Share lexical safety and replacement coordinates, while each caller retains
 // its own rules for admitting catalog hints or native identifier chains.
 function nativeConsoleCompletionContext(source, caret) {
-  if (source.length > 8192 || caret < 0 || caret > source.length) return null;
+  if (caret < 0 || caret > source.length) return null;
   // The sentinel makes an unfinished string, regex or comment consume the
   // caret. Reuse the source lexer rather than mistaking dots inside data for JS.
   const beforeCaret = source.slice(0, caret);
-  const lexed = sourcePrettyTokens(beforeCaret + '\u0001', 'javascript');
-  const last = lexed.at(-1);
+  const lexed = nativeConsoleLex(beforeCaret + '\u0001');
+  const last = lexed.tokens.at(-1);
   if (!last || last.kind !== 'operator' || last.text !== '\u0001') return null;
-  let previous = null;
-  for (const token of lexed) {
-    if (['whitespace', 'comment', 'line-comment'].includes(token.kind)) continue;
-    if (token.text === '/' && sourcePrettyMayStartRegex(previous) && sourcePrettyRegexEnd(beforeCaret, token.start) === token.start + 1) return null;
-    previous = token;
+  // A regex cannot span lines, so only a slash on the caret's line can leave
+  // the caret inside an unfinished one.
+  const significant = lexed.significant, line = beforeCaret.lastIndexOf('\n') + 1;
+  let first = significant.length - 1;
+  while (first > 0 && significant[first - 1].start >= line) --first;
+  for (let position = first; position < significant.length - 1; ++position) {
+    const token = significant[position];
+    if (token.text === '/' && sourcePrettyMayStartRegex(significant[position - 1] ?? null) && sourcePrettyRegexEnd(beforeCaret, token.start) === token.start + 1) return null;
   }
-  const tokens = lexed.slice(0, -1).filter(token => !['whitespace', 'comment', 'line-comment'].includes(token.kind));
-  let index = tokens.length - 1;
+  // Every significant token before the sentinel, read in place: callers walk
+  // back from index and never past it.
+  const tokens = significant;
+  let index = tokens.length - 2;
   const word = tokens[index]?.kind === 'word' && tokens[index].end === caret ? tokens[index--] : null;
   const start = word?.start ?? caret;
   const prefix = word?.text ?? '';
@@ -138,7 +177,7 @@ function nativeConsoleSuggestions(source, caret, explicit = false) {
   // prefix match when Enter submits; explicit completion still includes it.
   if (!explicit && caret === end && group.has(prefix)) return null;
   const items = [...group.values()].filter(entry => entry.name.startsWith(prefix) &&
-    (explicit || entry.name !== source.slice(start, end))).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).slice(0, 24);
+    (explicit || entry.name !== source.slice(start, end))).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   return items.length ? {items, start, end, prefix, source, caret} : null;
 }
 
@@ -155,7 +194,7 @@ function nativeConsoleCompletionQuery(source, caret, explicit = false) {
     if (owner?.kind !== 'word' || !/^[A-Za-z_$][\w$]*$/.test(owner.text)) return null;
     path.unshift(owner.text); index -= 2;
   }
-  if (path.length > 8 || path.some(component => component.length > 128) || prefix.length > 128 || !path.length && !prefix && !explicit) return null;
+  if (!path.length && !prefix && !explicit) return null;
   if (tokens[index] && ['.', '?.', ')', ']'].includes(tokens[index].text)) return null;
   return {path, prefix, start, end, source, caret};
 }
@@ -255,8 +294,6 @@ function createNativeConsoleCompletion(source, mirror, root, provider = null) {
   function accept() {
     if (!current || current.source !== source.value || current.caret !== source.selectionStart || source.selectionStart !== source.selectionEnd) { close(); return; }
     const item = current.items[selected];
-    const next = source.value.slice(0, current.start) + item.name + source.value.slice(current.end);
-    if (next.length > 8192 || new TextEncoder().encode(next).length > 8192) { close(); return; }
     source.focus(); source.setSelectionRange(current.start, current.end);
     // The native editing command participates in WebKit's undo stack.
     if (!document.execCommand('insertText', false, item.name)) source.setRangeText(item.name, current.start, current.end, 'end');
